@@ -1,0 +1,95 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Radiance cascades, compose stage.
+//
+// Front-to-back composition of the interval partitioning, coarsest cascade
+// first:
+//
+//   full[C-1] = march[C-1].radiance + march[C-1].transmittance * sky
+//   full[c]   = march[c].radiance   + march[c].transmittance * sample(full[c+1])
+//
+// A ray is "march[c].radiance" if an occluder sits inside cascade c's
+// interval; otherwise its transmittance is 1 and the radiance comes from
+// everything farther along the same direction, which the coarser cascade
+// already composed. This is exact alpha compositing along the ray, which is
+// why a wall in front of a lit room stays dark behind it: the wall's
+// transmittance is 0 and the far radiance is gated out. The spatial part of
+// the composition samples the coarser probe grid bilinearly at the parent
+// probe location; the angular part is the IDENTITY - the angular schedule is
+// constant across cascades (every cascade carries the same direction count,
+// only the spatial grid refines), so each direction composes against the same
+// direction index one level up.
+//
+// The sky base is the shared GRADIENT-ONLY sky model
+// (environment_common.glsl): the sun disk is deliberately excluded here - a
+// sub-pixel disk would alias into the coarse angular texels and put sparkle
+// into every GI sample that escapes the room. Direct view and reflections
+// see the disk (composite pass, ray_reflections); the transport field stays
+// smooth.
+
+
+#include "scene_common.glsl"
+#include "environment_common.glsl"
+
+layout(set = 1, binding = 0) uniform sampler2DArray fullCoarseSampler; // composed radiance of cascade c+1
+layout(set = 1, binding = 1, rgba16f) uniform restrict writeonly image2DArray fullFine;
+layout(set = 1, binding = 2, rgba16f) uniform restrict readonly image2DArray marchFine;
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+
+layout(push_constant) uniform ComposePush
+{
+    layout(offset = 0) vec4 coarsestFlag;   // w 1 when this is the coarsest cascade (sky base)
+    layout(offset = 16) uvec4 fineGrid;     // x gridW, y gridH, z azCount, w elCount (cascade being written)
+    layout(offset = 32) uvec4 coarseGrid;   // x gridW, y gridH, z azCount, w elCount (cascade c+1)
+} push_;
+
+// Direction of one cascade texel: the same equirectangular table the march
+// and the gather use (constant angular schedule).
+vec3 directionOf(uint directionIndex, uint elCount)
+{
+    const uint azIndex = directionIndex / elCount;
+    const uint elIndex = directionIndex % elCount;
+    const float azimuth = (float(azIndex) + 0.5) / float(push_.fineGrid.z) * 6.283185307179586;
+    const float elevation = (float(elIndex) + 0.5) / float(elCount) * 3.141592653589793 - 1.5707963267948966;
+    return vec3(cos(elevation) * cos(azimuth), sin(elevation), cos(elevation) * sin(azimuth));
+}
+
+void main()
+{
+    const uint probeX = gl_GlobalInvocationID.x;
+    const uint probeY = gl_GlobalInvocationID.y;
+    const uint directionIndex = gl_GlobalInvocationID.z;
+    if (probeX >= push_.fineGrid.x || probeY >= push_.fineGrid.y || directionIndex >= push_.fineGrid.z * push_.fineGrid.w)
+    {
+        return;
+    }
+
+    const vec4 marched = imageLoad(marchFine, ivec3(int(probeX), int(probeY), int(directionIndex)));
+    const vec3 radiance = marched.rgb;
+    const float transmittance = marched.a;
+
+    vec3 farRadiance = vec3(0.0);
+    if (push_.coarsestFlag.w > 0.5)
+    {
+        // The last cascade interval ends in open space: escaped rays see the
+        // sky. Zero sky radiance therefore closes the scene completely, which
+        // the leak test relies on. Gradient sky WITHOUT the sun disk: the
+        // transport field must stay smooth (see the header comment).
+        farRadiance = skyBase(directionOf(directionIndex, push_.fineGrid.w));
+    }
+    else
+    {
+        // Bilinear across the parent probe grid.
+        const vec2 parentCoordinates = (vec2(probeX, probeY) + vec2(0.5)) / vec2(2.0) - vec2(0.5);
+        const vec2 parentUv = (clamp(parentCoordinates, vec2(0.0), vec2(push_.coarseGrid.xy) - vec2(1.0)) + vec2(0.5)) /
+                              vec2(push_.coarseGrid.xy);
+        // Constant angular schedule: the coarse grid carries the same
+        // direction table, so the parent of a direction is that direction.
+        const uint coarseDirectionIndex = directionIndex;
+        farRadiance = texture(fullCoarseSampler, vec3(parentUv, float(coarseDirectionIndex))).rgb;
+    }
+
+    const vec3 composed = radiance + transmittance * farRadiance;
+    imageStore(fullFine, ivec3(int(probeX), int(probeY), int(directionIndex)), vec4(composed, 1.0));
+}

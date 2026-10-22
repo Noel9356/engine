@@ -1,0 +1,25 @@
+# Manifest of the test scene mod: the one content package the engine ships.
+# It owns the demo world (scene.toml), the PBR texture sets the world
+# references (assets/textures/) and the [renderer] default that points the
+# renderer at them (config.toml). The manifest is authoritative for identity
+# and wiring; the kernel validates it before touching anything. See
+# mods/README.md for the full schema.
+
+id = "test_scene"
+version = "1.0.0"
+engine_api = 1
+type = "script"
+entry = "script.lua"
+host = "lua_scripting"
+
+display_name = "Test Scene"
+description = "The demo world: a Cornell-style room with textured PBR surfaces, an emissive ceiling panel, point lights and a polished metal sphere. Ships the scene file, the texture sets and the texture directory default."
+author = "engine authors"
+
+capabilities = ["logging"]
+permissions = ["logging.write"]
+
+# The world content this package ships. Applied when no --scene flag is
+# given and the configuration defines no [scene] section of its own
+# (precedence: --scene > assembly [scene] > this file > code defaults).
+scene = "scene.toml"

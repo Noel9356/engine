@@ -1,0 +1,143 @@
+# engine runtime configuration.
+#
+# Paths are resolved relative to the engine executable directory. Modules that
+# are compiled out of the build must not be listed under [engine].modules; the
+# startup report names any mismatch precisely.
+#
+# This file is the second-highest configuration layer: shipped defaults (a
+# module's module.toml, a mod package's config.toml) only fill keys it leaves
+# unset, --scene replaces the world ([scene]) wholesale, and --set key=value
+# overrides anything from the command line. The precedence rules and the
+# provenance report are documented in docs/configuration.md.
+#
+# The world content lives with the content mod: mods/test_scene declares
+# scene.toml in its manifest, and this file deliberately defines no [scene]
+# section - the demo room, camera and sun come from that package. An assembly
+# that wants its own world defines [scene] here (it then wins over every
+# installed content mod) or passes --scene (it wins over everything).
+
+[engine]
+modules = ["logging", "window", "input", "renderer", "pbr", "radiance_cascades", "ray_reflections", "screenshot",
+           "lua_scripting"]
+
+# Mod packages are discovered on disk, not listed here: every subdirectory of
+# mod_directory that contains a mod.toml is a mod. The content package
+# (mods/test_scene) arrives with the runtime.
+# mod_directory = "mods"
+
+# Mod ids listed here are skipped during discovery; useful to keep a package
+# installed but inactive without deleting it. Disabling the content mod also
+# removes its world: the run then renders an empty scene unless the assembly
+# defines [scene] itself.
+# disabled_mods = ["test_scene"]
+
+# Provider selection for capabilities that several components offer. Only
+# needed when more than one implementation is present in the build.
+[providers]
+# window = "glfw_window"
+
+# Permission denials. Each entry denies one declared permission of one
+# component (module, native mod or script mod); denied permissions fail
+# startup with a precise diagnostic.
+[permissions]
+# denied = [["example_cpp_mod", "capability.input"]]
+
+[logging]
+level = "information"
+# file = "engine.log"
+
+[window]
+title = "engine demo"
+width = 1280
+height = 720
+resizable = true
+
+[input]
+
+[renderer]
+# Validation layers off for interactive runs: every dispatch pays a large
+# CPU tax under the layer, which starves the window's message pump on slower
+# machines (the OS then marks the window "not responding" during heavy
+# frames). The automated runs re-enable it: config/smoke.toml and
+# config/leak_test.toml keep enable_validation = true.
+enable_validation = false
+vsync = true
+prefer_discrete_device = true
+# Transient render targets (G-buffer, radiance layers, cascade fields) and
+# the host-written uniforms are single-buffered and shared by every slot, so
+# the frame loop serializes execution: each frame waits for both in-flight
+# fences before recording. max_frames_in_flight therefore decouples command
+# buffers and swapchain acquisition, not GPU execution - frames cannot
+# overlap without racing the shared targets (docs/robustness.md, problem 38).
+max_frames_in_flight = 2
+# Compiled SPIR-V lands in runtime/shaders (module build output). The
+# texture directory is deliberately NOT set here: content belongs to the
+# content mod, whose shipped defaults point the renderer at the package's
+# own assets (mods/test_scene/config.toml).
+shader_directory = "shaders"
+exposure = 1.15
+tonemap = "aces"
+
+# Lighting technique selection: each entry is the name of one lighting
+# technique module (an algorithm, loaded as a module under [engine].modules).
+# The renderer records the listed techniques in order and composes their
+# radiance layers; an empty list renders fully unlit. Direct lighting and
+# global illumination each have many possible algorithms, so modules are
+# named after the algorithm they implement - not after a category.
+[lighting]
+techniques = ["pbr", "radiance_cascades", "ray_reflections"]
+
+# Direct lighting technique settings (pbr module).
+[lighting.pbr]
+shadows = true
+penumbra = 12.0
+shadow_steps = 24
+
+# Radiance cascades GI settings (radiance_cascades module).
+#
+# Cost model: the march dispatches (extent/stride)^2 * rays * march_steps
+# scene-SDF evaluations per frame, and the SDF is linear in the object
+# count. probe_stride 2 at 1280x720 launched 29 million sphere-tracing
+# invocations per frame - multi-second frames that starved the message pump
+# ("not responding"). stride 8 with the same ray count is a 16x cheaper
+# march; the LOS-guarded gather, the soft cascade blend and the spatial
+# filter carry the smoothness instead of probe density.
+[lighting.radiance_cascades]
+cascades = 5
+interval_base = 0.5
+interval_factor = 3.0
+probe_stride = 8
+base_rays = 128
+gather_visibility = true
+los_steps = 16
+march_steps = 48
+relight_shadows = true
+shadow_steps = 24
+# Edge-aware spatial filter radius on the gathered GI (pixels, 0 = off).
+# Removes the probe grid's spatial scale; depth/normal weights keep edges hard.
+# One probe cell spans 8 pixels, so the radius must average ACROSS cells.
+spatial_filter = 10
+
+# Ray traced glossy reflections (ray_reflections module): one SDF reflection
+# ray per pixel where the Fresnel weight justifies one. Surfaces rougher than
+# max_roughness fade out (a single ray cannot carry a wide glossy lobe).
+# The pbr technique dims its analytic specular by the same Fresnel weight,
+# so the two layers split the specular energy instead of drawing the sun
+# twice (see pbr_lighting.comp reflectionWeight).
+[lighting.ray_reflections]
+max_roughness = 0.5
+max_distance = 40.0
+march_steps = 64
+
+[screenshot]
+key = "F12"
+# Captures are written to a 'screenshots' folder in the process working
+# directory - the project root for the documented quick start. Any relative
+# path here resolves against the working directory too; absolute paths are
+# used as-is. e.g. output_directory = "captures"
+# output_directory = "screenshots"
+
+# Diagnostics are opt-in: the shutdown communication latency and frame-time
+# report is a developer tool. Enable it here or per run with --latency-report.
+[diagnostics]
+latency_report = false

@@ -1,0 +1,245 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Radiance cascades, march stage.
+//
+// One invocation per (probe, direction). Two anchoring modes:
+//
+// - Cascade 0 anchors probes ON THE SURFACE (the world position of their cell
+//   center, from the depth buffer) - that keeps the finest cascade exactly on
+//   the geometry the final gather samples, which is what gives contact-scale
+//   GI its positional variation. Its march covers the view-depth remainder of
+//   the first interval: from the surface at view depth D, direction w marches
+//   until the ray reaches view depth interval.y (the end of cascade 0's slab)
+//   or until it hits - whichever comes first. The transmittance then chains
+//   into the coarse cascades' slabs without gaps or overlaps along the ray.
+//
+// - Coarser cascades anchor probes ON THE CAMERA RAY at their interval start
+//   (camera + ray * tStart) and march the view-depth slab [tStart, tEnd]: for
+//   direction w the distance range along w is [0, (tEnd - tStart) / cos(w,
+//   ray)] because view depth advances by cos(w, ray) per unit of ray travel.
+//   This is what makes the interval partitioning composable: every cascade's
+//   slab starts exactly where the finer cascade's slab ended, measured along
+//   the same view ray, so the compose stage's transmittance chaining is
+//   geometrically consistent instead of mixing fields anchored on unrelated
+//   surfaces (the artifact that read as giant soft blobs).
+//
+// Every occlusion decision uses the exact analytic SDF; a probe whose anchor
+// ended up inside geometry (a view ray grazing a wall) stores transmittance 0
+// - conservative darkness, never invented light, which is what the automated
+// leak check relies on.
+
+
+#include "relight_common.glsl"
+#include "common/cascade_common.glsl"
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform sampler2D depthSampler;
+layout(set = 1, binding = 1) uniform sampler2D normalSampler;
+layout(set = 1, binding = 2, rgba16f) uniform restrict writeonly image2DArray cascadeMarch;
+// rgb = surface radiance seen by the ray inside the interval, a = transmittance (1 unoccluded, 0 hit)
+
+layout(push_constant) uniform MarchPush
+{
+    layout(offset = 0) vec4 interval;       // x tStart, y tEnd (view depth, from the camera)
+    layout(offset = 16) uvec4 flags;        // x primitiveCount, y maxSteps, z cameraAnchored, w unused
+    layout(offset = 32) uvec4 grid;         // x gridW, y gridH, z azCount, w elCount
+    layout(offset = 48) uvec4 extentStride; // x extentW, y extentH, z strideX, w strideY
+} push_;
+
+// Cascade 0 probes anchor on the surface (the world position of the cell
+// center; sky cells fall back to the camera position). Coarse cascades anchor
+// at tStart along their cell's camera ray - PULLED BACK to just in front of
+// the cell's own surface whenever that surface sits before the slab start:
+// an anchor beyond the surface lands in the empty space behind thin walls or
+// floors (geometry here is boxes, not infinite solids, so the SDF there reads
+// "outside" and the pass-through guard never fires). Marching from behind the
+// surface hits its back face and gates the whole direction black, which every
+// pixel sampling that cell then inherits - the black near-field band at
+// cascade boundaries. Anchoring just in front of the surface keeps the field
+// in visible space: the march sees the real room, and the overlap with the
+// finer cascade's slab is the (empty) gap between the pixel and the slab
+// start. The gather's line-of-sight guard decides which pixels may use such a
+// pulled probe.
+vec3 probeAnchor(uint probeX, uint probeY, out vec3 surfaceNormal, out vec3 cellRayDirection, out float anchorDepth)
+{
+    const vec2 probePixel =
+        vec2((float(probeX) + 0.5) * push_.extentStride.z, (float(probeY) + 0.5) * push_.extentStride.w);
+    const vec2 probeUv = probePixel / vec2(push_.extentStride.xy);
+    const vec2 probeNdc = probeUv * 2.0 - vec2(1.0);
+    cellRayDirection = cameraRayDirection(inverseViewProjection, cameraPosition.xyz, probeNdc);
+
+    if (push_.flags.z != 0u)
+    {
+        // Camera-anchored: the probe sits ON the cell's own surface (the
+        // surface seen at the cell centre, pulled five centimetres in front
+        // of itself), clamped into the cascade's slab. Surface-proximal
+        // probes remove the parallax between the field and the pixels that
+        // sample it: a bare tStart anchor floats mid-air for every cell
+        // whose surface lies beyond the slab start, and the probe's rays
+        // then read the room from the wrong place - per-probe variance that
+        // read as blocky staircases riding every surface seen at an angle.
+        //
+        // - A MIXED cell (the depth buffer inside the cell spans a large
+        //   range: a small bright feature like a window opening framed by
+        //   the occluder around it) anchors at the cell's FAR surface, as
+        //   before: anchoring on the framing occluder would read the whole
+        //   cell dark and the feature's light would never enter the cascade
+        //   hierarchy (the automated leak check fails exactly this way).
+        // - The mixed/pure CLASSIFICATION is a CONTINUOUS blend, not the
+        //   binary branch it once was: a hard branch put neighbouring cells
+        //   on opposite anchors (far surface vs slab start), their fields
+        //   disagreed, and the compose bilinear interpolated between them -
+        //   rectangle-scale stair steps around every small bright emitter
+        //   (the blocky halo banding on the ceiling around the emissive
+        //   panel). The blend ramps over the same depth-spread width the
+        //   binary test used, so anchorDepth moves smoothly across cell
+        //   boundaries while keeping both regimes intact.
+        // - The pull distance uses the cell centre's CONTINUOUS view depth;
+        //   the 4x4 tap minimum quantizes the anchor to the tap lattice,
+        //   which stepped the field along iso-depth contours.
+        // - A cell whose surface lies beyond the slab end anchors at the
+        //   slab end: the probe covers the slab tail only, and the finer
+        //   cascades own everything in front of it.
+        //
+        // Sky cells keep the tStart anchor on the camera ray: no surface
+        // exists, and the march still sees whatever crosses the slab there.
+        surfaceNormal = vec3(0.0);
+        anchorDepth = push_.interval.x;
+        float nearDepth;
+        float farDepth;
+        cellDepthRange(depthSampler, probeUv,
+                       vec2(push_.extentStride.z, push_.extentStride.w) / vec2(push_.extentStride.xy),
+                       nearDepth, farDepth);
+        if (farDepth < 1.0)
+        {
+            const float centerDepth = viewDepthAt(depthSampler, probeUv);
+            // The pure/mixed anchor blend (and its rationale) is shared with
+            // the gather stage: cascade_common.glsl.
+            anchorDepth =
+                cascadeAnchorDepth(push_.interval.x, push_.interval.y, centerDepth, nearDepth, farDepth);
+        }
+        return cameraPosition.xyz + cellRayDirection * anchorDepth;
+    }
+
+    anchorDepth = 0.0;
+    const float depth = texture(depthSampler, probeUv).r;
+    if (depth < 1.0)
+    {
+        surfaceNormal = normalize(texture(normalSampler, probeUv).xyz);
+        return worldPositionFromDepth(inverseViewProjection, probeUv * 2.0 - vec2(1.0), depth);
+    }
+    // Sky cell: anchor mid-air along the camera ray at the interval start so
+    // the march still sees whatever crosses the slab there.
+    surfaceNormal = vec3(0.0);
+    return cameraPosition.xyz + cellRayDirection * push_.interval.x;
+}
+
+void main()
+{
+    const uint probeX = gl_GlobalInvocationID.x;
+    const uint probeY = gl_GlobalInvocationID.y;
+    const uint directionIndex = gl_GlobalInvocationID.z;
+    if (probeX >= push_.grid.x || probeY >= push_.grid.y || directionIndex >= push_.grid.z * push_.grid.w)
+    {
+        return;
+    }
+
+    const vec3 direction =
+        cascadeDirection(directionIndex / push_.grid.w, directionIndex % push_.grid.w, push_.grid.z, push_.grid.w);
+
+    vec3 surfaceNormal;
+    vec3 cellRayDirection;
+    float anchorDepth;
+    const vec3 anchor = probeAnchor(probeX, probeY, surfaceNormal, cellRayDirection, anchorDepth);
+    const bool cameraAnchored = push_.flags.z != 0u;
+    const float viewDepth = length(anchor - cameraPosition.xyz);
+    const float viewCosine = max(dot(direction, cellRayDirection), 0.0);
+
+    // A camera-anchored probe can land beyond geometry (its cell's view ray
+    // exits the room through a wall before the interval start). Sphere tracing
+    // from inside a solid oscillates, so bail out early - as a PASS-THROUGH
+    // (transmittance 1, no radiance), not as a blocker: zeroing here would cut
+    // every direction of probes anchored behind the camera-side walls and
+    // darken entire rooms. Which pixels may use such a probe is decided where
+    // it is checkable: the gather's line-of-sight guard drops probes that are
+    // occluded from the shaded surface, which is also what keeps the automated
+    // leak check green.
+    if (cameraAnchored && sceneSDF(anchor, push_.flags.x) < -0.01)
+    {
+        imageStore(cascadeMarch, ivec3(int(probeX), int(probeY), int(directionIndex)), vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    // Leave the anchor surface: rays start one centimetre along the normal so
+    // the surface-anchored march cannot immediately re-hit its own probe
+    // surface. The SDF normal is used deliberately: the depth buffer's normal
+    // carries the material's normal map, whose tangent-heavy perturbations can
+    // point the offset back INSIDE the curved surface - the march then
+    // immediately re-hits the probe surface and every direction reads as a
+    // grazing self-hit (the whole probe turns into a pass-through).
+    vec3 origin = anchor;
+    if (!cameraAnchored && any(greaterThan(abs(surfaceNormal), vec3(0.0))))
+    {
+        origin = anchor + sdfNormal(anchor, push_.flags.x) * 0.01;
+    }
+
+    // Distance range along the ray direction. The slab is a VIEW-DEPTH
+    // interval: the ray stays inside it while its view depth advances from
+    // the anchor towards interval.y - which only happens for directions with
+    // a positive cosine against the cell's camera ray.
+    //
+    // - Forward directions (viewCosine > 0) march until the ray's view depth
+    //   reaches interval.y: distance (interval.y - anchorDepth) / viewCosine.
+    //
+    // - Backward directions (viewCosine <= 0) leave the slab TOWARDS the
+    //   camera. Their segment is the room between the camera plane and the
+    //   anchor: distance anchorDepth / |viewCosine|. Bounding them at the
+    //   camera plane is what keeps the probe field honest - the former
+    //   (interval.y - anchorDepth) / max(viewCosine, 0.3) formula handed
+    //   backward rays a 30 m budget that crossed the camera plane and
+    //   collected arbitrary far geometry, and every pixel sampling those
+    //   directions inherited the per-probe variance as blocky staircases.
+    //
+    // Surface-anchored cascade 0 keeps the [0, interval.y] remainder rule: a
+    // surface beyond the slab end has an empty segment (pass-through), and
+    // its backward directions are outside cascade 0's slab by definition.
+    float marchStart = 0.0;
+    float marchEnd;
+    if (cameraAnchored)
+    {
+        marchEnd = viewCosine > 0.0 ? (push_.interval.y - anchorDepth) / max(viewCosine, 0.001)
+                                    : anchorDepth / max(-viewCosine, 0.001);
+    }
+    else
+    {
+        marchEnd = max((push_.interval.y - viewDepth) / max(viewCosine, 0.3), 0.0);
+    }
+
+    float hit = traceInterval(origin, direction, marchStart, marchEnd, push_.flags.x, push_.flags.y);
+    if (!cameraAnchored && hit > 0.0 && hit < 0.02)
+    {
+        // A hit this close is the probe's own surface seen at a grazing angle,
+        // not a real occluder.
+        hit = -1.0;
+    }
+
+    vec4 result = vec4(0.0, 0.0, 0.0, 1.0); // unoccluded by default
+    if (hit > 0.0)
+    {
+        const vec3 hitPoint = origin + direction * hit;
+        vec3 normal = sdfNormal(hitPoint, push_.flags.x);
+        // Face the hemisphere the ray arrived from so the relight sees the
+        // correct side of the surface.
+        normal *= -sign(dot(normal, direction));
+        // Diffuse relight at the hit point: sun + point lights with the hit
+        // surface's TEXTURED material (shared relight_common.glsl). This is
+        // the one direct bounce the cascades carry; higher order bounces
+        // would need iterating the merge (documented limit).
+        vec3 unusedAlbedo;
+        const vec3 radiance = surfaceOutgoingRadiance(hitPoint, normal, push_.flags.x, unusedAlbedo);
+        result = vec4(radiance, 0.0);
+    }
+
+    imageStore(cascadeMarch, ivec3(int(probeX), int(probeY), int(directionIndex)), result);
+}

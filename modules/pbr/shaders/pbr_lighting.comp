@@ -1,0 +1,226 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Analytic PBR direct lighting compute pass (technique "pbr" of
+// [lighting].techniques).
+//
+// Reads the G-buffer, evaluates sun + point lights with a Cook-Torrance GGX
+// BRDF and analytic SDF soft shadows, writes the direct radiance into the
+// HDR target the composite pass assembles. Shadow rays trace the exact scene
+// SDF (scene_common.glsl), so shadowing is consistent with the geometry that
+// was rasterized and with the GI tracer - one geometry truth, three consumers.
+
+
+#include "scene_common.glsl"
+#include "lighting_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform sampler2D albedoSampler; // rgb albedo, a roughness
+layout(set = 1, binding = 1) uniform sampler2D normalSampler; // rgb world normal, a metallic
+layout(set = 1, binding = 2) uniform sampler2D depthSampler;
+layout(set = 1, binding = 3, rgba16f) uniform restrict writeonly image2D directImage;
+
+layout(push_constant) uniform PassPush
+{
+    layout(offset = 0) vec4 shadowAndFlags;   // x shadows enabled, y penumbra factor
+    layout(offset = 16) uvec4 counts;         // x primitive count
+    layout(offset = 32) vec4 reflectionFold;  // x ray_reflections enabled, y its max roughness
+} passPush;
+
+float distributionGGX(float nDotH, float roughness)
+{
+    const float alpha = roughness * roughness;
+    const float alpha2 = alpha * alpha;
+    const float denominator = nDotH * nDotH * (alpha2 - 1.0) + 1.0;
+    return alpha2 / (3.14159265358979 * denominator * denominator);
+}
+
+float geometrySmith(float nDotV, float nDotL, float roughness)
+{
+    const float r = roughness + 1.0;
+    const float k = (r * r) / 8.0;
+    const float ggxV = nDotV / (nDotV * (1.0 - k) + k);
+    const float ggxL = nDotL / (nDotL * (1.0 - k) + k);
+    return ggxV * ggxL;
+}
+
+vec3 fresnelSchlick(float cosine, vec3 f0)
+{
+    return f0 + (1.0 - f0) * pow(1.0 - cosine, 5.0);
+}
+
+struct LightContribution
+{
+    vec3 direction;   // from the surface towards the light
+    vec3 radiance;    // light color * intensity * falloff
+    float maxDistance; // shadow ray bound
+};
+
+// Specular hand-off to the ray_reflections technique. That pass ray traces
+// one mirror-ish reflection per glossy pixel and pre-multiplies it with the
+// Fresnel weight computed here; the composite then ADDS both layers. Without
+// the fold the sun is drawn twice on every glossy pixel - the analytic GGX
+// highlight AND the mirrored sun disk (the double sun on the metal sphere) -
+// and at grazing angles the specular energy roughly doubles. The weight must
+// match ray_reflections.comp exactly: same Schlick-with-roughness Fresnel,
+// same fade curve (a smooth surface hands over fully, a surface at the
+// technique's max roughness keeps its analytic highlight).
+float reflectionWeight(vec3 normal, vec3 viewDirection, vec3 f0, float roughness)
+{
+    if (passPush.reflectionFold.x < 0.5)
+    {
+        return 0.0;
+    }
+    const float maxRoughness = max(passPush.reflectionFold.y, 0.01);
+    const float fade = pow(clamp(1.0 - roughness / maxRoughness, 0.0, 1.0), 1.5);
+    if (fade <= 0.0)
+    {
+        return 0.0;
+    }
+    const float cosine = max(dot(normal, viewDirection), 0.0);
+    const vec3 maxColor = max(vec3(1.0 - roughness), f0);
+    const vec3 fresnel = f0 + (maxColor - f0) * pow(1.0 - cosine, 5.0);
+    return (fresnel.x + fresnel.y + fresnel.z) / 3.0 * fade;
+}
+
+LightContribution sunContribution(vec3 worldPosition)
+{
+    LightContribution contribution;
+    contribution.direction = -normalize(sunDirectionIntensity.xyz);
+    contribution.radiance = sunColorEnabled.rgb * sunDirectionIntensity.w;
+    contribution.maxDistance = 60.0;
+    return contribution;
+}
+
+LightContribution pointContribution(vec3 worldPosition, uint index)
+{
+    LightContribution contribution;
+    const vec4 positionRadius = pointPositionRadius[index];
+    const vec4 colorIntensity = pointColorIntensity[index];
+    const vec3 delta = positionRadius.xyz - worldPosition;
+    const float distance = length(delta);
+    contribution.direction = delta / max(distance, 1e-5);
+    const float falloff = 1.0 / max(distance * distance, 1e-6);
+    contribution.radiance = colorIntensity.rgb * colorIntensity.w * falloff;
+    // The shadow ray MUST stop at the light, not at the light's radius
+    // cutoff: a ray that flies past the light treats whatever sits beyond it
+    // (a ceiling centimetres behind a wall-mounted lamp, say) as an
+    // occluder, carving phantom shadow disks around every nearby light -
+    // looping bright/dark bands on the surfaces that face the light.
+    contribution.maxDistance = max(distance - 0.05, 0.05);
+    return contribution;
+}
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imageSize = imageSize(directImage);
+    if (pixel.x >= imageSize.x || pixel.y >= imageSize.y)
+    {
+        return;
+    }
+
+    const vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(imageSize);
+    const vec2 normalized = uv * 2.0 - vec2(1.0);
+    const float depth = texture(depthSampler, uv).r;
+
+    if (depth >= 1.0)
+    {
+        imageStore(directImage, pixel, vec4(0.0));
+        return;
+    }
+
+    const vec3 worldPosition = worldPositionFromDepth(inverseViewProjection, normalized, depth);
+    const vec4 normalMetallic = texture(normalSampler, uv);
+    const vec3 normal = normalize(normalMetallic.xyz);
+    const float metallic = normalMetallic.a;
+    const vec4 albedoRoughness = texture(albedoSampler, uv);
+    const vec3 albedo = albedoRoughness.rgb;
+    const float roughness = max(albedoRoughness.a, 0.045);
+
+    const vec3 viewDirection = normalize(cameraPosition.xyz - worldPosition);
+    const vec3 f0 = mix(vec3(0.04), albedo, metallic);
+
+    const bool shadows = passPush.shadowAndFlags.x > 0.5 && lightCountsAndFlags.y != 0;
+    const float penumbra = max(passPush.shadowAndFlags.y, 1.0);
+    const uint shadowSteps = uint(max(lightCountsAndFlags.z, 4));
+    const uint primitiveCount = passPush.counts.x;
+
+    // Shadow rays must LEAVE the surface along a point that is guaranteed
+    // outside the analytic geometry. The G-buffer normal carries the
+    // material's normal map; on curved surfaces (spheres, rotated boxes with
+    // tangent-heavy maps) its perturbation can push the offset start point
+    // INSIDE the SDF, where every shadow ray reports an immediate hit - black
+    // blocks speckled over exactly the curved, textured objects. When the
+    // offset point is inside, re-offset along the SDF's own geometric normal,
+    // which is exact at the surface.
+    vec3 shadowOrigin = worldPosition + normal * 0.004;
+    if (shadows && sceneSDF(shadowOrigin, primitiveCount) < 0.0)
+    {
+        shadowOrigin = worldPosition + sdfNormal(worldPosition, primitiveCount) * 0.004;
+    }
+
+    // One fold per pixel: the analytic specular hands over to the ray traced
+    // reflection layer by this weight (see reflectionWeight above).
+    const float specularFold = 1.0 - reflectionWeight(normal, viewDirection, f0, roughness);
+
+    vec3 radiance = vec3(0.0);
+
+    // Sun light.
+    if (sunColorEnabled.w > 0.5 && sunDirectionIntensity.w > 0.0)
+    {
+        const LightContribution light = sunContribution(worldPosition);
+        const vec3 halfVector = normalize(viewDirection + light.direction);
+        const float nDotL = max(dot(normal, light.direction), 0.0);
+        const float nDotV = max(dot(normal, viewDirection), 0.0);
+        const float nDotH = max(dot(normal, halfVector), 0.0);
+        if (nDotL > 0.0)
+        {
+            float shadow = 1.0;
+            if (shadows)
+            {
+                shadow = softShadow(shadowOrigin, light.direction, light.maxDistance,
+                                    primitiveCount, shadowSteps, penumbra);
+            }
+            if (shadow > 0.0)
+            {
+                const vec3 fresnel = fresnelSchlick(max(dot(halfVector, viewDirection), 0.0), f0);
+                const vec3 specular =
+                    distributionGGX(nDotH, roughness) * geometrySmith(nDotV, nDotL, roughness) * fresnel /
+                    max(4.0 * nDotV * nDotL, 1e-4);
+                const vec3 diffuse = albedo / 3.14159265358979 * (vec3(1.0) - fresnel) * (1.0 - metallic);
+                radiance += (diffuse + specular * specularFold) * light.radiance * nDotL * shadow;
+            }
+        }
+    }
+
+    // Point lights.
+    for (uint index = 0u; index < uint(lightCountsAndFlags.x); ++index)
+    {
+        const LightContribution light = pointContribution(worldPosition, index);
+        const vec3 halfVector = normalize(viewDirection + light.direction);
+        const float nDotL = max(dot(normal, light.direction), 0.0);
+        const float nDotV = max(dot(normal, viewDirection), 0.0);
+        const float nDotH = max(dot(normal, halfVector), 0.0);
+        if (nDotL > 0.0)
+        {
+            float shadow = 1.0;
+            if (shadows)
+            {
+                shadow = softShadow(shadowOrigin, light.direction, light.maxDistance,
+                                    primitiveCount, shadowSteps, penumbra);
+            }
+            if (shadow > 0.0)
+            {
+                const vec3 fresnel = fresnelSchlick(max(dot(halfVector, viewDirection), 0.0), f0);
+                const vec3 specular =
+                    distributionGGX(nDotH, roughness) * geometrySmith(nDotV, nDotL, roughness) * fresnel /
+                    max(4.0 * nDotV * nDotL, 1e-4);
+                const vec3 diffuse = albedo / 3.14159265358979 * (vec3(1.0) - fresnel) * (1.0 - metallic);
+                radiance += (diffuse + specular * specularFold) * light.radiance * nDotL * shadow;
+            }
+        }
+    }
+
+    imageStore(directImage, pixel, vec4(radiance, 1.0));
+}

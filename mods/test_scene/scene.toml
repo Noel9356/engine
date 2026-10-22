@@ -1,0 +1,173 @@
+# The test scene: the world content of the test_scene mod.
+#
+# This file may define only [scene] (the kernel enforces it, exactly like a
+# --scene file). It is applied wholesale, so partial configurations can never
+# merge with it. The same section documents the world's tuning decisions -
+# they were verified against captures, not guessed.
+
+[scene]
+# Sky model: vertical gradient (zenith/horizon/ground radiance) plus a sun
+# disk on the direct view and in reflections. Keys left out fall back to the
+# flat sky_radiance value, so legacy configurations render unchanged.
+sky_radiance = [0.22, 0.30, 0.48]
+[scene.sky]
+zenith = [0.30, 0.44, 0.78]
+horizon = [0.62, 0.68, 0.78]
+ground = [0.12, 0.11, 0.10]
+sun_disk = true
+sun_disk_size_degrees = 0.8
+
+# Free-fly camera: the configured position/look_at is the STARTING pose, then
+# WASD flies, the mouse looks (cursor captured at startup; Esc releases, F or
+# left-click re-captures), Space/E rise, Ctrl/Q sink, Shift boosts, the wheel
+# scales fly_speed. Set free_fly = false for a fixed tripod camera.
+[scene.camera]
+position = [0.0, 1.55, 2.9]
+look_at = [0.0, 1.05, -0.4]
+fov = 62.0
+near = 0.05
+far = 200.0
+free_fly = true
+fly_speed = 4.0
+fly_boost = 4.0
+look_sensitivity = 0.0022
+
+# Sun through the front window: the direction points TOWARDS the scene, so a
+# z component near -1 throws the light deep into the room through the window
+# opening (a steep -y lands the bright patch on the floor just behind the
+# default camera, which read as an unlit room).
+[scene.sun]
+direction = [-0.3, -0.45, -0.84]
+color = [1.0, 0.94, 0.82]
+intensity = 4.0
+
+# Demo room: Cornell-style box with a window opening in the front wall.
+# Textured objects reference PBR texture sets (a folder named <set> under
+# [renderer].texture_directory with Color/NormalGL/Roughness/Metalness PNGs,
+# CC0 from ambientCG; this package ships the sets and the directory default).
+# uv_scale is world meters per texture tile. Untextured objects use their
+# flat values.
+[[scene.objects]]
+type = "plane"
+position = [0.0, 0.0, 0.0]
+size = [3.5, 0.01, 3.5]
+texture = "WoodFloor055"
+uv_scale = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 3.0, 0.0]
+size = [3.5, 0.01, 3.5]
+texture = "Plaster001"
+uv_scale = 2.0
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 1.5, -3.5]
+size = [3.5, 3.5, 0.01]
+texture = "Bricks070"
+uv_scale = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [-3.5, 1.5, 0.0]
+size = [0.01, 3.5, 3.5]
+albedo = [0.65, 0.2, 0.18]
+roughness = 0.9
+uv_scale = 2.0
+
+[[scene.objects]]
+type = "plane"
+position = [3.5, 1.5, 0.0]
+size = [0.01, 3.5, 3.5]
+albedo = [0.22, 0.45, 0.2]
+roughness = 0.9
+uv_scale = 2.0
+
+# Front wall with a window opening: four boxes leave the gap.
+[[scene.objects]]
+type = "plane"
+position = [-2.05, 1.5, 3.5]
+size = [1.45, 1.5, 0.01]
+texture = "Plaster001"
+uv_scale = 2.0
+
+[[scene.objects]]
+type = "plane"
+position = [2.05, 1.5, 3.5]
+size = [1.45, 1.5, 0.01]
+texture = "Plaster001"
+uv_scale = 2.0
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 0.45, 3.5]
+size = [0.6, 0.45, 0.01]
+texture = "Plaster001"
+uv_scale = 2.0
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 2.55, 3.5]
+size = [0.6, 0.45, 0.01]
+texture = "Plaster001"
+uv_scale = 2.0
+
+[[scene.objects]]
+type = "box"
+position = [-1.1, 0.6, -1.0]
+size = [0.6, 0.6, 0.6]
+rotation_y = 25.0
+texture = "Concrete034"
+uv_scale = 1.8
+
+# Polished metal: the metalness map (Metal049A) makes it a mirror-ish
+# conductor; roughness map keeps a slight brushed grain. This is the
+# reflection showcase - it must show the room, the panel and the sun.
+[[scene.objects]]
+type = "sphere"
+position = [1.2, 0.8, -0.3]
+size = [0.8, 0.8, 0.8]
+texture = "Metal049A"
+uv_scale = 2.0
+
+# Glossy dielectric: flat values only (no texture), exercises the
+# fresnel/specular path of the analytic material.
+[[scene.objects]]
+type = "sphere"
+position = [-0.1, 0.42, 0.8]
+size = [0.4, 0.4, 0.4]
+albedo = [0.85, 0.32, 0.18]
+roughness = 0.18
+metallic = 0.0
+
+# Warm emissive ceiling panel (drives the GI bounce). Radiance = albedo x
+# strength, so the number IS the panel's outgoing radiance: a 1.6x1.6 m panel
+# at 14 flooded the whole room with indirect light (the white ceiling wash and
+# the washed-out mirror ball) - 3.5 keeps the panel the brightest element
+# while walls and the floor keep visible gradation under ACES.
+[[scene.objects]]
+type = "box"
+position = [0.0, 2.92, 0.0]
+size = [0.8, 0.03, 0.8]
+albedo = [1.0, 0.93, 0.8]
+emissive_strength = 3.5
+
+# Point lights: a cool fill behind the objects (lifts the dark back of the
+# room and gives the mirror ball something to reflect) and a warm accent on
+# the red wall. Point lights participate in the direct pass (with SDF soft
+# shadows), in the GI first-bounce relight and in the reflection relight.
+# Intensities are inverse-square, so a light 2 m from its target surface
+# delivers intensity/4 - 6.0/3.5 land the pools in the ACES shoulder instead
+# of clipping them flat.
+[[scene.point_lights]]
+position = [0.0, 2.2, -2.6]
+color = [0.85, 0.9, 1.0]
+intensity = 6.0
+radius = 12.0
+
+[[scene.point_lights]]
+position = [-2.4, 1.6, 1.8]
+color = [1.0, 0.75, 0.5]
+intensity = 3.5
+radius = 9.0

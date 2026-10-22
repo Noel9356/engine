@@ -1,0 +1,14 @@
+# Shipped defaults of the test scene mod. Defaults fill only what the
+# assembly left unset (docs/configuration.md): every configuration that does
+# not set renderer.texture_directory inherits the path into this package,
+# and any assembly or --set value wins over it. [scene] is deliberately
+# absent here - world content has a dedicated channel (scene.toml, declared
+# through the manifest's scene key), and a defaults file defining [scene]
+# fails startup with a precise error.
+
+[renderer]
+# The texture sets this package's scene references live in the package's
+# assets/textures/ directory, which the build copies into
+# runtime/mods/test_scene/assets/textures/. The path resolves relative to
+# the engine executable, like every runtime path.
+texture_directory = "mods/test_scene/assets/textures"

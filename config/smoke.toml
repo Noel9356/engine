@@ -1,0 +1,149 @@
+# Headless smoke configuration: small resolution and reduced GI cost so the
+# run stays fast on software rasterizers (lavapipe) while still exercising the
+# full pipeline - geometry, direct PBR, radiance cascades, composite, capture.
+# This configuration defines its own [scene]: the assembly owns the world, so
+# the installed content mod's scene file is not applied (and --validate would
+# say so in a warning).
+
+[engine]
+modules = ["logging", "window", "input", "renderer", "pbr", "radiance_cascades", "ray_reflections", "screenshot",
+           "lua_scripting"]
+
+[logging]
+level = "information"
+
+[window]
+title = "engine smoke"
+width = 480
+height = 270
+resizable = false
+
+[renderer]
+enable_validation = true
+vsync = false
+exposure = 1.1
+tonemap = "aces"
+
+[lighting]
+techniques = ["pbr", "radiance_cascades", "ray_reflections"]
+
+[lighting.pbr]
+shadows = false
+shadow_steps = 8
+
+[lighting.radiance_cascades]
+cascades = 5
+interval_base = 0.5
+interval_factor = 2.0
+probe_stride = 8
+base_rays = 12
+gather_visibility = true
+los_steps = 12
+march_steps = 32
+relight_shadows = false
+spatial_filter = 1
+shadow_steps = 8
+
+[scene]
+sky_radiance = [0.22, 0.30, 0.48]
+
+[scene.camera]
+# Headless run: pin the camera (a captured cursor on Xvfb can emit
+# phantom motion deltas that would drift the pose between runs).
+free_fly = false
+position = [0.0, 1.55, 2.9]
+look_at = [0.0, 1.05, -0.4]
+fov = 62.0
+
+[scene.sun]
+direction = [-0.35, -0.75, -0.55]
+color = [1.0, 0.94, 0.82]
+intensity = 3.2
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 0.0, 0.0]
+size = [3.5, 0.01, 3.5]
+albedo = [0.75, 0.74, 0.72]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 3.0, 0.0]
+size = [3.5, 0.01, 3.5]
+albedo = [0.72, 0.72, 0.72]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 1.5, -3.5]
+size = [3.5, 3.5, 0.01]
+albedo = [0.78, 0.78, 0.78]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [-3.5, 1.5, 0.0]
+size = [0.01, 3.5, 3.5]
+albedo = [0.65, 0.2, 0.18]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [3.5, 1.5, 0.0]
+size = [0.01, 3.5, 3.5]
+albedo = [0.22, 0.45, 0.2]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [-2.05, 1.5, 3.5]
+size = [1.45, 3.5, 0.01]
+albedo = [0.78, 0.78, 0.78]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [2.05, 1.5, 3.5]
+size = [1.45, 3.5, 0.01]
+albedo = [0.78, 0.78, 0.78]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 0.45, 3.5]
+size = [0.6, 0.9, 0.01]
+albedo = [0.78, 0.78, 0.78]
+roughness = 0.9
+
+[[scene.objects]]
+type = "plane"
+position = [0.0, 2.55, 3.5]
+size = [0.6, 0.9, 0.01]
+albedo = [0.78, 0.78, 0.78]
+roughness = 0.9
+
+[[scene.objects]]
+type = "box"
+position = [-1.1, 0.6, -1.0]
+size = [0.6, 0.6, 0.6]
+rotation_y = 25.0
+albedo = [0.82, 0.55, 0.3]
+roughness = 0.7
+
+[[scene.objects]]
+type = "sphere"
+position = [1.2, 0.8, -0.3]
+size = [0.8, 0.8, 0.8]
+albedo = [0.35, 0.5, 0.85]
+roughness = 0.3
+
+[[scene.objects]]
+type = "box"
+position = [0.0, 2.92, 0.0]
+size = [0.8, 0.03, 0.8]
+albedo = [1.0, 0.93, 0.8]
+emissive_strength = 6.0
+
+[screenshot]
+key = "F12"

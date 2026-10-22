@@ -1,0 +1,10 @@
+id = "qa_capture"
+version = "1.0.0"
+engine_api = 1
+type = "script"
+entry = "script.lua"
+host = "lua_scripting"
+display_name = "QA capture"
+description = "Requests one screenshot on the first rendered frame for headless QA."
+capabilities = ["logging", "screenshot"]
+permissions = ["logging.write", "screenshot.request"]

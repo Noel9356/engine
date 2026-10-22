@@ -1,0 +1,211 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Ray traced glossy reflections against the exact analytic scene SDF
+// (technique "ray_reflections" of [lighting].techniques).
+//
+// One reflection ray per pixel where the surface can show one: the Fresnel
+// term at grazing incidence plus a roughness fade decide the weight. The ray
+// sphere-traces the same SDF the GI tracer and the shadow rays use, so a
+// reflection hit is exact scene geometry - the same "one geometry truth"
+// rule every other tracing consumer follows.
+//
+//   hit: radiance = direct relight at the hit (textured, shared
+//        surfaceOutgoingRadiance) + albedo * GI sampled from the composed
+//        cascade field where the hit point reprojects into the frame with a
+//        matching depth (screen-space reuse; misses of the reuse window stay
+//        direct-only, documented limit) + the hit's emissive;
+//   miss: the shared sky model WITH the sun disk - a chrome ball shows the
+//        sun itself.
+//
+// The pbr technique multiplies its analytic specular by (1 - this weight)
+// (pbr_lighting.comp reflectionWeight, same formula), so the two layers
+// SPLIT the specular energy instead of adding it twice: without that fold
+// the sun appeared twice on every glossy pixel (GGX highlight AND mirrored
+// disk). The fade curve is pow(1 - roughness/max, 1.5): a smooth surface
+// hands over fully, roughness falls off smoothly towards the max - the
+// earlier squared fade crushed a roughness 0.2 metal's room reflection to a
+// fifth of its Fresnel weight, which read as a dark, highlight-only ball.
+//
+// The output is PRE-multiplied by the Fresnel weight: the composite adds the
+// layer to the frame without further terms.
+
+
+#include "relight_common.glsl"
+#include "environment_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform sampler2D albedoSampler; // rgb albedo, a roughness
+layout(set = 1, binding = 1) uniform sampler2D normalSampler; // rgb world normal, a metallic
+layout(set = 1, binding = 2) uniform sampler2D depthSampler;
+layout(set = 1, binding = 3) uniform sampler2D giSampler; // composed diffuse GI (irradiance / pi)
+layout(set = 1, binding = 4, rgba16f) uniform restrict writeonly image2D specularImage;
+
+layout(push_constant) uniform ReflectionPush
+{
+    layout(offset = 0) vec4 settings;  // x max roughness, y max distance, z unused, w unused
+    layout(offset = 16) uvec4 counts;  // x primitiveCount, y marchSteps, z unused, w unused
+} push_;
+
+vec3 fresnelSchlickRoughness(float cosine, vec3 f0, float roughness)
+{
+    const vec3 maxColor = max(vec3(1.0 - roughness), f0);
+    return f0 + (maxColor - f0) * pow(1.0 - cosine, 5.0);
+}
+
+void main()
+{
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 extent = imageSize(specularImage);
+    if (pixel.x >= extent.x || pixel.y >= extent.y)
+    {
+        return;
+    }
+
+    const vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(extent);
+    const float depth = texture(depthSampler, uv).r;
+    if (depth >= 1.0)
+    {
+        imageStore(specularImage, pixel, vec4(0.0));
+        return;
+    }
+
+    const vec2 normalized = uv * 2.0 - vec2(1.0);
+    const vec3 position = worldPositionFromDepth(inverseViewProjection, normalized, depth);
+    const vec4 normalMetallic = texture(normalSampler, uv);
+    const vec3 normal = normalize(normalMetallic.xyz);
+    const float metallic = normalMetallic.a;
+    const vec4 albedoRoughness = texture(albedoSampler, uv);
+    const vec3 albedo = albedoRoughness.rgb;
+    const float roughness = albedoRoughness.a;
+
+    const float maxRoughness = max(push_.settings.x, 0.01);
+    // Fade curve shared with pbr_lighting.comp's reflectionWeight (see the
+    // header): pow(1 - roughness/max, 1.5) keeps smooth surfaces fully
+    // ray-reflected while mid-roughness surfaces fall off smoothly. A single
+    // sharp ray cannot represent a wide glossy lobe, so surfaces at the max
+    // roughness boundary keep their analytic GGX highlight instead.
+    const float fade = pow(clamp(1.0 - roughness / maxRoughness, 0.0, 1.0), 1.5);
+    if (fade <= 0.0)
+    {
+        imageStore(specularImage, pixel, vec4(0.0));
+        return;
+    }
+
+    const vec3 viewDirection = normalize(cameraPosition.xyz - position);
+    const vec3 f0 = mix(vec3(0.04), albedo, metallic);
+    const vec3 fresnel = fresnelSchlickRoughness(max(dot(normal, viewDirection), 0.0), f0, roughness);
+    const float weight = (fresnel.x + fresnel.y + fresnel.z) / 3.0 * fade;
+    if (weight < 0.015)
+    {
+        imageStore(specularImage, pixel, vec4(0.0));
+        return;
+    }
+
+    const vec3 direction = reflect(-viewDirection, normal);
+    // The launch origin must be OUTSIDE the analytic geometry: the G-buffer
+    // normal carries the material's normal map, whose tangent-heavy
+    // perturbation on curved surfaces (the metal sphere's brushed grain) can
+    // push the one-centimetre offset back INSIDE the SDF. Sphere tracing from
+    // inside a solid reports a bogus immediate hit at the first step, which
+    // the self-hit guard then discards - the whole pixel reflected the SKY
+    // instead of the room (dark sky-coloured patches speckled over the curved,
+    // textured mirror). Same discipline as pbr_lighting.comp's shadow origin
+    // and the gather's LOS start: fall back to the SDF's own geometric normal,
+    // then to the camera direction, which is always outside for a visible
+    // surface.
+    vec3 origin = position + normal * 0.01;
+    if (sceneSDF(origin, push_.counts.x) < 0.0)
+    {
+        origin = position + sdfNormal(position, push_.counts.x) * 0.01;
+    }
+    if (sceneSDF(origin, push_.counts.x) < 0.0)
+    {
+        origin = position + viewDirection * 0.01;
+    }
+    // Convex self-hit resolution. Every scene primitive is convex, so a
+    // reflection ray that LEAVES a surface can never legitimately return to
+    // the SAME primitive - any such hit is a grazing re-entry of the launcher
+    // (the launch origin sits one centimetre out, and rays near the horizon
+    // re-hit the launcher several centimetres away). The earlier fixed guard
+    // rejected only hits below three centimetres; grazing re-entries beyond
+    // that painted the dark speckle ring riding the chrome ball's rim. Now
+    // the hit's owner primitive is compared against the launch point's: hits
+    // on the launcher (or inside the launch clearance) SKIP PAST and the
+    // march restarts just beyond them, budget bounded, so the ball reflects
+    // the room behind it instead of speckled self-images.
+    const uint launchOwner = primitiveOwnerAt(position, push_.counts.x);
+    vec3 traceOrigin = origin;
+    float remainingDistance = push_.settings.y;
+    float hit = -1.0;
+    for (uint attempt = 0u; attempt < 4u; ++attempt)
+    {
+        hit = traceInterval(traceOrigin, direction, 0.02, remainingDistance, push_.counts.x, push_.counts.y);
+        if (hit < 0.0)
+        {
+            break; // open reflection: the loop keeps hit = -1 (sky)
+        }
+        const bool beyondLaunchClearance = hit >= 0.03;
+        const bool differentPrimitive =
+            primitiveOwnerAt(traceOrigin + direction * hit, push_.counts.x) != launchOwner;
+        if (beyondLaunchClearance && differentPrimitive)
+        {
+            break; // a genuine reflection target
+        }
+        // Grazing self-hit: skip past it and keep marching.
+        const float advance = hit + 0.05;
+        traceOrigin += direction * advance;
+        remainingDistance -= advance;
+        hit = -1.0;
+        if (remainingDistance <= 0.05)
+        {
+            break;
+        }
+    }
+
+    vec3 radiance;
+    if (hit > 0.0)
+    {
+        const vec3 hitPoint = traceOrigin + direction * hit;
+        vec3 hitNormal = sdfNormal(hitPoint, push_.counts.x);
+        hitNormal *= -sign(dot(hitNormal, direction));
+        vec3 hitAlbedo;
+        radiance = surfaceOutgoingRadiance(hitPoint, hitNormal, push_.counts.x, hitAlbedo);
+
+        // Screen-space GI reuse: where the hit point is visible from the
+        // camera, its diffuse GI from the cascade field completes the
+        // reflection (walls lit only by bounce light show up on the chrome
+        // ball). The visibility test compares WORLD positions under a
+        // view-depth-scaled tolerance - comparing raw clip depths is
+        // non-linear (hyper-strict near the camera, uselessly loose far
+        // away), which silently dropped most reuse windows. A depth mismatch
+        // (or off-screen) simply keeps the direct relight - no invented
+        // light.
+        const vec4 clip = viewProjection * vec4(hitPoint, 1.0);
+        const vec3 projected = clip.xyz / max(clip.w, 1e-5);
+        if (all(greaterThan(projected.xy, vec2(-0.999))) && all(lessThan(projected.xy, vec2(0.999))) &&
+            projected.z > 0.0 && projected.z < 1.0)
+        {
+            const vec2 hitUv = projected.xy * 0.5 + vec2(0.5);
+            const float hitDepth = texture(depthSampler, hitUv).r;
+            if (hitDepth < 1.0)
+            {
+                const vec3 bufferedPosition =
+                    worldPositionFromDepth(inverseViewProjection, hitUv * 2.0 - vec2(1.0), hitDepth);
+                const float tolerance = max(0.02, 0.02 * length(hitPoint - cameraPosition.xyz));
+                if (distance(bufferedPosition, hitPoint) < tolerance)
+                {
+                    radiance += hitAlbedo * texture(giSampler, hitUv).rgb;
+                }
+            }
+        }
+    }
+    else
+    {
+        // Open reflection (or the ray budget ran out past self-hits): the
+        // sky, with the sun disk (direct view semantics).
+        radiance = skyRadiance(direction);
+    }
+
+    imageStore(specularImage, pixel, vec4(radiance * weight, 1.0));
+}

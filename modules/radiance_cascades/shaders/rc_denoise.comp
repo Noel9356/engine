@@ -1,0 +1,121 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Radiance cascades, spatial filter stage.
+//
+// The gather output carries the probe grid's spatial scale: probes sit every
+// probe_stride pixels and their LOS-gated blend, surface anchoring and the
+// interval-composed radiance field all leave block-structured residual
+// energy that reads as "blocky" patches even when the transport itself is
+// correct. This pass is a small edge-aware (bilateral) filter: neighbouring
+// GI samples are averaged with weights that fall off with depth distance and
+// normal disagreement, so flat surfaces smooth strongly while silhouettes
+// keep their hard edge and light stays on its own side of a wall.
+//
+// The kernel is deliberately tiny (radius 2 by default): it is a cleanup of
+// grid-scale structure, not a denoiser for random noise - there is no random
+// sampling anywhere in the cascade path, so there is no noise to fight.
+
+
+#include "scene_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform sampler2D giSampler;  // gathered irradiance (module-owned temp)
+layout(set = 1, binding = 1) uniform sampler2D depthSampler;
+layout(set = 1, binding = 2) uniform sampler2D normalSampler;
+layout(set = 1, binding = 3, rgba16f) uniform restrict writeonly image2D filteredImage;
+
+layout(push_constant) uniform FilterPush
+{
+    layout(offset = 0) ivec4 params;   // x kernel radius, y normal power, z depth band percent, w unused
+    layout(offset = 16) vec4 cameraPlanes; // x near plane, y far plane (meters), zw unused
+} push_;
+
+// NDC depth -> view distance (the perspective hyperbola inverted). The band
+// below compares view depths, not raw NDC depths: the projection makes one
+// milli-NDC a hair's breadth near the camera and metres far away, so the old
+// NDC metric held edges close to the camera but widened to MULTIPLES OF A
+// METRE at mid range - the filter then happily averaged GI across distant
+// parallel surfaces (a wall in front of a wall, boxes in front of the back
+// wall) whose normals agree, and the blocky far-field bleed rode exactly
+// those pairs.
+float viewDepth(float ndcDepth)
+{
+    const float nearPlane = push_.cameraPlanes.x;
+    const float farPlane = push_.cameraPlanes.y;
+    return nearPlane * farPlane / max(farPlane - ndcDepth * (farPlane - nearPlane), 1e-4);
+}
+
+void main()
+{
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 extent = imageSize(filteredImage);
+    if (pixel.x >= extent.x || pixel.y >= extent.y)
+    {
+        return;
+    }
+
+    const vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(extent);
+    const float centerDepth = texture(depthSampler, uv).r;
+    if (centerDepth >= 1.0)
+    {
+        // Sky pixels carry no GI by construction (the composite paints the
+        // sky radiance there); keep them exactly zero so nothing can bleed
+        // onto them - the leak check reads sky-adjacent sealed regions.
+        imageStore(filteredImage, pixel, vec4(0.0));
+        return;
+    }
+    const vec3 centerNormal = normalize(texture(normalSampler, uv).xyz);
+
+    // The kernel radius clamp follows the probe stride: at stride 8 one
+    // probe cell spans 8 pixels, so removing the grid's spatial scale needs
+    // a window that averages ACROSS cells (radius ~10) while the bilateral
+    // weights keep silhouettes hard. (The old 8-pixel clamp predates the
+    // dense-probe era and silently capped configured radii larger than 8.)
+    const int radius = clamp(push_.params.x, 0, 16);
+    const float normalPower = max(float(push_.params.y), 1.0);
+    // Depth band as a PERCENT of the surface's view depth (4 = 4%): one
+    // metric for the whole frame, tight where geometry is close, generous
+    // where it is far - see viewDepth above for why the band cannot be
+    // measured in NDC units.
+    const float depthBandPercent = max(float(push_.params.z), 1) * 0.01;
+    const float centerViewDepth = viewDepth(centerDepth);
+
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    for (int offsetY = -radius; offsetY <= radius; ++offsetY)
+    {
+        for (int offsetX = -radius; offsetX <= radius; ++offsetX)
+        {
+            const ivec2 tap = clamp(pixel + ivec2(offsetX, offsetY), ivec2(0), extent - ivec2(1));
+            const vec2 tapUv = (vec2(tap) + vec2(0.5)) / vec2(extent);
+            const float tapDepth = texture(depthSampler, tapUv).r;
+            if (tapDepth >= 1.0)
+            {
+                continue; // sky neighbours carry no GI to average in
+            }
+            const vec3 tapNormal = normalize(texture(normalSampler, tapUv).xyz);
+            // Relative view-depth band: neighbouring pixels of one surface
+            // sit at nearly equal distance from the camera; a step across an
+            // edge is orders of magnitude larger and its weight collapses.
+            const float tapViewDepth = viewDepth(tapDepth);
+            const float depthWeight = exp(-abs(tapViewDepth - centerViewDepth) /
+                                          (depthBandPercent * max(centerViewDepth, 0.02)));
+            const float normalWeight = pow(max(dot(tapNormal, centerNormal), 0.0), normalPower);
+            const float weight = depthWeight * normalWeight;
+            if (weight < 0.004)
+            {
+                continue;
+            }
+            sum += weight * texture(giSampler, tapUv).rgb;
+            weightSum += weight;
+        }
+    }
+
+    // Renormalized average; with a depth+normal aware kernel the surviving
+    // taps are the same surface, so the normalization cannot pull light
+    // across a silhouette. An isolated pixel (everything rejected) keeps its
+    // own unfiltered value instead of collapsing to black.
+    const vec3 filtered = weightSum > 0.0 ? sum / weightSum : texture(giSampler, uv).rgb;
+    imageStore(filteredImage, pixel, vec4(filtered, 1.0));
+}

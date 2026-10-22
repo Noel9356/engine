@@ -1,0 +1,419 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Radiance cascades, final gather.
+//
+// Per pixel diffuse irradiance from the composed cascades:
+//
+//   gi = sum_probe weight * sum_dir max(0, N.L) * solidAngle * full[dir] / pi
+//
+// SOFT CASCADE SELECTION: the composed field of cascade c is valid from its
+// slab start outwards, and each cascade's probes sit at that slab start
+// (cascade 0 on the surfaces, coarser cascades on the camera ray). Selecting
+// ONE cascade per pixel by depth produced hard bands wherever the selection
+// flipped (the fields disagree slightly at the boundary). Instead every
+// pixel blends the depth-selected cascade with the next FINER one:
+//
+//   w = smoothstep over the first 35% of the selected slab
+//   gi = mix(gather(finer), gather(selected), w)
+//
+// At the slab start the two fields are both valid (the finer cascade's slab
+// ends exactly there), so the blend is continuous across boundaries; deep in
+// the slab the selected cascade wins. Pixels in cascade 0 use cascade 0
+// directly - there is no finer field.
+//
+// The probe blend is the second pillar of the no-light-leak guarantee: plain
+// bilinear interpolation across the probe grid bleeds radiance across wall
+// silhouettes (the classic screen-space GI leak). Here each of the four
+// neighbouring probes is line-of-sight checked against the pixel's world
+// position through the exact analytic SDF; occluded probes are dropped from
+// the blend (smoothly near silhouettes - see lineOfSight in scene_common.glsl
+// for why the transition is continuous instead of binary). A pixel whose
+// coarse-cascade coverage collapses (weightSum < 0.5 - two of four probes
+// blocked, or the pure renormalization clamp region) hands off smoothly to
+// the finer cascade's result, which has a denser grid and far fewer blocked
+// probes near silhouettes. This replaces the old "clamp at half coverage"
+// that let partially blocked pixels go dark - the dark blotches riding probe
+// grids at every wall edge.
+//
+// When BOTH the selected and the finer cascade are fully occluded the pixel
+// falls back to its OWN direct irradiance over pi (directIrradianceOverPi:
+// sun + point lights with SDF shadows, no albedo). The composite multiplies
+// the gi slot by the pixel's albedo, so the fallback must arrive as
+// irradiance/pi - feeding it surfaceOutgoingRadiance instead multiplied the
+// albedo twice and skipped the Lambert /pi: bright albedo-squared blotches
+// riding exactly the probe cells whose coarse coverage collapsed (the
+// strongest remaining blockiness after the visibility work). Geometrically
+// exact for the pixel, cannot smuggle light across geometry, never invents
+// indirect light. A lit interior through a window reads lit; a sealed dark
+// wall still reads dark because its own direct light IS zero.
+
+
+#include "relight_common.glsl"
+#include "common/cascade_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// One composed-cascade sampler per cascade index (cascades is configurable up
+// to 8). GLSL cannot dynamically index samplers, and the cascade choice is
+// per-pixel, so the shader switches over the cascade index. Unused cascades
+// bind the sky stand-in and are never selected.
+layout(set = 1, binding = 0) uniform sampler2DArray fullCascade0;
+layout(set = 1, binding = 1) uniform sampler2DArray fullCascade1;
+layout(set = 1, binding = 2) uniform sampler2DArray fullCascade2;
+layout(set = 1, binding = 3) uniform sampler2DArray fullCascade3;
+layout(set = 1, binding = 4) uniform sampler2DArray fullCascade4;
+layout(set = 1, binding = 5) uniform sampler2DArray fullCascade5;
+layout(set = 1, binding = 6) uniform sampler2DArray fullCascade6;
+layout(set = 1, binding = 7) uniform sampler2DArray fullCascade7;
+layout(set = 1, binding = 8) uniform sampler2D depthSampler;
+layout(set = 1, binding = 9) uniform sampler2D normalSampler;
+layout(set = 1, binding = 10, rgba16f) uniform restrict writeonly image2D giImage;
+
+layout(push_constant) uniform GatherPush
+{
+    layout(offset = 0) uvec4 counts;   // x primitiveCount, y losSteps, z visibilityEnabled, w cascadeCount
+    layout(offset = 16) vec4 schedule; // x intervalBase, y intervalFactor, z probeStride, w unused
+    layout(offset = 32) uvec4 dirs;    // x azCount, y elCount
+} push_;
+
+// The angular schedule is constant across cascades (every cascade carries the
+// same direction count; the spatial grid refines instead); the direction math
+// is shared with the march stage (cascade_common.glsl).
+vec3 directionOf(uint directionIndex, uint elCount)
+{
+    return cascadeDirection(directionIndex / elCount, directionIndex % elCount, push_.dirs.x, elCount);
+}
+
+// Anchor of one probe of `cascade` in the pixel's neighbourhood. Cascade 0
+// anchors on the surface seen at the probe pixel (depth buffer); coarser
+// cascades anchor exactly where the march stage placed them - the pure/mixed
+// blend is the SHARED cascadeAnchorDepth (cascade_common.glsl), so the
+// line-of-sight check can never desynchronize from the field the probe
+// actually carries.
+vec3 probeAnchor(ivec2 probe, uint cascade, ivec2 extent, out vec3 surfaceNormal)
+{
+    const uint stride = uint(push_.schedule.z) << cascade;
+    const vec2 probePixel = vec2((float(probe.x) + 0.5) * float(stride), (float(probe.y) + 0.5) * float(stride));
+    const vec2 probeUv = probePixel / vec2(extent);
+    const vec2 probeNdc = probeUv * 2.0 - vec2(1.0);
+    const vec3 rayDirection = cameraRayDirection(inverseViewProjection, cameraPosition.xyz, probeNdc);
+
+    if (cascade > 0u)
+    {
+        const float tStart = push_.schedule.x * pow(push_.schedule.y, float(cascade - 1));
+        const float tEnd = push_.schedule.x * pow(push_.schedule.y, float(cascade));
+        surfaceNormal = vec3(0.0);
+        float anchorDepth = tStart;
+        float nearDepth;
+        float farDepth;
+        cellDepthRange(depthSampler, probeUv, float(stride) / vec2(extent), nearDepth, farDepth);
+        if (farDepth < 1.0)
+        {
+            const float centerDepth = viewDepthAt(depthSampler, probeUv);
+            anchorDepth = cascadeAnchorDepth(tStart, tEnd, centerDepth, nearDepth, farDepth);
+        }
+        return cameraPosition.xyz + rayDirection * anchorDepth;
+    }
+
+    const float depth = texture(depthSampler, probeUv).r;
+    if (depth < 1.0)
+    {
+        surfaceNormal = normalize(texture(normalSampler, probeUv).xyz);
+        return worldPositionFromDepth(inverseViewProjection, probeNdc, depth);
+    }
+    surfaceNormal = vec3(0.0);
+    return cameraPosition.xyz;
+}
+
+// Diffuse irradiance of one probe of one cascade for the given surface
+// normal. Quadrature over the cascade's direction texels with equirectangular
+// solid angles.
+vec3 probeIrradiance(sampler2DArray cascadeSampler, ivec2 probe, vec3 normal)
+{
+    const uint azCount = push_.dirs.x;
+    const uint elCount = push_.dirs.y;
+
+    vec3 sum = vec3(0.0);
+    for (uint directionIndex = 0u; directionIndex < azCount * elCount; ++directionIndex)
+    {
+        const vec3 direction = directionOf(directionIndex, elCount);
+        const float cosine = max(dot(normal, direction), 0.0);
+        if (cosine <= 0.0)
+        {
+            continue;
+        }
+        const uint elIndex = directionIndex % elCount;
+        const float elevation = (float(elIndex) + 0.5) / float(elCount) * 3.141592653589793 - 1.5707963267948966;
+        const float solidAngle = 6.283185307179586 / float(azCount) * 3.141592653589793 / float(elCount) *
+                                 cos(elevation);
+        const vec3 radiance = texelFetch(cascadeSampler, ivec3(probe.x, probe.y, int(directionIndex)), 0).rgb;
+        sum += cosine * solidAngle * radiance;
+    }
+    return sum / 3.14159265358979;
+}
+
+// The four bilinear corner probes of one pixel on cascade `cascade`'s grid,
+// with their bilinear weights.
+void cornerProbes(uint cascade, ivec2 extent, out ivec2 probes[4], out float weights[4])
+{
+    const uint stride = uint(push_.schedule.z) << cascade;
+    const vec2 grid = vec2(extent) / float(stride);
+    const vec2 uv = (vec2(gl_GlobalInvocationID.xy) + vec2(0.5)) / vec2(extent);
+    const vec2 gridCoordinates = uv * grid - vec2(0.5);
+    const vec2 base = floor(gridCoordinates);
+    const vec2 fraction = gridCoordinates - base;
+    const ivec2 gridLimit = ivec2(ceil(grid)) - ivec2(1);
+    probes[0] = clamp(ivec2(base), ivec2(0), gridLimit);
+    probes[1] = clamp(ivec2(base) + ivec2(1, 0), ivec2(0), gridLimit);
+    probes[2] = clamp(ivec2(base) + ivec2(0, 1), ivec2(0), gridLimit);
+    probes[3] = clamp(ivec2(base) + ivec2(1, 1), ivec2(0), gridLimit);
+    weights[0] = (1.0 - fraction.x) * (1.0 - fraction.y);
+    weights[1] = fraction.x * (1.0 - fraction.y);
+    weights[2] = (1.0 - fraction.x) * fraction.y;
+    weights[3] = fraction.x * fraction.y;
+}
+
+// One cascade's LOS-guarded probe blend for this pixel. Returns the
+// irradiance and the surviving bilinear weight sum through `coverage` (0 =
+// every probe blocked: the caller decides the fallback).
+vec3 gatherCascade(uint cascade, ivec2 extent, vec3 position, vec3 normal, out float coverage)
+{
+    ivec2 probes[4];
+    float weights[4];
+    cornerProbes(cascade, extent, probes, weights);
+
+    const bool visibilityEnabled = push_.counts.z != 0u;
+    vec3 accumulated = vec3(0.0);
+    float weightSum = 0.0;
+
+    // The pixel's LOS start leaves its surface by a centimetre - but the
+    // G-buffer normal carries the material's normal map, whose tangent-heavy
+    // perturbations on curved surfaces (spheres, cylinder-ish boxes) can push
+    // that offset back INSIDE the geometry; a sphere tracing started inside a
+    // solid reports an immediate hit and the probe (and with it the whole
+    // neighbourhood's coverage) collapses to zero. When the offset point is
+    // inside, fall back to offsetting towards the camera, which is always
+    // outside for a visible surface.
+    vec3 losStart = position + normal * 0.01;
+    if (sceneSDF(losStart, push_.counts.x) < 0.0)
+    {
+        losStart = position + normalize(cameraPosition.xyz - position) * 0.01;
+    }
+
+    for (uint corner = 0u; corner < 4u; ++corner)
+    {
+        if (weights[corner] < 0.001)
+        {
+            continue;
+        }
+        const ivec2 probe = probes[corner];
+
+        // Leak guard: drop probes the pixel cannot see.
+        float visibility = 1.0;
+        if (visibilityEnabled)
+        {
+            vec3 probeNormal;
+            const vec3 anchor = probeAnchor(probe, cascade, extent, probeNormal);
+            // The probe side gets the same inside test: surface-anchored
+            // probes carry the probe pixel's normal-mapped normal; a
+            // perturbed offset can sit inside the surface and self-block the
+            // probe.
+            vec3 losEnd = anchor + probeNormal * 0.01;
+            if (sceneSDF(losEnd, push_.counts.x) < 0.0)
+            {
+                losEnd = anchor;
+            }
+            // Same-surface trust: a probe anchored on the pixel's OWN surface
+            // is kept even when the straight segment grazes the object's own
+            // silhouette. The grazing band of every curved or angled surface
+            // lost ALL of its probes this way - screen-space neighbours anchor
+            // across the object's edge, the segment exits through the object
+            // itself, coverage collapsed to zero and the starved-pixel
+            // fallback (the pixel's own direct light, near zero on a shadowed
+            // face) painted soft black blobs in a periodic per-probe pattern.
+            //
+            // The discriminator is the SEGMENT MIDPOINT's signed distance,
+            // taken between the two offset endpoints:
+            // - two points of one surface sit ~1 cm in front of the same
+            //   plane, so their midpoint reads ~+1 cm - trusted;
+            // - a probe across a solid wall puts the midpoint INSIDE the
+            //   wall (negative) - the full line-of-sight test runs and the
+            //   probe stays blocked, so the no-leak guarantee is unchanged;
+            // - a probe across a window opening puts the midpoint in free
+            //   space (positive) - trusted, but the two anchors sit on the
+            //   same plane beside the opening and carry near-identical
+            //   fields, so no visible energy crosses.
+            // The normal agreement (material normal maps perturb both sides
+            // equally) plus the distance bound keep the trust local; beyond
+            // it the segment test is simply skipped and the LOS decides.
+            //
+            // Assigns the OUTER visibility on purpose: this line once
+            // re-declared `float visibility;` locally, SHADOWING the guard's
+            // result - every computed LOS value died at the end of this block
+            // and the blend kept the initialized 1.0, so NO probe was ever
+            // dropped and the gather bilinearly bled radiance across every
+            // wall silhouette at the probe grid's scale (the persistent
+            // blocky light leaks). The leak check missed it because its
+            // sealed probe sits deep inside thick geometry, beyond the
+            // grid-scale bleed.
+            const vec3 toProbe = anchor - position;
+            if (dot(toProbe, toProbe) < 0.64 && dot(normal, probeNormal) > 0.75)
+            {
+                const vec3 midPoint = (losStart + losEnd) * 0.5;
+                visibility = sceneSDF(midPoint, push_.counts.x) > -0.02 ? 1.0
+                                                                          : lineOfSight(losStart, losEnd,
+                                                                                        push_.counts.x,
+                                                                                        push_.counts.y);
+            }
+            else
+            {
+                visibility = lineOfSight(losStart, losEnd, push_.counts.x, push_.counts.y);
+            }
+        }
+
+        const float weight = weights[corner] * visibility;
+        if (weight <= 0.0)
+        {
+            continue;
+        }
+        vec3 irradiance;
+        switch (cascade)
+        {
+        case 0u: irradiance = probeIrradiance(fullCascade0, probe, normal); break;
+        case 1u: irradiance = probeIrradiance(fullCascade1, probe, normal); break;
+        case 2u: irradiance = probeIrradiance(fullCascade2, probe, normal); break;
+        case 3u: irradiance = probeIrradiance(fullCascade3, probe, normal); break;
+        case 4u: irradiance = probeIrradiance(fullCascade4, probe, normal); break;
+        case 5u: irradiance = probeIrradiance(fullCascade5, probe, normal); break;
+        case 6u: irradiance = probeIrradiance(fullCascade6, probe, normal); break;
+        default: irradiance = probeIrradiance(fullCascade7, probe, normal); break;
+        }
+        accumulated += weight * irradiance;
+        weightSum += weight;
+    }
+
+    coverage = weightSum;
+    // Exact weighted average of the surviving (line-of-sight checked)
+    // probes. The earlier denominator floor of 0.7 clamped the
+    // normalization, which AMPLIFIED every partially blocked pixel by up to
+    // 1.4x - a bright rim riding exactly the contact silhouettes where two
+    // of four probes drop out. Fully visible neighbourhoods are unchanged
+    // (weightSum 1), and the starved-pixel fallback below owns the truly
+    // blocked ones; nothing amplifies in between.
+    return weightSum > 0.0 ? accumulated / weightSum : vec3(0.0);
+}
+
+void main()
+{
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 extent = imageSize(giImage);
+    if (pixel.x >= extent.x || pixel.y >= extent.y)
+    {
+        return;
+    }
+
+    const vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(extent);
+    const float depth = texture(depthSampler, uv).r;
+    if (depth >= 1.0)
+    {
+        imageStore(giImage, pixel, vec4(0.0));
+        return;
+    }
+
+    const vec2 normalized = uv * 2.0 - vec2(1.0);
+    const vec3 position = worldPositionFromDepth(inverseViewProjection, normalized, depth);
+    const vec3 normal = normalize(texture(normalSampler, uv).xyz);
+
+    // Depth-selective cascade choice: the smallest cascade whose interval end
+    // reaches beyond the pixel's view depth (radial distance from the camera
+    // - the same measure the march and interval schedule use).
+    const float viewDepth = length(position - cameraPosition.xyz);
+    uint cascade = 0u;
+    float intervalEnd = push_.schedule.x;
+    for (uint candidate = 0u; candidate + 1u < push_.counts.w; ++candidate)
+    {
+        if (viewDepth < intervalEnd)
+        {
+            break;
+        }
+        intervalEnd *= push_.schedule.y;
+        ++cascade;
+    }
+
+    // Soft selection: blend the selected cascade with the next FINER one
+    // over the first 25% of the selected slab. At the slab start both fields
+    // are valid (the finer slab ends exactly there); deeper in the slab the
+    // selected field wins. Pixels in cascade 0 have no finer field.
+    float coverage;
+    vec3 selected = gatherCascade(cascade, extent, position, normal, coverage);
+    vec3 gi = selected;
+    float finerCoverage = 0.0;
+    if (cascade > 0u)
+    {
+        const float tStart = push_.schedule.x * pow(push_.schedule.y, float(cascade - 1));
+        const float slabLength = push_.schedule.x * pow(push_.schedule.y, float(cascade)) - tStart;
+        // The blend spans the first 40% of the slab: the coarser field is
+        // smoother (its probe grid filters the direct lighting's high
+        // frequencies), so leaning on it through the first slab stretch
+        // visibly reduces the per-probe blockiness of the finer field while
+        // the depth-selected cascade still owns the slab's deep part.
+        const float blend = smoothstep(0.0, 0.4, clamp((viewDepth - tStart) / max(slabLength, 1e-4), 0.0, 1.0));
+        vec3 finer = vec3(0.0);
+        if (blend < 1.0 || coverage < 0.3)
+        {
+            finer = gatherCascade(cascade - 1u, extent, position, normal, finerCoverage);
+        }
+
+        if (coverage >= 0.3)
+        {
+            // Trusted region: the LOS-guarded blend of the two cascades.
+            gi = mix(finer, selected, blend);
+        }
+        else
+        {
+            // Starved band (an object standing in front of a wall aliases
+            // every coarse cell around itself: the mixed-cell anchors land
+            // on the wall BEHIND the object, which the object's own pixels
+            // cannot see). The fallback engages CONTINUOUSLY as coverage
+            // collapses - a hard switch here drew bright rings around every
+            // object's contact silhouette: the finer field is brighter than
+            // the starved coarse one, and a discontinuity rides the whole
+            // silhouette. Deeper fallbacks engage only when the previous
+            // one is empty as well: the finer cascade, then cascade 0 (its
+            // probes anchor on the surfaces right around the pixel), and
+            // the pixel's own direct radiance strictly last. Every step is
+            // LOS guarded, so the no-leak property is unchanged.
+            vec3 fallback = finer;
+            float fallbackCoverage = finerCoverage;
+            // The cascade-0 rescue is only worth its cost on the COARSE
+            // cascades: cascade 0 and 1 grids are already nearly as dense as
+            // cascade 0 itself, so their starved band cannot gain coverage.
+            if (fallbackCoverage < 0.3 && cascade > 1u)
+            {
+                float cascade0Coverage = 0.0;
+                const vec3 cascade0 = gatherCascade(0u, extent, position, normal, cascade0Coverage);
+                if (cascade0Coverage > fallbackCoverage)
+                {
+                    fallback = cascade0;
+                    fallbackCoverage = cascade0Coverage;
+                }
+            }
+            if (fallbackCoverage < 0.001)
+            {
+                fallback = directIrradianceOverPi(position, normal, push_.counts.x);
+            }
+            const float trust = smoothstep(0.0, 0.3, coverage);
+            gi = mix(fallback, mix(finer, selected, blend), trust);
+        }
+    }
+
+    // Everything starved: both cascades occluded (or empty) while the pixel
+    // may sit on a directly lit surface. Its own direct radiance is exact and
+    // leak-free; a dark pixel evaluates to dark because its own direct light
+    // is dark.
+    if (all(lessThan(gi, vec3(1e-5))))
+    {
+        gi = directIrradianceOverPi(position, normal, push_.counts.x);
+    }
+    imageStore(giImage, pixel, vec4(gi, 1.0));
+}
