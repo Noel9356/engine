@@ -86,7 +86,8 @@ float reflectionWeight(vec3 normal, vec3 viewDirection, vec3 f0, float roughness
 LightContribution sunContribution(vec3 worldPosition)
 {
     LightContribution contribution;
-    contribution.direction = -normalize(sunDirectionIntensity.xyz);
+    // Already normalized at upload (fillSunAndPointLights, light_uniform.hpp).
+    contribution.direction = -sunDirectionIntensity.xyz;
     contribution.radiance = sunColorEnabled.rgb * sunDirectionIntensity.w;
     contribution.maxDistance = 60.0;
     return contribution;

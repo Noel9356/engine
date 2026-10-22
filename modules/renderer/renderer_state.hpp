@@ -359,6 +359,12 @@ struct RendererState
     vk::DeviceSize captureBufferSize = 0;
     std::vector<std::uint8_t> capturePixels;
 
+    // Barrier scratch reused across frames by the record functions: recording
+    // runs every frame and a fresh vector per barrier group was pure heap
+    // churn on the record path. Cleared per use, never carried between groups.
+    std::vector<vk::ImageMemoryBarrier2> frameStartBarriers;
+    std::vector<vk::ImageMemoryBarrier2> radianceBarriers;
+
     QueueFamilyIndices findQueueFamilies(const vk::raii::PhysicalDevice& candidate,
                                          const vk::raii::SurfaceKHR& targetSurface) const;
     bool supportsSwapchainExtension(const vk::raii::PhysicalDevice& candidate) const;

@@ -76,14 +76,6 @@ layout(push_constant) uniform GatherPush
     layout(offset = 32) uvec4 dirs;    // x azCount, y elCount
 } push_;
 
-// The angular schedule is constant across cascades (every cascade carries the
-// same direction count; the spatial grid refines instead); the direction math
-// is shared with the march stage (cascade_common.glsl).
-vec3 directionOf(uint directionIndex, uint elCount)
-{
-    return cascadeDirection(directionIndex / elCount, directionIndex % elCount, push_.dirs.x, elCount);
-}
-
 // Anchor of one probe of `cascade` in the pixel's neighbourhood. Cascade 0
 // anchors on the surface seen at the probe pixel (depth buffer); coarser
 // cascades anchor exactly where the march stage placed them - the pure/mixed
@@ -127,27 +119,25 @@ vec3 probeAnchor(ivec2 probe, uint cascade, ivec2 extent, out vec3 surfaceNormal
 
 // Diffuse irradiance of one probe of one cascade for the given surface
 // normal. Quadrature over the cascade's direction texels with equirectangular
-// solid angles.
+// solid angles - both the directions and their solid angles come from the
+// precomputed table (cascade_common.glsl): this loop runs 4 probes x up to 3
+// cascade gathers per pixel, where the former per-direction trig (four
+// transcendentals plus a cosine for the solid angle) dominated the pass.
 vec3 probeIrradiance(sampler2DArray cascadeSampler, ivec2 probe, vec3 normal)
 {
-    const uint azCount = push_.dirs.x;
-    const uint elCount = push_.dirs.y;
+    const uint directionCount = push_.dirs.x * push_.dirs.y;
 
     vec3 sum = vec3(0.0);
-    for (uint directionIndex = 0u; directionIndex < azCount * elCount; ++directionIndex)
+    for (uint directionIndex = 0u; directionIndex < directionCount; ++directionIndex)
     {
-        const vec3 direction = directionOf(directionIndex, elCount);
-        const float cosine = max(dot(normal, direction), 0.0);
+        const vec4 directionData = cascadeDirections[directionIndex];
+        const float cosine = max(dot(normal, directionData.xyz), 0.0);
         if (cosine <= 0.0)
         {
             continue;
         }
-        const uint elIndex = directionIndex % elCount;
-        const float elevation = (float(elIndex) + 0.5) / float(elCount) * 3.141592653589793 - 1.5707963267948966;
-        const float solidAngle = 6.283185307179586 / float(azCount) * 3.141592653589793 / float(elCount) *
-                                 cos(elevation);
         const vec3 radiance = texelFetch(cascadeSampler, ivec3(probe.x, probe.y, int(directionIndex)), 0).rgb;
-        sum += cosine * solidAngle * radiance;
+        sum += cosine * directionData.w * radiance;
     }
     return sum / 3.14159265358979;
 }

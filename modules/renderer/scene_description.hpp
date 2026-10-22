@@ -78,14 +78,20 @@ struct SceneCamera
     float lookSensitivity = defaultLookSensitivity; // yaw/pitch radians per cursor pixel
 };
 
-// GPU layout shared with the shaders (render_interface.hpp documents the
+// GPU layout shared with the shaders (scene_common.glsl documents the
 // std430 struct; keep both sides in sync).
 struct GpuScenePrimitive
 {
-    std::array<float, 4> positionType;             // xyz position, w SceneObjectType
-    std::array<float, 4> sizeRotation;             // xyz size, w rotationY (radians)
+    std::array<float, 4> positionType;  // xyz position, w SceneObjectType
+    std::array<float, 4> sizeRotation;  // xyz size, w rotationY (radians)
     std::array<float, 4> albedoRoughness;          // rgb albedo, a roughness
-    std::array<float, 4> metallicEmissiveStrength; // x metallic, y emissive strength, z unused, w unused
+    // x metallic, y emissive strength, z sin(rotationY), w cos(rotationY).
+    // The rotation trig is baked here at upload: the SDF shaders apply this
+    // transform for every primitive on every sphere-tracing step, and the two
+    // transcendentals must not be re-evaluated inside that loop (the march
+    // alone evaluates the field up to (extent/stride)^2 * rays * steps times
+    // per frame). The z/w lanes were previously unused.
+    std::array<float, 4> metallicEmissiveStrength;
 };
 
 // Sun description ([scene.sun]); the direction points TOWARDS the scene (the

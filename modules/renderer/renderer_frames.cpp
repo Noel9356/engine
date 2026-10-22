@@ -231,8 +231,11 @@ void RendererState::recordGeometryPass(vk::raii::CommandBuffer& commandBuffer,
 
 void RendererState::recordFrameStartBarrier(vk::raii::CommandBuffer& commandBuffer)
 {
-    std::vector<vk::ImageMemoryBarrier2> barriers;
-    barriers.reserve(6);
+    // Reused scratch (renderer_state.hpp): recording runs every frame and the
+    // fresh-vector-per-frame allocations showed up as pure heap churn on the
+    // record path.
+    std::vector<vk::ImageMemoryBarrier2>& barriers = frameStartBarriers;
+    barriers.clear();
     const vk::Image frameImages[6] = {**emissiveImage.image, **albedoImage.image, **normalImage.image,
                                       hasDirectRadianceTarget ? **directRadianceImage.image : vk::Image{},
                                       hasIndirectDiffuseTarget ? **indirectRadianceImage.image : vk::Image{},
@@ -292,14 +295,14 @@ void RendererState::recordGBufferHandoffBarrier(vk::raii::CommandBuffer& command
 void RendererState::recordRadianceToCompositeBarrier(vk::raii::CommandBuffer& commandBuffer)
 {
     // Compute writes (direct, diffuse, specular) -> composite fragment reads.
+    // Scratch reused across frames (renderer_state.hpp) - see
+    // recordFrameStartBarrier.
     if (!hasDirectRadianceTarget && !hasIndirectDiffuseTarget && !hasIndirectSpecularTarget)
     {
         return;
     }
-    std::vector<vk::ImageMemoryBarrier2> barriers;
-    barriers.reserve(static_cast<std::size_t>(hasDirectRadianceTarget) +
-                     static_cast<std::size_t>(hasIndirectDiffuseTarget) +
-                     static_cast<std::size_t>(hasIndirectSpecularTarget));
+    std::vector<vk::ImageMemoryBarrier2>& barriers = radianceBarriers;
+    barriers.clear();
     const auto radianceBarrier = [&barriers](const vk::Image image)
     {
         vk::ImageMemoryBarrier2 barrier;
@@ -372,7 +375,7 @@ void RendererState::recordSwapchainCaptureAndPresentTransitions(vk::raii::Comman
         captureEnterBarrier.setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
         captureEnterBarrier.setImage(swapchainImages[imageIndex]);
         captureEnterBarrier.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
-        std::vector<vk::ImageMemoryBarrier2> captureEnter{captureEnterBarrier};
+        std::array<vk::ImageMemoryBarrier2, 1> captureEnter{captureEnterBarrier};
         vk::DependencyInfo captureEnterDependency;
         captureEnterDependency.setImageMemoryBarriers(captureEnter);
         commandBuffer.pipelineBarrier2(captureEnterDependency);
@@ -383,7 +386,7 @@ void RendererState::recordSwapchainCaptureAndPresentTransitions(vk::raii::Comman
         copyRegion.setImageSubresource(vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1));
         copyRegion.setImageOffset(vk::Offset3D(0, 0, 0));
         copyRegion.setImageExtent(vk::Extent3D(swapchainExtent.width, swapchainExtent.height, 1));
-        std::vector<vk::BufferImageCopy> copyRegions{copyRegion};
+        std::array<vk::BufferImageCopy, 1> copyRegions{copyRegion};
         commandBuffer.copyImageToBuffer(swapchainImages[imageIndex], vk::ImageLayout::eTransferSrcOptimal,
                                         **captureBuffer, copyRegions);
     }
@@ -404,7 +407,7 @@ void RendererState::recordSwapchainCaptureAndPresentTransitions(vk::raii::Comman
         presentBarrier.setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
         presentBarrier.setImage(swapchainImages[imageIndex]);
         presentBarrier.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
-        std::vector<vk::ImageMemoryBarrier2> present{presentBarrier};
+        std::array<vk::ImageMemoryBarrier2, 1> present{presentBarrier};
         vk::DependencyInfo presentDependency;
         presentDependency.setImageMemoryBarriers(present);
         commandBuffer.pipelineBarrier2(presentDependency);

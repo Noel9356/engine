@@ -65,13 +65,19 @@ vec3 sdfNormal(vec3 point, uint primitiveCount)
 
 // Diffuse sun contribution at an arbitrary world point. sunDirection points
 // FROM the light TOWARDS the scene, so the lit side faces -sunDirection.
+//
+// The uniform's xyz is normalized once at upload (fillSunAndPointLights,
+// light_uniform.hpp - the single definition every lighting module fills its
+// block from), so this per-pixel-per-evaluation normalize is gone: sunDiffuse
+// runs inside every shadowed relight and shadow ray, and normalize() was a
+// reciprocal-square-root per call buying nothing.
 vec3 sunDiffuse(vec3 point, vec3 normal, uint primitiveCount)
 {
     if (sunColorEnabled.w < 0.5 || sunDirectionIntensity.w <= 0.0)
     {
         return vec3(0.0);
     }
-    const vec3 direction = -normalize(sunDirectionIntensity.xyz);
+    const vec3 direction = -sunDirectionIntensity.xyz;
     const float cosine = max(dot(normal, direction), 0.0);
     if (cosine <= 0.0)
     {

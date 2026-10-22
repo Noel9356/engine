@@ -35,13 +35,6 @@ layout(std140, set = 0, binding = 0) uniform CameraUniform
     vec4 cameraPosition;
 };
 
-vec3 rotateY(vec3 vector, float radians)
-{
-    const float s = sin(radians);
-    const float c = cos(radians);
-    return vec3(c * vector.x + s * vector.z, vector.y, -s * vector.x + c * vector.z);
-}
-
 // World -> primitive-local, the inverse of the model matrix the geometry pass
 // rasterizes with. modelMatrix() places a unit primitive with
 // world = translate * rotateY(+radians) * scale, so recovering the local point
@@ -55,9 +48,21 @@ vec3 rotateY(vec3 vector, float radians)
 // across a 2x rotation seam on every GI bounce and reflection hit. With
 // rotation_y = 0 (the sealed leak-test room) both directions agree, which is
 // why the automated leak check never caught it.
-vec3 worldToLocalY(vec3 worldDelta, float radians)
+//
+// The rotation's sin/cos are NOT recomputed here: the primitive record carries
+// them baked at upload (metallicEmissiveStrength.zw = (sinY, cosY) of
+// sizeRotation.w, see scene_description.hpp). This transform runs for every
+// primitive on every sphere-tracing step - the march alone evaluates the field
+// up to (extent/stride)^2 * rays * steps times per frame - and two
+// transcendental re-evaluations inside that loop were the single largest
+// per-frame cost the tracing path carried. Mathematically identical to
+// rotateY(delta, -radians); only the evaluation site moved to the CPU.
+vec3 worldToLocalY(vec3 worldDelta, vec2 rotationTrig)
 {
-    return rotateY(worldDelta, -radians);
+    // rotateY(delta, -r): s = -sinY, c = cosY packed from the primitive.
+    return vec3(rotationTrig.y * worldDelta.x - rotationTrig.x * worldDelta.z,
+                worldDelta.y,
+                rotationTrig.x * worldDelta.x + rotationTrig.y * worldDelta.z);
 }
 
 // ---- Surface parameterization ----------------------------------------------------
@@ -160,13 +165,21 @@ float signedDistanceSphere(vec3 point, float radius)
 
 // Exact scene SDF: minimum over all configured primitives. Cost is linear in
 // the object count; the configuration caps it (max 32 objects).
-float sceneSDF(vec3 point, uint primitiveCount)
+//
+// sceneSDFOwned is the ONE loop definition: it additionally tracks which
+// primitive owns the minimum (first index on ties, the same rule
+// primitiveOwnerAt applies). sceneSDF discards the owner - the compiler
+// eliminates the dead tracking - so every existing consumer keeps its
+// instruction mix while traced hits get the owner for free (see
+// traceIntervalOwned below).
+float sceneSDFOwned(vec3 point, uint primitiveCount, out uint owner)
 {
     float minimum = 1e30;
+    uint nearest = 0u;
     for (uint index = 0u; index < primitiveCount; ++index)
     {
         const GpuPrimitive primitive = primitives[index];
-        const vec3 local = worldToLocalY(point - primitive.positionType.xyz, primitive.sizeRotation.w);
+        const vec3 local = worldToLocalY(point - primitive.positionType.xyz, primitive.metallicEmissiveStrength.zw);
         float distance;
         if (primitive.positionType.w < 0.5)
         {
@@ -176,25 +189,47 @@ float sceneSDF(vec3 point, uint primitiveCount)
         {
             distance = signedDistanceSphere(local, primitive.sizeRotation.x);
         }
-        minimum = min(minimum, distance);
+        if (distance < minimum)
+        {
+            minimum = distance;
+            nearest = index;
+        }
     }
+    owner = nearest;
     return minimum;
+}
+
+float sceneSDF(vec3 point, uint primitiveCount)
+{
+    uint unusedOwner;
+    return sceneSDFOwned(point, primitiveCount, unusedOwner);
 }
 
 // Sphere tracing inside [tStart, tEnd] (the cascade interval). Returns the hit
 // distance, or -1.0 when the ray leaves the interval unoccluded. The epsilon
 // grows with distance so grazing rays stay conservative; a fixed epsilon is a
 // classic light-leak source at thin walls.
-float traceInterval(vec3 origin, vec3 direction, float tStart, float tEnd, uint primitiveCount, uint maxSteps)
+//
+// traceIntervalOwned additionally reports the owning primitive of the hit:
+// the hit step already evaluated the field at the hit point, so the arg-min
+// index is known there and the consumer's post-hit primitiveOwnerAt scan (one
+// full linear pass over the primitives per hit) becomes unnecessary. The owner
+// is only meaningful when the returned distance is >= 0. The plain
+// traceInterval keeps its signature for callers that never use the owner.
+float traceIntervalOwned(vec3 origin, vec3 direction, float tStart, float tEnd, uint primitiveCount,
+                         uint maxSteps, out uint owner)
 {
     float t = tStart;
+    owner = 0u;
     for (uint step = 0u; step < maxSteps; ++step)
     {
         const vec3 point = origin + direction * t;
-        const float distance = sceneSDF(point, primitiveCount);
+        uint stepOwner;
+        const float distance = sceneSDFOwned(point, primitiveCount, stepOwner);
         const float epsilon = max(0.0004, 0.0008 * t);
         if (distance < epsilon)
         {
+            owner = stepOwner;
             return t;
         }
         t += distance;
@@ -204,6 +239,12 @@ float traceInterval(vec3 origin, vec3 direction, float tStart, float tEnd, uint 
         }
     }
     return -1.0;
+}
+
+float traceInterval(vec3 origin, vec3 direction, float tStart, float tEnd, uint primitiveCount, uint maxSteps)
+{
+    uint unusedOwner;
+    return traceIntervalOwned(origin, direction, tStart, tEnd, primitiveCount, maxSteps, unusedOwner);
 }
 
 // Visibility query between two world points used by the probe gather: 1.0

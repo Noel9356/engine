@@ -32,6 +32,7 @@ Documentation lives NEXT TO THE CODE IT DESCRIBES: every module, the kernel, the
 | `docs/building.md` | configure/build/test, dependency tiers, `_deps` layout, offline controls, module options |
 | `docs/configuration.md` | global and shared `engine.toml` sections ([engine], [providers], [permissions], [scene], [diagnostics]); per-module keys are documented by their owning module |
 | `docs/robustness.md` | problems found and fixed, how runtime regressions are caught, known limits |
+| `docs/performance_changes.md` | the performance pass: architecture verdict, the five per-frame cost fixes, verification |
 | `kernel/README.md` | the kernel concerns file by file, the six contracts, lifecycle, mod loading, startup diagnostics |
 | `host/README.md` | composition root, frame loop, CLI flags, exit codes, the leak-check harness |
 | `mods/README.md` | mod packages, the `mod.toml` schema, world content (`scene = ...`), native and Lua authoring guides, mod portability rules |

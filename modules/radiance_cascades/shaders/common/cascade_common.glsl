@@ -1,24 +1,32 @@
 // Math shared by the radiance cascades march and gather stages.
 //
-// The anchor classification and the direction table live here because the two
-// stages previously carried byte-identical copies with a "MUST keep the same
-// formula" comment: a mismatch would desynchronize the line-of-sight check
-// from the field the probe actually carries. One definition removes the
-// failure mode instead of policing it.
+// Two things live here because both stages previously carried byte-identical
+// copies that had to be kept in sync by comment alone (a mismatch would
+// desynchronize the line-of-sight check from the field the probe actually
+// carries). One definition removes the failure mode instead of policing it:
+//
+// - The precomputed direction table (see the buffer below): the equirect
+//   schedule used to be a function here that every consumer re-evaluated with
+//   4-5 transcendentals per direction - the gather inside a per-pixel
+//   per-probe quadrature loop (~1000+ evaluations per pixel), the march once
+//   per invocation, the compose once per coarsest-cascade texel. The schedule
+//   is a pure function of the angular schedule, constant across cascades AND
+//   frames, so it is now computed once per rebuild on the CPU
+//   (RadianceCascadesPass::rebuild builds the identical equirectangular
+//   schedule) and uploaded as this buffer.
 
 #ifndef ENGINE_CASCADE_COMMON_GLSL
 #define ENGINE_CASCADE_COMMON_GLSL
 
-// Direction of one probe ray: equirectangular over (azCount x elCount), cell
-// centres offset by half a step. CONSTANT angular schedule across cascades
-// (every cascade carries the same direction count; the spatial grid refines
-// instead).
-vec3 cascadeDirection(uint azIndex, uint elIndex, uint azCount, uint elCount)
+// Precomputed direction table, one vec4 per (azimuth x elevation) direction in
+// the march's image-layer order (azimuth-major: index = azIndex * elCount +
+// elIndex): xyz the unit direction, w the direction's equirectangular solid
+// angle (2*pi/azCount) * (pi/elCount) * cos(elevation) - the exact quadrature
+// weight the gather's probeIrradiance previously recomputed per pixel.
+layout(std430, set = 0, binding = 7) readonly buffer CascadeDirectionTable
 {
-    const float azimuth = (float(azIndex) + 0.5) / float(azCount) * 6.283185307179586;
-    const float elevation = (float(elIndex) + 0.5) / float(elCount) * 3.141592653589793 - 1.5707963267948966;
-    return vec3(cos(elevation) * cos(azimuth), sin(elevation), cos(elevation) * sin(azimuth));
-}
+    vec4 cascadeDirections[];
+};
 
 // Anchor depth of one probe inside its cascade slab [tStart, tEnd], given the
 // cell's depth-buffer statistics:

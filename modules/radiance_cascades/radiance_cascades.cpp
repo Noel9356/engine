@@ -205,7 +205,8 @@ public:
         }
 
         // march[c] writes -> compose reads.
-        barrierCascades(commandBuffer, marchBarriers(), vk::PipelineStageFlagBits2::eComputeShader,
+        marchBarriers(cascadeImageScratch);
+        barrierCascades(commandBuffer, cascadeImageScratch, vk::PipelineStageFlagBits2::eComputeShader,
                         vk::PipelineStageFlagBits2::eComputeShader);
 
         // ---- Compose: front-to-back interval chaining. --------------------
@@ -297,8 +298,10 @@ private:
     void barrierCascades(vk::raii::CommandBuffer& commandBuffer, const std::vector<vk::Image>& images,
                          vk::PipelineStageFlagBits2 sourceStage, vk::PipelineStageFlagBits2 destinationStage)
     {
-        std::vector<vk::ImageMemoryBarrier2> barriers;
-        barriers.reserve(images.size());
+        // Scratch members (below): record() runs every frame and fresh
+        // vectors per barrier group were pure heap churn on the record path.
+        std::vector<vk::ImageMemoryBarrier2>& barriers = cascadeBarrierScratch;
+        barriers.clear();
         for (const vk::Image& image : images)
         {
             vk::ImageMemoryBarrier2 barrier;
@@ -319,15 +322,13 @@ private:
         commandBuffer.pipelineBarrier2(dependency);
     }
 
-    std::vector<vk::Image> marchBarriers() const
+    void marchBarriers(std::vector<vk::Image>& images)
     {
-        std::vector<vk::Image> images;
-        images.reserve(marchImages.size());
+        images.clear();
         for (const CascadeImage& cascade : marchImages)
         {
             images.push_back(**cascade.image);
         }
-        return images;
     }
 
     void createCascadeImage(CascadeImage& target, const FrameRenderContext& context, vk::Extent2D grid,
@@ -463,6 +464,7 @@ private:
         gatherTemp = CascadeImage{};
         skyImage = CascadeImage{};
         lightStorage.reset();
+        directionStorage.reset();
         composeSampler.reset();
         nearestSampler.reset();
 
@@ -473,6 +475,47 @@ private:
         azimuthBase = std::max(2u, static_cast<std::uint32_t>(std::lround(std::sqrt(
                                         static_cast<double>(settings.baseRays) * 2.0))));
         elevationBase = std::max(3u, settings.baseRays / azimuthBase);
+
+        // Direction table: one vec4 per (azimuth x elevation) direction, the
+        // equirectangular schedule the shaders previously recomputed with 4-5
+        // transcendentals per direction per pixel (the gather's quadrature
+        // loop) or per invocation (the march). The schedule is constant across
+        // cascades and frames, so it is built once per rebuild and uploaded to
+        // the host-visible storage buffer bound at shared set 0 / binding 7
+        // (cascade_common.glsl). Layer order matches the march's image layers:
+        // index = azIndex * elevationBase + elIndex.
+        {
+            constexpr double directionTablePi = 3.14159265358979323846;
+            constexpr double directionTableTwoPi = 6.28318530717958647692;
+            const std::uint32_t directionCount = azimuthBase * elevationBase;
+            std::vector<std::array<float, 4>> directions(directionCount);
+            for (std::uint32_t azimuthIndex = 0; azimuthIndex < azimuthBase; ++azimuthIndex)
+            {
+                for (std::uint32_t elevationIndex = 0; elevationIndex < elevationBase; ++elevationIndex)
+                {
+                    const float azimuth = static_cast<float>((static_cast<double>(azimuthIndex) + 0.5) /
+                                                             static_cast<double>(azimuthBase) *
+                                                             directionTableTwoPi);
+                    const float elevation =
+                        static_cast<float>((static_cast<double>(elevationIndex) + 0.5) /
+                                               static_cast<double>(elevationBase) * directionTablePi -
+                                           0.5 * directionTablePi);
+                    const float cosElevation = std::cos(elevation);
+                    const float solidAngle = static_cast<float>(
+                        directionTableTwoPi / static_cast<double>(azimuthBase) * directionTablePi /
+                        static_cast<double>(elevationBase)) * cosElevation;
+                    directions[azimuthIndex * elevationBase + elevationIndex] = {
+                        cosElevation * std::cos(azimuth), std::sin(elevation), cosElevation * std::sin(azimuth),
+                        solidAngle};
+                }
+            }
+            directionStorage = createMappedHostVisibleBuffer(
+                context.device, context.physicalDevice,
+                static_cast<vk::DeviceSize>(directions.size() * sizeof(std::array<float, 4>)),
+                vk::BufferUsageFlagBits::eStorageBuffer);
+            std::memcpy(directionStorage.mapped, directions.data(),
+                        directions.size() * sizeof(std::array<float, 4>));
+        }
 
         const auto gridWidth = [this, &context](std::uint32_t cascade)
         {
@@ -524,8 +567,9 @@ private:
             // Shared set 0: camera UBO, primitives SSBO, light UBO (the two
             // relighting passes), material table SSBO, albedo/data texture
             // arrays (textured relight), environment UBO (the compose sky
-            // base).
-            std::array<vk::DescriptorSetLayoutBinding, 7> bindings;
+            // base), cascade direction table SSBO (binding 7,
+            // cascade_common.glsl).
+            std::array<vk::DescriptorSetLayoutBinding, 8> bindings;
             bindings[0].setBinding(0).setDescriptorType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(1);
             bindings[0].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             bindings[1].setBinding(1).setDescriptorType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(1);
@@ -540,6 +584,8 @@ private:
             bindings[5].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             bindings[6].setBinding(6).setDescriptorType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(1);
             bindings[6].setStageFlags(vk::ShaderStageFlagBits::eCompute);
+            bindings[7].setBinding(7).setDescriptorType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(1);
+            bindings[7].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             vk::DescriptorSetLayoutCreateInfo setInfo;
             setInfo.setBindings(bindings);
             sharedSetLayout = std::make_unique<vk::raii::DescriptorSetLayout>(context.device, setInfo);
@@ -677,7 +723,7 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 3> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, 3),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageBuffer, 2),
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageBuffer, 3),
                 vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 2)};
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
@@ -699,7 +745,8 @@ private:
             vk::DescriptorImageInfo dataArrayInfo(**nearestSampler, context.dataArrayView,
                                                   vk::ImageLayout::eShaderReadOnlyOptimal);
             vk::DescriptorBufferInfo environmentInfo(context.environmentBuffer, 0, vk::WholeSize);
-            std::array<vk::WriteDescriptorSet, 7> writes;
+            vk::DescriptorBufferInfo directionsInfo(**directionStorage.buffer, 0, vk::WholeSize);
+            std::array<vk::WriteDescriptorSet, 8> writes;
             writes[0].setDstSet(**sharedSet).setDstBinding(0).setDescriptorType(vk::DescriptorType::eUniformBuffer);
             writes[0].setBufferInfo(cameraInfo);
             writes[1].setDstSet(**sharedSet).setDstBinding(1).setDescriptorType(vk::DescriptorType::eStorageBuffer);
@@ -714,6 +761,8 @@ private:
             writes[5].setImageInfo(dataArrayInfo);
             writes[6].setDstSet(**sharedSet).setDstBinding(6).setDescriptorType(vk::DescriptorType::eUniformBuffer);
             writes[6].setBufferInfo(environmentInfo);
+            writes[7].setDstSet(**sharedSet).setDstBinding(7).setDescriptorType(vk::DescriptorType::eStorageBuffer);
+            writes[7].setBufferInfo(directionsInfo);
             context.device.updateDescriptorSets(writes, {});
         }
 
@@ -894,6 +943,7 @@ private:
     std::unique_ptr<vk::raii::Sampler> nearestSampler;
     std::unique_ptr<vk::raii::Sampler> composeSampler;
     MappedHostVisibleBuffer lightStorage;
+    MappedHostVisibleBuffer directionStorage;
 
     std::unique_ptr<vk::raii::DescriptorSetLayout> sharedSetLayout;
     std::unique_ptr<vk::raii::DescriptorSetLayout> marchSetLayout;
@@ -919,6 +969,10 @@ private:
     std::unique_ptr<vk::raii::Pipeline> denoisePipeline;
     std::unique_ptr<vk::raii::DescriptorPool> denoisePool;
     std::unique_ptr<vk::raii::DescriptorSet> denoiseSet;
+
+    // Record-path scratch reused across frames (see barrierCascades above).
+    std::vector<vk::ImageMemoryBarrier2> cascadeBarrierScratch;
+    std::vector<vk::Image> cascadeImageScratch;
 };
 
 // ---- Module lifecycle ---------------------------------------------------------------

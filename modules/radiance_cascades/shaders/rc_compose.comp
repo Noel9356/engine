@@ -30,6 +30,7 @@
 
 #include "scene_common.glsl"
 #include "environment_common.glsl"
+#include "common/cascade_common.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2DArray fullCoarseSampler; // composed radiance of cascade c+1
 layout(set = 1, binding = 1, rgba16f) uniform restrict writeonly image2DArray fullFine;
@@ -44,16 +45,11 @@ layout(push_constant) uniform ComposePush
     layout(offset = 32) uvec4 coarseGrid;   // x gridW, y gridH, z azCount, w elCount (cascade c+1)
 } push_;
 
-// Direction of one cascade texel: the same equirectangular table the march
-// and the gather use (constant angular schedule).
-vec3 directionOf(uint directionIndex, uint elCount)
-{
-    const uint azIndex = directionIndex / elCount;
-    const uint elIndex = directionIndex % elCount;
-    const float azimuth = (float(azIndex) + 0.5) / float(push_.fineGrid.z) * 6.283185307179586;
-    const float elevation = (float(elIndex) + 0.5) / float(elCount) * 3.141592653589793 - 1.5707963267948966;
-    return vec3(cos(elevation) * cos(azimuth), sin(elevation), cos(elevation) * sin(azimuth));
-}
+// Direction of one cascade texel: the precomputed direction table the march
+// and the gather read (cascade_common.glsl) - the coarsest cascade's sky base
+// is the only remaining consumer here, and it fetches the same row the field
+// was marched with. Constant angular schedule: every cascade carries the same
+// direction table, only the spatial grid refines.
 
 void main()
 {
@@ -76,7 +72,7 @@ void main()
         // sky. Zero sky radiance therefore closes the scene completely, which
         // the leak test relies on. Gradient sky WITHOUT the sun disk: the
         // transport field must stay smooth (see the header comment).
-        farRadiance = skyBase(directionOf(directionIndex, push_.fineGrid.w));
+        farRadiance = skyBase(cascadeDirections[directionIndex].xyz);
     }
     else
     {

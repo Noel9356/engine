@@ -138,16 +138,20 @@ void main()
     vec3 traceOrigin = origin;
     float remainingDistance = push_.settings.y;
     float hit = -1.0;
+    uint hitOwner = 0u;
     for (uint attempt = 0u; attempt < 4u; ++attempt)
     {
-        hit = traceInterval(traceOrigin, direction, 0.02, remainingDistance, push_.counts.x, push_.counts.y);
+        // The trace reports the hit's owning primitive directly (the arg-min
+        // at the hit step) - the former post-hit primitiveOwnerAt scan ran a
+        // full pass over the primitives on every attempt of every pixel.
+        hit = traceIntervalOwned(traceOrigin, direction, 0.02, remainingDistance, push_.counts.x, push_.counts.y,
+                                 hitOwner);
         if (hit < 0.0)
         {
             break; // open reflection: the loop keeps hit = -1 (sky)
         }
         const bool beyondLaunchClearance = hit >= 0.03;
-        const bool differentPrimitive =
-            primitiveOwnerAt(traceOrigin + direction * hit, push_.counts.x) != launchOwner;
+        const bool differentPrimitive = hitOwner != launchOwner;
         if (beyondLaunchClearance && differentPrimitive)
         {
             break; // a genuine reflection target
@@ -170,7 +174,8 @@ void main()
         vec3 hitNormal = sdfNormal(hitPoint, push_.counts.x);
         hitNormal *= -sign(dot(hitNormal, direction));
         vec3 hitAlbedo;
-        radiance = surfaceOutgoingRadiance(hitPoint, hitNormal, push_.counts.x, hitAlbedo);
+        // Owner comes from the trace (scene_common.glsl traceIntervalOwned).
+        radiance = surfaceOutgoingRadianceOwned(hitPoint, hitNormal, hitOwner, push_.counts.x, hitAlbedo);
 
         // Screen-space GI reuse: where the hit point is visible from the
         // camera, its diffuse GI from the cascade field completes the

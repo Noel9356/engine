@@ -37,41 +37,28 @@ vec3 directIrradianceOverPi(vec3 point, vec3 normal, uint primitiveCount)
 // Index of the primitive that owns a world point (nearest signed distance -
 // the same ownership rule every SDF consumer applies). surfaceOutgoingRadiance
 // and the reflection pass's convex self-hit test share this.
+// Traced hits should NOT call this: the trace's arg-min owner is available for
+// free through sceneSDFOwned/traceIntervalOwned (scene_common.glsl) - this scan
+// is for owners that were not produced by a trace (the reflection launch point).
 uint primitiveOwnerAt(vec3 point, uint primitiveCount)
 {
-    float best = 1e30;
-    uint owner = 0u;
-    for (uint index = 0u; index < primitiveCount; ++index)
-    {
-        const GpuPrimitive primitive = primitives[index];
-        const vec3 local = worldToLocalY(point - primitive.positionType.xyz, primitive.sizeRotation.w);
-        float distance;
-        if (primitive.positionType.w < 0.5)
-        {
-            distance = signedDistanceBox(local, primitive.sizeRotation.xyz);
-        }
-        else
-        {
-            distance = signedDistanceSphere(local, primitive.sizeRotation.x);
-        }
-        if (distance < best)
-        {
-            best = distance;
-            owner = index;
-        }
-    }
+    uint owner;
+    sceneSDFOwned(point, primitiveCount, owner);
     return owner;
 }
 
-vec3 surfaceOutgoingRadiance(vec3 point, vec3 normal, uint primitiveCount, out vec3 materialAlbedo)
+// Relight of a traced hit point. Callers pass the owner the trace already
+// produced (sceneSDFOwned/traceIntervalOwned in scene_common.glsl): the
+// former primitiveOwnerAt re-scan at the hit point re-evaluated the whole
+// field the trace had just walked.
+vec3 surfaceOutgoingRadianceOwned(vec3 point, vec3 normal, uint owner, uint primitiveCount,
+                                  out vec3 materialAlbedo)
 {
-    const uint owner = primitiveOwnerAt(point, primitiveCount);
-
     const GpuPrimitive primitive = primitives[owner];
-    // worldToLocalY (NOT rotateY): this must be the inverse of the model
+    // worldToLocalY (NOT the forward rotation): this must be the inverse of the model
     // matrix, or the local point - and with it the sampled texel - drifts
     // across the surface as the rotation grows (see scene_common.glsl).
-    const vec3 localPoint = worldToLocalY(point - primitive.positionType.xyz, primitive.sizeRotation.w);
+    const vec3 localPoint = worldToLocalY(point - primitive.positionType.xyz, primitive.metallicEmissiveStrength.zw);
     const SurfaceMaterial material = materialAt(owner, localPoint);
     // Lambertian outgoing radiance: albedo/pi * E, with the 1/pi folded into
     // directIrradianceOverPi (see the comment above for the unit chain).

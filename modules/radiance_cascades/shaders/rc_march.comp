@@ -145,8 +145,7 @@ void main()
         return;
     }
 
-    const vec3 direction =
-        cascadeDirection(directionIndex / push_.grid.w, directionIndex % push_.grid.w, push_.grid.z, push_.grid.w);
+    const vec3 direction = cascadeDirections[directionIndex].xyz;
 
     vec3 surfaceNormal;
     vec3 cellRayDirection;
@@ -216,7 +215,9 @@ void main()
         marchEnd = max((push_.interval.y - viewDepth) / max(viewCosine, 0.3), 0.0);
     }
 
-    float hit = traceInterval(origin, direction, marchStart, marchEnd, push_.flags.x, push_.flags.y);
+    uint hitOwner;
+    float hit = traceIntervalOwned(origin, direction, marchStart, marchEnd, push_.flags.x, push_.flags.y,
+                                   hitOwner);
     if (!cameraAnchored && hit > 0.0 && hit < 0.02)
     {
         // A hit this close is the probe's own surface seen at a grazing angle,
@@ -237,7 +238,9 @@ void main()
         // the one direct bounce the cascades carry; higher order bounces
         // would need iterating the merge (documented limit).
         vec3 unusedAlbedo;
-        const vec3 radiance = surfaceOutgoingRadiance(hitPoint, normal, push_.flags.x, unusedAlbedo);
+        // The hit's owning primitive comes from the trace itself (the arg-min
+        // at the hit step) - no post-hit ownership scan needed.
+        const vec3 radiance = surfaceOutgoingRadianceOwned(hitPoint, normal, hitOwner, push_.flags.x, unusedAlbedo);
         result = vec4(radiance, 0.0);
     }
 

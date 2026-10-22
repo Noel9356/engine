@@ -101,15 +101,20 @@ void RendererState::createSceneGeometry()
                                   static_cast<float>(static_cast<std::uint32_t>(object.type))};
         primitive.sizeRotation = {object.size[0], object.size[1], object.size[2], object.rotationYRadians};
         primitive.albedoRoughness = {object.albedo[0], object.albedo[1], object.albedo[2], object.roughness};
-        primitive.metallicEmissiveStrength = {object.metallic, object.emissiveStrength, 0.0f, 0.0f};
+        // Rotation trig baked for the SDF shaders (scene_description.hpp): the
+        // tracing loops must not re-evaluate sin/cos per primitive per step.
+        primitive.metallicEmissiveStrength = {object.metallic, object.emissiveStrength,
+                                              std::sin(object.rotationYRadians),
+                                              std::cos(object.rotationYRadians)};
         primitives.push_back(primitive);
     }
     if (primitives.empty())
     {
+        // Degenerate stand-in with rotation 0: sin 0, cos 1.
         primitives.push_back(GpuScenePrimitive{{0.0f, 0.0f, 0.0f, 0.0f},
                                                {0.001f, 0.001f, 0.001f, 0.0f},
                                                {0.0f, 0.0f, 0.0f, 1.0f},
-                                               {0.0f, 0.0f, 0.0f, 0.0f}});
+                                               {0.0f, 0.0f, 0.0f, 1.0f}});
     }
     uploadToDeviceLocal(primitivesBuffer, primitives.data(),
                         static_cast<vk::DeviceSize>(primitives.size() * sizeof(GpuScenePrimitive)),
