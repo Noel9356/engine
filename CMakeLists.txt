@@ -85,9 +85,17 @@ if(ENGINE_BUILD_MODULE_RAY_REFLECTIONS)
     add_subdirectory(modules/ray_reflections)
 endif()
 
+# The tests live in tests/ (a Catch2 suite plus the native-mod loading
+# fixture). A tree that ships without that directory (this public tree does -
+# the docs describe the full internal layout) builds without them instead of
+# failing configure, and says so in the configure output.
 if(ENGINE_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+        enable_testing()
+        add_subdirectory(tests)
+    else()
+        message(STATUS "ENGINE_BUILD_TESTS is ON but tests/ is not part of this tree - building without tests")
+    endif()
 endif()
 
 if(ENGINE_BUILD_DEMO)

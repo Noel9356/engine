@@ -381,21 +381,26 @@ endif()
 
 # ---- Catch2 (tests) -------------------------------------------------------------
 # A system Catch2 3.x is probed first; the fetched copy is the fallback. Only
-# needed when ENGINE_BUILD_TESTS is ON.
+# needed when ENGINE_BUILD_TESTS is ON - and the gate below is the code form
+# of that comment: a tests-less tree (or an explicit
+# -DENGINE_BUILD_TESTS=OFF) must not spend a download on a suite it cannot
+# build.
 
-if(NOT TARGET Catch2::Catch2WithMain)
-    find_package(Catch2 3.16.1 CONFIG QUIET)
+if(ENGINE_BUILD_TESTS)
+    if(NOT TARGET Catch2::Catch2WithMain)
+        find_package(Catch2 3.16.1 CONFIG QUIET)
+    endif()
+
+    set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+    set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
+
+    engine_acquire_dependency(catch2 Catch2::Catch2WithMain
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.16.1
+        GIT_SHALLOW TRUE
+    )
 endif()
-
-set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
-set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
-
-engine_acquire_dependency(catch2 Catch2::Catch2WithMain
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG v3.16.1
-    GIT_SHALLOW TRUE
-)
 
 # ---- Origin report -------------------------------------------------------------
 # One consolidated configure-time summary: for every third party dependency,
