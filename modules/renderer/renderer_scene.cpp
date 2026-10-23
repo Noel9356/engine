@@ -127,10 +127,10 @@ void RendererState::createSceneGeometry()
         // Degenerate stand-in with rotation 0: sin 0, cos 1.
         primitives.push_back(
             GpuScenePrimitive{
-                {0.0f, 0.0f, 0.0f, 0.0f},
-                {0.001f, 0.001f, 0.001f, 0.0f},
-                {0.0f, 0.0f, 0.0f, 1.0f},
-                {0.0f, 0.0f, 0.0f, 1.0f}
+                .positionType             = {0.0f, 0.0f, 0.0f, 0.0f},
+                .sizeRotation             = {0.001f, 0.001f, 0.001f, 0.0f},
+                .albedoRoughness          = {0.0f, 0.0f, 0.0f, 1.0f},
+                .metallicEmissiveStrength = {0.0f, 0.0f, 0.0f, 1.0f}
             }
         );
     }
@@ -166,7 +166,7 @@ void RendererState::createSceneGeometry()
     }
     if (materialTable.empty())
     {
-        materialTable.push_back(GpuSceneMaterial{{-1, -1, 0, 0}, {1.0f, 0.0f, 0.0f, 0.0f}});
+        materialTable.push_back(GpuSceneMaterial{.layers = {-1, -1, 0, 0}, .scaleAndFlags = {1.0f, 0.0f, 0.0f, 0.0f}});
     }
     // Material diagnostics: which texture set resolved to which array layer,
     // and the loaded data statistics of each set (roughness/metallic means).

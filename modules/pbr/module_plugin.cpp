@@ -19,13 +19,13 @@ engine::ModuleInterface *createpbrPluginModule()
 }
 
 const engine::EngineModulePluginEntry pbrPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "pbr",
-    &createpbrPluginModule,
-    pbrProvidedCapabilities,
-    2,
-    pbrRequiredCapabilities,
-    2
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "pbr",
+    .createModule            = &createpbrPluginModule,
+    .providedCapabilities    = pbrProvidedCapabilities,
+    .providedCapabilityCount = 2,
+    .requiredCapabilities    = pbrRequiredCapabilities,
+    .requiredCapabilityCount = 2
 };
 } // namespace
 

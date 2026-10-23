@@ -133,9 +133,8 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
                     {
                         ResolutionDiagnostic diagnostic;
                         diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
-                        diagnostic.message = "configuration selects '" + selection->providerName
-                                           + "' for capability '" + requirement
-                                           + "' but that component does not provide the capability.";
+                        diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '"
+                                           + requirement + "' but that component does not provide the capability.";
                         diagnostic.involvementChain.push_back(selection->providerName);
                         diagnostic.involvementChain.push_back(requirement);
                         result.diagnostics.push_back(std::move(diagnostic));

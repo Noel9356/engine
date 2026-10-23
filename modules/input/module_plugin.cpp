@@ -19,13 +19,13 @@ engine::ModuleInterface *createinputPluginModule()
 }
 
 const engine::EngineModulePluginEntry inputPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "input",
-    &createinputPluginModule,
-    inputProvidedCapabilities,
-    1,
-    inputRequiredCapabilities,
-    2
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "input",
+    .createModule            = &createinputPluginModule,
+    .providedCapabilities    = inputProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = inputRequiredCapabilities,
+    .requiredCapabilityCount = 2
 };
 } // namespace
 

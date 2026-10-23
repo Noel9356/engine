@@ -19,13 +19,13 @@ engine::ModuleInterface *createscreenshotPluginModule()
 }
 
 const engine::EngineModulePluginEntry screenshotPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "screenshot",
-    &createscreenshotPluginModule,
-    screenshotProvidedCapabilities,
-    1,
-    screenshotRequiredCapabilities,
-    2
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "screenshot",
+    .createModule            = &createscreenshotPluginModule,
+    .providedCapabilities    = screenshotProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = screenshotRequiredCapabilities,
+    .requiredCapabilityCount = 2
 };
 } // namespace
 

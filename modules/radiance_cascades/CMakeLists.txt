@@ -39,6 +39,14 @@ set_target_properties(engine_module_radiance_cascades PROPERTIES
     INSTALL_RPATH "$ORIGIN:$ORIGIN/.."
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
+# MinGW: one explicit __declspec(dllexport) (the plugin entry point) disables
+# the linker's all-symbol auto-export, and WINDOWS_EXPORT_ALL_SYMBOLS above is
+# implemented only for MS-compatible toolchains; this flag publishes the
+# module's C++ surface to the other plugins' import libraries (the lighting
+# techniques reach RendererModule::attachLightingTechnique directly).
+if(MINGW)
+    target_link_options(engine_module_radiance_cascades PRIVATE -Wl,--export-all-symbols)
+endif()
 
 
 # This module provides a demand marker capability ("indirect_diffuse") and no

@@ -185,7 +185,7 @@ public:
     // disabledMods. There is deliberately no capability demand key here: the
     // active mods are the sole demand source, so a run without mods loads no
     // modules at all.
-    std::string              modDirectory() const;
+    std::string modDirectory() const;
     // Directory scanned for module plugin binaries, relative to the
     // executable directory when not absolute. Default: "modules".
     std::string              modulesDirectory() const;

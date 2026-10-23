@@ -141,7 +141,7 @@ bool ConfigurationStore::loadFromFile(
         {
             parsedTable = new toml::table();
         }
-        const ConfigProvenance provenance{ConfigProvenance::Layer::EngineConfig, path.string()};
+        const ConfigProvenance provenance{.layer = ConfigProvenance::Layer::EngineConfig, .source = path.string()};
         mergeTableAsOverride(*parsedTable, parsed, "", provenance);
         return true;
     }
@@ -224,7 +224,7 @@ bool ConfigurationStore::mergeDefaultsFile(
         // tolerates a defaults-only composition (tests rely on it).
         parsedTable = new toml::table();
     }
-    const ConfigProvenance provenance{layer, source};
+    const ConfigProvenance provenance{.layer = layer, .source = source};
     mergeTableAsDefaults(*parsedTable, parsed, "", provenance);
     return true;
 }
@@ -284,7 +284,7 @@ bool ConfigurationStore::applySceneFile(
     // objects the scene file lists, never a merge with the demo room.
     parsedTable->erase(sceneSectionName);
     eraseProvenanceUnder(sceneSectionName);
-    const ConfigProvenance provenance{ConfigProvenance::Layer::SceneFile, path.string()};
+    const ConfigProvenance provenance{.layer = ConfigProvenance::Layer::SceneFile, .source = path.string()};
     parsedTable->insert_or_assign(sceneSectionName, *sceneTable);
     recordProvenance(*sceneTable, sceneSectionName, provenance);
     return true;
@@ -361,7 +361,7 @@ bool ConfigurationStore::applyCommandLineOverrides(
     {
         parsedTable = new toml::table();
     }
-    const ConfigProvenance provenance{ConfigProvenance::Layer::CommandLine, "--set"};
+    const ConfigProvenance provenance{.layer = ConfigProvenance::Layer::CommandLine, .source = "--set"};
     for (const StagedOverride &staged : stagedOverrides)
     {
         std::string fullPath;

@@ -19,13 +19,13 @@ engine::ModuleInterface *createray_reflectionsPluginModule()
 }
 
 const engine::EngineModulePluginEntry ray_reflectionsPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "ray_reflections",
-    &createray_reflectionsPluginModule,
-    ray_reflectionsProvidedCapabilities,
-    1,
-    ray_reflectionsRequiredCapabilities,
-    2
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "ray_reflections",
+    .createModule            = &createray_reflectionsPluginModule,
+    .providedCapabilities    = ray_reflectionsProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = ray_reflectionsRequiredCapabilities,
+    .requiredCapabilityCount = 2
 };
 } // namespace
 

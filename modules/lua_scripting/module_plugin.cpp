@@ -20,13 +20,13 @@ engine::ModuleInterface *createlua_scriptingPluginModule()
 }
 
 const engine::EngineModulePluginEntry lua_scriptingPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "lua_scripting",
-    &createlua_scriptingPluginModule,
-    lua_scriptingProvidedCapabilities,
-    1,
-    lua_scriptingRequiredCapabilities,
-    2
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "lua_scripting",
+    .createModule            = &createlua_scriptingPluginModule,
+    .providedCapabilities    = lua_scriptingProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = lua_scriptingRequiredCapabilities,
+    .requiredCapabilityCount = 2
 };
 } // namespace
 

@@ -107,9 +107,7 @@ public:
     // The pull surface behind ComponentContext::acquireCapability: resolves
     // every request straight from the declaring provider's
     // capabilityPointerFor hook at acquisition time. Nothing is stored.
-    void *resolveCapabilityPointer(
-        const std::string &requesterName, const std::string &capabilityName
-    ) override;
+    void *resolveCapabilityPointer(const std::string &requesterName, const std::string &capabilityName) override;
 
     const ConfigurationStore &configuration() const
     {
@@ -284,10 +282,17 @@ private:
     std::unordered_set<std::string> demandedCapabilities;
 
     std::vector<ComponentRecord> records;
-    bool                         configurationLoaded = false;
-    bool                         componentsGathered  = false;
-    bool                         constructed         = false;
-    bool                         started             = false;
+    // The components that completed the construct phase, in the resolver's
+    // dependency order (providers before consumers). start() and stop() walk
+    // this sequence - not the discovery-ordered records vector - because the
+    // start phase consumes provider work: the renderer needs the window the
+    // window module creates during its own start. The records vector holds
+    // the plugin scan order, which says nothing about providership.
+    std::vector<ComponentRecord *> componentStartOrder;
+    bool                           configurationLoaded = false;
+    bool                           componentsGathered  = false;
+    bool                           constructed         = false;
+    bool                           started             = false;
 };
 
 } // namespace engine

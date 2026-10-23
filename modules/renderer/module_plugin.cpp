@@ -19,13 +19,13 @@ engine::ModuleInterface *createrendererPluginModule()
 }
 
 const engine::EngineModulePluginEntry rendererPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "renderer",
-    &createrendererPluginModule,
-    rendererProvidedCapabilities,
-    1,
-    rendererRequiredCapabilities,
-    2
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "renderer",
+    .createModule            = &createrendererPluginModule,
+    .providedCapabilities    = rendererProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = rendererRequiredCapabilities,
+    .requiredCapabilityCount = 2
 };
 } // namespace
 

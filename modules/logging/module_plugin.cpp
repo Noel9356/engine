@@ -18,13 +18,13 @@ engine::ModuleInterface *createloggingPluginModule()
 }
 
 const engine::EngineModulePluginEntry loggingPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "logging",
-    &createloggingPluginModule,
-    loggingProvidedCapabilities,
-    1,
-    nullptr,
-    0
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "logging",
+    .createModule            = &createloggingPluginModule,
+    .providedCapabilities    = loggingProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = nullptr,
+    .requiredCapabilityCount = 0
 };
 } // namespace
 

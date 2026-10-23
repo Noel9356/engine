@@ -46,8 +46,8 @@ std::string describeGlfwError(
 
 WindowModule::WindowModule()
 {
-    componentManifest.name                 = "window";
-    componentManifest.kind                 = ComponentKind::Module;
+    componentManifest.name = "window";
+    componentManifest.kind = ComponentKind::Module;
     // The implementation-bound member name: this module is the GLFW
     // implementation of the "window" family. Consumers require the family;
     // a mod that needs this backend names the member exactly.

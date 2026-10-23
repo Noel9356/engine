@@ -600,7 +600,9 @@ void EngineKernel::computeDemandClosure()
         const auto providesCapability = [&capabilityName](const std::vector<std::string> &provided)
         {
             return std::any_of(
-                provided.begin(), provided.end(), [&capabilityName](const std::string &candidate)
+                provided.begin(),
+                provided.end(),
+                [&capabilityName](const std::string &candidate)
                 { return capabilityRequirementSatisfiedBy(capabilityName, candidate); }
             );
         };
@@ -938,11 +940,11 @@ EngineKernel::ComponentRecord *EngineKernel::resolveScriptHost(
     {
         return record.manifest.kind == ComponentKind::Module
             && std::any_of(
-                   record.manifest.providedCapabilities.begin(),
-                   record.manifest.providedCapabilities.end(),
-                   [&capabilityName](const std::string &candidate)
-                   { return capabilityRequirementSatisfiedBy(capabilityName, candidate); }
-               );
+                record.manifest.providedCapabilities.begin(),
+                record.manifest.providedCapabilities.end(),
+                [&capabilityName](const std::string &candidate)
+                { return capabilityRequirementSatisfiedBy(capabilityName, candidate); }
+            );
     };
     std::vector<ComponentRecord *> candidates;
     for (ComponentRecord &record : records)
@@ -1148,6 +1150,7 @@ bool EngineKernel::runConstructPhase(
                 return false;
             }
             record->constructed = true;
+            componentStartOrder.push_back(record);
             continue;
         }
 
@@ -1199,6 +1202,7 @@ bool EngineKernel::runConstructPhase(
             }
         }
         record->constructed = true;
+        componentStartOrder.push_back(record);
     }
     return true;
 }
@@ -1280,8 +1284,9 @@ void *EngineKernel::resolveCapabilityPointer(
     }
 
     throw std::logic_error(
-        "capability '" + capabilityName + "' has no active provider; a component acquired it without a "
-        "requirement whose provider is available in this run"
+        "capability '" + capabilityName
+        + "' has no active provider; a component acquired it without a "
+          "requirement whose provider is available in this run"
     );
 }
 
@@ -1361,8 +1366,16 @@ void EngineKernel::start()
     {
         throw std::runtime_error("engine kernel: start requires a completed construct phase");
     }
-    for (ComponentRecord &record : records)
+    // The construct phase walks the resolver's dependency order and so does
+    // the start phase: a module's start consumes provider work (the renderer
+    // targets the window created during the window module's start, the input
+    // module attaches to it). Iterating the discovery-ordered records vector
+    // here would race the dependency graph - the plugin scan order says
+    // nothing about providership, and on a filesystem that returns modules
+    // alphabetically the renderer would start before the window existed.
+    for (ComponentRecord *recordPointer : componentStartOrder)
     {
+        ComponentRecord &record = *recordPointer;
         if (!record.constructed || record.started)
         {
             continue;
@@ -1387,9 +1400,15 @@ void EngineKernel::stop()
     {
         bus.publish(EngineShutdownStartedEvent{});
     }
-    for (auto iterator = records.rbegin(); iterator != records.rend(); ++iterator)
+    // Tear down in the reverse of the start order: consumers stop while the
+    // providers they depend on still exist (the renderer releases its device
+    // and surface before the window module destroys the window they target).
+    // Records that never completed the construct phase are not in the
+    // sequence; their instances were never started, so there is nothing to
+    // stop - the per-record pass below still releases them.
+    for (auto iterator = componentStartOrder.rbegin(); iterator != componentStartOrder.rend(); ++iterator)
     {
-        ComponentRecord &record = *iterator;
+        ComponentRecord &record = **iterator;
         if (record.started && record.moduleInstance != nullptr)
         {
             record.moduleInstance->stop();
@@ -1398,6 +1417,9 @@ void EngineKernel::stop()
         {
             record.modInstance->stop();
         }
+    }
+    for (ComponentRecord &record : records)
+    {
         // Shared library mods own their destruction function; destroying them
         // through delete here would use the engine allocator on mod memory.
         if (record.modEntryTable != nullptr && record.modInstance != nullptr)
@@ -1412,6 +1434,7 @@ void EngineKernel::stop()
     constructed = false;
 
     records.clear();
+    componentStartOrder.clear();
     componentsGathered = false;
 }
 

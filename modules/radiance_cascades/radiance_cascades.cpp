@@ -190,13 +190,15 @@ public:
                 vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 1, **marchSets[cascade], {}
             );
             const MarchPush pushValue{
-                {intervalStart(cascade), intervalEnd(cascade), 0.0f, 0.0f},
-                {context.primitiveCount, settings.marchSteps, cascade > 0 ? 1u : 0u, 0u},
-                {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
-                {context.extent.width,
+                .interval = {intervalStart(cascade), intervalEnd(cascade), 0.0f, 0.0f},
+                .flags    = {context.primitiveCount, settings.marchSteps, cascade > 0 ? 1u : 0u, 0u},
+                .grid     = {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
+                .extentStride = {
+                    context.extent.width,
                     context.extent.height,
                     settings.probeStride << cascade,
-                    settings.probeStride << cascade}
+                    settings.probeStride << cascade
+                }
             };
             commandBuffer.pushConstants(
                 **marchPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
@@ -226,12 +228,14 @@ public:
                 vk::PipelineBindPoint::eCompute, **composePipelineLayout, 1, **composeSets[cascade], {}
             );
             const ComposePush pushValue{
-                {0.0f, 0.0f, 0.0f, cascade == cascades - 1 ? 1.0f : 0.0f},
-                {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
-                {gridWidth(cascade + 1),
+                .coarsestFlag = {0.0f, 0.0f, 0.0f, cascade == cascades - 1 ? 1.0f : 0.0f},
+                .fineGrid   = {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
+                .coarseGrid = {
+                    gridWidth(cascade + 1),
                     gridHeight(cascade + 1),
                     azimuthCount(cascade + 1),
-                    elevationCount(cascade + 1)}
+                    elevationCount(cascade + 1)
+                }
             };
             commandBuffer.pushConstants(
                 **composePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
@@ -267,9 +271,10 @@ public:
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 0, **sharedSet, {});
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 1, **gatherSet, {});
         const GatherPush gatherPush{
-            {context.primitiveCount, settings.losSteps, settings.gatherVisibility ? 1u : 0u, cascades},
-            {settings.intervalBase, settings.intervalFactor, static_cast<float>(settings.probeStride), 0.0f},
-            {azimuthCount(0), elevationCount(0), 0u, 0u}
+            .counts = {context.primitiveCount, settings.losSteps, settings.gatherVisibility ? 1u : 0u, cascades},
+            .schedule =
+                {settings.intervalBase, settings.intervalFactor, static_cast<float>(settings.probeStride), 0.0f},
+            .dirs = {azimuthCount(0), elevationCount(0), 0u, 0u}
         };
         commandBuffer.pushConstants(
             **gatherPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(gatherPush), &gatherPush
@@ -297,8 +302,9 @@ public:
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **denoisePipelineLayout, 0, **sharedSet, {});
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **denoisePipelineLayout, 1, **denoiseSet, {});
         const FilterPush filterPush{
-            {static_cast<std::int32_t>(settings.spatialFilterRadius), filterNormalPower, filterDepthBandPercent, 0},
-            {context.cameraNearPlane, context.cameraFarPlane, 0.0f, 0.0f}
+            .params =
+                {static_cast<std::int32_t>(settings.spatialFilterRadius), filterNormalPower, filterDepthBandPercent, 0},
+            .cameraPlanes = {context.cameraNearPlane, context.cameraFarPlane, 0.0f, 0.0f}
         };
         commandBuffer.pushConstants(
             **denoisePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(filterPush), &filterPush
@@ -744,7 +750,7 @@ private:
                 std::unique_ptr<vk::raii::PipelineLayout> layout;
                 std::unique_ptr<vk::raii::Pipeline>       pipeline;
             };
-            return Built{std::move(layout), std::move(pipeline)};
+            return Built{.layout = std::move(layout), .pipeline = std::move(pipeline)};
         };
 
         auto marchBuilt = makeComputePipeline(

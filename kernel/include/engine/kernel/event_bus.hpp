@@ -216,7 +216,9 @@ private:
     )
     {
         const SubscriptionToken token = nextToken++;
-        handlers.push_back(HandlerEntry{userData, handler, token, false});
+        handlers.push_back(
+            HandlerEntry{.userData = userData, .invoke = handler, .token = token, .pendingRemoval = false}
+        );
         return token;
     }
 

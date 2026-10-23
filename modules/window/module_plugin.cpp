@@ -19,13 +19,13 @@ engine::ModuleInterface *createwindowPluginModule()
 }
 
 const engine::EngineModulePluginEntry windowPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "window",
-    &createwindowPluginModule,
-    windowProvidedCapabilities,
-    1,
-    windowRequiredCapabilities,
-    1
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "window",
+    .createModule            = &createwindowPluginModule,
+    .providedCapabilities    = windowProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = windowRequiredCapabilities,
+    .requiredCapabilityCount = 1
 };
 } // namespace
 

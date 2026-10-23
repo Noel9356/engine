@@ -101,9 +101,9 @@ public:
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **pipelineLayout, 1, **frameSet, {});
 
         const PbrPassPush pushValue{
-            {lights->shadowsEnabled ? 1.0f : 0.0f, lights->penumbra, 0.0f, 0.0f},
-            {context.primitiveCount, 0u, 0u, 0u},
-            {reflectionFold.enabled ? 1.0f : 0.0f, reflectionFold.maxRoughness, 0.0f, 0.0f}
+            .shadowAndFlags     = {lights->shadowsEnabled ? 1.0f : 0.0f, lights->penumbra, 0.0f, 0.0f},
+            .counts             = {context.primitiveCount, 0u, 0u, 0u},
+            .reflectionFoldPush = {reflectionFold.enabled ? 1.0f : 0.0f, reflectionFold.maxRoughness, 0.0f, 0.0f}
         };
         commandBuffer.pushConstants(
             **pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue

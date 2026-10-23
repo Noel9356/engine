@@ -17,8 +17,8 @@ namespace engine
 
 RendererModule::RendererModule()
 {
-    componentManifest.name                 = "renderer";
-    componentManifest.kind                 = ComponentKind::Module;
+    componentManifest.name = "renderer";
+    componentManifest.kind = ComponentKind::Module;
     // The implementation-bound member name: this module is the Vulkan
     // implementation of the "renderer" family. Consumers require the family;
     // a mod that needs this backend names the member exactly.

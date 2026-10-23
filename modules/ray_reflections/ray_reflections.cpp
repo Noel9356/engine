@@ -91,8 +91,8 @@ public:
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **pipelineLayout, 1, **frameSet, {});
 
         const ReflectionPush pushValue{
-            {settings.maxRoughness, settings.maxDistance, 0.0f, 0.0f},
-            {context.primitiveCount, settings.marchSteps, 0u, 0u}
+            .settings = {settings.maxRoughness, settings.maxDistance, 0.0f, 0.0f},
+            .counts   = {context.primitiveCount, settings.marchSteps, 0u, 0u}
         };
         commandBuffer.pushConstants(
             **pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue

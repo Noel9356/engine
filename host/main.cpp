@@ -264,8 +264,9 @@ int main(
         }
     }
 
-    const std::vector<engine::WindowIdentifier> windowIdentifiers =
-        window != nullptr ? window->windowIdentifiers() : std::vector<engine::WindowIdentifier>{};
+    const std::vector<engine::WindowIdentifier> windowIdentifiers = window != nullptr
+                                                                      ? window->windowIdentifiers()
+                                                                      : std::vector<engine::WindowIdentifier>{};
     const engine::WindowIdentifier              mainWindow = windowIdentifiers.empty() ? engine::invalidWindowIdentifier
                                                                                        : windowIdentifiers.front();
 

@@ -24,8 +24,8 @@ constexpr std::int32_t releasedAction = GLFW_RELEASE;
 
 InputModule::InputModule()
 {
-    componentManifest.name                 = "input";
-    componentManifest.kind                 = ComponentKind::Module;
+    componentManifest.name = "input";
+    componentManifest.kind = ComponentKind::Module;
     // The implementation-bound member name: this module is the GLFW
     // implementation of the "input" family (see window.glfw).
     componentManifest.providedCapabilities = {"input.glfw"};

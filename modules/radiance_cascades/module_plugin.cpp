@@ -19,13 +19,13 @@ engine::ModuleInterface *createradiance_cascadesPluginModule()
 }
 
 const engine::EngineModulePluginEntry radiance_cascadesPluginEntry{
-    engine::engineModulePluginAbiVersion,
-    "radiance_cascades",
-    &createradiance_cascadesPluginModule,
-    radiance_cascadesProvidedCapabilities,
-    1,
-    radiance_cascadesRequiredCapabilities,
-    2
+    .abiVersion              = engine::engineModulePluginAbiVersion,
+    .moduleName              = "radiance_cascades",
+    .createModule            = &createradiance_cascadesPluginModule,
+    .providedCapabilities    = radiance_cascadesProvidedCapabilities,
+    .providedCapabilityCount = 1,
+    .requiredCapabilities    = radiance_cascadesRequiredCapabilities,
+    .requiredCapabilityCount = 2
 };
 } // namespace
 

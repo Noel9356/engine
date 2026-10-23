@@ -32,7 +32,7 @@ struct ScriptModDescription
     // the script. The kernel only matches this name against provider
     // declarations; the meaning of the capability lives in the provider's
     // published header.
-    std::string           hostCapability;
+    std::string hostCapability;
 };
 
 // Interface of a module that hosts script mods. A script mod's package
@@ -74,9 +74,7 @@ public:
     // std::logic_error with a precise diagnostic when the request cannot be
     // resolved (no provider, several providers, or a provider that returned
     // no implementation).
-    virtual void *resolveCapabilityPointer(
-        const std::string &requesterName, const std::string &capabilityName
-    ) = 0;
+    virtual void *resolveCapabilityPointer(const std::string &requesterName, const std::string &capabilityName) = 0;
 };
 
 // Everything a module or a mod may touch from the kernel. The context enforces

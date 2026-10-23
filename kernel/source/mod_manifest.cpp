@@ -233,13 +233,11 @@ bool ModManifestLoader::loadFromFile(
                          + "name the required capability whose provider hosts the script runtime";
             return false;
         }
-        if (std::find(
-                outManifest.capabilities.begin(), outManifest.capabilities.end(), outManifest.hostCapability
-            )
+        if (std::find(outManifest.capabilities.begin(), outManifest.capabilities.end(), outManifest.hostCapability)
             == outManifest.capabilities.end())
         {
-            errorMessage = describeLocation(manifestPath) + " declares host_capability '"
-                         + outManifest.hostCapability + "' which is not in its 'capabilities' list; the host "
+            errorMessage = describeLocation(manifestPath) + " declares host_capability '" + outManifest.hostCapability
+                         + "' which is not in its 'capabilities' list; the host "
                            "capability must also be a required capability so the provider is ordered first";
             return false;
         }
