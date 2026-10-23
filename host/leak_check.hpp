@@ -5,7 +5,7 @@
 // the host's frame loop only wires the capture sink in and reports the
 // outcome; the evaluation policy lives here.
 
-#include "engine/capabilities/renderer_contract.hpp"
+#include "renderer_capability.hpp"
 #include "engine/kernel/event_bus.hpp"
 
 #include <cstdint>

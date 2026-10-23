@@ -1,6 +1,5 @@
 #include "engine/kernel/component_interface.hpp"
 
-#include "engine/kernel/capability_registry.hpp"
 #include "engine/kernel/configuration.hpp"
 #include "engine/kernel/permission_system.hpp"
 
@@ -13,13 +12,13 @@ namespace engine
 
 ComponentContext::ComponentContext(
     EventBus                              &eventBus,
-    CapabilityRegistry                    &capabilityRegistry,
+    CapabilityResolver                    &capabilityResolver,
     PermissionSystem                      &permissionSystem,
     const ConfigurationStore              &configuration,
     std::string                            componentName,
     const std::unordered_set<std::string> *demandedCapabilities
 )
-    : eventBus_(eventBus), capabilityRegistry_(capabilityRegistry), permissionSystem_(permissionSystem),
+    : eventBus_(eventBus), capabilityResolver_(capabilityResolver), permissionSystem_(permissionSystem),
       configuration_(configuration), componentName_(std::move(componentName)),
       demandedCapabilities_(demandedCapabilities)
 {

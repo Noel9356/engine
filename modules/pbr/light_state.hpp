@@ -5,7 +5,7 @@
 // PBR pass (per-frame GPU upload). Owned by the module through shared_ptr so
 // the pass survives a module stop until the renderer detaches it.
 
-#include "engine/capabilities/lighting_contract.hpp"
+#include "lighting_capability.hpp"
 #include "light_uniform.hpp"
 
 #include <algorithm>

@@ -1,7 +1,7 @@
 #ifndef ENGINE_MODULES_LOGGING_HPP
 #define ENGINE_MODULES_LOGGING_HPP
 
-#include "engine/capabilities/logging_contract.hpp"
+#include "logging_capability.hpp"
 #include "engine/kernel/component_interface.hpp"
 
 #include <fstream>

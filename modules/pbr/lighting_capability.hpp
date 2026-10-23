@@ -1,9 +1,15 @@
-#ifndef ENGINE_CAPABILITIES_LIGHTING_CONTRACT_HPP
-#define ENGINE_CAPABILITIES_LIGHTING_CONTRACT_HPP
+#ifndef ENGINE_MODULES_PBR_LIGHTING_CAPABILITY_HPP
+#define ENGINE_MODULES_PBR_LIGHTING_CAPABILITY_HPP
 
-// Mod-facing contract: implementation-, platform- and vendor-agnostic. Light
+// The published capability surface of the lighting state, provided by the pbr
+// module. Every consumer - other modules, native mods, the host - includes
+// THIS header, from the module that provides the capability: the provider
+// owns and publishes its own capability vocabulary, so there is no central
+// contract directory and no mirrored copy that could drift.
+//
+// Mod-facing and implementation-, platform- and vendor-agnostic: light
 // descriptions are plain primitive values; the lighting passes behind this
-// contract may be PBR compute passes today and another technique tomorrow.
+// capability may be PBR compute passes today and another technique tomorrow.
 // Script mods do not call this directly yet (the Lua bridge is the script ABI
 // and grows deliberately); C++ mods acquire this capability like any other.
 
@@ -65,4 +71,4 @@ public:
 
 } // namespace engine
 
-#endif // ENGINE_CAPABILITIES_LIGHTING_CONTRACT_HPP
+#endif // ENGINE_MODULES_PBR_LIGHTING_CAPABILITY_HPP

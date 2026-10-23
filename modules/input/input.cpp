@@ -1,6 +1,6 @@
 #include "input.hpp"
 
-#include "engine/capabilities/window_contract.hpp"
+#include "window_capability.hpp"
 
 #include <GLFW/glfw3.h>
 
@@ -15,11 +15,10 @@ namespace
 constexpr std::int32_t pressedAction  = GLFW_PRESS;
 constexpr std::int32_t releasedAction = GLFW_RELEASE;
 
-// keyCodeName/keyCodeFromName live in the kernel (source/
-// input_contract_names.cpp): they are input-contract metadata shared by the
-// screenshot trigger configuration and the Lua script bridge, and across
-// module plugins every shared library resolves contract symbols from the
-// kernel it links - a module-local definition strands the other plugins.
+// keyCodeName/keyCodeFromName are published with the input capability header
+// (input_capability.hpp) as inline functions: capability metadata lives with
+// the capability, and every consumer binary embeds the table it uses, so no
+// plugin depends on another plugin's symbols at load time.
 
 } // namespace
 
@@ -27,7 +26,9 @@ InputModule::InputModule()
 {
     componentManifest.name                 = "input";
     componentManifest.kind                 = ComponentKind::Module;
-    componentManifest.providedCapabilities = {"input"};
+    // The implementation-bound member name: this module is the GLFW
+    // implementation of the "input" family (see window.glfw).
+    componentManifest.providedCapabilities = {"input.glfw"};
     componentManifest.requiredCapabilities = {"logging", "window"};
     componentManifest.requiredPermissions  = {"capability.logging", "capability.window"};
 }
@@ -108,7 +109,7 @@ void *InputModule::capabilityPointerFor(
     const std::string &capabilityName
 )
 {
-    if (capabilityName == InputCapability::capabilityName)
+    if (capabilityName == "input.glfw")
     {
         return static_cast<InputCapability *>(this);
     }

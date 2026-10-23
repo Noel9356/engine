@@ -1,7 +1,6 @@
 #ifndef ENGINE_KERNEL_ENGINE_KERNEL_HPP
 #define ENGINE_KERNEL_ENGINE_KERNEL_HPP
 
-#include "capability_registry.hpp"
 #include "component_interface.hpp"
 #include "component_manifest.hpp"
 #include "configuration.hpp"
@@ -34,18 +33,18 @@ struct EngineShutdownStartedEvent
 };
 
 // Owns the minimal kernel: configuration, component graph resolution, the
-// permission system, the capability registry and the event bus, and drives the
-// construct / start / stop lifecycle in dependency order.
+// permission system and the event bus, and drives the construct / start /
+// stop lifecycle in dependency order.
 //
 // The kernel deliberately knows nothing about windows, rendering or scripting,
 // and it does not know any module by name: modules and mods are anonymous
 // capability providers and consumers that declare themselves through static
-// descriptors and manifests. The kernel never registers a module or a service;
-// it only mediates: it resolves who requires which capability, orders the
-// construct phases, connects acquisitions to providers and enforces
-// permissions. Startup problems are collected into one precise report instead
-// of failing with the first error.
-class EngineKernel final
+// descriptors and manifests. The kernel never registers a module, a service
+// or a capability: it only mediates. It resolves who requires which capability,
+// orders the construct phases, pulls every acquisition straight from the
+// declaring provider and enforces permissions. Startup problems are collected
+// into one precise report instead of failing with the first error.
+class EngineKernel final : public CapabilityResolver
 {
 public:
     EngineKernel() = default;
@@ -83,7 +82,8 @@ public:
     bool validate(std::string &report);
 
     // Full startup: validate, then run construct for every component in
-    // dependency order, registering provided capabilities as they appear.
+    // dependency order, verifying each provided capability has an
+    // implementation behind it.
     bool construct(std::string &report);
 
     // Runs start for every component in dependency order and publishes
@@ -104,10 +104,12 @@ public:
         return bus;
     }
 
-    CapabilityRegistry &capabilityRegistry()
-    {
-        return capabilityRegistry_;
-    }
+    // The pull surface behind ComponentContext::acquireCapability: resolves
+    // every request straight from the declaring provider's
+    // capabilityPointerFor hook at acquisition time. Nothing is stored.
+    void *resolveCapabilityPointer(
+        const std::string &requesterName, const std::string &capabilityName
+    ) override;
 
     const ConfigurationStore &configuration() const
     {
@@ -173,6 +175,10 @@ private:
     };
 
     bool loadConfiguration(std::string &report);
+    // Asks one constructed component for the implementation behind a
+    // capability name it declared; shared by the exact and the family path of
+    // resolveCapabilityPointer.
+    void *capabilityPointerOf(ComponentRecord &provider, const std::string &capabilityName);
     // Scans config/modules/<name>/module.toml shipped defaults; the lowest
     // configuration layer (defaults fill gaps, they never override).
     bool loadModuleDefaults(std::string &report);
@@ -214,15 +220,17 @@ private:
     bool instantiateActiveModules(std::string &report);
     // The construct phase both construct() and startup recovery share: walks
     // the resolved order, hosts script mods through their resolved provider
-    // and registers every component's provided capabilities as they appear.
+    // and verifies every provided capability has an implementation behind it
+    // (nothing is stored - acquisition pulls from the provider at call time).
     bool runConstructPhase(
         const DependencyResolver::ResolutionResult &resolution,
         const std::vector<ComponentManifest>       &manifests,
         std::string                                &report
     );
     // Resolves the hosting module of one script mod: the active component
-    // that provides the "scripting" capability, honoring the configuration's
-    // [providers] selection when several implementations are active.
+    // that provides the host capability the package declared, honoring the
+    // configuration's [providers] selection when several implementations are
+    // active.
     // Returns nullptr (with a diagnostic in the report) when no provider or
     // an ambiguous provider set remains.
     ComponentRecord *resolveScriptHost(const ComponentRecord &scriptRecord, std::string &report);
@@ -262,7 +270,6 @@ private:
     std::string        startupWarnings_;
     ConfigurationStore configurationStore;
     EventBus           bus;
-    CapabilityRegistry capabilityRegistry_;
     PermissionSystem   permissionSystem_;
 
     // The plugin descriptors found in the modules directory. Declared before

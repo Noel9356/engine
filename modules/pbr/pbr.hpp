@@ -1,8 +1,8 @@
 #ifndef ENGINE_MODULES_PBR_PBR_HPP
 #define ENGINE_MODULES_PBR_PBR_HPP
 
-#include "engine/capabilities/lighting_contract.hpp"
-#include "engine/capabilities/logging_contract.hpp"
+#include "lighting_capability.hpp"
+#include "logging_capability.hpp"
 #include "engine/kernel/component_interface.hpp"
 
 #include "light_state.hpp"

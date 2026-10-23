@@ -1,6 +1,6 @@
 #include "screenshot.hpp"
 
-#include "engine/capabilities/input_contract.hpp"
+#include "input_capability.hpp"
 
 #include <stb_image_write.h>
 

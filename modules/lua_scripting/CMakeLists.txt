@@ -5,12 +5,13 @@ add_library(engine_module_lua_scripting SHARED
 
 target_link_libraries(engine_module_lua_scripting
     PUBLIC engine_kernel
-    PUBLIC engine_contracts
+    PUBLIC engine_capability_logging
+    PUBLIC engine_capability_window
+    PUBLIC engine_capability_input
+    PUBLIC engine_capability_renderer
+    PUBLIC engine_capability_screenshot
     PRIVATE engine_sol2_bindings
 )
-
-# The host composition root includes the module header directly.
-target_include_directories(engine_module_lua_scripting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 
 # Module plugin deployment: the binary lands in runtime/modules/, the directory
@@ -28,3 +29,10 @@ set_target_properties(engine_module_lua_scripting PROPERTIES
     INSTALL_RPATH "$ORIGIN:$ORIGIN/.."
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
+
+
+# This module provides the "scripting.lua" capability but publishes no C++
+# capability header: its consumer surface is the Lua bridge installed into
+# every script state (mods/README.md), and the kernel reaches the hosting
+# surface through the kernel-owned ScriptModHost interface. Nothing here
+# needs a header-only include target.

@@ -1,8 +1,12 @@
-#ifndef ENGINE_CAPABILITIES_SCREENSHOT_CONTRACT_HPP
-#define ENGINE_CAPABILITIES_SCREENSHOT_CONTRACT_HPP
+#ifndef ENGINE_MODULES_SCREENSHOT_SCREENSHOT_CAPABILITY_HPP
+#define ENGINE_MODULES_SCREENSHOT_SCREENSHOT_CAPABILITY_HPP
 
-// Mod-facing contract: implementation-, platform- and vendor-agnostic.
-// See mods/README.md, section "Portability".
+// The published capability surface of the screenshot module. Every consumer -
+// other modules, native mods, the host - includes THIS header, from the
+// module that provides the capability: the provider owns and publishes its
+// own capability vocabulary, so there is no central contract directory and
+// no mirrored copy that could drift. Like every published capability header
+// this stays implementation-, platform- and vendor-agnostic.
 
 #include <string>
 
@@ -32,4 +36,4 @@ public:
 
 } // namespace engine
 
-#endif // ENGINE_CAPABILITIES_SCREENSHOT_CONTRACT_HPP
+#endif // ENGINE_MODULES_SCREENSHOT_SCREENSHOT_CAPABILITY_HPP

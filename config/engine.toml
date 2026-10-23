@@ -37,10 +37,13 @@
 # defines [scene] itself.
 # disabled_mods = ["test_scene"]
 
-# Provider selection for capabilities that several components offer. Only
-# needed when more than one implementation is present in the build.
+# Provider selection for capabilities that several implementations offer.
+# The key is the capability name (a family such as "renderer" when the
+# candidates are its implementation-bound members), the value is the
+# component name that should win. Only needed when more than one
+# implementation is present in the build.
 [providers]
-# window = "glfw_window"
+# renderer = "renderer"
 
 # Permission denials. Each entry denies one declared permission of one
 # component (module, native mod or script mod); denied permissions fail

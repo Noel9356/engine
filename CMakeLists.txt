@@ -54,15 +54,19 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(engine_dependencies)
+# The portability guard for the modules' published capability headers; every
+# module's CMakeLists calls it for the headers it publishes.
+include(capability_header_guard)
 
 # ---- Engine targets ---------------------------------------------------------------
-# The tree is flat by design: kernel/, contracts/, modules/<name>/, host/ and
-# mods/ are siblings at the root. A module directory is self-contained
-# (sources, headers, shaders); a mod directory is a runtime package (mod.toml
-# plus entry sources).
+# The tree is flat by design: kernel/, modules/<name>/, host/ and mods/ are
+# siblings at the root. A module directory is self-contained (sources, its
+# published capability headers, shaders); a mod directory is a runtime package
+# (mod.toml plus entry sources). There is no central capability directory: a
+# capability's types are published by the module that provides it, and
+# consumers include that header directly.
 
 add_subdirectory(kernel)
-add_subdirectory(contracts)
 
 if(ENGINE_BUILD_MODULE_LOGGING)
     add_subdirectory(modules/logging)

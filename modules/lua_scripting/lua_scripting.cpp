@@ -13,10 +13,11 @@ namespace engine
 namespace
 {
 
-// This module's own capability name: it appears in the manifest, the plugin
-// descriptor and the capability pointer dispatch below, so it is named once
-// here (the kernel only ever receives it as data).
-constexpr const char *scriptingCapabilityName = "scripting";
+// This module's own capability name, the implementation-bound member of the
+// "scripting" family: it appears in the manifest, the plugin descriptor and
+// the capability pointer dispatch below, so it is named once here (the kernel
+// only ever receives it as data).
+constexpr const char *scriptingCapabilityName = "scripting.lua";
 // Bridge surface installed into every script state. Handlers live in plain
 // Lua tables inside the state, so no sol types leak into the module header and
 // no per event heap traffic happens outside the state.

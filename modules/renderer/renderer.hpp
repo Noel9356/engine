@@ -1,9 +1,9 @@
 #ifndef ENGINE_MODULES_RENDERER_RENDERER_HPP
 #define ENGINE_MODULES_RENDERER_RENDERER_HPP
 
-#include "engine/capabilities/logging_contract.hpp"
-#include "engine/capabilities/renderer_contract.hpp"
-#include "engine/capabilities/window_contract.hpp"
+#include "logging_capability.hpp"
+#include "renderer_capability.hpp"
+#include "window_capability.hpp"
 #include "engine/kernel/component_interface.hpp"
 #include "engine/kernel/event_bus.hpp"
 

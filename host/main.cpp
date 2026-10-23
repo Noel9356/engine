@@ -1,8 +1,10 @@
-#include "engine/capabilities/input_contract.hpp"
-#include "engine/capabilities/renderer_contract.hpp"
-#include "engine/capabilities/screenshot_contract.hpp"
-#include "engine/capabilities/window_contract.hpp"
-#include "engine/kernel/capability_registry.hpp"
+// The composition root includes the published capability headers of the
+// modules it acquires from - the providers themselves own and publish their
+// capability types; there is no central contract directory.
+#include "input_capability.hpp"
+#include "renderer_capability.hpp"
+#include "screenshot_capability.hpp"
+#include "window_capability.hpp"
 #include "engine/kernel/engine_kernel.hpp"
 #include "leak_check.hpp"
 

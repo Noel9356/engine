@@ -11,7 +11,7 @@
 
 namespace
 {
-const char *const lua_scriptingProvidedCapabilities[] = {"scripting"};
+const char *const lua_scriptingProvidedCapabilities[] = {"scripting.lua"};
 const char *const lua_scriptingRequiredCapabilities[] = {"logging", "window"};
 
 engine::ModuleInterface *createlua_scriptingPluginModule()

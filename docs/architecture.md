@@ -1,13 +1,13 @@
 # Architecture
 
-The kernel owns four concerns: component lifecycle, the event bus, the capability registry and the permission system. Everything else is a module behind a contract, and mods use exactly the same contracts. No kernel file knows GLFW, Vulkan, or windows exist — and no kernel file knows any module by name or any capability by meaning: modules are anonymous capability providers that describe themselves through static plugin descriptors, mods are anonymous consumers, and the kernel only mediates between them. Nothing is registered anywhere; a module exists in a run exactly when an active mod requires a capability it provides. This document is the system map and the cross-cutting models; every module's internals live next to its code in `modules/<name>/README.md`.
+The kernel owns three concerns: component lifecycle, the event bus and the permission system. Everything else is a module behind a capability it publishes, and mods consume exactly the same capabilities. No kernel file knows GLFW, Vulkan, or windows exist — and no kernel file knows any module by name or any capability by meaning: modules are anonymous capability providers that describe themselves through static plugin descriptors, mods are anonymous consumers, and the kernel only mediates between them. Nothing is registered anywhere — neither modules nor capabilities; a module exists in a run exactly when an active mod requires a capability it provides. This document is the system map and the cross-cutting models; every module's internals live next to its code in `modules/<name>/README.md`.
 
 ## Documentation index
 
 | Document | Contents |
 |---|---|
 | `../mods/README.md` | mod packages, the `mod.toml` schema, authoring guides, portability rules |
-| `../modules/logging/README.md` | the logging service and its contract |
+| `../modules/logging/README.md` | the logging service and its capability surface |
 | `../modules/window/README.md` | windowing backend, presentation surface factory, resize events |
 | `../modules/input/README.md` | input aggregation, consumed deltas, capture mode, the free-fly consumer reference |
 | `../modules/renderer/README.md` | the frame pipeline, G-buffer, materials and textures, camera, synchronization |
@@ -19,13 +19,23 @@ The kernel owns four concerns: component lifecycle, the event bus, the capabilit
 | `configuration.md` | global and shared configuration sections ([engine], [providers], [permissions], [scene], [diagnostics]); per-module keys live in the module docs |
 | `building.md` | configure/build, dependency tiers, `_deps` layout, offline controls, module options |
 
-## Capability contracts
+## Capability surfaces
 
-A capability is a pure virtual interface plus a stable name, e.g. `LoggerCapability` with `capabilityName == "logging"`. Contract headers live in the `contracts/` target (`contracts/include/engine/capabilities/`) — deliberately outside the kernel tree, because the kernel must not know what any capability means. Both sides compile against them even when the provider is excluded from the build, and each plugin carries its own copy of the one compiled contract TU (the input key-name table). Consumers ask their `ComponentContext` for an interface and never downcast to concrete module types. When several components require one capability, the registry hands every consumer the same shared instance.
+A capability is a pure virtual interface plus a stable name, e.g. `LoggerCapability` with `capabilityName == "logging"`. The capability's vocabulary lives in a header published by the module that PROVIDES it — `modules/logging/logging_capability.hpp`, `modules/window/window_capability.hpp`, and so on. There is no central contract directory: the provider owns its types, consumers include the provider's header directly, and the header is the single source of truth on both sides. Adding a capability means touching the module that provides it, never a shared tree. In CMake each module declares an `engine_capability_<name>` INTERFACE target that carries its include path and nothing else: a consumer links that target to compile against the capability without linking the provider's implementation binary, so the include graph in the build files IS the capability graph. A consumer compiles against a capability even when the provider that implements it is excluded from the build — the demand then fails at startup with a precise diagnostic instead of a compile error.
 
-Capability names are opaque to the kernel: it matches requirement strings against provider declarations and never interprets what a capability means. The semantics live entirely in the contract header and its consumers. The one exception the kernel could have had — resolving a script mod's host — is not one: the package declares `host_capability` (one of its own requirements), and the kernel resolves that provider like any other requirement.
+### Families and implementations
 
-Contracts are the mod-facing stability surface and are held to a portability rule, enforced mechanically at configure time: `contracts/CMakeLists.txt` fails the configure if a contract header includes a graphics, windowing, or platform header (Vulkan, OpenGL, GLFW, X11, Win32). Module implementations keep their specifics behind opaque handles — the window contract deals in `void*` presentation surfaces and extension-name strings, so a renderer made from Vulkan and one made from OpenGL are indistinguishable from behind the contracts. Script mods see nothing else at all (`../mods/README.md`, section "Portability").
+Capability names come in two shapes. A **family name** (`renderer`) is implementation-agnostic demand: "I need frame rendering, whichever implementation is installed". A **family member** (`renderer.vulkan`) is one implementation of that family, named after it. A requirement matches exactly first; a family requirement with no exact provider is satisfied by the single active member of that family, and two active members are an ambiguity that only a `[providers]` selection resolves. A requirement that names a member (`renderer.vulkan`) matches that implementation exactly — that is how a mod declares it NEEDS one specific backend. The shipped tree uses both shapes: `window.glfw`, `input.glfw`, `renderer.vulkan` and `scripting.lua` are the implementation-bound members their modules provide, while mods require the families — which is why the demo mod never names GLFW or Vulkan even though both run underneath.
+
+This is also the answer to "does the engine expose platform-specific capabilities?": yes — as family members. The portable surface every consumer is encouraged to use is the family; the implementation-bound member is visible, nameable, and picked either by installing only one implementation or by a `[providers]` selection. Script mods never see any of it: their surface is the Lua bridge (`../mods/README.md`, section "Portability").
+
+### Names are opaque; acquisition is a pull
+
+Capability names are opaque to the kernel: it matches requirement strings against provider declarations and never interprets what a capability means. The semantics live entirely in the provider's published header and its consumers. The one exception the kernel could have had — resolving a script mod's host — is not one: the package declares `host_capability` (one of its own requirements), and the kernel resolves that provider like any other requirement.
+
+Acquisition stores nothing. `ComponentContext::acquireCapability` checks the permission (`capability.<name>`, derived from the requirement that pulled the component in) and then PULLS: the kernel walks the constructed components, finds the provider of the exact name — or of the family member that satisfies it — and calls that provider's `capabilityPointerFor` hook at the moment of the call, every time. There is no capability registry, no stored implementation table, and no construction-time population step; the construct phase only VERIFIES that every declared capability returns an implementation. Consumers cast the returned pointer to the interface they compiled against (the provider's published header); the kernel stays type-blind end to end. When several components consume one capability they pull the same provider object, so sharing costs nothing — there is simply nothing to duplicate.
+
+Published capability headers are held to a portability rule, enforced mechanically at configure time: each module's `CMakeLists.txt` runs `engine_guard_capability_header` (from `cmake/capability_header_guard.cmake`) on the headers it publishes, and a header that starts including a graphics, windowing, or platform header (Vulkan, OpenGL, GLFW, X11, Win32) fails the configure. Module implementations keep their specifics behind opaque handles — the window capability deals in `void*` presentation surfaces and extension-name strings, so a renderer made from Vulkan and one made from OpenGL are indistinguishable behind the capability. Script mods see nothing else at all (`../mods/README.md`, section "Portability").
 
 ## Capability demand: how modules get activated
 
@@ -33,8 +43,8 @@ There is no module list and no registration anywhere — not in the host, not in
 
 1. **Module plugins describe themselves.** Every plugin binary in the modules directory exports one descriptor (name, factory, static provided/required capability lists). The kernel reads descriptors without creating instances.
 2. **Mods are the sole demand roots.** Every active mod package becomes a component; its `capabilities` list states what it consumes, and a script mod's `host_capability` names which requirement its host must satisfy.
-3. **The closure runs transitively.** Each demanded capability activates the plugin(s) that provide it (honoring a `[providers]` selection when one applies), and an activated plugin's own requirements demand further providers — the renderer brings `window` and `logging` with it, for example.
-4. **Only then are instances created.** Plugins nobody required are never instantiated and their binaries are released before any construct phase; an instance manifest must agree with its static descriptor (drift is a precise startup error), and the registry receives each provider's implementation pointers as it constructs.
+3. **The closure runs transitively.** Each demanded capability activates the plugin(s) that provide it — exact name matches first, then the members of the demanded family (honoring a `[providers]` selection when one applies) — and an activated plugin's own requirements demand further providers — the renderer brings `window` and `logging` with it, for example. A family demand satisfied through a member also marks the member as demanded, so a provider consulting the closure about its own capability sees the demand that activated it.
+4. **Only then are instances created.** Plugins nobody required are never instantiated and their binaries are released before any construct phase; an instance manifest must agree with its static descriptor (drift is a precise startup error), and the construct phase verifies each provided capability has an implementation behind it — nothing is stored, because acquisition pulls from the provider at call time.
 
 A requirement no available component satisfies fails startup with one precise diagnostic naming the consumer, the capability and the available alternatives. A run with no active mods loads zero modules: the engine kernel starts, publishes nothing, and exits cleanly. Startup work scales with what the run actually uses — a content mod that does not require `indirect_specular` never loads the reflection module at all.
 
@@ -59,7 +69,7 @@ The bus is single threaded by contract. Unsubscribing during dispatch is deferre
 
 The engine prioritises communication latency over decoupling, by measured design:
 
-- **Module-to-module, mod-to-module and mod-to-mod calls.** Capability calls are direct virtual calls on a pointer acquired once (one vtable indirection, no lookup, no locking). The event bus is the only fan-out medium and dispatches synchronously on the caller's stack. Both paths are the minimum achievable for in-process, same-thread communication.
+- **Module-to-module, mod-to-module and mod-to-mod calls.** Capability calls are direct virtual calls on a pointer acquired from the provider (one vtable indirection, no lookup, no locking). The event bus is the only fan-out medium and dispatches synchronously on the caller's stack. Both paths are the minimum achievable for in-process, same-thread communication.
 - **Measured, not assumed - and opt-in.** Recording is off by default (a normal run publishes thousands of events per second and its user does not want a data dump on shutdown; disabled, the bus never reads a clock, so measurement costs nothing). With `[diagnostics] latency_report = true` or the `--latency-report` flag, every `publish()` records its dispatch duration into a per-channel fixed-size ring (no heap growth) and the host prints a per-channel mean/p50/p95/p99/max report plus the frame-time percentiles at shutdown.
 - **Evaluated and rejected alternatives.** Message queues add queueing latency and memory for decoupling no current feature needs; a threaded or async bus adds synchronization on every publish and re-opens the data-race surface the single-thread contract closed; an ECS would change data layout, not communication latency. The architecture stays.
 
@@ -93,9 +103,9 @@ All checks accumulate into one report before failing. Diagnosed cases, each nami
 
 ## Extending
 
-- New capability: add a contract header under `contracts/include/engine/capabilities/`, implement it in a module, acquire it where needed.
+- New capability: publish its header from the module that provides it (`modules/<name>/<name>_capability.hpp`), implement it, and let consumers include that header. If several implementations of one family will exist, provide the implementation-bound member name in the plugin descriptor and let consumers demand the family.
 - New module: create `modules/<name>` with its own `README.md` (plus `shaders/` if it owns GLSL), add a CMake option and subdirectory, and declare the module's name, factory and static capability lists in its `module_plugin.cpp` descriptor. No registration exists anywhere: mods activate it by requiring its capabilities.
-- New backend: implement the same contract and ship both providers; `[providers]` picks one at runtime.
+- New backend for an existing family: implement the same published interface, provide the family member name in the descriptor, ship both providers; `[providers]` picks one at runtime (installing only one implementation needs no selection at all).
 - New mod: create `mods/<id>/` with a `mod.toml`; see `../mods/README.md`.
 
 ## Conventions
@@ -116,13 +126,13 @@ Mods face as few restrictions as possible, and every restriction that exists mus
 
 ### Asset ownership: the engine ships no content
 
-The engine tree (kernel, contracts, modules, host, build scripts) is code only. Content lives in mod packages, and the split is enforced structurally, not by convention alone:
+The engine tree (kernel, modules, host, build scripts) is code only. Content lives in mod packages, and the split is enforced structurally, not by convention alone:
 
 - **Content assets belong to mods.** Texture sets, world definitions and the defaults that point the renderer at them live in `mods/<id>/` (`assets/`, `scene.toml`, `config.toml`). The build copies each package's content into the runtime layout next to its entry; there is no engine-owned asset directory at all. A build without packages is a working engine that renders whatever the configuration defines - an empty sky by default.
 - **Shaders are not assets.** A shader is the implementation of a rendering technique: it is written next to the module that owns the algorithm, compiled by CMake at build time, and fails the build loudly when broken. The runtime layout reflects this: SPIR-V lands in `runtime/shaders/` (build output, like the executable), not under any `assets` name.
 - **The world has exactly one source.** A run's `[scene]` comes from `--scene`, from the assembly, or from the single active content mod's declared scene file - never merged across sources (see `docs/configuration.md`, "The layer stack"), and never from a defaults file, which cannot define `[scene]` at all. Content mods coexist freely; the one-world rule fails startup only when no explicit source exists and two or more active packages claim the world - ambiguity is reported, never resolved silently.
 
-The shipped `test_scene` package is the worked example: it owns the demo world, its texture sets, and the `renderer.texture_directory` default, and nothing in `modules/`, `contracts/` or `kernel/` names it.
+The shipped `test_scene` package is the worked example: it owns the demo world, its texture sets, and the `renderer.texture_directory` default, and nothing in `modules/` or `kernel/` names it.
 
 ### Code hygiene: no hardcoding, no dead code, no god objects
 

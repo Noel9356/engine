@@ -1,6 +1,6 @@
 #include "radiance_cascades.hpp"
 
-#include "engine/capabilities/lighting_contract.hpp"
+#include "lighting_capability.hpp"
 #include "light_uniform.hpp"
 #include "render_interface.hpp"
 #include "renderer.hpp"
@@ -1233,9 +1233,17 @@ void RadianceCascadesModule::stop()
 }
 
 void *RadianceCascadesModule::capabilityPointerFor(
-    const std::string & /*capabilityName*/
+    const std::string &capabilityName
 )
 {
+    // "indirect_diffuse" is a demand marker: it carries no call interface, so
+    // the implementation behind it is the module object itself. The kernel
+    // type-erases the pointer; whoever demands the marker consumes the work
+    // the module attaches to the frame, not a cast.
+    if (capabilityName == "indirect_diffuse")
+    {
+        return this;
+    }
     return nullptr;
 }
 

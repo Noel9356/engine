@@ -1,6 +1,6 @@
 #include "ray_reflections.hpp"
 
-#include "engine/capabilities/lighting_contract.hpp"
+#include "lighting_capability.hpp"
 #include "light_uniform.hpp"
 #include "render_interface.hpp"
 #include "renderer.hpp"
@@ -444,9 +444,16 @@ void RayReflectionsModule::stop()
 }
 
 void *RayReflectionsModule::capabilityPointerFor(
-    const std::string & /*capabilityName*/
+    const std::string &capabilityName
 )
 {
+    // "indirect_specular" is a demand marker: it carries no call interface, so
+    // the implementation behind it is the module object itself (see the
+    // radiance cascades module for the reasoning).
+    if (capabilityName == "indirect_specular")
+    {
+        return this;
+    }
     return nullptr;
 }
 

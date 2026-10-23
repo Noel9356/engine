@@ -464,6 +464,12 @@ void *PbrLightingModule::capabilityPointerFor(
     {
         return static_cast<LightingCapability *>(this);
     }
+    // "direct_diffuse" is a demand marker: it carries no call interface, so
+    // the implementation behind it is the module object itself.
+    if (capabilityName == "direct_diffuse")
+    {
+        return this;
+    }
     return nullptr;
 }
 

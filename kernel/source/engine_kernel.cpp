@@ -1,5 +1,6 @@
 #include "engine/kernel/engine_kernel.hpp"
 
+#include "engine/kernel/capability_name.hpp"
 #include "engine/kernel/filesystem_utilities.hpp"
 #include "engine/kernel/mod_api.hpp"
 #include "engine/kernel/mod_discovery.hpp"
@@ -134,7 +135,7 @@ std::unique_ptr<ComponentContext> EngineKernel::createHostContext()
 {
     permissionSystem_.grantAllPermissions(hostContextName());
     return std::make_unique<ComponentContext>(
-        bus, capabilityRegistry_, permissionSystem_, configurationStore, hostContextName(), nullptr
+        bus, *this, permissionSystem_, configurationStore, hostContextName(), nullptr
     );
 }
 
@@ -551,12 +552,13 @@ void EngineKernel::gatherModPackages(
 
 // Capability demand closure over opaque names, seeded by the active mods
 // alone: every mod's required capabilities join the worklist, and each
-// demanded capability activates the module plugins that provide it - all of
-// them when the configuration's [providers] selection does not name exactly
-// one - while an activated plugin's own requirements join the worklist in
-// turn. With no mods there is no demand: no module plugin is instantiated.
-// Capability names are never interpreted: the kernel only matches strings
-// between consumer requirements and provider declarations.
+// demanded capability activates the module plugins that provide it - exact
+// name matches first, then any member of the demanded family ("example"
+// activates a plugin providing "example.impl") - while an activated
+// plugin's own requirements join the worklist in turn. With no mods there is
+// no demand: no module plugin is instantiated. Capability names are never
+// interpreted: the kernel only matches strings between consumer requirements
+// and provider declarations.
 void EngineKernel::computeDemandClosure()
 {
     demandedCapabilities.clear();
@@ -590,27 +592,29 @@ void EngineKernel::computeDemandClosure()
         demandedCapabilities.insert(capabilityName);
 
         // Providers of this capability among the descriptors and the mod
-        // records. The [providers] selection narrows the choice when it
-        // names one of them; otherwise every provider activates and the
-        // resolver reports the ambiguity (or the selection naming an
-        // implementation that does not exist).
+        // records: exact name matches first, then - for a family demand -
+        // every provider of a member of that family. The [providers]
+        // selection narrows the choice when it names one of them; otherwise
+        // every candidate activates and the resolver reports the ambiguity
+        // (or the selection naming an implementation that does not exist).
+        const auto providesCapability = [&capabilityName](const std::vector<std::string> &provided)
+        {
+            return std::any_of(
+                provided.begin(), provided.end(), [&capabilityName](const std::string &candidate)
+                { return capabilityRequirementSatisfiedBy(capabilityName, candidate); }
+            );
+        };
         std::vector<std::string> providerNames;
         for (ModulePluginRecord &plugin : modulePlugins)
         {
-            if (std::find(plugin.providedCapabilities.begin(), plugin.providedCapabilities.end(), capabilityName)
-                != plugin.providedCapabilities.end())
+            if (providesCapability(plugin.providedCapabilities))
             {
                 providerNames.push_back(plugin.name);
             }
         }
         for (const ComponentRecord &record : records)
         {
-            if (std::find(
-                    record.manifest.providedCapabilities.begin(),
-                    record.manifest.providedCapabilities.end(),
-                    capabilityName
-                )
-                != record.manifest.providedCapabilities.end())
+            if (providesCapability(record.manifest.providedCapabilities))
             {
                 providerNames.push_back(record.name);
             }
@@ -648,6 +652,16 @@ void EngineKernel::computeDemandClosure()
                     continue;
                 }
                 plugin.active = true;
+                // A family demand satisfied through a member also marks the
+                // member itself as demanded: a provider consulting the closure
+                // about its own capability sees the demand that activated it.
+                for (const std::string &providedName : plugin.providedCapabilities)
+                {
+                    if (capabilityRequirementSatisfiedBy(capabilityName, providedName))
+                    {
+                        demandedCapabilities.insert(providedName);
+                    }
+                }
                 for (const std::string &requiredName : plugin.requiredCapabilities)
                 {
                     worklist.push_back(requiredName);
@@ -910,15 +924,26 @@ void EngineKernel::appendModRiskWarning(
 }
 
 // Resolves the hosting module of one script mod: the active component that
-// provides the host capability the package declared, honoring the
-// configuration's [providers] selection when several implementations are
-// active. The kernel never names the host or the capability: the script
-// package required the capability, the graph picked the provider.
+// provides the host capability the package declared (exact name first, then
+// any member of the demanded family), honoring the configuration's
+// [providers] selection when several implementations are active. The kernel
+// never names the host or the capability: the script package required the
+// capability, the graph picked the provider.
 EngineKernel::ComponentRecord *EngineKernel::resolveScriptHost(
     const ComponentRecord &scriptRecord, std::string &report
 )
 {
-    const std::string              capabilityName = scriptRecord.scriptMod.hostCapability;
+    const std::string capabilityName = scriptRecord.scriptMod.hostCapability;
+    const auto        providesHost   = [&capabilityName](const ComponentRecord &record)
+    {
+        return record.manifest.kind == ComponentKind::Module
+            && std::any_of(
+                   record.manifest.providedCapabilities.begin(),
+                   record.manifest.providedCapabilities.end(),
+                   [&capabilityName](const std::string &candidate)
+                   { return capabilityRequirementSatisfiedBy(capabilityName, candidate); }
+               );
+    };
     std::vector<ComponentRecord *> candidates;
     for (ComponentRecord &record : records)
     {
@@ -928,10 +953,7 @@ EngineKernel::ComponentRecord *EngineKernel::resolveScriptHost(
         {
             continue;
         }
-        if (std::find(
-                record.manifest.providedCapabilities.begin(), record.manifest.providedCapabilities.end(), capabilityName
-            )
-            != record.manifest.providedCapabilities.end())
+        if (providesHost(record))
         {
             candidates.push_back(&record);
         }
@@ -1133,7 +1155,7 @@ bool EngineKernel::runConstructPhase(
         // lifetime (event publishing from frame loops or input callbacks), so
         // it must not live in this loop's stack frame.
         record->context = std::make_unique<ComponentContext>(
-            bus, capabilityRegistry_, permissionSystem_, configurationStore, record->name, &demandedCapabilities
+            bus, *this, permissionSystem_, configurationStore, record->name, &demandedCapabilities
         );
         ComponentContext &context = *record->context;
         try
@@ -1154,6 +1176,10 @@ bool EngineKernel::runConstructPhase(
             return false;
         }
 
+        // The construct phase validates that every declared capability has an
+        // implementation behind it - and nothing else. No pointer is stored:
+        // acquisition pulls from the declaring provider at call time, so there
+        // is no registry to fill and no shared instance to hand out.
         for (const std::string &capabilityName : record->manifest.providedCapabilities)
         {
             void *capabilityPointer = nullptr;
@@ -1171,19 +1197,118 @@ bool EngineKernel::runConstructPhase(
                         + "' declares capability '" + capabilityName + "' but returned no implementation.\n";
                 return false;
             }
-            try
-            {
-                capabilityRegistry_.registerCapability(capabilityName, record->name, capabilityPointer);
-            }
-            catch (const std::logic_error &error)
-            {
-                report += "- " + std::string(error.what()) + "\n";
-                return false;
-            }
         }
         record->constructed = true;
     }
     return true;
+}
+
+// The pull behind ComponentContext::acquireCapability. Resolves the requested
+// capability name against the constructed components: exact declarations first,
+// then - for a family request - the single active member of that family. Every
+// resolved pointer comes straight from the declaring provider's
+// capabilityPointerFor hook at call time; nothing is cached here between
+// requests. A request that cannot resolve to exactly one implementation throws
+// with a precise diagnostic.
+void *EngineKernel::resolveCapabilityPointer(
+    const std::string & /*requesterName*/, const std::string &capabilityName
+)
+{
+    std::vector<ComponentRecord *> exactProviders;
+    std::vector<ComponentRecord *> memberProviders;
+    std::string                    memberName;
+    for (ComponentRecord &record : records)
+    {
+        if (!record.constructed)
+        {
+            continue;
+        }
+        for (const std::string &providedName : record.manifest.providedCapabilities)
+        {
+            if (providedName == capabilityName)
+            {
+                exactProviders.push_back(&record);
+            }
+            else if (capabilityRequirementSatisfiedBy(capabilityName, providedName))
+            {
+                memberProviders.push_back(&record);
+                memberName = providedName;
+            }
+        }
+    }
+
+    if (!exactProviders.empty())
+    {
+        if (exactProviders.size() > 1)
+        {
+            std::string names;
+            for (const ComponentRecord *provider : exactProviders)
+            {
+                if (!names.empty())
+                {
+                    names += ", ";
+                }
+                names += "'" + provider->name + "'";
+            }
+            throw std::logic_error(
+                "capability '" + capabilityName + "' is provided by several components (" + names
+                + "); choose one in the configuration under [providers]"
+            );
+        }
+        return capabilityPointerOf(*exactProviders.front(), capabilityName);
+    }
+
+    if (!memberProviders.empty())
+    {
+        if (memberProviders.size() > 1)
+        {
+            std::string names;
+            for (const ComponentRecord *provider : memberProviders)
+            {
+                if (!names.empty())
+                {
+                    names += ", ";
+                }
+                names += "'" + provider->name + "'";
+            }
+            throw std::logic_error(
+                "capability family '" + capabilityName + "' is ambiguous: " + std::to_string(memberProviders.size())
+                + " implementations are active (" + names + "); choose one in the configuration under [providers]"
+            );
+        }
+        return capabilityPointerOf(*memberProviders.front(), memberName);
+    }
+
+    throw std::logic_error(
+        "capability '" + capabilityName + "' has no active provider; a component acquired it without a "
+        "requirement whose provider is available in this run"
+    );
+}
+
+// Asks one component for the implementation behind a capability name it
+// declared. The construct phase verified the pointer exists, so nullptr here
+// is a broken provider, not a resolution failure.
+void *EngineKernel::capabilityPointerOf(
+    ComponentRecord &provider, const std::string &capabilityName
+)
+{
+    void *capabilityPointer = nullptr;
+    if (provider.moduleInstance != nullptr)
+    {
+        capabilityPointer = provider.moduleInstance->capabilityPointerFor(capabilityName);
+    }
+    else if (provider.modInstance != nullptr)
+    {
+        capabilityPointer = provider.modInstance->capabilityPointerFor(capabilityName);
+    }
+    if (capabilityPointer == nullptr)
+    {
+        throw std::logic_error(
+            "component '" + provider.name + "' declares capability '" + capabilityName
+            + "' but returned no implementation"
+        );
+    }
+    return capabilityPointer;
 }
 
 bool EngineKernel::construct(

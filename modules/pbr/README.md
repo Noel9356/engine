@@ -1,10 +1,10 @@
 # pbr module
 
-The analytic direct-lighting technique. The pbr module attaches a compute pass to the renderer through the technique interface (`modules/renderer/render_interface.hpp`), owns the scene light state behind the `LightingCapability` (capability name `lighting`, contract in `contracts/include/engine/capabilities/lighting_contract.hpp`), and writes the DIRECT radiance layer the composite adds. It is named after its algorithm — physically based rendering direct transport — because technique modules are named after algorithms, never after rendering categories (`docs/architecture.md`).
+The analytic direct-lighting technique. The pbr module attaches a compute pass to the renderer through the technique interface (`modules/renderer/render_interface.hpp`), owns the scene light state behind the `LightingCapability` (capability name `lighting`, published in `lighting_capability.hpp` next to this module — the light-state vocabulary travels with its provider), and writes the DIRECT radiance layer the composite adds. It is named after its algorithm — physically based rendering direct transport — because technique modules are named after algorithms, never after rendering categories (`docs/architecture.md`).
 
 ## The LightingCapability
 
-The pbr module is the capability's provider: the sun is set with `setSunLight`/`clearSunLight`/`hasSunLight`/`sunLight(const)`, and point lights are managed with `addPointLight`/`removePointLight`/`clearPointLights`/`pointLightCount`/`pointLight(index)`. The state is consumed once per frame by the lighting passes; `[scene.sun]` and `[[scene.point_lights]]` in the configuration only SEED it. Live point lights are capped at 16; `addPointLight` returns the invalid handle when the cap is reached, so a caller can react instead of silently overwriting an existing light. Light descriptions are plain primitive values (directions, colors, radii), so the contract stays implementation-, platform- and vendor-agnostic like every other contract. C++ mods acquire this capability to drive lights at runtime; script mods interact with lighting through configuration today, because the Lua bridge grows deliberately.
+The pbr module is the capability's provider: the sun is set with `setSunLight`/`clearSunLight`/`hasSunLight`/`sunLight(const)`, and point lights are managed with `addPointLight`/`removePointLight`/`clearPointLights`/`pointLightCount`/`pointLight(index)`. The state is consumed once per frame by the lighting passes; `[scene.sun]` and `[[scene.point_lights]]` in the configuration only SEED it. Live point lights are capped at 16; `addPointLight` returns the invalid handle when the cap is reached, so a caller can react instead of silently overwriting an existing light. Light descriptions are plain primitive values (directions, colors, radii), so the published header stays implementation-, platform- and vendor-agnostic like every other capability surface. C++ mods acquire this capability to drive lights at runtime; script mods interact with lighting through configuration today, because the Lua bridge grows deliberately.
 
 ## The direct pass
 
@@ -37,6 +37,7 @@ The sun and point lights are seeded from `[scene.sun]` and `[[scene.point_lights
 
 ## Files
 
+- `lighting_capability.hpp` — the published capability surface every consumer includes
 - `pbr.hpp` / `pbr.cpp` — the technique module and the `LightingCapability` provider
 - `light_state.hpp` — the scene light state behind the capability
 - `shaders/pbr_lighting.comp` — the direct-lighting compute pass

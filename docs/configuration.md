@@ -84,7 +84,7 @@ There is no module list and no demand list. Modules are activated purely by the 
 
 ## [providers]
 
-Picks one implementation when several provide the same capability, e.g. `window = "glfw_window"`. Keys are capability names, values are component names. Two providers with no selection fails startup, naming the candidates and the key that resolves them.
+Picks one implementation when several provide the same capability, e.g. `renderer = "renderer"`. The key is the capability name - a family such as `renderer` when the candidates are its implementation-bound members (`renderer.vulkan` and friends), or an exact name shared by several providers. Values are component names. Several providers with no selection fails startup, naming the candidates and the key that resolves them.
 
 ## [permissions]
 

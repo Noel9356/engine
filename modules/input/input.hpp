@@ -1,9 +1,9 @@
 #ifndef ENGINE_MODULES_INPUT_HPP
 #define ENGINE_MODULES_INPUT_HPP
 
-#include "engine/capabilities/input_contract.hpp"
-#include "engine/capabilities/logging_contract.hpp"
-#include "engine/capabilities/window_contract.hpp"
+#include "input_capability.hpp"
+#include "logging_capability.hpp"
+#include "window_capability.hpp"
 #include "engine/kernel/component_interface.hpp"
 
 #include <cstdint>

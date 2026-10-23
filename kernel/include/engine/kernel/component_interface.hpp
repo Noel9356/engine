@@ -1,7 +1,6 @@
 #ifndef ENGINE_KERNEL_COMPONENT_INTERFACE_HPP
 #define ENGINE_KERNEL_COMPONENT_INTERFACE_HPP
 
-#include "capability_registry.hpp"
 #include "component_manifest.hpp"
 #include "event_bus.hpp"
 #include "permission_system.hpp"
@@ -31,7 +30,8 @@ struct ScriptModDescription
     std::filesystem::path scriptPath;
     // The capability, from the package's required set, whose provider hosts
     // the script. The kernel only matches this name against provider
-    // declarations; the meaning of the capability lives in the contract.
+    // declarations; the meaning of the capability lives in the provider's
+    // published header.
     std::string           hostCapability;
 };
 
@@ -59,9 +59,30 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// The kernel-side surface behind ComponentContext's capability acquisition.
+// Implemented by EngineKernel. Every call resolves the implementation pointer
+// PULL-BASED from the declaring provider at acquisition time: the request
+// walks the active components, asks the declaring provider's
+// capabilityPointerFor hook and hands the result straight to the caller -
+// nothing is stored or registered anywhere between the phases.
+class CapabilityResolver
+{
+public:
+    virtual ~CapabilityResolver() = default;
+
+    // Returns the implementation pointer of the named capability. Throws
+    // std::logic_error with a precise diagnostic when the request cannot be
+    // resolved (no provider, several providers, or a provider that returned
+    // no implementation).
+    virtual void *resolveCapabilityPointer(
+        const std::string &requesterName, const std::string &capabilityName
+    ) = 0;
+};
+
 // Everything a module or a mod may touch from the kernel. The context enforces
 // the permission system at the only point where cross component access happens:
-// capability acquisition.
+// capability acquisition. Acquisition is type-erased by name here; the caller
+// casts to the capability interface published by the providing module.
 class ComponentContext final
 {
 public:
@@ -72,7 +93,7 @@ public:
     // context receives null (the host never contributes capability work).
     ComponentContext(
         EventBus                              &eventBus,
-        CapabilityRegistry                    &capabilityRegistry,
+        CapabilityResolver                    &capabilityResolver,
         PermissionSystem                      &permissionSystem,
         const ConfigurationStore              &configuration,
         std::string                            componentName,
@@ -84,13 +105,15 @@ public:
         return eventBus_;
     }
 
-    // Acquires the shared provider instance of one capability contract. Fails
-    // when the permission "capability.<name>" was not granted to this
-    // component (the engine blocks the access), or when the capability does
-    // not exist.
-    template <typename CapabilityType> CapabilityType &acquireCapability() const
+    // Acquires the implementation of one capability by name and returns it
+    // type-erased. Fails when the permission "capability.<name>" was not
+    // granted to this component (the engine blocks the access), or when the
+    // name has no single active implementation - the resolver's exception
+    // carries the precise diagnostic.
+    void *acquireCapability(
+        const std::string &capabilityName
+    ) const
     {
-        const std::string capabilityName = CapabilityType::capabilityName;
         const std::string permissionName = std::string(capabilityPermissionPrefix) + capabilityName;
         if (!permissionSystem_.isGranted(componentName_, permissionName))
         {
@@ -100,7 +123,18 @@ public:
                 + "' was not granted. Declare the requirement in the manifest."
             );
         }
-        void *capabilityPointer = capabilityRegistry_.acquireCapability(capabilityName);
+        return capabilityResolver_.resolveCapabilityPointer(componentName_, capabilityName);
+    }
+
+    // Typed convenience over the name-based acquire above: the caller states
+    // the capability interface it compiled against (published by the providing
+    // module) and the context resolves the pointer through the kernel's pull.
+    // The cast is the caller's statement of intent; the kernel stays type
+    // blind - this template lives at the consumer side and never names a
+    // concrete provider.
+    template <typename CapabilityType> CapabilityType &acquireCapability() const
+    {
+        void *capabilityPointer = acquireCapability(std::string(CapabilityType::capabilityName));
         return *static_cast<CapabilityType *>(capabilityPointer);
     }
 
@@ -138,7 +172,7 @@ public:
 
 private:
     EventBus                              &eventBus_;
-    CapabilityRegistry                    &capabilityRegistry_;
+    CapabilityResolver                    &capabilityResolver_;
     PermissionSystem                      &permissionSystem_;
     const ConfigurationStore              &configuration_;
     std::string                            componentName_;
@@ -161,8 +195,10 @@ public:
     virtual void start()                              = 0;
     virtual void stop()                               = 0;
 
-    // Returns this module typed as the capability contract registered under the
-    // given capability name, or nullptr when the module does not provide it.
+    // Returns this module typed as the implementation behind the given
+    // capability name, or nullptr when the module does not provide it. The
+    // kernel calls this at acquisition time - nothing is stored or registered:
+    // the pull goes straight to the declaring provider, every time.
     virtual void *capabilityPointerFor(const std::string &capabilityName) = 0;
 
     // Returns the script host surface of this module, or nullptr when the

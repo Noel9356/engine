@@ -11,7 +11,7 @@
 #include <cmath>
 #include <cstdint>
 
-#include "engine/capabilities/lighting_contract.hpp"
+#include "lighting_capability.hpp"
 #include "scene_description.hpp" // maxPointLights
 
 namespace engine

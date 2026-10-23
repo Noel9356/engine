@@ -1,5 +1,7 @@
 #include "engine/kernel/dependency_resolver.hpp"
 
+#include "engine/kernel/capability_name.hpp"
+
 #include <algorithm>
 #include <functional>
 #include <map>
@@ -54,85 +56,120 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
         }
     }
 
-    // Apply provider selections and report ambiguity or bad selections.
-    std::map<std::string, ManifestIndex> selectedProvider; // capability -> provider index
-    for (const auto &entry : capabilityProviders)
+    // Provider candidates for one requirement: exact declarations first, then
+    // - when the requirement names a family - every member of that family.
+    // A family requirement several exact providers satisfy is ambiguity among
+    // the exact providers; members only come into play when no exact provider
+    // exists.
+    const auto candidateProviders = [&capabilityProviders](const std::string &requirement)
     {
-        const std::string                &capabilityName = entry.first;
-        const std::vector<ManifestIndex> &providers      = entry.second;
-
-        const auto selection = std::find_if(
-            selections_.begin(),
-            selections_.end(),
-            [&capabilityName](const ProviderSelection &candidate) { return candidate.capabilityName == capabilityName; }
-        );
-
-        if (providers.size() > 1)
+        std::vector<ManifestIndex> candidates;
+        const auto                 exact = capabilityProviders.find(requirement);
+        if (exact != capabilityProviders.end())
         {
-            if (selection == selections_.end())
+            candidates = exact->second;
+            return candidates;
+        }
+        if (isImplementationBoundCapabilityName(requirement))
+        {
+            return candidates; // an implementation-bound name only matches exactly
+        }
+        for (const auto &entry : capabilityProviders)
+        {
+            if (capabilityRequirementSatisfiedBy(requirement, entry.first))
             {
-                std::string providerList;
-                for (ManifestIndex providerIndex : providers)
-                {
-                    if (!providerList.empty())
-                    {
-                        providerList += ", ";
-                    }
-                    providerList += manifests_[providerIndex].name;
-                }
-                ResolutionDiagnostic diagnostic;
-                diagnostic.kind    = ResolutionDiagnostic::Kind::AmbiguousCapability;
-                diagnostic.message = "capability '" + capabilityName + "' is provided by several components ["
-                                   + providerList + "]; choose one in the configuration under [providers]."
-                                   + capabilityName;
-                result.diagnostics.push_back(std::move(diagnostic));
+                candidates.insert(candidates.end(), entry.second.begin(), entry.second.end());
             }
-            else
+        }
+        return candidates;
+    };
+
+    // Apply provider selections and report ambiguity or bad selections.
+    std::map<std::string, ManifestIndex> selectedProvider; // requirement -> provider index
+    {
+        std::set<std::string> requirementNames;
+        for (const ComponentManifest &manifest : manifests_)
+        {
+            requirementNames.insert(manifest.requiredCapabilities.begin(), manifest.requiredCapabilities.end());
+        }
+        for (const std::string &requirement : requirementNames)
+        {
+            const std::vector<ManifestIndex> providers = candidateProviders(requirement);
+
+            const auto selection = std::find_if(
+                selections_.begin(),
+                selections_.end(),
+                [&requirement](const ProviderSelection &candidate) { return candidate.capabilityName == requirement; }
+            );
+
+            if (providers.size() > 1)
             {
-                const auto chosen = std::find_if(
-                    providers.begin(),
-                    providers.end(),
-                    [this, &selection](ManifestIndex providerIndex)
-                    { return manifests_[providerIndex].name == selection->providerName; }
-                );
-                if (chosen == providers.end())
+                if (selection == selections_.end())
                 {
+                    std::string providerList;
+                    for (ManifestIndex providerIndex : providers)
+                    {
+                        if (!providerList.empty())
+                        {
+                            providerList += ", ";
+                        }
+                        providerList += manifests_[providerIndex].name;
+                    }
                     ResolutionDiagnostic diagnostic;
-                    diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
-                    diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '"
-                                       + capabilityName + "' but that component does not provide the capability.";
-                    diagnostic.involvementChain.push_back(selection->providerName);
-                    diagnostic.involvementChain.push_back(capabilityName);
+                    diagnostic.kind    = ResolutionDiagnostic::Kind::AmbiguousCapability;
+                    diagnostic.message = "capability '" + requirement + "' is provided by several components ["
+                                       + providerList + "]; choose one in the configuration under [providers].";
                     result.diagnostics.push_back(std::move(diagnostic));
                 }
                 else
                 {
-                    selectedProvider.emplace(capabilityName, *chosen);
+                    const auto chosen = std::find_if(
+                        providers.begin(),
+                        providers.end(),
+                        [this, &selection](ManifestIndex providerIndex)
+                        { return manifests_[providerIndex].name == selection->providerName; }
+                    );
+                    if (chosen == providers.end())
+                    {
+                        ResolutionDiagnostic diagnostic;
+                        diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
+                        diagnostic.message = "configuration selects '" + selection->providerName
+                                           + "' for capability '" + requirement
+                                           + "' but that component does not provide the capability.";
+                        diagnostic.involvementChain.push_back(selection->providerName);
+                        diagnostic.involvementChain.push_back(requirement);
+                        result.diagnostics.push_back(std::move(diagnostic));
+                    }
+                    else
+                    {
+                        selectedProvider.emplace(requirement, *chosen);
+                    }
                 }
             }
-        }
-        else if (providers.size() == 1)
-        {
-            if (selection != selections_.end() && manifests_[providers.front()].name != selection->providerName)
+            else if (providers.size() == 1)
             {
-                ResolutionDiagnostic diagnostic;
-                diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
-                diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '"
-                                   + capabilityName + "' but the only provider is '"
-                                   + manifests_[providers.front()].name + "'.";
-                result.diagnostics.push_back(std::move(diagnostic));
-            }
-            else
-            {
-                selectedProvider.emplace(capabilityName, providers.front());
+                if (selection != selections_.end() && manifests_[providers.front()].name != selection->providerName)
+                {
+                    ResolutionDiagnostic diagnostic;
+                    diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
+                    diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '"
+                                       + requirement + "' but the only provider is '"
+                                       + manifests_[providers.front()].name + "'.";
+                    result.diagnostics.push_back(std::move(diagnostic));
+                }
+                else
+                {
+                    selectedProvider.emplace(requirement, providers.front());
+                }
             }
         }
     }
 
-    // Selections that name a capability nobody provides.
+    // Selections that name a capability nobody provides - neither exactly nor
+    // through a family member.
     for (const ProviderSelection &selection : selections_)
     {
-        if (capabilityProviders.find(selection.capabilityName) == capabilityProviders.end())
+        if (candidateProviders(selection.capabilityName).empty())
         {
             ResolutionDiagnostic diagnostic;
             diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;

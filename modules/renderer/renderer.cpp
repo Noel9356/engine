@@ -19,7 +19,10 @@ RendererModule::RendererModule()
 {
     componentManifest.name                 = "renderer";
     componentManifest.kind                 = ComponentKind::Module;
-    componentManifest.providedCapabilities = {"renderer"};
+    // The implementation-bound member name: this module is the Vulkan
+    // implementation of the "renderer" family. Consumers require the family;
+    // a mod that needs this backend names the member exactly.
+    componentManifest.providedCapabilities = {"renderer.vulkan"};
     // "input" is deliberately NOT in requiredCapabilities: the renderer
     // degrades to a static camera when the input module is absent (minimal
     // builds). The permission is still declared so an acquisition attempt
@@ -186,7 +189,7 @@ void *RendererModule::capabilityPointerFor(
     const std::string &capabilityName
 )
 {
-    if (capabilityName == RendererCapability::capabilityName)
+    if (capabilityName == "renderer.vulkan")
     {
         return static_cast<RendererCapability *>(this);
     }

@@ -1,10 +1,10 @@
 # renderer module
 
-The graphics backend and the owner of the frame. The renderer is a Vulkan 1.3 implementation (vulkan-hpp `vk::raii`, dynamic rendering, sync2) that rasterizes the shared `[scene]` world description into a G-buffer, dispatches the attached lighting technique modules against it, composites the radiance layers into the swapchain, copies captures, and presents. It exposes the `RendererCapability` (capability name `renderer`, contract in `contracts/include/engine/capabilities/renderer_contract.hpp`) and attaches technique modules through an in-tree interface that is deliberately NOT a capability contract (see below), so the kernel and script mods stay backend-agnostic while C++ technique modules get a typed, zero-overhead integration point.
+The graphics backend and the owner of the frame. The renderer is a Vulkan 1.3 implementation (vulkan-hpp `vk::raii`, dynamic rendering, sync2) that rasterizes the shared `[scene]` world description into a G-buffer, dispatches the attached lighting technique modules against it, composites the radiance layers into the swapchain, copies captures, and presents. It exposes the `RendererCapability` (capability name `renderer`, published in `renderer_capability.hpp` next to this module; the plugin descriptor carries the implementation-bound member name `renderer.vulkan`) and attaches technique modules through an in-tree interface that is deliberately NOT a capability surface (see below), so the kernel and script mods stay backend-agnostic while C++ technique modules get a typed, zero-overhead integration point.
 
 ## Contract
 
-`RendererCapability` is intentionally small: `renderFrame()` renders one frame, `waitUntilIdle()` drains the device (used before teardown and before offscreen reads), `requestFrameCapture()` queues the capture path (the screenshot module's programmatic entry point), and `validationErrorsObserved()` reports whether the debug messenger saw a validation error — the flag the host's smoke mode turns into exit code 3. The contract carries no Vulkan vocabulary; the contract purity guard in `contracts/CMakeLists.txt` fails the configure if it ever does.
+`RendererCapability` is intentionally small: `renderFrame()` renders one frame, `waitUntilIdle()` drains the device (used before teardown and before offscreen reads), `requestFrameCapture()` queues the capture path (the screenshot module's programmatic entry point), and `validationErrorsObserved()` reports whether the debug messenger saw a validation error — the flag the host's smoke mode turns into exit code 3. The published header carries no Vulkan vocabulary; the published-header guard (`cmake/capability_header_guard.cmake`, called from this module's `CMakeLists.txt`) fails the configure if it ever does.
 
 ## The technique attach point
 
@@ -53,7 +53,8 @@ Vulkan 1.3 features are enabled explicitly, not assumed; the graphics pipeline c
 
 One state struct, several translation units split by concern (the module-private `renderer_state.hpp` is the only place they meet):
 
-- `renderer.hpp` — the module interface (contracts, technique attach point)
+- `renderer.hpp` — the module interface (capability implementation, technique attach point)
+- `renderer_capability.hpp` — the published capability surface every consumer includes
 - `renderer_state.hpp` — module-private shared state: named constants, GPU-side structs, `RendererState` with every method declaration
 - `renderer.cpp` — the module lifecycle: construct/start/stop, capability pointer, technique attach and ordering, frame event publish
 - `renderer_device.cpp` — instance, physical-device selection, device, surface, swapchain, frame images and layout transitions

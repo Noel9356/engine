@@ -1,9 +1,10 @@
 # The engine kernel: event bus, dependency resolution, permission system,
 # configuration and lifecycle. Nothing here knows about windows, rendering or
-# scripting, and nothing here knows what any capability means: the capability
-# contracts live in the separate contracts/ target, which the kernel does not
-# link - the kernel only matches opaque capability name strings between
-# consumer requirements and provider declarations.
+# scripting, and nothing here knows what any capability means: every
+# capability's published header lives in its providing module's directory,
+# which the kernel does not include - the kernel only matches opaque
+# capability name strings between consumer requirements and provider
+# declarations.
 
 add_library(engine_kernel SHARED
     source/component_context.cpp
@@ -17,7 +18,7 @@ add_library(engine_kernel SHARED
 )
 
 # The kernel is the one shared library every module plugin binds to: one
-# process, one kernel instance, one capability registry. The DLL lives next to
+# process, one kernel instance. The DLL lives next to
 # the engine executable (the first entry of the Windows DLL search order, so
 # plugins resolve it without any path configuration); on POSIX the plugins
 # reach it through their $ORIGIN/.. RPATH.

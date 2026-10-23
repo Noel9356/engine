@@ -48,7 +48,10 @@ WindowModule::WindowModule()
 {
     componentManifest.name                 = "window";
     componentManifest.kind                 = ComponentKind::Module;
-    componentManifest.providedCapabilities = {"window"};
+    // The implementation-bound member name: this module is the GLFW
+    // implementation of the "window" family. Consumers require the family;
+    // a mod that needs this backend names the member exactly.
+    componentManifest.providedCapabilities = {"window.glfw"};
     componentManifest.requiredCapabilities = {"logging"};
     componentManifest.requiredPermissions  = {"capability.logging"};
     componentManifest.knownConfigKeys      = {"window.title", "window.width", "window.height", "window.resizable"};
@@ -121,7 +124,7 @@ void *WindowModule::capabilityPointerFor(
     const std::string &capabilityName
 )
 {
-    if (capabilityName == WindowCapability::capabilityName)
+    if (capabilityName == "window.glfw")
     {
         return static_cast<WindowCapability *>(this);
     }

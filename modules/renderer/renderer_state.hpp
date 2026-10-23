@@ -12,9 +12,9 @@
 #include "render_interface.hpp"
 #include "scene_description.hpp"
 #include "scene_math.hpp"
-#include "engine/capabilities/logging_contract.hpp"
-#include "engine/capabilities/renderer_contract.hpp"
-#include "engine/capabilities/window_contract.hpp"
+#include "logging_capability.hpp"
+#include "renderer_capability.hpp"
+#include "window_capability.hpp"
 #include "engine/kernel/event_bus.hpp"
 
 #include <vulkan/vulkan.hpp>

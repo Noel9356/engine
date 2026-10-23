@@ -5,13 +5,12 @@ add_library(engine_module_ray_reflections SHARED
 
 target_link_libraries(engine_module_ray_reflections
     PUBLIC engine_kernel
-    PUBLIC engine_contracts
+    PUBLIC engine_capability_logging
+    PUBLIC engine_capability_renderer
+    PUBLIC engine_capability_pbr
     PRIVATE engine_module_renderer
     PRIVATE engine_vulkan_hpp_bindings
 )
-
-# The module attaches its pass through the renderer's in-tree interface.
-target_include_directories(engine_module_ray_reflections PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(ENGINE_BUILD_DEMO)
     include("${CMAKE_SOURCE_DIR}/cmake/shader_compilation.cmake")
@@ -36,3 +35,11 @@ set_target_properties(engine_module_ray_reflections PROPERTIES
     INSTALL_RPATH "$ORIGIN:$ORIGIN/.."
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
+
+
+# This module provides a demand marker capability ("indirect_specular") and no
+# call interface of its own: its implementation surface is the lighting
+# technique pass it attaches to the renderer (modules/renderer/
+# render_interface.hpp, an in-tree integration that is deliberately not a
+# capability). Consumers demand the marker; nothing includes a header here,
+# so no header-only include target exists.

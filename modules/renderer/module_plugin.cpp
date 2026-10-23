@@ -10,7 +10,7 @@
 
 namespace
 {
-const char *const rendererProvidedCapabilities[] = {"renderer"};
+const char *const rendererProvidedCapabilities[] = {"renderer.vulkan"};
 const char *const rendererRequiredCapabilities[] = {"logging", "window"};
 
 engine::ModuleInterface *createrendererPluginModule()

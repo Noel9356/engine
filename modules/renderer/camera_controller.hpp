@@ -22,8 +22,8 @@
 // yaw/pitch pair from that direction, so a configuration authored as a look
 // target keeps its framing until the first input arrives.
 
-#include "engine/capabilities/input_contract.hpp"
-#include "engine/capabilities/logging_contract.hpp"
+#include "input_capability.hpp"
+#include "logging_capability.hpp"
 #include "scene_description.hpp"
 
 #include <algorithm>

@@ -1,9 +1,15 @@
-#ifndef ENGINE_CAPABILITIES_RENDERER_CONTRACT_HPP
-#define ENGINE_CAPABILITIES_RENDERER_CONTRACT_HPP
+#ifndef ENGINE_MODULES_RENDERER_RENDERER_CAPABILITY_HPP
+#define ENGINE_MODULES_RENDERER_RENDERER_CAPABILITY_HPP
 
-// Mod-facing contract: implementation-, platform- and vendor-agnostic. The
-// renderer behind it may be Vulkan today and another graphics API tomorrow;
-// frame events carry only primitive types. See mods/README.md, section
+// The published capability surface of the renderer module. Every consumer -
+// other modules, native mods, the host - includes THIS header, from the
+// module that provides the capability: the provider owns and publishes its
+// own capability vocabulary, so there is no central contract directory and
+// no mirrored copy that could drift.
+//
+// Mod-facing and implementation-, platform- and vendor-agnostic: the renderer
+// behind it may be Vulkan today and another graphics API tomorrow; frame
+// events carry only primitive types. See mods/README.md, section
 // "Portability".
 
 #include <cstdint>
@@ -35,13 +41,16 @@ struct FrameRenderedEvent
     std::uint64_t frameIndex = 0;
 };
 
-// Capability "renderer": frame rendering. The contract is intentionally small
+// Capability "renderer": frame rendering. The surface is intentionally small
 // and lighting agnostic: rendering features grow through configurable pipeline
 // state inside the provider, never through algorithm specific forks of this
 // interface.
 class RendererCapability
 {
 public:
+    // The implementation-agnostic family name of this capability. Consumers
+    // acquire through it; the module's plugin descriptor carries the
+    // implementation-bound member name ("renderer.vulkan").
     static constexpr const char *capabilityName = "renderer";
 
     virtual ~RendererCapability() = default;
@@ -66,4 +75,4 @@ public:
 
 } // namespace engine
 
-#endif // ENGINE_CAPABILITIES_RENDERER_CONTRACT_HPP
+#endif // ENGINE_MODULES_RENDERER_RENDERER_CAPABILITY_HPP

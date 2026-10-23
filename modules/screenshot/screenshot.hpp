@@ -1,10 +1,10 @@
 #ifndef ENGINE_MODULES_SCREENSHOT_HPP
 #define ENGINE_MODULES_SCREENSHOT_HPP
 
-#include "engine/capabilities/input_contract.hpp"
-#include "engine/capabilities/logging_contract.hpp"
-#include "engine/capabilities/renderer_contract.hpp"
-#include "engine/capabilities/screenshot_contract.hpp"
+#include "input_capability.hpp"
+#include "logging_capability.hpp"
+#include "renderer_capability.hpp"
+#include "screenshot_capability.hpp"
 #include "engine/kernel/component_interface.hpp"
 #include "engine/kernel/event_bus.hpp"
 

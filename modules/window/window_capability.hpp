@@ -1,11 +1,16 @@
-#ifndef ENGINE_CAPABILITIES_WINDOW_CONTRACT_HPP
-#define ENGINE_CAPABILITIES_WINDOW_CONTRACT_HPP
+#ifndef ENGINE_MODULES_WINDOW_WINDOW_CAPABILITY_HPP
+#define ENGINE_MODULES_WINDOW_WINDOW_CAPABILITY_HPP
 
-// Mod-facing contract. Like every header under engine/capabilities this must
-// stay implementation-, platform- and vendor-agnostic: no Vulkan, OpenGL,
-// GLFW, Win32 or X11 headers, and no types from them. The configure step
-// enforces this mechanically (see kernel/CMakeLists.txt); the mod facing rules
-// are documented in mods/README.md, section "Portability".
+// The published capability surface of the window module. Every consumer -
+// other modules, native mods, the host - includes THIS header, from the
+// module that provides the capability: the provider owns and publishes its
+// own capability vocabulary, so there is no central contract directory and
+// no mirrored copy that could drift.
+//
+// This must stay implementation-, platform- and vendor-agnostic: no Vulkan,
+// OpenGL, GLFW, Win32 or X11 headers, and no types from them. The per-module
+// purity guard in the module's CMakeLists enforces this mechanically; the
+// mod-facing rules are documented in mods/README.md, section "Portability".
 
 #include <cstdint>
 #include <string>
@@ -41,16 +46,19 @@ struct WindowResizedEvent
     std::uint32_t    height           = 0;
 };
 
-// Capability "window": surface and event pump. The contract is deliberately
+// Capability "window": surface and event pump. The surface is deliberately
 // windowing library agnostic: nothing here names the underlying library. Two
 // members deal in opaque handles (nativeWindowHandle, createPresentationSurface)
 // so rendering and input implementations can attach to a window without this
-// contract knowing their APIs. A rendering backend for another graphics API is
-// a different module implementation behind the same renderer contract; mods
+// header knowing their APIs. A rendering backend for another graphics API is
+// a different module implementation behind the same renderer capability; mods
 // cannot tell the difference (mods/README.md, section "Portability").
 class WindowCapability
 {
 public:
+    // The implementation-agnostic family name of this capability. Consumers
+    // acquire through it; the module's plugin descriptor carries the
+    // implementation-bound member name ("window.glfw").
     static constexpr const char *capabilityName = "window";
 
     virtual ~WindowCapability() = default;
@@ -83,8 +91,8 @@ public:
 
     // Native window handle for implementations that attach backend specific
     // callbacks (input, platform integration). The pointed-to type is a
-    // windowing library detail of the provider implementation; contract
-    // consumers treat it as opaque.
+    // windowing library detail of the provider implementation; consumers
+    // treat it as opaque.
     virtual void *nativeWindowHandle(WindowIdentifier windowIdentifier) = 0;
 
     // Reverse lookup used by input implementations inside platform callbacks.
@@ -93,4 +101,4 @@ public:
 
 } // namespace engine
 
-#endif // ENGINE_CAPABILITIES_WINDOW_CONTRACT_HPP
+#endif // ENGINE_MODULES_WINDOW_WINDOW_CAPABILITY_HPP

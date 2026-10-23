@@ -10,7 +10,7 @@
 
 namespace
 {
-const char *const windowProvidedCapabilities[] = {"window"};
+const char *const windowProvidedCapabilities[] = {"window.glfw"};
 const char *const windowRequiredCapabilities[] = {"logging"};
 
 engine::ModuleInterface *createwindowPluginModule()

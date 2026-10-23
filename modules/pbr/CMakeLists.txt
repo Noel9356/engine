@@ -5,13 +5,12 @@ add_library(engine_module_pbr SHARED
 
 target_link_libraries(engine_module_pbr
     PUBLIC engine_kernel
-    PUBLIC engine_contracts
+    PUBLIC engine_capability_pbr
+    PUBLIC engine_capability_logging
+    PUBLIC engine_capability_renderer
     PRIVATE engine_module_renderer
     PRIVATE engine_vulkan_hpp_bindings
 )
-
-# The module attaches its pass through the renderer's in-tree interface.
-target_include_directories(engine_module_pbr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(ENGINE_BUILD_DEMO)
     include("${CMAKE_SOURCE_DIR}/cmake/shader_compilation.cmake")
@@ -36,3 +35,15 @@ set_target_properties(engine_module_pbr PROPERTIES
     INSTALL_RPATH "$ORIGIN:$ORIGIN/.."
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
+
+
+# The published capability surface of this module: a header-only INTERFACE
+# target. Consumers link it to include lighting_capability.hpp WITHOUT linking this module's
+# implementation - the capability graph stays explicit in the target links,
+# and no consumer binary depends on another module's symbols at load time.
+add_library(engine_capability_pbr INTERFACE)
+target_include_directories(engine_capability_pbr INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# The portability guard: the published header must stay implementation-,
+# platform- and vendor-agnostic (see cmake/capability_header_guard.cmake).
+engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/lighting_capability.hpp")

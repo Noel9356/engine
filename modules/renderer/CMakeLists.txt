@@ -14,14 +14,14 @@ add_library(engine_module_renderer SHARED
 
 target_link_libraries(engine_module_renderer
     PUBLIC engine_kernel
-    PUBLIC engine_contracts
+    PUBLIC engine_capability_renderer
+    PUBLIC engine_capability_logging
+    PUBLIC engine_capability_window
+    PUBLIC engine_capability_input
+    PUBLIC engine_capability_pbr
     PRIVATE engine_vulkan_hpp_bindings
     PRIVATE engine_stb_bindings
 )
-
-# The host composition root includes the module header directly; lighting
-# modules include the pass interface the same way.
-target_include_directories(engine_module_renderer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # The renderer owns the scene rasterization and composite shaders. The shared
 # SDF/PBR include directory is consumed by the lighting modules through
@@ -52,3 +52,15 @@ set_target_properties(engine_module_renderer PROPERTIES
     INSTALL_RPATH "$ORIGIN:$ORIGIN/.."
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
+
+
+# The published capability surface of this module: a header-only INTERFACE
+# target. Consumers link it to include renderer_capability.hpp WITHOUT linking this module's
+# implementation - the capability graph stays explicit in the target links,
+# and no consumer binary depends on another module's symbols at load time.
+add_library(engine_capability_renderer INTERFACE)
+target_include_directories(engine_capability_renderer INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# The portability guard: the published header must stay implementation-,
+# platform- and vendor-agnostic (see cmake/capability_header_guard.cmake).
+engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/renderer_capability.hpp")

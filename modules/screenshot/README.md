@@ -1,6 +1,6 @@
 # screenshot module
 
-PNG capture of the presented frame. The module exposes the `ScreenshotCapability` (capability name `screenshot`, contract in `contracts/include/engine/capabilities/screenshot_contract.hpp`) — a single `requestScreenshot()` method — and owns the whole path from the request to a file on disk: queue, copy, readback, encode, write.
+PNG capture of the presented frame. The module exposes the `ScreenshotCapability` (capability name `screenshot`, published in `screenshot_capability.hpp` next to this module) — a single `requestScreenshot()` method — and owns the whole path from the request to a file on disk: queue, copy, readback, encode, write.
 
 ## Request paths
 
@@ -23,7 +23,7 @@ The capture is recorded inside the same command buffer as the frame — the swap
 | required capabilities | `logging`, `input`, `renderer` |
 | required permissions | `capability.logging`, `capability.input`, `capability.renderer`, `filesystem.write` |
 
-The dependency on `input` is for the hotkey subscription; a build without the input module cannot resolve this module's requirement, so a screenshot-only headless setup should queue captures through the renderer contract or the Lua bridge instead.
+The dependency on `input` is for the hotkey subscription; a build without the input module cannot resolve this module's requirement, so a screenshot-only headless setup should queue captures through the renderer capability or the Lua bridge instead.
 
 ## Configuration
 
@@ -36,6 +36,7 @@ Relative paths (including the default) resolve against the process working direc
 
 ## Files
 
+- `screenshot_capability.hpp` — the published capability surface every consumer includes
 - `screenshot.hpp` / `screenshot.cpp` — the module, the queue, the readback and PNG writing
 - `module_plugin.cpp` — the static plugin descriptor (name, factory, provided capabilities)
 - `CMakeLists.txt` — target and option wiring (`ENGINE_BUILD_MODULE_SCREENSHOT`)

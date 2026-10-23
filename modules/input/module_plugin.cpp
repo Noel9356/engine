@@ -10,7 +10,7 @@
 
 namespace
 {
-const char *const inputProvidedCapabilities[] = {"input"};
+const char *const inputProvidedCapabilities[] = {"input.glfw"};
 const char *const inputRequiredCapabilities[] = {"logging", "window"};
 
 engine::ModuleInterface *createinputPluginModule()

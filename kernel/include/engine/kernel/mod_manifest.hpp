@@ -28,12 +28,12 @@ namespace engine
 //   display_name = "Example Mod"         # optional, defaults to id
 //   description  = "..."                 # optional
 //   author       = "..."                 # optional
-//   capabilities = ["logging", "input"]  # required capabilities (graph edges);
+//   capabilities = ["example_capability"] # required capabilities (graph edges);
 //                                        # each also grants its capability.<name>
 //                                        # permission, so acquisitions need no
 //                                        # second list. Mods never name a module;
 //                                        # they name the capabilities they consume.
-//   host_capability = "scripting"        # script mods only: which ONE required
+//   host_capability = "example_capability" # script mods only: which ONE required
 //                                        # capability's provider hosts the script
 //                                        # runtime. The kernel resolves that
 //                                        # provider without interpreting the name.
