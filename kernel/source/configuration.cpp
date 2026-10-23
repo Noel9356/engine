@@ -570,6 +570,7 @@ void ConfigurationStore::declareAssemblyKnownKeys()
     // loop (--leak-check).
     declareKnownConfigKey("engine.modules");
     declareKnownConfigKey("engine.mod_directory");
+    declareKnownConfigKey("engine.modules_directory");
     declareKnownConfigKey("engine.disabled_mods");
     declareKnownConfigKey(providersSectionName);
     declareKnownConfigKey("permissions.denied");
@@ -685,6 +686,27 @@ std::string ConfigurationStore::modDirectory() const
         return directory;
     }
     if (const auto* value = engineTable->get_as<std::string>("mod_directory"))
+    {
+        directory = value->get();
+    }
+    return directory;
+}
+
+std::string ConfigurationStore::modulesDirectory() const
+{
+    // The default matches the runtime layout the build assembles; a value in
+    // the configuration relocates the scan without touching the kernel.
+    std::string directory = "modules";
+    if (parsedTable == nullptr)
+    {
+        return directory;
+    }
+    const toml::table* engineTable = parsedTable->get_as<toml::table>(engineSectionName);
+    if (engineTable == nullptr)
+    {
+        return directory;
+    }
+    if (const auto* value = engineTable->get_as<std::string>("modules_directory"))
     {
         directory = value->get();
     }

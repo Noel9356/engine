@@ -3,6 +3,7 @@
 #include "engine/kernel/filesystem_utilities.hpp"
 #include "engine/kernel/mod_api.hpp"
 #include "engine/kernel/mod_discovery.hpp"
+#include "engine/kernel/module_api.hpp"
 
 #include <algorithm>
 #include <set>
@@ -341,15 +342,23 @@ EngineKernel::ComponentRecord* EngineKernel::findRecord(const std::string& name)
     return nullptr;
 }
 
-// Builds one record per component: compiled module factories, in-process mod
-// factories, shared library mods from the configuration, and validates that
-// every module listed in the configuration is actually available in this build.
+// Builds one record per component: module plugins from the modules directory,
+// in-process mod factories, shared library mods from the configuration, and
+// validates that every module listed in the configuration is actually
+// available in this run.
 bool EngineKernel::gatherComponents(std::string& report)
 {
     if (componentsGathered)
     {
         return true;
     }
+
+    // Runtime module plugins first: every plugin binary in the modules
+    // directory registers a factory, exactly like the compile-time
+    // registrations the composition root no longer makes. Load failures are
+    // reported and skipped; a configured module backed by no factory then
+    // reports below through the availability diagnostic.
+    loadModulePlugins(report);
 
     const std::vector<std::string> configuredModules = configurationStore.moduleNames();
 
@@ -387,15 +396,18 @@ bool EngineKernel::gatherComponents(std::string& report)
         records.push_back(std::move(record));
     }
 
-    // Modules requested in the configuration but absent from this build.
+    // Modules requested in the configuration but backed by no factory: the
+    // plugin binary is missing from the modules directory (or failed to load
+    // above), the module was compiled out through its build option, or the
+    // configuration name is wrong.
     for (const std::string& moduleName : configuredModules)
     {
         const bool registered = moduleFactories.find(moduleName) != moduleFactories.end();
         if (!registered)
         {
             report += "- module '" + moduleName +
-                      "' is listed in the configuration but is not available in this build "
-                      "(compiled out through its build option, or the name is wrong).\n";
+                      "' is listed in the configuration but is not available in this run (its plugin is missing "
+                      "from the modules directory, compiled out through its build option, or the name is wrong).\n";
         }
     }
 

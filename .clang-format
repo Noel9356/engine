@@ -1,0 +1,70 @@
+---
+
+Language: Cpp
+Standard: c++20
+ColumnLimit: 120
+TabWidth: 4
+UseTab: Never
+
+IndentWidth: 4
+ContinuationIndentWidth: 4
+
+NamespaceIndentation: None
+
+BasedOnStyle: LLVM
+
+AlignAfterOpenBracket: DontAlign
+
+AlignConsecutiveDeclarations:
+    Enabled: true
+    AlignFunctionDeclarations: true
+
+AlignConsecutiveAssignments:
+    Enabled: true
+    AcrossEmptyLines: false
+    AcrossComments: false
+    PadOperators: true
+
+AlignOperands: AlignAfterOperator
+
+Cpp11BracedListStyle: FunctionCall
+
+BinPackParameters: false
+BinPackArguments: false
+
+BreakBeforeBraces: Allman
+
+# Break: Bracket braced list
+BreakAfterOpenBracketBracedList: true
+BreakBeforeCloseBracketBracedList: true
+
+# Break: Bracket function
+BreakAfterOpenBracketFunction: true
+BreakBeforeCloseBracketFunction: true
+
+BreakFunctionDefinitionParameters: true
+
+BreakBeforeBinaryOperators: NonAssignment
+
+AccessModifierOffset: -4
+
+# Try to keep the right-hand expression on the same line as `=`
+PenaltyBreakAssignment: 1000
+
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+
+BreakConstructorInitializers: BeforeColon
+
+SortIncludes: Never
+IncludeBlocks: Preserve
+FixNamespaceComments: true
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+InsertNewlineAtEOF: true

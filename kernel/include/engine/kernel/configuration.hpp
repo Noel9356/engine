@@ -176,11 +176,15 @@ public:
     // or delegates content to the installed content mod's scene file.
     bool hasSection(const std::string& sectionName) const;
 
-    // [engine] section. Module names must match compiled module factories; mod
+    // [engine] section. Module names must match the factories registered by
+    // the module plugins (or by a host that links modules directly); mod
     // packages are discovered in modDirectory and skipped when their id is in
     // disabledMods.
     std::vector<std::string> moduleNames() const;
     std::string modDirectory() const;
+    // Directory scanned for module plugin binaries, relative to the
+    // executable directory when not absolute. Default: "modules".
+    std::string modulesDirectory() const;
     std::vector<std::string> disabledMods() const;
 
     // [providers] capability name -> selected provider name.

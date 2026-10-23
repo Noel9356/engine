@@ -271,6 +271,15 @@ set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+# One GLFW per process: the window module initializes and pumps GLFW, and the
+# input module attaches its callbacks to the window module's GLFWwindow and
+# polls glfwGetKey. GLFW forbids more than one initialized copy per process;
+# a static copy baked into each plugin would embed a private, never
+# initialized GLFW state in every plugin binary and leave input silently dead.
+# SHARED puts one GLFW runtime (libglfw.so.3 / glfw3.dll) into the runtime
+# directory next to the engine executable, where the loader of every plugin
+# finds it (application directory on Windows, $ORIGIN/.. RPATH on POSIX).
+set(GLFW_LIBRARY_TYPE SHARED CACHE STRING "" FORCE)
 
 engine_acquire_dependency(glfw glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git

@@ -6,36 +6,6 @@
 #include "engine/kernel/engine_kernel.hpp"
 #include "leak_check.hpp"
 
-#include <engine_module_availability.h>
-
-#if ENGINE_BUILD_MODULE_LOGGING
-#include "logging.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_WINDOW
-#include "window.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_INPUT
-#include "input.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_RENDERER
-#include "renderer.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_SCREENSHOT
-#include "screenshot.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_LUA_SCRIPTING
-#include "lua_scripting.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_PBR
-#include "pbr.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_RADIANCE_CASCADES
-#include "radiance_cascades.hpp"
-#endif
-#if ENGINE_BUILD_MODULE_RAY_REFLECTIONS
-#include "ray_reflections.hpp"
-#endif
-
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -200,39 +170,11 @@ int main(int argc, char** argv)
         }
     }
 
-    // Compile time module selection: every registration sits behind its build
-    // option, so excluding a module in CMake removes it from the composition
-    // root as well. A module that is listed in the configuration but excluded
-    // here produces a precise startup diagnostic instead of a link error.
-#if ENGINE_BUILD_MODULE_LOGGING
-    kernel.registerModuleFactory("logging", []() { return std::make_unique<engine::LoggingModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_WINDOW
-    kernel.registerModuleFactory("window", []() { return std::make_unique<engine::WindowModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_INPUT
-    kernel.registerModuleFactory("input", []() { return std::make_unique<engine::InputModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_RENDERER
-    kernel.registerModuleFactory("renderer", []() { return std::make_unique<engine::RendererModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_SCREENSHOT
-    kernel.registerModuleFactory("screenshot", []() { return std::make_unique<engine::ScreenshotModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_LUA_SCRIPTING
-    kernel.registerModuleFactory("lua_scripting", []() { return std::make_unique<engine::LuaScriptingModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_PBR
-    kernel.registerModuleFactory("pbr", []() { return std::make_unique<engine::PbrLightingModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_RADIANCE_CASCADES
-    kernel.registerModuleFactory("radiance_cascades",
-                                 []() { return std::make_unique<engine::RadianceCascadesModule>(); });
-#endif
-#if ENGINE_BUILD_MODULE_RAY_REFLECTIONS
-    kernel.registerModuleFactory("ray_reflections",
-                                 []() { return std::make_unique<engine::RayReflectionsModule>(); });
-#endif
+    // Module availability is runtime, not compile time: the kernel scans
+    // <exe_dir>/modules for plugin binaries and registers one factory per
+    // plugin (engine/kernel/module_api.hpp). The composition root registers
+    // nothing here; a module listed in the configuration but missing from the
+    // modules directory produces the kernel's precise startup diagnostic.
 
     // Command line diagnostics override: enable recording before the kernel
     // loads its configuration (which applies [diagnostics] latency_report),

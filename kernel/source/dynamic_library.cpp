@@ -22,7 +22,17 @@ bool DynamicLibrary::load(const std::filesystem::path& libraryPath, std::string&
     release();
 
 #if defined(_WIN32)
-    HMODULE loadedHandle = ::LoadLibraryW(libraryPath.c_str());
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR searches the loaded library's own
+    // directory first, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS adds the application
+    // directory and the system directories. Together a plugin in
+    // <exe>/modules/ resolves its sibling plugins from its own directory and
+    // the kernel and GLFW runtimes from the directory of the executable -
+    // without either flag, plain LoadLibrary would search neither the
+    // plugin's own directory nor honor the runtime layout's split between
+    // modules/ and the executable directory.
+    HMODULE loadedHandle =
+        ::LoadLibraryExW(libraryPath.c_str(), nullptr,
+                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (loadedHandle == nullptr)
     {
         const DWORD errorCode = ::GetLastError();

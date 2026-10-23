@@ -10,8 +10,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
-# Native mods are shared libraries that link the kernel statically; every
-# engine object must therefore be position independent.
+# Native mods and module plugins are shared libraries that link the kernel
+# dynamically; every engine object must therefore be position independent.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---- Platform preprocessor setup -------------------------------------------------
@@ -23,9 +23,10 @@ if(WIN32)
     add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 
-# ---- Options: compile time module selection ------------------------------------
-# Every module can be excluded from the build; the runtime configuration must
-# then not list it either, and the startup report names any mismatch.
+# ---- Options: runtime module selection -----------------------------------------
+# Every module can be excluded from the build; its plugin binary is then not
+# produced, the runtime configuration must not list it either, and the startup
+# report names any mismatch.
 
 option(ENGINE_BUILD_MODULE_LOGGING "Include the logging module in the build" ON)
 option(ENGINE_BUILD_MODULE_WINDOW "Include the window module in the build" ON)
@@ -39,16 +40,21 @@ option(ENGINE_BUILD_MODULE_RAY_REFLECTIONS "Include the ray traced reflections l
 option(ENGINE_BUILD_DEMO "Build the demo host" ON)
 option(ENGINE_BUILD_TESTS "Build the kernel and module tests" ON)
 
-# ---- Dependencies and generated files -------------------------------------------
-
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(engine_dependencies)
-
+# ---- Runtime layout -------------------------------------------------------------
+# Every engine runtime artifact lands in build/runtime/: the executable, the
+# kernel shared library, the GLFW runtime the window and input plugins share,
+# and the modules/ plugin directory. These two set() calls MUST run BEFORE
+# include(engine_dependencies): a directory-scope set() writes the scope at
+# the moment it executes, and the dependency fetch's add_subdirectory
+# snapshots that scope when it runs. After the include, the fetched GLFW
+# shared runtime keeps its default location under _deps/ and the runtime
+# layout assembles without it - the window and input plugins then fail to
+# load with an unsatisfied glfw dependency.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime")
 
-set(ENGINE_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
-configure_file(cmake/engine_module_availability.h.in "${ENGINE_GENERATED_INCLUDE_DIR}/engine_module_availability.h" @ONLY)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(engine_dependencies)
 
 # ---- Engine targets ---------------------------------------------------------------
 # The tree is flat by design: kernel/, modules/<name>/, host/ and mods/ are

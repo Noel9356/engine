@@ -3,34 +3,12 @@ add_executable(engine
     leak_check.cpp
 )
 
+# The host links only the kernel: every module arrives at runtime as a plugin
+# loaded from <exe_dir>/modules (kernel/source/module_plugins.cpp), so the set
+# of available modules is a property of the deployment, not of the link line.
+# The ENGINE_BUILD_MODULE_* options keep controlling which plugin binaries the
+# build produces; the kernel reports a module listed in the configuration but
+# missing from the modules directory through its startup diagnostic.
 target_link_libraries(engine
     PRIVATE engine_kernel
 )
-
-if(ENGINE_BUILD_MODULE_LOGGING)
-    target_link_libraries(engine PRIVATE engine_module_logging)
-endif()
-if(ENGINE_BUILD_MODULE_WINDOW)
-    target_link_libraries(engine PRIVATE engine_module_window)
-endif()
-if(ENGINE_BUILD_MODULE_INPUT)
-    target_link_libraries(engine PRIVATE engine_module_input)
-endif()
-if(ENGINE_BUILD_MODULE_RENDERER)
-    target_link_libraries(engine PRIVATE engine_module_renderer)
-endif()
-if(ENGINE_BUILD_MODULE_SCREENSHOT)
-    target_link_libraries(engine PRIVATE engine_module_screenshot)
-endif()
-if(ENGINE_BUILD_MODULE_LUA_SCRIPTING)
-    target_link_libraries(engine PRIVATE engine_module_lua_scripting)
-endif()
-if(ENGINE_BUILD_MODULE_PBR)
-    target_link_libraries(engine PRIVATE engine_module_pbr)
-endif()
-if(ENGINE_BUILD_MODULE_RADIANCE_CASCADES)
-    target_link_libraries(engine PRIVATE engine_module_radiance_cascades)
-endif()
-if(ENGINE_BUILD_MODULE_RAY_REFLECTIONS)
-    target_link_libraries(engine PRIVATE engine_module_ray_reflections)
-endif()

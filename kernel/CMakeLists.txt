@@ -3,21 +3,34 @@
 # windows, rendering or scripting - including its headers, which stay free of
 # graphics, windowing and platform libraries by the contract purity guard below.
 
-add_library(engine_kernel STATIC
+add_library(engine_kernel SHARED
     source/component_context.cpp
     source/configuration.cpp
     source/dependency_resolver.cpp
     source/dynamic_library.cpp
     source/engine_kernel.cpp
     source/filesystem_utilities.cpp
+    source/input_contract_names.cpp
     source/mod_discovery.cpp
     source/mod_manifest.cpp
+    source/module_plugins.cpp
+)
+
+# The kernel is the one shared library every module plugin binds to: one
+# process, one kernel instance, one capability registry. The DLL lives next to
+# the engine executable (the first entry of the Windows DLL search order, so
+# plugins resolve it without any path configuration); on POSIX the plugins
+# reach it through their $ORIGIN/.. RPATH.
+set_target_properties(engine_kernel PROPERTIES
+    PREFIX "lib"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime"
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
 target_include_directories(engine_kernel
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${ENGINE_GENERATED_INCLUDE_DIR}"
 )
 
 target_link_libraries(engine_kernel

@@ -171,6 +171,11 @@ private:
     bool finishConfiguration(std::string& report);
     bool gatherComponents(std::string& report);
     void gatherModPackages(std::string& report);
+    // Runtime module loading: scans the modules directory and registers one
+    // factory per plugin binary (engine/kernel/module_api.hpp). Runs inside
+    // gatherComponents, before the configured modules resolve against the
+    // factory inventory.
+    void loadModulePlugins(std::string& report);
     DependencyResolver::ResolutionResult resolveGraph(const std::vector<ComponentManifest>& manifests,
                                                       std::string& report) const;
     bool runConstructPhase(const DependencyResolver::ResolutionResult& resolution,
@@ -208,6 +213,13 @@ private:
 
     std::unordered_map<std::string, ModuleFactory> moduleFactories;
     std::unordered_map<std::string, ModFactory> modFactories;
+
+    // The module plugin binaries backing the factories registered by
+    // loadModulePlugins. Declared before records so reverse destruction
+    // releases every component instance first and unloads the libraries last
+    // (a factory's function pointer into a plugin must outlive the instances
+    // the factory created).
+    std::vector<std::unique_ptr<DynamicLibrary>> modulePluginLibraries;
 
     std::vector<ComponentRecord> records;
     bool configurationLoaded = false;
