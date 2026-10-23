@@ -193,13 +193,13 @@ private:
     bool finishConfiguration(std::string &report);
     bool gatherComponents(std::string &report);
     void gatherModPackages(std::string &report);
-    // Capability demand: seeds the worklist with every mod's required
-    // capabilities plus the assembly's [engine].required_capabilities, then
-    // activates the module plugins that provide them - transitively, because
-    // an activated plugin's own requirements demand further providers. Runs
-    // after the mods are gathered and before any module is instantiated; a
-    // plugin whose capabilities nobody requires is never instantiated and its
-    // binary is released.
+    // Capability demand: seeds the worklist with every active mod's required
+    // capabilities, then activates the module plugins that provide them -
+    // transitively, because an activated plugin's own requirements demand
+    // further providers. Runs after the mods are gathered and before any
+    // module is instantiated; a plugin whose capabilities no mod requires is
+    // never instantiated and its binary is released. With no active mods, no
+    // module loads at all.
     void computeDemandClosure();
     // Runtime module discovery: scans the modules directory and reads one
     // static descriptor per plugin binary (engine/kernel/module_api.hpp).

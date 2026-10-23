@@ -2,21 +2,42 @@
 # It owns the demo world (scene.toml), the PBR texture sets the world
 # references (assets/textures/) and the [renderer] default that points the
 # renderer at them (config.toml). The manifest is authoritative for identity
-# and wiring; the kernel validates it before touching anything. See
-# mods/README.md for the full schema.
+# and wiring; the kernel validates it before touching anything.
+#
+# Mods never name a module: they name the capabilities they require, and the
+# dependency graph picks the providers. This package is the sole demand root
+# of the demo run - every capability the demo pipeline needs is required
+# here, which is exactly why its provider modules load and everything else
+# stays dormant.
 
 id = "test_scene"
 version = "1.0.0"
 engine_api = 1
 type = "script"
 entry = "script.lua"
-host = "lua_scripting"
 
 display_name = "Test Scene"
 description = "The demo world: a Cornell-style room with textured PBR surfaces, an emissive ceiling panel, point lights and a polished metal sphere. Ships the scene file, the texture sets and the texture directory default."
 author = "engine authors"
 
-capabilities = ["logging"]
+# The host capability names which required capability's provider hosts this
+# script; the kernel resolves that provider without knowing module names.
+host_capability = "scripting"
+
+# What this run consumes, and therefore what loads:
+#   scripting         the script host (host_capability above)
+#   logging           the script's log lines and every provider's diagnostics
+#   window            the demo window the host frame loop drives
+#   input             the free-fly camera
+#   renderer          frame rendering
+#   lighting          the scene light state the lighting passes read
+#   direct_diffuse    the analytic direct PBR pass
+#   indirect_diffuse  the radiance-cascades GI
+#   indirect_specular the ray-traced reflections
+#   screenshot        key-triggered captures
+capabilities = ["scripting", "logging", "window", "input", "renderer", "lighting",
+                "direct_diffuse", "indirect_diffuse", "indirect_specular", "screenshot"]
+
 permissions = ["logging.write"]
 
 # The world content this package ships. Applied when no --scene flag is

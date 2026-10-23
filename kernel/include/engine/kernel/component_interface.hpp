@@ -21,26 +21,27 @@ class ConfigurationStore;
 
 // One script mod handed over to a hosting module. The kernel discovers script
 // packages through their manifests; the host module owns the actual runtime
-// (isolated Lua states, bridge tables) and the script lifecycle.
+// (isolated Lua states, bridge tables) and the script lifecycle. Which of the
+// package's required capabilities names its host is package data
+// (ModManifest::hostCapability): the kernel resolves the provider of that
+// capability without knowing what it is called.
 struct ScriptModDescription
 {
     std::string           modId;
     std::filesystem::path scriptPath;
+    // The capability, from the package's required set, whose provider hosts
+    // the script. The kernel only matches this name against provider
+    // declarations; the meaning of the capability lives in the contract.
+    std::string           hostCapability;
 };
 
-// Interface of a module that hosts script mods. A script mod declares the
-// scripting capability in its package manifest; the kernel resolves that
-// requirement to the active provider module and talks to it through this
-// contract only - never to a concrete scripting backend.
+// Interface of a module that hosts script mods. A script mod's package
+// declares which of its required capabilities the host must provide; the
+// kernel resolves that requirement to the active provider and talks to it
+// through this contract only - never to a concrete scripting backend.
 class ScriptModHost
 {
 public:
-    // The capability name whose provider hosts script mods. Defined here
-    // because both the kernel (host resolution) and the manifest loader
-    // (package validation) build on it; modules that host script mods
-    // provide it, script mods require it.
-    static constexpr const char *scriptingCapabilityName = "scripting";
-
     virtual ~ScriptModHost() = default;
 
     // Called once per discovered script mod during the construct phase, in

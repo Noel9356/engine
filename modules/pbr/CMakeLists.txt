@@ -5,6 +5,7 @@ add_library(engine_module_pbr SHARED
 
 target_link_libraries(engine_module_pbr
     PUBLIC engine_kernel
+    PUBLIC engine_contracts
     PRIVATE engine_module_renderer
     PRIVATE engine_vulkan_hpp_bindings
 )

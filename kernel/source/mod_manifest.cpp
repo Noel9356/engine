@@ -203,12 +203,11 @@ bool ModManifestLoader::loadFromFile(
     }
     if (table.get("host") != nullptr)
     {
-        // Removed field: a script mod is hosted by whichever active module
-        // provides the capability its package requires - never by a module
-        // name written into the package.
-        errorMessage = describeLocation(manifestPath) + " declares the removed key 'host'; script mods are hosted "
-                     + "by the module that provides the '" + std::string(ScriptModHost::scriptingCapabilityName)
-                     + "' capability - add it to 'capabilities' and delete 'host'";
+        // Removed field: a mod never names a module. The host is declared as a
+        // capability requirement, so the dependency graph picks the provider.
+        errorMessage = describeLocation(manifestPath) + " declares the removed key 'host'; a mod never names a "
+                     + "module. Declare the capability the host must provide as 'host_capability' (and list it "
+                       "under 'capabilities')";
         return false;
     }
     if (!readStringArray(table, "capabilities", outManifest.capabilities, manifestPath, errorMessage)
@@ -217,6 +216,33 @@ bool ModManifestLoader::loadFromFile(
         || !readStringArray(table, "config_keys", outManifest.configKeys, manifestPath, errorMessage))
     {
         return false;
+    }
+    if (outManifest.isScript())
+    {
+        // The host is a capability requirement, never a module name: the mod
+        // declares which ONE of its required capabilities the host module must
+        // provide, and the kernel resolves that provider like any other
+        // requirement. Native mods never name a host.
+        if (!readOptionalString(table, "host_capability", outManifest.hostCapability, manifestPath, errorMessage))
+        {
+            return false;
+        }
+        if (outManifest.hostCapability.empty())
+        {
+            errorMessage = describeLocation(manifestPath) + " is a script mod but declares no 'host_capability'; "
+                         + "name the required capability whose provider hosts the script runtime";
+            return false;
+        }
+        if (std::find(
+                outManifest.capabilities.begin(), outManifest.capabilities.end(), outManifest.hostCapability
+            )
+            == outManifest.capabilities.end())
+        {
+            errorMessage = describeLocation(manifestPath) + " declares host_capability '"
+                         + outManifest.hostCapability + "' which is not in its 'capabilities' list; the host "
+                           "capability must also be a required capability so the provider is ordered first";
+            return false;
+        }
     }
     for (const std::string &configKey : outManifest.configKeys)
     {
@@ -244,16 +270,6 @@ bool ModManifestLoader::loadFromFile(
     {
         errorMessage = describeLocation(manifestPath) + " has type '" + outManifest.type
                      + "'; expected 'native' or 'script'";
-        return false;
-    }
-    if (outManifest.isScript()
-        && std::find(
-               outManifest.capabilities.begin(), outManifest.capabilities.end(), ScriptModHost::scriptingCapabilityName
-           ) == outManifest.capabilities.end())
-    {
-        errorMessage = describeLocation(manifestPath) + " is a script mod but does not require the '"
-                     + std::string(ScriptModHost::scriptingCapabilityName)
-                     + "' capability; add it to 'capabilities' so an active module can host the script";
         return false;
     }
     if (outManifest.engineApi != engineModInterfaceVersion)

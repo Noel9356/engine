@@ -14,6 +14,7 @@ add_library(engine_module_renderer SHARED
 
 target_link_libraries(engine_module_renderer
     PUBLIC engine_kernel
+    PUBLIC engine_contracts
     PRIVATE engine_vulkan_hpp_bindings
     PRIVATE engine_stb_bindings
 )

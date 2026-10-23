@@ -13,6 +13,10 @@ namespace engine
 namespace
 {
 
+// This module's own capability name: it appears in the manifest, the plugin
+// descriptor and the capability pointer dispatch below, so it is named once
+// here (the kernel only ever receives it as data).
+constexpr const char *scriptingCapabilityName = "scripting";
 // Bridge surface installed into every script state. Handlers live in plain
 // Lua tables inside the state, so no sol types leak into the module header and
 // no per event heap traffic happens outside the state.
@@ -89,9 +93,9 @@ LuaScriptingModule::LuaScriptingModule()
     componentManifest.name = "lua_scripting";
     componentManifest.kind = ComponentKind::Module;
     // This module is a script host: it provides the scripting capability (the
-    // kernel resolves script mods' requirement for it to this module and hands
-    // the packages over through the ScriptModHost contract).
-    componentManifest.providedCapabilities = {ScriptModHost::scriptingCapabilityName};
+    // kernel resolves script mods' declared host capability to this module and
+    // hands the packages over through the ScriptModHost contract).
+    componentManifest.providedCapabilities = {scriptingCapabilityName};
     componentManifest.requiredCapabilities = {"logging", "window"};
     componentManifest.requiredPermissions  = {"capability.logging", "capability.window", "capability.screenshot"};
 }
@@ -190,7 +194,7 @@ void *LuaScriptingModule::capabilityPointerFor(
 {
     // The scripting capability is realized by the ScriptModHost surface of
     // this module; the kernel resolves script hosting through it.
-    if (capabilityName == ScriptModHost::scriptingCapabilityName)
+    if (capabilityName == scriptingCapabilityName)
     {
         return static_cast<void *>(static_cast<ScriptModHost *>(this));
     }

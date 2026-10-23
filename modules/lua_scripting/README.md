@@ -1,6 +1,6 @@
 # lua_scripting module
 
-The script-mod host. This module embeds Lua 5.4 (via sol2) and implements the kernel's `ScriptModHost` contract (`kernel/include/engine/kernel/component_interface.hpp`): for every discovered script mod that requires the `scripting` capability this module provides, it creates an isolated Lua state, loads the package's entry file, and exposes a permission-checked `engine` bridge table. Script mods therefore need no build system, no compiler, and no C++ knowledge — a `mod.toml` plus a `.lua` file is a complete mod (`mods/README.md`). A mod never names its host: the kernel resolves the capability requirement to whichever active module provides it.
+The script-mod host. This module embeds Lua 5.4 (via sol2) and implements the kernel's `ScriptModHost` contract (`kernel/include/engine/kernel/component_interface.hpp`): for every discovered script mod whose declared `host_capability` is the `scripting` capability this module provides, it creates an isolated Lua state, loads the package's entry file, and exposes a permission-checked `engine` bridge table. Script mods therefore need no build system, no compiler, and no C++ knowledge — a `mod.toml` plus a `.lua` file is a complete mod (`mods/README.md`). A mod never names its host: the kernel resolves the declared host capability to whichever active module provides it.
 
 ## The bridge
 
@@ -14,7 +14,7 @@ The `engine` table is the entire script ABI, and it grows deliberately: every fu
 | `engine.window_size()` | returns `width, height` of the main window |
 | `engine.request_screenshot()` | queues a screenshot through the screenshot module |
 
-Isolation: each script runs in its own Lua state, so script mods cannot see each other's globals, and a crashing script surfaces as a load/call error diagnostic naming the mod instead of taking the host down. Permissions are enforced at the boundary: a script mod's declared grants (for example `logging.write`, `screenshot.request` — see `mods/README.md`) are validated at startup, and a denied permission fails the run precisely; per-call re-checking inside the bridge is a roadmap item, not a shipped guarantee. The screenshot capability is resolved at first bridge CALL, not at construct: this module only requires `logging` and `window`, so the kernel's construct order may run it before the screenshot module registers its capability, and a construct-time acquire cached that failure for the process lifetime - the F11 path of the old example mod was silently dead this way (problem 59 in `docs/robustness.md`).
+Isolation: each script runs in its own Lua state, so script mods cannot see each other's globals, and a crashing script surfaces as a load/call error diagnostic naming the mod instead of taking the host down. Permissions are enforced at the boundary: a script mod's declared grants (for example `logging.write` — see `mods/README.md`) are validated at startup, and a denied permission fails the run precisely; per-call re-checking inside the bridge is a roadmap item, not a shipped guarantee. The screenshot capability is resolved at the first bridge CALL, not at construct: this module only requires `logging` and `window`, so the kernel's construct order may run it before the screenshot module registers its capability, and a construct-time acquire would cache that failure for the process lifetime.
 
 ## Wiring
 
@@ -24,7 +24,7 @@ Isolation: each script runs in its own Lua state, so script mods cannot see each
 | required capabilities | `logging`, `window` |
 | required permissions | `capability.logging`, `capability.window`, `capability.screenshot` |
 
-The module activates on demand: a script mod's `"scripting"` requirement pulls it into the run (nothing else does — a run with no script mods never loads it). The kernel orders every script mod after its host automatically, so a script can assume the modules its bridge calls into are started.
+The module activates on demand: a script mod whose `host_capability` is `scripting` pulls it into the run (nothing else does — a run with no script mods never loads it). The kernel orders every script mod after its host automatically, so a script can assume the modules its bridge calls into are started.
 
 ## Configuration
 
@@ -33,8 +33,7 @@ None — the module takes no configuration section. Script mods are discovered f
 ## Files
 
 - `lua_scripting.hpp` / `lua_scripting.cpp` — the module, the sol2 bridge, per-mod state management
+- `module_plugin.cpp` — the static plugin descriptor (name, factory, provided capabilities)
 - `CMakeLists.txt` — target and option wiring (`ENGINE_BUILD_MODULE_LUA_SCRIPTING`); the build acquires Lua 5.4 and sol2 through the dependency tiers in `docs/building.md` (Lua is pinned to 5.4 because sol2 requires it exactly)
 
-## Tests
-
-Script-mod discovery, manifest validation and hosting are covered by `tests/mod_manifest_tests.cpp` and `tests/kernel_integration_tests.cpp`; the shipped content package `mods/test_scene/` is the minimal live script mod (load + log, exercised by every smoke run), and the QA packages under `scripts/qa/` drive the frame-subscription and capture paths end to end.
+The shipped content package `mods/test_scene/` is the minimal live script mod: discovery, manifest validation, hosting and the bridge's log path are exercised by every run that loads it.

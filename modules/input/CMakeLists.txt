@@ -7,6 +7,7 @@ target_compile_definitions(engine_module_input PRIVATE GLFW_INCLUDE_NONE)
 
 target_link_libraries(engine_module_input
     PUBLIC engine_kernel
+    PUBLIC engine_contracts
     PRIVATE glfw
 )
 

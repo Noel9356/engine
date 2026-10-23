@@ -15,20 +15,16 @@
 # installed content mod) or passes --scene (it wins over everything).
 
 [engine]
-# Capability demand of the assembly (the composition root's frame loop and
-# whatever else the assembly consumes directly). Modules are NOT listed here:
-# there is no module list anymore. A module loads only when something requires
-# a capability it provides - a mod's manifest, or this demand list - and the
-# providers' own requirements pull their dependencies transitively (the
-# renderer, for example, brings window and logging with it). The script host
-# arrives through the content mod's "scripting" requirement. A capability
-# nothing requires stays dormant: its plugin is never instantiated.
-#
-# This assembly runs the full demo pipeline: camera input, frame rendering,
-# the scene light state, the direct PBR pass, the radiance-cascades GI, the
-# ray-traced reflections and key-triggered captures.
-required_capabilities = ["input", "renderer", "lighting", "direct_diffuse", "indirect_diffuse",
-                         "indirect_specular", "screenshot"]
+# Modules are NOT listed here and there is no demand list either: the active
+# mods are the sole demand source. A module loads only when an active mod's
+# manifest requires a capability it provides, and the providers' own
+# requirements pull their dependencies transitively (the renderer, for
+# example, brings window and logging with it). A capability no mod requires
+# stays dormant: its plugin is never instantiated. This assembly's demo
+# pipeline is demanded by the shipped content mod (mods/test_scene): camera
+# input, frame rendering, the scene light state, the direct PBR pass, the
+# radiance-cascades GI, the ray-traced reflections and key-triggered
+# captures.
 
 # Mod packages are discovered on disk, not listed here: every subdirectory of
 # mod_directory that contains a mod.toml is a mod. The content package
@@ -90,9 +86,9 @@ tonemap = "aces"
 
 # Lighting composition. There is no technique list anymore: each lighting
 # technique module provides a radiance-layer capability (direct_diffuse,
-# indirect_diffuse, indirect_specular) and is activated exactly when that
-# capability is demanded - see [engine].required_capabilities above. The
-# layers the composite reads follow from what attached, in a fixed order:
+# indirect_diffuse, indirect_specular) and is activated exactly when a mod
+# demands that capability. The layers the composite reads follow from what
+# attached, in a fixed order:
 # direct + albedo * (1 - metallic) * diffuseGI + specular + emissive.
 #
 # max_roughness is the specular hand-off point shared by the direct pass and

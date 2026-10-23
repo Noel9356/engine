@@ -25,8 +25,8 @@ endif()
 
 # ---- Options: runtime module selection -----------------------------------------
 # Every module can be excluded from the build; its plugin binary is then not
-# produced, the runtime configuration must not list it either, and the startup
-# report names any mismatch.
+# produced, and a run whose mods demand a capability only it provides fails
+# startup with a precise diagnostic naming the consumer.
 
 option(ENGINE_BUILD_MODULE_LOGGING "Include the logging module in the build" ON)
 option(ENGINE_BUILD_MODULE_WINDOW "Include the window module in the build" ON)
@@ -38,7 +38,6 @@ option(ENGINE_BUILD_MODULE_PBR "Include the pbr lighting technique module in the
 option(ENGINE_BUILD_MODULE_RADIANCE_CASCADES "Include the radiance cascades lighting technique module in the build" ON)
 option(ENGINE_BUILD_MODULE_RAY_REFLECTIONS "Include the ray traced reflections lighting technique module in the build" ON)
 option(ENGINE_BUILD_DEMO "Build the demo host" ON)
-option(ENGINE_BUILD_TESTS "Build the kernel and module tests" ON)
 
 # ---- Runtime layout -------------------------------------------------------------
 # Every engine runtime artifact lands in build/runtime/: the executable, the
@@ -57,11 +56,13 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(engine_dependencies)
 
 # ---- Engine targets ---------------------------------------------------------------
-# The tree is flat by design: kernel/, modules/<name>/, host/ and mods/ are
-# siblings at the root. A module directory is self-contained (sources, headers,
-# shaders); a mod directory is a runtime package (mod.toml plus entry sources).
+# The tree is flat by design: kernel/, contracts/, modules/<name>/, host/ and
+# mods/ are siblings at the root. A module directory is self-contained
+# (sources, headers, shaders); a mod directory is a runtime package (mod.toml
+# plus entry sources).
 
 add_subdirectory(kernel)
+add_subdirectory(contracts)
 
 if(ENGINE_BUILD_MODULE_LOGGING)
     add_subdirectory(modules/logging)
@@ -89,19 +90,6 @@ if(ENGINE_BUILD_MODULE_RADIANCE_CASCADES)
 endif()
 if(ENGINE_BUILD_MODULE_RAY_REFLECTIONS)
     add_subdirectory(modules/ray_reflections)
-endif()
-
-# The tests live in tests/ (a Catch2 suite plus the native-mod loading
-# fixture). A tree that ships without that directory (this public tree does -
-# the docs describe the full internal layout) builds without them instead of
-# failing configure, and says so in the configure output.
-if(ENGINE_BUILD_TESTS)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
-        enable_testing()
-        add_subdirectory(tests)
-    else()
-        message(STATUS "ENGINE_BUILD_TESTS is ON but tests/ is not part of this tree - building without tests")
-    endif()
 endif()
 
 if(ENGINE_BUILD_DEMO)

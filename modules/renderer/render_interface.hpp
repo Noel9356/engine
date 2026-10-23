@@ -14,8 +14,7 @@
 // is. What a technique contributes is declared as a physical output (which
 // radiance target it writes), and the renderer composes the frame from that
 // declaration. Which techniques exist in a run is decided by capability
-// demand ([engine].required_capabilities plus what mods require) - never by
-// a list here.
+// demand (the active mods' requirements) - never by a list here.
 
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_raii.hpp>

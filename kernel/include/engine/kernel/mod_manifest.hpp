@@ -31,11 +31,12 @@ namespace engine
 //   capabilities = ["logging", "input"]  # required capabilities (graph edges);
 //                                        # each also grants its capability.<name>
 //                                        # permission, so acquisitions need no
-//                                        # second list. A script mod must
-//                                        # require "scripting" - its provider
-//                                        # hosts the script runtime. Mods never
-//                                        # name a module; they name the
-//                                        # capabilities they consume.
+//                                        # second list. Mods never name a module;
+//                                        # they name the capabilities they consume.
+//   host_capability = "scripting"        # script mods only: which ONE required
+//                                        # capability's provider hosts the script
+//                                        # runtime. The kernel resolves that
+//                                        # provider without interpreting the name.
 //   permissions  = ["filesystem.write"]  # extra permission grants beyond the
 //                                        # derived capability ones (deniable
 //                                        # in configuration)
@@ -60,6 +61,11 @@ struct ModManifest
     std::string              description;
     std::string              author;
     std::vector<std::string> capabilities;
+    // Script mods only: the required capability whose provider hosts the
+    // script. Package data, like the rest of the manifest - the kernel
+    // resolves the provider of this capability but never interprets the name
+    // (a script host is whatever module provides it). Empty for native mods.
+    std::string              hostCapability;
     std::vector<std::string> permissions;
     std::vector<std::string> requiresComponents;
     // Configuration keys the mod reads, "<section>.<dotted path>" each. They

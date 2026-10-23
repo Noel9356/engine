@@ -5,7 +5,7 @@
 #   1. Already available target: a superproject or a previous include() may
 #      have provided the dependency; its target is reused and nothing is
 #      fetched. System packages found through find_package produce the same
-#      effect: GLFW 3.4+, Catch2 3.16+ and a complete Vulkan SDK (headers
+#      effect: GLFW 3.4+ and a complete Vulkan SDK (headers
 #      including vulkan.hpp plus the loader) are probed explicitly below.
 #   2. Vendored copy under third_party/<name>: a drop-in source tree, either a
 #      full CMake project (has CMakeLists.txt, added as a subdirectory) or a
@@ -386,29 +386,6 @@ if(NOT TARGET engine_stb_bindings)
     # SYSTEM: stb is a third-party single header; its warnings must not leak
     # into the engine's warning-clean build.
     target_include_directories(engine_stb_bindings SYSTEM INTERFACE "${ENGINE_STB_DIR}")
-endif()
-
-# ---- Catch2 (tests) -------------------------------------------------------------
-# A system Catch2 3.x is probed first; the fetched copy is the fallback. Only
-# needed when ENGINE_BUILD_TESTS is ON - and the gate below is the code form
-# of that comment: a tests-less tree (or an explicit
-# -DENGINE_BUILD_TESTS=OFF) must not spend a download on a suite it cannot
-# build.
-
-if(ENGINE_BUILD_TESTS)
-    if(NOT TARGET Catch2::Catch2WithMain)
-        find_package(Catch2 3.16.1 CONFIG QUIET)
-    endif()
-
-    set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
-    set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
-
-    engine_acquire_dependency(catch2 Catch2::Catch2WithMain
-        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-        GIT_TAG v3.16.1
-        GIT_SHALLOW TRUE
-    )
 endif()
 
 # ---- Origin report -------------------------------------------------------------

@@ -5,6 +5,7 @@ add_library(engine_module_lua_scripting SHARED
 
 target_link_libraries(engine_module_lua_scripting
     PUBLIC engine_kernel
+    PUBLIC engine_contracts
     PRIVATE engine_sol2_bindings
 )
 

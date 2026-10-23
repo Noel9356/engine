@@ -7,6 +7,7 @@ target_compile_definitions(engine_module_window PRIVATE GLFW_INCLUDE_NONE)
 
 target_link_libraries(engine_module_window
     PUBLIC engine_kernel
+    PUBLIC engine_contracts
     PRIVATE glfw
     # The window module creates Vulkan presentation surfaces (glfwCreateWindowSurface):
     # it needs the Vulkan C headers. Headers only, PRIVATE - the capability contract

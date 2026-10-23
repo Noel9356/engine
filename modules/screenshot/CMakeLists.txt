@@ -7,6 +7,7 @@ target_compile_definitions(engine_module_screenshot PRIVATE STB_IMAGE_WRITE_IMPL
 
 target_link_libraries(engine_module_screenshot
     PUBLIC engine_kernel
+    PUBLIC engine_contracts
     PRIVATE engine_stb_bindings
 )
 

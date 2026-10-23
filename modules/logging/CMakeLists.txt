@@ -3,7 +3,7 @@ add_library(engine_module_logging SHARED
     logging.cpp
 )
 
-target_link_libraries(engine_module_logging PUBLIC engine_kernel)
+target_link_libraries(engine_module_logging PUBLIC engine_kernel engine_contracts)
 
 # The host composition root includes the module header directly.
 target_include_directories(engine_module_logging PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")

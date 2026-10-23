@@ -331,7 +331,27 @@ bool EngineKernel::prepareComponents(
     std::string &report
 )
 {
-    return loadConfiguration(report) && gatherComponents(report) && finishConfiguration(report);
+    // The command line is the highest configuration layer, but two of the
+    // keys it can override ([engine].mod_directory, [engine].disabled_mods)
+    // are consumed by mod discovery, which must run before the scene file is
+    // resolved (a content mod's scene claim needs the discovered packages
+    // first). The staged assignments are therefore applied once here, so
+    // discovery sees the final runtime layout, and again after the scene
+    // layer in finishConfiguration, where the general precedence contract
+    // (command line above everything) is decided. Re-applying the same
+    // assignments is idempotent: each write replaces exactly the value it
+    // names.
+    if (!loadConfiguration(report))
+    {
+        return false;
+    }
+    std::string overridesError;
+    if (!configurationStore.applyCommandLineOverrides(overridesError))
+    {
+        report += "- " + overridesError + "\n";
+        return false;
+    }
+    return gatherComponents(report) && finishConfiguration(report);
 }
 
 std::vector<std::pair<const EngineKernel::ComponentRecord *, std::string>> EngineKernel::applyPermissionPass()
@@ -382,8 +402,9 @@ EngineKernel::ComponentRecord *EngineKernel::findRecord(
 // Builds one record per component. Modules are NOT registered anywhere: their
 // plugin binaries describe themselves statically, the demand closure decides
 // which of them this run actually needs, and only those are instantiated.
-// Mods are the demand roots of the run: every active package becomes a
-// component, and its requirements pull the providers it needs.
+// Mods are the SOLE demand roots of the run: every active package becomes a
+// component, and its requirements pull the providers it needs. A run with no
+// mods instantiates no module at all.
 bool EngineKernel::gatherComponents(
     std::string &report
 )
@@ -402,10 +423,9 @@ bool EngineKernel::gatherComponents(
     // and their required capabilities seed the demand closure.
     gatherModPackages(report);
 
-    // Demand closure over opaque capability names: mods' requirements plus
-    // the assembly's [engine].required_capabilities, transitively closed
-    // through the providers' own requirements. Marks plugin descriptors
-    // active; nothing is instantiated yet.
+    // Demand closure over opaque capability names: the mods' requirements
+    // alone, transitively closed through the providers' own requirements.
+    // Marks plugin descriptors active; nothing is instantiated yet.
     computeDemandClosure();
 
     // Instantiate only the plugins the closure marked active; verify each
@@ -507,11 +527,11 @@ void EngineKernel::gatherModPackages(
         }
         else
         {
-            // Script mod: hosted by whichever active module provides the
-            // scripting capability (resolved in the construct phase). The
-            // record exists so the resolver and the permission system see
-            // the script's capabilities and permissions like any other
-            // component's.
+            // Script mod: hosted by whichever active module provides the host
+            // capability the package declares (resolved in the construct
+            // phase). The record exists so the resolver and the permission
+            // system see the script's capabilities and permissions like any
+            // other component's.
             ComponentRecord record;
             record.name                          = modManifest.id;
             record.manifest.kind                 = ComponentKind::ScriptMod;
@@ -522,20 +542,21 @@ void EngineKernel::gatherModPackages(
             record.manifest.knownConfigKeys      = modManifest.configKeys;
             record.scriptMod.modId               = modManifest.id;
             record.scriptMod.scriptPath          = modManifest.directory / modManifest.entry;
+            record.scriptMod.hostCapability      = modManifest.hostCapability;
             appendModRiskWarning(modManifest, false);
             records.push_back(std::move(record));
         }
     }
 }
 
-// Capability demand closure over opaque names. Seeds: every active mod's
-// required capabilities plus the assembly's [engine].required_capabilities
-// (the composition root's demand, stated as data). Each demanded capability
-// activates the module plugins that provide it - all of them when the
-// configuration's [providers] selection does not name exactly one - and an
-// activated plugin's own requirements join the worklist. Capability names
-// are never interpreted: the kernel only matches strings between consumer
-// requirements and provider declarations.
+// Capability demand closure over opaque names, seeded by the active mods
+// alone: every mod's required capabilities join the worklist, and each
+// demanded capability activates the module plugins that provide it - all of
+// them when the configuration's [providers] selection does not name exactly
+// one - while an activated plugin's own requirements join the worklist in
+// turn. With no mods there is no demand: no module plugin is instantiated.
+// Capability names are never interpreted: the kernel only matches strings
+// between consumer requirements and provider declarations.
 void EngineKernel::computeDemandClosure()
 {
     demandedCapabilities.clear();
@@ -549,16 +570,13 @@ void EngineKernel::computeDemandClosure()
     std::vector<std::string> worklist;
     for (const ComponentRecord &record : records)
     {
-        // At this point records holds exactly the active mods: the demand
-        // roots of the run.
+        // At this point records holds exactly the active mods: the sole
+        // demand roots of the run. Nothing else - not the configuration, not
+        // the host - can pull a module in.
         for (const std::string &capabilityName : record.manifest.requiredCapabilities)
         {
             worklist.push_back(capabilityName);
         }
-    }
-    for (const std::string &capabilityName : configurationStore.requiredCapabilities())
-    {
-        worklist.push_back(capabilityName);
     }
 
     while (!worklist.empty())
@@ -892,15 +910,15 @@ void EngineKernel::appendModRiskWarning(
 }
 
 // Resolves the hosting module of one script mod: the active component that
-// provides the scripting capability, honoring the configuration's [providers]
-// selection when several implementations are active. The kernel never names
-// the host: the script package required the capability, the graph picked the
-// provider.
+// provides the host capability the package declared, honoring the
+// configuration's [providers] selection when several implementations are
+// active. The kernel never names the host or the capability: the script
+// package required the capability, the graph picked the provider.
 EngineKernel::ComponentRecord *EngineKernel::resolveScriptHost(
     const ComponentRecord &scriptRecord, std::string &report
 )
 {
-    const std::string              capabilityName = ScriptModHost::scriptingCapabilityName;
+    const std::string              capabilityName = scriptRecord.scriptMod.hostCapability;
     std::vector<ComponentRecord *> candidates;
     for (ComponentRecord &record : records)
     {
@@ -921,7 +939,7 @@ EngineKernel::ComponentRecord *EngineKernel::resolveScriptHost(
     if (candidates.empty())
     {
         report += "- script mod '" + scriptRecord.name + "' cannot be hosted: no active module provides the '"
-                + capabilityName + "' capability it requires.\n";
+                + capabilityName + "' capability it names as its host.\n";
         return nullptr;
     }
     if (candidates.size() > 1)
@@ -1094,7 +1112,7 @@ bool EngineKernel::runConstructPhase(
             if (scriptHost == nullptr)
             {
                 report += "- script mod '" + record->name + "' cannot be hosted: module '" + hostRecord->name
-                        + "' provides the '" + std::string(ScriptModHost::scriptingCapabilityName)
+                        + "' provides the '" + record->scriptMod.hostCapability
                         + "' capability but does not host script mods.\n";
                 return false;
             }

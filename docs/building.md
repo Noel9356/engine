@@ -5,31 +5,26 @@ Requirements: CMake 3.24+, a C++20 compiler, a Vulkan loader, and `glslangValida
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-ctest --test-dir build
 ./build/runtime/engine --validate
 ```
 
 If the Vulkan loader is not on the default linker path, add `-DCMAKE_PREFIX_PATH=/your/prefix`. On Windows the build defines `WIN32_LEAN_AND_MEAN` and `NOMINMAX` once for the whole tree (engine targets and in-tree mods alike), so no source file defines them itself.
 
-## Testing
+## Runtime verification without a display
 
-`ctest --test-dir build` runs three tiers:
+`engine --validate` is a pure dry run - configuration, manifests, graph resolution, permission pass - and touches no backend, so it runs anywhere and is the first check after every configuration or manifest edit.
 
-- `engine_tests` — the kernel and module unit tests; headless by design, no window, no Vulkan instance.
-- `engine_headless_smoke` — boots the assembled runtime and renders 30 frames of the 3D scene (`config/smoke.toml`: small resolution, reduced GI cost) with the validation layers on, failing on crashes, exceptions and any validation error. Registered on Linux when the demo host is built.
-- `engine_leak_check` — runs `config/leak_test.toml` (a sealed room with one light inside and a window opening) through `engine --leak-check`, which evaluates the captured frame against the configured sealed/lit regions and exits 4 on a light leak or a dead GI path. This is the automated no-light-leak guard for the radiance cascades pass.
+`engine --smoke-frames <n>` renders exactly `n` frames, queues one screenshot through the screenshot module halfway through (exercising the readback and PNG write), shuts down cleanly and reports through exit codes: `0` clean, `1` the frame loop threw, `2` bad usage, `3` the graphics backend observed validation errors during the run, `4` the leak check failed (`--leak-check`). The renderer observes backend errors through the debug messenger, so a broken pipeline or a disabled feature fails the run even when the driver would have carried on. Communication latency and frame-time reporting is opt-in (`[diagnostics] latency_report = true` or `--latency-report`); a normal run stays quiet at shutdown.
 
-The smoke test needs a Vulkan ICD plus `Xvfb` on display-less machines; it uses the system GPU driver when one is present. In a container, any software ICD works, for example Mesa lavapipe (`mesa-vulkan-drivers`) with the Khronos validation layer (`vulkan-validationlayers`), discovered through the standard loader variables:
+On a display-less machine the smoke run needs a Vulkan ICD; any software ICD works, for example Mesa lavapipe (`mesa-vulkan-drivers`) with the Khronos validation layer (`vulkan-validationlayers`), discovered through the standard loader variables:
 
 ```bash
 export VK_DRIVER_FILES=/path/to/lvp_icd.json   # or VK_ICD_FILENAMES on older loaders
 export VK_LAYER_PATH=/path/to/explicit_layer.d
-sh scripts/run_headless_smoke.sh build/runtime/engine 30
+./build/runtime/engine --smoke-frames 30
 ```
 
-## Smoke runs without a display
-
-`engine --smoke-frames <n>` renders exactly `n` frames, queues one screenshot through the screenshot module halfway through (exercising the readback and PNG write), shuts down cleanly and reports through exit codes: `0` clean, `1` the frame loop threw, `2` bad usage, `3` the graphics backend observed validation errors during the run, `4` the leak check failed (`--leak-check`). The renderer observes backend errors through the debug messenger, so a broken pipeline or a disabled feature fails the run even when the driver would have carried on. Communication latency and frame-time reporting is opt-in (`[diagnostics] latency_report = true` or `--latency-report`); a normal run stays quiet at shutdown. See `docs/robustness.md`, section "How runtime regressions are caught".
+The `--leak-check` flag evaluates the captured frame against the `[leak_test]` section of the configuration (a sealed region that must stay dark and, optionally, a lit region that must receive light - together they catch both light leaks and a silently dead GI path) and exits 4 on failure. The shipped `config/engine.toml` defines no `[leak_test]`; an assembly that wants the check adds the section itself.
 
 Screenshots are written to a `screenshots` folder in the process working directory by default - the project root for the documented quick start (`./build/runtime/engine` from the engine tree) - so captures land where the user actually looks; `[screenshot] output_directory` overrides this (relative paths also resolve against the working directory, absolute paths as-is; see `modules/screenshot/README.md`).
 
@@ -37,7 +32,7 @@ Screenshots are written to a `screenshots` folder in the process working directo
 
 Resolution order per dependency — nothing is fetched when a usable copy already exists:
 
-1. Existing target: a superproject-provided target, or a system package (`find_package` probes GLFW 3.4+, Catch2 3.16+, and a complete Vulkan SDK).
+1. Existing target: a superproject-provided target, or a system package (`find_package` probes GLFW 3.4+, and a complete Vulkan SDK).
 2. Vendored copy: `third_party/<name>/` if you create it (full CMake project or plain header/source layout).
 3. Populated build tree: a `<name>-src` directory from an earlier configure is reused; no network access.
 4. Pinned download: release tags for git dependencies, SHA256-verified tarballs for URL downloads.
@@ -63,7 +58,7 @@ FetchContent separates each dependency automatically:
 | Directory | Contents |
 |---|---|
 | `build/_deps/<name>-src` | source tree, downloaded once, reused forever |
-| `build/_deps/<name>-build` | its own CMake build tree (only GLFW and Catch2 ship one) |
+| `build/_deps/<name>-build` | its own CMake build tree (only GLFW ships one) |
 | `build/_deps/<name>-subbuild` | FetchContent's populate bookkeeping |
 
 Header-only dependencies the engine wraps itself (Vulkan-Hpp, sol2, toml++) are populate-only: a `-src` directory, no `-build`. stb is a single file cached in `build/deps/stb/`; the Lua tarball is cached in `build/deps/`.
@@ -82,7 +77,7 @@ MinGW CMake bundles curl/GnuTLS without a CA trust store, so HTTPS downloads can
 
 Each module has an option: `ENGINE_BUILD_MODULE_LOGGING`, `..._WINDOW`, `..._INPUT`, `..._RENDERER`, `..._SCREENSHOT`, `..._LUA_SCRIPTING`, `..._PBR`, `..._RADIANCE_CASCADES`, `..._RAY_REFLECTIONS`. Excluding a module removes its code and its third-party dependencies; a run that then demands a capability only it provides fails startup with a precise diagnostic naming the consumer, never a link error. Each module's build surface (its option, its dependencies, its shaders) is described in its own `modules/<name>/README.md`.
 
-`ENGINE_BUILD_TESTS=OFF` removes the test suite and the Catch2 dependency entirely. `ENGINE_BUILD_DEMO=OFF` removes the host executable and the runtime layout assembly (configs and mod packages).
+`ENGINE_BUILD_DEMO=OFF` removes the host executable and the runtime layout assembly (configs and mod packages).
 
 ## Runtime layout
 

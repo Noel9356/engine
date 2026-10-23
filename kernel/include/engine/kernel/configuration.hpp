@@ -180,10 +180,11 @@ public:
     // or delegates content to the installed content mod's scene file.
     bool hasSection(const std::string &sectionName) const;
 
-    // [engine] section. The assembly declares its capability demand under
-    // required_capabilities; mod packages are discovered in modDirectory and
-    // skipped when their id is in disabledMods.
-    std::vector<std::string> requiredCapabilities() const;
+    // [engine] section: runtime layout and discovery. Mod packages are
+    // discovered in modDirectory and skipped when their id is in
+    // disabledMods. There is deliberately no capability demand key here: the
+    // active mods are the sole demand source, so a run without mods loads no
+    // modules at all.
     std::string              modDirectory() const;
     // Directory scanned for module plugin binaries, relative to the
     // executable directory when not absolute. Default: "modules".

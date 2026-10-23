@@ -175,10 +175,10 @@ int main(
     // Module availability is runtime, not compile time: the kernel scans
     // <exe_dir>/modules for plugin binaries and reads their static
     // descriptors (engine/kernel/module_api.hpp). Nothing is registered
-    // here or anywhere else: a module is instantiated only when something in
-    // this run requires a capability it provides (a mod's manifest, or the
-    // assembly's [engine].required_capabilities), and a requirement no
-    // available module satisfies fails startup with a precise diagnostic.
+    // here or anywhere else, and the mods are the sole demand source: a
+    // module is instantiated only when an active mod's manifest requires a
+    // capability it provides, and a requirement no available module
+    // satisfies fails startup with a precise diagnostic.
 
     // Command line diagnostics override: enable recording before the kernel
     // loads its configuration (which applies [diagnostics] latency_report),
@@ -221,8 +221,20 @@ int main(
 
     // The frame loop belongs to the composition root, not to the kernel: the
     // kernel only mediates communication, it never owns a window or a frame.
+    // The host is a consumer like any other: it acquires the capabilities the
+    // active mods have pulled in, and a capability no mod demanded is simply
+    // absent - the run degrades instead of assuming a backend exists.
     std::unique_ptr<engine::ComponentContext> hostContext = kernel.createHostContext();
-    engine::WindowCapability                 &window      = hostContext->acquireCapability<engine::WindowCapability>();
+
+    engine::WindowCapability *window = nullptr;
+    try
+    {
+        window = &hostContext->acquireCapability<engine::WindowCapability>();
+    }
+    catch (const std::exception &)
+    {
+        std::cout << "window capability is not available in this run; nothing to drive\n";
+    }
 
     engine::RendererCapability *renderer = nullptr;
     try
@@ -250,7 +262,8 @@ int main(
         }
     }
 
-    const std::vector<engine::WindowIdentifier> windowIdentifiers = window.windowIdentifiers();
+    const std::vector<engine::WindowIdentifier> windowIdentifiers =
+        window != nullptr ? window->windowIdentifiers() : std::vector<engine::WindowIdentifier>{};
     const engine::WindowIdentifier              mainWindow = windowIdentifiers.empty() ? engine::invalidWindowIdentifier
                                                                                        : windowIdentifiers.front();
 
@@ -285,10 +298,11 @@ int main(
     const bool  diagnosticsEnabled = !frameSamples.empty();
     try
     {
-        while (mainWindow != engine::invalidWindowIdentifier && !window.windowCloseRequested(mainWindow))
+        while (window != nullptr && mainWindow != engine::invalidWindowIdentifier
+               && !window->windowCloseRequested(mainWindow))
         {
-            window.pollEvents();
-            if (window.windowCloseRequested(mainWindow))
+            window->pollEvents();
+            if (window->windowCloseRequested(mainWindow))
             {
                 break;
             }

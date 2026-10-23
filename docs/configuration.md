@@ -25,7 +25,7 @@ Rules the stack guarantees:
 
 ### Shipped defaults
 
-A module directory may carry `module.toml` and a mod package may carry `config.toml` next to its `mod.toml`; the build copies both into the runtime layout and the kernel merges them as the two defaults layers above. Defaults files may only define sections, and never the assembly- or host-owned ones (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`, `[leak_test]`) — a package that could grow the module list or deny permissions would break the authority model — and never `[scene]` (world content has a dedicated channel, see the layer rules above). Any such file fails startup with a precise error. The in-tree example is the content package's own: `mods/test_scene/config.toml` ships `renderer.texture_directory`, so the renderer finds the package's texture sets in every configuration that does not set the key itself; the assembly can override it from `engine.toml`, and `--set` overrides both.
+A module directory may carry `module.toml` and a mod package may carry `config.toml` next to its `mod.toml`; the build copies both into the runtime layout and the kernel merges them as the two defaults layers above. Defaults files may only define sections, and never the assembly- or host-owned ones (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`, `[leak_test]`) — a package that could relocate the runtime layout or deny permissions would break the authority model — and never `[scene]` (world content has a dedicated channel, see the layer rules above). Any such file fails startup with a precise error. The in-tree example is the content package's own: `mods/test_scene/config.toml` ships `renderer.texture_directory`, so the renderer finds the package's texture sets in every configuration that does not set the key itself; the assembly can override it from `engine.toml`, and `--set` overrides both.
 
 ### Provenance
 
@@ -63,12 +63,12 @@ This document covers the GLOBAL and SHARED sections. Each module owns the docume
 | `[input]` | `../modules/input/README.md` |
 | `[renderer]` | `../modules/renderer/README.md` |
 | `[screenshot]` | `../modules/screenshot/README.md` |
-| `[diagnostics]` | here (host-owned opt-in reporting; see also `../host/README.md`) |
+| `[diagnostics]` | here (host-owned opt-in reporting) |
 | `[lighting]` (shared hand-off key `max_roughness`), `[lighting.pbr]` | `../modules/pbr/README.md` |
 | `[lighting.radiance_cascades]` | `../modules/radiance_cascades/README.md` |
 | `[lighting.ray_reflections]` | `../modules/ray_reflections/README.md` |
 | `[scene]` | here (shared world content — read by several modules) |
-| `[leak_test]` | `../host/README.md` (host-only, consumed by `--leak-check`) |
+| `[leak_test]` | here (host-only, consumed by `--leak-check`) |
 
 Sections other than a component's own are read-only shared configuration by convention: the module that owns a section reads it, everyone else treats it as data.
 
@@ -76,12 +76,11 @@ Sections other than a component's own are read-only shared configuration by conv
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `required_capabilities` | string array | `[]` | capability demand of the assembly: every named capability pulls its providers into the active set, transitively |
 | `mod_directory` | string | `"mods"` | directory scanned for mod packages |
 | `modules_directory` | string | `"modules"` | directory scanned for module plugin binaries |
 | `disabled_mods` | string array | `[]` | mod ids to skip at discovery |
 
-There is no module list. Modules are activated purely by capability demand: a module loads exactly when a mod's manifest, or this `required_capabilities` list, requires a capability it provides (and an activated module's own requirements pull its dependencies transitively — the renderer brings `window` and `logging` with it). A capability nothing requires stays dormant: its plugin is never instantiated and its binary is released before any construct phase. A demanded capability with no available provider fails startup with a precise diagnostic naming the consumer and the alternatives; the composition root's demand lives here because it is assembly data, not engine code.
+There is no module list and no demand list. Modules are activated purely by the active mods' capability requirements: a module loads exactly when an active mod requires a capability it provides (and an activated module's own requirements pull its dependencies transitively — the renderer brings `window` and `logging` with it). A capability no mod requires stays dormant: its plugin is never instantiated and its binary is released before any construct phase. A demanded capability with no available provider fails startup with a precise diagnostic naming the consumer and the alternatives. A run with no active mods loads no module at all.
 
 ## [providers]
 
@@ -129,9 +128,11 @@ The demo scene ships five CC0 texture sets from [ambientCG](https://ambientcg.co
 
 ## Minimal example
 
+An assembly wires the runtime layout and the shared sections; the capability demand comes from the mods:
+
 ```toml
 [engine]
-required_capabilities = ["window", "input", "renderer"]
+disabled_mods = []
 
 [window]
 title = "my demo"
@@ -140,7 +141,17 @@ title = "my demo"
 enable_validation = false
 ```
 
-This assembly demands the window/input/renderer capabilities directly; their providers pull `logging` (and, through the shipped content mod's `scripting` requirement, the script host) in transitively. The assembly defines no `[scene]`, so the installed content mod's world renders (the shipped `test_scene`). Mod packages still load from the default `mods/` directory; add `mod_directory`/`disabled_mods` under `[engine]` to control them — disabling the content mod also removes its world, and with it the `scripting` demand, so the script host module stays dormant too. Remove `input` from the demand list and the input module never loads: startup gets faster and the camera stays at its configured pose.
+```toml
+# mods/my_game/mod.toml — the demand side of the same run
+id = "my_game"
+engine_api = 1
+type = "script"
+entry = "main.lua"
+host_capability = "scripting"
+capabilities = ["scripting", "logging", "window", "input", "renderer"]
+```
+
+The mod's requirement list is what pulls the providers in — the script host, the logger, the window, the input aggregator and the renderer (the renderer's own requirements bring `logging` and `window` transitively, so the explicit entries are documentation as much as wiring). The assembly defines no `[scene]`, so an installed content mod's world renders if one is present. Removing `input` from the demand list and restarting keeps the input module dormant entirely: startup gets faster and the camera stays at its configured pose.
 
 ## Layered one-liners
 

@@ -1,6 +1,6 @@
 # input module
 
-Keyboard and mouse aggregation for the whole engine. The module attaches GLFW key, cursor-position and scroll callbacks to the windows created by the window module and exposes the `InputCapability` (capability name `input`, contract in `kernel/include/engine/capabilities/input_contract.hpp`). The contract stays implementation-agnostic — no GLFW types cross it — so consumers are written once and survive a windowing backend swap.
+Keyboard and mouse aggregation for the whole engine. The module attaches GLFW key, cursor-position and scroll callbacks to the windows created by the window module and exposes the `InputCapability` (capability name `input`, contract in `contracts/include/engine/capabilities/input_contract.hpp`). The contract stays implementation-agnostic — no GLFW types cross it — so consumers are written once and survive a windowing backend swap.
 
 ## Contract
 
@@ -22,13 +22,10 @@ Reserved — the input module takes no configuration. The `[input]` section exis
 
 ## Consumer reference: the free-fly camera
 
-The renderer integrates a fly controller every frame from the input capability when present (`modules/renderer/camera_controller.hpp` — header-only, driven entirely through this contract, unit tested with a stub input in `tests/camera_controller_tests.cpp`): **WASD** flies, the mouse looks while the cursor is captured (**Esc** releases; **F** or left-click re-captures), **Space**/**E** rise, **Ctrl**/**Q** sink, **Shift** multiplies speed, and the wheel scales the base speed. The controller is the reference consumer for the delta discipline — one drain per frame, no polling of raw motion, no assumptions about event counts.
+The renderer integrates a fly controller every frame from the input capability when present (`modules/renderer/camera_controller.hpp` — header-only, driven entirely through this contract): **WASD** flies, the mouse looks while the cursor is captured (**Esc** releases; **F** or left-click re-captures), **Space**/**E** rise, **Ctrl**/**Q** sink, **Shift** multiplies speed, and the wheel scales the base speed. The controller is the reference consumer for the delta discipline — one drain per frame, no polling of raw motion, no assumptions about event counts.
 
 ## Files
 
 - `input.hpp` / `input.cpp` — the module, its capability implementation, the GLFW callbacks and the event publishing
+- `module_plugin.cpp` — the static plugin descriptor (name, factory, provided capabilities)
 - `CMakeLists.txt` — target and option wiring (`ENGINE_BUILD_MODULE_INPUT`)
-
-## Tests
-
-`tests/camera_controller_tests.cpp` unit tests the dominant consumer against a stub capability (capture transitions, boost scaling, delta draining). The module itself is exercised by the kernel integration tests and by the headless smoke run, which boots input together with window and renderer under Xvfb or a real display.
