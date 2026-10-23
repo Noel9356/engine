@@ -26,9 +26,9 @@ struct ComponentManifest
     std::string   name;
     ComponentKind kind = ComponentKind::Module;
 
-    // Capability names this component makes available to others, for example
-    // "window" or "logging". Capabilities are engine level contracts; they may
-    // be implemented by a module or by a mod.
+    // Capability names this component makes available to others. A capability
+    // is an engine level contract (its name is the contract's capabilityName);
+    // it may be implemented by a module or by a mod.
     std::vector<std::string> providedCapabilities;
 
     // Capability names that must resolve to a started provider before this
@@ -37,7 +37,8 @@ struct ComponentManifest
     std::vector<std::string> requiredCapabilities;
 
     // Component names this component must be ordered after, regardless of
-    // capabilities. Used by script mods that need their scripting host.
+    // capabilities. Rarely needed: capability requirements already order
+    // providers before consumers.
     std::vector<std::string> requiredComponents;
 
     // Permission identifiers the component declares, for example
@@ -46,7 +47,7 @@ struct ComponentManifest
     std::vector<std::string> requiredPermissions;
 
     // Configuration keys the component reads, as "<section>.<dotted path>"
-    // ("renderer.exposure", "scene.camera.fov"). The kernel aggregates these
+    // ("scene.camera.fov"). The kernel aggregates these
     // into the known-key registry behind --validate's unknown-key warnings:
     // a key the assembly or the command line sets that nobody declares is
     // dead configuration and gets reported as a warning. Arrays of tables are

@@ -80,7 +80,7 @@ MinGW CMake bundles curl/GnuTLS without a CA trust store, so HTTPS downloads can
 
 ## Options
 
-Each module has an option: `ENGINE_BUILD_MODULE_LOGGING`, `..._WINDOW`, `..._INPUT`, `..._RENDERER`, `..._SCREENSHOT`, `..._LUA_SCRIPTING`, `..._PBR`, `..._RADIANCE_CASCADES`, `..._RAY_REFLECTIONS`. Excluding a module removes its code, its third-party dependencies, and its registration; a configuration still listing it fails with a precise diagnostic, never a link error. The compiled set is generated into `engine_module_availability.h`. Each module's build surface (its option, its dependencies, its shaders) is described in its own `modules/<name>/README.md`.
+Each module has an option: `ENGINE_BUILD_MODULE_LOGGING`, `..._WINDOW`, `..._INPUT`, `..._RENDERER`, `..._SCREENSHOT`, `..._LUA_SCRIPTING`, `..._PBR`, `..._RADIANCE_CASCADES`, `..._RAY_REFLECTIONS`. Excluding a module removes its code and its third-party dependencies; a run that then demands a capability only it provides fails startup with a precise diagnostic naming the consumer, never a link error. Each module's build surface (its option, its dependencies, its shaders) is described in its own `modules/<name>/README.md`.
 
 `ENGINE_BUILD_TESTS=OFF` removes the test suite and the Catch2 dependency entirely. `ENGINE_BUILD_DEMO=OFF` removes the host executable and the runtime layout assembly (configs and mod packages).
 

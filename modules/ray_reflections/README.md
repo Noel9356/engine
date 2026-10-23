@@ -18,19 +18,20 @@ The pass reads the scene light state through the `LightingCapability` (capabilit
 
 | Manifest field | Value |
 |---|---|
-| provided capabilities | (none — a technique, not a capability provider) |
-| required capabilities | `logging`, `renderer`, `lighting` |
+| provided capabilities | `indirect_specular` (this technique's radiance layer) |
+| required capabilities | `logging`, `renderer` |
 | required permissions | `capability.logging`, `capability.renderer`, `capability.lighting` |
 
-The `lighting` requirement is deliberate: the relight reads the scene light state the pbr module provides. List the technique under `[lighting].techniques`.
+The `lighting` acquisition is deliberate but optional: the relight reads the scene light state (see `modules/pbr/README.md`) when a provider exists, and reflections degrade to emissive + sky without one. A run activates this module exactly when something demands `indirect_specular` (`[engine].required_capabilities` or a mod's manifest); an active module always attaches its pass.
 
 ## Configuration
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `max_roughness` | float | `0.35` | surfaces rougher than this fade to no reflection (a single sharp ray cannot carry a wide glossy lobe). When this technique is listed, the pbr pass reads the same key and hands its analytic specular over by the same Fresnel weight, so both layers partition the specular energy (problem 46) |
 | `max_distance` | float | `40.0` | reflection ray bound in world units |
 | `march_steps` | integer | `96` | sphere-tracing steps per reflection ray |
+
+`max_roughness` is not in this section: the hand-off point is the shared `[lighting].max_roughness` key, read by both this pass and the direct pass so the two sides of the specular partition can never drift apart (problem 46).
 
 ## Files
 

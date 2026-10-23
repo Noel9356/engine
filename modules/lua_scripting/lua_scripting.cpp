@@ -86,9 +86,12 @@ void installEngineBridge(
 
 LuaScriptingModule::LuaScriptingModule()
 {
-    componentManifest.name                 = "lua_scripting";
-    componentManifest.kind                 = ComponentKind::Module;
-    componentManifest.providedCapabilities = {};
+    componentManifest.name = "lua_scripting";
+    componentManifest.kind = ComponentKind::Module;
+    // This module is a script host: it provides the scripting capability (the
+    // kernel resolves script mods' requirement for it to this module and hands
+    // the packages over through the ScriptModHost contract).
+    componentManifest.providedCapabilities = {ScriptModHost::scriptingCapabilityName};
     componentManifest.requiredCapabilities = {"logging", "window"};
     componentManifest.requiredPermissions  = {"capability.logging", "capability.window", "capability.screenshot"};
 }
@@ -182,9 +185,15 @@ void LuaScriptingModule::stop()
 }
 
 void *LuaScriptingModule::capabilityPointerFor(
-    const std::string & /*capabilityName*/
+    const std::string &capabilityName
 )
 {
+    // The scripting capability is realized by the ScriptModHost surface of
+    // this module; the kernel resolves script hosting through it.
+    if (capabilityName == ScriptModHost::scriptingCapabilityName)
+    {
+        return static_cast<void *>(static_cast<ScriptModHost *>(this));
+    }
     return nullptr;
 }
 

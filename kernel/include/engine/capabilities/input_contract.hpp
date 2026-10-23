@@ -12,9 +12,9 @@ namespace engine
 {
 
 // Keyboard codes with stable values. The enum intentionally matches the GLFW
-// key identifiers so the input module passes platform values through without a
-// translation table; a different backend implementation would map its native
-// codes onto these values instead.
+// key identifiers so the current input implementation passes platform values
+// through without a translation table; a different backend implementation
+// would map its native codes onto these values instead.
 enum class KeyCode : std::int32_t
 {
     Unknown      = -1,
@@ -136,11 +136,11 @@ enum class MouseButton : std::int32_t
     Middle = 2
 };
 
-// Capability "input": keyboard and mouse state provided by the input module.
-// Continuous devices (cursor, wheel) are consumed as per-frame DELTAS: the
-// module accumulates platform events and every consumer query drains the
-// accumulator, so each frame reads exactly the motion that arrived since the
-// last query - no event subscription needed on the hot path.
+// Capability "input": keyboard and mouse state. Continuous devices (cursor,
+// wheel) are consumed as per-frame DELTAS: the provider accumulates platform
+// events and every consumer query drains the accumulator, so each frame reads
+// exactly the motion that arrived since the last query - no event subscription
+// needed on the hot path.
 class InputCapability
 {
 public:

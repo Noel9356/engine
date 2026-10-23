@@ -165,7 +165,7 @@ public:
     // malformed --set is a usage error before any backend starts. The value
     // side is parsed as TOML (numbers, booleans, quoted strings, arrays,
     // inline tables); anything that does not parse as a TOML value becomes a
-    // literal string, so --set window.title=My Title works without quotes.
+    // literal string, so --set scene.note=My Title works without quotes.
     bool stageCommandLineOverride(const std::string &assignment, std::string &errorMessage);
 
     // Layer 4, application: writes the staged assignments into the effective
@@ -180,11 +180,10 @@ public:
     // or delegates content to the installed content mod's scene file.
     bool hasSection(const std::string &sectionName) const;
 
-    // [engine] section. Module names must match the factories registered by
-    // the module plugins (or by a host that links modules directly); mod
-    // packages are discovered in modDirectory and skipped when their id is in
-    // disabledMods.
-    std::vector<std::string> moduleNames() const;
+    // [engine] section. The assembly declares its capability demand under
+    // required_capabilities; mod packages are discovered in modDirectory and
+    // skipped when their id is in disabledMods.
+    std::vector<std::string> requiredCapabilities() const;
     std::string              modDirectory() const;
     // Directory scanned for module plugin binaries, relative to the
     // executable directory when not absolute. Default: "modules".
@@ -198,8 +197,8 @@ public:
     std::vector<std::pair<std::string, std::string>> permissionDenials() const;
 
     // Typed value access into one component section, for example
-    // stringValue("window", "title"). Returns empty when the section or the
-    // key is absent; the owning component applies its own default.
+    // stringValue("scene", "sky_radiance"). Returns empty when the section or
+    // the key is absent; the owning component applies its own default.
     std::optional<std::string>  stringValue(const std::string &sectionName, const std::string &key) const;
     std::optional<std::int64_t> integerValue(const std::string &sectionName, const std::string &key) const;
     std::optional<bool>         booleanValue(const std::string &sectionName, const std::string &key) const;

@@ -11,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace engine
@@ -27,12 +28,19 @@ struct ScriptModDescription
     std::filesystem::path scriptPath;
 };
 
-// Interface of a module that can host script mods. Implemented by the
-// scripting module; the kernel only ever talks to this contract, never to a
-// concrete scripting backend.
+// Interface of a module that hosts script mods. A script mod declares the
+// scripting capability in its package manifest; the kernel resolves that
+// requirement to the active provider module and talks to it through this
+// contract only - never to a concrete scripting backend.
 class ScriptModHost
 {
 public:
+    // The capability name whose provider hosts script mods. Defined here
+    // because both the kernel (host resolution) and the manifest loader
+    // (package validation) build on it; modules that host script mods
+    // provide it, script mods require it.
+    static constexpr const char *scriptingCapabilityName = "scripting";
+
     virtual ~ScriptModHost() = default;
 
     // Called once per discovered script mod during the construct phase, in
@@ -56,12 +64,18 @@ public:
 class ComponentContext final
 {
 public:
+    // demandedCapabilities is the kernel's demand-closure set (which capability
+    // names some component of this run actually requires). It carries no
+    // meaning to the kernel; providers consult it to learn whether one of
+    // THEIR OWN capabilities is wanted before contributing work. The host
+    // context receives null (the host never contributes capability work).
     ComponentContext(
-        EventBus                 &eventBus,
-        CapabilityRegistry       &capabilityRegistry,
-        PermissionSystem         &permissionSystem,
-        const ConfigurationStore &configuration,
-        std::string               componentName
+        EventBus                              &eventBus,
+        CapabilityRegistry                    &capabilityRegistry,
+        PermissionSystem                      &permissionSystem,
+        const ConfigurationStore              &configuration,
+        std::string                            componentName,
+        const std::unordered_set<std::string> *demandedCapabilities
     );
 
     EventBus &eventBus()
@@ -71,7 +85,8 @@ public:
 
     // Acquires the shared provider instance of one capability contract. Fails
     // when the permission "capability.<name>" was not granted to this
-    // component, or when the capability does not exist.
+    // component (the engine blocks the access), or when the capability does
+    // not exist.
     template <typename CapabilityType> CapabilityType &acquireCapability() const
     {
         const std::string capabilityName = CapabilityType::capabilityName;
@@ -79,12 +94,26 @@ public:
         if (!permissionSystem_.isGranted(componentName_, permissionName))
         {
             throw ComponentAccessError(
-                "component '" + componentName_ + "' tried to acquire capability '" + capabilityName
-                + "' without the granted permission '" + permissionName + "'. Declare the permission in the manifest."
+                "component '" + componentName_ + "' was blocked by the permission system while acquiring '"
+                + capabilityName + "': the permission '" + permissionName
+                + "' was not granted. Declare the requirement in the manifest."
             );
         }
         void *capabilityPointer = capabilityRegistry_.acquireCapability(capabilityName);
         return *static_cast<CapabilityType *>(capabilityPointer);
+    }
+
+    // Whether the demand closure of this run contains the named capability.
+    // The kernel treats capability names as opaque strings; the question is
+    // only meaningful to a provider asking about one of its OWN capabilities
+    // ("should I contribute the work this capability stands for?"). Returns
+    // false when the context has no demand set (the host context).
+    bool isCapabilityDemanded(
+        const std::string &capabilityName
+    ) const
+    {
+        return demandedCapabilities_ != nullptr
+            && demandedCapabilities_->find(capabilityName) != demandedCapabilities_->end();
     }
 
     // Typed configuration access into the component's own section.
@@ -107,11 +136,12 @@ public:
     std::size_t         configurationArraySizeInSection(const std::string &section, const std::string &path) const;
 
 private:
-    EventBus                 &eventBus_;
-    CapabilityRegistry       &capabilityRegistry_;
-    PermissionSystem         &permissionSystem_;
-    const ConfigurationStore &configuration_;
-    std::string               componentName_;
+    EventBus                              &eventBus_;
+    CapabilityRegistry                    &capabilityRegistry_;
+    PermissionSystem                      &permissionSystem_;
+    const ConfigurationStore              &configuration_;
+    std::string                            componentName_;
+    const std::unordered_set<std::string> *demandedCapabilities_ = nullptr;
 };
 
 // Lifecycle contract for modules. construct acquires dependencies and

@@ -18,9 +18,9 @@ enum class LogLevel
     Error
 };
 
-// Capability "logging": message sink provided by the logging module. Every
-// other component depends on it first, which makes it the root of the
-// dependency graph.
+// Capability "logging": message sink. Every other component depends on it
+// first, which makes it the root of the dependency graph; whichever component
+// provides it is just the graph's first provider.
 class LoggerCapability
 {
 public:

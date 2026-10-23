@@ -21,11 +21,11 @@ The march dispatches `(extent/stride)^2 * rays * march_steps` scene-SDF evaluati
 
 | Manifest field | Value |
 |---|---|
-| provided capabilities | (none — a technique, not a capability provider) |
-| required capabilities | `logging`, `renderer`, `lighting` |
+| provided capabilities | `indirect_diffuse` (this technique's radiance layer) |
+| required capabilities | `logging`, `renderer` |
 | required permissions | `capability.logging`, `capability.renderer`, `capability.lighting` |
 
-The `lighting` requirement is deliberate: the technique reads the scene light state the pbr module provides. Listing the technique without a lighting provider fails resolution precisely (`docs/architecture.md`, "Startup diagnostics"). List it under `[lighting].techniques`.
+The `lighting` acquisition is deliberate but optional: the technique reads the scene light state (see `modules/pbr/README.md`) when a provider exists, and degrades to emissive + sky transport without one. A run activates this module exactly when something demands `indirect_diffuse` (`[engine].required_capabilities` or a mod's manifest); an active module always attaches its pass.
 
 ## Configuration
 
@@ -45,7 +45,7 @@ The `lighting` requirement is deliberate: the technique reads the scene light st
 
 ## The no-leak guarantee, automated
 
-`config/leak_test.toml` renders a sealed room with one emissive panel and a window opening using the GI technique ONLY (`techniques = ["radiance_cascades"]`), and `engine --leak-check` evaluates the captured frame against configured regions: the sealed region must stay dark (the transport path cannot leak), the window view must receive light (the GI path is alive). The `engine_leak_check` cTest runs it automatically — this is the automated guard that keeps every fix above fixed (`docs/building.md`, "Testing"; `host/README.md`, exit code 4).
+`config/leak_test.toml` renders a sealed room with one emissive panel and a window opening using the GI technique ONLY (its demand list names `indirect_diffuse` but neither `direct_diffuse` nor `indirect_specular`), and `engine --leak-check` evaluates the captured frame against configured regions: the sealed region must stay dark (the transport path cannot leak), the window view must receive light (the GI path is alive). The `engine_leak_check` cTest runs it automatically — this is the automated guard that keeps every fix above fixed (`docs/building.md`, "Testing"; `host/README.md`, exit code 4).
 
 ## Files
 

@@ -329,22 +329,6 @@ struct RendererState
     std::chrono::steady_clock::time_point lastFrameTime{};
     bool                                  flyCameraSeeded = false;
 
-    // [lighting].techniques as configured; start() compares it against the
-    // attached techniques and reports every configured-but-missing name.
-    std::vector<std::string> configuredTechniques;
-
-    [[nodiscard]] bool hasTechniqueNamed(
-        const std::string &name
-    ) const
-    {
-        return std::any_of(
-            lightingTechniques.begin(),
-            lightingTechniques.end(),
-            [&name](const std::shared_ptr<LightingTechniquePass> &technique)
-            { return name == technique->techniqueName(); }
-        );
-    }
-
     // Written by the debug messenger callback; observed through the contract.
     std::atomic<bool> validationErrorSeen{false};
     LoggerCapability *validationLogger = nullptr;

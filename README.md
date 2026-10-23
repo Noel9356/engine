@@ -1,6 +1,6 @@
 # engine
 
-A modular C++20 engine kernel. The kernel owns four things only: capability contracts, component lifecycle, the event bus, and the permission system. Every feature — windows, rendering, input, screenshots, scripting — lives in an interchangeable module behind a capability contract, and mods (C++ shared libraries or Lua scripts) talk to modules and to each other through exactly the same contracts. Nothing in the kernel knows that GLFW, Vulkan, or a window exist. Script mods are implementation-, platform-, and vendor-agnostic by construction — the renderer can be made from Vulkan or OpenGL without a script being able to tell (`mods/README.md`, section "Portability").
+A modular C++20 engine kernel. The kernel owns four things only: capability contracts, component lifecycle, the event bus, and the permission system. Every feature — windows, rendering, input, screenshots, scripting — lives in an interchangeable module behind a capability contract, and mods (C++ shared libraries or Lua scripts) talk to modules and to each other through exactly the same contracts. Nothing in the kernel knows that GLFW, Vulkan, or a window exist — and nothing registers a module anywhere: modules are anonymous capability providers that describe themselves through static plugin descriptors, and a module is instantiated only when something in the run (a mod's manifest, or the assembly's `[engine].required_capabilities`) requires a capability it provides. The kernel mediates and enforces; it never interprets. Script mods are implementation-, platform-, and vendor-agnostic by construction — the renderer can be made from Vulkan or OpenGL without a script being able to tell (`mods/README.md`, section "Portability").
 
 ## Quick start
 
@@ -24,11 +24,12 @@ Dependencies are never fetched when a usable copy already exists: existing targe
 
 ## Documentation
 
-Documentation lives NEXT TO THE CODE IT DESCRIBES: every module, the kernel, the host and the mods tree carry their own `README.md`, and `docs/` keeps only the cross-cutting guides.
+Documentation lives NEXT TO THE CODE IT DESCRIBES: every module, the kernel, the host and the mods tree carry their own `README.md`, and `docs/` keeps only the cross-cutting guides. `REFACTORING.md` at the tree root explains the capability-demand architecture and what changed in the last refactor.
 
 | Document | Contents |
 |---|---|
-| `docs/architecture.md` | system map, contracts, components and mods, event bus, communication latency model, lifecycle, conventions |
+| `REFACTORING.md` | the capability-demand refactor: no registration, demand closure, layer capabilities, mod risk advisories |
+| `docs/architecture.md` | system map, contracts, capability demand, components and mods, event bus, communication latency model, lifecycle, conventions |
 | `docs/building.md` | configure/build/test, dependency tiers, `_deps` layout, offline controls, module options |
 | `docs/configuration.md` | global and shared `engine.toml` sections ([engine], [providers], [permissions], [scene], [diagnostics]); per-module keys are documented by their owning module |
 | `docs/robustness.md` | problems found and fixed, how runtime regressions are caught, known limits |

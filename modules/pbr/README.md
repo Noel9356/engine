@@ -12,18 +12,18 @@ The pbr module is the capability's provider: the sun is set with `setSunLight`/`
 
 - Shadow rays leave the surface through a guarded origin: the G-buffer normal carries the normal map, and when the offset point sits inside the analytic SDF the origin re-offsets along the SDF's geometric normal — a normal-mapped normal once pushed origins inside the geometry and self-shadowed whole patches (problem 45 in `docs/robustness.md`).
 - Point-light shadow rays terminate AT the light. A radius-cutoff bound once let them fly past the light and hit whatever sat behind it, carving phantom shadow disks out of surfaces beyond the light (problem 44).
-- When `ray_reflections` is configured, this pass dims its analytic specular by the same Fresnel weight the reflection layer carries, so the two passes SPLIT the specular energy instead of drawing the sun twice — the sun appeared twice on every glossy pixel until the partition (problem 46). The hand-over weight is keyed off `[lighting.ray_reflections].max_roughness`.
+- When the run also demands `indirect_specular`, this pass dims its analytic specular by the same Fresnel weight the reflection layer carries, so the two passes SPLIT the specular energy instead of drawing the sun twice — the sun appeared twice on every glossy pixel until the partition (problem 46). The hand-over weight is the shared `[lighting].max_roughness` key, read by both layers so the two sides of the hand-off can never drift apart.
 - The relight of first-bounce hit points (shared with GI and reflections through `surfaceOutgoingRadiance` in `relight_common.glsl`) stores physically scaled LAMBERTIAN radiance, so every stage of the transport chain carries the same energy unit (problem 41).
 
 ## Wiring
 
 | Manifest field | Value |
 |---|---|
-| provided capabilities | `lighting` |
+| provided capabilities | `lighting`, `direct_diffuse` |
 | required capabilities | `logging`, `renderer` |
 | required permissions | `capability.logging`, `capability.renderer` |
 
-The module is a technique: list it under `[lighting].techniques` (the renderer records techniques in order, direct before indirect). It has no capability consumers of its own except mods that mutate lights.
+The module provides two capabilities: `lighting` (the scene light state every lighting pass reads) and `direct_diffuse` (its radiance layer). It is activated exactly when one of them is demanded — by `[engine].required_capabilities` or a mod's manifest. A run that demands only `lighting` gets the state with an idle pass (the leak test does exactly this); demanding `direct_diffuse` attaches the analytic pass.
 
 ## Configuration
 

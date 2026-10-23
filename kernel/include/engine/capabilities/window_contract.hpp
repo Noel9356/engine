@@ -41,13 +41,12 @@ struct WindowResizedEvent
     std::uint32_t    height           = 0;
 };
 
-// Capability "window": surface and event pump provided by the window module.
-// The contract is deliberately windowing library agnostic: the current
-// implementation wraps GLFW, but nothing here names GLFW. Two members deal in
-// opaque handles (nativeWindowHandle, createPresentationSurface) so rendering
-// and input implementations can attach to a window without this contract
-// knowing their APIs. A rendering backend for another graphics API is a
-// different module implementation behind the same renderer contract; mods
+// Capability "window": surface and event pump. The contract is deliberately
+// windowing library agnostic: nothing here names the underlying library. Two
+// members deal in opaque handles (nativeWindowHandle, createPresentationSurface)
+// so rendering and input implementations can attach to a window without this
+// contract knowing their APIs. A rendering backend for another graphics API is
+// a different module implementation behind the same renderer contract; mods
 // cannot tell the difference (mods/README.md, section "Portability").
 class WindowCapability
 {
@@ -83,12 +82,12 @@ public:
     ) = 0;
 
     // Native window handle for implementations that attach backend specific
-    // callbacks (the input module) or platform integration. The pointed-to
-    // type is a windowing library detail of the window module implementation;
-    // contract consumers treat it as opaque.
+    // callbacks (input, platform integration). The pointed-to type is a
+    // windowing library detail of the provider implementation; contract
+    // consumers treat it as opaque.
     virtual void *nativeWindowHandle(WindowIdentifier windowIdentifier) = 0;
 
-    // Reverse lookup used by the input module inside platform callbacks.
+    // Reverse lookup used by input implementations inside platform callbacks.
     virtual WindowIdentifier windowIdentifierFromNativeHandle(void *nativeWindowHandle) = 0;
 };
 

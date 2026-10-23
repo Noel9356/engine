@@ -9,11 +9,13 @@
 // pass objects that record their work into the renderer's frame command
 // buffer.
 //
-// A technique module is named after its ALGORITHM ("pbr", "radiance_cascades"),
-// never after a rendering category: categories grow implementations while the
-// algorithm stays what it is. What a technique contributes is declared as a
-// physical output (which radiance target it writes), and the renderer composes
-// the frame from that declaration.
+// A technique module is named after its ALGORITHM, never after a rendering
+// category: categories grow implementations while the algorithm stays what it
+// is. What a technique contributes is declared as a physical output (which
+// radiance target it writes), and the renderer composes the frame from that
+// declaration. Which techniques exist in a run is decided by capability
+// demand ([engine].required_capabilities plus what mods require) - never by
+// a list here.
 
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_raii.hpp>
@@ -99,13 +101,13 @@ constexpr bool hasLightingTarget(
     return (static_cast<std::uint32_t>(mask) & static_cast<std::uint32_t>(flag)) != 0;
 }
 
-// Specular hand-off contract between the analytic direct pass (pbr) and the
-// ray traced reflection pass: pbr fades its analytic specular to zero as
-// roughness approaches the hand-off point and the reflection pass takes over
-// above it, so the sun is not drawn twice on glossy surfaces. Both modules
-// read [lighting.ray_reflections].max_roughness - with these defaults, from
-// one place, because a mismatch would double-light or drop the sun exactly at
-// the fade band.
+// Specular hand-off contract between the analytic direct pass and the ray
+// traced reflection pass: the direct pass fades its analytic specular to zero
+// as roughness approaches the hand-off point and the reflection pass takes
+// over above it, so the sun is not drawn twice on glossy surfaces. Both sides
+// read the shared [lighting].max_roughness configuration key - from one
+// place, with these defaults, because a mismatch would double-light or drop
+// the sun exactly at the fade band.
 inline constexpr float         defaultReflectionMaxRoughness = 0.35f;
 inline constexpr float         defaultReflectionMaxDistance  = 40.0f;
 inline constexpr std::uint32_t defaultReflectionMarchSteps   = 96;
@@ -119,7 +121,7 @@ class LightingTechniquePass
 public:
     virtual ~LightingTechniquePass() = default;
 
-    // Algorithm name, matched against [lighting] techniques entries.
+    // Algorithm name, for startup logs and same-name re-attach replacement.
     virtual const char *techniqueName() const = 0;
 
     virtual LightingTarget targets() const = 0;

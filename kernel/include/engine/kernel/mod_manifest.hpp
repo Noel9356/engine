@@ -25,20 +25,22 @@ namespace engine
 //                                        # name (lib<entry>.so / <entry>.dll),
 //                                        # script -> script file relative to
 //                                        # the package directory
-//   host         = "lua_scripting"       # script mods: hosting module name
 //   display_name = "Example Mod"         # optional, defaults to id
 //   description  = "..."                 # optional
 //   author       = "..."                 # optional
 //   capabilities = ["logging", "input"]  # required capabilities (graph edges);
 //                                        # each also grants its capability.<name>
 //                                        # permission, so acquisitions need no
-//                                        # second list
+//                                        # second list. A script mod must
+//                                        # require "scripting" - its provider
+//                                        # hosts the script runtime. Mods never
+//                                        # name a module; they name the
+//                                        # capabilities they consume.
 //   permissions  = ["filesystem.write"]  # extra permission grants beyond the
 //                                        # derived capability ones (deniable
 //                                        # in configuration)
 //   requires     = []                    # component names to order after
-//                                        # (any mod type; script mods also
-//                                        # order after their host)
+//                                        # (any mod type)
 //   config_keys  = ["example_mod.level"] # configuration keys the mod reads
 //                                        # (feeds the known-key registry)
 //   scene        = "scene.toml"          # optional: world content file the mod
@@ -54,7 +56,6 @@ struct ModManifest
     std::uint32_t            engineApi = engineModInterfaceVersion;
     std::string              type; // "native" or "script"
     std::string              entry;
-    std::string              host = "lua_scripting";
     std::string              displayName;
     std::string              description;
     std::string              author;

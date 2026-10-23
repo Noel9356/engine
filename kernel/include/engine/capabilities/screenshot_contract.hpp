@@ -9,16 +9,16 @@
 namespace engine
 {
 
-// Published after the screenshot module wrote one capture to disk.
+// Published after the provider wrote one capture to disk.
 struct ScreenshotSavedEvent
 {
     std::string filePath;
 };
 
-// Capability "screenshot": key triggered and programmatic captures provided by
-// the screenshot module. The trigger key and the output directory come from the
-// module configuration; mods call requestScreenshot to queue a capture without
-// touching the keyboard path.
+// Capability "screenshot": key triggered and programmatic captures. The
+// trigger key and the output directory come from the provider's own
+// configuration section; mods call requestScreenshot to queue a capture
+// without touching the keyboard path.
 class ScreenshotCapability
 {
 public:

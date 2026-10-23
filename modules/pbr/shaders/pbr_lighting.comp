@@ -1,7 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Analytic PBR direct lighting compute pass (technique "pbr" of
-// [lighting].techniques).
+// Analytic PBR direct lighting compute pass (the direct_diffuse layer).
 //
 // Reads the G-buffer, evaluates sun + point lights with a Cook-Torrance GGX
 // BRDF and analytic SDF soft shadows, writes the direct radiance into the

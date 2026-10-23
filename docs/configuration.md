@@ -64,7 +64,7 @@ This document covers the GLOBAL and SHARED sections. Each module owns the docume
 | `[renderer]` | `../modules/renderer/README.md` |
 | `[screenshot]` | `../modules/screenshot/README.md` |
 | `[diagnostics]` | here (host-owned opt-in reporting; see also `../host/README.md`) |
-| `[lighting]`, `[lighting.pbr]` | `../modules/pbr/README.md` |
+| `[lighting]` (shared hand-off key `max_roughness`), `[lighting.pbr]` | `../modules/pbr/README.md` |
 | `[lighting.radiance_cascades]` | `../modules/radiance_cascades/README.md` |
 | `[lighting.ray_reflections]` | `../modules/ray_reflections/README.md` |
 | `[scene]` | here (shared world content — read by several modules) |
@@ -76,11 +76,12 @@ Sections other than a component's own are read-only shared configuration by conv
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `modules` | string array | (none) | modules to instantiate; must match what the build contains |
+| `required_capabilities` | string array | `[]` | capability demand of the assembly: every named capability pulls its providers into the active set, transitively |
 | `mod_directory` | string | `"mods"` | directory scanned for mod packages |
+| `modules_directory` | string | `"modules"` | directory scanned for module plugin binaries |
 | `disabled_mods` | string array | `[]` | mod ids to skip at discovery |
 
-Listing a module that was compiled out (`ENGINE_BUILD_MODULE_<NAME>=OFF`) or misspelling one fails startup with a precise diagnostic.
+There is no module list. Modules are activated purely by capability demand: a module loads exactly when a mod's manifest, or this `required_capabilities` list, requires a capability it provides (and an activated module's own requirements pull its dependencies transitively — the renderer brings `window` and `logging` with it). A capability nothing requires stays dormant: its plugin is never instantiated and its binary is released before any construct phase. A demanded capability with no available provider fails startup with a precise diagnostic naming the consumer and the alternatives; the composition root's demand lives here because it is assembly data, not engine code.
 
 ## [providers]
 
@@ -92,7 +93,7 @@ Picks one implementation when several provide the same capability, e.g. `window 
 |---|---|---|
 | `denied` | array of `[component, permission]` pairs | deny one declared permission of one component |
 
-Modules and mods are both subject to denials; a denied permission fails startup precisely.
+Modules and mods are both subject to denials; a denied permission fails startup precisely. An acquisition attempt without a grant is blocked at runtime with a `ComponentAccessError` naming the offender and the missing grant. The kernel also prints one structural advisory per mod that runs native machine code, requests permissions outside the `capability.*` namespace, or acquires a broad set of capabilities — see `architecture.md`, "Mod risk advisories".
 
 ## [diagnostics]
 
@@ -130,7 +131,7 @@ The demo scene ships five CC0 texture sets from [ambientCG](https://ambientcg.co
 
 ```toml
 [engine]
-modules = ["logging", "window", "input", "renderer"]
+required_capabilities = ["window", "input", "renderer"]
 
 [window]
 title = "my demo"
@@ -139,7 +140,7 @@ title = "my demo"
 enable_validation = false
 ```
 
-This assembly defines no `[scene]`, so the installed content mod's world renders (the shipped `test_scene`). Mod packages still load from the default `mods/` directory; add `mod_directory`/`disabled_mods` under `[engine]` to control them — disabling the content mod also removes its world, leaving an empty sky unless the assembly defines `[scene]` itself.
+This assembly demands the window/input/renderer capabilities directly; their providers pull `logging` (and, through the shipped content mod's `scripting` requirement, the script host) in transitively. The assembly defines no `[scene]`, so the installed content mod's world renders (the shipped `test_scene`). Mod packages still load from the default `mods/` directory; add `mod_directory`/`disabled_mods` under `[engine]` to control them — disabling the content mod also removes its world, and with it the `scripting` demand, so the script host module stays dormant too. Remove `input` from the demand list and the input module never loads: startup gets faster and the camera stays at its configured pose.
 
 ## Layered one-liners
 

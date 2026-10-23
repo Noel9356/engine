@@ -26,11 +26,11 @@ struct RendererState;
 // through the vk::raii interfaces. The module owns the instance, device,
 // swapchain, the scene rasterization (from the shared [scene] configuration)
 // and the frame pipeline: geometry pass, attached lighting techniques,
-// composite. Lighting techniques are separate modules named after their
-// ALGORITHM ("pbr", "radiance_cascades") that attach through the method
-// attachLightingTechnique and declare which radiance layers they write; when
-// none is attached the renderer renders unlit (albedo + emissive + sky), so
-// every lighting layer can be configured away independently.
+// composite. Lighting techniques are separate modules that attach through the
+// method attachLightingTechnique and declare which radiance layers they write;
+// which techniques exist in a run is decided by capability demand, not by any
+// list here. When none is attached the renderer renders unlit (albedo +
+// emissive + sky), so every lighting layer can be left out independently.
 class RendererModule final : public ModuleInterface, public RendererCapability
 {
 public:

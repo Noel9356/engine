@@ -26,10 +26,9 @@ RendererModule::RendererModule()
     // passes the permission gate when the capability exists.
     componentManifest.requiredCapabilities = {"logging", "window"};
     componentManifest.requiredPermissions  = {"capability.logging", "capability.window", "capability.input"};
-    // Every configuration key the renderer reads (its own section, the
-    // [lighting] composition keys it owns, and the [scene] world content it
-    // rasterizes) - the known-key registry behind --validate's unknown-key
-    // warnings is built from these declarations.
+    // Every configuration key the renderer reads (its own section and the
+    // [scene] world content it rasterizes) - the known-key registry behind
+    // --validate's unknown-key warnings is built from these declarations.
     componentManifest.knownConfigKeys = {
         "renderer.enable_validation",
         "renderer.fail_on_validation_error",
@@ -40,7 +39,6 @@ RendererModule::RendererModule()
         "renderer.tonemap",
         "renderer.shader_directory",
         "renderer.texture_directory",
-        "lighting.techniques",
         "scene.sky_radiance",
         "scene.sky.zenith",
         "scene.sky.horizon",
@@ -117,10 +115,9 @@ void RendererModule::construct(
     {
         throw std::runtime_error(logPrefix + "" + sceneError);
     }
-    // Lighting technique selection: [lighting] techniques = ["pbr", ...].
-    // A technique module attaches itself when its algorithm name is listed;
-    // an empty list (or a missing section) means no lighting at all.
-    state->configuredTechniques       = context.configurationStringArrayInSection("lighting", "techniques");
+    // Lighting composition: the active lighting techniques attach themselves
+    // during their own construct phases (demand-driven activation decides
+    // which modules exist); the renderer only composes what attached.
     const std::string shaderDirectory = context.configurationString("shader_directory").value_or("shaders");
     state->shaderDirectory            = shaderDirectory;
     state->textureDirectory           = context.configurationString("texture_directory").value_or("");
@@ -143,12 +140,12 @@ void RendererModule::start()
                                         : state->textureDirectory;
     state->initialize(*windowCapability, *logger);
 
-    if (state->configuredTechniques.empty())
+    if (state->lightingTechniques.empty())
     {
         logger->logMessage(
             LogLevel::Information,
             logPrefix
-                + "no lighting techniques configured; the scene renders unlit "
+                + "no lighting techniques attached; the scene renders unlit "
                   "(albedo + emissive + sky)"
         );
     }
@@ -168,18 +165,6 @@ void RendererModule::start()
             logPrefix + "lighting techniques = [" + attached + "] (" + std::to_string(state->lightingTechniques.size())
                 + " attached)"
         );
-    }
-    for (const std::string &name : state->configuredTechniques)
-    {
-        if (!state->hasTechniqueNamed(name))
-        {
-            logger->logMessage(
-                LogLevel::Warning,
-                logPrefix + "lighting technique '" + name
-                    + "' is configured but no module attached it; is its module built and listed "
-                      "under [engine].modules?"
-            );
-        }
     }
 }
 

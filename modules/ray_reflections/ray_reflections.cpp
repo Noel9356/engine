@@ -347,9 +347,11 @@ private:
 
 RayReflectionsModule::RayReflectionsModule()
 {
-    componentManifest.name                 = "ray_reflections";
-    componentManifest.kind                 = ComponentKind::Module;
-    componentManifest.providedCapabilities = {};
+    componentManifest.name = "ray_reflections";
+    componentManifest.kind = ComponentKind::Module;
+    // "indirect_specular" is this technique's radiance layer: the run demands
+    // it when the reflection pass should attach to the renderer.
+    componentManifest.providedCapabilities = {"indirect_specular"};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
     // capability.lighting is optional at acquire time (a missing or denied
     // provider only strips the direct relight from reflection hits - they
@@ -359,13 +361,13 @@ RayReflectionsModule::RayReflectionsModule()
     // reflection then rendered lightless (black mirror ball) - exactly the
     // silent failure mode the permission system exists to make precise.
     componentManifest.requiredPermissions = {"capability.logging", "capability.renderer", "capability.lighting"};
-    // The pass settings the module reads from [lighting.ray_reflections],
-    // plus the technique composition list it shares with the renderer.
+    // The pass settings the module reads from [lighting.ray_reflections]
+    // plus the shared specular hand-off key ([lighting].max_roughness) it
+    // splits the glossy energy with the direct pass through.
     componentManifest.knownConfigKeys = {
-        "lighting.ray_reflections.max_roughness",
+        "lighting.max_roughness",
         "lighting.ray_reflections.max_distance",
         "lighting.ray_reflections.march_steps",
-        "lighting.techniques",
     };
 }
 
@@ -381,13 +383,13 @@ void RayReflectionsModule::construct(
     logger = &context.acquireCapability<LoggerCapability>();
 
     RayReflectionsPass::Settings settings;
-    settings.maxRoughness = static_cast<float>(context
-            .configurationFloatingInSection("lighting", "ray_reflections.max_roughness")
-            .value_or(defaultReflectionMaxRoughness));
-    settings.maxDistance  = static_cast<float>(context
+    settings.maxRoughness = static_cast<float>(
+        context.configurationFloatingInSection("lighting", "max_roughness").value_or(defaultReflectionMaxRoughness)
+    );
+    settings.maxDistance = static_cast<float>(context
             .configurationFloatingInSection("lighting", "ray_reflections.max_distance")
             .value_or(defaultReflectionMaxDistance));
-    settings.marchSteps   = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+    settings.marchSteps  = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "ray_reflections.march_steps")
             .value_or(defaultReflectionMarchSteps),
         8,
@@ -410,9 +412,11 @@ void RayReflectionsModule::construct(
         lighting = nullptr;
     }
 
-    // Selection: [lighting] techniques = ["ray_reflections", ...].
-    const std::vector<std::string> techniques = context.configurationStringArrayInSection("lighting", "techniques");
-    passAttached = std::find(techniques.begin(), techniques.end(), "ray_reflections") != techniques.end();
+    // Attachment follows demand: this module only activates when the run
+    // required the indirect_specular layer it provides, so an active module
+    // always attaches. Asking about one's OWN capability is the one question
+    // the demand set answers.
+    passAttached = context.isCapabilityDemanded("indirect_specular");
 
     pass = std::make_shared<RayReflectionsPass>(settings, lighting);
     if (passAttached)
@@ -428,7 +432,7 @@ void RayReflectionsModule::start()
     logger->logMessage(
         LogLevel::Information,
         std::string("ray_reflections module started; technique ")
-            + (passAttached ? "attached (indirect specular)" : "not listed in [lighting].techniques; idle")
+            + (passAttached ? "attached (indirect specular)" : "indirect_specular not demanded; idle")
     );
 }
 

@@ -1094,15 +1094,16 @@ private:
 
 RadianceCascadesModule::RadianceCascadesModule()
 {
-    componentManifest.name                 = "radiance_cascades";
-    componentManifest.kind                 = ComponentKind::Module;
-    componentManifest.providedCapabilities = {};
+    componentManifest.name = "radiance_cascades";
+    componentManifest.kind = ComponentKind::Module;
+    // "indirect_diffuse" is this technique's radiance layer: the run demands
+    // it when the GI transport pass should attach to the renderer.
+    componentManifest.providedCapabilities = {"indirect_diffuse"};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
     // capability.lighting is optional here: without a light provider there
     // are no lights, and GI degrades to emissive + sky transport.
     componentManifest.requiredPermissions = {"capability.logging", "capability.renderer", "capability.lighting"};
-    // The pass settings the module reads from [lighting.radiance_cascades],
-    // plus the technique composition list it shares with the renderer.
+    // The pass settings the module reads from [lighting.radiance_cascades].
     componentManifest.knownConfigKeys = {
         "lighting.radiance_cascades.cascades",
         "lighting.radiance_cascades.interval_base",
@@ -1115,7 +1116,6 @@ RadianceCascadesModule::RadianceCascadesModule()
         "lighting.radiance_cascades.relight_shadows",
         "lighting.radiance_cascades.shadow_steps",
         "lighting.radiance_cascades.spatial_filter",
-        "lighting.techniques",
     };
 }
 
@@ -1199,11 +1199,11 @@ void RadianceCascadesModule::construct(
         lighting = nullptr;
     }
 
-    // Selection: [lighting] techniques = ["radiance_cascades", ...]. A
-    // technique module that is loaded but not listed stays idle; the renderer
-    // composes only the listed ones.
-    const std::vector<std::string> techniques = context.configurationStringArrayInSection("lighting", "techniques");
-    passAttached      = std::find(techniques.begin(), techniques.end(), "radiance_cascades") != techniques.end();
+    // Attachment follows demand: this module only activates when the run
+    // required the indirect_diffuse layer it provides, so an active module
+    // always attaches. Asking about one's OWN capability is the one question
+    // the demand set answers.
+    passAttached      = context.isCapabilityDemanded("indirect_diffuse");
     lightingAvailable = lighting != nullptr;
 
     pass = std::make_shared<RadianceCascadesPass>(settings, lighting);
@@ -1220,7 +1220,7 @@ void RadianceCascadesModule::start()
     logger->logMessage(
         LogLevel::Information,
         std::string("radiance_cascades module started; technique ")
-            + (passAttached ? "attached (indirect radiance)" : "not listed in [lighting].techniques; idle")
+            + (passAttached ? "attached (indirect radiance)" : "indirect_diffuse not demanded; idle")
             + ", light capability " + (lightingAvailable ? "present" : "absent (no first-bounce relight)")
     );
 }

@@ -19,11 +19,12 @@ class PbrLightingPass;
 // Module "pbr": a lighting TECHNIQUE module named after its algorithm, not
 // after a rendering category. It owns the scene light state (the
 // LightingCapability contract: sun + point lights, mutable by C++ mods at
-// runtime) and, when [lighting] techniques lists "pbr", attaches the analytic
-// PBR pass, which evaluates the lights with a Cook-Torrance GGX BRDF and
-// analytic SDF soft shadows and writes the direct radiance target. A module
-// that is loaded but not listed stays an idle light provider: mods can still
-// place lights, and another lighting technique (or none) consumes them.
+// runtime) and provides the direct_diffuse layer capability: when the run
+// demands it, the module attaches the analytic PBR pass, which evaluates the
+// lights with a Cook-Torrance GGX BRDF and analytic SDF soft shadows and
+// writes the direct radiance target. A module that is activated only for its
+// light state stays an idle provider: mods can still place lights, and
+// another lighting technique (or none) consumes them.
 class PbrLightingModule final : public ModuleInterface, public LightingCapability
 {
 public:

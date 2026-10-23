@@ -11,9 +11,9 @@
 namespace engine
 {
 
-// Published by the renderer module at the beginning of every rendered frame,
-// before command recording. Components that must act inside the frame (the
-// screenshot module requests its capture here) do so from this event.
+// Published by the frame rendering provider at the beginning of every
+// rendered frame, before command recording. Components that must act inside
+// the frame (capture requests queue here) do so from this event.
 struct FrameBeginEvent
 {
     std::uint64_t frameIndex = 0;
@@ -35,10 +35,10 @@ struct FrameRenderedEvent
     std::uint64_t frameIndex = 0;
 };
 
-// Capability "renderer": frame rendering provided by the renderer module. The
-// contract is intentionally small and lighting agnostic: rendering features
-// grow through configurable pipeline state inside the module, never through
-// algorithm specific forks of this interface.
+// Capability "renderer": frame rendering. The contract is intentionally small
+// and lighting agnostic: rendering features grow through configurable pipeline
+// state inside the provider, never through algorithm specific forks of this
+// interface.
 class RendererCapability
 {
 public:
@@ -59,7 +59,7 @@ public:
 
     // Reports whether the graphics backend observed internal errors during
     // this session (driver diagnostics or validation-layer reports). The
-    // renderer keeps rendering after such errors, so automated runs and
+    // provider keeps rendering after such errors, so automated runs and
     // embedders poll this to turn silent backend failures into exit codes.
     virtual bool validationErrorsObserved() const = 0;
 };

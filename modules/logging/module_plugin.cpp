@@ -1,20 +1,30 @@
 // The module plugin seam of 'logging': one exported entry point that hands the
 // kernel this binary's static descriptor (engine/kernel/module_api.hpp). The
-// kernel dlopens the library from the modules directory and registers the
-// factory under the descriptor's module name.
+// descriptor carries the module's name, its factory and its static capability
+// declaration; the kernel reads all three without creating an instance, and
+// only instantiates the module when the demand closure requires one of its
+// capabilities.
 #include "engine/kernel/module_api.hpp"
 
 #include "logging.hpp"
 
 namespace
 {
+const char *const loggingProvidedCapabilities[] = {"logging"};
+
 engine::ModuleInterface *createloggingPluginModule()
 {
     return new engine::LoggingModule();
 }
 
 const engine::EngineModulePluginEntry loggingPluginEntry{
-    engine::engineModulePluginAbiVersion, "logging", &createloggingPluginModule
+    engine::engineModulePluginAbiVersion,
+    "logging",
+    &createloggingPluginModule,
+    loggingProvidedCapabilities,
+    1,
+    nullptr,
+    0
 };
 } // namespace
 

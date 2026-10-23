@@ -1,6 +1,6 @@
 # Architecture
 
-The kernel owns four concerns: capability contracts, component lifecycle, the event bus, and the permission system. Everything else is a module behind a contract, and mods use exactly the same contracts. No kernel file knows GLFW, Vulkan, or windows exist. This document is the system map and the cross-cutting models; every module's internals live next to its code in `modules/<name>/README.md` (see the index below).
+The kernel owns four concerns: capability contracts, component lifecycle, the event bus, and the permission system. Everything else is a module behind a contract, and mods use exactly the same contracts. No kernel file knows GLFW, Vulkan, or windows exist - and no kernel file knows any module by name: modules are anonymous capability providers that describe themselves through static plugin descriptors, and the kernel only mediates between consumers and providers. Nothing is registered anywhere; a module exists in a run exactly when something requires a capability it provides. This document is the system map and the cross-cutting models; every module's internals live next to its code in `modules/<name>/README.md` (see the index below).
 
 ## Documentation index
 
@@ -26,7 +26,21 @@ The kernel owns four concerns: capability contracts, component lifecycle, the ev
 
 A capability is a pure virtual interface plus a stable name, e.g. `LoggerCapability` with `capabilityName == "logging"`. Contract headers live in the kernel's include tree (`kernel/include/engine/capabilities/`), so both sides compile against them even when the provider is excluded from the build. Consumers ask their `ComponentContext` for an interface and never downcast to concrete module types. When several components require one capability, the registry hands every consumer the same shared instance.
 
+Capability names are opaque to the kernel: it matches requirement strings against provider declarations and never interprets what a capability means. The semantics live entirely in the contract header and its consumers.
+
 Contracts are the mod-facing stability surface and are held to a portability rule, enforced mechanically at configure time: `kernel/CMakeLists.txt` fails the configure if a contract header includes a graphics, windowing, or platform header (Vulkan, OpenGL, GLFW, X11, Win32). Module implementations keep their specifics behind opaque handles — the window contract deals in `void*` presentation surfaces and extension-name strings, so a renderer made from Vulkan and one made from OpenGL are indistinguishable from behind the contracts. Script mods see nothing else at all (`../mods/README.md`, section "Portability"). The six contracts and the registry mechanics are detailed in `../kernel/README.md`.
+
+## Capability demand: how modules get activated
+
+There is no module list and no registration anywhere - not in the host, not in the kernel, not in a configuration file. Activation is demand-driven, computed once at startup from static declarations:
+
+1. **Module plugins describe themselves.** Every plugin binary in the modules directory exports one descriptor (name, factory, static provided/required capability lists). The kernel reads descriptors without creating instances.
+2. **Mods are the demand roots.** Every active mod package becomes a component; its `capabilities` list states what it consumes (a script mod's `"scripting"` entry pulls its host in).
+3. **The assembly states its own demand as data.** `[engine].required_capabilities` names the capabilities the composition root consumes directly (the frame loop needs `window` and `renderer`; the demo also demands the lighting layers and `screenshot`).
+4. **The closure runs transitively.** Each demanded capability activates the plugin(s) that provide it (honoring a `[providers]` selection when one applies), and an activated plugin's own requirements demand further providers - the renderer brings `window` and `logging` with it, for example.
+5. **Only then are instances created.** Plugins nobody required are never instantiated and their binaries are released before any construct phase; an instance manifest must agree with its static descriptor (drift is a precise startup error), and the registry receives each provider's implementation pointers as it constructs.
+
+A requirement no available component satisfies fails startup with one precise diagnostic naming the consumer, the capability and the available alternatives. A run with no mods and an empty demand list loads zero modules: the engine kernel starts, publishes nothing, and exits cleanly. Startup work scales with what the run actually uses - a GI-only test run never loads the reflection module at all.
 
 ## Components, modules, mods
 
@@ -61,7 +75,11 @@ Destructors are defensive: `stop()` no-ops when `construct` never ran, and the k
 
 ## Permissions
 
-A component may only acquire capabilities it declared (`capability.<name>`) and may only write files with `filesystem.write`. The configuration can deny individual permissions per component; denial fails startup with a precise diagnostic. The host composition root is trusted; mods are subject to the same declared-grant model as modules.
+A component may only acquire capabilities it declared (`capability.<name>`) and may only write files with `filesystem.write`. The configuration can deny individual permissions per component; denial fails startup with a precise diagnostic. The host composition root is trusted; mods are subject to the same declared-grant model as modules. An acquisition without a grant is **blocked**: the engine refuses the access with a `ComponentAccessError` naming the component, the capability and the missing permission - during startup that fails the construct phase with the diagnostic, and at runtime it surfaces through the frame loop's error handling instead of ever handing out the capability.
+
+### Mod risk advisories
+
+The permission system enforces what it can; what it cannot enforce structurally, it makes visible. At discovery the kernel prints one warning per mod whose request is structurally sensitive - the signals are generic, never capability semantics: the mod runs native machine code, it requests permissions outside the `capability.*` namespace (direct environment access such as `filesystem.write`), or it acquires a broad set of capabilities. The advisories print on every normal run and in `--validate`, so a user installs third-party mods knowing exactly what they asked for.
 
 ## Startup diagnostics
 
@@ -71,17 +89,17 @@ All checks accumulate into one report before failing. Diagnosed cases, each nami
 - ambiguous provider (with candidates and the `[providers]` key that resolves it)
 - dependency cycles (with the full participant chain)
 - permission denials
-- modules requested but compiled out
+- module manifest/descriptor drift (a rebuilt module disagreeing with its static declaration)
 - mod interface version mismatches, duplicate mod ids, missing mod libraries
-- script mods whose host module is missing, Lua script load failures
+- script mods with no active `scripting` provider, Lua script load failures
 
 `engine --validate` exits 0 and prints `engine configuration is valid` on success.
 
 ## Extending
 
 - New capability: add a contract header under `kernel/include/engine/capabilities/`, implement it in a module, acquire it where needed.
-- New module: create `modules/<name>` with its own `README.md` (plus `shaders/` if it owns GLSL), add a CMake option and subdirectory, register it in the host behind the option.
-- New backend: implement the same contract and list both providers; `[providers]` picks one at runtime.
+- New module: create `modules/<name>` with its own `README.md` (plus `shaders/` if it owns GLSL), add a CMake option and subdirectory, and declare the module's name, factory and static capability lists in its `module_plugin.cpp` descriptor. No registration exists anywhere: consumers (mods or `[engine].required_capabilities`) activate it by requiring its capabilities.
+- New backend: implement the same contract and ship both providers; `[providers]` picks one at runtime.
 - New mod: create `mods/<id>/` with a `mod.toml`; see `../mods/README.md`.
 
 ## Conventions
@@ -115,5 +133,5 @@ The shipped `test_scene` package is the worked example: it owns the demo world, 
 Three standing rules, applied as a full-tree audit and kept as the bar every change is held to:
 
 - **No hardcoding.** No baked-in world content (the engine's own fallback is an empty scene - content belongs to mods, see above); no unnamed magic numbers (timeouts, budgets, binding numbers, formats and thresholds are named constants at the top of their file, each with the reason for its value); no repeated path or name literals (the default configuration path is named once and quoted by the usage text; the "mods" and "shaders" directories live in one constant each). A number or a path that appears twice without sharing a name is a defect, because the two sites can drift silently.
-- **No dead code.** Unused API surface, leftover compatibility mappings and stale references are deleted, not kept "just in case". The 2026-10 audit removed the deprecated `[lighting].direct` / `[lighting].gi` fallback mapping (superseded by `[lighting].techniques`; no config, test or document used it) and retired the renderer's private copies of the shared Vulkan helpers (`findMemoryType`, shader-byte reading) that `vulkan_utilities.hpp` already provided - the shared copy now carries the SPIR-V word-alignment check the private one had. Removing a compatibility shim is announced in the docs the same way adding one is: the technique list is the only spelling of the lighting selection.
+- **No dead code.** Unused API surface, leftover compatibility mappings and stale references are deleted, not kept "just in case". The 2026-10 audit removed the deprecated `[lighting].direct` / `[lighting].gi` fallback mapping and retired the renderer's private copies of the shared Vulkan helpers (`findMemoryType`, shader-byte reading) that `vulkan_utilities.hpp` already provided - the shared copy now carries the SPIR-V word-alignment check the private one had. The same audit pass later removed the module registration API, the `[engine].modules` list and the `[lighting].techniques` selector when capability demand replaced them (see `REFACTORING.md` at the tree root). Removing a compatibility shim is announced in the docs the same way adding one is: the capability demand lists are the only spelling of what a run loads.
 - **No god objects.** A type or file that accretes several concerns is split by concern before it hardens. `RendererState` (one struct, ~3.1k lines covering device creation, scene resources, pipelines, recording and the frame loop) is now one state across five translation units split by concern - `renderer_device.cpp`, `renderer_scene.cpp`, `renderer_pipelines.cpp`, `renderer_frames.cpp`, and a slim `renderer.cpp` for the module lifecycle - with the module-private `renderer_state.hpp` as the only place they meet; the kernel's mod-package discovery (directory scan, native library loading) moved out of `engine_kernel.cpp` into `mod_discovery.cpp`, leaving the kernel's gather phase policy-only; the host's leak-check policy moved out of `main.cpp` into `leak_check.cpp`, leaving the composition root with wiring and reporting. The split is structural, not architectural churn: one state struct, zero behavior change, and every concern owns a file whose name says what it does.

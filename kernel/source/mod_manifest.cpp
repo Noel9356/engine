@@ -2,6 +2,8 @@
 
 #include <toml.hpp>
 
+#include <algorithm>
+
 namespace engine
 {
 
@@ -192,12 +194,21 @@ bool ModManifestLoader::loadFromFile(
     if (!readOptionalString(table, "version", outManifest.version, manifestPath, errorMessage)
         || !readRequiredString(table, "type", outManifest.type, manifestPath, errorMessage)
         || !readRequiredString(table, "entry", outManifest.entry, manifestPath, errorMessage)
-        || !readOptionalString(table, "host", outManifest.host, manifestPath, errorMessage)
         || !readOptionalString(table, "display_name", outManifest.displayName, manifestPath, errorMessage)
         || !readOptionalString(table, "description", outManifest.description, manifestPath, errorMessage)
         || !readOptionalString(table, "author", outManifest.author, manifestPath, errorMessage)
         || !readOptionalString(table, "scene", outManifest.scene, manifestPath, errorMessage))
     {
+        return false;
+    }
+    if (table.get("host") != nullptr)
+    {
+        // Removed field: a script mod is hosted by whichever active module
+        // provides the capability its package requires - never by a module
+        // name written into the package.
+        errorMessage = describeLocation(manifestPath) + " declares the removed key 'host'; script mods are hosted "
+                     + "by the module that provides the '" + std::string(ScriptModHost::scriptingCapabilityName)
+                     + "' capability - add it to 'capabilities' and delete 'host'";
         return false;
     }
     if (!readStringArray(table, "capabilities", outManifest.capabilities, manifestPath, errorMessage)
@@ -233,6 +244,16 @@ bool ModManifestLoader::loadFromFile(
     {
         errorMessage = describeLocation(manifestPath) + " has type '" + outManifest.type
                      + "'; expected 'native' or 'script'";
+        return false;
+    }
+    if (outManifest.isScript()
+        && std::find(
+               outManifest.capabilities.begin(), outManifest.capabilities.end(), ScriptModHost::scriptingCapabilityName
+           ) == outManifest.capabilities.end())
+    {
+        errorMessage = describeLocation(manifestPath) + " is a script mod but does not require the '"
+                     + std::string(ScriptModHost::scriptingCapabilityName)
+                     + "' capability; add it to 'capabilities' so an active module can host the script";
         return false;
     }
     if (outManifest.engineApi != engineModInterfaceVersion)

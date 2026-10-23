@@ -1,7 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 // Ray traced glossy reflections against the exact analytic scene SDF
-// (technique "ray_reflections" of [lighting].techniques).
+// (the indirect_specular layer).
 //
 // One reflection ray per pixel where the surface can show one: the Fresnel
 // term at grazing incidence plus a roughness fade decide the weight. The ray

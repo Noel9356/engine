@@ -1,8 +1,6 @@
 # engine runtime configuration.
 #
-# Paths are resolved relative to the engine executable directory. Modules that
-# are compiled out of the build must not be listed under [engine].modules; the
-# startup report names any mismatch precisely.
+# Paths are resolved relative to the engine executable directory.
 #
 # This file is the second-highest configuration layer: shipped defaults (a
 # module's module.toml, a mod package's config.toml) only fill keys it leaves
@@ -17,8 +15,20 @@
 # installed content mod) or passes --scene (it wins over everything).
 
 [engine]
-modules = ["logging", "window", "input", "renderer", "pbr", "radiance_cascades", "ray_reflections", "screenshot",
-           "lua_scripting"]
+# Capability demand of the assembly (the composition root's frame loop and
+# whatever else the assembly consumes directly). Modules are NOT listed here:
+# there is no module list anymore. A module loads only when something requires
+# a capability it provides - a mod's manifest, or this demand list - and the
+# providers' own requirements pull their dependencies transitively (the
+# renderer, for example, brings window and logging with it). The script host
+# arrives through the content mod's "scripting" requirement. A capability
+# nothing requires stays dormant: its plugin is never instantiated.
+#
+# This assembly runs the full demo pipeline: camera input, frame rendering,
+# the scene light state, the direct PBR pass, the radiance-cascades GI, the
+# ray-traced reflections and key-triggered captures.
+required_capabilities = ["input", "renderer", "lighting", "direct_diffuse", "indirect_diffuse",
+                         "indirect_specular", "screenshot"]
 
 # Mod packages are discovered on disk, not listed here: every subdirectory of
 # mod_directory that contains a mod.toml is a mod. The content package
@@ -78,14 +88,19 @@ shader_directory = "shaders"
 exposure = 1.15
 tonemap = "aces"
 
-# Lighting technique selection: each entry is the name of one lighting
-# technique module (an algorithm, loaded as a module under [engine].modules).
-# The renderer records the listed techniques in order and composes their
-# radiance layers; an empty list renders fully unlit. Direct lighting and
-# global illumination each have many possible algorithms, so modules are
-# named after the algorithm they implement - not after a category.
+# Lighting composition. There is no technique list anymore: each lighting
+# technique module provides a radiance-layer capability (direct_diffuse,
+# indirect_diffuse, indirect_specular) and is activated exactly when that
+# capability is demanded - see [engine].required_capabilities above. The
+# layers the composite reads follow from what attached, in a fixed order:
+# direct + albedo * (1 - metallic) * diffuseGI + specular + emissive.
+#
+# max_roughness is the specular hand-off point shared by the direct pass and
+# the reflection pass (both read it, so the two sides of the hand-off can
+# never drift apart: below the threshold the analytic specular draws the sun,
+# above it the reflection ray does).
 [lighting]
-techniques = ["pbr", "radiance_cascades", "ray_reflections"]
+max_roughness = 0.5
 
 # Direct lighting technique settings (pbr module).
 [lighting.pbr]
@@ -118,14 +133,13 @@ shadow_steps = 24
 # One probe cell spans 8 pixels, so the radius must average ACROSS cells.
 spatial_filter = 10
 
-# Ray traced glossy reflections (ray_reflections module): one SDF reflection
-# ray per pixel where the Fresnel weight justifies one. Surfaces rougher than
-# max_roughness fade out (a single ray cannot carry a wide glossy lobe).
-# The pbr technique dims its analytic specular by the same Fresnel weight,
-# so the two layers split the specular energy instead of drawing the sun
-# twice (see pbr_lighting.comp reflectionWeight).
+# Ray traced glossy reflections: one SDF reflection ray per pixel where the
+# Fresnel weight justifies one. Surfaces rougher than the shared hand-off
+# point ([lighting].max_roughness above) fade out (a single ray cannot carry a
+# wide glossy lobe). The direct pass dims its analytic specular by the same
+# Fresnel weight, so the two layers split the specular energy instead of
+# drawing the sun twice (see pbr_lighting.comp reflectionWeight).
 [lighting.ray_reflections]
-max_roughness = 0.5
 max_distance = 40.0
 march_steps = 64
 

@@ -8,10 +8,12 @@
 namespace engine
 {
 
-// Maps capability contract names ("window", "logging", ...) to the single
-// provider instance selected during dependency resolution. When two components
-// require the same capability they both receive this one shared instance; the
-// registry is the mechanism that makes shared dependencies free of duplicates.
+// Maps capability contract names to the single provider instance selected
+// during dependency resolution. When two components require the same
+// capability they both receive this one shared instance; the registry is the
+// mechanism that makes shared dependencies free of duplicates. The kernel
+// never interprets the names: they are opaque keys between consumers and
+// providers.
 class CapabilityRegistry final
 {
 public:

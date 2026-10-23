@@ -1,6 +1,6 @@
 # lua_scripting module
 
-The script-mod host. This module embeds Lua 5.4 (via sol2) and implements the kernel's `ScriptModHost` contract (`kernel/include/engine/kernel/component_interface.hpp`): for every discovered script mod whose `host` field names this module, it creates an isolated Lua state, loads the package's entry file, and exposes a permission-checked `engine` bridge table. Script mods therefore need no build system, no compiler, and no C++ knowledge — a `mod.toml` plus a `.lua` file is a complete mod (`mods/README.md`).
+The script-mod host. This module embeds Lua 5.4 (via sol2) and implements the kernel's `ScriptModHost` contract (`kernel/include/engine/kernel/component_interface.hpp`): for every discovered script mod that requires the `scripting` capability this module provides, it creates an isolated Lua state, loads the package's entry file, and exposes a permission-checked `engine` bridge table. Script mods therefore need no build system, no compiler, and no C++ knowledge — a `mod.toml` plus a `.lua` file is a complete mod (`mods/README.md`). A mod never names its host: the kernel resolves the capability requirement to whichever active module provides it.
 
 ## The bridge
 
@@ -20,11 +20,11 @@ Isolation: each script runs in its own Lua state, so script mods cannot see each
 
 | Manifest field | Value |
 |---|---|
-| provided capabilities | (none — this module is a host, not a capability provider) |
+| provided capabilities | `scripting` (the script-host surface behind `ScriptModHost`) |
 | required capabilities | `logging`, `window` |
 | required permissions | `capability.logging`, `capability.window`, `capability.screenshot` |
 
-The kernel orders every script mod after its host module automatically, so a script can assume the modules its bridge calls into are started.
+The module activates on demand: a script mod's `"scripting"` requirement pulls it into the run (nothing else does — a run with no script mods never loads it). The kernel orders every script mod after its host automatically, so a script can assume the modules its bridge calls into are started.
 
 ## Configuration
 

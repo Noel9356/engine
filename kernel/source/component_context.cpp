@@ -6,19 +6,22 @@
 
 #include <algorithm>
 #include <string_view>
+#include <unordered_set>
 
 namespace engine
 {
 
 ComponentContext::ComponentContext(
-    EventBus                 &eventBus,
-    CapabilityRegistry       &capabilityRegistry,
-    PermissionSystem         &permissionSystem,
-    const ConfigurationStore &configuration,
-    std::string               componentName
+    EventBus                              &eventBus,
+    CapabilityRegistry                    &capabilityRegistry,
+    PermissionSystem                      &permissionSystem,
+    const ConfigurationStore              &configuration,
+    std::string                            componentName,
+    const std::unordered_set<std::string> *demandedCapabilities
 )
     : eventBus_(eventBus), capabilityRegistry_(capabilityRegistry), permissionSystem_(permissionSystem),
-      configuration_(configuration), componentName_(std::move(componentName))
+      configuration_(configuration), componentName_(std::move(componentName)),
+      demandedCapabilities_(demandedCapabilities)
 {
 }
 

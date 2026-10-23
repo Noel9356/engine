@@ -173,10 +173,12 @@ int main(
     }
 
     // Module availability is runtime, not compile time: the kernel scans
-    // <exe_dir>/modules for plugin binaries and registers one factory per
-    // plugin (engine/kernel/module_api.hpp). The composition root registers
-    // nothing here; a module listed in the configuration but missing from the
-    // modules directory produces the kernel's precise startup diagnostic.
+    // <exe_dir>/modules for plugin binaries and reads their static
+    // descriptors (engine/kernel/module_api.hpp). Nothing is registered
+    // here or anywhere else: a module is instantiated only when something in
+    // this run requires a capability it provides (a mod's manifest, or the
+    // assembly's [engine].required_capabilities), and a requirement no
+    // available module satisfies fails startup with a precise diagnostic.
 
     // Command line diagnostics override: enable recording before the kernel
     // loads its configuration (which applies [diagnostics] latency_report),
@@ -206,7 +208,14 @@ int main(
     if (!kernel.construct(report))
     {
         std::cerr << report;
+        std::cerr << kernel.startupWarnings();
         return 1;
+    }
+    // Mod trust advisories are part of the user-facing startup output: the
+    // engine blocks what it can enforce, and the user decides what to trust.
+    if (!kernel.startupWarnings().empty())
+    {
+        std::cout << kernel.startupWarnings();
     }
     kernel.start();
 

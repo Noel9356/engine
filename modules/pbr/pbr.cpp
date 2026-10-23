@@ -57,10 +57,10 @@ class PbrLightingPass final : public LightingTechniquePass
 public:
     struct ReflectionFoldSettings
     {
-        // True when the ray_reflections technique is attached alongside this
-        // pass: the analytic specular then hands over to the ray traced layer
-        // per pixel (see pbr_lighting.comp reflectionWeight), so the sun is
-        // not drawn twice on glossy surfaces.
+        // True when the reflection layer (indirect_specular) is active in
+        // this run alongside this pass: the analytic specular then hands over
+        // to the ray traced layer per pixel (see pbr_lighting.comp
+        // reflectionWeight), so the sun is not drawn twice on glossy surfaces.
         bool  enabled      = false;
         float maxRoughness = defaultReflectionMaxRoughness;
     };
@@ -297,20 +297,24 @@ private:
 
 PbrLightingModule::PbrLightingModule()
 {
-    componentManifest.name                 = "pbr";
-    componentManifest.kind                 = ComponentKind::Module;
-    componentManifest.providedCapabilities = {"lighting"};
+    componentManifest.name = "pbr";
+    componentManifest.kind = ComponentKind::Module;
+    // "lighting" is the scene light state (sun + point lights, seeded from
+    // the shared [scene] world content, mutable by mods through the contract).
+    // "direct_diffuse" is this technique's radiance layer: the run demands it
+    // when the direct pass should attach to the renderer.
+    componentManifest.providedCapabilities = {"lighting", "direct_diffuse"};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
     componentManifest.requiredPermissions  = {"capability.logging", "capability.renderer"};
     // The light state is seeded from the shared [scene] world content; the
-    // technique reads its own [lighting.pbr] settings plus the composition
-    // keys it shares with the renderer and the other techniques.
+    // technique reads its own [lighting.pbr] settings plus the shared
+    // specular hand-off key ([lighting].max_roughness) it splits the glossy
+    // energy with the reflection layer through.
     componentManifest.knownConfigKeys = {
         "lighting.pbr.shadows",
         "lighting.pbr.penumbra",
         "lighting.pbr.shadow_steps",
-        "lighting.techniques",
-        "lighting.ray_reflections.max_roughness",
+        "lighting.max_roughness",
         "scene.sun.direction",
         "scene.sun.color",
         "scene.sun.intensity",
@@ -391,22 +395,24 @@ void PbrLightingModule::construct(
         state->pointLights.push_back(light);
     }
 
-    // Selection: [lighting] techniques = ["pbr", ...]. A technique module that
-    // is loaded but not listed starts as an idle light provider; the renderer
-    // composes only the listed ones.
-    const std::vector<std::string> techniques = context.configurationStringArrayInSection("lighting", "techniques");
-    passAttached = std::find(techniques.begin(), techniques.end(), "pbr") != techniques.end();
+    // Attachment follows demand: the kernel activated this module because the
+    // run required one of its capabilities. The direct pass attaches only when
+    // the run demanded the direct_diffuse layer (a module activated just for
+    // the light state stays an idle provider). Asking about one's OWN
+    // capability is the one question the demand set answers.
+    passAttached = context.isCapabilityDemanded("direct_diffuse");
 
-    // Specular hand-off: when the ray_reflections technique is listed too,
-    // this pass dims its analytic specular by the same Fresnel weight the
-    // reflection pass uses, so the sun is not drawn twice on glossy pixels.
-    // The max roughness must match [lighting.ray_reflections] exactly.
+    // Specular hand-off: when the run also demands the indirect_specular
+    // layer, this pass dims its analytic specular by the same Fresnel weight
+    // the reflection pass uses, so the sun is not drawn twice on glossy
+    // pixels. Both layers read the shared [lighting].max_roughness key, so
+    // the two sides of the hand-off can never drift apart.
     PbrLightingPass::ReflectionFoldSettings reflectionFold;
-    if (std::find(techniques.begin(), techniques.end(), "ray_reflections") != techniques.end())
+    if (context.isCapabilityDemanded("indirect_specular"))
     {
         reflectionFold.enabled      = true;
         reflectionFold.maxRoughness = static_cast<float>(
-            context.configurationFloatingInSection("lighting", "ray_reflections.max_roughness").value_or(0.35)
+            context.configurationFloatingInSection("lighting", "max_roughness").value_or(0.35)
         );
     }
 
@@ -430,8 +436,8 @@ void PbrLightingModule::start()
     logger->logMessage(
         LogLevel::Information,
         std::string("pbr module started; technique ")
-            + (passAttached ? "attached (direct radiance)" : "not listed in [lighting].techniques; idle") + ", sun "
-            + (state->sunEnabled ? "on" : "off") + ", shadows " + (state->shadowsEnabled ? "on" : "off")
+            + (passAttached ? "attached (direct radiance)" : "direct_diffuse not demanded; idle (light state only)")
+            + ", sun " + (state->sunEnabled ? "on" : "off") + ", shadows " + (state->shadowsEnabled ? "on" : "off")
     );
 }
 

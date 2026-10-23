@@ -12,7 +12,12 @@ namespace engine
 // whose reported version differs: a rebuilt kernel combined with stale plugin
 // binaries from an older interface must fail with a precise diagnostic, never
 // crash inside a mismatched vtable.
-inline constexpr std::uint32_t engineModulePluginAbiVersion = 1u;
+//
+// Version 2 added the static capability declaration (providedCapabilities /
+// requiredCapabilities): the kernel resolves the capability demand closure
+// from this metadata BEFORE instantiating anything, so a module whose
+// capabilities nobody requires is never created and its binary is released.
+inline constexpr std::uint32_t engineModulePluginAbiVersion = 2u;
 
 // The descriptor every module plugin returns from its single exported entry
 // point. Plain data and plain function pointers: nothing that crosses the
@@ -22,12 +27,20 @@ struct EngineModulePluginEntry
 {
     // Must equal engineModulePluginAbiVersion at the time of loading.
     std::uint32_t abiVersion;
-    // The configuration name of the module ("window", "renderer"), exactly
-    // what the composition root used to pass to registerModuleFactory.
+    // The module's own name, exactly what the module's manifest reports.
     const char *moduleName;
     // Creates one module instance. The kernel owns the returned object and
     // releases it with delete: one process, one heap.
     ModuleInterface *(*createModule)();
+    // Static capability declaration, read before any instantiation. Each
+    // array holds plain string literals with static storage duration (or is
+    // null when the count is zero). The kernel verifies, after creating an
+    // instance, that the instance manifest agrees with this declaration: a
+    // mismatch is a precise startup problem, never silent drift.
+    const char *const *providedCapabilities;
+    std::uint32_t      providedCapabilityCount;
+    const char *const *requiredCapabilities;
+    std::uint32_t      requiredCapabilityCount;
 };
 
 } // namespace engine

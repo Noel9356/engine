@@ -22,6 +22,11 @@ const std::string &hostContextName()
     return name;
 }
 
+// A mod that acquires at least this many distinct capabilities is reported as
+// a broad-access advisory: the number is a structural signal only, the kernel
+// never interprets what the capabilities mean.
+constexpr std::size_t broadCapabilityWarningThreshold = 5;
+
 std::filesystem::path resolveAgainstExecutableDirectory(
     const std::filesystem::path &path
 )
@@ -68,6 +73,19 @@ std::vector<std::string> effectivePermissions(
     return std::vector<std::string>(unique.begin(), unique.end());
 }
 
+// Order-insensitive comparison of a manifest's capability declaration against
+// the static descriptor declaration. Used after instantiation: the descriptor
+// resolved the demand, the manifest must agree, and drift between them would
+// silently break both directions of the contract.
+bool sameStringSet(
+    const std::vector<std::string> &left, const std::vector<std::string> &right
+)
+{
+    const std::set<std::string> leftSet(left.begin(), left.end());
+    const std::set<std::string> rightSet(right.begin(), right.end());
+    return leftSet == rightSet;
+}
+
 } // namespace
 
 void EngineKernel::setConfigurationFile(
@@ -105,20 +123,6 @@ void EngineKernel::setModsDirectory(
     componentsGathered    = false;
 }
 
-void EngineKernel::registerModuleFactory(
-    const std::string &moduleName, ModuleFactory factory
-)
-{
-    moduleFactories[moduleName] = std::move(factory);
-}
-
-void EngineKernel::registerModFactory(
-    const std::string &modName, ModFactory factory
-)
-{
-    modFactories[modName] = std::move(factory);
-}
-
 EngineKernel::~EngineKernel()
 {
     // Guarantees that components are stopped and released even when a caller
@@ -130,7 +134,7 @@ std::unique_ptr<ComponentContext> EngineKernel::createHostContext()
 {
     permissionSystem_.grantAllPermissions(hostContextName());
     return std::make_unique<ComponentContext>(
-        bus, capabilityRegistry_, permissionSystem_, configurationStore, hostContextName()
+        bus, capabilityRegistry_, permissionSystem_, configurationStore, hostContextName(), nullptr
     );
 }
 
@@ -375,10 +379,11 @@ EngineKernel::ComponentRecord *EngineKernel::findRecord(
     return nullptr;
 }
 
-// Builds one record per component: module plugins from the modules directory,
-// in-process mod factories, shared library mods from the configuration, and
-// validates that every module listed in the configuration is actually
-// available in this run.
+// Builds one record per component. Modules are NOT registered anywhere: their
+// plugin binaries describe themselves statically, the demand closure decides
+// which of them this run actually needs, and only those are instantiated.
+// Mods are the demand roots of the run: every active package becomes a
+// component, and its requirements pull the providers it needs.
 bool EngineKernel::gatherComponents(
     std::string &report
 )
@@ -388,82 +393,26 @@ bool EngineKernel::gatherComponents(
         return true;
     }
 
-    // Runtime module plugins first: every plugin binary in the modules
-    // directory registers a factory, exactly like the compile-time
-    // registrations the composition root no longer makes. Load failures are
-    // reported and skipped; a configured module backed by no factory then
-    // reports below through the availability diagnostic.
+    // Read the module plugin inventory: one static descriptor per binary,
+    // no instances created (see loadModulePlugins).
     loadModulePlugins(report);
 
-    const std::vector<std::string> configuredModules = configurationStore.moduleNames();
-
-    std::vector<std::string> knownModuleNames;
-    knownModuleNames.reserve(moduleFactories.size());
-    for (const auto &entry : moduleFactories)
-    {
-        knownModuleNames.push_back(entry.first);
-    }
-
-    for (const std::string &moduleName : configuredModules)
-    {
-        const auto factory = moduleFactories.find(moduleName);
-        if (factory == moduleFactories.end())
-        {
-            continue; // reported below against the compiled module inventory
-        }
-        ComponentRecord record;
-        record.name           = moduleName;
-        record.manifest.kind  = ComponentKind::Module;
-        record.ownedModule    = factory->second();
-        record.moduleInstance = record.ownedModule.get();
-        if (record.ownedModule == nullptr)
-        {
-            report += "- module factory for '" + moduleName + "' returned no instance.\n";
-            return false;
-        }
-        record.manifest = record.moduleInstance->manifest();
-        if (record.manifest.name != moduleName)
-        {
-            report += "- module '" + moduleName + "' reports the manifest name '" + record.manifest.name
-                    + "'; the configuration name and the manifest name must match.\n";
-            return false;
-        }
-        records.push_back(std::move(record));
-    }
-
-    // Modules requested in the configuration but backed by no factory: the
-    // plugin binary is missing from the modules directory (or failed to load
-    // above), the module was compiled out through its build option, or the
-    // configuration name is wrong.
-    for (const std::string &moduleName : configuredModules)
-    {
-        const bool registered = moduleFactories.find(moduleName) != moduleFactories.end();
-        if (!registered)
-        {
-            report += "- module '" + moduleName
-                    + "' is listed in the configuration but is not available in this run (its plugin is missing "
-                      "from the modules directory, compiled out through its build option, or the name is wrong).\n";
-        }
-    }
-
-    // Mod packages discovered in the mods directory, one mod.toml per package.
+    // Mod packages discovered in the mods directory, one mod.toml per
+    // package. Mods are always active - they are the reason the run exists -
+    // and their required capabilities seed the demand closure.
     gatherModPackages(report);
 
-    // In-process mod factories (tests and statically linked mods).
-    for (const auto &entry : modFactories)
+    // Demand closure over opaque capability names: mods' requirements plus
+    // the assembly's [engine].required_capabilities, transitively closed
+    // through the providers' own requirements. Marks plugin descriptors
+    // active; nothing is instantiated yet.
+    computeDemandClosure();
+
+    // Instantiate only the plugins the closure marked active; verify each
+    // instance manifest against its static descriptor; release the rest.
+    if (!instantiateActiveModules(report))
     {
-        ComponentRecord record;
-        record.name          = entry.first;
-        record.manifest.kind = ComponentKind::SharedLibraryMod;
-        record.ownedMod      = entry.second();
-        record.modInstance   = record.ownedMod.get();
-        if (record.modInstance == nullptr)
-        {
-            report += "- mod factory for '" + entry.first + "' returned no instance.\n";
-            return false;
-        }
-        record.manifest = record.modInstance->manifest();
-        records.push_back(std::move(record));
+        return false;
     }
 
     componentsGathered = true;
@@ -473,7 +422,8 @@ bool EngineKernel::gatherComponents(
 // Turns the packages discovered on disk into component records. The
 // filesystem scan and the native library loading live in mod_discovery.cpp;
 // this phase owns the kernel policy: scene claims, shipped defaults, record
-// wiring for native and script mods.
+// wiring for native and script mods, and the structural risk advisories the
+// user sees before any mod code runs.
 void EngineKernel::gatherModPackages(
     std::string &report
 )
@@ -552,22 +502,16 @@ void EngineKernel::gatherModPackages(
             record.manifest.requiredPermissions  = modManifest.permissions;
             record.manifest.requiredComponents   = modManifest.requiresComponents;
             record.manifest.knownConfigKeys      = modManifest.configKeys;
+            appendModRiskWarning(modManifest, true);
             records.push_back(std::move(record));
         }
         else
         {
-            // Script mod: hosted by a module through the ScriptModHost
-            // contract. The record exists so the resolver and the permission
-            // system see the script's capabilities and permissions like any
-            // other component's.
-            const bool hostAvailable = moduleFactories.find(modManifest.host) != moduleFactories.end();
-            if (!hostAvailable)
-            {
-                report += "- script mod '" + modManifest.id + "' declares host '" + modManifest.host
-                        + "' which is not available in this build (compiled out through its build option, "
-                          "or the name is wrong).\n";
-                continue;
-            }
+            // Script mod: hosted by whichever active module provides the
+            // scripting capability (resolved in the construct phase). The
+            // record exists so the resolver and the permission system see
+            // the script's capabilities and permissions like any other
+            // component's.
             ComponentRecord record;
             record.name                          = modManifest.id;
             record.manifest.kind                 = ComponentKind::ScriptMod;
@@ -576,13 +520,444 @@ void EngineKernel::gatherModPackages(
             record.manifest.requiredPermissions  = modManifest.permissions;
             record.manifest.requiredComponents   = modManifest.requiresComponents;
             record.manifest.knownConfigKeys      = modManifest.configKeys;
-            record.manifest.requiredComponents.push_back(modManifest.host); // always ordered after its host
-            record.scriptHostName       = modManifest.host;
-            record.scriptMod.modId      = modManifest.id;
-            record.scriptMod.scriptPath = modManifest.directory / modManifest.entry;
+            record.scriptMod.modId               = modManifest.id;
+            record.scriptMod.scriptPath          = modManifest.directory / modManifest.entry;
+            appendModRiskWarning(modManifest, false);
             records.push_back(std::move(record));
         }
     }
+}
+
+// Capability demand closure over opaque names. Seeds: every active mod's
+// required capabilities plus the assembly's [engine].required_capabilities
+// (the composition root's demand, stated as data). Each demanded capability
+// activates the module plugins that provide it - all of them when the
+// configuration's [providers] selection does not name exactly one - and an
+// activated plugin's own requirements join the worklist. Capability names
+// are never interpreted: the kernel only matches strings between consumer
+// requirements and provider declarations.
+void EngineKernel::computeDemandClosure()
+{
+    demandedCapabilities.clear();
+    for (ModulePluginRecord &plugin : modulePlugins)
+    {
+        plugin.active = false;
+    }
+
+    const std::vector<DependencyResolver::ProviderSelection> selections = configurationStore.providerSelections();
+
+    std::vector<std::string> worklist;
+    for (const ComponentRecord &record : records)
+    {
+        // At this point records holds exactly the active mods: the demand
+        // roots of the run.
+        for (const std::string &capabilityName : record.manifest.requiredCapabilities)
+        {
+            worklist.push_back(capabilityName);
+        }
+    }
+    for (const std::string &capabilityName : configurationStore.requiredCapabilities())
+    {
+        worklist.push_back(capabilityName);
+    }
+
+    while (!worklist.empty())
+    {
+        const std::string capabilityName = std::move(worklist.back());
+        worklist.pop_back();
+        if (demandedCapabilities.find(capabilityName) != demandedCapabilities.end())
+        {
+            continue;
+        }
+        demandedCapabilities.insert(capabilityName);
+
+        // Providers of this capability among the descriptors and the mod
+        // records. The [providers] selection narrows the choice when it
+        // names one of them; otherwise every provider activates and the
+        // resolver reports the ambiguity (or the selection naming an
+        // implementation that does not exist).
+        std::vector<std::string> providerNames;
+        for (ModulePluginRecord &plugin : modulePlugins)
+        {
+            if (std::find(plugin.providedCapabilities.begin(), plugin.providedCapabilities.end(), capabilityName)
+                != plugin.providedCapabilities.end())
+            {
+                providerNames.push_back(plugin.name);
+            }
+        }
+        for (const ComponentRecord &record : records)
+        {
+            if (std::find(
+                    record.manifest.providedCapabilities.begin(),
+                    record.manifest.providedCapabilities.end(),
+                    capabilityName
+                )
+                != record.manifest.providedCapabilities.end())
+            {
+                providerNames.push_back(record.name);
+            }
+        }
+        if (providerNames.size() > 1)
+        {
+            const auto selection = std::find_if(
+                selections.begin(),
+                selections.end(),
+                [&capabilityName](const DependencyResolver::ProviderSelection &candidate)
+                { return candidate.capabilityName == capabilityName; }
+            );
+            if (selection != selections.end())
+            {
+                const bool selectionMatches = std::find(
+                                                  providerNames.begin(), providerNames.end(), selection->providerName
+                                              )
+                                           != providerNames.end();
+                if (selectionMatches)
+                {
+                    providerNames.assign(1, selection->providerName);
+                }
+                // A selection that matches nothing stays unapplied: every
+                // candidate activates and the resolver reports the stale
+                // selection with its precise diagnostic.
+            }
+        }
+
+        for (const std::string &providerName : providerNames)
+        {
+            for (ModulePluginRecord &plugin : modulePlugins)
+            {
+                if (plugin.name != providerName || plugin.active)
+                {
+                    continue;
+                }
+                plugin.active = true;
+                for (const std::string &requiredName : plugin.requiredCapabilities)
+                {
+                    worklist.push_back(requiredName);
+                }
+            }
+        }
+    }
+}
+
+// Runtime module discovery: the plugin seam of the kernel.
+//
+// Every shared library in the modules directory declares itself through one
+// exported entry point (engine/kernel/module_api.hpp): its name, its factory
+// and its static capability declaration. Reading a descriptor is uniform -
+// dlopen, resolve, version check, copy the declaration - and creating an
+// instance is a separate decision the demand closure owns. The composition
+// root registers nothing and the kernel registers nothing: the set of
+// available modules comes from the runtime layout, and the set of ACTIVE
+// modules comes from what this run actually requires.
+void EngineKernel::loadModulePlugins(
+    std::string &report
+)
+{
+    // Fresh scan every gather: release the libraries of a previous scan so a
+    // re-gather never accumulates stale handles.
+    modulePlugins.clear();
+
+    std::filesystem::path       modulesDirectory  = configurationStore.modulesDirectory();
+    const std::filesystem::path resolvedDirectory = modulesDirectory.is_absolute()
+                                                      ? modulesDirectory
+                                                      : executableDirectory() / modulesDirectory;
+
+    std::error_code                     scanError;
+    std::filesystem::directory_iterator plugin{
+        resolvedDirectory, std::filesystem::directory_options::skip_permission_denied, scanError
+    };
+    if (scanError)
+    {
+        report += "- module plugins directory '" + resolvedDirectory.string()
+                + "' cannot be scanned: " + scanError.message() + "\n";
+        return;
+    }
+
+    std::vector<std::filesystem::path> pluginPaths;
+    for (const std::filesystem::directory_entry &entry : plugin)
+    {
+        std::error_code statError;
+        if (statError || !entry.is_regular_file())
+        {
+            continue;
+        }
+        const std::filesystem::path libraryPath = entry.path();
+        const std::string           extension   = libraryPath.extension().string();
+        // Both shared library extensions are accepted on every platform: the
+        // modules directory is a deployment layout, and a plugin tree
+        // assembled for one platform must not silently look empty when
+        // inspected from the other.
+        if (extension == ".dll" || extension == ".so")
+        {
+            pluginPaths.push_back(libraryPath);
+        }
+    }
+    // Sorted scan order: startup behavior and reports never depend on
+    // filesystem iteration order.
+    std::sort(pluginPaths.begin(), pluginPaths.end());
+
+    for (const std::filesystem::path &libraryPath : pluginPaths)
+    {
+        auto        library = std::make_unique<DynamicLibrary>();
+        std::string loadError;
+        if (!library->load(libraryPath, loadError))
+        {
+            report += "- " + loadError + "\n";
+            continue;
+        }
+
+        const auto query = reinterpret_cast<const EngineModulePluginEntry *(*)()>(
+            library->resolveSymbol("engineQueryModulePlugin")
+        );
+        if (query == nullptr)
+        {
+            report += "- '" + libraryPath.string()
+                    + "' exports no engineQueryModulePlugin entry point; not a module plugin.\n";
+            continue;
+        }
+
+        const EngineModulePluginEntry *pluginEntry = query();
+        if (pluginEntry == nullptr || pluginEntry->abiVersion != engineModulePluginAbiVersion)
+        {
+            report += "- '" + libraryPath.string()
+                    + "' was built against a different module plugin ABI (expected version "
+                    + std::to_string(engineModulePluginAbiVersion) + "); rebuild the plugin with this kernel.\n";
+            continue;
+        }
+        if (pluginEntry->moduleName == nullptr || pluginEntry->createModule == nullptr)
+        {
+            report += "- '" + libraryPath.string() + "' returns an incomplete plugin descriptor.\n";
+            continue;
+        }
+
+        ModulePluginRecord record;
+        record.name         = pluginEntry->moduleName;
+        record.createModule = pluginEntry->createModule;
+        for (std::uint32_t index = 0; index < pluginEntry->providedCapabilityCount; ++index)
+        {
+            if (pluginEntry->providedCapabilities != nullptr && pluginEntry->providedCapabilities[index] != nullptr)
+            {
+                record.providedCapabilities.emplace_back(pluginEntry->providedCapabilities[index]);
+            }
+        }
+        for (std::uint32_t index = 0; index < pluginEntry->requiredCapabilityCount; ++index)
+        {
+            if (pluginEntry->requiredCapabilities != nullptr && pluginEntry->requiredCapabilities[index] != nullptr)
+            {
+                record.requiredCapabilities.emplace_back(pluginEntry->requiredCapabilities[index]);
+            }
+        }
+
+        if (std::find_if(
+                modulePlugins.begin(),
+                modulePlugins.end(),
+                [&record](const ModulePluginRecord &existing) { return existing.name == record.name; }
+            )
+            != modulePlugins.end())
+        {
+            report += "- module '" + record.name + "' is provided by more than one plugin binary; '"
+                    + libraryPath.string() + "' is ignored.\n";
+            continue;
+        }
+
+        record.library = std::move(library);
+        modulePlugins.push_back(std::move(record));
+    }
+}
+
+// Instantiates exactly the plugins the demand closure marked active. The
+// instance manifest must agree with the static descriptor (name, provided,
+// required): the descriptor decided the demand, so drift would silently
+// change what the run computed. Plugins nobody required are released here -
+// their binaries are unloaded and they never exist as components.
+bool EngineKernel::instantiateActiveModules(
+    std::string &report
+)
+{
+    bool successful = true;
+    for (const ModulePluginRecord &plugin : modulePlugins)
+    {
+        if (!plugin.active)
+        {
+            continue;
+        }
+        ComponentRecord record;
+        record.name          = plugin.name;
+        record.manifest.kind = ComponentKind::Module;
+        record.ownedModule.reset(plugin.createModule());
+        record.moduleInstance = record.ownedModule.get();
+        if (record.ownedModule == nullptr)
+        {
+            report += "- module factory for '" + plugin.name + "' returned no instance.\n";
+            successful = false;
+            continue;
+        }
+        record.manifest = record.moduleInstance->manifest();
+        if (record.manifest.name != plugin.name)
+        {
+            report += "- module '" + plugin.name + "' reports the manifest name '" + record.manifest.name
+                    + "'; the descriptor name and the manifest name must match.\n";
+            successful = false;
+            continue;
+        }
+        if (!sameStringSet(record.manifest.providedCapabilities, plugin.providedCapabilities))
+        {
+            report += "- module '" + plugin.name
+                    + "' declares different provided capabilities in its manifest than in its plugin descriptor; "
+                      "rebuild the plugin with this kernel.\n";
+            successful = false;
+            continue;
+        }
+        if (!sameStringSet(record.manifest.requiredCapabilities, plugin.requiredCapabilities))
+        {
+            report += "- module '" + plugin.name
+                    + "' declares different required capabilities in its manifest than in its plugin descriptor; "
+                      "rebuild the plugin with this kernel.\n";
+            successful = false;
+            continue;
+        }
+        records.push_back(std::move(record));
+    }
+
+    // Release the descriptors nobody required: their binaries unload now,
+    // before any construct phase. A module that never becomes a component
+    // never touches a backend.
+    for (ModulePluginRecord &plugin : modulePlugins)
+    {
+        if (!plugin.active && plugin.library)
+        {
+            plugin.library->release();
+        }
+    }
+    return successful;
+}
+
+// Structural risk advisory for one active mod. The signals are generic (they
+// never name or interpret a capability): running native machine code,
+// requesting permissions outside the capability.* namespace (direct
+// environment access such as writing files) and acquiring a broad set of
+// capabilities. The engine blocks what it can enforce; the user decides
+// whether to trust what it cannot.
+void EngineKernel::appendModRiskWarning(
+    const ModManifest &modManifest, bool isNativeMod
+)
+{
+    std::vector<std::string> reasons;
+    if (isNativeMod)
+    {
+        reasons.emplace_back("it runs native machine code");
+    }
+    std::vector<std::string> environmentPermissions;
+    for (const std::string &permission : modManifest.permissions)
+    {
+        if (permission.rfind(capabilityPermissionPrefix, 0) != 0)
+        {
+            environmentPermissions.push_back(permission);
+        }
+    }
+    if (!environmentPermissions.empty())
+    {
+        std::string joined;
+        for (const std::string &permission : environmentPermissions)
+        {
+            if (!joined.empty())
+            {
+                joined += ", ";
+            }
+            joined += "'" + permission + "'";
+        }
+        reasons.push_back("it requests permissions outside the engine's capability system: " + joined);
+    }
+    if (modManifest.capabilities.size() >= broadCapabilityWarningThreshold)
+    {
+        reasons.push_back(
+            "it acquires a broad set of " + std::to_string(modManifest.capabilities.size()) + " capabilities"
+        );
+    }
+    if (reasons.empty())
+    {
+        return;
+    }
+    std::string joined;
+    for (const std::string &reason : reasons)
+    {
+        if (!joined.empty())
+        {
+            joined += "; ";
+        }
+        joined += reason;
+    }
+    startupWarnings_ += "warning: mod '" + modManifest.id + "' requests elevated trust: " + joined
+                      + ". Review this mod before trusting it with sensitive data.\n";
+}
+
+// Resolves the hosting module of one script mod: the active component that
+// provides the scripting capability, honoring the configuration's [providers]
+// selection when several implementations are active. The kernel never names
+// the host: the script package required the capability, the graph picked the
+// provider.
+EngineKernel::ComponentRecord *EngineKernel::resolveScriptHost(
+    const ComponentRecord &scriptRecord, std::string &report
+)
+{
+    const std::string              capabilityName = ScriptModHost::scriptingCapabilityName;
+    std::vector<ComponentRecord *> candidates;
+    for (ComponentRecord &record : records)
+    {
+        // Script hosting is a module surface: mod instances are consumers by
+        // contract shape (ModInterface has no ScriptModHost hook).
+        if (record.manifest.kind != ComponentKind::Module || !record.constructed)
+        {
+            continue;
+        }
+        if (std::find(
+                record.manifest.providedCapabilities.begin(), record.manifest.providedCapabilities.end(), capabilityName
+            )
+            != record.manifest.providedCapabilities.end())
+        {
+            candidates.push_back(&record);
+        }
+    }
+    if (candidates.empty())
+    {
+        report += "- script mod '" + scriptRecord.name + "' cannot be hosted: no active module provides the '"
+                + capabilityName + "' capability it requires.\n";
+        return nullptr;
+    }
+    if (candidates.size() > 1)
+    {
+        const std::vector<DependencyResolver::ProviderSelection> selections = configurationStore.providerSelections();
+        const auto                                               selection  = std::find_if(
+            selections.begin(),
+            selections.end(),
+            [&capabilityName](const DependencyResolver::ProviderSelection &candidate)
+            { return candidate.capabilityName == capabilityName; }
+        );
+        if (selection != selections.end())
+        {
+            for (ComponentRecord *candidate : candidates)
+            {
+                if (candidate->name == selection->providerName)
+                {
+                    return candidate;
+                }
+            }
+        }
+        std::string names;
+        for (const ComponentRecord *candidate : candidates)
+        {
+            if (!names.empty())
+            {
+                names += ", ";
+            }
+            names += "'" + candidate->name + "'";
+        }
+        report += "- script mod '" + scriptRecord.name + "' cannot be hosted: " + std::to_string(candidates.size())
+                + " active modules provide the '" + capabilityName + "' capability (" + names
+                + "); select one under [providers].\n";
+        return nullptr;
+    }
+    return candidates.front();
 }
 
 DependencyResolver::ResolutionResult EngineKernel::resolveGraph(
@@ -653,15 +1028,15 @@ bool EngineKernel::validate(
 
     if (!report.empty())
     {
-        // Non fatal diagnostics accumulated: modules requested in the
-        // configuration but compiled out of this build, denied permissions,
-        // malformed key declarations.
+        // Non fatal diagnostics accumulated: denied permissions, malformed
+        // key declarations.
         return false;
     }
 
     // Warnings never fail validation and never fail a run: they are appended
     // after the failure check so a warning stays a warning.
     report += deferredConfigurationWarnings;
+    report += startupWarnings_;
 
     std::string                                resolutionReport;
     const DependencyResolver::ResolutionResult resolution = resolveGraph(componentManifests(), resolutionReport);
@@ -699,21 +1074,28 @@ bool EngineKernel::runConstructPhase(
 
         // Script mods have no instance of their own: the record is a proxy in
         // the dependency graph, and the actual script runtime lives in the
-        // hosting module. The resolver guarantees the host constructed first.
+        // module that provides the scripting capability. The resolver
+        // guarantees that provider constructed first (the script's
+        // requirement is a graph edge).
         if (record->manifest.kind == ComponentKind::ScriptMod)
         {
-            ComponentRecord *hostRecord = findRecord(record->scriptHostName);
-            if (hostRecord == nullptr || !hostRecord->constructed)
+            ComponentRecord *hostRecord = resolveScriptHost(*record, report);
+            if (hostRecord == nullptr)
             {
-                report += "- script mod '" + record->name + "' cannot be hosted: module '" + record->scriptHostName
+                return false;
+            }
+            if (!hostRecord->constructed)
+            {
+                report += "- script mod '" + record->name + "' cannot be hosted: module '" + hostRecord->name
                         + "' did not construct.\n";
                 return false;
             }
             ScriptModHost *scriptHost = hostRecord->moduleInstance->scriptModHost();
             if (scriptHost == nullptr)
             {
-                report += "- script mod '" + record->name + "' declares host '" + record->scriptHostName
-                        + "' which does not host script mods.\n";
+                report += "- script mod '" + record->name + "' cannot be hosted: module '" + hostRecord->name
+                        + "' provides the '" + std::string(ScriptModHost::scriptingCapabilityName)
+                        + "' capability but does not host script mods.\n";
                 return false;
             }
             try
@@ -733,7 +1115,7 @@ bool EngineKernel::runConstructPhase(
         // lifetime (event publishing from frame loops or input callbacks), so
         // it must not live in this loop's stack frame.
         record->context = std::make_unique<ComponentContext>(
-            bus, capabilityRegistry_, permissionSystem_, configurationStore, record->name
+            bus, capabilityRegistry_, permissionSystem_, configurationStore, record->name, &demandedCapabilities
         );
         ComponentContext &context = *record->context;
         try

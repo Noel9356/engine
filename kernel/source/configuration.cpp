@@ -599,7 +599,7 @@ void ConfigurationStore::declareAssemblyKnownKeys()
     // dynamic, the whole section is declared. [permissions] and
     // [diagnostics]: read by the kernel. [leak_test]: read by the host frame
     // loop (--leak-check).
-    declareKnownConfigKey("engine.modules");
+    declareKnownConfigKey("engine.required_capabilities");
     declareKnownConfigKey("engine.mod_directory");
     declareKnownConfigKey("engine.modules_directory");
     declareKnownConfigKey("engine.disabled_mods");
@@ -642,8 +642,9 @@ std::vector<std::string> ConfigurationStore::unknownKeyWarnings() const
             section,
             [&](const std::string &leafPath)
             {
-                // The walk yields full paths ("engine.modules"); the registry
-                // stores section-relative paths ("modules").
+                // The walk yields full paths ("engine.required_capabilities");
+                // the registry stores section-relative paths
+                // ("required_capabilities").
                 const std::string relativePath = leafPath.size() > section.size() ? leafPath.substr(section.size() + 1)
                                                                                   : leafPath;
                 if (sectionDeclared && knownSection->second.count(relativePath) > 0)
@@ -691,23 +692,27 @@ bool ConfigurationStore::hasSection(
     return sectionTable(sectionName) != nullptr;
 }
 
-std::vector<std::string> ConfigurationStore::moduleNames() const
+std::vector<std::string> ConfigurationStore::requiredCapabilities() const
 {
-    std::vector<std::string> names;
+    // The assembly's own capability demand (data, not code): every name here
+    // pulls its providers into the active set exactly like a mod's
+    // requirements do. The kernel never interprets the names.
+    std::vector<std::string> capabilities;
     if (parsedTable == nullptr)
     {
-        return names;
+        return capabilities;
     }
     const toml::table *engineTable = parsedTable->get_as<toml::table>(engineSectionName);
     if (engineTable == nullptr)
     {
-        return names;
+        return capabilities;
     }
-    if (const toml::array *moduleArray = engineTable->get_as<toml::array>("modules"))
+    if (const toml::array *capabilityArray = engineTable->get_as<toml::array>("required_capabilities"))
     {
-        moduleArray->for_each([&names](const toml::value<std::string> &element) { names.push_back(element.get()); });
+        capabilityArray->for_each([&capabilities](const toml::value<std::string> &element)
+            { capabilities.push_back(element.get()); });
     }
-    return names;
+    return capabilities;
 }
 
 std::string ConfigurationStore::modDirectory() const

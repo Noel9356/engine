@@ -13,7 +13,6 @@ add_library(engine_kernel SHARED
     source/input_contract_names.cpp
     source/mod_discovery.cpp
     source/mod_manifest.cpp
-    source/module_plugins.cpp
 )
 
 # The kernel is the one shared library every module plugin binds to: one

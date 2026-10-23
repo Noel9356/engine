@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace engine
@@ -36,15 +37,17 @@ struct EngineShutdownStartedEvent
 // permission system, the capability registry and the event bus, and drives the
 // construct / start / stop lifecycle in dependency order.
 //
-// The kernel deliberately knows nothing about windows, rendering or scripting:
-// those are capability providers registered from outside. Startup problems are
-// collected into one precise report instead of failing with the first error.
+// The kernel deliberately knows nothing about windows, rendering or scripting,
+// and it does not know any module by name: modules and mods are anonymous
+// capability providers and consumers that declare themselves through static
+// descriptors and manifests. The kernel never registers a module or a service;
+// it only mediates: it resolves who requires which capability, orders the
+// construct phases, connects acquisitions to providers and enforces
+// permissions. Startup problems are collected into one precise report instead
+// of failing with the first error.
 class EngineKernel final
 {
 public:
-    using ModuleFactory = std::function<std::unique_ptr<ModuleInterface>()>;
-    using ModFactory    = std::function<std::unique_ptr<ModInterface>()>;
-
     EngineKernel() = default;
     ~EngineKernel();
 
@@ -73,14 +76,6 @@ public:
     // Default: "mods". The configuration key [engine].mod_directory overrides
     // this default; an explicit call here overrides both.
     void setModsDirectory(const std::filesystem::path &modsDirectory);
-
-    // Registers a factory for one compiled module. The name must match the
-    // module name used in the configuration.
-    void registerModuleFactory(const std::string &moduleName, ModuleFactory factory);
-
-    // Registers an in-process mod factory (used by tests and by statically
-    // linked mods). Shared library mods come from the configuration instead.
-    void registerModFactory(const std::string &modName, ModFactory factory);
 
     // Dry run: loads the configuration, builds every manifest, resolves the
     // graph and checks permissions. On failure the report contains one line per
@@ -119,11 +114,36 @@ public:
         return configurationStore;
     }
 
+    // Warnings that do not fail a run (dangerous-mod advisories and similar
+    // policy notices). validate() appends them to its report; a normal run
+    // prints them through this accessor so the user always sees them.
+    const std::string &startupWarnings() const
+    {
+        return startupWarnings_;
+    }
+
     // Trusted context for the composition root (the frame loop). The host may
     // acquire every available capability.
     std::unique_ptr<ComponentContext> createHostContext();
 
 private:
+    // One module plugin binary found in the modules directory, described by
+    // its own static descriptor (engine/kernel/module_api.hpp). The kernel
+    // holds the descriptor WITHOUT creating an instance: only plugins whose
+    // provided capabilities the demand closure requires are ever instantiated.
+    // The library stays loaded for active plugins so their function pointers
+    // and static data stay valid; the kernel releases the libraries of
+    // non-required plugins immediately after the closure is computed.
+    struct ModulePluginRecord
+    {
+        std::string name;
+        ModuleInterface *(*createModule)() = nullptr;
+        std::vector<std::string>        providedCapabilities;
+        std::vector<std::string>        requiredCapabilities;
+        std::unique_ptr<DynamicLibrary> library;
+        bool                            active = false;
+    };
+
     struct ComponentRecord
     {
         // Declaration order is destruction order reversed: the library is
@@ -153,6 +173,8 @@ private:
     };
 
     bool loadConfiguration(std::string &report);
+    // Scans config/modules/<name>/module.toml shipped defaults; the lowest
+    // configuration layer (defaults fill gaps, they never override).
     bool loadModuleDefaults(std::string &report);
     // The front-door sequence validate and construct share: load the layered
     // configuration, build the component records, resolve the world source.
@@ -171,18 +193,45 @@ private:
     bool finishConfiguration(std::string &report);
     bool gatherComponents(std::string &report);
     void gatherModPackages(std::string &report);
-    // Runtime module loading: scans the modules directory and registers one
-    // factory per plugin binary (engine/kernel/module_api.hpp). Runs inside
-    // gatherComponents, before the configured modules resolve against the
-    // factory inventory.
+    // Capability demand: seeds the worklist with every mod's required
+    // capabilities plus the assembly's [engine].required_capabilities, then
+    // activates the module plugins that provide them - transitively, because
+    // an activated plugin's own requirements demand further providers. Runs
+    // after the mods are gathered and before any module is instantiated; a
+    // plugin whose capabilities nobody requires is never instantiated and its
+    // binary is released.
+    void computeDemandClosure();
+    // Runtime module discovery: scans the modules directory and reads one
+    // static descriptor per plugin binary (engine/kernel/module_api.hpp).
+    // No instance is created here. Runs inside gatherComponents, before the
+    // demand closure decides which descriptors become components.
     void loadModulePlugins(std::string &report);
-    DependencyResolver::ResolutionResult
-         resolveGraph(const std::vector<ComponentManifest> &manifests, std::string &report) const;
+    // Instantiates exactly the plugins the demand closure marked active,
+    // verifies each instance manifest against its static descriptor and
+    // turns it into a component record. Returns false (with diagnostics in
+    // the report) when a factory fails or a manifest drifts from the
+    // descriptor.
+    bool instantiateActiveModules(std::string &report);
+    // The construct phase both construct() and startup recovery share: walks
+    // the resolved order, hosts script mods through their resolved provider
+    // and registers every component's provided capabilities as they appear.
     bool runConstructPhase(
         const DependencyResolver::ResolutionResult &resolution,
         const std::vector<ComponentManifest>       &manifests,
         std::string                                &report
     );
+    // Resolves the hosting module of one script mod: the active component
+    // that provides the "scripting" capability, honoring the configuration's
+    // [providers] selection when several implementations are active.
+    // Returns nullptr (with a diagnostic in the report) when no provider or
+    // an ambiguous provider set remains.
+    ComponentRecord *resolveScriptHost(const ComponentRecord &scriptRecord, std::string &report);
+    // Structural risk advisories for one active mod: native machine code,
+    // environment permissions (anything outside the capability.* namespace)
+    // and broad capability access. Appends one warning line per mod.
+    void appendModRiskWarning(const ModManifest &modManifest, bool isNativeMod);
+    DependencyResolver::ResolutionResult
+         resolveGraph(const std::vector<ComponentManifest> &manifests, std::string &report) const;
     void appendDiagnosticsReport(
         const std::vector<DependencyResolver::ResolutionDiagnostic> &diagnostics, std::string &report
     ) const;
@@ -210,20 +259,22 @@ private:
     // key warnings): printed after the failure check so a warning stays a
     // warning.
     std::string        deferredConfigurationWarnings;
+    std::string        startupWarnings_;
     ConfigurationStore configurationStore;
     EventBus           bus;
     CapabilityRegistry capabilityRegistry_;
     PermissionSystem   permissionSystem_;
 
-    std::unordered_map<std::string, ModuleFactory> moduleFactories;
-    std::unordered_map<std::string, ModFactory>    modFactories;
+    // The plugin descriptors found in the modules directory. Declared before
+    // records so reverse destruction releases every component instance first
+    // and unloads the plugin libraries last (a factory's function pointer
+    // into a plugin must outlive the instances the factory created).
+    std::vector<ModulePluginRecord> modulePlugins;
 
-    // The module plugin binaries backing the factories registered by
-    // loadModulePlugins. Declared before records so reverse destruction
-    // releases every component instance first and unloads the libraries last
-    // (a factory's function pointer into a plugin must outlive the instances
-    // the factory created).
-    std::vector<std::unique_ptr<DynamicLibrary>> modulePluginLibraries;
+    // Every capability the demand closure found a consumer for. ComponentContext
+    // exposes it to modules ("was my layer capability demanded?"); it carries
+    // no meaning the kernel would interpret.
+    std::unordered_set<std::string> demandedCapabilities;
 
     std::vector<ComponentRecord> records;
     bool                         configurationLoaded = false;

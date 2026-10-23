@@ -1,9 +1,9 @@
 #ifndef ENGINE_KERNEL_PERMISSION_SYSTEM_HPP
 #define ENGINE_KERNEL_PERMISSION_SYSTEM_HPP
 
-#include <map>
-#include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace engine
@@ -24,6 +24,10 @@ inline constexpr const char *capabilityPermissionPrefix = "capability.";
 // the runtime configuration does not deny it - a denial wins over every
 // grant. Modules are not exempt: the rule is uniform, which keeps the
 // startup report honest about who may touch what.
+//
+// Containers are unordered on purpose: isGranted sits on the capability
+// acquisition path, which components call during construct and (for lazy
+// acquisitions) at frame time; the checks must stay constant-cost hashes.
 class PermissionSystem final
 {
 public:
@@ -33,7 +37,7 @@ public:
         const std::string &componentName, const std::vector<std::string> &permissions
     )
     {
-        std::set<std::string> &permissionSet = declaredPermissions[componentName];
+        std::unordered_set<std::string> &permissionSet = declaredPermissions[componentName];
         permissionSet.insert(permissions.begin(), permissions.end());
     }
 
@@ -52,14 +56,16 @@ public:
         const std::string &componentName, const std::string &permission
     )
     {
-        deniedPermissions.emplace(componentName, permission);
+        deniedPermissions[componentName].insert(permission);
     }
 
     bool isGranted(
         const std::string &componentName, const std::string &permission
     ) const
     {
-        if (deniedPermissions.find(std::make_pair(componentName, permission)) != deniedPermissions.end())
+        const auto deniedComponent = deniedPermissions.find(componentName);
+        if (deniedComponent != deniedPermissions.end()
+            && deniedComponent->second.find(permission) != deniedComponent->second.end())
         {
             return false;
         }
@@ -93,9 +99,9 @@ public:
     }
 
 private:
-    std::map<std::string, std::set<std::string>>  declaredPermissions;
-    std::set<std::pair<std::string, std::string>> deniedPermissions;
-    std::set<std::string>                         trustedComponents;
+    std::unordered_map<std::string, std::unordered_set<std::string>> declaredPermissions;
+    std::unordered_map<std::string, std::unordered_set<std::string>> deniedPermissions;
+    std::unordered_set<std::string>                                  trustedComponents;
 };
 
 } // namespace engine
