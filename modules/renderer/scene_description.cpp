@@ -12,7 +12,9 @@ namespace engine
 namespace
 {
 
-bool parseVec3(ComponentContext& context, const std::string& path, std::array<float, 3>& out)
+bool parseVec3(
+    ComponentContext &context, const std::string &path, std::array<float, 3> &out
+)
 {
     const std::vector<double> values = context.configurationFloatingArrayInSection("scene", path);
     if (values.size() != 3)
@@ -28,7 +30,9 @@ bool parseVec3(ComponentContext& context, const std::string& path, std::array<fl
 
 } // namespace
 
-bool SceneDescription::parseFromConfiguration(ComponentContext& context, SceneDescription& scene, std::string& error)
+bool SceneDescription::parseFromConfiguration(
+    ComponentContext &context, SceneDescription &scene, std::string &error
+)
 {
     scene = SceneDescription{};
 
@@ -43,10 +47,10 @@ bool SceneDescription::parseFromConfiguration(ComponentContext& context, SceneDe
 
     // [scene.sky] gradient: unspecified components default to the flat
     // sky_radiance value, so legacy configurations render exactly as before.
-    const auto parseSkyColor = [&context](const char* path, std::array<float, 3>& target,
-                                          const std::array<float, 3>& fallback)
+    const auto parseSkyColor =
+        [&context](const char *path, std::array<float, 3> &target, const std::array<float, 3> &fallback)
     {
-        std::array<float, 3> value = fallback;
+        std::array<float, 3>      value      = fallback;
         const std::vector<double> configured = context.configurationFloatingArrayInSection("scene", path);
         if (configured.size() == 3)
         {
@@ -60,9 +64,10 @@ bool SceneDescription::parseFromConfiguration(ComponentContext& context, SceneDe
     parseSkyColor("sky.zenith", scene.sky.zenith, scene.skyRadiance);
     parseSkyColor("sky.horizon", scene.sky.horizon, scene.skyRadiance);
     parseSkyColor("sky.ground", scene.sky.ground, scene.skyRadiance);
-    scene.sky.sunDisk = context.configurationBooleanInSection("scene", "sky.sun_disk").value_or(true);
+    scene.sky.sunDisk            = context.configurationBooleanInSection("scene", "sky.sun_disk").value_or(true);
     scene.sky.sunDiskSizeDegrees = static_cast<float>(
-        context.configurationFloatingInSection("scene", "sky.sun_disk_size_degrees").value_or(0.6));
+        context.configurationFloatingInSection("scene", "sky.sun_disk_size_degrees").value_or(0.6)
+    );
     if (scene.sky.sunDiskSizeDegrees <= 0.0f || scene.sky.sunDiskSizeDegrees > 10.0f)
     {
         error = "scene sky sun_disk_size_degrees must be within (0, 10]";
@@ -114,15 +119,15 @@ bool SceneDescription::parseFromConfiguration(ComponentContext& context, SceneDe
     const std::size_t objectCount = context.configurationArraySizeInSection("scene", "objects");
     if (objectCount > maxSceneObjects)
     {
-        error = "scene configuration holds " + std::to_string(objectCount) + " objects; the limit is " +
-                std::to_string(maxSceneObjects) + " (analytic SDF tracing cost is linear in the object count)";
+        error = "scene configuration holds " + std::to_string(objectCount) + " objects; the limit is "
+              + std::to_string(maxSceneObjects) + " (analytic SDF tracing cost is linear in the object count)";
         return false;
     }
     scene.objects.reserve(objectCount);
     for (std::size_t object = 0; object < objectCount; ++object)
     {
         const std::string prefix = "objects[" + std::to_string(object) + "]";
-        SceneObject parsed;
+        SceneObject       parsed;
         const std::string typeName = context.configurationStringInSection("scene", prefix + ".type").value_or("box");
         if (typeName == "box" || typeName == "plane")
         {
@@ -141,8 +146,8 @@ bool SceneDescription::parseFromConfiguration(ComponentContext& context, SceneDe
         }
         else
         {
-            error = "scene object " + std::to_string(object) + " has unknown type '" + typeName +
-                    "' (known: box, sphere, plane)";
+            error = "scene object " + std::to_string(object) + " has unknown type '" + typeName
+                  + "' (known: box, sphere, plane)";
             return false;
         }
         if (!parseVec3(context, prefix + ".position", parsed.position))
@@ -197,15 +202,17 @@ bool SceneDescription::parseFromConfiguration(ComponentContext& context, SceneDe
 
     // Texture set registry: first-use order, so layer indices are stable and
     // independent of object order changes elsewhere.
-    for (const SceneObject& object : scene.objects)
+    for (const SceneObject &object : scene.objects)
     {
         if (object.textureSet.empty())
         {
             continue;
         }
-        const bool registered = std::any_of(scene.textureSets.begin(), scene.textureSets.end(),
-                                            [&object](const std::string& registeredName)
-                                            { return registeredName == object.textureSet; });
+        const bool registered = std::any_of(
+            scene.textureSets.begin(),
+            scene.textureSets.end(),
+            [&object](const std::string &registeredName) { return registeredName == object.textureSet; }
+        );
         if (!registered)
         {
             scene.textureSets.push_back(object.textureSet);
@@ -215,4 +222,3 @@ bool SceneDescription::parseFromConfiguration(ComponentContext& context, SceneDe
 }
 
 } // namespace engine
-

@@ -60,7 +60,9 @@ void RendererState::createRenderFinishedSemaphores()
     }
 }
 
-void RendererState::recreateSwapchain(WindowCapability& window, LoggerCapability& logger)
+void RendererState::recreateSwapchain(
+    WindowCapability &window, LoggerCapability &logger
+)
 {
     const vk::Format previousFormat = swapchainFormat;
     device->waitIdle();
@@ -91,7 +93,7 @@ void RendererState::recreateSwapchain(WindowCapability& window, LoggerCapability
 
     // Lighting passes own descriptor sets that reference the recreated frame
     // resources; the waitIdle above makes rebuilding them safe.
-    for (const auto& technique : lightingTechniques)
+    for (const auto &technique : lightingTechniques)
     {
         technique->notifyFrameResourcesRecreated();
     }
@@ -112,8 +114,8 @@ void RendererState::releaseCaptureBuffer()
 
 void RendererState::ensureCaptureBuffer()
 {
-    const vk::DeviceSize requiredSize =
-        static_cast<vk::DeviceSize>(swapchainExtent.width) * swapchainExtent.height * bytesPerPixel;
+    const vk::DeviceSize requiredSize = static_cast<vk::DeviceSize>(swapchainExtent.width) * swapchainExtent.height
+                                      * bytesPerPixel;
     if (captureBuffer != nullptr && captureBufferSize >= requiredSize)
     {
         return;
@@ -127,19 +129,22 @@ void RendererState::ensureCaptureBuffer()
     captureBuffer = std::make_unique<vk::raii::Buffer>(*device, bufferInfo);
 
     const vk::MemoryRequirements requirements = captureBuffer->getMemoryRequirements();
-    vk::MemoryAllocateInfo allocateInfo;
+    vk::MemoryAllocateInfo       allocateInfo;
     allocateInfo.setAllocationSize(requirements.size);
-    allocateInfo.setMemoryTypeIndex(
-        findMemoryType(**physicalDevice, requirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible |
-                                                       vk::MemoryPropertyFlagBits::eHostCoherent));
+    allocateInfo.setMemoryTypeIndex(findMemoryType(
+        **physicalDevice,
+        requirements.memoryTypeBits,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+    ));
     captureMemory = std::make_unique<vk::raii::DeviceMemory>(*device, allocateInfo);
     captureBuffer->bindMemory(*captureMemory, 0);
     captureBufferSize = requirements.size;
-    captureMapped = captureMemory->mapMemory(0, requirements.size);
+    captureMapped     = captureMemory->mapMemory(0, requirements.size);
 }
 
-void RendererState::recordGeometryPass(vk::raii::CommandBuffer& commandBuffer,
-                                       const FrameRenderContext& frameContext)
+void RendererState::recordGeometryPass(
+    vk::raii::CommandBuffer &commandBuffer, const FrameRenderContext &frameContext
+)
 {
     std::array<vk::ClearValue, 3> clearValues;
     clearValues[0].setColor(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}));
@@ -147,8 +152,9 @@ void RendererState::recordGeometryPass(vk::raii::CommandBuffer& commandBuffer,
     clearValues[2].setColor(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}));
 
     std::array<vk::RenderingAttachmentInfo, 3> colorAttachments;
-    const vk::ImageView attachmentViews[3] = {frameContext.emissiveView, frameContext.albedoView,
-                                              frameContext.normalView};
+    const vk::ImageView                        attachmentViews[3] = {
+        frameContext.emissiveView, frameContext.albedoView, frameContext.normalView
+    };
     for (std::size_t index = 0; index < 3; ++index)
     {
         colorAttachments[index].setImageView(attachmentViews[index]);
@@ -178,16 +184,23 @@ void RendererState::recordGeometryPass(vk::raii::CommandBuffer& commandBuffer,
 
     commandBuffer.beginRendering(renderingInfo);
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, **scenePipeline);
-    const vk::Viewport viewport(0.0f, 0.0f, static_cast<float>(frameContext.extent.width),
-                                static_cast<float>(frameContext.extent.height), 0.0f, 1.0f);
+    const vk::Viewport viewport(
+        0.0f,
+        0.0f,
+        static_cast<float>(frameContext.extent.width),
+        static_cast<float>(frameContext.extent.height),
+        0.0f,
+        1.0f
+    );
     commandBuffer.setViewport(0, viewport);
     const vk::Rect2D scissor(vk::Offset2D(0, 0), frameContext.extent);
     commandBuffer.setScissor(0, scissor);
-    commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **scenePipelineLayout, 0, **sceneDescriptorSet,
-                                     {});
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eGraphics, **scenePipelineLayout, 0, **sceneDescriptorSet, {}
+    );
 
-    const GeometryBuffer* currentMesh = nullptr;
-    for (const SceneObject& object : scene.objects)
+    const GeometryBuffer *currentMesh = nullptr;
+    for (const SceneObject &object : scene.objects)
     {
         Mat4 model = modelMatrix(object.position.data(), object.rotationYRadians, object.size.data());
         // Material layers resolve the object's texture set the same way the
@@ -203,25 +216,34 @@ void RendererState::recordGeometryPass(vk::raii::CommandBuffer& commandBuffer,
         }
         struct ObjectPush
         {
-            Mat4 model;
+            Mat4                 model;
             std::array<float, 4> albedoRoughness;
             std::array<float, 4> metallicEmissiveStrength;
             std::array<float, 4> materialLayers;
-        } pushValue{model,
-                    {object.albedo[0], object.albedo[1], object.albedo[2], object.roughness},
-                    {object.metallic, object.emissiveStrength, 0.0f, 0.0f},
-                    {static_cast<float>(albedoLayer), static_cast<float>(albedoLayer), object.uvScale,
-                     static_cast<float>(static_cast<std::uint32_t>(object.type))}};
-        commandBuffer.pushConstants(**scenePipelineLayout,
-                                    vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0,
-                                    sizeof(pushValue), &pushValue);
+        } pushValue{
+            model,
+            {object.albedo[0], object.albedo[1], object.albedo[2], object.roughness},
+            {object.metallic, object.emissiveStrength, 0.0f, 0.0f},
+            {static_cast<float>(albedoLayer),
+                static_cast<float>(albedoLayer),
+                object.uvScale,
+                static_cast<float>(static_cast<std::uint32_t>(object.type))}
+        };
+        commandBuffer.pushConstants(
+            **scenePipelineLayout,
+            vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
+            0,
+            sizeof(pushValue),
+            &pushValue
+        );
 
-        const GeometryBuffer& mesh = object.type == SceneObjectType::Sphere ? sphereMesh : boxMesh;
+        const GeometryBuffer &mesh = object.type == SceneObjectType::Sphere ? sphereMesh : boxMesh;
         if (currentMesh != &mesh)
         {
             commandBuffer.bindVertexBuffers(0, **mesh.buffer, {0});
-            commandBuffer.bindIndexBuffer(**mesh.buffer, static_cast<vk::DeviceSize>(mesh.indexOffsetBytes),
-                                          vk::IndexType::eUint32);
+            commandBuffer.bindIndexBuffer(
+                **mesh.buffer, static_cast<vk::DeviceSize>(mesh.indexOffsetBytes), vk::IndexType::eUint32
+            );
             currentMesh = &mesh;
         }
         commandBuffer.drawIndexed(mesh.indexCount, 1, 0, 0, 0);
@@ -229,17 +251,23 @@ void RendererState::recordGeometryPass(vk::raii::CommandBuffer& commandBuffer,
     commandBuffer.endRendering();
 }
 
-void RendererState::recordFrameStartBarrier(vk::raii::CommandBuffer& commandBuffer)
+void RendererState::recordFrameStartBarrier(
+    vk::raii::CommandBuffer &commandBuffer
+)
 {
     // Reused scratch (renderer_state.hpp): recording runs every frame and the
     // fresh-vector-per-frame allocations showed up as pure heap churn on the
     // record path.
-    std::vector<vk::ImageMemoryBarrier2>& barriers = frameStartBarriers;
+    std::vector<vk::ImageMemoryBarrier2> &barriers = frameStartBarriers;
     barriers.clear();
-    const vk::Image frameImages[6] = {**emissiveImage.image, **albedoImage.image, **normalImage.image,
-                                      hasDirectRadianceTarget ? **directRadianceImage.image : vk::Image{},
-                                      hasIndirectDiffuseTarget ? **indirectRadianceImage.image : vk::Image{},
-                                      hasIndirectSpecularTarget ? **indirectSpecularImage.image : vk::Image{}};
+    const vk::Image frameImages[6] = {
+        **emissiveImage.image,
+        **albedoImage.image,
+        **normalImage.image,
+        hasDirectRadianceTarget ? **directRadianceImage.image : vk::Image{},
+        hasIndirectDiffuseTarget ? **indirectRadianceImage.image : vk::Image{},
+        hasIndirectSpecularTarget ? **indirectSpecularImage.image : vk::Image{}
+    };
     for (const vk::Image image : frameImages)
     {
         if (!image)
@@ -264,35 +292,43 @@ void RendererState::recordFrameStartBarrier(vk::raii::CommandBuffer& commandBuff
     commandBuffer.pipelineBarrier2(dependency);
 }
 
-void RendererState::recordGBufferHandoffBarrier(vk::raii::CommandBuffer& commandBuffer)
+void RendererState::recordGBufferHandoffBarrier(
+    vk::raii::CommandBuffer &commandBuffer
+)
 {
     std::array<vk::ImageMemoryBarrier2, 4> barriers;
-    const vk::Image images[4] = {**emissiveImage.image, **albedoImage.image, **normalImage.image,
-                                 **depthImage.image};
+    const vk::Image images[4] = {**emissiveImage.image, **albedoImage.image, **normalImage.image, **depthImage.image};
     for (std::size_t index = 0; index < 4; ++index)
     {
-        barriers[index].setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput |
-                                        vk::PipelineStageFlagBits2::eLateFragmentTests);
-        barriers[index].setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite |
-                                         vk::AccessFlagBits2::eDepthStencilAttachmentWrite);
-        barriers[index].setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader |
-                                        vk::PipelineStageFlagBits2::eFragmentShader);
-        barriers[index].setDstAccessMask(vk::AccessFlagBits2::eShaderRead |
-                                         vk::AccessFlagBits2::eShaderStorageRead);
+        barriers[index].setSrcStageMask(
+            vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eLateFragmentTests
+        );
+        barriers[index].setSrcAccessMask(
+            vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eDepthStencilAttachmentWrite
+        );
+        barriers[index].setDstStageMask(
+            vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eFragmentShader
+        );
+        barriers[index].setDstAccessMask(vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderStorageRead);
         barriers[index].setOldLayout(vk::ImageLayout::eGeneral);
         barriers[index].setNewLayout(vk::ImageLayout::eGeneral);
         barriers[index].setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
         barriers[index].setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
         barriers[index].setImage(images[index]);
-        barriers[index].setSubresourceRange(vk::ImageSubresourceRange(
-            index == 3 ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
+        barriers[index].setSubresourceRange(
+            vk::ImageSubresourceRange(
+                index == 3 ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1
+            )
+        );
     }
     vk::DependencyInfo dependency;
     dependency.setImageMemoryBarriers(barriers);
     commandBuffer.pipelineBarrier2(dependency);
 }
 
-void RendererState::recordRadianceToCompositeBarrier(vk::raii::CommandBuffer& commandBuffer)
+void RendererState::recordRadianceToCompositeBarrier(
+    vk::raii::CommandBuffer &commandBuffer
+)
 {
     // Compute writes (direct, diffuse, specular) -> composite fragment reads.
     // Scratch reused across frames (renderer_state.hpp) - see
@@ -301,7 +337,7 @@ void RendererState::recordRadianceToCompositeBarrier(vk::raii::CommandBuffer& co
     {
         return;
     }
-    std::vector<vk::ImageMemoryBarrier2>& barriers = radianceBarriers;
+    std::vector<vk::ImageMemoryBarrier2> &barriers = radianceBarriers;
     barriers.clear();
     const auto radianceBarrier = [&barriers](const vk::Image image)
     {
@@ -335,8 +371,9 @@ void RendererState::recordRadianceToCompositeBarrier(vk::raii::CommandBuffer& co
     commandBuffer.pipelineBarrier2(dependency);
 }
 
-void RendererState::recordSwapchainEnterTransition(vk::raii::CommandBuffer& commandBuffer,
-                                                   std::uint32_t imageIndex)
+void RendererState::recordSwapchainEnterTransition(
+    vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex
+)
 {
     // Composite into the swapchain image: UNDEFINED -> COLOR_ATTACHMENT.
     vk::ImageMemoryBarrier2 enterBarrier;
@@ -351,13 +388,14 @@ void RendererState::recordSwapchainEnterTransition(vk::raii::CommandBuffer& comm
     enterBarrier.setImage(swapchainImages[imageIndex]);
     enterBarrier.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
     std::array<vk::ImageMemoryBarrier2, 1> enter{enterBarrier};
-    vk::DependencyInfo dependency;
+    vk::DependencyInfo                     dependency;
     dependency.setImageMemoryBarriers(enter);
     commandBuffer.pipelineBarrier2(dependency);
 }
 
-void RendererState::recordSwapchainCaptureAndPresentTransitions(vk::raii::CommandBuffer& commandBuffer,
-                                                                std::uint32_t imageIndex)
+void RendererState::recordSwapchainCaptureAndPresentTransitions(
+    vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex
+)
 {
     if (captureRequested)
     {
@@ -376,7 +414,7 @@ void RendererState::recordSwapchainCaptureAndPresentTransitions(vk::raii::Comman
         captureEnterBarrier.setImage(swapchainImages[imageIndex]);
         captureEnterBarrier.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
         std::array<vk::ImageMemoryBarrier2, 1> captureEnter{captureEnterBarrier};
-        vk::DependencyInfo captureEnterDependency;
+        vk::DependencyInfo                     captureEnterDependency;
         captureEnterDependency.setImageMemoryBarriers(captureEnter);
         commandBuffer.pipelineBarrier2(captureEnterDependency);
 
@@ -387,34 +425,40 @@ void RendererState::recordSwapchainCaptureAndPresentTransitions(vk::raii::Comman
         copyRegion.setImageOffset(vk::Offset3D(0, 0, 0));
         copyRegion.setImageExtent(vk::Extent3D(swapchainExtent.width, swapchainExtent.height, 1));
         std::array<vk::BufferImageCopy, 1> copyRegions{copyRegion};
-        commandBuffer.copyImageToBuffer(swapchainImages[imageIndex], vk::ImageLayout::eTransferSrcOptimal,
-                                        **captureBuffer, copyRegions);
+        commandBuffer.copyImageToBuffer(
+            swapchainImages[imageIndex], vk::ImageLayout::eTransferSrcOptimal, **captureBuffer, copyRegions
+        );
     }
 
     // -> PRESENT_SRC_KHR (from attachment or transfer layout).
     {
         vk::ImageMemoryBarrier2 presentBarrier;
-        presentBarrier.setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput |
-                                       vk::PipelineStageFlagBits2::eTransfer);
-        presentBarrier.setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite |
-                                        vk::AccessFlagBits2::eTransferRead);
+        presentBarrier.setSrcStageMask(
+            vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eTransfer
+        );
+        presentBarrier.setSrcAccessMask(
+            vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eTransferRead
+        );
         presentBarrier.setDstStageMask(vk::PipelineStageFlagBits2::eNone);
         presentBarrier.setDstAccessMask(vk::AccessFlags2());
-        presentBarrier.setOldLayout(captureRequested ? vk::ImageLayout::eTransferSrcOptimal
-                                                     : vk::ImageLayout::eColorAttachmentOptimal);
+        presentBarrier.setOldLayout(
+            captureRequested ? vk::ImageLayout::eTransferSrcOptimal : vk::ImageLayout::eColorAttachmentOptimal
+        );
         presentBarrier.setNewLayout(vk::ImageLayout::ePresentSrcKHR);
         presentBarrier.setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
         presentBarrier.setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
         presentBarrier.setImage(swapchainImages[imageIndex]);
         presentBarrier.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
         std::array<vk::ImageMemoryBarrier2, 1> present{presentBarrier};
-        vk::DependencyInfo presentDependency;
+        vk::DependencyInfo                     presentDependency;
         presentDependency.setImageMemoryBarriers(present);
         commandBuffer.pipelineBarrier2(presentDependency);
     }
 }
 
-void RendererState::recordCompositePass(vk::raii::CommandBuffer& commandBuffer, std::uint32_t imageIndex)
+void RendererState::recordCompositePass(
+    vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex
+)
 {
     vk::RenderingAttachmentInfo colorAttachment;
     colorAttachment.setImageView(swapchainImageViews[imageIndex]);
@@ -430,55 +474,65 @@ void RendererState::recordCompositePass(vk::raii::CommandBuffer& commandBuffer, 
 
     struct CompositePush
     {
-        std::array<float, 4> flagsExposure; // x unused, w exposure
+        std::array<float, 4>        flagsExposure; // x unused, w exposure
         std::array<std::int32_t, 4> modeFlags;
-    } pushValue{{0.0f, 0.0f, 0.0f, exposure},
-                {tonemapMode == "aces" ? tonemapAces : (tonemapMode == "reinhard" ? tonemapReinhard : tonemapNone),
-                 hasDirectRadianceTarget ? 1 : 0, hasIndirectDiffuseTarget ? 1 : 0,
-                 hasIndirectSpecularTarget ? 1 : 0}};
+    } pushValue{
+        {0.0f, 0.0f, 0.0f, exposure},
+        {tonemapMode == "aces" ? tonemapAces : (tonemapMode == "reinhard" ? tonemapReinhard : tonemapNone),
+            hasDirectRadianceTarget ? 1 : 0,
+            hasIndirectDiffuseTarget ? 1 : 0,
+            hasIndirectSpecularTarget ? 1 : 0}
+    };
 
     commandBuffer.beginRendering(renderingInfo);
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, **compositePipeline);
-    const vk::Viewport viewport(0.0f, 0.0f, static_cast<float>(swapchainExtent.width),
-                                static_cast<float>(swapchainExtent.height), 0.0f, 1.0f);
+    const vk::Viewport viewport(
+        0.0f, 0.0f, static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height), 0.0f, 1.0f
+    );
     commandBuffer.setViewport(0, viewport);
     commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
-    commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, **compositePipelineLayout, 0,
-                                     **compositeDescriptorSet, {});
-    commandBuffer.pushConstants(**compositePipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(pushValue),
-                                &pushValue);
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eGraphics, **compositePipelineLayout, 0, **compositeDescriptorSet, {}
+    );
+    commandBuffer.pushConstants(
+        **compositePipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(pushValue), &pushValue
+    );
     commandBuffer.draw(3, 1, 0, 0);
     commandBuffer.endRendering();
 }
 
-void RendererState::recordFrameCommands(vk::raii::CommandBuffer& commandBuffer, std::uint32_t imageIndex)
+void RendererState::recordFrameCommands(
+    vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex
+)
 {
     commandBuffer.reset();
     commandBuffer.begin(vk::CommandBufferBeginInfo());
 
     // FrameRenderContext: everything the lighting passes may touch this frame.
-    FrameRenderContext frameContext{*device,
-                                    **physicalDevice,
-                                    graphicsQueue,
-                                    graphicsQueueFamily,
-                                    swapchainExtent,
-                                    resolvedShaderDirectory,
-                                    *albedoImage.view,
-                                    *normalImage.view,
-                                    *emissiveImage.view,
-                                    *depthImage.view,
-                                    hasDirectRadianceTarget ? *directRadianceImage.view : *dummyImage.view,
-                                    hasIndirectDiffuseTarget ? *indirectRadianceImage.view : *dummyImage.view,
-                                    hasIndirectSpecularTarget ? *indirectSpecularImage.view : *dummyImage.view,
-                                    **primitivesBuffer.buffer,
-                                    static_cast<std::uint32_t>(scene.objects.size()),
-                                    **materialsBuffer.buffer,
-                                    *albedoArrayImage.view,
-                                    *dataArrayImage.view,
-                                    **environmentBufferStorage.buffer,
-                                    **cameraBufferStorage.buffer,
-                                    scene.camera.nearPlane,
-                                    scene.camera.farPlane};
+    FrameRenderContext frameContext{
+        *device,
+        **physicalDevice,
+        graphicsQueue,
+        graphicsQueueFamily,
+        swapchainExtent,
+        resolvedShaderDirectory,
+        *albedoImage.view,
+        *normalImage.view,
+        *emissiveImage.view,
+        *depthImage.view,
+        hasDirectRadianceTarget ? *directRadianceImage.view : *dummyImage.view,
+        hasIndirectDiffuseTarget ? *indirectRadianceImage.view : *dummyImage.view,
+        hasIndirectSpecularTarget ? *indirectSpecularImage.view : *dummyImage.view,
+        **primitivesBuffer.buffer,
+        static_cast<std::uint32_t>(scene.objects.size()),
+        **materialsBuffer.buffer,
+        *albedoArrayImage.view,
+        *dataArrayImage.view,
+        **environmentBufferStorage.buffer,
+        **cameraBufferStorage.buffer,
+        scene.camera.nearPlane,
+        scene.camera.farPlane
+    };
 
     recordGeometryPass(commandBuffer, frameContext);
 
@@ -514,7 +568,7 @@ void RendererState::recordFrameCommands(vk::raii::CommandBuffer& commandBuffer, 
     // ordered and visible - without it the reflection pass sampled stale or
     // garbage GI (nondeterministic reflections that shifted every frame).
     bool firstTechnique = true;
-    for (const auto& technique : lightingTechniques)
+    for (const auto &technique : lightingTechniques)
     {
         if (!firstTechnique)
         {
@@ -522,8 +576,9 @@ void RendererState::recordFrameCommands(vk::raii::CommandBuffer& commandBuffer, 
             interTechniqueBarrier.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
             interTechniqueBarrier.setSrcAccessMask(vk::AccessFlagBits2::eShaderStorageWrite);
             interTechniqueBarrier.setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
-            interTechniqueBarrier.setDstAccessMask(vk::AccessFlagBits2::eShaderRead |
-                                                   vk::AccessFlagBits2::eShaderStorageRead);
+            interTechniqueBarrier.setDstAccessMask(
+                vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderStorageRead
+            );
             vk::DependencyInfo interTechniqueDependency;
             interTechniqueDependency.setMemoryBarriers(interTechniqueBarrier);
             commandBuffer.pipelineBarrier2(interTechniqueDependency);
@@ -542,7 +597,9 @@ void RendererState::recordFrameCommands(vk::raii::CommandBuffer& commandBuffer, 
     commandBuffer.end();
 }
 
-void RendererState::updateCameraIntegration(LoggerCapability& logger)
+void RendererState::updateCameraIntegration(
+    LoggerCapability &logger
+)
 {
     // Free-fly camera integration runs EVERY frame (even a skipped one), so
     // the delta time stays truthful and input never accumulates unnoticed.
@@ -553,19 +610,20 @@ void RendererState::updateCameraIntegration(LoggerCapability& logger)
     if (!flyCameraSeeded)
     {
         flyCamera.syncFromCamera(scene.camera);
-        lastFrameTime = now;
+        lastFrameTime   = now;
         flyCameraSeeded = true;
         if (inputCapability != nullptr && scene.camera.freeFly)
         {
             inputCapability->setCursorCaptured(true);
-            logger.logMessage(LogLevel::Information,
-                              "camera: free-fly active - WASD move, mouse look, Space/E up, Ctrl/Q down, "
-                              "Shift boost, wheel speed, F toggle mouse capture, Esc release");
+            logger.logMessage(
+                LogLevel::Information,
+                "camera: free-fly active - WASD move, mouse look, Space/E up, Ctrl/Q down, "
+                "Shift boost, wheel speed, F toggle mouse capture, Esc release"
+            );
         }
         else if (inputCapability == nullptr)
         {
-            logger.logMessage(LogLevel::Information,
-                              "camera: static (input capability not available in this build)");
+            logger.logMessage(LogLevel::Information, "camera: static (input capability not available in this build)");
         }
     }
     else
@@ -583,7 +641,9 @@ void RendererState::updateCameraIntegration(LoggerCapability& logger)
     }
 }
 
-bool RendererState::waitForFrameSerializationGuarded(LoggerCapability& logger)
+bool RendererState::waitForFrameSerializationGuarded(
+    LoggerCapability &logger
+)
 {
     // Frame execution serialization. All transient GPU resources - the
     // G-buffer, the radiance targets, the cascade fields - are single-buffered
@@ -612,8 +672,9 @@ bool RendererState::waitForFrameSerializationGuarded(LoggerCapability& logger)
     // eSuccess and eTimeout return. On timeout the GPU did not retire that
     // frame, so this frame is skipped instead of re-recording a command
     // buffer that is still in flight.
-    const vk::Result slotFenceDone =
-        device->waitForFences({*inFlightFences[currentFrame]}, true, frameTimeoutNanoseconds);
+    const vk::Result slotFenceDone = device->waitForFences(
+        {*inFlightFences[currentFrame]}, true, frameTimeoutNanoseconds
+    );
     if (slotFenceDone == vk::Result::eTimeout)
     {
         logger.logMessage(LogLevel::Warning, logPrefix + "frame fence timed out; skipping a frame");
@@ -625,28 +686,31 @@ bool RendererState::waitForFrameSerializationGuarded(LoggerCapability& logger)
     // so the first two frames pass straight through.
     if (maxFramesInFlight > 1)
     {
-        const std::uint32_t previousSlot = (currentFrame + 1) % maxFramesInFlight;
-        const vk::Result previousFrameDone =
-            device->waitForFences({*inFlightFences[previousSlot]}, true, frameTimeoutNanoseconds);
+        const std::uint32_t previousSlot      = (currentFrame + 1) % maxFramesInFlight;
+        const vk::Result    previousFrameDone = device->waitForFences(
+            {*inFlightFences[previousSlot]}, true, frameTimeoutNanoseconds
+        );
         if (previousFrameDone == vk::Result::eTimeout)
         {
-            logger.logMessage(LogLevel::Warning,
-                              logPrefix + "previous frame fence timed out; skipping a frame");
+            logger.logMessage(LogLevel::Warning, logPrefix + "previous frame fence timed out; skipping a frame");
             return false;
         }
     }
     return true;
 }
 
-bool RendererState::readbackCapturePixels(LoggerCapability& logger)
+bool RendererState::readbackCapturePixels(
+    LoggerCapability &logger
+)
 {
     // Errors throw; only eSuccess and eTimeout return. The readback needs
     // the fence: reading mapped memory while the GPU may still write it
     // would race, so a timeout discards the capture instead. The window
     // is the generous capture budget, not the per-frame present timeout -
     // a 2 s CPU-rendered frame must still capture.
-    const vk::Result captureDone =
-        device->waitForFences({*inFlightFences[currentFrame]}, true, captureTimeoutNanoseconds);
+    const vk::Result captureDone = device->waitForFences(
+        {*inFlightFences[currentFrame]}, true, captureTimeoutNanoseconds
+    );
     if (captureDone == vk::Result::eTimeout)
     {
         logger.logMessage(LogLevel::Warning, logPrefix + "frame capture fence timed out; capture discarded");
@@ -654,9 +718,9 @@ bool RendererState::readbackCapturePixels(LoggerCapability& logger)
     }
 
     capturePixels.resize(static_cast<std::size_t>(swapchainExtent.width) * swapchainExtent.height * bytesPerPixel);
-    const std::uint8_t* source = static_cast<const std::uint8_t*>(captureMapped);
-    const bool isBgraOrder = swapchainFormat == vk::Format::eB8G8R8A8Srgb ||
-                             swapchainFormat == vk::Format::eB8G8R8A8Unorm;
+    const std::uint8_t *source      = static_cast<const std::uint8_t *>(captureMapped);
+    const bool          isBgraOrder = swapchainFormat == vk::Format::eB8G8R8A8Srgb
+                                   || swapchainFormat == vk::Format::eB8G8R8A8Unorm;
     for (std::size_t pixel = 0; pixel < capturePixels.size() / bytesPerPixel; ++pixel)
     {
         const std::size_t offset = pixel * bytesPerPixel;
@@ -678,22 +742,25 @@ bool RendererState::readbackCapturePixels(LoggerCapability& logger)
 
     FrameCapturedEvent captured;
     captured.pixelData = capturePixels.data();
-    captured.width = swapchainExtent.width;
-    captured.height = swapchainExtent.height;
+    captured.width     = swapchainExtent.width;
+    captured.height    = swapchainExtent.height;
     if (frameCapturedChannel != nullptr)
     {
         frameCapturedChannel->publish(captured);
     }
     else
     {
-        logger.logMessage(LogLevel::Warning,
-                          logPrefix + "frame captured but no capture channel is bound; capture dropped");
+        logger.logMessage(
+            LogLevel::Warning, logPrefix + "frame captured but no capture channel is bound; capture dropped"
+        );
     }
     logger.logMessage(LogLevel::Debug, logPrefix + "frame captured");
     return true;
 }
 
-void RendererState::renderFrame(LoggerCapability& logger)
+void RendererState::renderFrame(
+    LoggerCapability &logger
+)
 {
     updateCameraIntegration(logger);
     if (!waitForFrameSerializationGuarded(logger))
@@ -708,12 +775,15 @@ void RendererState::renderFrame(LoggerCapability& logger)
     std::uint32_t imageIndex = 0;
     try
     {
-        imageIndex = swapchain->acquireNextImage(frameTimeoutNanoseconds,
-                                                 *imageAvailableSemaphores[FrameSyncPolicy::acquireSemaphoreIndex(currentFrame)],
-                                                 nullptr)
+        imageIndex = swapchain
+                         ->acquireNextImage(
+                             frameTimeoutNanoseconds,
+                             *imageAvailableSemaphores[FrameSyncPolicy::acquireSemaphoreIndex(currentFrame)],
+                             nullptr
+                         )
                          .value;
     }
-    catch (const vk::OutOfDateKHRError&)
+    catch (const vk::OutOfDateKHRError &)
     {
         framebufferResized = true;
         return;
@@ -721,7 +791,7 @@ void RendererState::renderFrame(LoggerCapability& logger)
 
     device->resetFences({*inFlightFences[currentFrame]});
 
-    vk::raii::CommandBuffer& commandBuffer = commandBuffers[currentFrame];
+    vk::raii::CommandBuffer &commandBuffer = commandBuffers[currentFrame];
     if (captureRequested)
     {
         ensureCaptureBuffer();
@@ -729,12 +799,13 @@ void RendererState::renderFrame(LoggerCapability& logger)
     recordFrameCommands(commandBuffer, imageIndex);
 
     vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
-    vk::SubmitInfo submitInfo;
+    vk::SubmitInfo         submitInfo;
     submitInfo.setWaitSemaphores(*imageAvailableSemaphores[FrameSyncPolicy::acquireSemaphoreIndex(currentFrame)]);
     submitInfo.setWaitDstStageMask(waitStage);
     submitInfo.setCommandBuffers(*commandBuffer);
     submitInfo.setSignalSemaphores(
-        *renderingFinishedSemaphores[FrameSyncPolicy::renderFinishedSemaphoreIndex(imageIndex)]);
+        *renderingFinishedSemaphores[FrameSyncPolicy::renderFinishedSemaphoreIndex(imageIndex)]
+    );
     graphicsQueue.submit(submitInfo, *inFlightFences[currentFrame]);
 
     if (captureRequested)
@@ -745,7 +816,8 @@ void RendererState::renderFrame(LoggerCapability& logger)
 
     vk::PresentInfoKHR presentInfo;
     presentInfo.setWaitSemaphores(
-        *renderingFinishedSemaphores[FrameSyncPolicy::renderFinishedSemaphoreIndex(imageIndex)]);
+        *renderingFinishedSemaphores[FrameSyncPolicy::renderFinishedSemaphoreIndex(imageIndex)]
+    );
     presentInfo.setSwapchains(**swapchain);
     presentInfo.setImageIndices(imageIndex);
     try
@@ -757,7 +829,7 @@ void RendererState::renderFrame(LoggerCapability& logger)
             framebufferResized = true;
         }
     }
-    catch (const vk::OutOfDateKHRError&)
+    catch (const vk::OutOfDateKHRError &)
     {
         framebufferResized = true;
     }
@@ -766,9 +838,11 @@ void RendererState::renderFrame(LoggerCapability& logger)
     currentFrame = (currentFrame + 1) % maxFramesInFlight;
 }
 
-void RendererState::initialize(WindowCapability& window, LoggerCapability& logger)
+void RendererState::initialize(
+    WindowCapability &window, LoggerCapability &logger
+)
 {
-    runtimeLogger = &logger;
+    runtimeLogger                                         = &logger;
     const std::vector<WindowIdentifier> windowIdentifiers = window.windowIdentifiers();
     if (windowIdentifiers.empty())
     {

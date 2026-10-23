@@ -37,16 +37,16 @@ public:
     RendererModule();
     ~RendererModule() override;
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
+    void *capabilityPointerFor(const std::string &capabilityName) override;
 
     void renderFrame() override;
     void waitUntilIdle() override;
@@ -59,21 +59,21 @@ public:
     // geometry pass, ordered by the physical layer they write (direct radiance
     // before indirect). Re-attaching a technique with the same name replaces
     // the previous one.
-    void attachLightingTechnique(const std::shared_ptr<LightingTechniquePass>& pass);
+    void attachLightingTechnique(const std::shared_ptr<LightingTechniquePass> &pass);
 
 private:
-    void handleWindowResized(const WindowResizedEvent& event);
+    void handleWindowResized(const WindowResizedEvent &event);
 
     ComponentManifest componentManifest;
-    LoggerCapability* logger = nullptr;
-    WindowCapability* windowCapability = nullptr;
+    LoggerCapability *logger           = nullptr;
+    WindowCapability *windowCapability = nullptr;
     // Frame events are published through channel references cached at
     // construct: the bus anchors channels on the heap, and the frame loop
     // publishes with zero lookups (see event_bus.hpp, hot path note).
-    EventChannel<FrameBeginEvent>* frameBeginChannel = nullptr;
-    EventChannel<FrameRenderedEvent>* frameRenderedChannel = nullptr;
-    EventSubscription resizeSubscription;
-    std::unique_ptr<RendererState> state;
+    EventChannel<FrameBeginEvent>    *frameBeginChannel    = nullptr;
+    EventChannel<FrameRenderedEvent> *frameRenderedChannel = nullptr;
+    EventSubscription                 resizeSubscription;
+    std::unique_ptr<RendererState>    state;
 };
 
 } // namespace engine

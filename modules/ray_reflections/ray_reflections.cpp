@@ -29,7 +29,7 @@ constexpr std::string_view moduleContext = "ray_reflections module";
 // Push-constant block mirrored by ray_reflections.comp (settings + counts).
 struct ReflectionPush
 {
-    std::array<float, 4> settings;
+    std::array<float, 4>         settings;
     std::array<std::uint32_t, 4> counts;
 };
 
@@ -39,7 +39,7 @@ static_assert(sizeof(ReflectionPush) == 32, "ray_reflections.comp expects a 32-b
 // GpuLightUniform.lightCountsAndFlags): shadows on, the same step budget the
 // direct pass defaults to.
 constexpr std::int32_t relightShadowsEnabled = 1;
-constexpr std::int32_t relightShadowSteps = 16;
+constexpr std::int32_t relightShadowSteps    = 16;
 
 // The pass object handed to the renderer. Owns its Vulkan objects; creates
 // them lazily on the first record and rebuilds them whenever the frame
@@ -53,17 +53,19 @@ public:
     {
         // Surfaces rougher than this fade out to zero reflection: one ray per
         // pixel cannot represent a wide glossy lobe without accumulation.
-        float maxRoughness = defaultReflectionMaxRoughness;
-        float maxDistance = defaultReflectionMaxDistance;
-        std::uint32_t marchSteps = defaultReflectionMarchSteps;
+        float         maxRoughness = defaultReflectionMaxRoughness;
+        float         maxDistance  = defaultReflectionMaxDistance;
+        std::uint32_t marchSteps   = defaultReflectionMarchSteps;
     };
 
-    explicit RayReflectionsPass(Settings settings, LightingCapability* lightingCapability)
+    explicit RayReflectionsPass(
+        Settings settings, LightingCapability *lightingCapability
+    )
         : settings(settings), lighting(lightingCapability)
     {
     }
 
-    const char* techniqueName() const override
+    const char *techniqueName() const override
     {
         return "ray_reflections";
     }
@@ -73,7 +75,9 @@ public:
         return LightingTarget::IndirectSpecular;
     }
 
-    void record(vk::raii::CommandBuffer& commandBuffer, const FrameRenderContext& context) override
+    void record(
+        vk::raii::CommandBuffer &commandBuffer, const FrameRenderContext &context
+    ) override
     {
         if (pipeline == nullptr || context.extent != cachedExtent || needsRecreate)
         {
@@ -86,10 +90,13 @@ public:
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **pipelineLayout, 0, **sharedSet, {});
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **pipelineLayout, 1, **frameSet, {});
 
-        const ReflectionPush pushValue{{settings.maxRoughness, settings.maxDistance, 0.0f, 0.0f},
-                                       {context.primitiveCount, settings.marchSteps, 0u, 0u}};
-        commandBuffer.pushConstants(**pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue),
-                                    &pushValue);
+        const ReflectionPush pushValue{
+            {settings.maxRoughness, settings.maxDistance, 0.0f, 0.0f},
+            {context.primitiveCount, settings.marchSteps, 0u, 0u}
+        };
+        commandBuffer.pushConstants(
+            **pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
+        );
 
         const std::uint32_t groupsX = (context.extent.width + 7) / 8;
         const std::uint32_t groupsY = (context.extent.height + 7) / 8;
@@ -107,10 +114,10 @@ private:
     // radiance cascades relight does).
     void updateLightUniform()
     {
-        GpuLightUniform uniform;
-        const bool hasLighting = lighting != nullptr;
+        GpuLightUniform             uniform;
+        const bool                  hasLighting = lighting != nullptr;
         DirectionalLightDescription sun;
-        const bool sunEnabled = hasLighting && lighting->hasSunLight();
+        const bool                  sunEnabled = hasLighting && lighting->hasSunLight();
         if (sunEnabled)
         {
             sun = lighting->sunLight();
@@ -126,7 +133,9 @@ private:
         std::memcpy(lightStorage.mapped, &uniform, sizeof(uniform));
     }
 
-    void rebuild(const FrameRenderContext& context)
+    void rebuild(
+        const FrameRenderContext &context
+    )
     {
         // Teardown in strict reverse dependency order.
         frameSet.reset();
@@ -144,8 +153,9 @@ private:
 
         // Light uniform buffer: host visible, persistently mapped, updated
         // every record call.
-        lightStorage = createMappedHostVisibleBuffer(context.device, context.physicalDevice, sizeof(GpuLightUniform),
-                                                     vk::BufferUsageFlagBits::eUniformBuffer);
+        lightStorage = createMappedHostVisibleBuffer(
+            context.device, context.physicalDevice, sizeof(GpuLightUniform), vk::BufferUsageFlagBits::eUniformBuffer
+        );
         // Set 0: camera, primitives, light uniforms (the relight), material
         // table, texture arrays, environment (sky fallback).
         {
@@ -158,9 +168,15 @@ private:
             bindings[2].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             bindings[3].setBinding(3).setDescriptorType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(1);
             bindings[3].setStageFlags(vk::ShaderStageFlagBits::eCompute);
-            bindings[4].setBinding(4).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+            bindings[4]
+                .setBinding(4)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorCount(1);
             bindings[4].setStageFlags(vk::ShaderStageFlagBits::eCompute);
-            bindings[5].setBinding(5).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+            bindings[5]
+                .setBinding(5)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorCount(1);
             bindings[5].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             bindings[6].setBinding(6).setDescriptorType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(1);
             bindings[6].setStageFlags(vk::ShaderStageFlagBits::eCompute);
@@ -174,7 +190,8 @@ private:
             std::array<vk::DescriptorSetLayoutBinding, 5> bindings;
             for (std::uint32_t binding = 0; binding < 4; ++binding)
             {
-                bindings[binding].setBinding(binding)
+                bindings[binding]
+                    .setBinding(binding)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
                     .setDescriptorCount(1);
                 bindings[binding].setStageFlags(vk::ShaderStageFlagBits::eCompute);
@@ -190,17 +207,18 @@ private:
         pushRange.setStageFlags(vk::ShaderStageFlagBits::eCompute);
         pushRange.setOffset(0);
         pushRange.setSize(sizeof(ReflectionPush));
-        vk::PipelineLayoutCreateInfo layoutInfo;
+        vk::PipelineLayoutCreateInfo                 layoutInfo;
         const std::array<vk::DescriptorSetLayout, 2> setLayouts{**sharedSetLayout, **frameSetLayout};
         layoutInfo.setSetLayouts(setLayouts);
         layoutInfo.setPushConstantRanges(pushRange);
         pipelineLayout = std::make_unique<vk::raii::PipelineLayout>(context.device, layoutInfo);
 
-        const std::vector<char> code =
-            readShaderBytes(context.shaderDirectory / "ray_reflections.comp.spv", moduleContext);
+        const std::vector<char> code = readShaderBytes(
+            context.shaderDirectory / "ray_reflections.comp.spv", moduleContext
+        );
         vk::ShaderModuleCreateInfo moduleInfo;
-        moduleInfo.setCodeSize(code.size()).setPCode(reinterpret_cast<const std::uint32_t*>(code.data()));
-        vk::raii::ShaderModule module(context.device, moduleInfo);
+        moduleInfo.setCodeSize(code.size()).setPCode(reinterpret_cast<const std::uint32_t *>(code.data()));
+        vk::raii::ShaderModule            module(context.device, moduleInfo);
         vk::PipelineShaderStageCreateInfo stage;
         stage.setStage(vk::ShaderStageFlagBits::eCompute).setModule(*module).setPName("main");
         vk::ComputePipelineCreateInfo pipelineInfo;
@@ -213,7 +231,8 @@ private:
             std::array<vk::DescriptorPoolSize, 3> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, 3),
                 vk::DescriptorPoolSize(vk::DescriptorType::eStorageBuffer, 2),
-                vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 2)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 2)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(1);
@@ -223,7 +242,8 @@ private:
             allocate.setDescriptorPool(**sharedPool);
             allocate.setSetLayouts(**sharedSetLayout);
             sharedSet = std::make_unique<vk::raii::DescriptorSet>(
-                std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+            );
 
             // The relight needs the light uniform block: the module owns a
             // zeroed copy (lights arrive through the G-buffer's direct pass,
@@ -232,11 +252,13 @@ private:
             vk::DescriptorBufferInfo primitivesInfo(context.primitivesBuffer, 0, vk::WholeSize);
             vk::DescriptorBufferInfo lightInfo(**lightStorage.buffer, 0, sizeof(GpuLightUniform));
             vk::DescriptorBufferInfo materialsInfo(context.materialsBuffer, 0, vk::WholeSize);
-            vk::DescriptorImageInfo albedoArrayInfo(**sampler, context.albedoArrayView,
-                                                    vk::ImageLayout::eShaderReadOnlyOptimal);
-            vk::DescriptorImageInfo dataArrayInfo(**sampler, context.dataArrayView,
-                                                  vk::ImageLayout::eShaderReadOnlyOptimal);
-            vk::DescriptorBufferInfo environmentInfo(context.environmentBuffer, 0, vk::WholeSize);
+            vk::DescriptorImageInfo  albedoArrayInfo(
+                **sampler, context.albedoArrayView, vk::ImageLayout::eShaderReadOnlyOptimal
+            );
+            vk::DescriptorImageInfo dataArrayInfo(
+                **sampler, context.dataArrayView, vk::ImageLayout::eShaderReadOnlyOptimal
+            );
+            vk::DescriptorBufferInfo              environmentInfo(context.environmentBuffer, 0, vk::WholeSize);
             std::array<vk::WriteDescriptorSet, 7> writes;
             writes[0].setDstSet(**sharedSet).setDstBinding(0).setDescriptorType(vk::DescriptorType::eUniformBuffer);
             writes[0].setBufferInfo(cameraInfo);
@@ -246,9 +268,15 @@ private:
             writes[2].setBufferInfo(lightInfo);
             writes[3].setDstSet(**sharedSet).setDstBinding(3).setDescriptorType(vk::DescriptorType::eStorageBuffer);
             writes[3].setBufferInfo(materialsInfo);
-            writes[4].setDstSet(**sharedSet).setDstBinding(4).setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+            writes[4]
+                .setDstSet(**sharedSet)
+                .setDstBinding(4)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[4].setImageInfo(albedoArrayInfo);
-            writes[5].setDstSet(**sharedSet).setDstBinding(5).setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+            writes[5]
+                .setDstSet(**sharedSet)
+                .setDstBinding(5)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[5].setImageInfo(dataArrayInfo);
             writes[6].setDstSet(**sharedSet).setDstBinding(6).setDescriptorType(vk::DescriptorType::eUniformBuffer);
             writes[6].setBufferInfo(environmentInfo);
@@ -259,7 +287,8 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 4),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(1);
@@ -269,7 +298,8 @@ private:
             allocate.setDescriptorPool(**framePool);
             allocate.setSetLayouts(**frameSetLayout);
             frameSet = std::make_unique<vk::raii::DescriptorSet>(
-                std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+            );
 
             std::array<vk::DescriptorImageInfo, 4> inputs;
             inputs[0] = vk::DescriptorImageInfo(**sampler, context.albedoView, vk::ImageLayout::eGeneral);
@@ -280,7 +310,9 @@ private:
             std::array<vk::WriteDescriptorSet, 5> writes;
             for (std::uint32_t binding = 0; binding < 4; ++binding)
             {
-                writes[binding].setDstSet(**frameSet).setDstBinding(binding)
+                writes[binding]
+                    .setDstSet(**frameSet)
+                    .setDstBinding(binding)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
                 writes[binding].setImageInfo(inputs[binding]);
             }
@@ -289,24 +321,24 @@ private:
             context.device.updateDescriptorSets(writes, {});
         }
 
-        cachedExtent = context.extent;
+        cachedExtent  = context.extent;
         needsRecreate = false;
     }
 
-    Settings settings;
-    LightingCapability* lighting = nullptr;
-    vk::Extent2D cachedExtent{};
-    bool needsRecreate = false;
-    MappedHostVisibleBuffer lightStorage;
-    std::unique_ptr<vk::raii::Sampler> sampler;
+    Settings                                       settings;
+    LightingCapability                            *lighting = nullptr;
+    vk::Extent2D                                   cachedExtent{};
+    bool                                           needsRecreate = false;
+    MappedHostVisibleBuffer                        lightStorage;
+    std::unique_ptr<vk::raii::Sampler>             sampler;
     std::unique_ptr<vk::raii::DescriptorSetLayout> sharedSetLayout;
     std::unique_ptr<vk::raii::DescriptorSetLayout> frameSetLayout;
-    std::unique_ptr<vk::raii::DescriptorPool> sharedPool;
-    std::unique_ptr<vk::raii::DescriptorSet> sharedSet;
-    std::unique_ptr<vk::raii::DescriptorPool> framePool;
-    std::unique_ptr<vk::raii::DescriptorSet> frameSet;
-    std::unique_ptr<vk::raii::PipelineLayout> pipelineLayout;
-    std::unique_ptr<vk::raii::Pipeline> pipeline;
+    std::unique_ptr<vk::raii::DescriptorPool>      sharedPool;
+    std::unique_ptr<vk::raii::DescriptorSet>       sharedSet;
+    std::unique_ptr<vk::raii::DescriptorPool>      framePool;
+    std::unique_ptr<vk::raii::DescriptorSet>       frameSet;
+    std::unique_ptr<vk::raii::PipelineLayout>      pipelineLayout;
+    std::unique_ptr<vk::raii::Pipeline>            pipeline;
 };
 
 } // namespace
@@ -315,8 +347,8 @@ private:
 
 RayReflectionsModule::RayReflectionsModule()
 {
-    componentManifest.name = "ray_reflections";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "ray_reflections";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
     // capability.lighting is optional at acquire time (a missing or denied
@@ -330,8 +362,10 @@ RayReflectionsModule::RayReflectionsModule()
     // The pass settings the module reads from [lighting.ray_reflections],
     // plus the technique composition list it shares with the renderer.
     componentManifest.knownConfigKeys = {
-        "lighting.ray_reflections.max_roughness", "lighting.ray_reflections.max_distance",
-        "lighting.ray_reflections.march_steps",   "lighting.techniques",
+        "lighting.ray_reflections.max_roughness",
+        "lighting.ray_reflections.max_distance",
+        "lighting.ray_reflections.march_steps",
+        "lighting.techniques",
     };
 }
 
@@ -340,21 +374,25 @@ RayReflectionsModule::~RayReflectionsModule()
     stop();
 }
 
-void RayReflectionsModule::construct(ComponentContext& context)
+void RayReflectionsModule::construct(
+    ComponentContext &context
+)
 {
     logger = &context.acquireCapability<LoggerCapability>();
 
     RayReflectionsPass::Settings settings;
-    settings.maxRoughness = static_cast<float>(
-        context.configurationFloatingInSection("lighting", "ray_reflections.max_roughness")
+    settings.maxRoughness = static_cast<float>(context
+            .configurationFloatingInSection("lighting", "ray_reflections.max_roughness")
             .value_or(defaultReflectionMaxRoughness));
-    settings.maxDistance = static_cast<float>(
-        context.configurationFloatingInSection("lighting", "ray_reflections.max_distance")
+    settings.maxDistance  = static_cast<float>(context
+            .configurationFloatingInSection("lighting", "ray_reflections.max_distance")
             .value_or(defaultReflectionMaxDistance));
-    settings.marchSteps = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+    settings.marchSteps   = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "ray_reflections.march_steps")
             .value_or(defaultReflectionMarchSteps),
-        8, 512));
+        8,
+        512
+    ));
     if (settings.maxRoughness <= 0.0f || settings.maxDistance <= 0.0f)
     {
         throw std::runtime_error("ray_reflections module: max_roughness and max_distance must be > 0");
@@ -362,12 +400,12 @@ void RayReflectionsModule::construct(ComponentContext& context)
 
     // The lighting capability is optional: without a provider the relight
     // sees no lights and reflections carry emissive + sky only.
-    LightingCapability* lighting = nullptr;
+    LightingCapability *lighting = nullptr;
     try
     {
         lighting = &context.acquireCapability<LightingCapability>();
     }
-    catch (const ComponentAccessError&)
+    catch (const ComponentAccessError &)
     {
         lighting = nullptr;
     }
@@ -379,17 +417,19 @@ void RayReflectionsModule::construct(ComponentContext& context)
     pass = std::make_shared<RayReflectionsPass>(settings, lighting);
     if (passAttached)
     {
-        RendererCapability& rendererCapability = context.acquireCapability<RendererCapability>();
-        auto* rendererModule = static_cast<RendererModule*>(&rendererCapability);
+        RendererCapability &rendererCapability = context.acquireCapability<RendererCapability>();
+        auto               *rendererModule     = static_cast<RendererModule *>(&rendererCapability);
         rendererModule->attachLightingTechnique(pass);
     }
 }
 
 void RayReflectionsModule::start()
 {
-    logger->logMessage(LogLevel::Information,
-                       std::string("ray_reflections module started; technique ") +
-                           (passAttached ? "attached (indirect specular)" : "not listed in [lighting].techniques; idle"));
+    logger->logMessage(
+        LogLevel::Information,
+        std::string("ray_reflections module started; technique ")
+            + (passAttached ? "attached (indirect specular)" : "not listed in [lighting].techniques; idle")
+    );
 }
 
 void RayReflectionsModule::stop()
@@ -399,7 +439,9 @@ void RayReflectionsModule::stop()
     logger = nullptr;
 }
 
-void* RayReflectionsModule::capabilityPointerFor(const std::string& /*capabilityName*/)
+void *RayReflectionsModule::capabilityPointerFor(
+    const std::string & /*capabilityName*/
+)
 {
     return nullptr;
 }

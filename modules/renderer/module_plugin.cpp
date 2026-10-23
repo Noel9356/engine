@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createrendererPluginModule()
+engine::ModuleInterface *createrendererPluginModule()
 {
     return new engine::RendererModule();
 }
 
 const engine::EngineModulePluginEntry rendererPluginEntry{
-    engine::engineModulePluginAbiVersion, "renderer", &createrendererPluginModule};
+    engine::engineModulePluginAbiVersion, "renderer", &createrendererPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &rendererPluginEntry;
 }

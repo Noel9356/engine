@@ -16,7 +16,9 @@ DynamicLibrary::~DynamicLibrary()
     release();
 }
 
-bool DynamicLibrary::load(const std::filesystem::path& libraryPath, std::string& errorMessage)
+bool DynamicLibrary::load(
+    const std::filesystem::path &libraryPath, std::string &errorMessage
+)
 {
     errorMessage.clear();
     release();
@@ -30,17 +32,22 @@ bool DynamicLibrary::load(const std::filesystem::path& libraryPath, std::string&
     // without either flag, plain LoadLibrary would search neither the
     // plugin's own directory nor honor the runtime layout's split between
     // modules/ and the executable directory.
-    HMODULE loadedHandle =
-        ::LoadLibraryExW(libraryPath.c_str(), nullptr,
-                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    HMODULE loadedHandle = ::LoadLibraryExW(
+        libraryPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+    );
     if (loadedHandle == nullptr)
     {
-        const DWORD errorCode = ::GetLastError();
-        LPSTR messageBuffer = nullptr;
-        const DWORD messageSize = ::FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                                                       FORMAT_MESSAGE_IGNORE_INSERTS,
-                                                   nullptr, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                                                   reinterpret_cast<LPSTR>(&messageBuffer), 0, nullptr);
+        const DWORD errorCode     = ::GetLastError();
+        LPSTR       messageBuffer = nullptr;
+        const DWORD messageSize   = ::FormatMessageA(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            errorCode,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPSTR>(&messageBuffer),
+            0,
+            nullptr
+        );
         errorMessage = "failed to load '" + libraryPath.string() + "'";
         if (messageSize > 0 && messageBuffer != nullptr)
         {
@@ -52,11 +59,11 @@ bool DynamicLibrary::load(const std::filesystem::path& libraryPath, std::string&
     handle = loadedHandle;
     return true;
 #else
-    void* loadedHandle = ::dlopen(libraryPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    void *loadedHandle = ::dlopen(libraryPath.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (loadedHandle == nullptr)
     {
-        const char* failureReason = ::dlerror();
-        errorMessage = "failed to load '" + libraryPath.string() + "'";
+        const char *failureReason = ::dlerror();
+        errorMessage              = "failed to load '" + libraryPath.string() + "'";
         if (failureReason != nullptr)
         {
             errorMessage += ": " + std::string(failureReason);
@@ -82,14 +89,16 @@ void DynamicLibrary::release()
     handle = nullptr;
 }
 
-void* DynamicLibrary::resolveSymbol(const std::string& symbolName) const
+void *DynamicLibrary::resolveSymbol(
+    const std::string &symbolName
+) const
 {
     if (handle == nullptr)
     {
         return nullptr;
     }
 #if defined(_WIN32)
-    return reinterpret_cast<void*>(::GetProcAddress(static_cast<HMODULE>(handle), symbolName.c_str()));
+    return reinterpret_cast<void *>(::GetProcAddress(static_cast<HMODULE>(handle), symbolName.c_str()));
 #else
     return ::dlsym(handle, symbolName.c_str());
 #endif

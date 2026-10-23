@@ -16,15 +16,15 @@ namespace engine
 
 ScreenshotModule::ScreenshotModule()
 {
-    componentManifest.name = "screenshot";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "screenshot";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {"screenshot"};
     // "input" is deliberately NOT required: the module reacts to key presses
     // through the event bus (input publishes KeyPressedEvent), so a build
     // without the input module loses only the hotkey, not the capability API.
     componentManifest.requiredCapabilities = {"logging", "renderer"};
-    componentManifest.requiredPermissions = {"capability.logging", "capability.renderer", "filesystem.write"};
-    componentManifest.knownConfigKeys = {"screenshot.key", "screenshot.output_directory"};
+    componentManifest.requiredPermissions  = {"capability.logging", "capability.renderer", "filesystem.write"};
+    componentManifest.knownConfigKeys      = {"screenshot.key", "screenshot.output_directory"};
 }
 
 ScreenshotModule::~ScreenshotModule()
@@ -32,38 +32,47 @@ ScreenshotModule::~ScreenshotModule()
     stop();
 }
 
-void ScreenshotModule::construct(ComponentContext& context)
+void ScreenshotModule::construct(
+    ComponentContext &context
+)
 {
-    boundContext = &context;
-    logger = &context.acquireCapability<LoggerCapability>();
+    boundContext       = &context;
+    logger             = &context.acquireCapability<LoggerCapability>();
     rendererCapability = &context.acquireCapability<RendererCapability>();
 
-    triggerKeyName = context.configurationString("key").value_or("F12");
+    triggerKeyName          = context.configurationString("key").value_or("F12");
     const KeyCode parsedKey = keyCodeFromName(triggerKeyName);
     if (parsedKey == KeyCode::Unknown)
     {
-        throw std::runtime_error("screenshot module: configuration key '" + triggerKeyName +
-                                 "' is not a known key name");
+        throw std::runtime_error(
+            "screenshot module: configuration key '" + triggerKeyName + "' is not a known key name"
+        );
     }
     triggerKeyCode = static_cast<std::uint32_t>(parsedKey);
 
     outputDirectory = context.configurationString("output_directory").value_or(std::string());
 
-    EventBus& bus = context.eventBus();
-    EventChannel<KeyPressedEvent>& pressedChannel = bus.channel<KeyPressedEvent>();
-    keyPressedSubscription =
-        EventSubscription(&bus, typeid(KeyPressedEvent),
-                          pressedChannel.subscribe<ScreenshotModule, &ScreenshotModule::handleKeyPressed>(this));
+    EventBus                      &bus            = context.eventBus();
+    EventChannel<KeyPressedEvent> &pressedChannel = bus.channel<KeyPressedEvent>();
+    keyPressedSubscription                        = EventSubscription(
+        &bus,
+        typeid(KeyPressedEvent),
+        pressedChannel.subscribe<ScreenshotModule, &ScreenshotModule::handleKeyPressed>(this)
+    );
 
-    EventChannel<FrameBeginEvent>& frameBeginChannel = bus.channel<FrameBeginEvent>();
-    frameBeginSubscription =
-        EventSubscription(&bus, typeid(FrameBeginEvent),
-                          frameBeginChannel.subscribe<ScreenshotModule, &ScreenshotModule::handleFrameBegin>(this));
+    EventChannel<FrameBeginEvent> &frameBeginChannel = bus.channel<FrameBeginEvent>();
+    frameBeginSubscription                           = EventSubscription(
+        &bus,
+        typeid(FrameBeginEvent),
+        frameBeginChannel.subscribe<ScreenshotModule, &ScreenshotModule::handleFrameBegin>(this)
+    );
 
-    EventChannel<FrameCapturedEvent>& capturedChannel = bus.channel<FrameCapturedEvent>();
-    frameCapturedSubscription =
-        EventSubscription(&bus, typeid(FrameCapturedEvent),
-                          capturedChannel.subscribe<ScreenshotModule, &ScreenshotModule::handleFrameCaptured>(this));
+    EventChannel<FrameCapturedEvent> &capturedChannel = bus.channel<FrameCapturedEvent>();
+    frameCapturedSubscription                         = EventSubscription(
+        &bus,
+        typeid(FrameCapturedEvent),
+        capturedChannel.subscribe<ScreenshotModule, &ScreenshotModule::handleFrameCaptured>(this)
+    );
 }
 
 void ScreenshotModule::start()
@@ -81,12 +90,14 @@ void ScreenshotModule::start()
     else
     {
         resolvedOutputDirectory = std::filesystem::path(outputDirectory).is_relative()
-                                      ? (std::filesystem::current_path() / outputDirectory)
-                                      : std::filesystem::path(outputDirectory);
+                                    ? (std::filesystem::current_path() / outputDirectory)
+                                    : std::filesystem::path(outputDirectory);
     }
-    logger->logMessage(LogLevel::Information,
-                       "screenshot module started; trigger key is '" + triggerKeyName +
-                           "', captures are written to '" + resolvedOutputDirectory.string() + "'");
+    logger->logMessage(
+        LogLevel::Information,
+        "screenshot module started; trigger key is '" + triggerKeyName + "', captures are written to '"
+            + resolvedOutputDirectory.string() + "'"
+    );
 }
 
 void ScreenshotModule::stop()
@@ -94,16 +105,18 @@ void ScreenshotModule::stop()
     keyPressedSubscription.release();
     frameBeginSubscription.release();
     frameCapturedSubscription.release();
-    boundContext = nullptr;
+    boundContext       = nullptr;
     rendererCapability = nullptr;
-    logger = nullptr;
+    logger             = nullptr;
 }
 
-void* ScreenshotModule::capabilityPointerFor(const std::string& capabilityName)
+void *ScreenshotModule::capabilityPointerFor(
+    const std::string &capabilityName
+)
 {
     if (capabilityName == ScreenshotCapability::capabilityName)
     {
-        return static_cast<ScreenshotCapability*>(this);
+        return static_cast<ScreenshotCapability *>(this);
     }
     return nullptr;
 }
@@ -113,7 +126,9 @@ void ScreenshotModule::requestScreenshot()
     captureQueued = true;
 }
 
-void ScreenshotModule::handleKeyPressed(const KeyPressedEvent& event)
+void ScreenshotModule::handleKeyPressed(
+    const KeyPressedEvent &event
+)
 {
     if (static_cast<std::uint32_t>(event.keyCode) == triggerKeyCode)
     {
@@ -122,7 +137,9 @@ void ScreenshotModule::handleKeyPressed(const KeyPressedEvent& event)
     }
 }
 
-void ScreenshotModule::handleFrameBegin(const FrameBeginEvent& /*event*/)
+void ScreenshotModule::handleFrameBegin(
+    const FrameBeginEvent & /*event*/
+)
 {
     if (captureQueued && rendererCapability != nullptr)
     {
@@ -132,7 +149,9 @@ void ScreenshotModule::handleFrameBegin(const FrameBeginEvent& /*event*/)
     }
 }
 
-void ScreenshotModule::handleFrameCaptured(const FrameCapturedEvent& event)
+void ScreenshotModule::handleFrameCaptured(
+    const FrameCapturedEvent &event
+)
 {
     if (!captureQueued || boundContext == nullptr)
     {
@@ -140,13 +159,20 @@ void ScreenshotModule::handleFrameCaptured(const FrameCapturedEvent& event)
     }
     captureQueued = false;
 
-    const std::filesystem::path& directory = resolvedOutputDirectory;
+    const std::filesystem::path &directory = resolvedOutputDirectory;
     std::filesystem::create_directories(directory);
 
-    const std::string filePath = (directory / nextCaptureFilePath()).string();
-    const int strideBytes = static_cast<int>(event.width) * 4;
-    if (stbi_write_png(filePath.c_str(), static_cast<int>(event.width), static_cast<int>(event.height), 4,
-                       event.pixelData, strideBytes) == 0)
+    const std::string filePath    = (directory / nextCaptureFilePath()).string();
+    const int         strideBytes = static_cast<int>(event.width) * 4;
+    if (stbi_write_png(
+            filePath.c_str(),
+            static_cast<int>(event.width),
+            static_cast<int>(event.height),
+            4,
+            event.pixelData,
+            strideBytes
+        )
+        == 0)
     {
         logger->logMessage(LogLevel::Error, "screenshot module: failed to write '" + filePath + "'");
         return;
@@ -163,7 +189,7 @@ void ScreenshotModule::handleFrameCaptured(const FrameCapturedEvent& event)
 std::string ScreenshotModule::nextCaptureFilePath() const
 {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::tm timeInformation{};
+    std::tm           timeInformation{};
 #if defined(_WIN32)
     ::localtime_s(&timeInformation, &now);
 #else

@@ -49,15 +49,15 @@ namespace engine
 // and lets the kernel parse manifests with the dependency it already carries.
 struct ModManifest
 {
-    std::string id;
-    std::string version = "0.0.0";
-    std::uint32_t engineApi = engineModInterfaceVersion;
-    std::string type; // "native" or "script"
-    std::string entry;
-    std::string host = "lua_scripting";
-    std::string displayName;
-    std::string description;
-    std::string author;
+    std::string              id;
+    std::string              version   = "0.0.0";
+    std::uint32_t            engineApi = engineModInterfaceVersion;
+    std::string              type; // "native" or "script"
+    std::string              entry;
+    std::string              host = "lua_scripting";
+    std::string              displayName;
+    std::string              description;
+    std::string              author;
     std::vector<std::string> capabilities;
     std::vector<std::string> permissions;
     std::vector<std::string> requiresComponents;
@@ -97,10 +97,10 @@ struct ModManifest
 class ModManifestLoader final
 {
 public:
-    static constexpr const char* manifestFileName = "mod.toml";
+    static constexpr const char *manifestFileName = "mod.toml";
 
-    bool loadFromFile(const std::filesystem::path& manifestPath, ModManifest& outManifest,
-                      std::string& errorMessage) const;
+    bool
+    loadFromFile(const std::filesystem::path &manifestPath, ModManifest &outManifest, std::string &errorMessage) const;
 };
 
 } // namespace engine

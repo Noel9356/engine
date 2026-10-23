@@ -22,22 +22,22 @@ public:
     RayReflectionsModule();
     ~RayReflectionsModule() override;
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
+    void *capabilityPointerFor(const std::string &capabilityName) override;
 
 private:
-    ComponentManifest componentManifest;
-    LoggerCapability* logger = nullptr;
+    ComponentManifest                      componentManifest;
+    LoggerCapability                      *logger = nullptr;
     std::shared_ptr<LightingTechniquePass> pass;
-    bool passAttached = false;
+    bool                                   passAttached = false;
 };
 
 } // namespace engine

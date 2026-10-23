@@ -19,25 +19,25 @@ namespace engine
 {
 
 inline constexpr std::uint32_t maxSceneObjects = 32;
-inline constexpr std::uint32_t maxPointLights = 16;
+inline constexpr std::uint32_t maxPointLights  = 16;
 
 enum class SceneObjectType : std::uint32_t
 {
-    Box = 0,
+    Box    = 0,
     Sphere = 1,
 };
 
 struct SceneObject
 {
-    SceneObjectType type = SceneObjectType::Box;
+    SceneObjectType      type     = SceneObjectType::Box;
     std::array<float, 3> position = {0.0f, 0.0f, 0.0f};
     // Box: half extents; sphere: radius in x (y/z ignored - spheres keep exact
     // normals under uniform radius).
-    std::array<float, 3> size = {1.0f, 1.0f, 1.0f};
-    float rotationYRadians = 0.0f;
-    std::array<float, 3> albedo = {0.8f, 0.8f, 0.8f};
-    float roughness = 0.8f;
-    float metallic = 0.0f;
+    std::array<float, 3> size             = {1.0f, 1.0f, 1.0f};
+    float                rotationYRadians = 0.0f;
+    std::array<float, 3> albedo           = {0.8f, 0.8f, 0.8f};
+    float                roughness        = 0.8f;
+    float                metallic         = 0.0f;
     // Emissive radiance is albedo * emissiveStrength (unbounded HDR).
     float emissiveStrength = 0.0f;
     // PBR texture set ([scene.objects].texture = a folder named <name> under
@@ -54,27 +54,27 @@ struct SceneObject
 // Camera-feel defaults shared by [scene.camera] parsing (SceneCamera below)
 // and the fly controller's own fallbacks (camera_controller.hpp); one
 // definition so the two sites cannot drift apart.
-inline constexpr float defaultFlySpeed = 4.0f;
-inline constexpr float defaultFlyBoost = 4.0f;
+inline constexpr float defaultFlySpeed        = 4.0f;
+inline constexpr float defaultFlyBoost        = 4.0f;
 inline constexpr float defaultLookSensitivity = 0.0022f;
 // Fly speed scaling per scroll-wheel notch.
 inline constexpr float flyWheelSpeedFactor = 1.15f;
 
 struct SceneCamera
 {
-    std::array<float, 3> position = {0.0f, 1.6f, 3.5f};
-    std::array<float, 3> lookAt = {0.0f, 1.0f, 0.0f};
-    float verticalFieldOfViewDegrees = 60.0f;
-    float nearPlane = 0.05f;
-    float farPlane = 500.0f;
+    std::array<float, 3> position                   = {0.0f, 1.6f, 3.5f};
+    std::array<float, 3> lookAt                     = {0.0f, 1.0f, 0.0f};
+    float                verticalFieldOfViewDegrees = 60.0f;
+    float                nearPlane                  = 0.05f;
+    float                farPlane                   = 500.0f;
     // Free-fly controls ([scene.camera] free_fly). When enabled the camera
     // starts at position/look_at and is then driven by the keyboard and mouse
     // every frame (see camera_controller.hpp for the binding).
     bool freeFly = true;
     // Camera-feel defaults shared with the fly controller's own fallbacks
     // (one definition so the two cannot drift).
-    float flySpeed = defaultFlySpeed;            // base speed in world units per second
-    float flyBoost = defaultFlyBoost;            // speed multiplier while the boost key is held
+    float flySpeed        = defaultFlySpeed;        // base speed in world units per second
+    float flyBoost        = defaultFlyBoost;        // speed multiplier while the boost key is held
     float lookSensitivity = defaultLookSensitivity; // yaw/pitch radians per cursor pixel
 };
 
@@ -82,9 +82,9 @@ struct SceneCamera
 // std430 struct; keep both sides in sync).
 struct GpuScenePrimitive
 {
-    std::array<float, 4> positionType;  // xyz position, w SceneObjectType
-    std::array<float, 4> sizeRotation;  // xyz size, w rotationY (radians)
-    std::array<float, 4> albedoRoughness;          // rgb albedo, a roughness
+    std::array<float, 4> positionType;    // xyz position, w SceneObjectType
+    std::array<float, 4> sizeRotation;    // xyz size, w rotationY (radians)
+    std::array<float, 4> albedoRoughness; // rgb albedo, a roughness
     // x metallic, y emissive strength, z sin(rotationY), w cos(rotationY).
     // The rotation trig is baked here at upload: the SDF shaders apply this
     // transform for every primitive on every sphere-tracing step, and the two
@@ -100,8 +100,8 @@ struct GpuScenePrimitive
 struct SceneSun
 {
     std::array<float, 3> direction = {0.0f, -1.0f, 0.0f};
-    std::array<float, 3> color = {1.0f, 1.0f, 1.0f};
-    float intensity = 0.0f;
+    std::array<float, 3> color     = {1.0f, 1.0f, 1.0f};
+    float                intensity = 0.0f;
 };
 
 struct SceneSky
@@ -110,19 +110,19 @@ struct SceneSky
     // the flat sky_radiance value, which keeps old configurations exactly
     // flat). The sun disk is direct-view only (composite + reflections); the
     // GI transport field deliberately stays disk-free.
-    std::array<float, 3> zenith = {0.0f, 0.0f, 0.0f};
-    std::array<float, 3> horizon = {0.0f, 0.0f, 0.0f};
-    std::array<float, 3> ground = {0.0f, 0.0f, 0.0f};
-    bool sunDisk = true;
-    float sunDiskSizeDegrees = 0.6f;
+    std::array<float, 3> zenith             = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3> horizon            = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3> ground             = {0.0f, 0.0f, 0.0f};
+    bool                 sunDisk            = true;
+    float                sunDiskSizeDegrees = 0.6f;
 };
 
 struct SceneDescription
 {
-    SceneCamera camera;
-    SceneSun sun;
-    std::array<float, 3> skyRadiance = {0.0f, 0.0f, 0.0f};
-    SceneSky sky;
+    SceneCamera              camera;
+    SceneSun                 sun;
+    std::array<float, 3>     skyRadiance = {0.0f, 0.0f, 0.0f};
+    SceneSky                 sky;
     std::vector<SceneObject> objects;
     // Texture set names in first-use order; a scene object's textureSet name
     // maps to its texture array layer through this list (the renderer loads
@@ -136,7 +136,7 @@ struct SceneDescription
     // the same primitive for every object, which is what keeps traced and
     // rasterized geometry consistent. An absent [scene] yields an empty scene
     // and returns true - callers decide what an empty scene means for them.
-    static bool parseFromConfiguration(ComponentContext& context, SceneDescription& scene, std::string& error);
+    static bool parseFromConfiguration(ComponentContext &context, SceneDescription &scene, std::string &error);
 };
 
 } // namespace engine

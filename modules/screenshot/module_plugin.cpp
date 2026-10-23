@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createscreenshotPluginModule()
+engine::ModuleInterface *createscreenshotPluginModule()
 {
     return new engine::ScreenshotModule();
 }
 
 const engine::EngineModulePluginEntry screenshotPluginEntry{
-    engine::engineModulePluginAbiVersion, "screenshot", &createscreenshotPluginModule};
+    engine::engineModulePluginAbiVersion, "screenshot", &createscreenshotPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &screenshotPluginEntry;
 }

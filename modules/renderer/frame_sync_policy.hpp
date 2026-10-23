@@ -42,15 +42,17 @@ namespace engine
 // renderer state's configuration default and the [renderer] config fallback
 // all state the same number through these constants (the configuration clamp
 // uses the limit).
-inline constexpr std::uint32_t defaultFramesInFlight = 2;
+inline constexpr std::uint32_t defaultFramesInFlight  = 2;
 inline constexpr std::uint32_t maxFramesInFlightLimit = 8;
 
 struct FrameSyncPolicy
 {
-    std::uint32_t framesInFlight = defaultFramesInFlight;
+    std::uint32_t framesInFlight      = defaultFramesInFlight;
     std::uint32_t swapchainImageCount = 0;
 
-    void setSwapchainImageCount(std::uint32_t newSwapchainImageCount)
+    void setSwapchainImageCount(
+        std::uint32_t newSwapchainImageCount
+    )
     {
         swapchainImageCount = newSwapchainImageCount;
     }
@@ -67,12 +69,16 @@ struct FrameSyncPolicy
         return swapchainImageCount;
     }
 
-    [[nodiscard]] static constexpr std::uint32_t acquireSemaphoreIndex(std::uint32_t frameSlot)
+    [[nodiscard]] static constexpr std::uint32_t acquireSemaphoreIndex(
+        std::uint32_t frameSlot
+    )
     {
         return frameSlot;
     }
 
-    [[nodiscard]] static constexpr std::uint32_t renderFinishedSemaphoreIndex(std::uint32_t imageIndex)
+    [[nodiscard]] static constexpr std::uint32_t renderFinishedSemaphoreIndex(
+        std::uint32_t imageIndex
+    )
     {
         return imageIndex;
     }

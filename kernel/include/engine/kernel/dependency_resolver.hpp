@@ -32,15 +32,15 @@ public:
     {
         enum class Kind
         {
-            UnknownCapability,      // a required capability has no provider at all
-            UnknownComponent,       // a required component name matches nothing
-            AmbiguousCapability,    // several providers, no configuration choice
-            UnknownSelectedProvider,// configuration chose a provider that does not provide it
-            CyclicDependency        // providers and consumers form a cycle
+            UnknownCapability,       // a required capability has no provider at all
+            UnknownComponent,        // a required component name matches nothing
+            AmbiguousCapability,     // several providers, no configuration choice
+            UnknownSelectedProvider, // configuration chose a provider that does not provide it
+            CyclicDependency         // providers and consumers form a cycle
         };
 
-        Kind kind = Kind::UnknownCapability;
-        std::string message;
+        Kind                     kind = Kind::UnknownCapability;
+        std::string              message;
         std::vector<std::string> involvementChain; // component or capability names on the path
     };
 
@@ -51,7 +51,7 @@ public:
         // Indices into the manifests vector that was handed to the resolver,
         // providers before consumers. Indices instead of pointers keep the
         // result free of lifetime coupling to resolver internals.
-        std::vector<std::size_t> constructionOrder;
+        std::vector<std::size_t>          constructionOrder;
         std::vector<ResolutionDiagnostic> diagnostics;
     };
 

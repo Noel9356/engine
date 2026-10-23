@@ -19,23 +19,26 @@
 namespace engine
 {
 
-void RendererState::uploadToDeviceLocal(GeometryBuffer& target, const void* data, vk::DeviceSize byteSize,
-                                        vk::BufferUsageFlags usages)
+void RendererState::uploadToDeviceLocal(
+    GeometryBuffer &target, const void *data, vk::DeviceSize byteSize, vk::BufferUsageFlags usages
+)
 {
     vk::BufferCreateInfo stagingInfo;
     stagingInfo.setSize(byteSize);
     stagingInfo.setUsage(vk::BufferUsageFlagBits::eTransferSrc);
     stagingInfo.setSharingMode(vk::SharingMode::eExclusive);
-    vk::raii::Buffer stagingBuffer(*device, stagingInfo);
+    vk::raii::Buffer             stagingBuffer(*device, stagingInfo);
     const vk::MemoryRequirements stagingRequirements = stagingBuffer.getMemoryRequirements();
-    vk::MemoryAllocateInfo stagingAllocate;
+    vk::MemoryAllocateInfo       stagingAllocate;
     stagingAllocate.setAllocationSize(stagingRequirements.size);
-    stagingAllocate.setMemoryTypeIndex(findMemoryType(**physicalDevice, stagingRequirements.memoryTypeBits,
-                                                      vk::MemoryPropertyFlagBits::eHostVisible |
-                                                          vk::MemoryPropertyFlagBits::eHostCoherent));
+    stagingAllocate.setMemoryTypeIndex(findMemoryType(
+        **physicalDevice,
+        stagingRequirements.memoryTypeBits,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+    ));
     vk::raii::DeviceMemory stagingMemory(*device, stagingAllocate);
     stagingBuffer.bindMemory(*stagingMemory, 0);
-    void* mapped = stagingMemory.mapMemory(0, stagingRequirements.size);
+    void *mapped = stagingMemory.mapMemory(0, stagingRequirements.size);
     std::memcpy(mapped, data, static_cast<std::size_t>(byteSize));
     stagingMemory.unmapMemory();
 
@@ -43,12 +46,13 @@ void RendererState::uploadToDeviceLocal(GeometryBuffer& target, const void* data
     bufferInfo.setSize(byteSize);
     bufferInfo.setUsage(usages | vk::BufferUsageFlagBits::eTransferDst);
     bufferInfo.setSharingMode(vk::SharingMode::eExclusive);
-    target.buffer = std::make_unique<vk::raii::Buffer>(*device, bufferInfo);
+    target.buffer                             = std::make_unique<vk::raii::Buffer>(*device, bufferInfo);
     const vk::MemoryRequirements requirements = target.buffer->getMemoryRequirements();
-    vk::MemoryAllocateInfo allocateInfo;
+    vk::MemoryAllocateInfo       allocateInfo;
     allocateInfo.setAllocationSize(requirements.size);
-    allocateInfo.setMemoryTypeIndex(findMemoryType(**physicalDevice, requirements.memoryTypeBits,
-                                                   vk::MemoryPropertyFlagBits::eDeviceLocal));
+    allocateInfo.setMemoryTypeIndex(
+        findMemoryType(**physicalDevice, requirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
+    );
     target.memory = std::make_unique<vk::raii::DeviceMemory>(*device, allocateInfo);
     target.buffer->bindMemory(*target.memory, 0);
 
@@ -56,8 +60,7 @@ void RendererState::uploadToDeviceLocal(GeometryBuffer& target, const void* data
     commandAllocateInfo.setCommandPool(**commandPool);
     commandAllocateInfo.setLevel(vk::CommandBufferLevel::ePrimary);
     commandAllocateInfo.setCommandBufferCount(1);
-    vk::raii::CommandBuffer setupBuffer =
-        std::move(vk::raii::CommandBuffers(*device, commandAllocateInfo).front());
+    vk::raii::CommandBuffer setupBuffer = std::move(vk::raii::CommandBuffers(*device, commandAllocateInfo).front());
     setupBuffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
     vk::BufferCopy copyRegion(0, 0, byteSize);
     setupBuffer.copyBuffer(*stagingBuffer, *target.buffer, copyRegion);
@@ -70,19 +73,23 @@ void RendererState::uploadToDeviceLocal(GeometryBuffer& target, const void* data
 
 void RendererState::createSceneGeometry()
 {
-    const MeshData box = buildBoxMesh();
+    const MeshData box    = buildBoxMesh();
     const MeshData sphere = buildSphereMesh(sphereMeshSlices, sphereMeshStacks);
 
-    auto uploadMesh = [this](const MeshData& mesh, GeometryBuffer& target)
+    auto uploadMesh = [this](const MeshData &mesh, GeometryBuffer &target)
     {
-        const vk::DeviceSize vertexBytes = mesh.vertices.size() * sizeof(float);
-        const vk::DeviceSize indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
+        const vk::DeviceSize      vertexBytes = mesh.vertices.size() * sizeof(float);
+        const vk::DeviceSize      indexBytes  = mesh.indices.size() * sizeof(std::uint32_t);
         std::vector<std::uint8_t> combined(static_cast<std::size_t>(vertexBytes + indexBytes));
         std::memcpy(combined.data(), mesh.vertices.data(), static_cast<std::size_t>(vertexBytes));
         std::memcpy(combined.data() + vertexBytes, mesh.indices.data(), static_cast<std::size_t>(indexBytes));
-        uploadToDeviceLocal(target, combined.data(), static_cast<vk::DeviceSize>(combined.size()),
-                            vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer);
-        target.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+        uploadToDeviceLocal(
+            target,
+            combined.data(),
+            static_cast<vk::DeviceSize>(combined.size()),
+            vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer
+        );
+        target.indexCount       = static_cast<std::uint32_t>(mesh.indices.size());
         target.indexOffsetBytes = static_cast<std::size_t>(vertexBytes);
     };
     uploadMesh(box, boxMesh);
@@ -94,31 +101,45 @@ void RendererState::createSceneGeometry()
     // is handed to the lighting passes even for an empty scene.
     std::vector<GpuScenePrimitive> primitives;
     primitives.reserve(std::max<std::size_t>(scene.objects.size(), 1));
-    for (const SceneObject& object : scene.objects)
+    for (const SceneObject &object : scene.objects)
     {
         GpuScenePrimitive primitive;
-        primitive.positionType = {object.position[0], object.position[1], object.position[2],
-                                  static_cast<float>(static_cast<std::uint32_t>(object.type))};
-        primitive.sizeRotation = {object.size[0], object.size[1], object.size[2], object.rotationYRadians};
+        primitive.positionType = {
+            object.position[0],
+            object.position[1],
+            object.position[2],
+            static_cast<float>(static_cast<std::uint32_t>(object.type))
+        };
+        primitive.sizeRotation    = {object.size[0], object.size[1], object.size[2], object.rotationYRadians};
         primitive.albedoRoughness = {object.albedo[0], object.albedo[1], object.albedo[2], object.roughness};
         // Rotation trig baked for the SDF shaders (scene_description.hpp): the
         // tracing loops must not re-evaluate sin/cos per primitive per step.
-        primitive.metallicEmissiveStrength = {object.metallic, object.emissiveStrength,
-                                              std::sin(object.rotationYRadians),
-                                              std::cos(object.rotationYRadians)};
+        primitive.metallicEmissiveStrength = {
+            object.metallic,
+            object.emissiveStrength,
+            std::sin(object.rotationYRadians),
+            std::cos(object.rotationYRadians)
+        };
         primitives.push_back(primitive);
     }
     if (primitives.empty())
     {
         // Degenerate stand-in with rotation 0: sin 0, cos 1.
-        primitives.push_back(GpuScenePrimitive{{0.0f, 0.0f, 0.0f, 0.0f},
-                                               {0.001f, 0.001f, 0.001f, 0.0f},
-                                               {0.0f, 0.0f, 0.0f, 1.0f},
-                                               {0.0f, 0.0f, 0.0f, 1.0f}});
+        primitives.push_back(
+            GpuScenePrimitive{
+                {0.0f, 0.0f, 0.0f, 0.0f},
+                {0.001f, 0.001f, 0.001f, 0.0f},
+                {0.0f, 0.0f, 0.0f, 1.0f},
+                {0.0f, 0.0f, 0.0f, 1.0f}
+            }
+        );
     }
-    uploadToDeviceLocal(primitivesBuffer, primitives.data(),
-                        static_cast<vk::DeviceSize>(primitives.size() * sizeof(GpuScenePrimitive)),
-                        vk::BufferUsageFlagBits::eStorageBuffer);
+    uploadToDeviceLocal(
+        primitivesBuffer,
+        primitives.data(),
+        static_cast<vk::DeviceSize>(primitives.size() * sizeof(GpuScenePrimitive)),
+        vk::BufferUsageFlagBits::eStorageBuffer
+    );
 
     // Material table: one entry per primitive, resolving each object's
     // texture set name into array layer indices (materials_common.glsl
@@ -127,10 +148,10 @@ void RendererState::createSceneGeometry()
     createTextureArrays();
     std::vector<GpuSceneMaterial> materialTable;
     materialTable.reserve(std::max<std::size_t>(scene.objects.size(), 1));
-    for (const SceneObject& object : scene.objects)
+    for (const SceneObject &object : scene.objects)
     {
         GpuSceneMaterial material;
-        material.layers = {-1, -1, 0, 0};
+        material.layers        = {-1, -1, 0, 0};
         material.scaleAndFlags = {object.uvScale, 0.0f, 0.0f, 0.0f};
         if (!object.textureSet.empty())
         {
@@ -138,7 +159,7 @@ void RendererState::createSceneGeometry()
             if (registered != scene.textureSets.end())
             {
                 const std::int32_t layer = static_cast<std::int32_t>(registered - scene.textureSets.begin());
-                material.layers = {layer, layer, 0, 0};
+                material.layers          = {layer, layer, 0, 0};
             }
         }
         materialTable.push_back(material);
@@ -159,28 +180,35 @@ void RendererState::createSceneGeometry()
             const float metalMean = index < textureSetDataMeans.size() ? textureSetDataMeans[index][1] : -1.0f;
             runtimeLogger->logMessage(
                 LogLevel::Information,
-                logPrefix + "texture set '" + scene.textureSets[index] + "' -> layer " +
-                    std::to_string(index) + " (mean roughness " + std::to_string(roughMean) + ", mean metallic " +
-                    std::to_string(metalMean) + ")");
+                logPrefix + "texture set '" + scene.textureSets[index] + "' -> layer " + std::to_string(index)
+                    + " (mean roughness " + std::to_string(roughMean) + ", mean metallic " + std::to_string(metalMean)
+                    + ")"
+            );
         }
         for (std::size_t index = 0; index < scene.objects.size(); ++index)
         {
-            const SceneObject& object = scene.objects[index];
+            const SceneObject &object = scene.objects[index];
             if (!object.textureSet.empty())
             {
-                const auto registered = std::find(scene.textureSets.begin(), scene.textureSets.end(), object.textureSet);
+                const auto registered = std::find(
+                    scene.textureSets.begin(), scene.textureSets.end(), object.textureSet
+                );
                 runtimeLogger->logMessage(
                     LogLevel::Information,
-                    logPrefix + "object " + std::to_string(index) + " texture '" + object.textureSet +
-                        "' -> layer " + (registered != scene.textureSets.end()
-                                             ? std::to_string(registered - scene.textureSets.begin())
-                                             : std::string("UNRESOLVED (flat fallback)")));
+                    logPrefix + "object " + std::to_string(index) + " texture '" + object.textureSet + "' -> layer "
+                        + (registered != scene.textureSets.end()
+                                ? std::to_string(registered - scene.textureSets.begin())
+                                : std::string("UNRESOLVED (flat fallback)"))
+                );
             }
         }
     }
-    uploadToDeviceLocal(materialsBuffer, materialTable.data(),
-                        static_cast<vk::DeviceSize>(materialTable.size() * sizeof(GpuSceneMaterial)),
-                        vk::BufferUsageFlagBits::eStorageBuffer);
+    uploadToDeviceLocal(
+        materialsBuffer,
+        materialTable.data(),
+        static_cast<vk::DeviceSize>(materialTable.size() * sizeof(GpuSceneMaterial)),
+        vk::BufferUsageFlagBits::eStorageBuffer
+    );
 
     buildEnvironmentBuffer();
 
@@ -190,13 +218,15 @@ void RendererState::createSceneGeometry()
     cameraInfo.setSize(sizeof(CameraData));
     cameraInfo.setUsage(vk::BufferUsageFlagBits::eUniformBuffer);
     cameraInfo.setSharingMode(vk::SharingMode::eExclusive);
-    cameraBufferStorage.buffer = std::make_unique<vk::raii::Buffer>(*device, cameraInfo);
+    cameraBufferStorage.buffer                      = std::make_unique<vk::raii::Buffer>(*device, cameraInfo);
     const vk::MemoryRequirements cameraRequirements = cameraBufferStorage.buffer->getMemoryRequirements();
-    vk::MemoryAllocateInfo cameraAllocate;
+    vk::MemoryAllocateInfo       cameraAllocate;
     cameraAllocate.setAllocationSize(cameraRequirements.size);
-    cameraAllocate.setMemoryTypeIndex(findMemoryType(**physicalDevice, cameraRequirements.memoryTypeBits,
-                                                     vk::MemoryPropertyFlagBits::eHostVisible |
-                                                         vk::MemoryPropertyFlagBits::eHostCoherent));
+    cameraAllocate.setMemoryTypeIndex(findMemoryType(
+        **physicalDevice,
+        cameraRequirements.memoryTypeBits,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+    ));
     cameraBufferStorage.memory = std::make_unique<vk::raii::DeviceMemory>(*device, cameraAllocate);
     cameraBufferStorage.buffer->bindMemory(*cameraBufferStorage.memory, 0);
     cameraMapped = cameraBufferStorage.memory->mapMemory(0, sizeof(CameraData));
@@ -235,47 +265,54 @@ void RendererState::loadTextureSets()
         // defaults. A scene naming texture sets without a directory is a
         // precise configuration problem, not a silent flat-material scene.
         std::string setList;
-        for (const std::string& textureSet : scene.textureSets)
+        for (const std::string &textureSet : scene.textureSets)
         {
             setList += (setList.empty() ? "" : ", ") + textureSet;
         }
-        throw std::runtime_error(logPrefix + "the scene references texture set(s) [" + setList +
-                                 "] but [renderer].texture_directory is not configured; the content mod "
-                                 "that ships the textures normally provides it");
+        throw std::runtime_error(
+            logPrefix + "the scene references texture set(s) [" + setList
+            + "] but [renderer].texture_directory is not configured; the content mod "
+              "that ships the textures normally provides it"
+        );
     }
     textureSetDataMeans.clear();
     loadedTextureSets.clear();
     loadedTextureSets.resize(setCount);
-    loadedArrayExtent = vk::Extent2D{1, 1};
+    loadedArrayExtent   = vk::Extent2D{1, 1};
     anyTextureSetLoaded = false;
 
     for (std::size_t index = 0; index < setCount; ++index)
     {
         const std::filesystem::path setDirectory = resolvedTextureDirectory / scene.textureSets[index];
-        LoadedTextureSet& loaded = loadedTextureSets[index];
+        LoadedTextureSet           &loaded       = loadedTextureSets[index];
         loaded.albedo.assign(4, 255); // opaque white until Color.png loads
         loaded.data.assign(neutralDataTexel.begin(), neutralDataTexel.end());
 
-        int albedoWidth = 0;
-        int albedoHeight = 0;
-        int albedoChannels = 0;
-        const std::filesystem::path colorPath = setDirectory / colorMapName;
+        int                         albedoWidth    = 0;
+        int                         albedoHeight   = 0;
+        int                         albedoChannels = 0;
+        const std::filesystem::path colorPath      = setDirectory / colorMapName;
         if (stbi_uc *color = stbi_load(colorPath.string().c_str(), &albedoWidth, &albedoHeight, &albedoChannels, 4))
         {
-            const std::size_t pixelCount = static_cast<std::size_t>(albedoWidth) * static_cast<std::size_t>(albedoHeight);
+            const std::size_t pixelCount = static_cast<std::size_t>(albedoWidth)
+                                         * static_cast<std::size_t>(albedoHeight);
             loaded.albedo.resize(pixelCount * 4);
             std::memcpy(loaded.albedo.data(), color, pixelCount * 4);
             stbi_image_free(color);
-            if (anyTextureSetLoaded && (loadedArrayExtent.width != static_cast<std::uint32_t>(albedoWidth) ||
-                                        loadedArrayExtent.height != static_cast<std::uint32_t>(albedoHeight)))
+            if (anyTextureSetLoaded
+                && (loadedArrayExtent.width != static_cast<std::uint32_t>(albedoWidth)
+                    || loadedArrayExtent.height != static_cast<std::uint32_t>(albedoHeight)))
             {
-                throw std::runtime_error(logPrefix + "texture set '" + scene.textureSets[index] +
-                                         "' is " + std::to_string(albedoWidth) + "x" + std::to_string(albedoHeight) +
-                                         " but earlier sets are " + std::to_string(loadedArrayExtent.width) +
-                                         "x" + std::to_string(loadedArrayExtent.height) +
-                                         "; every texture set in a scene must share one resolution");
+                throw std::runtime_error(
+                    logPrefix + "texture set '" + scene.textureSets[index] + "' is " + std::to_string(albedoWidth) + "x"
+                    + std::to_string(albedoHeight) + " but earlier sets are " + std::to_string(loadedArrayExtent.width)
+                    + "x" + std::to_string(loadedArrayExtent.height)
+                    + "; every texture set in a scene must share one resolution"
+                );
             }
-            loadedArrayExtent = vk::Extent2D(static_cast<std::uint32_t>(albedoWidth), static_cast<std::uint32_t>(albedoHeight));
+            loadedArrayExtent = vk::Extent2D(
+                static_cast<std::uint32_t>(albedoWidth), static_cast<std::uint32_t>(albedoHeight)
+            );
             anyTextureSetLoaded = true;
 
             // Loads one single source channel of `fileName` into the packed
@@ -286,20 +323,24 @@ void RendererState::loadTextureSets()
             // respectively - decoding with 1 component twice would return the
             // RED channel both times, collapsing every normal to the +X+Y
             // diagonal and skewing the shading of every textured surface.
-            const auto loadDataChannel = [&](const char* fileName, int channel, int requestedComponents,
-                                             int sourceComponent)  // NOLINT(readability-identifier-length)
+            const auto loadDataChannel = [&](const char *fileName,
+                                             int         channel,
+                                             int         requestedComponents,
+                                             int         sourceComponent) // NOLINT(readability-identifier-length)
             {
-                const std::filesystem::path path = setDirectory / fileName;
-                int width = 0;
-                int height = 0;
-                int channels = 0;
-                if (stbi_uc* map = stbi_load(path.string().c_str(), &width, &height, &channels, requestedComponents))
+                const std::filesystem::path path     = setDirectory / fileName;
+                int                         width    = 0;
+                int                         height   = 0;
+                int                         channels = 0;
+                if (stbi_uc *map = stbi_load(path.string().c_str(), &width, &height, &channels, requestedComponents))
                 {
-                    if (static_cast<std::uint32_t>(width) != loadedArrayExtent.width ||
-                        static_cast<std::uint32_t>(height) != loadedArrayExtent.height)
+                    if (static_cast<std::uint32_t>(width) != loadedArrayExtent.width
+                        || static_cast<std::uint32_t>(height) != loadedArrayExtent.height)
                     {
-                        throw std::runtime_error(logPrefix + "texture set '" + scene.textureSets[index] +
-                                                 "' map '" + fileName + "' does not match the set's color map size");
+                        throw std::runtime_error(
+                            logPrefix + "texture set '" + scene.textureSets[index] + "' map '" + fileName
+                            + "' does not match the set's color map size"
+                        );
                     }
                     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
                     if (loaded.data.size() != pixelCount * 4)
@@ -311,7 +352,7 @@ void RendererState::loadTextureSets()
                         // interleaved channels.
                         for (std::size_t pixel = 0; pixel < pixelCount; ++pixel)
                         {
-                            std::uint8_t* texel = loaded.data.data() + pixel * 4;
+                            std::uint8_t *texel = loaded.data.data() + pixel * 4;
                             std::copy(neutralDataTexel.begin(), neutralDataTexel.end(), texel);
                         }
                     }
@@ -330,8 +371,8 @@ void RendererState::loadTextureSets()
             // Startup diagnostics: mean roughness/metallic of the packed
             // data layer (logged with the material table below).
             const std::size_t dataPixels = loaded.data.size() / 4;
-            double roughSum = 0.0;
-            double metalSum = 0.0;
+            double            roughSum   = 0.0;
+            double            metalSum   = 0.0;
             for (std::size_t pixel = 0; pixel < dataPixels; ++pixel)
             {
                 roughSum += loaded.data[pixel * 4 + 0];
@@ -339,16 +380,18 @@ void RendererState::loadTextureSets()
             }
             textureSetDataMeans.push_back(
                 {static_cast<float>(dataPixels > 0 ? roughSum / (dataPixels * 255.0) : 0.0),
-                 static_cast<float>(dataPixels > 0 ? metalSum / (dataPixels * 255.0) : 0.0)});
+                    static_cast<float>(dataPixels > 0 ? metalSum / (dataPixels * 255.0) : 0.0)}
+            );
         }
         else
         {
             if (runtimeLogger != nullptr)
             {
-                runtimeLogger->logMessage(LogLevel::Warning,
-                                          logPrefix + "texture set '" + scene.textureSets[index] +
-                                              "' has no Color.png under '" + setDirectory.string() +
-                                              "'; objects using it fall back to flat materials");
+                runtimeLogger->logMessage(
+                    LogLevel::Warning,
+                    logPrefix + "texture set '" + scene.textureSets[index] + "' has no Color.png under '"
+                        + setDirectory.string() + "'; objects using it fall back to flat materials"
+                );
             }
         }
     }
@@ -358,20 +401,19 @@ void RendererState::loadTextureSets()
 
 void RendererState::createArrayImages()
 {
-    const std::size_t setCount = scene.textureSets.size();
-    const std::uint32_t layers = static_cast<std::uint32_t>(std::max<std::size_t>(setCount, 1));
+    const std::size_t   setCount = scene.textureSets.size();
+    const std::uint32_t layers   = static_cast<std::uint32_t>(std::max<std::size_t>(setCount, 1));
     textureArrayMipLevels = anyTextureSetLoaded
-                                ? static_cast<std::uint32_t>(
-                                      std::floor(std::log2(std::max(loadedArrayExtent.width,
-                                                                    loadedArrayExtent.height)))) +
-                                      1
-                                : 1;
-    arrayLayerCount = layers;
+                              ? static_cast<std::uint32_t>(
+                                    std::floor(std::log2(std::max(loadedArrayExtent.width, loadedArrayExtent.height)))
+                                ) + 1
+                              : 1;
+    arrayLayerCount       = layers;
 
     // Layout plan: UNDEFINED -> transfer dst (upload) -> transfer src/dst
     // (mip chain) -> SHADER_READ_ONLY_OPTIMAL. The arrays are only ever
     // sampled afterwards, so they rest in the read-only layout for life.
-    const auto createArray = [&](FrameImage& target, vk::Format format)
+    const auto createArray = [&](FrameImage &target, vk::Format format)
     {
         vk::ImageCreateInfo imageInfo;
         imageInfo.setImageType(vk::ImageType::e2D);
@@ -381,16 +423,19 @@ void RendererState::createArrayImages()
         imageInfo.setArrayLayers(layers);
         imageInfo.setSamples(vk::SampleCountFlagBits::e1);
         imageInfo.setTiling(vk::ImageTiling::eOptimal);
-        imageInfo.setUsage(vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc |
-                           vk::ImageUsageFlagBits::eSampled);
+        imageInfo.setUsage(
+            vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc
+            | vk::ImageUsageFlagBits::eSampled
+        );
         imageInfo.setSharingMode(vk::SharingMode::eExclusive);
         imageInfo.setInitialLayout(vk::ImageLayout::eUndefined);
-        target.image = std::make_unique<vk::raii::Image>(*device, imageInfo);
+        target.image                              = std::make_unique<vk::raii::Image>(*device, imageInfo);
         const vk::MemoryRequirements requirements = target.image->getMemoryRequirements();
-        vk::MemoryAllocateInfo allocate;
+        vk::MemoryAllocateInfo       allocate;
         allocate.setAllocationSize(requirements.size);
-        allocate.setMemoryTypeIndex(findMemoryType(**physicalDevice, requirements.memoryTypeBits,
-                                                   vk::MemoryPropertyFlagBits::eDeviceLocal));
+        allocate.setMemoryTypeIndex(
+            findMemoryType(**physicalDevice, requirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
+        );
         target.memory = std::make_unique<vk::raii::DeviceMemory>(*device, allocate);
         target.image->bindMemory(*target.memory, 0);
         vk::ImageViewCreateInfo viewInfo;
@@ -398,7 +443,8 @@ void RendererState::createArrayImages()
         viewInfo.setViewType(vk::ImageViewType::e2DArray);
         viewInfo.setFormat(format);
         viewInfo.setSubresourceRange(
-            vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, textureArrayMipLevels, 0, layers));
+            vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, textureArrayMipLevels, 0, layers)
+        );
         target.view = std::make_unique<vk::raii::ImageView>(*device, viewInfo);
     };
 
@@ -415,11 +461,10 @@ void RendererState::createArrayImages()
         allocateInfo.setCommandPool(**commandPool);
         allocateInfo.setLevel(vk::CommandBufferLevel::ePrimary);
         allocateInfo.setCommandBufferCount(1);
-        vk::raii::CommandBuffer setupBuffer =
-            std::move(vk::raii::CommandBuffers(*device, allocateInfo).front());
+        vk::raii::CommandBuffer setupBuffer = std::move(vk::raii::CommandBuffers(*device, allocateInfo).front());
         setupBuffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
         std::array<vk::ImageMemoryBarrier2, 2> barriers;
-        const vk::Image arrayImages[2] = {*albedoArrayImage.image, *dataArrayImage.image};
+        const vk::Image                        arrayImages[2] = {*albedoArrayImage.image, *dataArrayImage.image};
         for (std::size_t index = 0; index < 2; ++index)
         {
             barriers[index].setSrcStageMask(vk::PipelineStageFlagBits2::eTopOfPipe);
@@ -452,31 +497,32 @@ void RendererState::uploadArrayLayersAndGenerateMips()
         // One staging buffer for both arrays; layer i's bytes start at
         // (2*layerIndex + array) * layerSize (4 bytes per pixel, no padding
         // because the extent is a multiple of 4 bytes per row).
-        const std::size_t layerBytes =
-            static_cast<std::size_t>(loadedArrayExtent.width) * loadedArrayExtent.height * 4;
+        const std::size_t layerBytes = static_cast<std::size_t>(loadedArrayExtent.width) * loadedArrayExtent.height * 4;
         std::vector<std::uint8_t> staging(loadedTextureSets.size() * 2 * layerBytes);
         for (std::size_t index = 0; index < loadedTextureSets.size(); ++index)
         {
-            std::memcpy(staging.data() + (index * 2) * layerBytes, loadedTextureSets[index].albedo.data(),
-                        layerBytes);
-            std::memcpy(staging.data() + (index * 2 + 1) * layerBytes, loadedTextureSets[index].data.data(),
-                        layerBytes);
+            std::memcpy(staging.data() + (index * 2) * layerBytes, loadedTextureSets[index].albedo.data(), layerBytes);
+            std::memcpy(
+                staging.data() + (index * 2 + 1) * layerBytes, loadedTextureSets[index].data.data(), layerBytes
+            );
         }
 
         vk::BufferCreateInfo bufferInfo;
         bufferInfo.setSize(static_cast<vk::DeviceSize>(staging.size()));
         bufferInfo.setUsage(vk::BufferUsageFlagBits::eTransferSrc);
         bufferInfo.setSharingMode(vk::SharingMode::eExclusive);
-        vk::raii::Buffer stagingBuffer(*device, bufferInfo);
+        vk::raii::Buffer             stagingBuffer(*device, bufferInfo);
         const vk::MemoryRequirements stagingRequirements = stagingBuffer.getMemoryRequirements();
-        vk::MemoryAllocateInfo stagingAllocate;
+        vk::MemoryAllocateInfo       stagingAllocate;
         stagingAllocate.setAllocationSize(stagingRequirements.size);
-        stagingAllocate.setMemoryTypeIndex(findMemoryType(**physicalDevice, stagingRequirements.memoryTypeBits,
-                                                          vk::MemoryPropertyFlagBits::eHostVisible |
-                                                              vk::MemoryPropertyFlagBits::eHostCoherent));
+        stagingAllocate.setMemoryTypeIndex(findMemoryType(
+            **physicalDevice,
+            stagingRequirements.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+        ));
         vk::raii::DeviceMemory stagingMemory(*device, stagingAllocate);
         stagingBuffer.bindMemory(*stagingMemory, 0);
-        void* mapped = stagingMemory.mapMemory(0, stagingRequirements.size);
+        void *mapped = stagingMemory.mapMemory(0, stagingRequirements.size);
         std::memcpy(mapped, staging.data(), staging.size());
         stagingMemory.unmapMemory();
 
@@ -484,11 +530,10 @@ void RendererState::uploadArrayLayersAndGenerateMips()
         allocateInfo.setCommandPool(**commandPool);
         allocateInfo.setLevel(vk::CommandBufferLevel::ePrimary);
         allocateInfo.setCommandBufferCount(1);
-        vk::raii::CommandBuffer setupBuffer =
-            std::move(vk::raii::CommandBuffers(*device, allocateInfo).front());
+        vk::raii::CommandBuffer setupBuffer = std::move(vk::raii::CommandBuffers(*device, allocateInfo).front());
         setupBuffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
 
-        const auto uploadArray = [&](const FrameImage& target, bool dataArray)
+        const auto uploadArray = [&](const FrameImage &target, bool dataArray)
         {
             std::vector<vk::BufferImageCopy> copies(loadedTextureSets.size());
             for (std::size_t index = 0; index < loadedTextureSets.size(); ++index)
@@ -499,11 +544,13 @@ void RendererState::uploadArrayLayersAndGenerateMips()
                 // member and must be set explicitly (a zero here silently
                 // writes every set into layer 0, last one wins).
                 copies[index].setBufferOffset(
-                    static_cast<vk::DeviceSize>((index * 2 + (dataArray ? 1 : 0)) * layerBytes));
+                    static_cast<vk::DeviceSize>((index * 2 + (dataArray ? 1 : 0)) * layerBytes)
+                );
                 copies[index].setBufferRowLength(0);
                 copies[index].setBufferImageHeight(0);
-                copies[index].setImageSubresource(vk::ImageSubresourceLayers(
-                    vk::ImageAspectFlagBits::eColor, 0, static_cast<std::uint32_t>(index), 1));
+                copies[index].setImageSubresource(
+                    vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, static_cast<std::uint32_t>(index), 1)
+                );
                 copies[index].setImageOffset(vk::Offset3D(0, 0, 0));
                 copies[index].setImageExtent(vk::Extent3D(loadedArrayExtent.width, loadedArrayExtent.height, 1));
             }
@@ -513,7 +560,7 @@ void RendererState::uploadArrayLayersAndGenerateMips()
         // UNDEFINED -> TRANSFER_DST for the copy, then TRANSFER_SRC for the
         // blit chain.
         std::array<vk::ImageMemoryBarrier2, 2> enterBarriers;
-        const vk::Image arrayImages[2] = {*albedoArrayImage.image, *dataArrayImage.image};
+        const vk::Image                        arrayImages[2] = {*albedoArrayImage.image, *dataArrayImage.image};
         for (std::size_t index = 0; index < 2; ++index)
         {
             enterBarriers[index].setSrcStageMask(vk::PipelineStageFlagBits2::eTopOfPipe);
@@ -525,7 +572,9 @@ void RendererState::uploadArrayLayersAndGenerateMips()
             enterBarriers[index].setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
             enterBarriers[index].setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
             enterBarriers[index].setImage(arrayImages[index]);
-            enterBarriers[index].setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, layers));
+            enterBarriers[index].setSubresourceRange(
+                vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, layers)
+            );
         }
         {
             vk::DependencyInfo dependency;
@@ -544,7 +593,7 @@ void RendererState::uploadArrayLayersAndGenerateMips()
         for (std::uint32_t level = 1; level < textureArrayMipLevels; ++level)
         {
             std::array<vk::ImageMemoryBarrier2, 4> levelBarriers;
-            const vk::Image arrayImages2[2] = {*albedoArrayImage.image, *dataArrayImage.image};
+            const vk::Image                        arrayImages2[2] = {*albedoArrayImage.image, *dataArrayImage.image};
             for (std::size_t index = 0; index < 2; ++index)
             {
                 // Source level: written last iteration (or by the upload for
@@ -559,7 +608,8 @@ void RendererState::uploadArrayLayersAndGenerateMips()
                 levelBarriers[index * 2].setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                 levelBarriers[index * 2].setImage(arrayImages2[index]);
                 levelBarriers[index * 2].setSubresourceRange(
-                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, level - 1, 1, 0, layers));
+                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, level - 1, 1, 0, layers)
+                );
                 // Destination level: first use.
                 levelBarriers[index * 2 + 1].setSrcStageMask(vk::PipelineStageFlagBits2::eTopOfPipe);
                 levelBarriers[index * 2 + 1].setSrcAccessMask(vk::AccessFlags2());
@@ -571,7 +621,8 @@ void RendererState::uploadArrayLayersAndGenerateMips()
                 levelBarriers[index * 2 + 1].setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                 levelBarriers[index * 2 + 1].setImage(arrayImages2[index]);
                 levelBarriers[index * 2 + 1].setSubresourceRange(
-                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, level, 1, 0, layers));
+                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, level, 1, 0, layers)
+                );
             }
             {
                 vk::DependencyInfo dependency;
@@ -579,17 +630,31 @@ void RendererState::uploadArrayLayersAndGenerateMips()
                 setupBuffer.pipelineBarrier2(dependency);
             }
 
-            const std::uint32_t sourceWidth = std::max(1u, loadedArrayExtent.width >> (level - 1));
-            const std::uint32_t sourceHeight = std::max(1u, loadedArrayExtent.height >> (level - 1));
-            const std::uint32_t targetWidth = std::max(1u, loadedArrayExtent.width >> level);
-            const std::uint32_t targetHeight = std::max(1u, loadedArrayExtent.height >> level);
+            const std::uint32_t         sourceWidth  = std::max(1u, loadedArrayExtent.width >> (level - 1));
+            const std::uint32_t         sourceHeight = std::max(1u, loadedArrayExtent.height >> (level - 1));
+            const std::uint32_t         targetWidth  = std::max(1u, loadedArrayExtent.width >> level);
+            const std::uint32_t         targetHeight = std::max(1u, loadedArrayExtent.height >> level);
             std::vector<vk::ImageBlit2> blits(layers);
             for (std::uint32_t layer = 0; layer < layers; ++layer)
             {
-                blits[layer].setSrcSubresource(vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, level - 1, layer, 1));
-                blits[layer].setSrcOffsets({vk::Offset3D(0, 0, 0), vk::Offset3D(static_cast<std::int32_t>(sourceWidth), static_cast<std::int32_t>(sourceHeight), 1)});
-                blits[layer].setDstSubresource(vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, level, layer, 1));
-                blits[layer].setDstOffsets({vk::Offset3D(0, 0, 0), vk::Offset3D(static_cast<std::int32_t>(targetWidth), static_cast<std::int32_t>(targetHeight), 1)});
+                blits[layer].setSrcSubresource(
+                    vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, level - 1, layer, 1)
+                );
+                blits[layer].setSrcOffsets(
+                    {vk::Offset3D(0, 0, 0),
+                        vk::Offset3D(
+                            static_cast<std::int32_t>(sourceWidth), static_cast<std::int32_t>(sourceHeight), 1
+                        )}
+                );
+                blits[layer].setDstSubresource(
+                    vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, level, layer, 1)
+                );
+                blits[layer].setDstOffsets(
+                    {vk::Offset3D(0, 0, 0),
+                        vk::Offset3D(
+                            static_cast<std::int32_t>(targetWidth), static_cast<std::int32_t>(targetHeight), 1
+                        )}
+                );
             }
             vk::BlitImageInfo2 blitInfo;
             blitInfo.setSrcImage(*albedoArrayImage.image);
@@ -618,8 +683,9 @@ void RendererState::uploadArrayLayersAndGenerateMips()
                 {
                     vk::ImageMemoryBarrier2 sourceLevels;
                     sourceLevels.setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer);
-                    sourceLevels.setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite |
-                                                  vk::AccessFlagBits2::eTransferRead);
+                    sourceLevels.setSrcAccessMask(
+                        vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eTransferRead
+                    );
                     sourceLevels.setDstStageMask(vk::PipelineStageFlagBits2::eAllCommands);
                     sourceLevels.setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
                     sourceLevels.setOldLayout(vk::ImageLayout::eTransferSrcOptimal);
@@ -627,8 +693,11 @@ void RendererState::uploadArrayLayersAndGenerateMips()
                     sourceLevels.setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                     sourceLevels.setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                     sourceLevels.setImage(image);
-                    sourceLevels.setSubresourceRange(vk::ImageSubresourceRange(
-                        vk::ImageAspectFlagBits::eColor, 0, textureArrayMipLevels - 1, 0, layers));
+                    sourceLevels.setSubresourceRange(
+                        vk::ImageSubresourceRange(
+                            vk::ImageAspectFlagBits::eColor, 0, textureArrayMipLevels - 1, 0, layers
+                        )
+                    );
                     finalBarriers.push_back(sourceLevels);
                 }
                 vk::ImageMemoryBarrier2 topLevel;
@@ -641,8 +710,9 @@ void RendererState::uploadArrayLayersAndGenerateMips()
                 topLevel.setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                 topLevel.setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                 topLevel.setImage(image);
-                topLevel.setSubresourceRange(vk::ImageSubresourceRange(
-                    vk::ImageAspectFlagBits::eColor, textureArrayMipLevels - 1, 1, 0, layers));
+                topLevel.setSubresourceRange(
+                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, textureArrayMipLevels - 1, 1, 0, layers)
+                );
                 finalBarriers.push_back(topLevel);
             }
             vk::DependencyInfo dependency;
@@ -664,43 +734,43 @@ void RendererState::buildEnvironmentBuffer()
     // solid angle, so the disk integrates back to exactly the configured sun
     // intensity: bright enough for ACES to clamp, without adding energy.
     EnvironmentData environment{};
-    environment.skyZenith = {scene.sky.zenith[0], scene.sky.zenith[1], scene.sky.zenith[2],
-                             skyZenithBlendExponent};
-    environment.skyHorizon = {scene.sky.horizon[0], scene.sky.horizon[1], scene.sky.horizon[2],
-                              skyGroundBlendExponent};
-    environment.skyGround = {scene.sky.ground[0], scene.sky.ground[1], scene.sky.ground[2], 0.0f};
+    environment.skyZenith  = {scene.sky.zenith[0], scene.sky.zenith[1], scene.sky.zenith[2], skyZenithBlendExponent};
+    environment.skyHorizon = {scene.sky.horizon[0], scene.sky.horizon[1], scene.sky.horizon[2], skyGroundBlendExponent};
+    environment.skyGround  = {scene.sky.ground[0], scene.sky.ground[1], scene.sky.ground[2], 0.0f};
 
-    float sunIntensity = 0.0f;
-    std::array<float, 3> sunColor = scene.sun.color;
+    float                sunIntensity = 0.0f;
+    std::array<float, 3> sunColor     = scene.sun.color;
     // The sun description rides on the scene (parsed from [scene.sun]); the
     // environment buffer is rebuilt whenever the scene changes.
-    sunIntensity = scene.sun.intensity;
-    std::array<float, 3> sunDirection = scene.sun.direction;
-    float directionLength = std::sqrt(sunDirection[0] * sunDirection[0] + sunDirection[1] * sunDirection[1] +
-                                      sunDirection[2] * sunDirection[2]);
+    sunIntensity                         = scene.sun.intensity;
+    std::array<float, 3> sunDirection    = scene.sun.direction;
+    float                directionLength = std::sqrt(
+        sunDirection[0] * sunDirection[0] + sunDirection[1] * sunDirection[1] + sunDirection[2] * sunDirection[2]
+    );
     if (directionLength < 1e-6f)
     {
         directionLength = 1.0f;
     }
-    for (float& component : sunDirection)
+    for (float &component : sunDirection)
     {
         component /= directionLength;
     }
 
-    const bool diskEnabled = scene.sky.sunDisk && sunIntensity > 0.0f;
+    const bool  diskEnabled  = scene.sky.sunDisk && sunIntensity > 0.0f;
     const float innerDegrees = std::max(scene.sky.sunDiskSizeDegrees * 0.5f, sunDiskMinSizeDegrees);
     const float outerDegrees = innerDegrees + sunDiskSoftLimbDegrees;
-    const float cosInner = std::cos(degreesToRadians(innerDegrees));
-    const float cosOuter = std::cos(degreesToRadians(outerDegrees));
-    const float solidAngle = twoPi * (1.0f - cosInner);
+    const float cosInner     = std::cos(degreesToRadians(innerDegrees));
+    const float cosOuter     = std::cos(degreesToRadians(outerDegrees));
+    const float solidAngle   = twoPi * (1.0f - cosInner);
     const float diskRadiance = solidAngle > 1e-8f ? sunIntensity / solidAngle : 0.0f;
     environment.skyGround[3] = diskEnabled ? 1.0f : 0.0f;
     // [scene.sun].direction points TOWARDS the scene (the light's travel
     // direction); the disk sits in the sky at the OPPOSITE direction - the
     // one an observer looks towards to see the sun.
     environment.sunDiskDirection = {-sunDirection[0], -sunDirection[1], -sunDirection[2], cosInner};
-    environment.sunDiskRadiance = {sunColor[0] * diskRadiance, sunColor[1] * diskRadiance, sunColor[2] * diskRadiance,
-                                   cosOuter};
+    environment.sunDiskRadiance  = {
+        sunColor[0] * diskRadiance, sunColor[1] * diskRadiance, sunColor[2] * diskRadiance, cosOuter
+    };
 
     if (environmentBufferStorage.buffer == nullptr)
     {
@@ -710,11 +780,13 @@ void RendererState::buildEnvironmentBuffer()
         environmentInfo.setSharingMode(vk::SharingMode::eExclusive);
         environmentBufferStorage.buffer = std::make_unique<vk::raii::Buffer>(*device, environmentInfo);
         const vk::MemoryRequirements environmentRequirements = environmentBufferStorage.buffer->getMemoryRequirements();
-        vk::MemoryAllocateInfo environmentAllocate;
+        vk::MemoryAllocateInfo       environmentAllocate;
         environmentAllocate.setAllocationSize(environmentRequirements.size);
-        environmentAllocate.setMemoryTypeIndex(findMemoryType(**physicalDevice, environmentRequirements.memoryTypeBits,
-                                                              vk::MemoryPropertyFlagBits::eHostVisible |
-                                                                  vk::MemoryPropertyFlagBits::eHostCoherent));
+        environmentAllocate.setMemoryTypeIndex(findMemoryType(
+            **physicalDevice,
+            environmentRequirements.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+        ));
         environmentBufferStorage.memory = std::make_unique<vk::raii::DeviceMemory>(*device, environmentAllocate);
         environmentBufferStorage.buffer->bindMemory(*environmentBufferStorage.memory, 0);
         environmentMapped = environmentBufferStorage.memory->mapMemory(0, sizeof(EnvironmentData));
@@ -728,14 +800,16 @@ void RendererState::buildEnvironmentBuffer()
 void RendererState::updateCameraBuffer()
 {
     const float aspect = swapchainExtent.height > 0
-                             ? static_cast<float>(swapchainExtent.width) / static_cast<float>(swapchainExtent.height)
-                             : 1.0f;
-    const Mat4 view = lookAtMatrix(scene.camera.position.data(), scene.camera.lookAt.data(),
-                                   std::array<float, 3>{0.0f, 1.0f, 0.0f}.data());
-    const Mat4 projection = perspectiveMatrix(degreesToRadians(scene.camera.verticalFieldOfViewDegrees), aspect,
-                                              scene.camera.nearPlane, scene.camera.farPlane);
-    const Mat4 viewProjection = multiplyMatrix(projection, view);
-    cameraData.viewProjection = viewProjection;
+                           ? static_cast<float>(swapchainExtent.width) / static_cast<float>(swapchainExtent.height)
+                           : 1.0f;
+    const Mat4  view   = lookAtMatrix(
+        scene.camera.position.data(), scene.camera.lookAt.data(), std::array<float, 3>{0.0f, 1.0f, 0.0f}.data()
+    );
+    const Mat4 projection = perspectiveMatrix(
+        degreesToRadians(scene.camera.verticalFieldOfViewDegrees), aspect, scene.camera.nearPlane, scene.camera.farPlane
+    );
+    const Mat4 viewProjection        = multiplyMatrix(projection, view);
+    cameraData.viewProjection        = viewProjection;
     cameraData.inverseViewProjection = inverseMatrix(viewProjection);
     cameraData.position = {scene.camera.position[0], scene.camera.position[1], scene.camera.position[2], 0.0f};
     if (cameraMapped != nullptr)

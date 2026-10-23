@@ -26,13 +26,16 @@ namespace engine
 // bytes must be a whole number of SPIR-V words: vkCreateShaderModule requires
 // codeSize to be a multiple of 4, and a truncated file would otherwise fail
 // far from its cause.
-inline std::vector<char> readShaderBytes(const std::filesystem::path& path, std::string_view errorContext)
+inline std::vector<char> readShaderBytes(
+    const std::filesystem::path &path, std::string_view errorContext
+)
 {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open())
     {
-        throw std::runtime_error(std::string(errorContext) + ": shader file '" + path.string() +
-                                 "' could not be opened");
+        throw std::runtime_error(
+            std::string(errorContext) + ": shader file '" + path.string() + "' could not be opened"
+        );
     }
     const std::streamsize size = file.tellg();
     file.seekg(0);
@@ -40,8 +43,10 @@ inline std::vector<char> readShaderBytes(const std::filesystem::path& path, std:
     file.read(bytes.data(), size);
     if (bytes.empty() || bytes.size() % sizeof(std::uint32_t) != 0)
     {
-        throw std::runtime_error(std::string(errorContext) + ": shader file '" + path.string() +
-                                 "' does not contain a whole number of SPIR-V words");
+        throw std::runtime_error(
+            std::string(errorContext) + ": shader file '" + path.string()
+            + "' does not contain a whole number of SPIR-V words"
+        );
     }
     return bytes;
 }
@@ -49,15 +54,15 @@ inline std::vector<char> readShaderBytes(const std::filesystem::path& path, std:
 // First memory type matching both the requirement bits and the allowed type
 // bitmask. Throws when the physical device offers none (never expected for
 // the property combinations the engine asks for).
-inline std::uint32_t findMemoryType(const vk::PhysicalDevice& physicalDevice, std::uint32_t typeFilter,
-                                    vk::MemoryPropertyFlags properties)
+inline std::uint32_t findMemoryType(
+    const vk::PhysicalDevice &physicalDevice, std::uint32_t typeFilter, vk::MemoryPropertyFlags properties
+)
 {
     const vk::PhysicalDeviceMemoryProperties memoryProperties = physicalDevice.getMemoryProperties();
     for (std::uint32_t typeIndex = 0; typeIndex < memoryProperties.memoryTypeCount; ++typeIndex)
     {
-        const bool typeMatches = (typeFilter & (1u << typeIndex)) != 0;
-        const bool propertiesMatch =
-            (memoryProperties.memoryTypes[typeIndex].propertyFlags & properties) == properties;
+        const bool typeMatches     = (typeFilter & (1u << typeIndex)) != 0;
+        const bool propertiesMatch = (memoryProperties.memoryTypes[typeIndex].propertyFlags & properties) == properties;
         if (typeMatches && propertiesMatch)
         {
             return typeIndex;
@@ -69,7 +74,9 @@ inline std::uint32_t findMemoryType(const vk::PhysicalDevice& physicalDevice, st
 // The G-buffer sampling sampler shared by the technique passes: nearest
 // filtering, clamp to edge (texel-exact G-buffer reads, no wraparound at the
 // screen border).
-inline std::unique_ptr<vk::raii::Sampler> makeNearestClampSampler(vk::raii::Device& device)
+inline std::unique_ptr<vk::raii::Sampler> makeNearestClampSampler(
+    vk::raii::Device &device
+)
 {
     vk::SamplerCreateInfo samplerInfo;
     samplerInfo.setMagFilter(vk::Filter::eNearest);
@@ -87,9 +94,9 @@ inline std::unique_ptr<vk::raii::Sampler> makeNearestClampSampler(vk::raii::Devi
 // dies with the memory object.
 struct MappedHostVisibleBuffer
 {
-    std::unique_ptr<vk::raii::Buffer> buffer;
+    std::unique_ptr<vk::raii::Buffer>       buffer;
     std::unique_ptr<vk::raii::DeviceMemory> memory;
-    void* mapped = nullptr;
+    void                                   *mapped = nullptr;
 
     void reset()
     {
@@ -99,22 +106,27 @@ struct MappedHostVisibleBuffer
     }
 };
 
-inline MappedHostVisibleBuffer createMappedHostVisibleBuffer(vk::raii::Device& device,
-                                                             const vk::PhysicalDevice& physicalDevice,
-                                                             vk::DeviceSize byteSize, vk::BufferUsageFlags usage)
+inline MappedHostVisibleBuffer createMappedHostVisibleBuffer(
+    vk::raii::Device         &device,
+    const vk::PhysicalDevice &physicalDevice,
+    vk::DeviceSize            byteSize,
+    vk::BufferUsageFlags      usage
+)
 {
     MappedHostVisibleBuffer result;
-    vk::BufferCreateInfo bufferInfo;
+    vk::BufferCreateInfo    bufferInfo;
     bufferInfo.setSize(byteSize);
     bufferInfo.setUsage(usage);
     bufferInfo.setSharingMode(vk::SharingMode::eExclusive);
-    result.buffer = std::make_unique<vk::raii::Buffer>(device, bufferInfo);
+    result.buffer                             = std::make_unique<vk::raii::Buffer>(device, bufferInfo);
     const vk::MemoryRequirements requirements = result.buffer->getMemoryRequirements();
-    vk::MemoryAllocateInfo allocateInfo;
+    vk::MemoryAllocateInfo       allocateInfo;
     allocateInfo.setAllocationSize(requirements.size);
-    allocateInfo.setMemoryTypeIndex(findMemoryType(physicalDevice, requirements.memoryTypeBits,
-                                                   vk::MemoryPropertyFlagBits::eHostVisible |
-                                                       vk::MemoryPropertyFlagBits::eHostCoherent));
+    allocateInfo.setMemoryTypeIndex(findMemoryType(
+        physicalDevice,
+        requirements.memoryTypeBits,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+    ));
     result.memory = std::make_unique<vk::raii::DeviceMemory>(device, allocateInfo);
     result.buffer->bindMemory(*result.memory, 0);
     result.mapped = result.memory->mapMemory(0, byteSize);

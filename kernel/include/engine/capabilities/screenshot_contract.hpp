@@ -22,7 +22,7 @@ struct ScreenshotSavedEvent
 class ScreenshotCapability
 {
 public:
-    static constexpr const char* capabilityName = "screenshot";
+    static constexpr const char *capabilityName = "screenshot";
 
     virtual ~ScreenshotCapability() = default;
 

@@ -17,30 +17,48 @@ namespace engine
 
 RendererModule::RendererModule()
 {
-    componentManifest.name = "renderer";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "renderer";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {"renderer"};
     // "input" is deliberately NOT in requiredCapabilities: the renderer
     // degrades to a static camera when the input module is absent (minimal
     // builds). The permission is still declared so an acquisition attempt
     // passes the permission gate when the capability exists.
     componentManifest.requiredCapabilities = {"logging", "window"};
-    componentManifest.requiredPermissions = {"capability.logging", "capability.window", "capability.input"};
+    componentManifest.requiredPermissions  = {"capability.logging", "capability.window", "capability.input"};
     // Every configuration key the renderer reads (its own section, the
     // [lighting] composition keys it owns, and the [scene] world content it
     // rasterizes) - the known-key registry behind --validate's unknown-key
     // warnings is built from these declarations.
     componentManifest.knownConfigKeys = {
-        "renderer.enable_validation",    "renderer.fail_on_validation_error", "renderer.vsync",
-        "renderer.prefer_discrete_device", "renderer.max_frames_in_flight",   "renderer.exposure",
-        "renderer.tonemap",              "renderer.shader_directory",         "renderer.texture_directory",
+        "renderer.enable_validation",
+        "renderer.fail_on_validation_error",
+        "renderer.vsync",
+        "renderer.prefer_discrete_device",
+        "renderer.max_frames_in_flight",
+        "renderer.exposure",
+        "renderer.tonemap",
+        "renderer.shader_directory",
+        "renderer.texture_directory",
         "lighting.techniques",
-        "scene.sky_radiance",            "scene.sky.zenith",                  "scene.sky.horizon",
-        "scene.sky.ground",              "scene.sky.sun_disk",                "scene.sky.sun_disk_size_degrees",
-        "scene.camera.position",         "scene.camera.look_at",              "scene.camera.fov",
-        "scene.camera.near",             "scene.camera.far",                  "scene.camera.free_fly",
-        "scene.camera.fly_speed",        "scene.camera.fly_boost",            "scene.camera.look_sensitivity",
-        "scene.sun.direction",           "scene.sun.color",                   "scene.sun.intensity",
+        "scene.sky_radiance",
+        "scene.sky.zenith",
+        "scene.sky.horizon",
+        "scene.sky.ground",
+        "scene.sky.sun_disk",
+        "scene.sky.sun_disk_size_degrees",
+        "scene.camera.position",
+        "scene.camera.look_at",
+        "scene.camera.fov",
+        "scene.camera.near",
+        "scene.camera.far",
+        "scene.camera.free_fly",
+        "scene.camera.fly_speed",
+        "scene.camera.fly_boost",
+        "scene.camera.look_sensitivity",
+        "scene.sun.direction",
+        "scene.sun.color",
+        "scene.sun.intensity",
         "scene.objects",
     };
 }
@@ -50,9 +68,11 @@ RendererModule::~RendererModule()
     stop();
 }
 
-void RendererModule::construct(ComponentContext& context)
+void RendererModule::construct(
+    ComponentContext &context
+)
 {
-    logger = &context.acquireCapability<LoggerCapability>();
+    logger           = &context.acquireCapability<LoggerCapability>();
     windowCapability = &context.acquireCapability<WindowCapability>();
 
     state = std::make_unique<RendererState>();
@@ -63,7 +83,7 @@ void RendererModule::construct(ComponentContext& context)
     {
         state->inputCapability = &context.acquireCapability<InputCapability>();
     }
-    catch (const std::exception&)
+    catch (const std::exception &)
     {
         state->inputCapability = nullptr;
     }
@@ -71,23 +91,23 @@ void RendererModule::construct(ComponentContext& context)
     // Channel references are cached once: channels are heap anchored inside
     // the bus and stay valid for the engine lifetime, so the frame loop can
     // publish without map lookups and without touching the context again.
-    frameBeginChannel = &context.eventBus().channel<FrameBeginEvent>();
-    frameRenderedChannel = &context.eventBus().channel<FrameRenderedEvent>();
+    frameBeginChannel           = &context.eventBus().channel<FrameBeginEvent>();
+    frameRenderedChannel        = &context.eventBus().channel<FrameRenderedEvent>();
     state->frameCapturedChannel = &context.eventBus().channel<FrameCapturedEvent>();
 
-    state->enableValidation = context.configurationBoolean("enable_validation").value_or(true);
+    state->enableValidation      = context.configurationBoolean("enable_validation").value_or(true);
     state->failOnValidationError = context.configurationBoolean("fail_on_validation_error").value_or(false);
-    state->vsync = context.configurationBoolean("vsync").value_or(true);
-    state->preferDiscreteDevice = context.configurationBoolean("prefer_discrete_device").value_or(true);
-    const auto frames = context.configurationInteger("max_frames_in_flight").value_or(defaultFramesInFlight);
-    state->maxFramesInFlight =
-        static_cast<std::uint32_t>(std::clamp<std::int64_t>(frames, 1, maxFramesInFlightLimit));
-    state->exposure = static_cast<float>(context.configurationFloating("exposure").value_or(1.0));
-    state->tonemapMode = context.configurationString("tonemap").value_or("aces");
+    state->vsync                 = context.configurationBoolean("vsync").value_or(true);
+    state->preferDiscreteDevice  = context.configurationBoolean("prefer_discrete_device").value_or(true);
+    const auto frames            = context.configurationInteger("max_frames_in_flight").value_or(defaultFramesInFlight);
+    state->maxFramesInFlight = static_cast<std::uint32_t>(std::clamp<std::int64_t>(frames, 1, maxFramesInFlightLimit));
+    state->exposure          = static_cast<float>(context.configurationFloating("exposure").value_or(1.0));
+    state->tonemapMode       = context.configurationString("tonemap").value_or("aces");
     if (state->tonemapMode != "aces" && state->tonemapMode != "reinhard" && state->tonemapMode != "none")
     {
-        throw std::runtime_error(logPrefix + "unknown tonemap mode '" + state->tonemapMode +
-                                 "' (known: aces, reinhard, none)");
+        throw std::runtime_error(
+            logPrefix + "unknown tonemap mode '" + state->tonemapMode + "' (known: aces, reinhard, none)"
+        );
     }
 
     // Shared world content ([scene]): validated at construct so configuration
@@ -100,37 +120,42 @@ void RendererModule::construct(ComponentContext& context)
     // Lighting technique selection: [lighting] techniques = ["pbr", ...].
     // A technique module attaches itself when its algorithm name is listed;
     // an empty list (or a missing section) means no lighting at all.
-    state->configuredTechniques = context.configurationStringArrayInSection("lighting", "techniques");
+    state->configuredTechniques       = context.configurationStringArrayInSection("lighting", "techniques");
     const std::string shaderDirectory = context.configurationString("shader_directory").value_or("shaders");
-    state->shaderDirectory = shaderDirectory;
-    state->textureDirectory = context.configurationString("texture_directory").value_or("");
+    state->shaderDirectory            = shaderDirectory;
+    state->textureDirectory           = context.configurationString("texture_directory").value_or("");
 
-    EventChannel<WindowResizedEvent>& resizedChannel = context.eventBus().channel<WindowResizedEvent>();
-    resizeSubscription = EventSubscription(&context.eventBus(), typeid(WindowResizedEvent),
-                                           resizedChannel.subscribe<RendererModule, &RendererModule::handleWindowResized>(
-                                               this));
+    EventChannel<WindowResizedEvent> &resizedChannel = context.eventBus().channel<WindowResizedEvent>();
+    resizeSubscription                               = EventSubscription(
+        &context.eventBus(),
+        typeid(WindowResizedEvent),
+        resizedChannel.subscribe<RendererModule, &RendererModule::handleWindowResized>(this)
+    );
 }
 
 void RendererModule::start()
 {
-    state->resolvedShaderDirectory = state->shaderDirectory.is_relative()
-                                         ? (executableDirectory() / state->shaderDirectory)
-                                         : state->shaderDirectory;
+    state->resolvedShaderDirectory  = state->shaderDirectory.is_relative()
+                                        ? (executableDirectory() / state->shaderDirectory)
+                                        : state->shaderDirectory;
     state->resolvedTextureDirectory = state->textureDirectory.is_relative()
-                                          ? (executableDirectory() / state->textureDirectory)
-                                          : state->textureDirectory;
+                                        ? (executableDirectory() / state->textureDirectory)
+                                        : state->textureDirectory;
     state->initialize(*windowCapability, *logger);
 
     if (state->configuredTechniques.empty())
     {
-        logger->logMessage(LogLevel::Information,
-                           logPrefix + "no lighting techniques configured; the scene renders unlit "
-                           "(albedo + emissive + sky)");
+        logger->logMessage(
+            LogLevel::Information,
+            logPrefix
+                + "no lighting techniques configured; the scene renders unlit "
+                  "(albedo + emissive + sky)"
+        );
     }
     else
     {
         std::string attached;
-        for (const auto& technique : state->lightingTechniques)
+        for (const auto &technique : state->lightingTechniques)
         {
             if (!attached.empty())
             {
@@ -138,18 +163,22 @@ void RendererModule::start()
             }
             attached += technique->techniqueName();
         }
-        logger->logMessage(LogLevel::Information,
-                           logPrefix + "lighting techniques = [" + attached + "] (" +
-                               std::to_string(state->lightingTechniques.size()) + " attached)");
+        logger->logMessage(
+            LogLevel::Information,
+            logPrefix + "lighting techniques = [" + attached + "] (" + std::to_string(state->lightingTechniques.size())
+                + " attached)"
+        );
     }
-    for (const std::string& name : state->configuredTechniques)
+    for (const std::string &name : state->configuredTechniques)
     {
         if (!state->hasTechniqueNamed(name))
         {
-            logger->logMessage(LogLevel::Warning,
-                               logPrefix + "lighting technique '" + name +
-                                   "' is configured but no module attached it; is its module built and listed "
-                                   "under [engine].modules?");
+            logger->logMessage(
+                LogLevel::Warning,
+                logPrefix + "lighting technique '" + name
+                    + "' is configured but no module attached it; is its module built and listed "
+                      "under [engine].modules?"
+            );
         }
     }
 }
@@ -162,22 +191,26 @@ void RendererModule::stop()
         state->device->waitIdle();
     }
     state.reset();
-    frameBeginChannel = nullptr;
+    frameBeginChannel    = nullptr;
     frameRenderedChannel = nullptr;
-    windowCapability = nullptr;
-    logger = nullptr;
+    windowCapability     = nullptr;
+    logger               = nullptr;
 }
 
-void* RendererModule::capabilityPointerFor(const std::string& capabilityName)
+void *RendererModule::capabilityPointerFor(
+    const std::string &capabilityName
+)
 {
     if (capabilityName == RendererCapability::capabilityName)
     {
-        return static_cast<RendererCapability*>(this);
+        return static_cast<RendererCapability *>(this);
     }
     return nullptr;
 }
 
-void RendererModule::attachLightingTechnique(const std::shared_ptr<LightingTechniquePass>& pass)
+void RendererModule::attachLightingTechnique(
+    const std::shared_ptr<LightingTechniquePass> &pass
+)
 {
     if (state == nullptr || pass == nullptr)
     {
@@ -185,14 +218,17 @@ void RendererModule::attachLightingTechnique(const std::shared_ptr<LightingTechn
     }
     // One pass per algorithm name: a re-attach replaces the previous pass
     // (keeps hot-reload style experimentation sane).
-    std::erase_if(state->lightingTechniques, [&pass](const std::shared_ptr<LightingTechniquePass>& existing)
-                  { return std::string_view(existing->techniqueName()) == pass->techniqueName(); });
+    std::erase_if(
+        state->lightingTechniques,
+        [&pass](const std::shared_ptr<LightingTechniquePass> &existing)
+        { return std::string_view(existing->techniqueName()) == pass->techniqueName(); }
+    );
     state->lightingTechniques.push_back(pass);
     // The record order is a physical contract (the member comment): direct
     // emitters evaluate before the passes that transport their light. Enforce
     // it here instead of trusting the configuration's module order; the
     // stable sort keeps equal-priority passes in attach order.
-    const auto targetRank = [](const std::shared_ptr<LightingTechniquePass>& technique)
+    const auto targetRank = [](const std::shared_ptr<LightingTechniquePass> &technique)
     {
         if (hasLightingTarget(technique->targets(), LightingTarget::Direct))
         {
@@ -204,16 +240,19 @@ void RendererModule::attachLightingTechnique(const std::shared_ptr<LightingTechn
         }
         return 2;
     };
-    std::stable_sort(state->lightingTechniques.begin(), state->lightingTechniques.end(),
-                     [&targetRank](const std::shared_ptr<LightingTechniquePass>& left,
-                                   const std::shared_ptr<LightingTechniquePass>& right)
-                     { return targetRank(left) < targetRank(right); });
+    std::stable_sort(
+        state->lightingTechniques.begin(),
+        state->lightingTechniques.end(),
+        [&targetRank](
+            const std::shared_ptr<LightingTechniquePass> &left, const std::shared_ptr<LightingTechniquePass> &right
+        ) { return targetRank(left) < targetRank(right); }
+    );
     // Recompute which radiance targets exist: the composite reads a target
     // only when at least one attached technique declares it.
-    state->hasDirectRadianceTarget = false;
-    state->hasIndirectDiffuseTarget = false;
+    state->hasDirectRadianceTarget   = false;
+    state->hasIndirectDiffuseTarget  = false;
     state->hasIndirectSpecularTarget = false;
-    for (const auto& technique : state->lightingTechniques)
+    for (const auto &technique : state->lightingTechniques)
     {
         state->hasDirectRadianceTarget |= hasLightingTarget(technique->targets(), LightingTarget::Direct);
         state->hasIndirectDiffuseTarget |= hasLightingTarget(technique->targets(), LightingTarget::IndirectDiffuse);
@@ -221,7 +260,9 @@ void RendererModule::attachLightingTechnique(const std::shared_ptr<LightingTechn
     }
 }
 
-void RendererModule::handleWindowResized(const WindowResizedEvent& /*event*/)
+void RendererModule::handleWindowResized(
+    const WindowResizedEvent & /*event*/
+)
 {
     if (state != nullptr)
     {
@@ -257,8 +298,11 @@ void RendererModule::renderFrame()
     // condition through their exit code without it.
     if (state->failOnValidationError && state->validationErrorSeen.load())
     {
-        throw std::runtime_error(logPrefix + "graphics backend reported a validation error "
-                                 "(fail_on_validation_error is enabled)");
+        throw std::runtime_error(
+            logPrefix
+            + "graphics backend reported a validation error "
+              "(fail_on_validation_error is enabled)"
+        );
     }
 
     FrameRenderedEvent rendered;

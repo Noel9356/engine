@@ -20,10 +20,10 @@ inline constexpr WindowIdentifier invalidWindowIdentifier = 0;
 
 struct WindowDescription
 {
-    std::string title;
-    std::uint32_t width = 1280;
-    std::uint32_t height = 720;
-    bool resizable = true;
+    std::string   title;
+    std::uint32_t width     = 1280;
+    std::uint32_t height    = 720;
+    bool          resizable = true;
 };
 
 // Published when the user closes a window.
@@ -37,8 +37,8 @@ struct WindowClosedEvent
 struct WindowResizedEvent
 {
     WindowIdentifier windowIdentifier = invalidWindowIdentifier;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
+    std::uint32_t    width            = 0;
+    std::uint32_t    height           = 0;
 };
 
 // Capability "window": surface and event pump provided by the window module.
@@ -52,11 +52,11 @@ struct WindowResizedEvent
 class WindowCapability
 {
 public:
-    static constexpr const char* capabilityName = "window";
+    static constexpr const char *capabilityName = "window";
 
     virtual ~WindowCapability() = default;
 
-    virtual WindowIdentifier createMainWindow(const WindowDescription& description) = 0;
+    virtual WindowIdentifier createMainWindow(const WindowDescription &description) = 0;
 
     virtual bool windowCloseRequested(WindowIdentifier windowIdentifier) = 0;
 
@@ -64,7 +64,7 @@ public:
     // WindowResizedEvent through the event bus.
     virtual void pollEvents() = 0;
 
-    virtual std::uint32_t framebufferWidth(WindowIdentifier windowIdentifier) = 0;
+    virtual std::uint32_t framebufferWidth(WindowIdentifier windowIdentifier)  = 0;
     virtual std::uint32_t framebufferHeight(WindowIdentifier windowIdentifier) = 0;
 
     virtual std::vector<WindowIdentifier> windowIdentifiers() const = 0;
@@ -77,18 +77,19 @@ public:
     // rendering implementation consumes these; script mods never see them, and
     // an implementation for another family ("opengl") uses the same members
     // with its own names and handles.
-    virtual std::vector<std::string> requiredInstanceExtensions(const std::string& graphicsApi) = 0;
-    virtual void* createPresentationSurface(const std::string& graphicsApi, void* graphicsInstance,
-                                            WindowIdentifier windowIdentifier) = 0;
+    virtual std::vector<std::string> requiredInstanceExtensions(const std::string &graphicsApi) = 0;
+    virtual void                    *createPresentationSurface(
+        const std::string &graphicsApi, void *graphicsInstance, WindowIdentifier windowIdentifier
+    ) = 0;
 
     // Native window handle for implementations that attach backend specific
     // callbacks (the input module) or platform integration. The pointed-to
     // type is a windowing library detail of the window module implementation;
     // contract consumers treat it as opaque.
-    virtual void* nativeWindowHandle(WindowIdentifier windowIdentifier) = 0;
+    virtual void *nativeWindowHandle(WindowIdentifier windowIdentifier) = 0;
 
     // Reverse lookup used by the input module inside platform callbacks.
-    virtual WindowIdentifier windowIdentifierFromNativeHandle(void* nativeWindowHandle) = 0;
+    virtual WindowIdentifier windowIdentifierFromNativeHandle(void *nativeWindowHandle) = 0;
 };
 
 } // namespace engine

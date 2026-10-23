@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createradiance_cascadesPluginModule()
+engine::ModuleInterface *createradiance_cascadesPluginModule()
 {
     return new engine::RadianceCascadesModule();
 }
 
 const engine::EngineModulePluginEntry radiance_cascadesPluginEntry{
-    engine::engineModulePluginAbiVersion, "radiance_cascades", &createradiance_cascadesPluginModule};
+    engine::engineModulePluginAbiVersion, "radiance_cascades", &createradiance_cascadesPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &radiance_cascadesPluginEntry;
 }

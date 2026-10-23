@@ -16,7 +16,7 @@ inline constexpr std::uint32_t engineModInterfaceVersion = 1;
 // Named once here because the kernel resolves it by string and every mod
 // defines it; a spelling drift on either side would fail startup with a
 // confusing "symbol not found" instead of pointing at the contract.
-inline constexpr const char* engineModEntryTableSymbol = "engine_query_mod_entry_table";
+inline constexpr const char *engineModEntryTableSymbol = "engine_query_mod_entry_table";
 
 } // namespace engine
 
@@ -35,8 +35,8 @@ extern "C"
     struct EngineModEntryTable
     {
         std::uint32_t interfaceVersion;
-        engine::ModInterface* (*createMod)();
-        void (*destroyMod)(engine::ModInterface* mod);
+        engine::ModInterface *(*createMod)();
+        void (*destroyMod)(engine::ModInterface *mod);
     };
 }
 

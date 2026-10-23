@@ -40,9 +40,9 @@ struct DiscoveredModPackage
 // duplicate id is reported and the later package dropped. A missing or
 // non-directory path is a valid state (no packages). Returns the active
 // packages in discovery order.
-std::vector<DiscoveredModPackage> discoverModPackages(const std::filesystem::path& modsDirectory,
-                                                      const std::vector<std::string>& disabledIds,
-                                                      std::string& report);
+std::vector<DiscoveredModPackage> discoverModPackages(
+    const std::filesystem::path &modsDirectory, const std::vector<std::string> &disabledIds, std::string &report
+);
 
 // One native package's loaded state. The library handle must outlive the mod
 // instance (the owner destroys in reverse declaration order); the instance is
@@ -50,8 +50,8 @@ std::vector<DiscoveredModPackage> discoverModPackages(const std::filesystem::pat
 struct NativeModLoad
 {
     std::unique_ptr<DynamicLibrary> library;
-    ModInterface* modInstance = nullptr;
-    const EngineModEntryTable* entryTable = nullptr;
+    ModInterface                   *modInstance = nullptr;
+    const EngineModEntryTable      *entryTable  = nullptr;
 };
 
 // Loads one native package's shared library, resolves its entry table,
@@ -59,7 +59,7 @@ struct NativeModLoad
 // package manifest on identity. Returns false with one report line when the
 // package cannot be used; the package is then dropped instead of failing the
 // whole startup, so the report stays one line per problem.
-bool loadNativeModEntry(const DiscoveredModPackage& package, NativeModLoad& load, std::string& report);
+bool loadNativeModEntry(const DiscoveredModPackage &package, NativeModLoad &load, std::string &report);
 
 } // namespace engine
 

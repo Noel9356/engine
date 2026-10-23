@@ -16,13 +16,15 @@ namespace engine
 namespace
 {
 
-const std::string& hostContextName()
+const std::string &hostContextName()
 {
     static const std::string name = "<host>";
     return name;
 }
 
-std::filesystem::path resolveAgainstExecutableDirectory(const std::filesystem::path& path)
+std::filesystem::path resolveAgainstExecutableDirectory(
+    const std::filesystem::path &path
+)
 {
     if (path.is_absolute())
     {
@@ -31,7 +33,9 @@ std::filesystem::path resolveAgainstExecutableDirectory(const std::filesystem::p
     return executableDirectory() / path;
 }
 
-std::string describeComponentKind(ComponentKind kind)
+std::string describeComponentKind(
+    ComponentKind kind
+)
 {
     switch (kind)
     {
@@ -52,10 +56,12 @@ std::string describeComponentKind(ComponentKind kind)
 // that are not capability acquisitions (filesystem.write, or a capability
 // acquired lazily without a graph edge). Configuration denials still win
 // over every grant, declared or derived.
-std::vector<std::string> effectivePermissions(const ComponentManifest& manifest)
+std::vector<std::string> effectivePermissions(
+    const ComponentManifest &manifest
+)
 {
     std::set<std::string> unique(manifest.requiredPermissions.begin(), manifest.requiredPermissions.end());
-    for (const std::string& capabilityName : manifest.requiredCapabilities)
+    for (const std::string &capabilityName : manifest.requiredCapabilities)
     {
         unique.insert(std::string(capabilityPermissionPrefix) + capabilityName);
     }
@@ -64,39 +70,51 @@ std::vector<std::string> effectivePermissions(const ComponentManifest& manifest)
 
 } // namespace
 
-void EngineKernel::setConfigurationFile(const std::filesystem::path& configurationPath)
+void EngineKernel::setConfigurationFile(
+    const std::filesystem::path &configurationPath
+)
 {
     configurationFilePath = configurationPath;
-    configurationLoaded = false;
+    configurationLoaded   = false;
     configurationStore.reset();
 }
 
-void EngineKernel::setSceneFile(const std::filesystem::path& scenePath)
+void EngineKernel::setSceneFile(
+    const std::filesystem::path &scenePath
+)
 {
-    sceneFilePath = scenePath;
+    sceneFilePath       = scenePath;
     configurationLoaded = false;
     configurationStore.reset();
 }
 
-bool EngineKernel::addCommandLineOverride(const std::string& assignment, std::string& error)
+bool EngineKernel::addCommandLineOverride(
+    const std::string &assignment, std::string &error
+)
 {
     // Parsed (not applied) immediately: a malformed --set must fail at the
     // composition root with exit code 2, before any backend starts.
     return configurationStore.stageCommandLineOverride(assignment, error);
 }
 
-void EngineKernel::setModsDirectory(const std::filesystem::path& modsDirectory)
+void EngineKernel::setModsDirectory(
+    const std::filesystem::path &modsDirectory
+)
 {
     explicitModsDirectory = modsDirectory;
-    componentsGathered = false;
+    componentsGathered    = false;
 }
 
-void EngineKernel::registerModuleFactory(const std::string& moduleName, ModuleFactory factory)
+void EngineKernel::registerModuleFactory(
+    const std::string &moduleName, ModuleFactory factory
+)
 {
     moduleFactories[moduleName] = std::move(factory);
 }
 
-void EngineKernel::registerModFactory(const std::string& modName, ModFactory factory)
+void EngineKernel::registerModFactory(
+    const std::string &modName, ModFactory factory
+)
 {
     modFactories[modName] = std::move(factory);
 }
@@ -111,11 +129,14 @@ EngineKernel::~EngineKernel()
 std::unique_ptr<ComponentContext> EngineKernel::createHostContext()
 {
     permissionSystem_.grantAllPermissions(hostContextName());
-    return std::make_unique<ComponentContext>(bus, capabilityRegistry_, permissionSystem_, configurationStore,
-                                              hostContextName());
+    return std::make_unique<ComponentContext>(
+        bus, capabilityRegistry_, permissionSystem_, configurationStore, hostContextName()
+    );
 }
 
-bool EngineKernel::loadConfiguration(std::string& report)
+bool EngineKernel::loadConfiguration(
+    std::string &report
+)
 {
     if (configurationLoaded)
     {
@@ -163,32 +184,37 @@ bool EngineKernel::loadConfiguration(std::string& report)
 // never depends on filesystem iteration order; when two defaults files
 // provide the same key, the alphabetically first module wins (defaults fill
 // gaps, they never override).
-bool EngineKernel::loadModuleDefaults(std::string& report)
+bool EngineKernel::loadModuleDefaults(
+    std::string &report
+)
 {
-    const std::filesystem::path defaultsDirectory =
-        resolveAgainstExecutableDirectory(ConfigurationStore::moduleDefaultsDirectory);
+    const std::filesystem::path defaultsDirectory = resolveAgainstExecutableDirectory(
+        ConfigurationStore::moduleDefaultsDirectory
+    );
     if (!std::filesystem::exists(defaultsDirectory) || !std::filesystem::is_directory(defaultsDirectory))
     {
         return true; // no module ships defaults: a valid state
     }
 
     std::vector<std::filesystem::path> moduleDirectories;
-    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(defaultsDirectory))
+    for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(defaultsDirectory))
     {
-        if (entry.is_directory() &&
-            std::filesystem::exists(entry.path() / ConfigurationStore::moduleDefaultsFileName))
+        if (entry.is_directory() && std::filesystem::exists(entry.path() / ConfigurationStore::moduleDefaultsFileName))
         {
             moduleDirectories.push_back(entry.path());
         }
     }
     std::sort(moduleDirectories.begin(), moduleDirectories.end());
 
-    for (const std::filesystem::path& moduleDirectory : moduleDirectories)
+    for (const std::filesystem::path &moduleDirectory : moduleDirectories)
     {
         std::string defaultsError;
-        if (!configurationStore.mergeDefaultsFile(moduleDirectory / ConfigurationStore::moduleDefaultsFileName,
-                                                  ConfigProvenance::Layer::ModuleDefaults,
-                                                  moduleDirectory.filename().string(), defaultsError))
+        if (!configurationStore.mergeDefaultsFile(
+                moduleDirectory / ConfigurationStore::moduleDefaultsFileName,
+                ConfigProvenance::Layer::ModuleDefaults,
+                moduleDirectory.filename().string(),
+                defaultsError
+            ))
         {
             report += "- " + defaultsError + "\n";
             return false;
@@ -205,7 +231,9 @@ bool EngineKernel::loadModuleDefaults(std::string& report)
 // on top. Then the configuration is complete, and [diagnostics] is applied
 // from the fully merged stack - a --set diagnostics.latency_report=true is
 // honored exactly like the configuration key.
-bool EngineKernel::finishConfiguration(std::string& report)
+bool EngineKernel::finishConfiguration(
+    std::string &report
+)
 {
     if (!sceneFilePath.empty())
     {
@@ -230,11 +258,11 @@ bool EngineKernel::finishConfiguration(std::string& report)
         // content mod claims it: that claim provides the world, through the
         // same wholesale [scene] swap --scene uses, so partial assembly
         // scenes can never merge with mod scenes.
-        const ModSceneClaim& claim = modSceneClaims.front();
+        const ModSceneClaim &claim = modSceneClaims.front();
         if (!std::filesystem::exists(claim.sceneFile))
         {
-            report += "- mod '" + claim.ownerId + "' declares scene file '" + claim.sceneFile.string() +
-                      "' which does not exist.\n";
+            report += "- mod '" + claim.ownerId + "' declares scene file '" + claim.sceneFile.string()
+                    + "' which does not exist.\n";
             return false;
         }
         std::string sceneError;
@@ -251,9 +279,9 @@ bool EngineKernel::finishConfiguration(std::string& report)
         // content mods, picking one silently would depend on filesystem
         // listing order. Content mods may coexist freely - the run just has
         // to say which world it wants.
-        report += "- the world is ambiguous: " + std::to_string(modSceneClaims.size()) +
-                  " active mods declare scene files";
-        for (const ModSceneClaim& claim : modSceneClaims)
+        report += "- the world is ambiguous: " + std::to_string(modSceneClaims.size())
+                + " active mods declare scene files";
+        for (const ModSceneClaim &claim : modSceneClaims)
         {
             report += " '" + claim.sceneFile.string() + "' (" + claim.ownerId + ")";
         }
@@ -266,11 +294,11 @@ bool EngineKernel::finishConfiguration(std::string& report)
         // Valid state, but the author should know the installed content is
         // not the world this run uses. validate() prints it; a normal run
         // stays quiet.
-        for (const ModSceneClaim& claim : modSceneClaims)
+        for (const ModSceneClaim &claim : modSceneClaims)
         {
-            deferredConfigurationWarnings += "warning: mod '" + claim.ownerId + "' declares scene file '" +
-                                             claim.sceneFile.string() +
-                                             "' but the configuration defines its own [scene]; the mod scene is "
+            deferredConfigurationWarnings += "warning: mod '" + claim.ownerId + "' declares scene file '"
+                                           + claim.sceneFile.string()
+                                           + "' but the configuration defines its own [scene]; the mod scene is "
                                              "not applied\n";
         }
     }
@@ -286,32 +314,35 @@ bool EngineKernel::finishConfiguration(std::string& report)
     // is covered once the flag is set; a --latency-report command line flag
     // set before construct is preserved (the flag can only turn recording ON,
     // never off).
-    bus.setLatencyRecordingEnabled(bus.latencyRecordingEnabled() ||
-                                   configurationStore
-                                       .booleanValue(ConfigurationStore::diagnosticsSectionName,
-                                                     ConfigurationStore::diagnosticsLatencyReportKey)
-                                       .value_or(false));
+    bus.setLatencyRecordingEnabled(
+        bus.latencyRecordingEnabled()
+        || configurationStore
+            .booleanValue(ConfigurationStore::diagnosticsSectionName, ConfigurationStore::diagnosticsLatencyReportKey)
+            .value_or(false)
+    );
     return true;
 }
 
-bool EngineKernel::prepareComponents(std::string& report)
+bool EngineKernel::prepareComponents(
+    std::string &report
+)
 {
     return loadConfiguration(report) && gatherComponents(report) && finishConfiguration(report);
 }
 
-std::vector<std::pair<const EngineKernel::ComponentRecord*, std::string>> EngineKernel::applyPermissionPass()
+std::vector<std::pair<const EngineKernel::ComponentRecord *, std::string>> EngineKernel::applyPermissionPass()
 {
-    std::vector<std::pair<const ComponentRecord*, std::string>> denied;
-    for (const auto& denial : configurationStore.permissionDenials())
+    std::vector<std::pair<const ComponentRecord *, std::string>> denied;
+    for (const auto &denial : configurationStore.permissionDenials())
     {
         permissionSystem_.denyPermission(denial.first, denial.second);
     }
-    for (const ComponentRecord& record : records)
+    for (const ComponentRecord &record : records)
     {
         const std::vector<std::string> grants = effectivePermissions(record.manifest);
         permissionSystem_.declarePermissions(record.name, grants);
         const std::vector<std::string> missing = permissionSystem_.missingPermissions(record.name, grants);
-        for (const std::string& permission : missing)
+        for (const std::string &permission : missing)
         {
             denied.emplace_back(&record, permission);
         }
@@ -323,16 +354,18 @@ std::vector<ComponentManifest> EngineKernel::componentManifests() const
 {
     std::vector<ComponentManifest> manifests;
     manifests.reserve(records.size());
-    for (const ComponentRecord& record : records)
+    for (const ComponentRecord &record : records)
     {
         manifests.push_back(record.manifest);
     }
     return manifests;
 }
 
-EngineKernel::ComponentRecord* EngineKernel::findRecord(const std::string& name)
+EngineKernel::ComponentRecord *EngineKernel::findRecord(
+    const std::string &name
+)
 {
-    for (ComponentRecord& candidate : records)
+    for (ComponentRecord &candidate : records)
     {
         if (candidate.name == name)
         {
@@ -346,7 +379,9 @@ EngineKernel::ComponentRecord* EngineKernel::findRecord(const std::string& name)
 // in-process mod factories, shared library mods from the configuration, and
 // validates that every module listed in the configuration is actually
 // available in this run.
-bool EngineKernel::gatherComponents(std::string& report)
+bool EngineKernel::gatherComponents(
+    std::string &report
+)
 {
     if (componentsGathered)
     {
@@ -364,12 +399,12 @@ bool EngineKernel::gatherComponents(std::string& report)
 
     std::vector<std::string> knownModuleNames;
     knownModuleNames.reserve(moduleFactories.size());
-    for (const auto& entry : moduleFactories)
+    for (const auto &entry : moduleFactories)
     {
         knownModuleNames.push_back(entry.first);
     }
 
-    for (const std::string& moduleName : configuredModules)
+    for (const std::string &moduleName : configuredModules)
     {
         const auto factory = moduleFactories.find(moduleName);
         if (factory == moduleFactories.end())
@@ -377,9 +412,9 @@ bool EngineKernel::gatherComponents(std::string& report)
             continue; // reported below against the compiled module inventory
         }
         ComponentRecord record;
-        record.name = moduleName;
-        record.manifest.kind = ComponentKind::Module;
-        record.ownedModule = factory->second();
+        record.name           = moduleName;
+        record.manifest.kind  = ComponentKind::Module;
+        record.ownedModule    = factory->second();
         record.moduleInstance = record.ownedModule.get();
         if (record.ownedModule == nullptr)
         {
@@ -389,8 +424,8 @@ bool EngineKernel::gatherComponents(std::string& report)
         record.manifest = record.moduleInstance->manifest();
         if (record.manifest.name != moduleName)
         {
-            report += "- module '" + moduleName + "' reports the manifest name '" + record.manifest.name +
-                      "'; the configuration name and the manifest name must match.\n";
+            report += "- module '" + moduleName + "' reports the manifest name '" + record.manifest.name
+                    + "'; the configuration name and the manifest name must match.\n";
             return false;
         }
         records.push_back(std::move(record));
@@ -400,13 +435,13 @@ bool EngineKernel::gatherComponents(std::string& report)
     // plugin binary is missing from the modules directory (or failed to load
     // above), the module was compiled out through its build option, or the
     // configuration name is wrong.
-    for (const std::string& moduleName : configuredModules)
+    for (const std::string &moduleName : configuredModules)
     {
         const bool registered = moduleFactories.find(moduleName) != moduleFactories.end();
         if (!registered)
         {
-            report += "- module '" + moduleName +
-                      "' is listed in the configuration but is not available in this run (its plugin is missing "
+            report += "- module '" + moduleName
+                    + "' is listed in the configuration but is not available in this run (its plugin is missing "
                       "from the modules directory, compiled out through its build option, or the name is wrong).\n";
         }
     }
@@ -415,13 +450,13 @@ bool EngineKernel::gatherComponents(std::string& report)
     gatherModPackages(report);
 
     // In-process mod factories (tests and statically linked mods).
-    for (const auto& entry : modFactories)
+    for (const auto &entry : modFactories)
     {
         ComponentRecord record;
-        record.name = entry.first;
+        record.name          = entry.first;
         record.manifest.kind = ComponentKind::SharedLibraryMod;
-        record.ownedMod = entry.second();
-        record.modInstance = record.ownedMod.get();
+        record.ownedMod      = entry.second();
+        record.modInstance   = record.ownedMod.get();
         if (record.modInstance == nullptr)
         {
             report += "- mod factory for '" + entry.first + "' returned no instance.\n";
@@ -439,7 +474,9 @@ bool EngineKernel::gatherComponents(std::string& report)
 // filesystem scan and the native library loading live in mod_discovery.cpp;
 // this phase owns the kernel policy: scene claims, shipped defaults, record
 // wiring for native and script mods.
-void EngineKernel::gatherModPackages(std::string& report)
+void EngineKernel::gatherModPackages(
+    std::string &report
+)
 {
     // Fresh scan state every call: the claims are re-collected from the
     // current packages, never carried over from an earlier gather.
@@ -450,13 +487,14 @@ void EngineKernel::gatherModPackages(std::string& report)
     {
         modsDirectory = configurationStore.modDirectory();
     }
-    const std::filesystem::path resolvedDirectory = resolveAgainstExecutableDirectory(modsDirectory);
-    const std::vector<DiscoveredModPackage> packages =
-        discoverModPackages(resolvedDirectory, configurationStore.disabledMods(), report);
+    const std::filesystem::path             resolvedDirectory = resolveAgainstExecutableDirectory(modsDirectory);
+    const std::vector<DiscoveredModPackage> packages          = discoverModPackages(
+        resolvedDirectory, configurationStore.disabledMods(), report
+    );
 
-    for (const DiscoveredModPackage& package : packages)
+    for (const DiscoveredModPackage &package : packages)
     {
-        const ModManifest& modManifest = package.manifest;
+        const ModManifest &modManifest = package.manifest;
 
         // World content claims: collected, never resolved here. Content mods
         // may coexist freely; finishConfiguration decides - an explicit world
@@ -469,7 +507,7 @@ void EngineKernel::gatherModPackages(std::string& report)
         {
             ModSceneClaim claim;
             claim.sceneFile = package.sceneFile;
-            claim.ownerId = modManifest.id;
+            claim.ownerId   = modManifest.id;
             modSceneClaims.push_back(std::move(claim));
         }
 
@@ -481,8 +519,12 @@ void EngineKernel::gatherModPackages(std::string& report)
         if (!package.defaultsFile.empty())
         {
             std::string defaultsError;
-            if (!configurationStore.mergeDefaultsFile(package.defaultsFile, ConfigProvenance::Layer::ModDefaults,
-                                                      modManifest.directory.filename().string(), defaultsError))
+            if (!configurationStore.mergeDefaultsFile(
+                    package.defaultsFile,
+                    ConfigProvenance::Layer::ModDefaults,
+                    modManifest.directory.filename().string(),
+                    defaultsError
+                ))
             {
                 report += "- " + defaultsError + "\n";
                 continue;
@@ -492,24 +534,24 @@ void EngineKernel::gatherModPackages(std::string& report)
         if (modManifest.isNative())
         {
             ComponentRecord record;
-            record.name = modManifest.id;
+            record.name          = modManifest.id;
             record.manifest.kind = ComponentKind::SharedLibraryMod;
             NativeModLoad load;
             if (!loadNativeModEntry(package, load, report))
             {
                 continue;
             }
-            record.library = std::move(load.library);
+            record.library       = std::move(load.library);
             record.modEntryTable = load.entryTable;
-            record.modInstance = load.modInstance;
-            record.manifest = record.modInstance->manifest();
+            record.modInstance   = load.modInstance;
+            record.manifest      = record.modInstance->manifest();
             // The package manifest is authoritative for identity and wiring;
             // the compiled manifest only had to agree on the name.
-            record.manifest.name = modManifest.id;
+            record.manifest.name                 = modManifest.id;
             record.manifest.requiredCapabilities = modManifest.capabilities;
-            record.manifest.requiredPermissions = modManifest.permissions;
-            record.manifest.requiredComponents = modManifest.requiresComponents;
-            record.manifest.knownConfigKeys = modManifest.configKeys;
+            record.manifest.requiredPermissions  = modManifest.permissions;
+            record.manifest.requiredComponents   = modManifest.requiresComponents;
+            record.manifest.knownConfigKeys      = modManifest.configKeys;
             records.push_back(std::move(record));
         }
         else
@@ -521,32 +563,33 @@ void EngineKernel::gatherModPackages(std::string& report)
             const bool hostAvailable = moduleFactories.find(modManifest.host) != moduleFactories.end();
             if (!hostAvailable)
             {
-                report += "- script mod '" + modManifest.id + "' declares host '" + modManifest.host +
-                          "' which is not available in this build (compiled out through its build option, "
+                report += "- script mod '" + modManifest.id + "' declares host '" + modManifest.host
+                        + "' which is not available in this build (compiled out through its build option, "
                           "or the name is wrong).\n";
                 continue;
             }
             ComponentRecord record;
-            record.name = modManifest.id;
-            record.manifest.kind = ComponentKind::ScriptMod;
-            record.manifest.name = modManifest.id;
+            record.name                          = modManifest.id;
+            record.manifest.kind                 = ComponentKind::ScriptMod;
+            record.manifest.name                 = modManifest.id;
             record.manifest.requiredCapabilities = modManifest.capabilities;
-            record.manifest.requiredPermissions = modManifest.permissions;
-            record.manifest.requiredComponents = modManifest.requiresComponents;
-            record.manifest.knownConfigKeys = modManifest.configKeys;
+            record.manifest.requiredPermissions  = modManifest.permissions;
+            record.manifest.requiredComponents   = modManifest.requiresComponents;
+            record.manifest.knownConfigKeys      = modManifest.configKeys;
             record.manifest.requiredComponents.push_back(modManifest.host); // always ordered after its host
-            record.scriptHostName = modManifest.host;
-            record.scriptMod.modId = modManifest.id;
+            record.scriptHostName       = modManifest.host;
+            record.scriptMod.modId      = modManifest.id;
             record.scriptMod.scriptPath = modManifest.directory / modManifest.entry;
             records.push_back(std::move(record));
         }
     }
 }
 
-DependencyResolver::ResolutionResult EngineKernel::resolveGraph(const std::vector<ComponentManifest>& manifests,
-                                                                std::string& report) const
+DependencyResolver::ResolutionResult EngineKernel::resolveGraph(
+    const std::vector<ComponentManifest> &manifests, std::string &report
+) const
 {
-    DependencyResolver resolver(manifests, configurationStore.providerSelections());
+    DependencyResolver                         resolver(manifests, configurationStore.providerSelections());
     const DependencyResolver::ResolutionResult resolution = resolver.resolve();
     if (!resolution.successful)
     {
@@ -555,17 +598,20 @@ DependencyResolver::ResolutionResult EngineKernel::resolveGraph(const std::vecto
     return resolution;
 }
 
-void EngineKernel::appendDiagnosticsReport(const std::vector<DependencyResolver::ResolutionDiagnostic>& diagnostics,
-                                           std::string& report) const
+void EngineKernel::appendDiagnosticsReport(
+    const std::vector<DependencyResolver::ResolutionDiagnostic> &diagnostics, std::string &report
+) const
 {
     report += "engine startup failed with " + std::to_string(diagnostics.size()) + " problem(s):\n";
-    for (const DependencyResolver::ResolutionDiagnostic& diagnostic : diagnostics)
+    for (const DependencyResolver::ResolutionDiagnostic &diagnostic : diagnostics)
     {
         report += "  - " + diagnostic.message + "\n";
     }
 }
 
-bool EngineKernel::validate(std::string& report)
+bool EngineKernel::validate(
+    std::string &report
+)
 {
     report.clear();
     if (!prepareComponents(report))
@@ -575,12 +621,12 @@ bool EngineKernel::validate(std::string& report)
 
     // Permission denials from the configuration are precise startup problems.
     std::vector<DependencyResolver::ResolutionDiagnostic> permissionDiagnostics;
-    for (const auto& [record, permission] : applyPermissionPass())
+    for (const auto &[record, permission] : applyPermissionPass())
     {
         DependencyResolver::ResolutionDiagnostic diagnostic;
-        diagnostic.kind = DependencyResolver::ResolutionDiagnostic::Kind::UnknownCapability;
-        diagnostic.message = describeComponentKind(record->manifest.kind) + " '" + record->name +
-                             "' requires permission '" + permission + "' which the configuration denies.";
+        diagnostic.kind    = DependencyResolver::ResolutionDiagnostic::Kind::UnknownCapability;
+        diagnostic.message = describeComponentKind(record->manifest.kind) + " '" + record->name
+                           + "' requires permission '" + permission + "' which the configuration denies.";
         permissionDiagnostics.push_back(std::move(diagnostic));
     }
     if (!permissionDiagnostics.empty())
@@ -592,15 +638,15 @@ bool EngineKernel::validate(std::string& report)
     // declared key surface. A malformed declaration is a startup problem -
     // it would silently weaken the unknown-key warnings otherwise.
     configurationStore.declareAssemblyKnownKeys();
-    for (const ComponentRecord& record : records)
+    for (const ComponentRecord &record : records)
     {
-        for (const std::string& configKey : record.manifest.knownConfigKeys)
+        for (const std::string &configKey : record.manifest.knownConfigKeys)
         {
             if (!configurationStore.declareKnownConfigKey(configKey))
             {
-                report += "- " + describeComponentKind(record.manifest.kind) + " '" + record.name +
-                          "' declares the malformed configuration key '" + configKey +
-                          "'; keys are '<section>.<dotted path>' of bare key segments.\n";
+                report += "- " + describeComponentKind(record.manifest.kind) + " '" + record.name
+                        + "' declares the malformed configuration key '" + configKey
+                        + "'; keys are '<section>.<dotted path>' of bare key segments.\n";
             }
         }
     }
@@ -617,7 +663,7 @@ bool EngineKernel::validate(std::string& report)
     // after the failure check so a warning stays a warning.
     report += deferredConfigurationWarnings;
 
-    std::string resolutionReport;
+    std::string                                resolutionReport;
     const DependencyResolver::ResolutionResult resolution = resolveGraph(componentManifests(), resolutionReport);
     report += resolutionReport;
     if (!resolution.successful)
@@ -629,20 +675,23 @@ bool EngineKernel::validate(std::string& report)
     // configuration (usually a typo), and the report should say so - but the
     // graph above it is fine. Normal runs stay quiet; --validate is the place
     // where the author is looking.
-    for (const std::string& warning : configurationStore.unknownKeyWarnings())
+    for (const std::string &warning : configurationStore.unknownKeyWarnings())
     {
         report += "warning: " + warning + "\n";
     }
     return true;
 }
 
-bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult& resolution,
-                                     const std::vector<ComponentManifest>& manifests, std::string& report)
+bool EngineKernel::runConstructPhase(
+    const DependencyResolver::ResolutionResult &resolution,
+    const std::vector<ComponentManifest>       &manifests,
+    std::string                                &report
+)
 {
     for (const std::size_t manifestIndex : resolution.constructionOrder)
     {
-        const ComponentManifest& manifest = manifests[manifestIndex];
-        ComponentRecord* record = findRecord(manifest.name);
+        const ComponentManifest &manifest = manifests[manifestIndex];
+        ComponentRecord         *record   = findRecord(manifest.name);
         if (record == nullptr || record->constructed)
         {
             continue;
@@ -653,25 +702,25 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult&
         // hosting module. The resolver guarantees the host constructed first.
         if (record->manifest.kind == ComponentKind::ScriptMod)
         {
-            ComponentRecord* hostRecord = findRecord(record->scriptHostName);
+            ComponentRecord *hostRecord = findRecord(record->scriptHostName);
             if (hostRecord == nullptr || !hostRecord->constructed)
             {
-                report += "- script mod '" + record->name + "' cannot be hosted: module '" +
-                          record->scriptHostName + "' did not construct.\n";
+                report += "- script mod '" + record->name + "' cannot be hosted: module '" + record->scriptHostName
+                        + "' did not construct.\n";
                 return false;
             }
-            ScriptModHost* scriptHost = hostRecord->moduleInstance->scriptModHost();
+            ScriptModHost *scriptHost = hostRecord->moduleInstance->scriptModHost();
             if (scriptHost == nullptr)
             {
-                report += "- script mod '" + record->name + "' declares host '" + record->scriptHostName +
-                          "' which does not host script mods.\n";
+                report += "- script mod '" + record->name + "' declares host '" + record->scriptHostName
+                        + "' which does not host script mods.\n";
                 return false;
             }
             try
             {
                 scriptHost->hostScriptMod(record->scriptMod);
             }
-            catch (const std::exception& error)
+            catch (const std::exception &error)
             {
                 report += "- construct failed for script mod '" + record->name + "': " + error.what() + "\n";
                 return false;
@@ -683,9 +732,10 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult&
         // Heap anchored: the component may cache this context for its whole
         // lifetime (event publishing from frame loops or input callbacks), so
         // it must not live in this loop's stack frame.
-        record->context = std::make_unique<ComponentContext>(bus, capabilityRegistry_, permissionSystem_,
-                                                              configurationStore, record->name);
-        ComponentContext& context = *record->context;
+        record->context = std::make_unique<ComponentContext>(
+            bus, capabilityRegistry_, permissionSystem_, configurationStore, record->name
+        );
+        ComponentContext &context = *record->context;
         try
         {
             if (record->moduleInstance != nullptr)
@@ -697,16 +747,16 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult&
                 record->modInstance->construct(context);
             }
         }
-        catch (const std::exception& error)
+        catch (const std::exception &error)
         {
-            report += "- construct failed for " + describeComponentKind(record->manifest.kind) + " '" +
-                      record->name + "': " + error.what() + "\n";
+            report += "- construct failed for " + describeComponentKind(record->manifest.kind) + " '" + record->name
+                    + "': " + error.what() + "\n";
             return false;
         }
 
-        for (const std::string& capabilityName : record->manifest.providedCapabilities)
+        for (const std::string &capabilityName : record->manifest.providedCapabilities)
         {
-            void* capabilityPointer = nullptr;
+            void *capabilityPointer = nullptr;
             if (record->moduleInstance != nullptr)
             {
                 capabilityPointer = record->moduleInstance->capabilityPointerFor(capabilityName);
@@ -717,15 +767,15 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult&
             }
             if (capabilityPointer == nullptr)
             {
-                report += "- " + describeComponentKind(record->manifest.kind) + " '" + record->name +
-                          "' declares capability '" + capabilityName + "' but returned no implementation.\n";
+                report += "- " + describeComponentKind(record->manifest.kind) + " '" + record->name
+                        + "' declares capability '" + capabilityName + "' but returned no implementation.\n";
                 return false;
             }
             try
             {
                 capabilityRegistry_.registerCapability(capabilityName, record->name, capabilityPointer);
             }
-            catch (const std::logic_error& error)
+            catch (const std::logic_error &error)
             {
                 report += "- " + std::string(error.what()) + "\n";
                 return false;
@@ -736,7 +786,9 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult&
     return true;
 }
 
-bool EngineKernel::construct(std::string& report)
+bool EngineKernel::construct(
+    std::string &report
+)
 {
     report.clear();
     if (constructed)
@@ -749,10 +801,10 @@ bool EngineKernel::construct(std::string& report)
     }
     // The same permission pass as validate: configuration denials become
     // precise startup problems before any construct callback runs.
-    for (const auto& [record, permission] : applyPermissionPass())
+    for (const auto &[record, permission] : applyPermissionPass())
     {
-        report += "- " + describeComponentKind(record->manifest.kind) + " '" + record->name +
-                  "' requires permission '" + permission + "' which the configuration denies.\n";
+        report += "- " + describeComponentKind(record->manifest.kind) + " '" + record->name + "' requires permission '"
+                + permission + "' which the configuration denies.\n";
     }
     if (!report.empty())
     {
@@ -760,7 +812,7 @@ bool EngineKernel::construct(std::string& report)
         return false;
     }
 
-    std::string resolutionReport;
+    std::string                                resolutionReport;
     const DependencyResolver::ResolutionResult resolution = resolveGraph(componentManifests(), resolutionReport);
     report += resolutionReport;
     if (!resolution.successful)
@@ -784,7 +836,7 @@ void EngineKernel::start()
     {
         throw std::runtime_error("engine kernel: start requires a completed construct phase");
     }
-    for (ComponentRecord& record : records)
+    for (ComponentRecord &record : records)
     {
         if (!record.constructed || record.started)
         {
@@ -812,7 +864,7 @@ void EngineKernel::stop()
     }
     for (auto iterator = records.rbegin(); iterator != records.rend(); ++iterator)
     {
-        ComponentRecord& record = *iterator;
+        ComponentRecord &record = *iterator;
         if (record.started && record.moduleInstance != nullptr)
         {
             record.moduleInstance->stop();
@@ -828,10 +880,10 @@ void EngineKernel::stop()
             record.modEntryTable->destroyMod(record.modInstance);
             record.modInstance = nullptr;
         }
-        record.started = false;
+        record.started     = false;
         record.constructed = false;
     }
-    started = false;
+    started     = false;
     constructed = false;
 
     records.clear();

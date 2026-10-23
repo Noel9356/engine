@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createloggingPluginModule()
+engine::ModuleInterface *createloggingPluginModule()
 {
     return new engine::LoggingModule();
 }
 
 const engine::EngineModulePluginEntry loggingPluginEntry{
-    engine::engineModulePluginAbiVersion, "logging", &createloggingPluginModule};
+    engine::engineModulePluginAbiVersion, "logging", &createloggingPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &loggingPluginEntry;
 }

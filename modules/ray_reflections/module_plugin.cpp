@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createray_reflectionsPluginModule()
+engine::ModuleInterface *createray_reflectionsPluginModule()
 {
     return new engine::RayReflectionsModule();
 }
 
 const engine::EngineModulePluginEntry ray_reflectionsPluginEntry{
-    engine::engineModulePluginAbiVersion, "ray_reflections", &createray_reflectionsPluginModule};
+    engine::engineModulePluginAbiVersion, "ray_reflections", &createray_reflectionsPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &ray_reflectionsPluginEntry;
 }

@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createlua_scriptingPluginModule()
+engine::ModuleInterface *createlua_scriptingPluginModule()
 {
     return new engine::LuaScriptingModule();
 }
 
 const engine::EngineModulePluginEntry lua_scriptingPluginEntry{
-    engine::engineModulePluginAbiVersion, "lua_scripting", &createlua_scriptingPluginModule};
+    engine::engineModulePluginAbiVersion, "lua_scripting", &createlua_scriptingPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &lua_scriptingPluginEntry;
 }

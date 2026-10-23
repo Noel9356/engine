@@ -23,15 +23,15 @@ class ComponentContext;
 struct LeakCapture
 {
     std::vector<std::uint8_t> pixels;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
+    std::uint32_t             width  = 0;
+    std::uint32_t             height = 0;
 };
 
 // Subscribes the sink to the FrameCapturedEvent channel; every capture
 // overwrites the previous frame's pixels. The subscription lives as long as
 // the bus (process lifetime for the host), so no subscription handle needs
 // keeping.
-void subscribeLeakCapture(EventBus& bus, LeakCapture& capture);
+void subscribeLeakCapture(EventBus &bus, LeakCapture &capture);
 
 // Evaluates the captured frame against the [leak_test] section of the
 // configuration: the configured sealed region must stay dark (a light leak
@@ -39,7 +39,7 @@ void subscribeLeakCapture(EventBus& bus, LeakCapture& capture);
 // dead GI path would fail it). Returns true when the check passes; on failure
 // returns false with a precise diagnostic (no capture, malformed region,
 // luminance above/below the configured bounds).
-bool evaluateLeakCheck(const ComponentContext& hostContext, const LeakCapture& capture, std::string& diagnostic);
+bool evaluateLeakCheck(const ComponentContext &hostContext, const LeakCapture &capture, std::string &diagnostic);
 
 } // namespace engine
 

@@ -24,7 +24,9 @@ enum class VisitState
 
 } // namespace
 
-DependencyResolver::DependencyResolver(std::vector<ComponentManifest> manifests, std::vector<ProviderSelection> selections)
+DependencyResolver::DependencyResolver(
+    std::vector<ComponentManifest> manifests, std::vector<ProviderSelection> selections
+)
     : manifests_(std::move(manifests)), selections_(std::move(selections))
 {
 }
@@ -46,7 +48,7 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
     std::map<std::string, std::vector<ManifestIndex>> capabilityProviders;
     for (ManifestIndex index = 0; index < manifestCount; ++index)
     {
-        for (const std::string& capabilityName : manifests_[index].providedCapabilities)
+        for (const std::string &capabilityName : manifests_[index].providedCapabilities)
         {
             capabilityProviders[capabilityName].push_back(index);
         }
@@ -54,16 +56,16 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
 
     // Apply provider selections and report ambiguity or bad selections.
     std::map<std::string, ManifestIndex> selectedProvider; // capability -> provider index
-    for (const auto& entry : capabilityProviders)
+    for (const auto &entry : capabilityProviders)
     {
-        const std::string& capabilityName = entry.first;
-        const std::vector<ManifestIndex>& providers = entry.second;
+        const std::string                &capabilityName = entry.first;
+        const std::vector<ManifestIndex> &providers      = entry.second;
 
-        const auto selection = std::find_if(selections_.begin(), selections_.end(),
-                                            [&capabilityName](const ProviderSelection& candidate)
-                                            {
-                                                return candidate.capabilityName == capabilityName;
-                                            });
+        const auto selection = std::find_if(
+            selections_.begin(),
+            selections_.end(),
+            [&capabilityName](const ProviderSelection &candidate) { return candidate.capabilityName == capabilityName; }
+        );
 
         if (providers.size() > 1)
         {
@@ -79,25 +81,26 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
                     providerList += manifests_[providerIndex].name;
                 }
                 ResolutionDiagnostic diagnostic;
-                diagnostic.kind = ResolutionDiagnostic::Kind::AmbiguousCapability;
-                diagnostic.message = "capability '" + capabilityName +
-                                     "' is provided by several components [" + providerList +
-                                     "]; choose one in the configuration under [providers]." + capabilityName;
+                diagnostic.kind    = ResolutionDiagnostic::Kind::AmbiguousCapability;
+                diagnostic.message = "capability '" + capabilityName + "' is provided by several components ["
+                                   + providerList + "]; choose one in the configuration under [providers]."
+                                   + capabilityName;
                 result.diagnostics.push_back(std::move(diagnostic));
             }
             else
             {
-                const auto chosen = std::find_if(providers.begin(), providers.end(),
-                                                 [this, &selection](ManifestIndex providerIndex)
-                                                 {
-                                                     return manifests_[providerIndex].name == selection->providerName;
-                                                 });
+                const auto chosen = std::find_if(
+                    providers.begin(),
+                    providers.end(),
+                    [this, &selection](ManifestIndex providerIndex)
+                    { return manifests_[providerIndex].name == selection->providerName; }
+                );
                 if (chosen == providers.end())
                 {
                     ResolutionDiagnostic diagnostic;
-                    diagnostic.kind = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
-                    diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '" +
-                                         capabilityName + "' but that component does not provide the capability.";
+                    diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
+                    diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '"
+                                       + capabilityName + "' but that component does not provide the capability.";
                     diagnostic.involvementChain.push_back(selection->providerName);
                     diagnostic.involvementChain.push_back(capabilityName);
                     result.diagnostics.push_back(std::move(diagnostic));
@@ -113,10 +116,10 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
             if (selection != selections_.end() && manifests_[providers.front()].name != selection->providerName)
             {
                 ResolutionDiagnostic diagnostic;
-                diagnostic.kind = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
-                diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '" +
-                                     capabilityName + "' but the only provider is '" +
-                                     manifests_[providers.front()].name + "'.";
+                diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
+                diagnostic.message = "configuration selects '" + selection->providerName + "' for capability '"
+                                   + capabilityName + "' but the only provider is '"
+                                   + manifests_[providers.front()].name + "'.";
                 result.diagnostics.push_back(std::move(diagnostic));
             }
             else
@@ -127,14 +130,14 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
     }
 
     // Selections that name a capability nobody provides.
-    for (const ProviderSelection& selection : selections_)
+    for (const ProviderSelection &selection : selections_)
     {
         if (capabilityProviders.find(selection.capabilityName) == capabilityProviders.end())
         {
             ResolutionDiagnostic diagnostic;
-            diagnostic.kind = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
-            diagnostic.message = "configuration selects '" + selection.providerName + "' for capability '" +
-                                 selection.capabilityName + "' but no component provides that capability.";
+            diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownSelectedProvider;
+            diagnostic.message = "configuration selects '" + selection.providerName + "' for capability '"
+                               + selection.capabilityName + "' but no component provides that capability.";
             result.diagnostics.push_back(std::move(diagnostic));
         }
     }
@@ -143,15 +146,15 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
     std::vector<std::pair<ManifestIndex, ManifestIndex>> edges;
     for (ManifestIndex consumerIndex = 0; consumerIndex < manifestCount; ++consumerIndex)
     {
-        const ComponentManifest& consumer = manifests_[consumerIndex];
+        const ComponentManifest &consumer = manifests_[consumerIndex];
 
-        for (const std::string& capabilityName : consumer.requiredCapabilities)
+        for (const std::string &capabilityName : consumer.requiredCapabilities)
         {
             const auto provider = selectedProvider.find(capabilityName);
             if (provider == selectedProvider.end())
             {
                 std::string availableList;
-                for (const auto& entry : capabilityProviders)
+                for (const auto &entry : capabilityProviders)
                 {
                     if (!availableList.empty())
                     {
@@ -160,10 +163,10 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
                     availableList += entry.first;
                 }
                 ResolutionDiagnostic diagnostic;
-                diagnostic.kind = ResolutionDiagnostic::Kind::UnknownCapability;
-                diagnostic.message = "component '" + consumer.name + "' requires capability '" + capabilityName +
-                                     "' but no available component provides it." +
-                                     (availableList.empty() ? std::string(" no capabilities are provided at all.")
+                diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownCapability;
+                diagnostic.message = "component '" + consumer.name + "' requires capability '" + capabilityName
+                                   + "' but no available component provides it."
+                                   + (availableList.empty() ? std::string(" no capabilities are provided at all.")
                                                             : " available capabilities: " + availableList + ".");
                 diagnostic.involvementChain.push_back(consumer.name);
                 diagnostic.involvementChain.push_back(capabilityName);
@@ -176,15 +179,15 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
             }
         }
 
-        for (const std::string& componentName : consumer.requiredComponents)
+        for (const std::string &componentName : consumer.requiredComponents)
         {
             const auto required = componentIndices.find(componentName);
             if (required == componentIndices.end())
             {
                 ResolutionDiagnostic diagnostic;
-                diagnostic.kind = ResolutionDiagnostic::Kind::UnknownComponent;
-                diagnostic.message = "component '" + consumer.name + "' requires component '" + componentName +
-                                     "' but no component with that name is available.";
+                diagnostic.kind    = ResolutionDiagnostic::Kind::UnknownComponent;
+                diagnostic.message = "component '" + consumer.name + "' requires component '" + componentName
+                                   + "' but no component with that name is available.";
                 diagnostic.involvementChain.push_back(consumer.name);
                 diagnostic.involvementChain.push_back(componentName);
                 result.diagnostics.push_back(std::move(diagnostic));
@@ -200,9 +203,9 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
     // Deterministic Kahn topological ordering. Duplicate edges collapse through
     // the edge set so shared dependencies are counted once.
     std::set<std::pair<ManifestIndex, ManifestIndex>> uniqueEdges(edges.begin(), edges.end());
-    std::vector<ManifestIndex> inDegree(manifestCount, 0);
-    std::vector<std::vector<ManifestIndex>> dependents(manifestCount);
-    for (const auto& edge : uniqueEdges)
+    std::vector<ManifestIndex>                        inDegree(manifestCount, 0);
+    std::vector<std::vector<ManifestIndex>>           dependents(manifestCount);
+    for (const auto &edge : uniqueEdges)
     {
         dependents[edge.first].push_back(edge.second);
         ++inDegree[edge.second];
@@ -240,12 +243,12 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
         // search over the adjacency list until a back edge is found, then
         // report every participant on that cycle path.
         std::vector<std::vector<ManifestIndex>> adjacency(manifestCount);
-        for (const auto& edge : uniqueEdges)
+        for (const auto &edge : uniqueEdges)
         {
             adjacency[edge.first].push_back(edge.second);
         }
 
-        std::vector<VisitState> visitState(manifestCount, VisitState::Unvisited);
+        std::vector<VisitState>    visitState(manifestCount, VisitState::Unvisited);
         std::vector<ManifestIndex> searchPath;
         std::vector<ManifestIndex> cycleNodes;
 

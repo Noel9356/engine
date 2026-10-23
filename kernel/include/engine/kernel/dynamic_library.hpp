@@ -17,20 +17,20 @@ public:
     DynamicLibrary() = default;
     ~DynamicLibrary();
 
-    DynamicLibrary(const DynamicLibrary&) = delete;
-    DynamicLibrary& operator=(const DynamicLibrary&) = delete;
+    DynamicLibrary(const DynamicLibrary &)            = delete;
+    DynamicLibrary &operator=(const DynamicLibrary &) = delete;
 
     // Loads the library from exactly the given path. Platform naming policy
     // (which decorated candidates to try, e.g. "lib<name>.so") lives with the
     // caller that knows the package layout, not here.
-    bool load(const std::filesystem::path& libraryPath, std::string& errorMessage);
+    bool load(const std::filesystem::path &libraryPath, std::string &errorMessage);
 
     void release();
 
-    void* resolveSymbol(const std::string& symbolName) const;
+    void *resolveSymbol(const std::string &symbolName) const;
 
 private:
-    void* handle = nullptr;
+    void *handle = nullptr;
 };
 
 } // namespace engine

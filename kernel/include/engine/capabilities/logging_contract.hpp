@@ -24,11 +24,11 @@ enum class LogLevel
 class LoggerCapability
 {
 public:
-    static constexpr const char* capabilityName = "logging";
+    static constexpr const char *capabilityName = "logging";
 
     virtual ~LoggerCapability() = default;
 
-    virtual void logMessage(LogLevel level, const std::string& message) = 0;
+    virtual void logMessage(LogLevel level, const std::string &message) = 0;
 };
 
 } // namespace engine

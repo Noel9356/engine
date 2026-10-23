@@ -25,7 +25,7 @@ namespace
 constexpr std::chrono::milliseconds noRendererPollInterval{16};
 // The assembly configuration the documented quick start uses; overridable
 // with --config. Named once: the usage text quotes the same path.
-constexpr const char* defaultConfigurationFile = "config/engine.toml";
+constexpr const char *defaultConfigurationFile = "config/engine.toml";
 
 void printUsage()
 {
@@ -62,16 +62,18 @@ void printUsage()
 
 } // namespace
 
-int main(int argc, char** argv)
+int main(
+    int argc, char **argv
+)
 {
-    std::filesystem::path configurationPath = defaultConfigurationFile;
-    std::filesystem::path scenePath;
+    std::filesystem::path    configurationPath = defaultConfigurationFile;
+    std::filesystem::path    scenePath;
     std::vector<std::string> overrideAssignments;
-    bool validateOnly = false;
-    bool provenanceReport = false;
-    bool leakCheck = false;
-    bool latencyReportFlag = false;
-    std::uint64_t smokeFrameLimit = 0;
+    bool                     validateOnly      = false;
+    bool                     provenanceReport  = false;
+    bool                     leakCheck         = false;
+    bool                     latencyReportFlag = false;
+    std::uint64_t            smokeFrameLimit   = 0;
 
     for (int index = 1; index < argc; ++index)
     {
@@ -89,7 +91,7 @@ int main(int argc, char** argv)
         {
             // Provenance is a validation-time report: it needs the fully
             // merged layer stack and no backends.
-            validateOnly = true;
+            validateOnly     = true;
             provenanceReport = true;
         }
         else if (argument == "--scene")
@@ -124,14 +126,14 @@ int main(int argc, char** argv)
         }
         else if (argument == "--smoke-frames" && index + 1 < argc)
         {
-            const std::string framesArgument = argv[++index];
-            std::size_t consumed = 0;
-            unsigned long long parsed = 0;
+            const std::string  framesArgument = argv[++index];
+            std::size_t        consumed       = 0;
+            unsigned long long parsed         = 0;
             try
             {
                 parsed = std::stoull(framesArgument, &consumed);
             }
-            catch (const std::exception&)
+            catch (const std::exception &)
             {
                 std::cerr << "--smoke-frames expects a positive number, got: " << framesArgument << "\n";
                 return 2;
@@ -159,7 +161,7 @@ int main(int argc, char** argv)
     }
     // Malformed --set assignments are usage errors: they are parsed here,
     // before any backend starts, and fail the run with exit code 2.
-    for (const std::string& assignment : overrideAssignments)
+    for (const std::string &assignment : overrideAssignments)
     {
         std::string overrideError;
         if (!kernel.addCommandLineOverride(assignment, overrideError))
@@ -187,7 +189,7 @@ int main(int argc, char** argv)
     if (validateOnly)
     {
         std::string report;
-        const bool successful = kernel.validate(report);
+        const bool  successful = kernel.validate(report);
         if (!report.empty())
         {
             std::cout << report;
@@ -211,14 +213,14 @@ int main(int argc, char** argv)
     // The frame loop belongs to the composition root, not to the kernel: the
     // kernel only mediates communication, it never owns a window or a frame.
     std::unique_ptr<engine::ComponentContext> hostContext = kernel.createHostContext();
-    engine::WindowCapability& window = hostContext->acquireCapability<engine::WindowCapability>();
+    engine::WindowCapability                 &window      = hostContext->acquireCapability<engine::WindowCapability>();
 
-    engine::RendererCapability* renderer = nullptr;
+    engine::RendererCapability *renderer = nullptr;
     try
     {
         renderer = &hostContext->acquireCapability<engine::RendererCapability>();
     }
-    catch (const std::exception&)
+    catch (const std::exception &)
     {
         std::cout << "renderer capability is not available in this build; running without frames\n";
     }
@@ -226,22 +228,22 @@ int main(int argc, char** argv)
     // The smoke run queues its capture through the screenshot capability so
     // the whole production path is exercised (module queue flag, frame begin
     // hand-off, readback, PNG write), not only the renderer readback.
-    engine::ScreenshotCapability* screenshot = nullptr;
+    engine::ScreenshotCapability *screenshot = nullptr;
     if (smokeFrameLimit > 0)
     {
         try
         {
             screenshot = &hostContext->acquireCapability<engine::ScreenshotCapability>();
         }
-        catch (const std::exception&)
+        catch (const std::exception &)
         {
             screenshot = nullptr;
         }
     }
 
     const std::vector<engine::WindowIdentifier> windowIdentifiers = window.windowIdentifiers();
-    const engine::WindowIdentifier mainWindow =
-        windowIdentifiers.empty() ? engine::invalidWindowIdentifier : windowIdentifiers.front();
+    const engine::WindowIdentifier              mainWindow = windowIdentifiers.empty() ? engine::invalidWindowIdentifier
+                                                                                       : windowIdentifiers.front();
 
     // The leak check reads the captured frame: subscribe to the capture event
     // and keep the last frame's pixels (the event payload only stays valid for
@@ -255,23 +257,23 @@ int main(int argc, char** argv)
     // A failure anywhere in the frame loop (a missing shader asset, a backend
     // that refuses a pipeline, a mod that throws during dispatch) must produce
     // a diagnostic and a non-zero exit instead of an uncaught exception.
-    int exitCode = 0;
-    std::uint64_t iterations = 0;
-    double totalFrameSeconds = 0.0;
-    double worstFrameSeconds = 0.0;
+    int           exitCode          = 0;
+    std::uint64_t iterations        = 0;
+    double        totalFrameSeconds = 0.0;
+    double        worstFrameSeconds = 0.0;
     // Frame-time percentile support, only maintained when the latency report
     // is enabled: a fixed 4096-slot ring (bounded memory like the bus rings)
     // plus a lifetime sum for the mean.
     constexpr std::size_t frameSampleCapacity = 4096;
-    std::vector<double> frameSamples;
+    std::vector<double>   frameSamples;
     frameSamples.reserve(frameSampleCapacity);
     if (latencyReportFlag || kernel.eventBus().latencyRecordingEnabled())
     {
         frameSamples.resize(frameSampleCapacity);
     }
-    std::size_t frameSampleCount = 0;
-    std::size_t frameSampleNext = 0;
-    const bool diagnosticsEnabled = !frameSamples.empty();
+    std::size_t frameSampleCount   = 0;
+    std::size_t frameSampleNext    = 0;
+    const bool  diagnosticsEnabled = !frameSamples.empty();
     try
     {
         while (mainWindow != engine::invalidWindowIdentifier && !window.windowCloseRequested(mainWindow))
@@ -294,15 +296,15 @@ int main(int argc, char** argv)
                 }
                 const auto frameStart = std::chrono::steady_clock::now();
                 renderer->renderFrame();
-                const double frameSeconds =
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - frameStart).count();
+                const double frameSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - frameStart)
+                                                .count();
                 totalFrameSeconds += frameSeconds;
                 worstFrameSeconds = std::max(worstFrameSeconds, frameSeconds);
                 if (diagnosticsEnabled)
                 {
                     frameSamples[frameSampleNext] = frameSeconds;
-                    frameSampleNext = (frameSampleNext + 1) % frameSampleCapacity;
-                    frameSampleCount = std::min(frameSampleCount + 1, frameSampleCapacity);
+                    frameSampleNext               = (frameSampleNext + 1) % frameSampleCapacity;
+                    frameSampleCount              = std::min(frameSampleCount + 1, frameSampleCapacity);
                 }
             }
             else
@@ -316,7 +318,7 @@ int main(int argc, char** argv)
             }
         }
     }
-    catch (const std::exception& error)
+    catch (const std::exception &error)
     {
         std::cerr << "engine frame loop failed: " << error.what() << "\n";
         exitCode = 1;
@@ -369,8 +371,9 @@ int main(int argc, char** argv)
             }
             if (iterations > 0 && renderer != nullptr)
             {
-                std::vector<double> ordered(frameSamples.begin(), frameSamples.begin() +
-                                                                        static_cast<std::ptrdiff_t>(frameSampleCount));
+                std::vector<double> ordered(
+                    frameSamples.begin(), frameSamples.begin() + static_cast<std::ptrdiff_t>(frameSampleCount)
+                );
                 std::sort(ordered.begin(), ordered.end());
                 const auto percentile = [&ordered](std::size_t fraction)
                 {
@@ -385,7 +388,7 @@ int main(int argc, char** argv)
             }
         }
     }
-    catch (const std::exception&)
+    catch (const std::exception &)
     {
         // The report is diagnostic; never turn it into a run failure.
     }

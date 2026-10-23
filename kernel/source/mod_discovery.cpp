@@ -8,9 +8,9 @@
 namespace engine
 {
 
-std::vector<DiscoveredModPackage> discoverModPackages(const std::filesystem::path& modsDirectory,
-                                                      const std::vector<std::string>& disabledIds,
-                                                      std::string& report)
+std::vector<DiscoveredModPackage> discoverModPackages(
+    const std::filesystem::path &modsDirectory, const std::vector<std::string> &disabledIds, std::string &report
+)
 {
     std::vector<DiscoveredModPackage> packages;
     if (!std::filesystem::exists(modsDirectory) || !std::filesystem::is_directory(modsDirectory))
@@ -19,7 +19,7 @@ std::vector<DiscoveredModPackage> discoverModPackages(const std::filesystem::pat
     }
 
     std::vector<std::filesystem::path> packageDirectories;
-    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(modsDirectory))
+    for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(modsDirectory))
     {
         if (entry.is_directory() && std::filesystem::exists(entry.path() / ModManifestLoader::manifestFileName))
         {
@@ -28,14 +28,15 @@ std::vector<DiscoveredModPackage> discoverModPackages(const std::filesystem::pat
     }
     std::sort(packageDirectories.begin(), packageDirectories.end());
 
-    ModManifestLoader manifestLoader;
+    ModManifestLoader     manifestLoader;
     std::set<std::string> seenIds;
-    for (const std::filesystem::path& packageDirectory : packageDirectories)
+    for (const std::filesystem::path &packageDirectory : packageDirectories)
     {
         DiscoveredModPackage package;
-        std::string manifestError;
-        if (!manifestLoader.loadFromFile(packageDirectory / ModManifestLoader::manifestFileName, package.manifest,
-                                         manifestError))
+        std::string          manifestError;
+        if (!manifestLoader.loadFromFile(
+                packageDirectory / ModManifestLoader::manifestFileName, package.manifest, manifestError
+            ))
         {
             report += "- " + manifestError + "\n";
             continue;
@@ -46,8 +47,8 @@ std::vector<DiscoveredModPackage> discoverModPackages(const std::filesystem::pat
         }
         if (!seenIds.insert(package.manifest.id).second)
         {
-            report += "- duplicate mod id '" + package.manifest.id + "' in '" + packageDirectory.string() +
-                      "'; mod ids must be unique across the mods directory.\n";
+            report += "- duplicate mod id '" + package.manifest.id + "' in '" + packageDirectory.string()
+                    + "'; mod ids must be unique across the mods directory.\n";
             continue;
         }
 
@@ -67,10 +68,12 @@ std::vector<DiscoveredModPackage> discoverModPackages(const std::filesystem::pat
     return packages;
 }
 
-bool loadNativeModEntry(const DiscoveredModPackage& package, NativeModLoad& load, std::string& report)
+bool loadNativeModEntry(
+    const DiscoveredModPackage &package, NativeModLoad &load, std::string &report
+)
 {
     const std::filesystem::path packageDirectory = package.manifest.directory;
-    const ModManifest& modManifest = package.manifest;
+    const ModManifest          &modManifest      = package.manifest;
 
     // Platform library naming, first accepted spelling per toolchain
     // convention: "<entry>.dll" on Windows (plus the MinGW "lib" prefixed
@@ -91,7 +94,7 @@ bool loadNativeModEntry(const DiscoveredModPackage& package, NativeModLoad& load
 #endif
 
     std::filesystem::path libraryPath;
-    for (const std::filesystem::path& candidate : libraryCandidates)
+    for (const std::filesystem::path &candidate : libraryCandidates)
     {
         if (std::filesystem::exists(candidate))
         {
@@ -102,12 +105,12 @@ bool loadNativeModEntry(const DiscoveredModPackage& package, NativeModLoad& load
     if (libraryPath.empty())
     {
         std::string expectedNames;
-        for (const std::filesystem::path& candidate : libraryCandidates)
+        for (const std::filesystem::path &candidate : libraryCandidates)
         {
             expectedNames += (expectedNames.empty() ? "" : ", ") + candidate.filename().string();
         }
-        report += "- native mod '" + modManifest.id + "' has no library file in '" + packageDirectory.string() +
-                  "' (looked for " + expectedNames + "); build the mod first.\n";
+        report += "- native mod '" + modManifest.id + "' has no library file in '" + packageDirectory.string()
+                + "' (looked for " + expectedNames + "); build the mod first.\n";
         return false;
     }
 
@@ -118,13 +121,14 @@ bool loadNativeModEntry(const DiscoveredModPackage& package, NativeModLoad& load
         report += "- " + loadError + "\n";
         return false;
     }
-    using ModEntryQueryFunction = const EngineModEntryTable* (*)();
-    const auto queryFunction =
-        reinterpret_cast<ModEntryQueryFunction>(load.library->resolveSymbol(engineModEntryTableSymbol));
+    using ModEntryQueryFunction = const EngineModEntryTable *(*)();
+    const auto queryFunction    = reinterpret_cast<ModEntryQueryFunction>(
+        load.library->resolveSymbol(engineModEntryTableSymbol)
+    );
     if (queryFunction == nullptr)
     {
-        report += "- shared library mod '" + libraryPath.string() + "' does not export " +
-                  std::string(engineModEntryTableSymbol) + ".\n";
+        report += "- shared library mod '" + libraryPath.string() + "' does not export "
+                + std::string(engineModEntryTableSymbol) + ".\n";
         return false;
     }
     load.entryTable = queryFunction();
@@ -135,9 +139,9 @@ bool loadNativeModEntry(const DiscoveredModPackage& package, NativeModLoad& load
     }
     if (load.entryTable->interfaceVersion != engineModInterfaceVersion)
     {
-        report += "- shared library mod '" + libraryPath.string() + "' reports interface version " +
-                  std::to_string(load.entryTable->interfaceVersion) + " but the engine provides version " +
-                  std::to_string(engineModInterfaceVersion) + "; rebuild the mod against this engine.\n";
+        report += "- shared library mod '" + libraryPath.string() + "' reports interface version "
+                + std::to_string(load.entryTable->interfaceVersion) + " but the engine provides version "
+                + std::to_string(engineModInterfaceVersion) + "; rebuild the mod against this engine.\n";
         return false;
     }
     load.modInstance = load.entryTable->createMod();
@@ -152,8 +156,8 @@ bool loadNativeModEntry(const DiscoveredModPackage& package, NativeModLoad& load
     const ComponentManifest compiledManifest = load.modInstance->manifest();
     if (!compiledManifest.name.empty() && compiledManifest.name != modManifest.id)
     {
-        report += "- native mod '" + modManifest.id + "' reports the compiled manifest name '" +
-                  compiledManifest.name + "'; the compiled manifest and mod.toml must agree.\n";
+        report += "- native mod '" + modManifest.id + "' reports the compiled manifest name '" + compiledManifest.name
+                + "'; the compiled manifest and mod.toml must agree.\n";
         return false;
     }
     return true;

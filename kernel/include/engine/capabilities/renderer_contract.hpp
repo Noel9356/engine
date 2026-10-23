@@ -24,9 +24,9 @@ struct FrameBeginEvent
 // rows are tightly packed RGBA8, top row first.
 struct FrameCapturedEvent
 {
-    const std::uint8_t* pixelData = nullptr;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
+    const std::uint8_t *pixelData = nullptr;
+    std::uint32_t       width     = 0;
+    std::uint32_t       height    = 0;
 };
 
 // Published after the frame was submitted and presented.
@@ -42,7 +42,7 @@ struct FrameRenderedEvent
 class RendererCapability
 {
 public:
-    static constexpr const char* capabilityName = "renderer";
+    static constexpr const char *capabilityName = "renderer";
 
     virtual ~RendererCapability() = default;
 

@@ -12,7 +12,7 @@ namespace engine
 namespace
 {
 
-constexpr std::int32_t pressedAction = GLFW_PRESS;
+constexpr std::int32_t pressedAction  = GLFW_PRESS;
 constexpr std::int32_t releasedAction = GLFW_RELEASE;
 
 // keyCodeName/keyCodeFromName live in the kernel (source/
@@ -25,11 +25,11 @@ constexpr std::int32_t releasedAction = GLFW_RELEASE;
 
 InputModule::InputModule()
 {
-    componentManifest.name = "input";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "input";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {"input"};
     componentManifest.requiredCapabilities = {"logging", "window"};
-    componentManifest.requiredPermissions = {"capability.logging", "capability.window"};
+    componentManifest.requiredPermissions  = {"capability.logging", "capability.window"};
 }
 
 InputModule::~InputModule()
@@ -37,10 +37,12 @@ InputModule::~InputModule()
     stop();
 }
 
-void InputModule::construct(ComponentContext& context)
+void InputModule::construct(
+    ComponentContext &context
+)
 {
-    boundContext = &context;
-    logger = &context.acquireCapability<LoggerCapability>();
+    boundContext     = &context;
+    logger           = &context.acquireCapability<LoggerCapability>();
     windowCapability = &context.acquireCapability<WindowCapability>();
 }
 
@@ -54,7 +56,7 @@ void InputModule::start()
     }
     for (WindowIdentifier identifier : identifiers)
     {
-        GLFWwindow* window = static_cast<GLFWwindow*>(windowCapability->nativeWindowHandle(identifier));
+        GLFWwindow *window = static_cast<GLFWwindow *>(windowCapability->nativeWindowHandle(identifier));
         if (window != nullptr)
         {
             // The input module owns the GLFW window user pointer: GLFW offers
@@ -78,7 +80,7 @@ void InputModule::stop()
     {
         for (WindowIdentifier identifier : windowCapability->windowIdentifiers())
         {
-            GLFWwindow* window = static_cast<GLFWwindow*>(windowCapability->nativeWindowHandle(identifier));
+            GLFWwindow *window = static_cast<GLFWwindow *>(windowCapability->nativeWindowHandle(identifier));
             if (window != nullptr)
             {
                 glfwSetKeyCallback(window, nullptr);
@@ -91,34 +93,38 @@ void InputModule::stop()
             }
         }
     }
-    pendingMouseX = 0.0;
-    pendingMouseY = 0.0;
-    pendingScrollX = 0.0;
-    pendingScrollY = 0.0;
-    cursorCaptured = false;
+    pendingMouseX       = 0.0;
+    pendingMouseY       = 0.0;
+    pendingScrollX      = 0.0;
+    pendingScrollY      = 0.0;
+    cursorCaptured      = false;
     cursorPositionKnown = false;
-    boundContext = nullptr;
-    windowCapability = nullptr;
-    logger = nullptr;
+    boundContext        = nullptr;
+    windowCapability    = nullptr;
+    logger              = nullptr;
 }
 
-void* InputModule::capabilityPointerFor(const std::string& capabilityName)
+void *InputModule::capabilityPointerFor(
+    const std::string &capabilityName
+)
 {
     if (capabilityName == InputCapability::capabilityName)
     {
-        return static_cast<InputCapability*>(this);
+        return static_cast<InputCapability *>(this);
     }
     return nullptr;
 }
 
-bool InputModule::isKeyDown(KeyCode keyCode)
+bool InputModule::isKeyDown(
+    KeyCode keyCode
+)
 {
     const std::vector<WindowIdentifier> identifiers = windowCapability->windowIdentifiers();
     if (identifiers.empty())
     {
         return false;
     }
-    GLFWwindow* window = static_cast<GLFWwindow*>(windowCapability->nativeWindowHandle(identifiers.front()));
+    GLFWwindow *window = static_cast<GLFWwindow *>(windowCapability->nativeWindowHandle(identifiers.front()));
     if (window == nullptr)
     {
         return false;
@@ -126,14 +132,16 @@ bool InputModule::isKeyDown(KeyCode keyCode)
     return glfwGetKey(window, static_cast<int>(keyCode)) == GLFW_PRESS;
 }
 
-bool InputModule::isMouseButtonDown(MouseButton button)
+bool InputModule::isMouseButtonDown(
+    MouseButton button
+)
 {
     const std::vector<WindowIdentifier> identifiers = windowCapability->windowIdentifiers();
     if (identifiers.empty())
     {
         return false;
     }
-    GLFWwindow* window = static_cast<GLFWwindow*>(windowCapability->nativeWindowHandle(identifiers.front()));
+    GLFWwindow *window = static_cast<GLFWwindow *>(windowCapability->nativeWindowHandle(identifiers.front()));
     if (window == nullptr)
     {
         return false;
@@ -141,32 +149,38 @@ bool InputModule::isMouseButtonDown(MouseButton button)
     return glfwGetMouseButton(window, static_cast<int>(button)) == GLFW_PRESS;
 }
 
-void InputModule::consumeMouseDelta(double& deltaX, double& deltaY)
+void InputModule::consumeMouseDelta(
+    double &deltaX, double &deltaY
+)
 {
-    deltaX = pendingMouseX;
-    deltaY = pendingMouseY;
+    deltaX        = pendingMouseX;
+    deltaY        = pendingMouseY;
     pendingMouseX = 0.0;
     pendingMouseY = 0.0;
 }
 
-void InputModule::consumeScrollDelta(double& deltaX, double& deltaY)
+void InputModule::consumeScrollDelta(
+    double &deltaX, double &deltaY
+)
 {
-    deltaX = pendingScrollX;
-    deltaY = pendingScrollY;
+    deltaX         = pendingScrollX;
+    deltaY         = pendingScrollY;
     pendingScrollX = 0.0;
     pendingScrollY = 0.0;
 }
 
-void InputModule::setCursorCaptured(bool captured)
+void InputModule::setCursorCaptured(
+    bool captured
+)
 {
     const std::vector<WindowIdentifier> identifiers = windowCapability == nullptr
-                                                         ? std::vector<WindowIdentifier>{}
-                                                         : windowCapability->windowIdentifiers();
+                                                        ? std::vector<WindowIdentifier>{}
+                                                        : windowCapability->windowIdentifiers();
     if (identifiers.empty())
     {
         return;
     }
-    GLFWwindow* window = static_cast<GLFWwindow*>(windowCapability->nativeWindowHandle(identifiers.front()));
+    GLFWwindow *window = static_cast<GLFWwindow *>(windowCapability->nativeWindowHandle(identifiers.front()));
     if (window == nullptr || captured == cursorCaptured)
     {
         return;
@@ -180,10 +194,10 @@ void InputModule::setCursorCaptured(bool captured)
     {
         glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, captured ? GLFW_TRUE : GLFW_FALSE);
     }
-    pendingMouseX = 0.0;
-    pendingMouseY = 0.0;
+    pendingMouseX       = 0.0;
+    pendingMouseY       = 0.0;
     cursorPositionKnown = false;
-    cursorCaptured = captured;
+    cursorCaptured      = captured;
 }
 
 bool InputModule::isCursorCaptured() const
@@ -191,9 +205,11 @@ bool InputModule::isCursorCaptured() const
     return cursorCaptured;
 }
 
-void InputModule::cursorPositionCallback(GLFWwindow* window, double x, double y)
+void InputModule::cursorPositionCallback(
+    GLFWwindow *window, double x, double y
+)
 {
-    InputModule* module = static_cast<InputModule*>(glfwGetWindowUserPointer(window));
+    InputModule *module = static_cast<InputModule *>(glfwGetWindowUserPointer(window));
     if (module == nullptr)
     {
         return;
@@ -202,8 +218,8 @@ void InputModule::cursorPositionCallback(GLFWwindow* window, double x, double y)
     {
         // Absolute position without a previous one: not motion.
         module->cursorPositionKnown = true;
-        module->lastCursorX = x;
-        module->lastCursorY = y;
+        module->lastCursorX         = x;
+        module->lastCursorY         = y;
         return;
     }
     module->pendingMouseX += x - module->lastCursorX;
@@ -212,9 +228,11 @@ void InputModule::cursorPositionCallback(GLFWwindow* window, double x, double y)
     module->lastCursorY = y;
 }
 
-void InputModule::scrollCallback(GLFWwindow* window, double x, double y)
+void InputModule::scrollCallback(
+    GLFWwindow *window, double x, double y
+)
 {
-    InputModule* module = static_cast<InputModule*>(glfwGetWindowUserPointer(window));
+    InputModule *module = static_cast<InputModule *>(glfwGetWindowUserPointer(window));
     if (module == nullptr)
     {
         return;
@@ -223,13 +241,14 @@ void InputModule::scrollCallback(GLFWwindow* window, double x, double y)
     module->pendingScrollY += y;
 }
 
-void InputModule::keyCallback(GLFWwindow* window, std::int32_t platformKeyCode, std::int32_t scanCode,
-                              std::int32_t action, std::int32_t modifiers)
+void InputModule::keyCallback(
+    GLFWwindow *window, std::int32_t platformKeyCode, std::int32_t scanCode, std::int32_t action, std::int32_t modifiers
+)
 {
     (void)scanCode;
     (void)modifiers;
 
-    InputModule* module = static_cast<InputModule*>(glfwGetWindowUserPointer(window));
+    InputModule *module = static_cast<InputModule *>(glfwGetWindowUserPointer(window));
     if (module == nullptr || module->boundContext == nullptr)
     {
         return;

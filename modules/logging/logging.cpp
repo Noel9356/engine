@@ -32,7 +32,9 @@ bool standardOutputIsTerminal()
 #endif
 }
 
-LogLevel parseLevelName(const std::string& levelName)
+LogLevel parseLevelName(
+    const std::string &levelName
+)
 {
     if (levelName == "trace")
     {
@@ -61,18 +63,20 @@ LogLevel parseLevelName(const std::string& levelName)
 
 LoggingModule::LoggingModule()
 {
-    componentManifest.name = "logging";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "logging";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {"logging"};
     componentManifest.requiredCapabilities = {};
-    componentManifest.requiredPermissions = {};
-    componentManifest.knownConfigKeys = {"logging.level", "logging.file"};
+    componentManifest.requiredPermissions  = {};
+    componentManifest.knownConfigKeys      = {"logging.level", "logging.file"};
 }
 
-void LoggingModule::construct(ComponentContext& context)
+void LoggingModule::construct(
+    ComponentContext &context
+)
 {
     const std::string levelName = context.configurationString("level").value_or("information");
-    minimumLevel = parseLevelName(levelName);
+    minimumLevel                = parseLevelName(levelName);
 
     const std::string fileName = context.configurationString("file").value_or("");
     if (!fileName.empty())
@@ -103,16 +107,20 @@ void LoggingModule::stop()
     }
 }
 
-void* LoggingModule::capabilityPointerFor(const std::string& capabilityName)
+void *LoggingModule::capabilityPointerFor(
+    const std::string &capabilityName
+)
 {
     if (capabilityName == LoggerCapability::capabilityName)
     {
-        return static_cast<LoggerCapability*>(this);
+        return static_cast<LoggerCapability *>(this);
     }
     return nullptr;
 }
 
-const char* LoggingModule::levelTag(LogLevel level)
+const char *LoggingModule::levelTag(
+    LogLevel level
+)
 {
     switch (level)
     {
@@ -130,7 +138,9 @@ const char* LoggingModule::levelTag(LogLevel level)
     return "LOG  ";
 }
 
-const char* LoggingModule::levelColor(LogLevel level)
+const char *LoggingModule::levelColor(
+    LogLevel level
+)
 {
     switch (level)
     {
@@ -148,7 +158,9 @@ const char* LoggingModule::levelColor(LogLevel level)
     return "";
 }
 
-void LoggingModule::logMessage(LogLevel level, const std::string& message)
+void LoggingModule::logMessage(
+    LogLevel level, const std::string &message
+)
 {
     if (static_cast<int>(level) < static_cast<int>(minimumLevel))
     {
@@ -156,7 +168,7 @@ void LoggingModule::logMessage(LogLevel level, const std::string& message)
     }
 
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::tm timeInformation{};
+    std::tm           timeInformation{};
 #if defined(_WIN32)
     ::localtime_s(&timeInformation, &now);
 #else

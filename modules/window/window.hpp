@@ -24,50 +24,51 @@ public:
     WindowModule();
     ~WindowModule() override;
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
+    void *capabilityPointerFor(const std::string &capabilityName) override;
 
-    WindowIdentifier createMainWindow(const WindowDescription& description) override;
-    bool windowCloseRequested(WindowIdentifier windowIdentifier) override;
-    void pollEvents() override;
-    std::uint32_t framebufferWidth(WindowIdentifier windowIdentifier) override;
-    std::uint32_t framebufferHeight(WindowIdentifier windowIdentifier) override;
+    WindowIdentifier              createMainWindow(const WindowDescription &description) override;
+    bool                          windowCloseRequested(WindowIdentifier windowIdentifier) override;
+    void                          pollEvents() override;
+    std::uint32_t                 framebufferWidth(WindowIdentifier windowIdentifier) override;
+    std::uint32_t                 framebufferHeight(WindowIdentifier windowIdentifier) override;
     std::vector<WindowIdentifier> windowIdentifiers() const override;
-    std::vector<std::string> requiredInstanceExtensions(const std::string& graphicsApi) override;
-    void* createPresentationSurface(const std::string& graphicsApi, void* graphicsInstance,
-                                    WindowIdentifier windowIdentifier) override;
-    void* nativeWindowHandle(WindowIdentifier windowIdentifier) override;
-    WindowIdentifier windowIdentifierFromNativeHandle(void* nativeWindowHandle) override;
+    std::vector<std::string>      requiredInstanceExtensions(const std::string &graphicsApi) override;
+    void                         *createPresentationSurface(
+        const std::string &graphicsApi, void *graphicsInstance, WindowIdentifier windowIdentifier
+    ) override;
+    void            *nativeWindowHandle(WindowIdentifier windowIdentifier) override;
+    WindowIdentifier windowIdentifierFromNativeHandle(void *nativeWindowHandle) override;
 
 private:
     struct WindowRecord
     {
-        WindowIdentifier identifier = invalidWindowIdentifier;
-        GLFWwindow* window = nullptr;
-        bool closeReported = false;
+        WindowIdentifier identifier    = invalidWindowIdentifier;
+        GLFWwindow      *window        = nullptr;
+        bool             closeReported = false;
     };
 
-    WindowRecord* findRecord(WindowIdentifier windowIdentifier);
-    void installCallbacks(GLFWwindow* window);
+    WindowRecord *findRecord(WindowIdentifier windowIdentifier);
+    void          installCallbacks(GLFWwindow *window);
 
-    static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
-    static void errorCallback(int errorCode, const char* description);
+    static void framebufferResizeCallback(GLFWwindow *window, int width, int height);
+    static void errorCallback(int errorCode, const char *description);
 
-    ComponentManifest componentManifest;
-    ComponentContext* boundContext = nullptr;
-    LoggerCapability* logger = nullptr;
-    WindowDescription pendingDescription;
-    bool glfwInitialized = false;
+    ComponentManifest                        componentManifest;
+    ComponentContext                        *boundContext = nullptr;
+    LoggerCapability                        *logger       = nullptr;
+    WindowDescription                        pendingDescription;
+    bool                                     glfwInitialized = false;
     std::map<WindowIdentifier, WindowRecord> windows;
-    WindowIdentifier nextWindowIdentifier = 1;
+    WindowIdentifier                         nextWindowIdentifier = 1;
 };
 
 } // namespace engine

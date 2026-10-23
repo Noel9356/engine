@@ -15,16 +15,16 @@ namespace engine
 std::filesystem::path executableDirectory()
 {
 #if defined(_WIN32)
-    wchar_t modulePath[MAX_PATH] = {};
-    const DWORD written = ::GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+    wchar_t     modulePath[MAX_PATH] = {};
+    const DWORD written              = ::GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
     if (written == 0)
     {
         return std::filesystem::current_path();
     }
     return std::filesystem::path(modulePath).parent_path();
 #else
-    char executablePath[PATH_MAX] = {};
-    const ssize_t written = ::readlink("/proc/self/exe", executablePath, sizeof(executablePath) - 1);
+    char          executablePath[PATH_MAX] = {};
+    const ssize_t written                  = ::readlink("/proc/self/exe", executablePath, sizeof(executablePath) - 1);
     if (written <= 0)
     {
         return std::filesystem::current_path();

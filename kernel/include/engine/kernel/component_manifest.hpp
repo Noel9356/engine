@@ -23,7 +23,7 @@ enum class ComponentKind
 // building it must be free of side effects so validation can run dry.
 struct ComponentManifest
 {
-    std::string name;
+    std::string   name;
     ComponentKind kind = ComponentKind::Module;
 
     // Capability names this component makes available to others, for example

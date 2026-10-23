@@ -34,14 +34,14 @@ constexpr std::string_view moduleContext = "radiance_cascades module";
 // fallbacks (probeStride 8 vs 4, baseRays 64 vs 32, losSteps 16 vs 24) -
 // unreachable but a silent trap for the first direct construction. The
 // values here are the ones the configuration layer has always applied.
-constexpr std::uint32_t defaultCascades = 5;
-constexpr float defaultIntervalBase = 0.5f;
-constexpr float defaultIntervalFactor = 3.0f;
-constexpr std::uint32_t defaultProbeStride = 4;
-constexpr std::uint32_t defaultBaseRays = 32;
-constexpr std::uint32_t defaultLosSteps = 24;
-constexpr std::uint32_t defaultMarchSteps = 48;
-constexpr std::uint32_t defaultShadowSteps = 16;
+constexpr std::uint32_t defaultCascades            = 5;
+constexpr float         defaultIntervalBase        = 0.5f;
+constexpr float         defaultIntervalFactor      = 3.0f;
+constexpr std::uint32_t defaultProbeStride         = 4;
+constexpr std::uint32_t defaultBaseRays            = 32;
+constexpr std::uint32_t defaultLosSteps            = 24;
+constexpr std::uint32_t defaultMarchSteps          = 48;
+constexpr std::uint32_t defaultShadowSteps         = 16;
 constexpr std::uint32_t defaultSpatialFilterRadius = 5;
 
 // Push-constant blocks as the .comp shaders see them (file scope so the
@@ -49,7 +49,7 @@ constexpr std::uint32_t defaultSpatialFilterRadius = 5;
 // shader-side byte counts).
 struct MarchPush
 {
-    std::array<float, 4> interval;
+    std::array<float, 4>         interval;
     std::array<std::uint32_t, 4> flags;
     std::array<std::uint32_t, 4> grid;
     std::array<std::uint32_t, 4> extentStride;
@@ -57,7 +57,7 @@ struct MarchPush
 
 struct ComposePush
 {
-    std::array<float, 4> coarsestFlag; // w 1 when this is the coarsest cascade
+    std::array<float, 4>         coarsestFlag; // w 1 when this is the coarsest cascade
     std::array<std::uint32_t, 4> fineGrid;
     std::array<std::uint32_t, 4> coarseGrid;
 };
@@ -65,14 +65,14 @@ struct ComposePush
 struct GatherPush
 {
     std::array<std::uint32_t, 4> counts;
-    std::array<float, 4> schedule;
+    std::array<float, 4>         schedule;
     std::array<std::uint32_t, 4> dirs;
 };
 
 struct FilterPush
 {
     std::array<std::int32_t, 4> params;
-    std::array<float, 4> cameraPlanes;
+    std::array<float, 4>        cameraPlanes;
 };
 
 static_assert(sizeof(MarchPush) == 64, "rc_march.comp expects a 64-byte push block");
@@ -83,14 +83,14 @@ static_assert(sizeof(FilterPush) == 32, "rc_denoise.comp expects a 32-byte push 
 // The spatial filter's fixed edge-awareness weights (rc_denoise.comp reads
 // params.y/z): the normal power and the depth-band percentage of the
 // camera depth range.
-constexpr std::int32_t filterNormalPower = 8;
+constexpr std::int32_t filterNormalPower      = 8;
 constexpr std::int32_t filterDepthBandPercent = 4;
 
 struct CascadeImage
 {
-    std::unique_ptr<vk::raii::Image> image;
+    std::unique_ptr<vk::raii::Image>        image;
     std::unique_ptr<vk::raii::DeviceMemory> memory;
-    std::unique_ptr<vk::raii::ImageView> view;
+    std::unique_ptr<vk::raii::ImageView>    view;
 };
 
 } // namespace
@@ -103,34 +103,36 @@ class RadianceCascadesPass final : public LightingTechniquePass
 public:
     struct Settings
     {
-        std::uint32_t cascades = defaultCascades;
-        float intervalBase = defaultIntervalBase;
-        float intervalFactor = defaultIntervalFactor;
+        std::uint32_t cascades       = defaultCascades;
+        float         intervalBase   = defaultIntervalBase;
+        float         intervalFactor = defaultIntervalFactor;
         // Cost note: the march dispatches (extent/stride)^2 * rays * steps
         // scene-SDF evaluations per frame. Stride 2 at 720p meant 29 million
         // march invocations - multi-second frames and a starved message pump
         // ("not responding"); the configured stride (demo: 8+) trades march
         // cost against smoothness, which the LOS-guarded gather and the
         // spatial filter carry.
-        std::uint32_t probeStride = defaultProbeStride;
-        std::uint32_t baseRays = defaultBaseRays;
-        bool gatherVisibility = true;
-        std::uint32_t losSteps = defaultLosSteps;
-        std::uint32_t marchSteps = defaultMarchSteps;
-        bool relightShadows = true;
-        std::uint32_t shadowSteps = defaultShadowSteps;
+        std::uint32_t probeStride      = defaultProbeStride;
+        std::uint32_t baseRays         = defaultBaseRays;
+        bool          gatherVisibility = true;
+        std::uint32_t losSteps         = defaultLosSteps;
+        std::uint32_t marchSteps       = defaultMarchSteps;
+        bool          relightShadows   = true;
+        std::uint32_t shadowSteps      = defaultShadowSteps;
         // Edge-aware spatial filter radius on the gather output (pixels, 0 =
         // pass-through copy). Removes the probe grid's spatial scale; the
         // depth/normal weights keep silhouettes hard.
         std::uint32_t spatialFilterRadius = defaultSpatialFilterRadius;
     };
 
-    RadianceCascadesPass(Settings settings, LightingCapability* lightingCapability)
+    RadianceCascadesPass(
+        Settings settings, LightingCapability *lightingCapability
+    )
         : settings(settings), lighting(lightingCapability)
     {
     }
 
-    const char* techniqueName() const override
+    const char *techniqueName() const override
     {
         return "radiance_cascades";
     }
@@ -140,7 +142,9 @@ public:
         return LightingTarget::IndirectDiffuse;
     }
 
-    void record(vk::raii::CommandBuffer& commandBuffer, const FrameRenderContext& context) override
+    void record(
+        vk::raii::CommandBuffer &commandBuffer, const FrameRenderContext &context
+    ) override
     {
         if (cascadeCount() == 0 || context.extent != cachedExtent || needsRecreate)
         {
@@ -156,15 +160,9 @@ public:
         // former per-cascade halving with a 2x3 floor handed the entire far
         // field six directions, which is where the composed field's angular
         // structure (giant soft blobs) came from.
-        const auto azimuthCount = [this](std::uint32_t)
-        {
-            return azimuthBase;
-        };
-        const auto elevationCount = [this](std::uint32_t)
-        {
-            return elevationBase;
-        };
-        const auto gridWidth = [this, &context](std::uint32_t cascade)
+        const auto azimuthCount   = [this](std::uint32_t) { return azimuthBase; };
+        const auto elevationCount = [this](std::uint32_t) { return elevationBase; };
+        const auto gridWidth      = [this, &context](std::uint32_t cascade)
         {
             const std::uint32_t stride = settings.probeStride << cascade;
             return (context.extent.width + stride - 1) / stride;
@@ -176,54 +174,73 @@ public:
         };
         const auto intervalStart = [this](std::uint32_t cascade)
         {
-            return cascade == 0 ? 0.0f : settings.intervalBase * std::pow(settings.intervalFactor,
-                                                                          static_cast<float>(cascade - 1));
+            return cascade == 0
+                     ? 0.0f
+                     : settings.intervalBase * std::pow(settings.intervalFactor, static_cast<float>(cascade - 1));
         };
         const auto intervalEnd = [this](std::uint32_t cascade)
-        {
-            return settings.intervalBase * std::pow(settings.intervalFactor, static_cast<float>(cascade));
-        };
+        { return settings.intervalBase * std::pow(settings.intervalFactor, static_cast<float>(cascade)); };
 
         // ---- March: every cascade traces its own interval. ----------------
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **marchPipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 0, **sharedSet, {});
         for (std::uint32_t cascade = 0; cascade < cascades; ++cascade)
         {
-            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 1,
-                                             **marchSets[cascade], {});
+            commandBuffer.bindDescriptorSets(
+                vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 1, **marchSets[cascade], {}
+            );
             const MarchPush pushValue{
                 {intervalStart(cascade), intervalEnd(cascade), 0.0f, 0.0f},
-                {context.primitiveCount, settings.marchSteps,
-                 cascade > 0 ? 1u : 0u, 0u},
+                {context.primitiveCount, settings.marchSteps, cascade > 0 ? 1u : 0u, 0u},
                 {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
-                {context.extent.width, context.extent.height, settings.probeStride << cascade,
-                 settings.probeStride << cascade}};
-            commandBuffer.pushConstants(**marchPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
-                                        sizeof(pushValue), &pushValue);
-            commandBuffer.dispatch((gridWidth(cascade) + 3) / 4, (gridHeight(cascade) + 3) / 4,
-                                   azimuthCount(cascade) * elevationCount(cascade));
+                {context.extent.width,
+                    context.extent.height,
+                    settings.probeStride << cascade,
+                    settings.probeStride << cascade}
+            };
+            commandBuffer.pushConstants(
+                **marchPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
+            );
+            commandBuffer.dispatch(
+                (gridWidth(cascade) + 3) / 4,
+                (gridHeight(cascade) + 3) / 4,
+                azimuthCount(cascade) * elevationCount(cascade)
+            );
         }
 
         // march[c] writes -> compose reads.
         marchBarriers(cascadeImageScratch);
-        barrierCascades(commandBuffer, cascadeImageScratch, vk::PipelineStageFlagBits2::eComputeShader,
-                        vk::PipelineStageFlagBits2::eComputeShader);
+        barrierCascades(
+            commandBuffer,
+            cascadeImageScratch,
+            vk::PipelineStageFlagBits2::eComputeShader,
+            vk::PipelineStageFlagBits2::eComputeShader
+        );
 
         // ---- Compose: front-to-back interval chaining. --------------------
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **composePipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **composePipelineLayout, 0, **sharedSet, {});
         for (std::uint32_t cascade = cascades; cascade-- > 0;)
         {
-            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **composePipelineLayout, 1,
-                                             **composeSets[cascade], {});
-            const ComposePush pushValue{{0.0f, 0.0f, 0.0f, cascade == cascades - 1 ? 1.0f : 0.0f},
-                        {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
-                        {gridWidth(cascade + 1), gridHeight(cascade + 1), azimuthCount(cascade + 1),
-                         elevationCount(cascade + 1)}};
-            commandBuffer.pushConstants(**composePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
-                                        sizeof(pushValue), &pushValue);
-            commandBuffer.dispatch((gridWidth(cascade) + 3) / 4, (gridHeight(cascade) + 3) / 4,
-                                   azimuthCount(cascade) * elevationCount(cascade));
+            commandBuffer.bindDescriptorSets(
+                vk::PipelineBindPoint::eCompute, **composePipelineLayout, 1, **composeSets[cascade], {}
+            );
+            const ComposePush pushValue{
+                {0.0f, 0.0f, 0.0f, cascade == cascades - 1 ? 1.0f : 0.0f},
+                {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
+                {gridWidth(cascade + 1),
+                    gridHeight(cascade + 1),
+                    azimuthCount(cascade + 1),
+                    elevationCount(cascade + 1)}
+            };
+            commandBuffer.pushConstants(
+                **composePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
+            );
+            commandBuffer.dispatch(
+                (gridWidth(cascade) + 3) / 4,
+                (gridHeight(cascade) + 3) / 4,
+                azimuthCount(cascade) * elevationCount(cascade)
+            );
 
             // full[c] write -> full[c-1] read in the next iteration.
             std::array<vk::ImageMemoryBarrier2, 1> barrier;
@@ -249,11 +266,14 @@ public:
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **gatherPipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 0, **sharedSet, {});
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 1, **gatherSet, {});
-        const GatherPush gatherPush{{context.primitiveCount, settings.losSteps, settings.gatherVisibility ? 1u : 0u, cascades},
-                     {settings.intervalBase, settings.intervalFactor, static_cast<float>(settings.probeStride), 0.0f},
-                     {azimuthCount(0), elevationCount(0), 0u, 0u}};
-        commandBuffer.pushConstants(**gatherPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
-                                    sizeof(gatherPush), &gatherPush);
+        const GatherPush gatherPush{
+            {context.primitiveCount, settings.losSteps, settings.gatherVisibility ? 1u : 0u, cascades},
+            {settings.intervalBase, settings.intervalFactor, static_cast<float>(settings.probeStride), 0.0f},
+            {azimuthCount(0), elevationCount(0), 0u, 0u}
+        };
+        commandBuffer.pushConstants(
+            **gatherPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(gatherPush), &gatherPush
+        );
         commandBuffer.dispatch((context.extent.width + 7) / 8, (context.extent.height + 7) / 8, 1);
 
         // ---- Spatial filter: edge-aware cleanup of the gather output. -----
@@ -276,11 +296,13 @@ public:
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **denoisePipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **denoisePipelineLayout, 0, **sharedSet, {});
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **denoisePipelineLayout, 1, **denoiseSet, {});
-        const FilterPush filterPush{{static_cast<std::int32_t>(settings.spatialFilterRadius), filterNormalPower,
-                                     filterDepthBandPercent, 0},
-                                    {context.cameraNearPlane, context.cameraFarPlane, 0.0f, 0.0f}};
-        commandBuffer.pushConstants(**denoisePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
-                                    sizeof(filterPush), &filterPush);
+        const FilterPush filterPush{
+            {static_cast<std::int32_t>(settings.spatialFilterRadius), filterNormalPower, filterDepthBandPercent, 0},
+            {context.cameraNearPlane, context.cameraFarPlane, 0.0f, 0.0f}
+        };
+        commandBuffer.pushConstants(
+            **denoisePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(filterPush), &filterPush
+        );
         commandBuffer.dispatch((context.extent.width + 7) / 8, (context.extent.height + 7) / 8, 1);
     }
 
@@ -295,14 +317,18 @@ private:
         return settings.cascades;
     }
 
-    void barrierCascades(vk::raii::CommandBuffer& commandBuffer, const std::vector<vk::Image>& images,
-                         vk::PipelineStageFlagBits2 sourceStage, vk::PipelineStageFlagBits2 destinationStage)
+    void barrierCascades(
+        vk::raii::CommandBuffer      &commandBuffer,
+        const std::vector<vk::Image> &images,
+        vk::PipelineStageFlagBits2    sourceStage,
+        vk::PipelineStageFlagBits2    destinationStage
+    )
     {
         // Scratch members (below): record() runs every frame and fresh
         // vectors per barrier group were pure heap churn on the record path.
-        std::vector<vk::ImageMemoryBarrier2>& barriers = cascadeBarrierScratch;
+        std::vector<vk::ImageMemoryBarrier2> &barriers = cascadeBarrierScratch;
         barriers.clear();
-        for (const vk::Image& image : images)
+        for (const vk::Image &image : images)
         {
             vk::ImageMemoryBarrier2 barrier;
             barrier.setSrcStageMask(sourceStage);
@@ -322,17 +348,24 @@ private:
         commandBuffer.pipelineBarrier2(dependency);
     }
 
-    void marchBarriers(std::vector<vk::Image>& images)
+    void marchBarriers(
+        std::vector<vk::Image> &images
+    )
     {
         images.clear();
-        for (const CascadeImage& cascade : marchImages)
+        for (const CascadeImage &cascade : marchImages)
         {
             images.push_back(**cascade.image);
         }
     }
 
-    void createCascadeImage(CascadeImage& target, const FrameRenderContext& context, vk::Extent2D grid,
-                            std::uint32_t layers, vk::ImageViewType viewType = vk::ImageViewType::e2DArray)
+    void createCascadeImage(
+        CascadeImage             &target,
+        const FrameRenderContext &context,
+        vk::Extent2D              grid,
+        std::uint32_t             layers,
+        vk::ImageViewType         viewType = vk::ImageViewType::e2DArray
+    )
     {
         vk::ImageCreateInfo imageInfo;
         imageInfo.setImageType(vk::ImageType::e2D);
@@ -345,12 +378,13 @@ private:
         imageInfo.setUsage(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage);
         imageInfo.setSharingMode(vk::SharingMode::eExclusive);
         imageInfo.setInitialLayout(vk::ImageLayout::eUndefined);
-        target.image = std::make_unique<vk::raii::Image>(context.device, imageInfo);
+        target.image                              = std::make_unique<vk::raii::Image>(context.device, imageInfo);
         const vk::MemoryRequirements requirements = target.image->getMemoryRequirements();
-        vk::MemoryAllocateInfo allocate;
+        vk::MemoryAllocateInfo       allocate;
         allocate.setAllocationSize(requirements.size);
-        allocate.setMemoryTypeIndex(findMemoryType(context.physicalDevice, requirements.memoryTypeBits,
-                                                   vk::MemoryPropertyFlagBits::eDeviceLocal));
+        allocate.setMemoryTypeIndex(findMemoryType(
+            context.physicalDevice, requirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal
+        ));
         target.memory = std::make_unique<vk::raii::DeviceMemory>(context.device, allocate);
         target.image->bindMemory(*target.memory, 0);
         vk::ImageViewCreateInfo viewInfo;
@@ -365,7 +399,7 @@ private:
         vk::CommandPoolCreateInfo poolInfo;
         poolInfo.setFlags(vk::CommandPoolCreateFlagBits::eTransient);
         poolInfo.setQueueFamilyIndex(context.graphicsQueueFamily);
-        vk::raii::CommandPool setupPool(context.device, poolInfo);
+        vk::raii::CommandPool         setupPool(context.device, poolInfo);
         vk::CommandBufferAllocateInfo allocateInfo;
         allocateInfo.setCommandPool(*setupPool);
         allocateInfo.setLevel(vk::CommandBufferLevel::ePrimary);
@@ -384,7 +418,7 @@ private:
         barrier.setImage(**target.image);
         barrier.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, layers));
         std::array<vk::ImageMemoryBarrier2, 1> barriers{barrier};
-        vk::DependencyInfo dependency;
+        vk::DependencyInfo                     dependency;
         dependency.setImageMemoryBarriers(barriers);
         setupBuffer.pipelineBarrier2(dependency);
         setupBuffer.end();
@@ -396,10 +430,10 @@ private:
 
     void updateLightUniform()
     {
-        GpuLightUniform uniform;
-        const bool hasLighting = lighting != nullptr;
+        GpuLightUniform             uniform;
+        const bool                  hasLighting = lighting != nullptr;
         DirectionalLightDescription sun;
-        const bool sunEnabled = hasLighting && lighting->hasSunLight();
+        const bool                  sunEnabled = hasLighting && lighting->hasSunLight();
         if (sunEnabled)
         {
             sun = lighting->sunLight();
@@ -411,12 +445,18 @@ private:
             pointLights[index] = lighting->pointLight(index);
         }
         fillSunAndPointLights(uniform, sunEnabled, sun, pointLights.data(), count);
-        uniform.lightCountsAndFlags = {static_cast<std::int32_t>(count), settings.relightShadows ? 1 : 0,
-                                       static_cast<std::int32_t>(settings.shadowSteps), 0};
+        uniform.lightCountsAndFlags = {
+            static_cast<std::int32_t>(count),
+            settings.relightShadows ? 1 : 0,
+            static_cast<std::int32_t>(settings.shadowSteps),
+            0
+        };
         std::memcpy(lightStorage.mapped, &uniform, sizeof(uniform));
     }
 
-    void rebuild(const FrameRenderContext& context)
+    void rebuild(
+        const FrameRenderContext &context
+    )
     {
         // Teardown in strict reverse dependency order: descriptor sets, pools,
         // pipelines, pipeline layouts, descriptor set layouts, then images,
@@ -428,12 +468,12 @@ private:
         gatherPool.reset();
         denoiseSet.reset();
         denoisePool.reset();
-        for (auto& set : composeSets)
+        for (auto &set : composeSets)
         {
             set.reset();
         }
         composePool.reset();
-        for (auto& set : marchSets)
+        for (auto &set : marchSets)
         {
             set.reset();
         }
@@ -453,16 +493,16 @@ private:
         composeSetLayout.reset();
         gatherSetLayout.reset();
         filterSetLayout.reset();
-        for (auto& image : fullImages)
+        for (auto &image : fullImages)
         {
             image = CascadeImage{};
         }
-        for (auto& image : marchImages)
+        for (auto &image : marchImages)
         {
             image = CascadeImage{};
         }
         gatherTemp = CascadeImage{};
-        skyImage = CascadeImage{};
+        skyImage   = CascadeImage{};
         lightStorage.reset();
         directionStorage.reset();
         composeSampler.reset();
@@ -472,8 +512,9 @@ private:
         // Direction table floors: 2 azimuth x 3 elevation is the minimum that
         // still covers overhead/underhead transport (an elevation floor of 2
         // missed a ceiling panel at ~70 degrees during bring-up).
-        azimuthBase = std::max(2u, static_cast<std::uint32_t>(std::lround(std::sqrt(
-                                        static_cast<double>(settings.baseRays) * 2.0))));
+        azimuthBase = std::max(
+            2u, static_cast<std::uint32_t>(std::lround(std::sqrt(static_cast<double>(settings.baseRays) * 2.0)))
+        );
         elevationBase = std::max(3u, settings.baseRays / azimuthBase);
 
         // Direction table: one vec4 per (azimuth x elevation) direction, the
@@ -485,36 +526,44 @@ private:
         // (cascade_common.glsl). Layer order matches the march's image layers:
         // index = azIndex * elevationBase + elIndex.
         {
-            constexpr double directionTablePi = 3.14159265358979323846;
-            constexpr double directionTableTwoPi = 6.28318530717958647692;
-            const std::uint32_t directionCount = azimuthBase * elevationBase;
+            constexpr double                  directionTablePi    = 3.14159265358979323846;
+            constexpr double                  directionTableTwoPi = 6.28318530717958647692;
+            const std::uint32_t               directionCount      = azimuthBase * elevationBase;
             std::vector<std::array<float, 4>> directions(directionCount);
             for (std::uint32_t azimuthIndex = 0; azimuthIndex < azimuthBase; ++azimuthIndex)
             {
                 for (std::uint32_t elevationIndex = 0; elevationIndex < elevationBase; ++elevationIndex)
                 {
-                    const float azimuth = static_cast<float>((static_cast<double>(azimuthIndex) + 0.5) /
-                                                             static_cast<double>(azimuthBase) *
-                                                             directionTableTwoPi);
-                    const float elevation =
-                        static_cast<float>((static_cast<double>(elevationIndex) + 0.5) /
-                                               static_cast<double>(elevationBase) * directionTablePi -
-                                           0.5 * directionTablePi);
+                    const float azimuth = static_cast<float>(
+                        (static_cast<double>(azimuthIndex) + 0.5) / static_cast<double>(azimuthBase)
+                        * directionTableTwoPi
+                    );
+                    const float elevation = static_cast<float>(
+                        (static_cast<double>(elevationIndex) + 0.5) / static_cast<double>(elevationBase)
+                            * directionTablePi
+                        - 0.5 * directionTablePi
+                    );
                     const float cosElevation = std::cos(elevation);
-                    const float solidAngle = static_cast<float>(
-                        directionTableTwoPi / static_cast<double>(azimuthBase) * directionTablePi /
-                        static_cast<double>(elevationBase)) * cosElevation;
+                    const float solidAngle   = static_cast<float>(
+                                                   directionTableTwoPi / static_cast<double>(azimuthBase)
+                                                   * directionTablePi / static_cast<double>(elevationBase)
+                                               )
+                                             * cosElevation;
                     directions[azimuthIndex * elevationBase + elevationIndex] = {
-                        cosElevation * std::cos(azimuth), std::sin(elevation), cosElevation * std::sin(azimuth),
-                        solidAngle};
+                        cosElevation * std::cos(azimuth),
+                        std::sin(elevation),
+                        cosElevation * std::sin(azimuth),
+                        solidAngle
+                    };
                 }
             }
             directionStorage = createMappedHostVisibleBuffer(
-                context.device, context.physicalDevice,
+                context.device,
+                context.physicalDevice,
                 static_cast<vk::DeviceSize>(directions.size() * sizeof(std::array<float, 4>)),
-                vk::BufferUsageFlagBits::eStorageBuffer);
-            std::memcpy(directionStorage.mapped, directions.data(),
-                        directions.size() * sizeof(std::array<float, 4>));
+                vk::BufferUsageFlagBits::eStorageBuffer
+            );
+            std::memcpy(directionStorage.mapped, directions.data(), directions.size() * sizeof(std::array<float, 4>));
         }
 
         const auto gridWidth = [this, &context](std::uint32_t cascade)
@@ -527,10 +576,7 @@ private:
             const std::uint32_t stride = settings.probeStride << cascade;
             return std::max(1u, (context.extent.height + stride - 1) / stride);
         };
-        const auto layers = [this](std::uint32_t)
-        {
-            return azimuthBase * elevationBase;
-        };
+        const auto layers = [this](std::uint32_t) { return azimuthBase * elevationBase; };
 
         // Cascade storage: march (radiance + transmittance) and full (composed
         // radiance) per cascade. Sized to the cascade grid, so memory decays
@@ -559,8 +605,9 @@ private:
         // Light uniform buffer (own copy: the GI relight configures shadow
         // behaviour from [lighting.radiance_cascades], independent of the
         // direct module).
-        lightStorage = createMappedHostVisibleBuffer(context.device, context.physicalDevice, sizeof(GpuLightUniform),
-                                                     vk::BufferUsageFlagBits::eUniformBuffer);
+        lightStorage = createMappedHostVisibleBuffer(
+            context.device, context.physicalDevice, sizeof(GpuLightUniform), vk::BufferUsageFlagBits::eUniformBuffer
+        );
 
         // Layouts -----------------------------------------------------------
         {
@@ -578,9 +625,15 @@ private:
             bindings[2].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             bindings[3].setBinding(3).setDescriptorType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(1);
             bindings[3].setStageFlags(vk::ShaderStageFlagBits::eCompute);
-            bindings[4].setBinding(4).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+            bindings[4]
+                .setBinding(4)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorCount(1);
             bindings[4].setStageFlags(vk::ShaderStageFlagBits::eCompute);
-            bindings[5].setBinding(5).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+            bindings[5]
+                .setBinding(5)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorCount(1);
             bindings[5].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             bindings[6].setBinding(6).setDescriptorType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(1);
             bindings[6].setStageFlags(vk::ShaderStageFlagBits::eCompute);
@@ -594,7 +647,8 @@ private:
             std::array<vk::DescriptorSetLayoutBinding, 3> bindings;
             for (std::uint32_t binding = 0; binding < 2; ++binding)
             {
-                bindings[binding].setBinding(binding)
+                bindings[binding]
+                    .setBinding(binding)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
                     .setDescriptorCount(1);
                 bindings[binding].setStageFlags(vk::ShaderStageFlagBits::eCompute);
@@ -607,7 +661,10 @@ private:
         }
         {
             std::array<vk::DescriptorSetLayoutBinding, 3> bindings;
-            bindings[0].setBinding(0).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+            bindings[0]
+                .setBinding(0)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorCount(1);
             bindings[0].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             bindings[1].setBinding(1).setDescriptorType(vk::DescriptorType::eStorageImage).setDescriptorCount(1);
             bindings[1].setStageFlags(vk::ShaderStageFlagBits::eCompute);
@@ -623,13 +680,13 @@ private:
             std::array<vk::DescriptorSetLayoutBinding, 4> bindings;
             for (std::uint32_t binding = 0; binding < 3; ++binding)
             {
-                bindings[binding].setBinding(binding)
+                bindings[binding]
+                    .setBinding(binding)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
                     .setDescriptorCount(1);
                 bindings[binding].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             }
-            bindings[3].setBinding(3).setDescriptorType(vk::DescriptorType::eStorageImage)
-                .setDescriptorCount(1);
+            bindings[3].setBinding(3).setDescriptorType(vk::DescriptorType::eStorageImage).setDescriptorCount(1);
             bindings[3].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             vk::DescriptorSetLayoutCreateInfo setInfo;
             setInfo.setBindings(bindings);
@@ -642,13 +699,13 @@ private:
             std::array<vk::DescriptorSetLayoutBinding, 11> bindings;
             for (std::uint32_t binding = 0; binding < 10; ++binding)
             {
-                bindings[binding].setBinding(binding)
+                bindings[binding]
+                    .setBinding(binding)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
                     .setDescriptorCount(1);
                 bindings[binding].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             }
-            bindings[10].setBinding(10).setDescriptorType(vk::DescriptorType::eStorageImage)
-                .setDescriptorCount(1);
+            bindings[10].setBinding(10).setDescriptorType(vk::DescriptorType::eStorageImage).setDescriptorCount(1);
             bindings[10].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             vk::DescriptorSetLayoutCreateInfo setInfo;
             setInfo.setBindings(bindings);
@@ -656,23 +713,26 @@ private:
         }
 
         // Pipelines ---------------------------------------------------------
-        auto makeComputePipeline = [&context](const std::vector<char>& code,
-                                              const vk::raii::DescriptorSetLayout& sharedLayout,
-                                              const vk::raii::DescriptorSetLayout& roleLayout, std::uint32_t pushSize)
+        auto makeComputePipeline = [&context](
+                                       const std::vector<char>             &code,
+                                       const vk::raii::DescriptorSetLayout &sharedLayout,
+                                       const vk::raii::DescriptorSetLayout &roleLayout,
+                                       std::uint32_t                        pushSize
+                                   )
         {
             vk::PushConstantRange pushRange;
             pushRange.setStageFlags(vk::ShaderStageFlagBits::eCompute);
             pushRange.setOffset(0);
             pushRange.setSize(pushSize);
-            vk::PipelineLayoutCreateInfo layoutInfo;
+            vk::PipelineLayoutCreateInfo                 layoutInfo;
             const std::array<vk::DescriptorSetLayout, 2> layouts{*sharedLayout, *roleLayout};
             layoutInfo.setSetLayouts(layouts);
             layoutInfo.setPushConstantRanges(pushRange);
             auto layout = std::make_unique<vk::raii::PipelineLayout>(context.device, layoutInfo);
 
             vk::ShaderModuleCreateInfo moduleInfo;
-            moduleInfo.setCodeSize(code.size()).setPCode(reinterpret_cast<const std::uint32_t*>(code.data()));
-            vk::raii::ShaderModule module(context.device, moduleInfo);
+            moduleInfo.setCodeSize(code.size()).setPCode(reinterpret_cast<const std::uint32_t *>(code.data()));
+            vk::raii::ShaderModule            module(context.device, moduleInfo);
             vk::PipelineShaderStageCreateInfo stage;
             stage.setStage(vk::ShaderStageFlagBits::eCompute).setModule(*module).setPName("main");
             vk::ComputePipelineCreateInfo pipelineInfo;
@@ -682,49 +742,63 @@ private:
             struct Built
             {
                 std::unique_ptr<vk::raii::PipelineLayout> layout;
-                std::unique_ptr<vk::raii::Pipeline> pipeline;
+                std::unique_ptr<vk::raii::Pipeline>       pipeline;
             };
             return Built{std::move(layout), std::move(pipeline)};
         };
 
-        auto marchBuilt = makeComputePipeline(readShaderBytes(context.shaderDirectory / "rc_march.comp.spv",
-                                                              moduleContext),
-                                              *sharedSetLayout, *marchSetLayout, sizeof(MarchPush));
+        auto marchBuilt = makeComputePipeline(
+            readShaderBytes(context.shaderDirectory / "rc_march.comp.spv", moduleContext),
+            *sharedSetLayout,
+            *marchSetLayout,
+            sizeof(MarchPush)
+        );
         marchPipelineLayout = std::move(marchBuilt.layout);
-        marchPipeline = std::move(marchBuilt.pipeline);
-        auto composeBuilt = makeComputePipeline(readShaderBytes(context.shaderDirectory / "rc_compose.comp.spv",
-                                                                moduleContext),
-                                                *sharedSetLayout, *composeSetLayout, sizeof(ComposePush));
+        marchPipeline       = std::move(marchBuilt.pipeline);
+        auto composeBuilt   = makeComputePipeline(
+            readShaderBytes(context.shaderDirectory / "rc_compose.comp.spv", moduleContext),
+            *sharedSetLayout,
+            *composeSetLayout,
+            sizeof(ComposePush)
+        );
         composePipelineLayout = std::move(composeBuilt.layout);
-        composePipeline = std::move(composeBuilt.pipeline);
-        auto gatherBuilt = makeComputePipeline(readShaderBytes(context.shaderDirectory / "rc_gather.comp.spv",
-                                                               moduleContext),
-                                               *sharedSetLayout, *gatherSetLayout, sizeof(GatherPush));
+        composePipeline       = std::move(composeBuilt.pipeline);
+        auto gatherBuilt      = makeComputePipeline(
+            readShaderBytes(context.shaderDirectory / "rc_gather.comp.spv", moduleContext),
+            *sharedSetLayout,
+            *gatherSetLayout,
+            sizeof(GatherPush)
+        );
         gatherPipelineLayout = std::move(gatherBuilt.layout);
-        gatherPipeline = std::move(gatherBuilt.pipeline);
+        gatherPipeline       = std::move(gatherBuilt.pipeline);
         // The filter pass has its own small layout (3 sampled images + 1
         // storage image) - the gather layout grew per-cascade sampler
         // bindings the filter does not use. Push block: params + camera
         // planes (32 bytes) - the planes linearize buffer depth for the
         // edge-aware depth band.
-        auto denoiseBuilt = makeComputePipeline(readShaderBytes(context.shaderDirectory / "rc_denoise.comp.spv",
-                                                                moduleContext),
-                                                *sharedSetLayout, *filterSetLayout, sizeof(FilterPush));
+        auto denoiseBuilt = makeComputePipeline(
+            readShaderBytes(context.shaderDirectory / "rc_denoise.comp.spv", moduleContext),
+            *sharedSetLayout,
+            *filterSetLayout,
+            sizeof(FilterPush)
+        );
         denoisePipelineLayout = std::move(denoiseBuilt.layout);
-        denoisePipeline = std::move(denoiseBuilt.pipeline);
+        denoisePipeline       = std::move(denoiseBuilt.pipeline);
 
         // Gather output temp: full screen extent, single layer, same format
         // as the indirect target. The gather and filter shaders declare plain
         // image2D/sampler2D, so the view is 2D (not the cascade 2D array).
-        createCascadeImage(gatherTemp, context, vk::Extent2D{context.extent.width, context.extent.height}, 1,
-                           vk::ImageViewType::e2D);
+        createCascadeImage(
+            gatherTemp, context, vk::Extent2D{context.extent.width, context.extent.height}, 1, vk::ImageViewType::e2D
+        );
 
         // Descriptor sets ---------------------------------------------------
         {
             std::array<vk::DescriptorPoolSize, 3> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, 3),
                 vk::DescriptorPoolSize(vk::DescriptorType::eStorageBuffer, 3),
-                vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 2)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 2)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(1);
@@ -734,18 +808,21 @@ private:
             allocate.setDescriptorPool(**sharedPool);
             allocate.setSetLayouts(**sharedSetLayout);
             sharedSet = std::make_unique<vk::raii::DescriptorSet>(
-                std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+            );
 
             vk::DescriptorBufferInfo cameraInfo(context.cameraBuffer, 0, sizeof(CameraData));
             vk::DescriptorBufferInfo primitivesInfo(context.primitivesBuffer, 0, vk::WholeSize);
             vk::DescriptorBufferInfo lightInfo(**lightStorage.buffer, 0, sizeof(GpuLightUniform));
             vk::DescriptorBufferInfo materialsInfo(context.materialsBuffer, 0, vk::WholeSize);
-            vk::DescriptorImageInfo albedoArrayInfo(**nearestSampler, context.albedoArrayView,
-                                                    vk::ImageLayout::eShaderReadOnlyOptimal);
-            vk::DescriptorImageInfo dataArrayInfo(**nearestSampler, context.dataArrayView,
-                                                  vk::ImageLayout::eShaderReadOnlyOptimal);
-            vk::DescriptorBufferInfo environmentInfo(context.environmentBuffer, 0, vk::WholeSize);
-            vk::DescriptorBufferInfo directionsInfo(**directionStorage.buffer, 0, vk::WholeSize);
+            vk::DescriptorImageInfo  albedoArrayInfo(
+                **nearestSampler, context.albedoArrayView, vk::ImageLayout::eShaderReadOnlyOptimal
+            );
+            vk::DescriptorImageInfo dataArrayInfo(
+                **nearestSampler, context.dataArrayView, vk::ImageLayout::eShaderReadOnlyOptimal
+            );
+            vk::DescriptorBufferInfo              environmentInfo(context.environmentBuffer, 0, vk::WholeSize);
+            vk::DescriptorBufferInfo              directionsInfo(**directionStorage.buffer, 0, vk::WholeSize);
             std::array<vk::WriteDescriptorSet, 8> writes;
             writes[0].setDstSet(**sharedSet).setDstBinding(0).setDescriptorType(vk::DescriptorType::eUniformBuffer);
             writes[0].setBufferInfo(cameraInfo);
@@ -755,9 +832,15 @@ private:
             writes[2].setBufferInfo(lightInfo);
             writes[3].setDstSet(**sharedSet).setDstBinding(3).setDescriptorType(vk::DescriptorType::eStorageBuffer);
             writes[3].setBufferInfo(materialsInfo);
-            writes[4].setDstSet(**sharedSet).setDstBinding(4).setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+            writes[4]
+                .setDstSet(**sharedSet)
+                .setDstBinding(4)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[4].setImageInfo(albedoArrayInfo);
-            writes[5].setDstSet(**sharedSet).setDstBinding(5).setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+            writes[5]
+                .setDstSet(**sharedSet)
+                .setDstBinding(5)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[5].setImageInfo(dataArrayInfo);
             writes[6].setDstSet(**sharedSet).setDstBinding(6).setDescriptorType(vk::DescriptorType::eUniformBuffer);
             writes[6].setBufferInfo(environmentInfo);
@@ -771,7 +854,8 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, cascades * 2),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, cascades)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, cascades)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(cascades);
@@ -783,19 +867,27 @@ private:
                 allocate.setDescriptorPool(**marchPool);
                 allocate.setSetLayouts(**marchSetLayout);
                 marchSets[cascade] = std::make_unique<vk::raii::DescriptorSet>(
-                    std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                    std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+                );
                 vk::DescriptorImageInfo depthInfo(**nearestSampler, context.depthView, vk::ImageLayout::eGeneral);
                 vk::DescriptorImageInfo normalInfo(**nearestSampler, context.normalView, vk::ImageLayout::eGeneral);
-                vk::DescriptorImageInfo outInfo(**nearestSampler, *marchImages[cascade].view,
-                                                vk::ImageLayout::eGeneral);
+                vk::DescriptorImageInfo outInfo(
+                    **nearestSampler, *marchImages[cascade].view, vk::ImageLayout::eGeneral
+                );
                 std::array<vk::WriteDescriptorSet, 3> writes;
-                writes[0].setDstSet(**marchSets[cascade]).setDstBinding(0)
+                writes[0]
+                    .setDstSet(**marchSets[cascade])
+                    .setDstBinding(0)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
                 writes[0].setImageInfo(depthInfo);
-                writes[1].setDstSet(**marchSets[cascade]).setDstBinding(1)
+                writes[1]
+                    .setDstSet(**marchSets[cascade])
+                    .setDstBinding(1)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
                 writes[1].setImageInfo(normalInfo);
-                writes[2].setDstSet(**marchSets[cascade]).setDstBinding(2)
+                writes[2]
+                    .setDstSet(**marchSets[cascade])
+                    .setDstBinding(2)
                     .setDescriptorType(vk::DescriptorType::eStorageImage);
                 writes[2].setImageInfo(outInfo);
                 context.device.updateDescriptorSets(writes, {});
@@ -806,7 +898,8 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, cascades),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, cascades * 2)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, cascades * 2)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(cascades);
@@ -818,24 +911,31 @@ private:
                 allocate.setDescriptorPool(**composePool);
                 allocate.setSetLayouts(**composeSetLayout);
                 composeSets[cascade] = std::make_unique<vk::raii::DescriptorSet>(
-                    std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                    std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+                );
                 // The coarsest cascade has no coarser neighbor: bind the sky
                 // dummy (the shader branches to the sky constant before it
                 // could ever read it).
-                const vk::ImageView coarseView =
-                    cascade + 1 < cascades ? *fullImages[cascade + 1].view : dummyView;
+                const vk::ImageView     coarseView = cascade + 1 < cascades ? *fullImages[cascade + 1].view : dummyView;
                 vk::DescriptorImageInfo coarseInfo(**composeSampler, coarseView, vk::ImageLayout::eGeneral);
                 vk::DescriptorImageInfo outInfo(**nearestSampler, *fullImages[cascade].view, vk::ImageLayout::eGeneral);
-                vk::DescriptorImageInfo marchInfo(**nearestSampler, *marchImages[cascade].view,
-                                                  vk::ImageLayout::eGeneral);
+                vk::DescriptorImageInfo marchInfo(
+                    **nearestSampler, *marchImages[cascade].view, vk::ImageLayout::eGeneral
+                );
                 std::array<vk::WriteDescriptorSet, 3> writes;
-                writes[0].setDstSet(**composeSets[cascade]).setDstBinding(0)
+                writes[0]
+                    .setDstSet(**composeSets[cascade])
+                    .setDstBinding(0)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
                 writes[0].setImageInfo(coarseInfo);
-                writes[1].setDstSet(**composeSets[cascade]).setDstBinding(1)
+                writes[1]
+                    .setDstSet(**composeSets[cascade])
+                    .setDstBinding(1)
                     .setDescriptorType(vk::DescriptorType::eStorageImage);
                 writes[1].setImageInfo(outInfo);
-                writes[2].setDstSet(**composeSets[cascade]).setDstBinding(2)
+                writes[2]
+                    .setDstSet(**composeSets[cascade])
+                    .setDstBinding(2)
                     .setDescriptorType(vk::DescriptorType::eStorageImage);
                 writes[2].setImageInfo(marchInfo);
                 context.device.updateDescriptorSets(writes, {});
@@ -845,7 +945,8 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 10),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(1);
@@ -855,7 +956,8 @@ private:
             allocate.setDescriptorPool(**gatherPool);
             allocate.setSetLayouts(**gatherSetLayout);
             gatherSet = std::make_unique<vk::raii::DescriptorSet>(
-                std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+            );
             // Bindings 0..7: the composed cascade of that index; slots beyond
             // the configured cascade count bind the sky stand-in (the gather
             // selection clamps to the configured count and never reads them).
@@ -865,11 +967,13 @@ private:
             std::array<vk::DescriptorImageInfo, 8> cascadeInfos;
             for (std::uint32_t cascade = 0; cascade < 8; ++cascade)
             {
-                const vk::ImageView cascadeView =
-                    cascade < cascades ? *fullImages[cascade].view : *skyImage.view;
-                cascadeInfos[cascade] = vk::DescriptorImageInfo(**nearestSampler, cascadeView,
-                                                                 vk::ImageLayout::eGeneral);
-                writes[cascade].setDstSet(**gatherSet).setDstBinding(cascade)
+                const vk::ImageView cascadeView = cascade < cascades ? *fullImages[cascade].view : *skyImage.view;
+                cascadeInfos[cascade]           = vk::DescriptorImageInfo(
+                    **nearestSampler, cascadeView, vk::ImageLayout::eGeneral
+                );
+                writes[cascade]
+                    .setDstSet(**gatherSet)
+                    .setDstBinding(cascade)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
                 writes[cascade].setImageInfo(cascadeInfos[cascade]);
             }
@@ -878,10 +982,14 @@ private:
             // The gather writes the MODULE temp; the filter pass turns it
             // into the renderer-owned indirect target.
             vk::DescriptorImageInfo outInfo(**nearestSampler, *gatherTemp.view, vk::ImageLayout::eGeneral);
-            writes[8].setDstSet(**gatherSet).setDstBinding(8)
+            writes[8]
+                .setDstSet(**gatherSet)
+                .setDstBinding(8)
                 .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[8].setImageInfo(depthInfo);
-            writes[9].setDstSet(**gatherSet).setDstBinding(9)
+            writes[9]
+                .setDstSet(**gatherSet)
+                .setDstBinding(9)
                 .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[9].setImageInfo(normalInfo);
             writes[10].setDstSet(**gatherSet).setDstBinding(10).setDescriptorType(vk::DescriptorType::eStorageImage);
@@ -892,7 +1000,8 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 3),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(1);
@@ -902,20 +1011,26 @@ private:
             allocate.setDescriptorPool(**denoisePool);
             allocate.setSetLayouts(**filterSetLayout);
             denoiseSet = std::make_unique<vk::raii::DescriptorSet>(
-                std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+            );
             vk::DescriptorImageInfo giInfo(**nearestSampler, *gatherTemp.view, vk::ImageLayout::eGeneral);
             vk::DescriptorImageInfo depthInfo(**nearestSampler, context.depthView, vk::ImageLayout::eGeneral);
             vk::DescriptorImageInfo normalInfo(**nearestSampler, context.normalView, vk::ImageLayout::eGeneral);
-            vk::DescriptorImageInfo outInfo(**nearestSampler, context.indirectRadianceView,
-                                            vk::ImageLayout::eGeneral);
+            vk::DescriptorImageInfo outInfo(**nearestSampler, context.indirectRadianceView, vk::ImageLayout::eGeneral);
             std::array<vk::WriteDescriptorSet, 4> writes;
-            writes[0].setDstSet(**denoiseSet).setDstBinding(0)
+            writes[0]
+                .setDstSet(**denoiseSet)
+                .setDstBinding(0)
                 .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[0].setImageInfo(giInfo);
-            writes[1].setDstSet(**denoiseSet).setDstBinding(1)
+            writes[1]
+                .setDstSet(**denoiseSet)
+                .setDstBinding(1)
                 .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[1].setImageInfo(depthInfo);
-            writes[2].setDstSet(**denoiseSet).setDstBinding(2)
+            writes[2]
+                .setDstSet(**denoiseSet)
+                .setDstBinding(2)
                 .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
             writes[2].setImageInfo(normalInfo);
             writes[3].setDstSet(**denoiseSet).setDstBinding(3).setDescriptorType(vk::DescriptorType::eStorageImage);
@@ -923,64 +1038,64 @@ private:
             context.device.updateDescriptorSets(writes, {});
         }
 
-        cachedExtent = context.extent;
+        cachedExtent  = context.extent;
         needsRecreate = false;
     }
 
-    Settings settings;
-    LightingCapability* lighting = nullptr;
+    Settings            settings;
+    LightingCapability *lighting = nullptr;
 
-    std::uint32_t azimuthBase = 0;
+    std::uint32_t azimuthBase   = 0;
     std::uint32_t elevationBase = 0;
-    vk::Extent2D cachedExtent{};
-    bool needsRecreate = false;
+    vk::Extent2D  cachedExtent{};
+    bool          needsRecreate = false;
 
     std::vector<CascadeImage> marchImages;
     std::vector<CascadeImage> fullImages;
-    CascadeImage gatherTemp; // full extent gather output, filtered into the target
-    CascadeImage skyImage; // 1x1x1 stand-in for the coarsest compose binding
+    CascadeImage              gatherTemp; // full extent gather output, filtered into the target
+    CascadeImage              skyImage;   // 1x1x1 stand-in for the coarsest compose binding
 
     std::unique_ptr<vk::raii::Sampler> nearestSampler;
     std::unique_ptr<vk::raii::Sampler> composeSampler;
-    MappedHostVisibleBuffer lightStorage;
-    MappedHostVisibleBuffer directionStorage;
+    MappedHostVisibleBuffer            lightStorage;
+    MappedHostVisibleBuffer            directionStorage;
 
-    std::unique_ptr<vk::raii::DescriptorSetLayout> sharedSetLayout;
-    std::unique_ptr<vk::raii::DescriptorSetLayout> marchSetLayout;
-    std::unique_ptr<vk::raii::DescriptorSetLayout> composeSetLayout;
-    std::unique_ptr<vk::raii::DescriptorSetLayout> gatherSetLayout;
-    std::unique_ptr<vk::raii::DescriptorSetLayout> filterSetLayout;
-    std::unique_ptr<vk::raii::DescriptorPool> sharedPool;
-    std::unique_ptr<vk::raii::DescriptorSet> sharedSet;
-    std::unique_ptr<vk::raii::DescriptorPool> marchPool;
+    std::unique_ptr<vk::raii::DescriptorSetLayout>        sharedSetLayout;
+    std::unique_ptr<vk::raii::DescriptorSetLayout>        marchSetLayout;
+    std::unique_ptr<vk::raii::DescriptorSetLayout>        composeSetLayout;
+    std::unique_ptr<vk::raii::DescriptorSetLayout>        gatherSetLayout;
+    std::unique_ptr<vk::raii::DescriptorSetLayout>        filterSetLayout;
+    std::unique_ptr<vk::raii::DescriptorPool>             sharedPool;
+    std::unique_ptr<vk::raii::DescriptorSet>              sharedSet;
+    std::unique_ptr<vk::raii::DescriptorPool>             marchPool;
     std::vector<std::unique_ptr<vk::raii::DescriptorSet>> marchSets;
-    std::unique_ptr<vk::raii::DescriptorPool> composePool;
+    std::unique_ptr<vk::raii::DescriptorPool>             composePool;
     std::vector<std::unique_ptr<vk::raii::DescriptorSet>> composeSets;
-    std::unique_ptr<vk::raii::DescriptorPool> gatherPool;
-    std::unique_ptr<vk::raii::DescriptorSet> gatherSet;
+    std::unique_ptr<vk::raii::DescriptorPool>             gatherPool;
+    std::unique_ptr<vk::raii::DescriptorSet>              gatherSet;
 
     std::unique_ptr<vk::raii::PipelineLayout> marchPipelineLayout;
-    std::unique_ptr<vk::raii::Pipeline> marchPipeline;
+    std::unique_ptr<vk::raii::Pipeline>       marchPipeline;
     std::unique_ptr<vk::raii::PipelineLayout> composePipelineLayout;
-    std::unique_ptr<vk::raii::Pipeline> composePipeline;
+    std::unique_ptr<vk::raii::Pipeline>       composePipeline;
     std::unique_ptr<vk::raii::PipelineLayout> gatherPipelineLayout;
-    std::unique_ptr<vk::raii::Pipeline> gatherPipeline;
+    std::unique_ptr<vk::raii::Pipeline>       gatherPipeline;
     std::unique_ptr<vk::raii::PipelineLayout> denoisePipelineLayout;
-    std::unique_ptr<vk::raii::Pipeline> denoisePipeline;
+    std::unique_ptr<vk::raii::Pipeline>       denoisePipeline;
     std::unique_ptr<vk::raii::DescriptorPool> denoisePool;
-    std::unique_ptr<vk::raii::DescriptorSet> denoiseSet;
+    std::unique_ptr<vk::raii::DescriptorSet>  denoiseSet;
 
     // Record-path scratch reused across frames (see barrierCascades above).
     std::vector<vk::ImageMemoryBarrier2> cascadeBarrierScratch;
-    std::vector<vk::Image> cascadeImageScratch;
+    std::vector<vk::Image>               cascadeImageScratch;
 };
 
 // ---- Module lifecycle ---------------------------------------------------------------
 
 RadianceCascadesModule::RadianceCascadesModule()
 {
-    componentManifest.name = "radiance_cascades";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "radiance_cascades";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
     // capability.lighting is optional here: without a light provider there
@@ -989,12 +1104,18 @@ RadianceCascadesModule::RadianceCascadesModule()
     // The pass settings the module reads from [lighting.radiance_cascades],
     // plus the technique composition list it shares with the renderer.
     componentManifest.knownConfigKeys = {
-        "lighting.radiance_cascades.cascades",         "lighting.radiance_cascades.interval_base",
-        "lighting.radiance_cascades.interval_factor",  "lighting.radiance_cascades.probe_stride",
-        "lighting.radiance_cascades.base_rays",        "lighting.radiance_cascades.gather_visibility",
-        "lighting.radiance_cascades.los_steps",        "lighting.radiance_cascades.march_steps",
-        "lighting.radiance_cascades.relight_shadows",  "lighting.radiance_cascades.shadow_steps",
-        "lighting.radiance_cascades.spatial_filter",   "lighting.techniques",
+        "lighting.radiance_cascades.cascades",
+        "lighting.radiance_cascades.interval_base",
+        "lighting.radiance_cascades.interval_factor",
+        "lighting.radiance_cascades.probe_stride",
+        "lighting.radiance_cascades.base_rays",
+        "lighting.radiance_cascades.gather_visibility",
+        "lighting.radiance_cascades.los_steps",
+        "lighting.radiance_cascades.march_steps",
+        "lighting.radiance_cascades.relight_shadows",
+        "lighting.radiance_cascades.shadow_steps",
+        "lighting.radiance_cascades.spatial_filter",
+        "lighting.techniques",
     };
 }
 
@@ -1003,41 +1124,53 @@ RadianceCascadesModule::~RadianceCascadesModule()
     stop();
 }
 
-void RadianceCascadesModule::construct(ComponentContext& context)
+void RadianceCascadesModule::construct(
+    ComponentContext &context
+)
 {
     logger = &context.acquireCapability<LoggerCapability>();
 
     RadianceCascadesPass::Settings settings;
-    settings.cascades = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.cascades").value_or(defaultCascades),
-        1, 8));
-    settings.intervalBase = static_cast<float>(
-        context.configurationFloatingInSection("lighting", "radiance_cascades.interval_base")
+    settings.cascades         = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        context.configurationIntegerInSection("lighting", "radiance_cascades.cascades").value_or(defaultCascades), 1, 8
+    ));
+    settings.intervalBase     = static_cast<float>(context
+            .configurationFloatingInSection("lighting", "radiance_cascades.interval_base")
             .value_or(defaultIntervalBase));
-    settings.intervalFactor = static_cast<float>(
-        context.configurationFloatingInSection("lighting", "radiance_cascades.interval_factor")
+    settings.intervalFactor   = static_cast<float>(context
+            .configurationFloatingInSection("lighting", "radiance_cascades.interval_factor")
             .value_or(defaultIntervalFactor));
-    settings.probeStride = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+    settings.probeStride      = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "radiance_cascades.probe_stride")
             .value_or(defaultProbeStride),
-        1, 64));
-    settings.baseRays = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        1,
+        64
+    ));
+    settings.baseRays         = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "radiance_cascades.base_rays").value_or(defaultBaseRays),
-        4, 256));
-    settings.gatherVisibility =
-        context.configurationBooleanInSection("lighting", "radiance_cascades.gather_visibility").value_or(true);
-    settings.losSteps = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        4,
+        256
+    ));
+    settings.gatherVisibility = context.configurationBooleanInSection("lighting", "radiance_cascades.gather_visibility")
+                                    .value_or(true);
+    settings.losSteps         = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "radiance_cascades.los_steps").value_or(defaultLosSteps),
-        4, 256));
-    settings.marchSteps = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        4,
+        256
+    ));
+    settings.marchSteps       = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "radiance_cascades.march_steps").value_or(defaultMarchSteps),
-        4, 512));
-    settings.relightShadows =
-        context.configurationBooleanInSection("lighting", "radiance_cascades.relight_shadows").value_or(true);
-    settings.shadowSteps = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        4,
+        512
+    ));
+    settings.relightShadows   = context.configurationBooleanInSection("lighting", "radiance_cascades.relight_shadows")
+                                    .value_or(true);
+    settings.shadowSteps      = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "radiance_cascades.shadow_steps")
             .value_or(defaultShadowSteps),
-        4, 256));
+        4,
+        256
+    ));
     // Filter radius clamp follows the shader's (rc_denoise.comp clamps 0..16):
     // the shipped demo asks for 10 (one probe cell spans 8 pixels at stride 8,
     // so the window must average ACROSS cells), and an 8-cap here silently
@@ -1046,7 +1179,9 @@ void RadianceCascadesModule::construct(ComponentContext& context)
     settings.spatialFilterRadius = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         context.configurationIntegerInSection("lighting", "radiance_cascades.spatial_filter")
             .value_or(defaultSpatialFilterRadius),
-        0, 16));
+        0,
+        16
+    ));
     if (settings.intervalBase <= 0.0f || settings.intervalFactor < 1.0f)
     {
         throw std::runtime_error("radiance_cascades module: interval_base must be > 0 and interval_factor >= 1");
@@ -1054,12 +1189,12 @@ void RadianceCascadesModule::construct(ComponentContext& context)
 
     // The lighting capability is optional (see the manifest comment): a
     // denied or missing provider only disables the first-bounce relight.
-    LightingCapability* lighting = nullptr;
+    LightingCapability *lighting = nullptr;
     try
     {
         lighting = &context.acquireCapability<LightingCapability>();
     }
-    catch (const ComponentAccessError&)
+    catch (const ComponentAccessError &)
     {
         lighting = nullptr;
     }
@@ -1068,25 +1203,26 @@ void RadianceCascadesModule::construct(ComponentContext& context)
     // technique module that is loaded but not listed stays idle; the renderer
     // composes only the listed ones.
     const std::vector<std::string> techniques = context.configurationStringArrayInSection("lighting", "techniques");
-    passAttached = std::find(techniques.begin(), techniques.end(), "radiance_cascades") != techniques.end();
+    passAttached      = std::find(techniques.begin(), techniques.end(), "radiance_cascades") != techniques.end();
     lightingAvailable = lighting != nullptr;
 
     pass = std::make_shared<RadianceCascadesPass>(settings, lighting);
     if (passAttached)
     {
-        RendererCapability& rendererCapability = context.acquireCapability<RendererCapability>();
-        auto* rendererModule = static_cast<RendererModule*>(&rendererCapability);
+        RendererCapability &rendererCapability = context.acquireCapability<RendererCapability>();
+        auto               *rendererModule     = static_cast<RendererModule *>(&rendererCapability);
         rendererModule->attachLightingTechnique(pass);
     }
 }
 
 void RadianceCascadesModule::start()
 {
-    logger->logMessage(LogLevel::Information,
-                       std::string("radiance_cascades module started; technique ") +
-                           (passAttached ? "attached (indirect radiance)"
-                                         : "not listed in [lighting].techniques; idle") +
-                           ", light capability " + (lightingAvailable ? "present" : "absent (no first-bounce relight)"));
+    logger->logMessage(
+        LogLevel::Information,
+        std::string("radiance_cascades module started; technique ")
+            + (passAttached ? "attached (indirect radiance)" : "not listed in [lighting].techniques; idle")
+            + ", light capability " + (lightingAvailable ? "present" : "absent (no first-bounce relight)")
+    );
 }
 
 void RadianceCascadesModule::stop()
@@ -1096,7 +1232,9 @@ void RadianceCascadesModule::stop()
     logger = nullptr;
 }
 
-void* RadianceCascadesModule::capabilityPointerFor(const std::string& /*capabilityName*/)
+void *RadianceCascadesModule::capabilityPointerFor(
+    const std::string & /*capabilityName*/
+)
 {
     return nullptr;
 }

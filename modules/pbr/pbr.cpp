@@ -32,9 +32,9 @@ constexpr std::string_view moduleContext = "pbr module";
 // layout can size its range with sizeof instead of a raw byte count.
 struct PbrPassPush
 {
-    std::array<float, 4> shadowAndFlags;
+    std::array<float, 4>         shadowAndFlags;
     std::array<std::uint32_t, 4> counts;
-    std::array<float, 4> reflectionFoldPush;
+    std::array<float, 4>         reflectionFoldPush;
 };
 
 static_assert(sizeof(PbrPassPush) == 48, "pbr_lighting.comp expects a 48-byte push block");
@@ -61,17 +61,18 @@ public:
         // pass: the analytic specular then hands over to the ray traced layer
         // per pixel (see pbr_lighting.comp reflectionWeight), so the sun is
         // not drawn twice on glossy surfaces.
-        bool enabled = false;
+        bool  enabled      = false;
         float maxRoughness = defaultReflectionMaxRoughness;
     };
 
-    PbrLightingPass(std::shared_ptr<LightState> sharedState,
-                    const ReflectionFoldSettings& reflectionFoldSettings)
+    PbrLightingPass(
+        std::shared_ptr<LightState> sharedState, const ReflectionFoldSettings &reflectionFoldSettings
+    )
         : lights(std::move(sharedState)), reflectionFold(reflectionFoldSettings)
     {
     }
 
-    const char* techniqueName() const override
+    const char *techniqueName() const override
     {
         return "pbr";
     }
@@ -81,7 +82,9 @@ public:
         return LightingTarget::Direct;
     }
 
-    void record(vk::raii::CommandBuffer& commandBuffer, const FrameRenderContext& context) override
+    void record(
+        vk::raii::CommandBuffer &commandBuffer, const FrameRenderContext &context
+    ) override
     {
         if (pipeline == nullptr || context.extent != cachedExtent || needsRecreate)
         {
@@ -97,12 +100,14 @@ public:
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **pipelineLayout, 0, **sharedSet, {});
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **pipelineLayout, 1, **frameSet, {});
 
-        const PbrPassPush pushValue{{lights->shadowsEnabled ? 1.0f : 0.0f, lights->penumbra, 0.0f, 0.0f},
-                                    {context.primitiveCount, 0u, 0u, 0u},
-                                    {reflectionFold.enabled ? 1.0f : 0.0f, reflectionFold.maxRoughness, 0.0f,
-                                     0.0f}};
-        commandBuffer.pushConstants(**pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue),
-                                    &pushValue);
+        const PbrPassPush pushValue{
+            {lights->shadowsEnabled ? 1.0f : 0.0f, lights->penumbra, 0.0f, 0.0f},
+            {context.primitiveCount, 0u, 0u, 0u},
+            {reflectionFold.enabled ? 1.0f : 0.0f, reflectionFold.maxRoughness, 0.0f, 0.0f}
+        };
+        commandBuffer.pushConstants(
+            **pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
+        );
 
         const std::uint32_t groupsX = (context.extent.width + 7) / 8;
         const std::uint32_t groupsY = (context.extent.height + 7) / 8;
@@ -115,7 +120,9 @@ public:
     }
 
 private:
-    void rebuild(const FrameRenderContext& context)
+    void rebuild(
+        const FrameRenderContext &context
+    )
     {
         // Teardown in strict reverse dependency order (see the class comment).
         frameSet.reset();
@@ -131,8 +138,9 @@ private:
 
         // Light uniform buffer: host visible, persistently mapped, updated
         // every frame (computation rule: one memcpy, no staging round trip).
-        lightStorage = createMappedHostVisibleBuffer(context.device, context.physicalDevice, sizeof(GpuLightUniform),
-                                                     vk::BufferUsageFlagBits::eUniformBuffer);
+        lightStorage = createMappedHostVisibleBuffer(
+            context.device, context.physicalDevice, sizeof(GpuLightUniform), vk::BufferUsageFlagBits::eUniformBuffer
+        );
 
         sampler = makeNearestClampSampler(context.device);
 
@@ -157,7 +165,8 @@ private:
             std::array<vk::DescriptorSetLayoutBinding, 4> bindings;
             for (std::uint32_t binding = 0; binding < 3; ++binding)
             {
-                bindings[binding].setBinding(binding)
+                bindings[binding]
+                    .setBinding(binding)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
                     .setDescriptorCount(1);
                 bindings[binding].setStageFlags(vk::ShaderStageFlagBits::eCompute);
@@ -173,17 +182,18 @@ private:
         pushRange.setStageFlags(vk::ShaderStageFlagBits::eCompute);
         pushRange.setOffset(0);
         pushRange.setSize(sizeof(PbrPassPush));
-        vk::PipelineLayoutCreateInfo layoutInfo;
+        vk::PipelineLayoutCreateInfo                 layoutInfo;
         const std::array<vk::DescriptorSetLayout, 2> setLayouts{**sharedSetLayout, **frameSetLayout};
         layoutInfo.setSetLayouts(setLayouts);
         layoutInfo.setPushConstantRanges(pushRange);
         pipelineLayout = std::make_unique<vk::raii::PipelineLayout>(context.device, layoutInfo);
 
-        const std::vector<char> code =
-            readShaderBytes(context.shaderDirectory / "pbr_lighting.comp.spv", moduleContext);
+        const std::vector<char> code = readShaderBytes(
+            context.shaderDirectory / "pbr_lighting.comp.spv", moduleContext
+        );
         vk::ShaderModuleCreateInfo moduleInfo;
-        moduleInfo.setCodeSize(code.size()).setPCode(reinterpret_cast<const std::uint32_t*>(code.data()));
-        vk::raii::ShaderModule module(context.device, moduleInfo);
+        moduleInfo.setCodeSize(code.size()).setPCode(reinterpret_cast<const std::uint32_t *>(code.data()));
+        vk::raii::ShaderModule            module(context.device, moduleInfo);
         vk::PipelineShaderStageCreateInfo stage;
         stage.setStage(vk::ShaderStageFlagBits::eCompute).setModule(*module).setPName("main");
         vk::ComputePipelineCreateInfo pipelineInfo;
@@ -195,7 +205,8 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, 2),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageBuffer, 1)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageBuffer, 1)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(1);
@@ -205,11 +216,12 @@ private:
             allocate.setDescriptorPool(**sharedPool);
             allocate.setSetLayouts(**sharedSetLayout);
             sharedSet = std::make_unique<vk::raii::DescriptorSet>(
-                std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+            );
 
-            vk::DescriptorBufferInfo cameraInfo(context.cameraBuffer, 0, sizeof(CameraData));
-            vk::DescriptorBufferInfo primitivesInfo(context.primitivesBuffer, 0, vk::WholeSize);
-            vk::DescriptorBufferInfo lightInfo(**lightStorage.buffer, 0, sizeof(GpuLightUniform));
+            vk::DescriptorBufferInfo              cameraInfo(context.cameraBuffer, 0, sizeof(CameraData));
+            vk::DescriptorBufferInfo              primitivesInfo(context.primitivesBuffer, 0, vk::WholeSize);
+            vk::DescriptorBufferInfo              lightInfo(**lightStorage.buffer, 0, sizeof(GpuLightUniform));
             std::array<vk::WriteDescriptorSet, 3> writes;
             writes[0].setDstSet(**sharedSet).setDstBinding(0).setDescriptorType(vk::DescriptorType::eUniformBuffer);
             writes[0].setBufferInfo(cameraInfo);
@@ -224,7 +236,8 @@ private:
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
                 vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 3),
-                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)};
+                vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 1)
+            };
             vk::DescriptorPoolCreateInfo poolInfo;
             poolInfo.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
             poolInfo.setMaxSets(1);
@@ -234,7 +247,8 @@ private:
             allocate.setDescriptorPool(**framePool);
             allocate.setSetLayouts(**frameSetLayout);
             frameSet = std::make_unique<vk::raii::DescriptorSet>(
-                std::move(vk::raii::DescriptorSets(context.device, allocate).front()));
+                std::move(vk::raii::DescriptorSets(context.device, allocate).front())
+            );
 
             std::array<vk::DescriptorImageInfo, 3> inputs;
             inputs[0] = vk::DescriptorImageInfo(**sampler, context.albedoView, vk::ImageLayout::eGeneral);
@@ -244,7 +258,9 @@ private:
             std::array<vk::WriteDescriptorSet, 4> writes;
             for (std::uint32_t binding = 0; binding < 3; ++binding)
             {
-                writes[binding].setDstSet(**frameSet).setDstBinding(binding)
+                writes[binding]
+                    .setDstSet(**frameSet)
+                    .setDstBinding(binding)
                     .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
                 writes[binding].setImageInfo(inputs[binding]);
             }
@@ -253,15 +269,15 @@ private:
             context.device.updateDescriptorSets(writes, {});
         }
 
-        cachedExtent = context.extent;
+        cachedExtent  = context.extent;
         needsRecreate = false;
     }
 
-    std::shared_ptr<LightState> lights;
-    ReflectionFoldSettings reflectionFold;
-    vk::Extent2D cachedExtent{};
-    bool needsRecreate = false;
-    MappedHostVisibleBuffer lightStorage;
+    std::shared_ptr<LightState>        lights;
+    ReflectionFoldSettings             reflectionFold;
+    vk::Extent2D                       cachedExtent{};
+    bool                               needsRecreate = false;
+    MappedHostVisibleBuffer            lightStorage;
     std::unique_ptr<vk::raii::Sampler> sampler;
     // Layouts are declared BEFORE the pools/sets/pipelines that embed them on
     // purpose: with this order even the automatic member destruction (which
@@ -269,30 +285,35 @@ private:
     // layouts before their descriptor set layouts.
     std::unique_ptr<vk::raii::DescriptorSetLayout> sharedSetLayout;
     std::unique_ptr<vk::raii::DescriptorSetLayout> frameSetLayout;
-    std::unique_ptr<vk::raii::DescriptorPool> sharedPool;
-    std::unique_ptr<vk::raii::DescriptorSet> sharedSet;
-    std::unique_ptr<vk::raii::DescriptorPool> framePool;
-    std::unique_ptr<vk::raii::DescriptorSet> frameSet;
-    std::unique_ptr<vk::raii::PipelineLayout> pipelineLayout;
-    std::unique_ptr<vk::raii::Pipeline> pipeline;
+    std::unique_ptr<vk::raii::DescriptorPool>      sharedPool;
+    std::unique_ptr<vk::raii::DescriptorSet>       sharedSet;
+    std::unique_ptr<vk::raii::DescriptorPool>      framePool;
+    std::unique_ptr<vk::raii::DescriptorSet>       frameSet;
+    std::unique_ptr<vk::raii::PipelineLayout>      pipelineLayout;
+    std::unique_ptr<vk::raii::Pipeline>            pipeline;
 };
 
 // ---- Module lifecycle ----------------------------------------------------------------
 
 PbrLightingModule::PbrLightingModule()
 {
-    componentManifest.name = "pbr";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "pbr";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {"lighting"};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
-    componentManifest.requiredPermissions = {"capability.logging", "capability.renderer"};
+    componentManifest.requiredPermissions  = {"capability.logging", "capability.renderer"};
     // The light state is seeded from the shared [scene] world content; the
     // technique reads its own [lighting.pbr] settings plus the composition
     // keys it shares with the renderer and the other techniques.
     componentManifest.knownConfigKeys = {
-        "lighting.pbr.shadows",       "lighting.pbr.penumbra", "lighting.pbr.shadow_steps",
-        "lighting.techniques",        "lighting.ray_reflections.max_roughness",
-        "scene.sun.direction",        "scene.sun.color",       "scene.sun.intensity",
+        "lighting.pbr.shadows",
+        "lighting.pbr.penumbra",
+        "lighting.pbr.shadow_steps",
+        "lighting.techniques",
+        "lighting.ray_reflections.max_roughness",
+        "scene.sun.direction",
+        "scene.sun.color",
+        "scene.sun.intensity",
         "scene.point_lights",
     };
 }
@@ -302,18 +323,22 @@ PbrLightingModule::~PbrLightingModule()
     stop();
 }
 
-void PbrLightingModule::construct(ComponentContext& context)
+void PbrLightingModule::construct(
+    ComponentContext &context
+)
 {
     logger = &context.acquireCapability<LoggerCapability>();
 
     // The light state is shared with the pass so the capability API and the
     // GPU upload always agree.
-    state = std::make_shared<LightState>();
+    state                 = std::make_shared<LightState>();
     state->shadowsEnabled = context.configurationBooleanInSection("lighting", "pbr.shadows").value_or(true);
-    state->penumbra =
-        static_cast<float>(context.configurationFloatingInSection("lighting", "pbr.penumbra").value_or(12.0));
+    state->penumbra       = static_cast<float>(
+        context.configurationFloatingInSection("lighting", "pbr.penumbra").value_or(12.0)
+    );
     state->shadowSteps = static_cast<std::int32_t>(
-        context.configurationIntegerInSection("lighting", "pbr.shadow_steps").value_or(24));
+        context.configurationIntegerInSection("lighting", "pbr.shadow_steps").value_or(24)
+    );
 
     const std::vector<double> direction = context.configurationFloatingArrayInSection("scene", "sun.direction");
     if (direction.size() == 3)
@@ -329,18 +354,20 @@ void PbrLightingModule::construct(ComponentContext& context)
         state->sun.color[1] = static_cast<float>(color[1]);
         state->sun.color[2] = static_cast<float>(color[2]);
     }
-    state->sun.intensity =
-        static_cast<float>(context.configurationFloatingInSection("scene", "sun.intensity").value_or(0.0));
+    state->sun.intensity = static_cast<float>(
+        context.configurationFloatingInSection("scene", "sun.intensity").value_or(0.0)
+    );
     state->sunEnabled = state->sun.intensity > 0.0f;
 
     // Point lights: [[scene.point_lights]] rows seed the capability state, so
     // configurations can place lights without a mod calling the API.
-    const std::size_t pointLightCount =
-        std::min<std::size_t>(context.configurationArraySizeInSection("scene", "point_lights"), maxPointLights);
+    const std::size_t pointLightCount = std::min<std::size_t>(
+        context.configurationArraySizeInSection("scene", "point_lights"), maxPointLights
+    );
     for (std::size_t index = 0; index < pointLightCount; ++index)
     {
-        const std::string prefix = "point_lights[" + std::to_string(index) + "]";
-        PointLightDescription light;
+        const std::string         prefix = "point_lights[" + std::to_string(index) + "]";
+        PointLightDescription     light;
         const std::vector<double> position = context.configurationFloatingArrayInSection("scene", prefix + ".position");
         if (position.size() == 3)
         {
@@ -355,10 +382,12 @@ void PbrLightingModule::construct(ComponentContext& context)
             light.color[1] = static_cast<float>(color[1]);
             light.color[2] = static_cast<float>(color[2]);
         }
-        light.intensity =
-            static_cast<float>(context.configurationFloatingInSection("scene", prefix + ".intensity").value_or(1.0));
-        light.radius =
-            static_cast<float>(context.configurationFloatingInSection("scene", prefix + ".radius").value_or(0.0));
+        light.intensity = static_cast<float>(
+            context.configurationFloatingInSection("scene", prefix + ".intensity").value_or(1.0)
+        );
+        light.radius = static_cast<float>(
+            context.configurationFloatingInSection("scene", prefix + ".radius").value_or(0.0)
+        );
         state->pointLights.push_back(light);
     }
 
@@ -375,9 +404,10 @@ void PbrLightingModule::construct(ComponentContext& context)
     PbrLightingPass::ReflectionFoldSettings reflectionFold;
     if (std::find(techniques.begin(), techniques.end(), "ray_reflections") != techniques.end())
     {
-        reflectionFold.enabled = true;
+        reflectionFold.enabled      = true;
         reflectionFold.maxRoughness = static_cast<float>(
-            context.configurationFloatingInSection("lighting", "ray_reflections.max_roughness").value_or(0.35));
+            context.configurationFloatingInSection("lighting", "ray_reflections.max_roughness").value_or(0.35)
+        );
     }
 
     // The pass object exists regardless; it only records when attached. The
@@ -386,22 +416,23 @@ void PbrLightingModule::construct(ComponentContext& context)
     pass = std::make_shared<PbrLightingPass>(state, reflectionFold);
     if (passAttached)
     {
-        RendererCapability& rendererCapability = context.acquireCapability<RendererCapability>();
+        RendererCapability &rendererCapability = context.acquireCapability<RendererCapability>();
         // In-tree wiring: the renderer capability of this build is implemented
         // by RendererModule (see host/main.cpp, composition root). Script mods
         // keep working through the agnostic contracts only.
-        auto* rendererModule = static_cast<RendererModule*>(&rendererCapability);
+        auto *rendererModule = static_cast<RendererModule *>(&rendererCapability);
         rendererModule->attachLightingTechnique(pass);
     }
 }
 
 void PbrLightingModule::start()
 {
-    logger->logMessage(LogLevel::Information,
-                       std::string("pbr module started; technique ") +
-                           (passAttached ? "attached (direct radiance)" : "not listed in [lighting].techniques; idle") +
-                           ", sun " + (state->sunEnabled ? "on" : "off") + ", shadows " +
-                           (state->shadowsEnabled ? "on" : "off"));
+    logger->logMessage(
+        LogLevel::Information,
+        std::string("pbr module started; technique ")
+            + (passAttached ? "attached (direct radiance)" : "not listed in [lighting].techniques; idle") + ", sun "
+            + (state->sunEnabled ? "on" : "off") + ", shadows " + (state->shadowsEnabled ? "on" : "off")
+    );
 }
 
 void PbrLightingModule::stop()
@@ -419,18 +450,22 @@ void PbrLightingModule::stop()
     logger = nullptr;
 }
 
-void* PbrLightingModule::capabilityPointerFor(const std::string& capabilityName)
+void *PbrLightingModule::capabilityPointerFor(
+    const std::string &capabilityName
+)
 {
     if (capabilityName == LightingCapability::capabilityName)
     {
-        return static_cast<LightingCapability*>(this);
+        return static_cast<LightingCapability *>(this);
     }
     return nullptr;
 }
 
-void PbrLightingModule::setSunLight(const DirectionalLightDescription& light)
+void PbrLightingModule::setSunLight(
+    const DirectionalLightDescription &light
+)
 {
-    state->sun = light;
+    state->sun        = light;
     state->sunEnabled = true;
 }
 
@@ -449,7 +484,9 @@ DirectionalLightDescription PbrLightingModule::sunLight() const
     return state->sun;
 }
 
-LightingCapability::PointLightHandle PbrLightingModule::addPointLight(const PointLightDescription& light)
+LightingCapability::PointLightHandle PbrLightingModule::addPointLight(
+    const PointLightDescription &light
+)
 {
     if (state->pointLights.size() >= maxPointLights)
     {
@@ -459,7 +496,9 @@ LightingCapability::PointLightHandle PbrLightingModule::addPointLight(const Poin
     return static_cast<LightingCapability::PointLightHandle>(state->pointLights.size());
 }
 
-void PbrLightingModule::removePointLight(LightingCapability::PointLightHandle handle)
+void PbrLightingModule::removePointLight(
+    LightingCapability::PointLightHandle handle
+)
 {
     if (handle == LightingCapability::invalidPointLight || handle > state->pointLights.size())
     {
@@ -478,7 +517,9 @@ std::uint32_t PbrLightingModule::pointLightCount() const
     return static_cast<std::uint32_t>(state->pointLights.size());
 }
 
-PointLightDescription PbrLightingModule::pointLight(std::uint32_t index) const
+PointLightDescription PbrLightingModule::pointLight(
+    std::uint32_t index
+) const
 {
     return state->pointLights.at(index);
 }

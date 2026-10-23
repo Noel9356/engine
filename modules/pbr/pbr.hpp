@@ -30,34 +30,34 @@ public:
     PbrLightingModule();
     ~PbrLightingModule() override;
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
+    void *capabilityPointerFor(const std::string &capabilityName) override;
 
     // LightingCapability (single threaded by the engine contract).
-    void setSunLight(const DirectionalLightDescription& light) override;
-    void clearSunLight() override;
-    bool hasSunLight() const override;
+    void                        setSunLight(const DirectionalLightDescription &light) override;
+    void                        clearSunLight() override;
+    bool                        hasSunLight() const override;
     DirectionalLightDescription sunLight() const override;
-    PointLightHandle addPointLight(const PointLightDescription& light) override;
-    void removePointLight(PointLightHandle handle) override;
-    void clearPointLights() override;
-    std::uint32_t pointLightCount() const override;
-    PointLightDescription pointLight(std::uint32_t index) const override;
+    PointLightHandle            addPointLight(const PointLightDescription &light) override;
+    void                        removePointLight(PointLightHandle handle) override;
+    void                        clearPointLights() override;
+    std::uint32_t               pointLightCount() const override;
+    PointLightDescription       pointLight(std::uint32_t index) const override;
 
 private:
-    ComponentManifest componentManifest;
-    LoggerCapability* logger = nullptr;
-    bool passAttached = false;
+    ComponentManifest                componentManifest;
+    LoggerCapability                *logger       = nullptr;
+    bool                             passAttached = false;
     std::shared_ptr<PbrLightingPass> pass;
-    std::shared_ptr<LightState> state;
+    std::shared_ptr<LightState>      state;
 };
 
 } // namespace engine

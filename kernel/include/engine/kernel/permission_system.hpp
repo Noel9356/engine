@@ -13,7 +13,7 @@ namespace engine
 // capability name. One definition because two sites build it (the kernel's
 // derived-grant pass and ComponentContext's acquisition check); a typo in
 // either would silently break the contract.
-inline constexpr const char* capabilityPermissionPrefix = "capability.";
+inline constexpr const char *capabilityPermissionPrefix = "capability.";
 
 // Permission identifiers follow the pattern "<domain>.<action>":
 //   capability.<name>    acquire the named capability contract
@@ -29,27 +29,35 @@ class PermissionSystem final
 public:
     // Declares the permission set of one component. Called once per component
     // before construction, from the manifest.
-    void declarePermissions(const std::string& componentName, const std::vector<std::string>& permissions)
+    void declarePermissions(
+        const std::string &componentName, const std::vector<std::string> &permissions
+    )
     {
-        std::set<std::string>& permissionSet = declaredPermissions[componentName];
+        std::set<std::string> &permissionSet = declaredPermissions[componentName];
         permissionSet.insert(permissions.begin(), permissions.end());
     }
 
     // Marks a component as trusted: the composition root (the host executable)
     // drives the frame loop and may acquire every available capability.
-    void grantAllPermissions(const std::string& componentName)
+    void grantAllPermissions(
+        const std::string &componentName
+    )
     {
         trustedComponents.insert(componentName);
     }
 
     // Denies one permission for one component. Called from runtime
     // configuration before construction.
-    void denyPermission(const std::string& componentName, const std::string& permission)
+    void denyPermission(
+        const std::string &componentName, const std::string &permission
+    )
     {
         deniedPermissions.emplace(componentName, permission);
     }
 
-    bool isGranted(const std::string& componentName, const std::string& permission) const
+    bool isGranted(
+        const std::string &componentName, const std::string &permission
+    ) const
     {
         if (deniedPermissions.find(std::make_pair(componentName, permission)) != deniedPermissions.end())
         {
@@ -69,11 +77,12 @@ public:
 
     // Returns every entry of requiredPermissions that is not granted, so the
     // kernel can produce one precise diagnostic per missing grant.
-    std::vector<std::string> missingPermissions(const std::string& componentName,
-                                                const std::vector<std::string>& requiredPermissions) const
+    std::vector<std::string> missingPermissions(
+        const std::string &componentName, const std::vector<std::string> &requiredPermissions
+    ) const
     {
         std::vector<std::string> missing;
-        for (const std::string& permission : requiredPermissions)
+        for (const std::string &permission : requiredPermissions)
         {
             if (!isGranted(componentName, permission))
             {
@@ -84,9 +93,9 @@ public:
     }
 
 private:
-    std::map<std::string, std::set<std::string>> declaredPermissions;
+    std::map<std::string, std::set<std::string>>  declaredPermissions;
     std::set<std::pair<std::string, std::string>> deniedPermissions;
-    std::set<std::string> trustedComponents;
+    std::set<std::string>                         trustedComponents;
 };
 
 } // namespace engine

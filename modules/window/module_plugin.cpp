@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createwindowPluginModule()
+engine::ModuleInterface *createwindowPluginModule()
 {
     return new engine::WindowModule();
 }
 
 const engine::EngineModulePluginEntry windowPluginEntry{
-    engine::engineModulePluginAbiVersion, "window", &createwindowPluginModule};
+    engine::engineModulePluginAbiVersion, "window", &createwindowPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &windowPluginEntry;
 }

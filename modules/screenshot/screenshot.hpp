@@ -28,40 +28,40 @@ public:
     ScreenshotModule();
     ~ScreenshotModule() override;
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
+    void *capabilityPointerFor(const std::string &capabilityName) override;
 
     void requestScreenshot() override;
 
 private:
-    void handleKeyPressed(const KeyPressedEvent& event);
-    void handleFrameBegin(const FrameBeginEvent& event);
-    void handleFrameCaptured(const FrameCapturedEvent& event);
+    void        handleKeyPressed(const KeyPressedEvent &event);
+    void        handleFrameBegin(const FrameBeginEvent &event);
+    void        handleFrameCaptured(const FrameCapturedEvent &event);
     std::string nextCaptureFilePath() const;
 
-    ComponentManifest componentManifest;
-    ComponentContext* boundContext = nullptr;
-    LoggerCapability* logger = nullptr;
-    RendererCapability* rendererCapability = nullptr;
-    EventSubscription keyPressedSubscription;
-    EventSubscription frameBeginSubscription;
-    EventSubscription frameCapturedSubscription;
+    ComponentManifest   componentManifest;
+    ComponentContext   *boundContext       = nullptr;
+    LoggerCapability   *logger             = nullptr;
+    RendererCapability *rendererCapability = nullptr;
+    EventSubscription   keyPressedSubscription;
+    EventSubscription   frameBeginSubscription;
+    EventSubscription   frameCapturedSubscription;
     // Default trigger: F12 from the input contract's key enum (one source of
     // the numeric code; the config [screenshot].key replaces it by name).
-    std::uint32_t triggerKeyCode = static_cast<std::uint32_t>(KeyCode::F12);
-    std::string triggerKeyName = "F12";
-    std::string outputDirectory; // empty = platform user media directory
+    std::uint32_t         triggerKeyCode = static_cast<std::uint32_t>(KeyCode::F12);
+    std::string           triggerKeyName = "F12";
+    std::string           outputDirectory; // empty = platform user media directory
     std::filesystem::path resolvedOutputDirectory;
-    bool captureQueued = false;
-    std::uint64_t captureCounter = 0;
+    bool                  captureQueued  = false;
+    std::uint64_t         captureCounter = 0;
 };
 
 } // namespace engine

@@ -17,8 +17,8 @@ namespace engine
 struct DirectionalLightDescription
 {
     float direction[3] = {0.0f, -1.0f, 0.0f};
-    float color[3] = {1.0f, 1.0f, 1.0f};
-    float intensity = 0.0f;
+    float color[3]     = {1.0f, 1.0f, 1.0f};
+    float intensity    = 0.0f;
 };
 
 // One positional light with inverse-square falloff. radius cuts the light off
@@ -27,9 +27,9 @@ struct DirectionalLightDescription
 struct PointLightDescription
 {
     float position[3] = {0.0f, 0.0f, 0.0f};
-    float color[3] = {1.0f, 1.0f, 1.0f};
-    float intensity = 0.0f;
-    float radius = 0.0f;
+    float color[3]    = {1.0f, 1.0f, 1.0f};
+    float intensity   = 0.0f;
+    float radius      = 0.0f;
 };
 
 // Capability "lighting": the scene light state. The state is consumed once per
@@ -39,7 +39,7 @@ struct PointLightDescription
 class LightingCapability
 {
 public:
-    static constexpr const char* capabilityName = "lighting";
+    static constexpr const char *capabilityName = "lighting";
 
     // Point lights are addressed by handle; handles are stable until removed.
     // The implementation caps the number of live point lights (see the
@@ -51,16 +51,16 @@ public:
 
     virtual ~LightingCapability() = default;
 
-    virtual void setSunLight(const DirectionalLightDescription& light) = 0;
-    virtual void clearSunLight() = 0;
-    virtual bool hasSunLight() const = 0;
-    virtual DirectionalLightDescription sunLight() const = 0;
+    virtual void                        setSunLight(const DirectionalLightDescription &light) = 0;
+    virtual void                        clearSunLight()                                       = 0;
+    virtual bool                        hasSunLight() const                                   = 0;
+    virtual DirectionalLightDescription sunLight() const                                      = 0;
 
-    virtual PointLightHandle addPointLight(const PointLightDescription& light) = 0;
-    virtual void removePointLight(PointLightHandle handle) = 0;
-    virtual void clearPointLights() = 0;
-    virtual std::uint32_t pointLightCount() const = 0;
-    virtual PointLightDescription pointLight(std::uint32_t index) const = 0;
+    virtual PointLightHandle      addPointLight(const PointLightDescription &light) = 0;
+    virtual void                  removePointLight(PointLightHandle handle)         = 0;
+    virtual void                  clearPointLights()                                = 0;
+    virtual std::uint32_t         pointLightCount() const                           = 0;
+    virtual PointLightDescription pointLight(std::uint32_t index) const             = 0;
 };
 
 } // namespace engine

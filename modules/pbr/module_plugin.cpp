@@ -8,16 +8,17 @@
 
 namespace
 {
-engine::ModuleInterface* createpbrPluginModule()
+engine::ModuleInterface *createpbrPluginModule()
 {
     return new engine::PbrLightingModule();
 }
 
 const engine::EngineModulePluginEntry pbrPluginEntry{
-    engine::engineModulePluginAbiVersion, "pbr", &createpbrPluginModule};
+    engine::engineModulePluginAbiVersion, "pbr", &createpbrPluginModule
+};
 } // namespace
 
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin()
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin()
 {
     return &pbrPluginEntry;
 }

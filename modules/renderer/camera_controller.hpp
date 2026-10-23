@@ -39,15 +39,20 @@ class FlyCameraController
 public:
     // Adopts the configured camera: position and yaw/pitch from
     // position -> look_at, speed knobs from the camera block.
-    void syncFromCamera(const SceneCamera& camera)
+    void syncFromCamera(
+        const SceneCamera &camera
+    )
     {
-        position_ = camera.position;
-        flySpeed_ = camera.flySpeed;
-        flyBoost_ = camera.flyBoost;
+        position_        = camera.position;
+        flySpeed_        = camera.flySpeed;
+        flyBoost_        = camera.flyBoost;
         lookSensitivity_ = camera.lookSensitivity;
 
-        float forward[3] = {camera.lookAt[0] - camera.position[0], camera.lookAt[1] - camera.position[1],
-                            camera.lookAt[2] - camera.position[2]};
+        float forward[3] = {
+            camera.lookAt[0] - camera.position[0],
+            camera.lookAt[1] - camera.position[1],
+            camera.lookAt[2] - camera.position[2]
+        };
         const float length = std::sqrt(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
         if (length > 1e-6f)
         {
@@ -61,24 +66,28 @@ public:
         // straight-up/down look_at, which the pitch clamp makes impossible to
         // re-enter afterwards.
         pitch_ = std::asin(std::clamp(forward[1], -1.0f, 1.0f));
-        yaw_ = std::atan2(forward[0], -forward[2]);
+        yaw_   = std::atan2(forward[0], -forward[2]);
     }
 
     // Writes the current fly state back into the camera block the renderer
     // uploads: position moves, look_at tracks the yaw/pitch direction.
-    void applyToCamera(SceneCamera& camera) const
+    void applyToCamera(
+        SceneCamera &camera
+    ) const
     {
         const float forwardX = std::cos(pitch_) * std::sin(yaw_);
         const float forwardY = std::sin(pitch_);
         const float forwardZ = -std::cos(pitch_) * std::cos(yaw_);
-        camera.position = position_;
-        camera.lookAt = {position_[0] + forwardX, position_[1] + forwardY, position_[2] + forwardZ};
+        camera.position      = position_;
+        camera.lookAt        = {position_[0] + forwardX, position_[1] + forwardY, position_[2] + forwardZ};
     }
 
     // One frame of input integration. input may be null (capability absent):
     // the controller then keeps the camera exactly where it is, so the rest
     // of the engine cannot tell. dt must be > 0.
-    void update(InputCapability* input, double deltaTime, LoggerCapability& logger)
+    void update(
+        InputCapability *input, double deltaTime, LoggerCapability &logger
+    )
     {
         if (input == nullptr || deltaTime <= 0.0)
         {
@@ -112,8 +121,9 @@ public:
         input->consumeScrollDelta(scrollX, scrollY);
         if (scrollY != 0.0)
         {
-            flySpeed_ =
-                std::clamp(flySpeed_ * std::pow(flyWheelSpeedFactor, static_cast<float>(scrollY)), minSpeed, maxSpeed);
+            flySpeed_ = std::clamp(
+                flySpeed_ * std::pow(flyWheelSpeedFactor, static_cast<float>(scrollY)), minSpeed, maxSpeed
+            );
         }
 
         const float forwardX = std::cos(pitch_) * std::sin(yaw_);
@@ -121,8 +131,8 @@ public:
         const float forwardZ = -std::cos(pitch_) * std::cos(yaw_);
         // Right = forward x worldUp (level, independent of pitch: a strafe
         // should not tilt with the look direction).
-        float rightX = -forwardZ;
-        float rightZ = forwardX;
+        float       rightX      = -forwardZ;
+        float       rightZ      = forwardX;
         const float rightLength = std::sqrt(rightX * rightX + rightZ * rightZ);
         if (rightLength > 1e-6f)
         {
@@ -180,7 +190,9 @@ private:
     static constexpr float minSpeed = 0.1f;
     static constexpr float maxSpeed = 200.0f;
 
-    void handleCaptureKeys(InputCapability* input, LoggerCapability& logger)
+    void handleCaptureKeys(
+        InputCapability *input, LoggerCapability &logger
+    )
     {
         if (togglePending_ && !input->isKeyDown(KeyCode::F))
         {
@@ -188,12 +200,13 @@ private:
         }
         if (!togglePending_ && input->isKeyDown(KeyCode::F))
         {
-            togglePending_ = true;
+            togglePending_      = true;
             const bool captured = !input->isCursorCaptured();
             input->setCursorCaptured(captured);
-            logger.logMessage(LogLevel::Information,
-                              std::string("camera: cursor ") + (captured ? "captured (mouse look active, Esc releases)"
-                                                                          : "released"));
+            logger.logMessage(
+                LogLevel::Information,
+                std::string("camera: cursor ") + (captured ? "captured (mouse look active, Esc releases)" : "released")
+            );
         }
         if (input->isKeyDown(KeyCode::Escape) && input->isCursorCaptured())
         {
@@ -206,12 +219,12 @@ private:
     }
 
     std::array<float, 3> position_{};
-    float yaw_ = 0.0f;
-    float pitch_ = 0.0f;
-    float flySpeed_ = defaultFlySpeed;
-    float flyBoost_ = defaultFlyBoost;
-    float lookSensitivity_ = defaultLookSensitivity;
-    bool togglePending_ = false;
+    float                yaw_             = 0.0f;
+    float                pitch_           = 0.0f;
+    float                flySpeed_        = defaultFlySpeed;
+    float                flyBoost_        = defaultFlyBoost;
+    float                lookSensitivity_ = defaultLookSensitivity;
+    bool                 togglePending_   = false;
 };
 
 } // namespace engine

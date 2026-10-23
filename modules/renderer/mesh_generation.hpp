@@ -21,7 +21,7 @@ inline constexpr std::size_t meshFloatsPerVertex = 6;
 
 struct MeshData
 {
-    std::vector<float> vertices;        // meshFloatsPerVertex per vertex
+    std::vector<float>         vertices; // meshFloatsPerVertex per vertex
     std::vector<std::uint32_t> indices;
 };
 

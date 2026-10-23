@@ -18,27 +18,27 @@ class LoggingModule final : public ModuleInterface, public LoggerCapability
 public:
     LoggingModule();
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
+    void *capabilityPointerFor(const std::string &capabilityName) override;
 
-    void logMessage(LogLevel level, const std::string& message) override;
+    void logMessage(LogLevel level, const std::string &message) override;
 
 private:
-    static const char* levelTag(LogLevel level);
-    static const char* levelColor(LogLevel level);
+    static const char *levelTag(LogLevel level);
+    static const char *levelColor(LogLevel level);
 
     ComponentManifest componentManifest;
-    LogLevel minimumLevel = LogLevel::Information;
-    std::ofstream fileSink;
-    std::mutex sinkMutex;
+    LogLevel          minimumLevel = LogLevel::Information;
+    std::ofstream     fileSink;
+    std::mutex        sinkMutex;
 };
 
 } // namespace engine

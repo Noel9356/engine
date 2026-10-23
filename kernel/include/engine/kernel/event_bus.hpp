@@ -31,20 +31,23 @@ struct ChannelLatencyStatistics
     // The per-sample ring stores nanoseconds in 32 bits; larger samples clamp.
     static constexpr std::uint64_t maxRecordableSampleNanoseconds = 0xFFFFFFFFull;
 
-    std::uint64_t deliveries = 0;
-    std::uint64_t totalNanoseconds = 0;
-    std::uint64_t maxNanoseconds = 0;
+    std::uint64_t deliveries              = 0;
+    std::uint64_t totalNanoseconds        = 0;
+    std::uint64_t maxNanoseconds          = 0;
     std::uint32_t samples[sampleCapacity] = {};
-    std::size_t sampleCount = 0;
-    std::size_t samplePosition = 0;
+    std::size_t   sampleCount             = 0;
+    std::size_t   samplePosition          = 0;
 
-    void record(std::uint64_t nanoseconds)
+    void record(
+        std::uint64_t nanoseconds
+    )
     {
         ++deliveries;
         totalNanoseconds += nanoseconds;
-        maxNanoseconds = std::max(maxNanoseconds, nanoseconds);
-        samples[samplePosition] =
-            static_cast<std::uint32_t>(std::min<std::uint64_t>(nanoseconds, maxRecordableSampleNanoseconds));
+        maxNanoseconds          = std::max(maxNanoseconds, nanoseconds);
+        samples[samplePosition] = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(nanoseconds, maxRecordableSampleNanoseconds)
+        );
         samplePosition = (samplePosition + 1) % sampleCapacity;
         if (sampleCount < sampleCapacity)
         {
@@ -56,7 +59,7 @@ struct ChannelLatencyStatistics
 // Prettifies a typeid name into a readable channel name: strips the GCC/Clang
 // leading length digits, the MSVC 'struct '/'class ' prefix and the common
 // 'engine::' namespace so reports stay stable across compilers.
-std::string prettifyChannelName(const std::type_index& eventType);
+std::string prettifyChannelName(const std::type_index &eventType);
 
 // Type-erased channel base so the bus can unsubscribe through the RAII guard.
 class EventBus;
@@ -72,45 +75,54 @@ class EventBus;
 // Thread policy: the bus is deliberately single threaded (engine main thread).
 // Cross thread delivery is a module concern and may be added later as a
 // dedicated delivery module without changing this interface.
-template <typename EventType>
-class EventChannel final
+template <typename EventType> class EventChannel final
 {
 public:
-    using HandlerFunction = void (*)(void* userData, const EventType& event);
+    using HandlerFunction = void (*)(void *userData, const EventType &event);
 
     EventChannel() = default;
 
-    EventChannel(const EventChannel&) = delete;
-    EventChannel& operator=(const EventChannel&) = delete;
+    EventChannel(const EventChannel &)            = delete;
+    EventChannel &operator=(const EventChannel &) = delete;
 
     // Subscribe a raw handler: a function taking user data plus the event.
     // Used by free function adapters and by tests.
-    SubscriptionToken subscribe(HandlerFunction handler, void* userData)
+    SubscriptionToken subscribe(
+        HandlerFunction handler, void *userData
+    )
     {
         return subscribeHandler(handler, userData);
     }
 
     // Subscribe a bound member function. The trampoline is resolved once at
     // registration time; dispatch pays a single indirect call.
-    template <typename ListenerClass, void (ListenerClass::*HandlerMethod)(const EventType&)>
-    SubscriptionToken subscribe(ListenerClass* listener)
+    template <typename ListenerClass, void (ListenerClass::*HandlerMethod)(const EventType &)>
+    SubscriptionToken subscribe(
+        ListenerClass *listener
+    )
     {
-        return subscribeHandler(&EventChannel::dispatchToMember<ListenerClass, HandlerMethod>, static_cast<void*>(listener));
+        return subscribeHandler(
+            &EventChannel::dispatchToMember<ListenerClass, HandlerMethod>, static_cast<void *>(listener)
+        );
     }
 
     // Subscribe a free function taking the event by const reference.
-    SubscriptionToken subscribe(void (*freeFunction)(const EventType&))
+    SubscriptionToken subscribe(
+        void (*freeFunction)(const EventType &)
+    )
     {
-        return subscribeHandler(&EventChannel::dispatchToFree, reinterpret_cast<void*>(freeFunction));
+        return subscribeHandler(&EventChannel::dispatchToFree, reinterpret_cast<void *>(freeFunction));
     }
 
     // Remove a handler. Safe to call from inside a handler that is currently
     // being dispatched; the removal is deferred until dispatch completes.
-    bool unsubscribe(SubscriptionToken token)
+    bool unsubscribe(
+        SubscriptionToken token
+    )
     {
         if (dispatching)
         {
-            for (HandlerEntry& entry : handlers)
+            for (HandlerEntry &entry : handlers)
             {
                 if (entry.token == token && !entry.pendingRemoval)
                 {
@@ -141,15 +153,17 @@ public:
     // channel's latency statistics. When it is disabled the clocks are never
     // read and the bookkeeping collapses to one branch - the measurement
     // costs nothing on the hot path of a normal run.
-    void publish(const EventType& event)
+    void publish(
+        const EventType &event
+    )
     {
-        const bool measure = recordingFlag != nullptr && *recordingFlag;
-        const std::chrono::steady_clock::time_point publishStart =
-            measure ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-        dispatching = true;
+        const bool                                  measure      = recordingFlag != nullptr && *recordingFlag;
+        const std::chrono::steady_clock::time_point publishStart = measure ? std::chrono::steady_clock::now()
+                                                                           : std::chrono::steady_clock::time_point{};
+        dispatching                                              = true;
         for (std::size_t index = 0; index < handlers.size(); ++index)
         {
-            const HandlerEntry& entry = handlers[index];
+            const HandlerEntry &entry = handlers[index];
             if (!entry.pendingRemoval)
             {
                 entry.invoke(entry.userData, event);
@@ -174,14 +188,16 @@ public:
 
     // Wiring for the bus-level recording switch. The flag is owned by the
     // EventBus so one call re-targets every channel.
-    void setRecordingFlag(const bool* flag)
+    void setRecordingFlag(
+        const bool *flag
+    )
     {
         recordingFlag = flag;
     }
 
     // Communication latency statistics of this channel (module-module,
     // mod-module and mod-mod dispatches all flow through here).
-    const ChannelLatencyStatistics& latencyStatistics() const
+    const ChannelLatencyStatistics &latencyStatistics() const
     {
         return statistics;
     }
@@ -189,43 +205,51 @@ public:
 private:
     struct HandlerEntry
     {
-        void* userData = nullptr;
-        HandlerFunction invoke = nullptr;
-        SubscriptionToken token = invalidSubscriptionToken;
-        bool pendingRemoval = false;
+        void             *userData       = nullptr;
+        HandlerFunction   invoke         = nullptr;
+        SubscriptionToken token          = invalidSubscriptionToken;
+        bool              pendingRemoval = false;
     };
 
-    SubscriptionToken subscribeHandler(HandlerFunction handler, void* userData)
+    SubscriptionToken subscribeHandler(
+        HandlerFunction handler, void *userData
+    )
     {
         const SubscriptionToken token = nextToken++;
         handlers.push_back(HandlerEntry{userData, handler, token, false});
         return token;
     }
 
-    template <typename ListenerClass, void (ListenerClass::*HandlerMethod)(const EventType&)>
-    static void dispatchToMember(void* userData, const EventType& event)
+    template <typename ListenerClass, void (ListenerClass::*HandlerMethod)(const EventType &)>
+    static void dispatchToMember(
+        void *userData, const EventType &event
+    )
     {
-        (static_cast<ListenerClass*>(userData)->*HandlerMethod)(event);
+        (static_cast<ListenerClass *>(userData)->*HandlerMethod)(event);
     }
 
-    static void dispatchToFree(void* userData, const EventType& event)
+    static void dispatchToFree(
+        void *userData, const EventType &event
+    )
     {
-        void (*freeFunction)(const EventType&) = reinterpret_cast<void (*)(const EventType&)>(userData);
+        void (*freeFunction)(const EventType &) = reinterpret_cast<void (*)(const EventType &)>(userData);
         freeFunction(event);
     }
 
-    std::vector<HandlerEntry> handlers;
+    std::vector<HandlerEntry>      handlers;
     std::vector<SubscriptionToken> deferredRemovals;
-    ChannelLatencyStatistics statistics;
-    const bool* recordingFlag = nullptr;
-    bool dispatching = false;
-    SubscriptionToken nextToken = 1;
+    ChannelLatencyStatistics       statistics;
+    const bool                    *recordingFlag = nullptr;
+    bool                           dispatching   = false;
+    SubscriptionToken              nextToken     = 1;
 
-    static std::uint64_t elapsedNanoseconds(const std::chrono::steady_clock::time_point& start)
+    static std::uint64_t elapsedNanoseconds(
+        const std::chrono::steady_clock::time_point &start
+    )
     {
-        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                             std::chrono::steady_clock::now() - start)
-                                             .count());
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()
+        );
     }
 };
 
@@ -244,8 +268,8 @@ class EventBus final
 public:
     EventBus() = default;
 
-    EventBus(const EventBus&) = delete;
-    EventBus& operator=(const EventBus&) = delete;
+    EventBus(const EventBus &)            = delete;
+    EventBus &operator=(const EventBus &) = delete;
 
     // Communication latency recording is a diagnostic, not a default: a normal
     // run publishes thousands of events per second and its users do not want a
@@ -253,7 +277,9 @@ public:
     // for measurement; enabled it records into the per-channel bounded rings
     // that latencyReport() prints. The host enables it from [diagnostics]
     // latency_report or the --latency-report command line flag.
-    void setLatencyRecordingEnabled(bool enabled)
+    void setLatencyRecordingEnabled(
+        bool enabled
+    )
     {
         latencyRecording = enabled;
     }
@@ -265,29 +291,32 @@ public:
 
     // Stable reference to the channel for the given event type. The reference
     // remains valid for the lifetime of the bus; cache it in the caller.
-    template <typename EventType>
-    EventChannel<EventType>& channel()
+    template <typename EventType> EventChannel<EventType> &channel()
     {
         const std::type_index eventType = typeid(EventType);
-        auto found = channels.find(eventType);
+        auto                  found     = channels.find(eventType);
         if (found == channels.end())
         {
             found = channels.emplace(eventType, std::make_unique<ChannelHolder<EventType>>()).first;
-            static_cast<ChannelHolder<EventType>*>(found->second.get())->channel.setRecordingFlag(&latencyRecording);
+            static_cast<ChannelHolder<EventType> *>(found->second.get())->channel.setRecordingFlag(&latencyRecording);
         }
-        return static_cast<ChannelHolder<EventType>*>(found->second.get())->channel;
+        return static_cast<ChannelHolder<EventType> *>(found->second.get())->channel;
     }
 
     // Convenience publish with a lookup per call. Hot paths should cache the
     // channel reference and publish through it directly.
     template <typename EventType>
-    void publish(const EventType& event)
+    void publish(
+        const EventType &event
+    )
     {
         channel<EventType>().publish(event);
     }
 
     // Unsubscribe without knowing the channel type. Used by EventSubscription.
-    void unsubscribeThrough(std::type_index eventType, SubscriptionToken token)
+    void unsubscribeThrough(
+        std::type_index eventType, SubscriptionToken token
+    )
     {
         const auto found = channels.find(eventType);
         if (found != channels.end())
@@ -302,17 +331,21 @@ public:
     // ring, so they are estimates over recent history, not lifetime exacts.
     std::string latencyReport() const
     {
-        std::string report;
-        std::vector<const ChannelHolderBase*> ordered;
+        std::string                            report;
+        std::vector<const ChannelHolderBase *> ordered;
         ordered.reserve(channels.size());
-        for (const auto& entry : channels)
+        for (const auto &entry : channels)
         {
             ordered.push_back(entry.second.get());
         }
         // Deterministic order: by channel name.
-        std::sort(ordered.begin(), ordered.end(), [](const ChannelHolderBase* left, const ChannelHolderBase* right)
-                  { return left->reportName() < right->reportName(); });
-        for (const ChannelHolderBase* channel : ordered)
+        std::sort(
+            ordered.begin(),
+            ordered.end(),
+            [](const ChannelHolderBase *left, const ChannelHolderBase *right)
+            { return left->reportName() < right->reportName(); }
+        );
+        for (const ChannelHolderBase *channel : ordered)
         {
             channel->appendReport(report);
         }
@@ -322,31 +355,34 @@ public:
 private:
     struct ChannelHolderBase
     {
-        virtual ~ChannelHolderBase() = default;
-        virtual bool unsubscribe(SubscriptionToken token) = 0;
-        virtual const std::string& reportName() const = 0;
-        virtual void appendReport(std::string& report) const = 0;
+        virtual ~ChannelHolderBase()                                       = default;
+        virtual bool               unsubscribe(SubscriptionToken token)    = 0;
+        virtual const std::string &reportName() const                      = 0;
+        virtual void               appendReport(std::string &report) const = 0;
     };
 
-    template <typename EventType>
-    struct ChannelHolder final : ChannelHolderBase
+    template <typename EventType> struct ChannelHolder final : ChannelHolderBase
     {
         EventChannel<EventType> channel;
-        std::string name = prettifyChannelName(typeid(EventType));
+        std::string             name = prettifyChannelName(typeid(EventType));
 
-        bool unsubscribe(SubscriptionToken token) override
+        bool unsubscribe(
+            SubscriptionToken token
+        ) override
         {
             return channel.unsubscribe(token);
         }
 
-        const std::string& reportName() const override
+        const std::string &reportName() const override
         {
             return name;
         }
 
-        void appendReport(std::string& report) const override
+        void appendReport(
+            std::string &report
+        ) const override
         {
-            const ChannelLatencyStatistics& stats = channel.latencyStatistics();
+            const ChannelLatencyStatistics &stats = channel.latencyStatistics();
             if (stats.deliveries == 0)
             {
                 return;
@@ -359,15 +395,15 @@ private:
                 return recent[index];
             };
             const std::uint64_t mean = stats.totalNanoseconds / stats.deliveries;
-            report += "  " + name + ": " + std::to_string(stats.deliveries) + " dispatches, mean " +
-                      std::to_string(mean) + " ns, p50 " + std::to_string(percentile(50)) + " ns, p95 " +
-                      std::to_string(percentile(95)) + " ns, p99 " + std::to_string(percentile(99)) + " ns, max " +
-                      std::to_string(stats.maxNanoseconds) + " ns\n";
+            report += "  " + name + ": " + std::to_string(stats.deliveries) + " dispatches, mean "
+                    + std::to_string(mean) + " ns, p50 " + std::to_string(percentile(50)) + " ns, p95 "
+                    + std::to_string(percentile(95)) + " ns, p99 " + std::to_string(percentile(99)) + " ns, max "
+                    + std::to_string(stats.maxNanoseconds) + " ns\n";
         }
     };
 
     std::unordered_map<std::type_index, std::unique_ptr<ChannelHolderBase>> channels;
-    bool latencyRecording = false;
+    bool                                                                    latencyRecording = false;
 };
 
 // RAII guard for one subscription. Releasing the guard unsubscribes the handler,
@@ -378,7 +414,9 @@ class EventSubscription final
 public:
     EventSubscription() = default;
 
-    EventSubscription(EventBus* ownerBus, std::type_index eventType, SubscriptionToken token)
+    EventSubscription(
+        EventBus *ownerBus, std::type_index eventType, SubscriptionToken token
+    )
         : ownerBus(ownerBus), eventType(eventType), token(token)
     {
     }
@@ -388,26 +426,30 @@ public:
         release();
     }
 
-    EventSubscription(const EventSubscription&) = delete;
-    EventSubscription& operator=(const EventSubscription&) = delete;
+    EventSubscription(const EventSubscription &)            = delete;
+    EventSubscription &operator=(const EventSubscription &) = delete;
 
-    EventSubscription(EventSubscription&& other) noexcept
+    EventSubscription(
+        EventSubscription &&other
+    ) noexcept
         : ownerBus(other.ownerBus), eventType(other.eventType), token(other.token)
     {
         other.ownerBus = nullptr;
-        other.token = invalidSubscriptionToken;
+        other.token    = invalidSubscriptionToken;
     }
 
-    EventSubscription& operator=(EventSubscription&& other) noexcept
+    EventSubscription &operator=(
+        EventSubscription &&other
+    ) noexcept
     {
         if (this != &other)
         {
             release();
-            ownerBus = other.ownerBus;
-            eventType = other.eventType;
-            token = other.token;
+            ownerBus       = other.ownerBus;
+            eventType      = other.eventType;
+            token          = other.token;
             other.ownerBus = nullptr;
-            other.token = invalidSubscriptionToken;
+            other.token    = invalidSubscriptionToken;
         }
         return *this;
     }
@@ -419,13 +461,13 @@ public:
             ownerBus->unsubscribeThrough(std::type_index(eventType), token);
         }
         ownerBus = nullptr;
-        token = invalidSubscriptionToken;
+        token    = invalidSubscriptionToken;
     }
 
 private:
-    EventBus* ownerBus = nullptr;
-    std::type_index eventType = typeid(void);
-    SubscriptionToken token = invalidSubscriptionToken;
+    EventBus         *ownerBus  = nullptr;
+    std::type_index   eventType = typeid(void);
+    SubscriptionToken token     = invalidSubscriptionToken;
 };
 
 } // namespace engine

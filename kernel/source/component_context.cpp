@@ -10,72 +10,91 @@
 namespace engine
 {
 
-ComponentContext::ComponentContext(EventBus& eventBus, CapabilityRegistry& capabilityRegistry,
-                                   PermissionSystem& permissionSystem, const ConfigurationStore& configuration,
-                                   std::string componentName)
+ComponentContext::ComponentContext(
+    EventBus                 &eventBus,
+    CapabilityRegistry       &capabilityRegistry,
+    PermissionSystem         &permissionSystem,
+    const ConfigurationStore &configuration,
+    std::string               componentName
+)
     : eventBus_(eventBus), capabilityRegistry_(capabilityRegistry), permissionSystem_(permissionSystem),
       configuration_(configuration), componentName_(std::move(componentName))
 {
 }
 
-std::optional<std::string> ComponentContext::configurationString(const std::string& key) const
+std::optional<std::string> ComponentContext::configurationString(
+    const std::string &key
+) const
 {
     return configuration_.stringValue(componentName_, key);
 }
 
-std::optional<std::int64_t> ComponentContext::configurationInteger(const std::string& key) const
+std::optional<std::int64_t> ComponentContext::configurationInteger(
+    const std::string &key
+) const
 {
     return configuration_.integerValue(componentName_, key);
 }
 
-std::optional<bool> ComponentContext::configurationBoolean(const std::string& key) const
+std::optional<bool> ComponentContext::configurationBoolean(
+    const std::string &key
+) const
 {
     return configuration_.booleanValue(componentName_, key);
 }
 
-std::optional<double> ComponentContext::configurationFloating(const std::string& key) const
+std::optional<double> ComponentContext::configurationFloating(
+    const std::string &key
+) const
 {
     return configuration_.floatingValue(componentName_, key);
 }
 
-std::optional<std::string> ComponentContext::configurationStringInSection(const std::string& section,
-                                                                          const std::string& path) const
+std::optional<std::string> ComponentContext::configurationStringInSection(
+    const std::string &section, const std::string &path
+) const
 {
     return configuration_.stringAtPath(section, path);
 }
 
-std::optional<std::int64_t> ComponentContext::configurationIntegerInSection(const std::string& section,
-                                                                            const std::string& path) const
+std::optional<std::int64_t> ComponentContext::configurationIntegerInSection(
+    const std::string &section, const std::string &path
+) const
 {
     return configuration_.integerAtPath(section, path);
 }
 
-std::optional<bool> ComponentContext::configurationBooleanInSection(const std::string& section,
-                                                                    const std::string& path) const
+std::optional<bool> ComponentContext::configurationBooleanInSection(
+    const std::string &section, const std::string &path
+) const
 {
     return configuration_.booleanAtPath(section, path);
 }
 
-std::optional<double> ComponentContext::configurationFloatingInSection(const std::string& section,
-                                                                       const std::string& path) const
+std::optional<double> ComponentContext::configurationFloatingInSection(
+    const std::string &section, const std::string &path
+) const
 {
     return configuration_.floatingAtPath(section, path);
 }
 
-std::vector<std::string> ComponentContext::configurationStringArrayInSection(const std::string& section,
-                                                                              const std::string& path) const
+std::vector<std::string> ComponentContext::configurationStringArrayInSection(
+    const std::string &section, const std::string &path
+) const
 {
     return configuration_.stringArrayAtPath(section, path);
 }
 
-std::vector<double> ComponentContext::configurationFloatingArrayInSection(const std::string& section,
-                                                                          const std::string& path) const
+std::vector<double> ComponentContext::configurationFloatingArrayInSection(
+    const std::string &section, const std::string &path
+) const
 {
     return configuration_.floatingArrayAtPath(section, path);
 }
 
-std::size_t ComponentContext::configurationArraySizeInSection(const std::string& section,
-                                                              const std::string& path) const
+std::size_t ComponentContext::configurationArraySizeInSection(
+    const std::string &section, const std::string &path
+) const
 {
     return configuration_.arraySizeAtPath(section, path);
 }
@@ -84,11 +103,13 @@ std::size_t ComponentContext::configurationArraySizeInSection(const std::string&
 // on every toolchain: GCC/Clang emit Itanium names ("17FrameBeginEvent" or the
 // nested "N6engine15FrameBeginEventE"), MSVC prefixes "struct " / "class " and
 // qualifies with namespaces. The common "engine::" qualification is dropped.
-std::string prettifyChannelName(const std::type_index& eventType)
+std::string prettifyChannelName(
+    const std::type_index &eventType
+)
 {
-    std::string name = eventType.name();
+    std::string                       name         = eventType.name();
     static constexpr std::string_view structPrefix = "struct ";
-    static constexpr std::string_view classPrefix = "class ";
+    static constexpr std::string_view classPrefix  = "class ";
     if (name.starts_with(structPrefix))
     {
         name.erase(0, structPrefix.size());
@@ -101,8 +122,8 @@ std::string prettifyChannelName(const std::type_index& eventType)
     {
         // Itanium nested form: N <len><id> <len><id> ... E - keep the last id.
         const std::string inner = name.substr(1, name.size() - 2);
-        std::string last;
-        std::size_t position = 0;
+        std::string       last;
+        std::size_t       position = 0;
         while (position < inner.size() && inner[position] >= '0' && inner[position] <= '9')
         {
             std::size_t digitsEnd = position;
@@ -110,12 +131,14 @@ std::string prettifyChannelName(const std::type_index& eventType)
             {
                 ++digitsEnd;
             }
-            const std::size_t length = static_cast<std::size_t>(std::stoull(inner.substr(position, digitsEnd - position)));
+            const std::size_t length = static_cast<std::size_t>(
+                std::stoull(inner.substr(position, digitsEnd - position))
+            );
             if (digitsEnd + length > inner.size())
             {
                 break;
             }
-            last = inner.substr(digitsEnd, length);
+            last     = inner.substr(digitsEnd, length);
             position = digitsEnd + length;
             // Source-name entries end where the next <number> or 'E' begins.
             while (position < inner.size() && !(inner[position] >= '0' && inner[position] <= '9'))

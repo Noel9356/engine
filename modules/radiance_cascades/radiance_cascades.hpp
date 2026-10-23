@@ -25,22 +25,22 @@ public:
     RadianceCascadesModule();
     ~RadianceCascadesModule() override;
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
+    void *capabilityPointerFor(const std::string &capabilityName) override;
 
 private:
-    ComponentManifest componentManifest;
-    LoggerCapability* logger = nullptr;
-    bool passAttached = false;
-    bool lightingAvailable = false;
+    ComponentManifest                      componentManifest;
+    LoggerCapability                      *logger            = nullptr;
+    bool                                   passAttached      = false;
+    bool                                   lightingAvailable = false;
     std::shared_ptr<LightingTechniquePass> pass;
 };
 

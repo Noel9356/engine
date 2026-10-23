@@ -24,10 +24,10 @@ struct EngineModulePluginEntry
     std::uint32_t abiVersion;
     // The configuration name of the module ("window", "renderer"), exactly
     // what the composition root used to pass to registerModuleFactory.
-    const char* moduleName;
+    const char *moduleName;
     // Creates one module instance. The kernel owns the returned object and
     // releases it with delete: one process, one heap.
-    ModuleInterface* (*createModule)();
+    ModuleInterface *(*createModule)();
 };
 
 } // namespace engine
@@ -43,6 +43,6 @@ struct EngineModulePluginEntry
 
 // Returns the static plugin descriptor of this module binary. The pointed-to
 // object must have static storage duration.
-ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry* engineQueryModulePlugin();
+ENGINE_MODULE_EXPORT const engine::EngineModulePluginEntry *engineQueryModulePlugin();
 
 #endif // ENGINE_KERNEL_MODULE_API_HPP

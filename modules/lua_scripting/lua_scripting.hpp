@@ -39,54 +39,54 @@ public:
     LuaScriptingModule();
     ~LuaScriptingModule() override;
 
-    const ComponentManifest& manifest() const override
+    const ComponentManifest &manifest() const override
     {
         return componentManifest;
     }
 
-    void construct(ComponentContext& context) override;
+    void construct(ComponentContext &context) override;
     void start() override;
     void stop() override;
 
-    void* capabilityPointerFor(const std::string& capabilityName) override;
-    ScriptModHost* scriptModHost() override;
+    void          *capabilityPointerFor(const std::string &capabilityName) override;
+    ScriptModHost *scriptModHost() override;
 
     // ScriptModHost: called by the kernel once per discovered script package.
-    void hostScriptMod(const ScriptModDescription& description) override;
+    void hostScriptMod(const ScriptModDescription &description) override;
 
     // Script bridge entry points (called from the Lua API surface).
-    void logForScripts(LogLevel level, const std::string& message);
+    void                                   logForScripts(LogLevel level, const std::string &message);
     std::tuple<std::int32_t, std::int32_t> windowSizeForScripts();
-    void requestScreenshotForScripts();
+    void                                   requestScreenshotForScripts();
 
 private:
     bool ensureScreenshotCapability();
     struct ScriptEnvironment
     {
-        std::string path;
-        std::string modId;
+        std::string                 path;
+        std::string                 modId;
         std::unique_ptr<sol::state> state;
     };
 
-    void loadScript(const ScriptModDescription& scriptMod);
-    void forwardKeyPressed(const KeyPressedEvent& event);
-    void forwardKeyReleased(const KeyReleasedEvent& event);
-    void dispatchKeyEvent(bool pressed, const std::string& keyName);
-    void forwardFrameBegin(const FrameBeginEvent& event);
+    void loadScript(const ScriptModDescription &scriptMod);
+    void forwardKeyPressed(const KeyPressedEvent &event);
+    void forwardKeyReleased(const KeyReleasedEvent &event);
+    void dispatchKeyEvent(bool pressed, const std::string &keyName);
+    void forwardFrameBegin(const FrameBeginEvent &event);
 
-    ComponentManifest componentManifest;
-    ComponentContext* boundContext = nullptr;
-    LoggerCapability* logger = nullptr;
-    WindowCapability* windowCapability = nullptr;
-    ScreenshotCapability* screenshotCapability = nullptr;
+    ComponentManifest     componentManifest;
+    ComponentContext     *boundContext         = nullptr;
+    LoggerCapability     *logger               = nullptr;
+    WindowCapability     *windowCapability     = nullptr;
+    ScreenshotCapability *screenshotCapability = nullptr;
     // Tri-state screenshot capability resolution: 0 unresolved, 1 available,
     // -1 decided unavailable (module compiled out or permission denied).
-    int screenshotResolutionState = 0;
-    EventSubscription keyPressedSubscription;
-    EventSubscription keyReleasedSubscription;
-    EventSubscription frameBeginSubscription;
+    int                               screenshotResolutionState = 0;
+    EventSubscription                 keyPressedSubscription;
+    EventSubscription                 keyReleasedSubscription;
+    EventSubscription                 frameBeginSubscription;
     std::vector<ScriptModDescription> pendingScripts;
-    std::vector<ScriptEnvironment> environments;
+    std::vector<ScriptEnvironment>    environments;
 };
 
 } // namespace engine

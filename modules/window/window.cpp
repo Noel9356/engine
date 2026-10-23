@@ -11,9 +11,11 @@ namespace
 
 // GLFW callbacks carry no user data for the error path; the active module is
 // tracked here for the duration of start() .. stop().
-WindowModule* activeWindowModule = nullptr;
+WindowModule *activeWindowModule = nullptr;
 
-std::string describeGlfwError(int errorCode)
+std::string describeGlfwError(
+    int errorCode
+)
 {
     switch (errorCode)
     {
@@ -44,12 +46,12 @@ std::string describeGlfwError(int errorCode)
 
 WindowModule::WindowModule()
 {
-    componentManifest.name = "window";
-    componentManifest.kind = ComponentKind::Module;
+    componentManifest.name                 = "window";
+    componentManifest.kind                 = ComponentKind::Module;
     componentManifest.providedCapabilities = {"window"};
     componentManifest.requiredCapabilities = {"logging"};
-    componentManifest.requiredPermissions = {"capability.logging"};
-    componentManifest.knownConfigKeys = {"window.title", "window.width", "window.height", "window.resizable"};
+    componentManifest.requiredPermissions  = {"capability.logging"};
+    componentManifest.knownConfigKeys      = {"window.title", "window.width", "window.height", "window.resizable"};
 }
 
 WindowModule::~WindowModule()
@@ -57,21 +59,23 @@ WindowModule::~WindowModule()
     stop();
 }
 
-void WindowModule::construct(ComponentContext& context)
+void WindowModule::construct(
+    ComponentContext &context
+)
 {
     boundContext = &context;
-    logger = &context.acquireCapability<LoggerCapability>();
+    logger       = &context.acquireCapability<LoggerCapability>();
 
-    const std::string title = context.configurationString("title").value_or("engine");
-    const auto width = context.configurationInteger("width").value_or(1280);
-    const auto height = context.configurationInteger("height").value_or(720);
-    const bool resizable = context.configurationBoolean("resizable").value_or(true);
+    const std::string title     = context.configurationString("title").value_or("engine");
+    const auto        width     = context.configurationInteger("width").value_or(1280);
+    const auto        height    = context.configurationInteger("height").value_or(720);
+    const bool        resizable = context.configurationBoolean("resizable").value_or(true);
 
     // The main window is created during start so that GLFW initialization
     // happens inside the start phase, never during dry validation.
-    pendingDescription.title = title;
-    pendingDescription.width = static_cast<std::uint32_t>(width);
-    pendingDescription.height = static_cast<std::uint32_t>(height);
+    pendingDescription.title     = title;
+    pendingDescription.width     = static_cast<std::uint32_t>(width);
+    pendingDescription.height    = static_cast<std::uint32_t>(height);
     pendingDescription.resizable = resizable;
 }
 
@@ -81,7 +85,7 @@ void WindowModule::start()
     {
         throw std::runtime_error("window module: glfwInit failed");
     }
-    glfwInitialized = true;
+    glfwInitialized    = true;
     activeWindowModule = this;
     glfwSetErrorCallback(&WindowModule::errorCallback);
 
@@ -94,7 +98,7 @@ void WindowModule::start()
 
 void WindowModule::stop()
 {
-    for (auto& entry : windows)
+    for (auto &entry : windows)
     {
         if (entry.second.window != nullptr)
         {
@@ -110,19 +114,23 @@ void WindowModule::stop()
         glfwInitialized = false;
     }
     activeWindowModule = nullptr;
-    boundContext = nullptr;
+    boundContext       = nullptr;
 }
 
-void* WindowModule::capabilityPointerFor(const std::string& capabilityName)
+void *WindowModule::capabilityPointerFor(
+    const std::string &capabilityName
+)
 {
     if (capabilityName == WindowCapability::capabilityName)
     {
-        return static_cast<WindowCapability*>(this);
+        return static_cast<WindowCapability *>(this);
     }
     return nullptr;
 }
 
-WindowIdentifier WindowModule::createMainWindow(const WindowDescription& description)
+WindowIdentifier WindowModule::createMainWindow(
+    const WindowDescription &description
+)
 {
     if (!glfwInitialized)
     {
@@ -133,8 +141,13 @@ WindowIdentifier WindowModule::createMainWindow(const WindowDescription& descrip
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, description.resizable ? GLFW_TRUE : GLFW_FALSE);
 
-    GLFWwindow* window = glfwCreateWindow(static_cast<int>(description.width), static_cast<int>(description.height),
-                                          description.title.c_str(), nullptr, nullptr);
+    GLFWwindow *window = glfwCreateWindow(
+        static_cast<int>(description.width),
+        static_cast<int>(description.height),
+        description.title.c_str(),
+        nullptr,
+        nullptr
+    );
     if (window == nullptr)
     {
         throw std::runtime_error("window module: glfwCreateWindow failed");
@@ -142,23 +155,27 @@ WindowIdentifier WindowModule::createMainWindow(const WindowDescription& descrip
 
     WindowRecord record;
     record.identifier = nextWindowIdentifier++;
-    record.window = window;
+    record.window     = window;
 
     installCallbacks(window);
     windows.emplace(record.identifier, record);
 
     if (logger != nullptr)
     {
-        logger->logMessage(LogLevel::Information,
-                           "created window '" + description.title + "' (" + std::to_string(description.width) + "x" +
-                               std::to_string(description.height) + ")");
+        logger->logMessage(
+            LogLevel::Information,
+            "created window '" + description.title + "' (" + std::to_string(description.width) + "x"
+                + std::to_string(description.height) + ")"
+        );
     }
     return record.identifier;
 }
 
-bool WindowModule::windowCloseRequested(WindowIdentifier windowIdentifier)
+bool WindowModule::windowCloseRequested(
+    WindowIdentifier windowIdentifier
+)
 {
-    WindowRecord* record = findRecord(windowIdentifier);
+    WindowRecord *record = findRecord(windowIdentifier);
     if (record == nullptr || record->window == nullptr)
     {
         return true;
@@ -175,9 +192,9 @@ void WindowModule::pollEvents()
     glfwPollEvents();
 
     // Report close requests exactly once per window.
-    for (auto& entry : windows)
+    for (auto &entry : windows)
     {
-        WindowRecord& record = entry.second;
+        WindowRecord &record = entry.second;
         if (!record.closeReported && record.window != nullptr && glfwWindowShouldClose(record.window))
         {
             record.closeReported = true;
@@ -191,27 +208,31 @@ void WindowModule::pollEvents()
     }
 }
 
-std::uint32_t WindowModule::framebufferWidth(WindowIdentifier windowIdentifier)
+std::uint32_t WindowModule::framebufferWidth(
+    WindowIdentifier windowIdentifier
+)
 {
-    WindowRecord* record = findRecord(windowIdentifier);
+    WindowRecord *record = findRecord(windowIdentifier);
     if (record == nullptr || record->window == nullptr)
     {
         return 0;
     }
-    int width = 0;
+    int width  = 0;
     int height = 0;
     glfwGetFramebufferSize(record->window, &width, &height);
     return static_cast<std::uint32_t>(width);
 }
 
-std::uint32_t WindowModule::framebufferHeight(WindowIdentifier windowIdentifier)
+std::uint32_t WindowModule::framebufferHeight(
+    WindowIdentifier windowIdentifier
+)
 {
-    WindowRecord* record = findRecord(windowIdentifier);
+    WindowRecord *record = findRecord(windowIdentifier);
     if (record == nullptr || record->window == nullptr)
     {
         return 0;
     }
-    int width = 0;
+    int width  = 0;
     int height = 0;
     glfwGetFramebufferSize(record->window, &width, &height);
     return static_cast<std::uint32_t>(height);
@@ -221,14 +242,16 @@ std::vector<WindowIdentifier> WindowModule::windowIdentifiers() const
 {
     std::vector<WindowIdentifier> identifiers;
     identifiers.reserve(windows.size());
-    for (const auto& entry : windows)
+    for (const auto &entry : windows)
     {
         identifiers.push_back(entry.first);
     }
     return identifiers;
 }
 
-std::vector<std::string> WindowModule::requiredInstanceExtensions(const std::string& graphicsApi)
+std::vector<std::string> WindowModule::requiredInstanceExtensions(
+    const std::string &graphicsApi
+)
 {
     if (graphicsApi != "vulkan")
     {
@@ -238,8 +261,8 @@ std::vector<std::string> WindowModule::requiredInstanceExtensions(const std::str
     {
         return {};
     }
-    std::uint32_t extensionCount = 0;
-    const char** extensionNames = glfwGetRequiredInstanceExtensions(&extensionCount);
+    std::uint32_t            extensionCount = 0;
+    const char             **extensionNames = glfwGetRequiredInstanceExtensions(&extensionCount);
     std::vector<std::string> extensions;
     extensions.reserve(extensionCount);
     for (std::uint32_t index = 0; index < extensionCount; ++index)
@@ -249,32 +272,37 @@ std::vector<std::string> WindowModule::requiredInstanceExtensions(const std::str
     return extensions;
 }
 
-void* WindowModule::createPresentationSurface(const std::string& graphicsApi, void* graphicsInstance,
-                                              WindowIdentifier windowIdentifier)
+void *WindowModule::createPresentationSurface(
+    const std::string &graphicsApi, void *graphicsInstance, WindowIdentifier windowIdentifier
+)
 {
     if (graphicsApi != "vulkan")
     {
         throw std::invalid_argument("window module: unsupported graphics API family '" + graphicsApi + "'");
     }
-    WindowRecord* record = findRecord(windowIdentifier);
+    WindowRecord *record = findRecord(windowIdentifier);
     if (record == nullptr || record->window == nullptr)
     {
         throw std::runtime_error("window module: surface requested for an unknown window");
     }
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-    const VkResult result =
-        glfwCreateWindowSurface(static_cast<VkInstance>(graphicsInstance), record->window, nullptr, &surface);
+    VkSurfaceKHR   surface = VK_NULL_HANDLE;
+    const VkResult result  = glfwCreateWindowSurface(
+        static_cast<VkInstance>(graphicsInstance), record->window, nullptr, &surface
+    );
     if (result != VK_SUCCESS)
     {
-        throw std::runtime_error("window module: glfwCreateWindowSurface failed with VkResult " +
-                                 std::to_string(static_cast<int>(result)));
+        throw std::runtime_error(
+            "window module: glfwCreateWindowSurface failed with VkResult " + std::to_string(static_cast<int>(result))
+        );
     }
     return surface;
 }
 
-void* WindowModule::nativeWindowHandle(WindowIdentifier windowIdentifier)
+void *WindowModule::nativeWindowHandle(
+    WindowIdentifier windowIdentifier
+)
 {
-    WindowRecord* record = findRecord(windowIdentifier);
+    WindowRecord *record = findRecord(windowIdentifier);
     if (record == nullptr)
     {
         return nullptr;
@@ -282,9 +310,11 @@ void* WindowModule::nativeWindowHandle(WindowIdentifier windowIdentifier)
     return record->window;
 }
 
-WindowIdentifier WindowModule::windowIdentifierFromNativeHandle(void* nativeWindowHandle)
+WindowIdentifier WindowModule::windowIdentifierFromNativeHandle(
+    void *nativeWindowHandle
+)
 {
-    for (const auto& entry : windows)
+    for (const auto &entry : windows)
     {
         if (entry.second.window == nativeWindowHandle)
         {
@@ -294,7 +324,9 @@ WindowIdentifier WindowModule::windowIdentifierFromNativeHandle(void* nativeWind
     return invalidWindowIdentifier;
 }
 
-WindowModule::WindowRecord* WindowModule::findRecord(WindowIdentifier windowIdentifier)
+WindowModule::WindowRecord *WindowModule::findRecord(
+    WindowIdentifier windowIdentifier
+)
 {
     const auto found = windows.find(windowIdentifier);
     if (found == windows.end())
@@ -304,12 +336,16 @@ WindowModule::WindowRecord* WindowModule::findRecord(WindowIdentifier windowIden
     return &found->second;
 }
 
-void WindowModule::installCallbacks(GLFWwindow* window)
+void WindowModule::installCallbacks(
+    GLFWwindow *window
+)
 {
     glfwSetFramebufferSizeCallback(window, &WindowModule::framebufferResizeCallback);
 }
 
-void WindowModule::framebufferResizeCallback(GLFWwindow* window, int width, int height)
+void WindowModule::framebufferResizeCallback(
+    GLFWwindow *window, int width, int height
+)
 {
     if (activeWindowModule == nullptr || activeWindowModule->boundContext == nullptr)
     {
@@ -322,18 +358,22 @@ void WindowModule::framebufferResizeCallback(GLFWwindow* window, int width, int 
     }
     WindowResizedEvent event;
     event.windowIdentifier = identifier;
-    event.width = static_cast<std::uint32_t>(width);
-    event.height = static_cast<std::uint32_t>(height);
+    event.width            = static_cast<std::uint32_t>(width);
+    event.height           = static_cast<std::uint32_t>(height);
     activeWindowModule->boundContext->eventBus().publish(event);
 }
 
-void WindowModule::errorCallback(int errorCode, const char* description)
+void WindowModule::errorCallback(
+    int errorCode, const char *description
+)
 {
     if (activeWindowModule != nullptr && activeWindowModule->logger != nullptr)
     {
-        activeWindowModule->logger->logMessage(LogLevel::Error, "window module: " + describeGlfwError(errorCode) +
-                                                                    " (" + std::to_string(errorCode) + "): " +
-                                                                    (description != nullptr ? description : ""));
+        activeWindowModule->logger->logMessage(
+            LogLevel::Error,
+            "window module: " + describeGlfwError(errorCode) + " (" + std::to_string(errorCode)
+                + "): " + (description != nullptr ? description : "")
+        );
     }
 }
 
