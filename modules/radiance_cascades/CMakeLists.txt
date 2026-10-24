@@ -8,7 +8,7 @@ target_link_libraries(engine_module_radiance_cascades
     PUBLIC engine_capability_logging
     PUBLIC engine_capability_renderer
     PUBLIC engine_capability_pbr
-    PRIVATE engine_module_renderer
+    PRIVATE engine_module_renderer_vulkan
     PRIVATE engine_vulkan_hpp_bindings
 )
 
@@ -20,7 +20,7 @@ if(ENGINE_BUILD_DEMO)
                                           shaders/rc_gather.comp
                                           shaders/rc_denoise.comp
                                   INCLUDE_DIRS shaders/common
-                                            "${CMAKE_SOURCE_DIR}/modules/renderer/shaders/common")
+                                            "${CMAKE_SOURCE_DIR}/modules/renderer_vulkan/shaders/common")
 endif()
 
 
@@ -51,7 +51,7 @@ endif()
 
 # This module provides a demand marker capability ("indirect_diffuse") and no
 # call interface of its own: its implementation surface is the lighting
-# technique pass it attaches to the renderer (modules/renderer/
+# technique pass it attaches to the renderer (modules/renderer_vulkan/
 # render_interface.hpp, an in-tree integration that is deliberately not a
 # capability). Consumers demand the marker; nothing includes a header here,
 # so no header-only include target exists.

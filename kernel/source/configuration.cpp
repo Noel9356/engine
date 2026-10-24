@@ -30,7 +30,7 @@ void walkLeafPaths(
     }
 }
 
-// TOML bare key characters, shared by --set paths and known-key declarations.
+// TOML bare key characters, shared by override paths and known-key declarations.
 bool isValidKeySegment(
     const std::string &segment
 )
@@ -65,8 +65,8 @@ std::string trimmed(
 }
 
 // Sections a shipped defaults file must never define: they belong to the
-// assembly ([engine], [providers], [permissions]) or to the host and kernel
-// ([diagnostics], [leak_test]). A package that could grow the module list or
+// assembly ([engine], [providers], [permissions]) or to the kernel
+// ([diagnostics]). A package that could grow the module list or
 // deny permissions would break the authority model the kernel is built on.
 bool isAssemblyOwnedSection(
     const std::string &sectionName
@@ -75,8 +75,7 @@ bool isAssemblyOwnedSection(
     return sectionName == ConfigurationStore::engineSectionName
         || sectionName == ConfigurationStore::providersSectionName
         || sectionName == ConfigurationStore::permissionsSectionName
-        || sectionName == ConfigurationStore::diagnosticsSectionName
-        || sectionName == ConfigurationStore::leakTestSectionName;
+        || sectionName == ConfigurationStore::diagnosticsSectionName;
 }
 
 std::string parseErrorDiagnostic(
@@ -97,7 +96,7 @@ std::string ConfigProvenance::layerName() const
     switch (layer)
     {
     case Layer::CommandLine:
-        return "command line (--set)";
+        return "staged override";
     case Layer::EngineConfig:
         return "engine configuration";
     case Layer::SceneFile:
@@ -199,8 +198,7 @@ bool ConfigurationStore::mergeDefaultsFile(
         if (sectionName == sceneSectionName)
         {
             // World content has a dedicated channel: a mod's declared scene
-            // file or the assembly's [scene] section, replaced wholesale by
-            // --scene. A defaults file would drip its scene keys into every
+            // file or the assembly's [scene] section. A defaults file would drip its scene keys into every
             // configuration that does not define the same keys - including
             // sealed-room test configurations that rely on an untouched
             // zero sky - so it is rejected instead of merged.
@@ -221,7 +219,7 @@ bool ConfigurationStore::mergeDefaultsFile(
     if (parsedTable == nullptr)
     {
         // The kernel always loads the assembly layer first; the store still
-        // tolerates a defaults-only composition (tests rely on it).
+        // tolerates a defaults-only composition (an empty configuration).
         parsedTable = new toml::table();
     }
     const ConfigProvenance provenance{.layer = layer, .source = source};
@@ -298,14 +296,14 @@ bool ConfigurationStore::stageCommandLineOverride(
     const std::size_t separator = assignment.find('=');
     if (separator == std::string::npos)
     {
-        errorMessage = "--set expects <key>=<value>, got '" + assignment + "' (no '=')";
+        errorMessage = "override assignment expects <key>=<value>, got '" + assignment + "' (no '=')";
         return false;
     }
     const std::string key      = trimmed(assignment.substr(0, separator));
     const std::string rawValue = trimmed(assignment.substr(separator + 1));
     if (key.empty() || key.front() == '.' || key.back() == '.' || key.find("..") != std::string::npos)
     {
-        errorMessage = "--set key '" + key
+        errorMessage = "override key '" + key
                      + "' is not a dotted path of bare key segments (example: scene.sun.intensity=2.0)";
         return false;
     }
@@ -319,7 +317,7 @@ bool ConfigurationStore::stageCommandLineOverride(
         position                  = (dot == std::string::npos) ? key.size() : dot + 1;
         if (!isValidKeySegment(segment))
         {
-            errorMessage = "--set key '" + key
+            errorMessage = "override key '" + key
                          + "' is not a dotted path of bare key segments (example: scene.sun.intensity=2.0)";
             return false;
         }
@@ -328,7 +326,7 @@ bool ConfigurationStore::stageCommandLineOverride(
 
     // TOML value syntax first (numbers, booleans, quoted strings, arrays,
     // inline tables); a raw value that TOML rejects becomes a literal string,
-    // so --set window.title=My Room works without quotes.
+    // so window.title=My Room works without quotes.
     bool parsedAsToml = false;
     if (!rawValue.empty())
     {
@@ -361,7 +359,7 @@ bool ConfigurationStore::applyCommandLineOverrides(
     {
         parsedTable = new toml::table();
     }
-    const ConfigProvenance provenance{.layer = ConfigProvenance::Layer::CommandLine, .source = "--set"};
+    const ConfigProvenance provenance{.layer = ConfigProvenance::Layer::CommandLine, .source = "staged override"};
     for (const StagedOverride &staged : stagedOverrides)
     {
         std::string fullPath;
@@ -387,7 +385,7 @@ bool ConfigurationStore::applyCommandLineOverrides(
             toml::table *next = (existing == nullptr) ? nullptr : existing->as_table();
             if (next == nullptr)
             {
-                errorMessage     = "--set " + fullPath + ": '" + navigated + "' is not a table";
+                errorMessage     = "override " + fullPath + ": '" + navigated + "' is not a table";
                 navigationFailed = true;
                 break;
             }
@@ -410,7 +408,7 @@ bool ConfigurationStore::applyCommandLineOverrides(
             const toml::node *valueNode = staged.parsedValue->get("value");
             if (valueNode == nullptr)
             {
-                errorMessage = "--set " + fullPath + ": the staged value is missing (internal error)";
+                errorMessage = "override " + fullPath + ": the staged value is missing (internal error)";
                 return false;
             }
             current->insert_or_assign(lastSegment, *valueNode);
@@ -557,7 +555,14 @@ bool ConfigurationStore::declareKnownConfigKey(
     {
         return false;
     }
-    const std::size_t separator = dottedKeyPath.find('.');
+    // A trailing ".*" is the dynamic sub-table wildcard (see the leaf check
+    // below): strip it for segment validation, register the entry verbatim.
+    const std::size_t wildcard = dottedKeyPath.rfind(".*");
+    const std::string validated =
+        wildcard != std::string::npos && wildcard + 2 == dottedKeyPath.size()
+            ? dottedKeyPath.substr(0, wildcard)
+            : dottedKeyPath;
+    const std::size_t separator = validated.find('.');
     if (separator == std::string::npos)
     {
         // No dot: the whole section is known. Used for sections whose keys are
@@ -569,8 +574,8 @@ bool ConfigurationStore::declareKnownConfigKey(
         knownKeys[dottedKeyPath].insert("");
         return true;
     }
-    const std::string section = dottedKeyPath.substr(0, separator);
-    const std::string path    = dottedKeyPath.substr(separator + 1);
+    const std::string section = validated.substr(0, separator);
+    const std::string path    = validated.substr(separator + 1);
     if (!isValidKeySegment(section) || path.empty() || path.front() == '.' || path.back() == '.'
         || path.find("..") != std::string::npos)
     {
@@ -589,7 +594,7 @@ bool ConfigurationStore::declareKnownConfigKey(
             return false;
         }
     }
-    knownKeys[section].insert(path);
+    knownKeys[section].insert(dottedKeyPath.substr(separator + 1));
     return true;
 }
 
@@ -597,18 +602,13 @@ void ConfigurationStore::declareAssemblyKnownKeys()
 {
     // [engine]: the assembly itself. [providers]: capability names are
     // dynamic, the whole section is declared. [permissions] and
-    // [diagnostics]: read by the kernel. [leak_test]: read by the host frame
-    // loop (--leak-check).
+    // [diagnostics]: read by the kernel.
     declareKnownConfigKey("engine.mod_directory");
     declareKnownConfigKey("engine.modules_directory");
     declareKnownConfigKey("engine.disabled_mods");
     declareKnownConfigKey(providersSectionName);
     declareKnownConfigKey("permissions.denied");
     declareKnownConfigKey(std::string(diagnosticsSectionName) + "." + diagnosticsLatencyReportKey);
-    declareKnownConfigKey(std::string(leakTestSectionName) + "." + leakTestMaxLuminanceKey);
-    declareKnownConfigKey(std::string(leakTestSectionName) + "." + leakTestRegionKey);
-    declareKnownConfigKey(std::string(leakTestSectionName) + "." + leakTestLitRegionKey);
-    declareKnownConfigKey(std::string(leakTestSectionName) + "." + leakTestMinLitLuminanceKey);
 }
 
 std::vector<std::string> ConfigurationStore::unknownKeyWarnings() const
@@ -647,6 +647,30 @@ std::vector<std::string> ConfigurationStore::unknownKeyWarnings() const
                 const std::string relativePath = leafPath.size() > section.size() ? leafPath.substr(section.size() + 1)
                                                                                   : leafPath;
                 if (sectionDeclared && knownSection->second.count(relativePath) > 0)
+                {
+                    return;
+                }
+                // Wildcard entries ("actions.*") declare DYNAMIC SUB-TABLES -
+                // sections whose keys are free-form maps the component walks
+                // by name ([input.actions] is the shipped example: action
+                // names are user-authored, not a fixed schema). A known path
+                // ending in ".*" covers every leaf beneath its prefix.
+                bool coveredByWildcard = false;
+                if (sectionDeclared)
+                {
+                    for (const std::string &known : knownSection->second)
+                    {
+                        const std::size_t wildcard = known.rfind(".*");
+                        if (wildcard != std::string::npos && wildcard + 2 == known.size()
+                            && relativePath.rfind(known.substr(0, wildcard), 0) == 0
+                            && (relativePath.size() == wildcard || relativePath[wildcard] == '.'))
+                        {
+                            coveredByWildcard = true;
+                            break;
+                        }
+                    }
+                }
+                if (coveredByWildcard)
                 {
                     return;
                 }

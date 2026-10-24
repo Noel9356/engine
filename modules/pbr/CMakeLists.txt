@@ -8,7 +8,7 @@ target_link_libraries(engine_module_pbr
     PUBLIC engine_capability_pbr
     PUBLIC engine_capability_logging
     PUBLIC engine_capability_renderer
-    PRIVATE engine_module_renderer
+    PRIVATE engine_module_renderer_vulkan
     PRIVATE engine_vulkan_hpp_bindings
 )
 
@@ -16,7 +16,7 @@ if(ENGINE_BUILD_DEMO)
     include("${CMAKE_SOURCE_DIR}/cmake/shader_compilation.cmake")
     engine_compile_module_shaders(TARGET engine_module_pbr
                                   SOURCES shaders/pbr_lighting.comp
-                                  INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/modules/renderer/shaders/common")
+                                  INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/modules/renderer_vulkan/shaders/common")
 endif()
 
 

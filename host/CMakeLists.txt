@@ -1,6 +1,5 @@
 add_executable(engine
     main.cpp
-    leak_check.cpp
 )
 
 # The host links only the kernel plus the published capability headers of the

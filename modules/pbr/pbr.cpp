@@ -51,7 +51,7 @@ static_assert(sizeof(PbrPassPush) == 48, "pbr_lighting.comp expects a 48-byte pu
 // outlives one rebuild is a declared member, never a local. A local layout
 // here once died at the end of rebuild() while the pipeline kept referencing
 // it, which NVIDIA's validation layer rejects on every frame bind
-// (docs/robustness.md, problem 25).
+// (docs/robustness.md, invariant 25).
 class PbrLightingPass final : public LightingTechniquePass
 {
 public:
@@ -160,7 +160,7 @@ private:
 
         // Set 1 layout: G-buffer inputs + direct radiance target. A member:
         // the pipeline layout and the frame descriptor set both embed it, so
-        // it must outlive this rebuild call (robustness.md problem 25).
+        // it must outlive this rebuild call (robustness.md invariant 25).
         {
             std::array<vk::DescriptorSetLayoutBinding, 4> bindings;
             for (std::uint32_t binding = 0; binding < 3; ++binding)

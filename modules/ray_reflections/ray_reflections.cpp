@@ -45,7 +45,7 @@ constexpr std::int32_t relightShadowSteps    = 16;
 // them lazily on the first record and rebuilds them whenever the frame
 // resources were recreated. Same lifetime discipline as the other technique
 // passes: layouts are declared members, teardown runs in strict reverse
-// dependency order (docs/robustness.md, problem 25).
+// dependency order (docs/robustness.md, invariant 25).
 class RayReflectionsPass final : public LightingTechniquePass
 {
 public:

@@ -4,7 +4,7 @@
 // Off-main-thread work with main-thread completion, as an opt-in utility.
 //
 // The engine's threading contract is deliberate and documented
-// (docs/architecture.md, docs/robustness.md problem 38): the event bus is
+// (docs/architecture.md, docs/robustness.md invariant 38): the event bus is
 // single threaded, the frame loop is serialized, and nothing shares GPU
 // resources across threads. That contract is exactly why this utility exists
 // as a KERNEL utility rather than a bus feature: modules occasionally need

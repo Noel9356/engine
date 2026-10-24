@@ -1,6 +1,6 @@
 # pbr module
 
-The analytic direct-lighting technique. The pbr module attaches a compute pass to the renderer through the technique interface (`modules/renderer/render_interface.hpp`), owns the scene light state behind the `LightingCapability` (capability name `lighting`, published in `lighting_capability.hpp` next to this module — the light-state vocabulary travels with its provider), and writes the DIRECT radiance layer the composite adds. It is named after its algorithm — physically based rendering direct transport — because technique modules are named after algorithms, never after rendering categories (`docs/architecture.md`).
+The analytic direct-lighting technique. The pbr module attaches a compute pass to the renderer through the technique interface (`modules/renderer_vulkan/render_interface.hpp`), owns the scene light state behind the `LightingCapability` (capability name `lighting`, published in `lighting_capability.hpp` next to this module — the light-state vocabulary travels with its provider), and writes the DIRECT radiance layer the composite adds. It is named after its algorithm — physically based rendering direct transport — because technique modules are named after algorithms, never after rendering categories (`docs/architecture.md`).
 
 ## The LightingCapability
 
@@ -10,8 +10,8 @@ The pbr module is the capability's provider: the sun is set with `setSunLight`/`
 
 `shaders/pbr_lighting.comp` evaluates Cook-Torrance GGX for every G-buffer pixel against the sun and all point lights, with analytic SDF soft shadows: shadow rays sphere-trace the same analytic scene SDF the renderer rasterizes against (one geometry truth — the shared parameterization in `scene_common.glsl`), and the penumbra factor shapes the soft shadow width. The dark-side details that make it robust:
 
-- Shadow rays leave the surface through a guarded origin: the G-buffer normal carries the normal map, and when the offset point sits inside the analytic SDF the origin re-offsets along the SDF's geometric normal — a normal-mapped normal pushed origins inside the geometry and self-shadowed whole patches until the guard went in.
-- Point-light shadow rays terminate AT the light. A radius-cutoff bound let them fly past the light and hit whatever sat behind it, carving phantom shadow disks out of surfaces beyond the light.
+- Shadow rays leave the surface through a guarded origin: the G-buffer normal carries the normal map, and a normal-mapped normal can push the offset point inside the analytic SDF — the origin then re-offsets along the SDF's geometric normal.
+- Point-light shadow rays terminate AT the light: a ray traveling past the light would shadow whatever sits behind it.
 - When the run also demands `indirect_specular`, this pass dims its analytic specular by the same Fresnel weight the reflection layer carries, so the two passes SPLIT the specular energy instead of drawing the sun twice. The hand-over weight is the shared `[lighting].max_roughness` key, read by both layers so the two sides of the hand-off can never drift apart.
 - The relight of first-bounce hit points (shared with GI and reflections through `surfaceOutgoingRadiance` in `relight_common.glsl`) stores physically scaled LAMBERTIAN radiance, so every stage of the transport chain carries the same energy unit.
 

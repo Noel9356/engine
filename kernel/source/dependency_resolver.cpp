@@ -178,6 +178,17 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
         }
     }
 
+    // A broken selection phase already carries the root cause (an ambiguity
+    // the configuration must settle, or a selection nobody can satisfy). The
+    // edge phase below would only repeat that failure per consumer - one
+    // precise diagnostic per broken startup means the resolver reports the
+    // root cause and stops (docs/architecture.md, the resolution contract).
+    if (!result.diagnostics.empty())
+    {
+        result.successful = false;
+        return result;
+    }
+
     // Build consumer -> provider edges. Each edge is (providerIndex, consumerIndex).
     std::vector<std::pair<ManifestIndex, ManifestIndex>> edges;
     for (ManifestIndex consumerIndex = 0; consumerIndex < manifestCount; ++consumerIndex)

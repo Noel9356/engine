@@ -1,6 +1,6 @@
 # Configuration reference
 
-Default file: `config/engine.toml`, resolved relative to the executable; `--config <path>` overrides. Parsed with toml++, so type errors report file and line. Run `./engine --validate` after every edit — it performs the full load/resolve/permission pass without opening a window, and warns about keys that no component declares.
+Default file: `config/engine.toml`, resolved relative to the executable. The executable takes no command line input; everything a run can vary lives in the configuration layers below. Parsed with toml++, so type errors report file and line. Startup performs the full load/resolve/permission pass and warns about keys that no component declares; the kernel's `validate()` runs the same pass without opening a window (an embedder's dry run).
 
 ## The layer stack
 
@@ -8,9 +8,9 @@ The effective configuration is assembled from layers, in decreasing precedence:
 
 | Layer | Provided by | Merge rule |
 |---|---|---|
-| command line (`--set`) | the `--set key=value` flags, in the order given | replaces; highest authority |
-| engine configuration | `config/engine.toml` (or `--config <path>`) | replaces |
-| scene file | the world source: `--scene <path>`, or a content mod's declared scene file when the assembly defines no `[scene]` of its own (see below) | replaces the whole `[scene]` section, nothing else |
+| staged overrides | assignments a composition root stages through the kernel before `construct()`; the shipped executable stages none | replaces; highest authority |
+| engine configuration | `config/engine.toml` | replaces |
+| scene file | the world source: a composition root's explicit scene file, or a content mod's declared scene file when the assembly defines no `[scene]` of its own (see below) | replaces the whole `[scene]` section, nothing else |
 | module defaults | `config/modules/<name>/module.toml`, when a module ships one | fills gaps only |
 | mod defaults | `<mod package>/config.toml`, per active package | fills gaps only |
 | code defaults | each component's `value_or(...)` in source | reached when no layer above provided the key |
@@ -19,32 +19,32 @@ Rules the stack guarantees:
 
 - **The engine configuration always wins over shipped files.** A `module.toml` or a mod's `config.toml` can never override a value the assembly provides; defaults only FILL keys nobody above them set. Between two defaults files providing the same key, the first merge wins — module defaults before mod defaults, each group in sorted name order.
 - **Tables deep-merge; arrays and `[[scene.objects]]` rows replace wholesale.** A higher layer that sets `[[scene.objects]]` replaces the entire object list, never appends to it. That is what keeps scene authoring predictable: the objects a run uses are the objects the winning layer lists.
-- **The scene file owns `[scene]`, and the world has exactly one source.** Precedence: `--scene` (explicit intent) > the assembly's own `[scene]` > an installed content mod's declared scene file (`scene = ...` in `mod.toml`, applied with the same wholesale swap) > code defaults. `--scene` swaps the world section out from under the assembly configuration wholesale: a key the assembly's `[scene]` had is gone unless the scene file lists it too. A scene file may define ONLY `[scene]` (sub-tables and array-of-tables rows included); any other top-level key, or a missing/`[scene]`-as-value, is a precise startup error. This is why `--scene` is useful with the shipped demo assembly: the content mod's demo objects do not leak into your world. Content mods may coexist freely: with an explicit world source their claims are simply not applied (`--validate` warns; an explicit `--scene` stays quiet), and only claims that would decide the world must be unambiguous — two or more active claims with no explicit source fail startup with a report naming every claim. World content never arrives through a defaults layer: a `config.toml` or `module.toml` that defines `[scene]` fails startup with a precise error, because per-key default merging would drip scene values into configurations that did not ask for them (a sealed-room test whose zero sky must stay zero no matter what content is installed).
-- **The command line is absolute.** `--set` is parsed before any backend starts (a malformed assignment is a usage error, exit code 2) and applied after every other layer. Keys are dotted paths of bare segments (`scene.sun.intensity`, `test_scene`'s `renderer.texture_directory`); values use TOML syntax — numbers, booleans, quoted strings, arrays, inline tables — and any raw value TOML rejects becomes a literal string, so `--set window.title=My Room` works without quotes.
+- **The scene file owns `[scene]`, and the world has exactly one source.** Precedence: an explicitly staged scene file (a composition root's explicit intent) > the assembly's own `[scene]` > an installed content mod's declared scene file (`scene = ...` in `mod.toml`) > code defaults. A scene file swaps the world section out from under the assembly configuration wholesale: a key the assembly's `[scene]` had is gone unless the scene file lists it too. A scene file may define ONLY `[scene]` (sub-tables and array-of-tables rows included); any other top-level key, or a missing/`[scene]`-as-value, is a precise startup error. This is how an assembly replaces the shipped demo world: the content mod's demo objects do not leak into your world. Content mods may coexist freely: with an explicit world source their claims are simply not applied (a warning says so), and only claims that would decide the world must be unambiguous — two or more active claims with no explicit source fail startup with a report naming every claim. World content never arrives through a defaults layer: a `config.toml` or `module.toml` that defines `[scene]` fails startup with a precise error, because per-key default merging would drip scene values into configurations that did not ask for them (a sealed room whose zero sky must stay zero no matter what content is installed).
+- **Staged overrides are absolute.** A composition root stages `section.path=value` assignments before any backend starts (a malformed assignment fails right there) and they are applied after every other layer. The shipped executable stages nothing — an assembly's world is what its files say — but the layer exists so an embedder can vary a run without rewriting files. Keys are dotted paths of bare segments (`scene.sun.intensity`); values use TOML syntax — numbers, booleans, quoted strings, arrays, inline tables — and any raw value TOML rejects becomes a literal string, so `window.title=My Room` works without quotes.
 - **No hot reload.** The stack is assembled once, before any component constructs.
 
 ### Shipped defaults
 
-A module directory may carry `module.toml` and a mod package may carry `config.toml` next to its `mod.toml`; the build copies both into the runtime layout and the kernel merges them as the two defaults layers above. Defaults files may only define sections, and never the assembly- or host-owned ones (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`, `[leak_test]`) — a package that could relocate the runtime layout or deny permissions would break the authority model — and never `[scene]` (world content has a dedicated channel, see the layer rules above). Any such file fails startup with a precise error. The in-tree example is the content package's own: `mods/test_scene/config.toml` ships `renderer.texture_directory`, so the renderer finds the package's texture sets in every configuration that does not set the key itself; the assembly can override it from `engine.toml`, and `--set` overrides both.
+A module directory may carry `module.toml` and a mod package may carry `config.toml` next to its `mod.toml`; the build copies both into the runtime layout and the kernel merges them as the two defaults layers above. Defaults files may only define sections, and never the assembly-owned ones (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`) — a package that could relocate the runtime layout or deny permissions would break the authority model — and never `[scene]` (world content has a dedicated channel, see the layer rules above). Any such file fails startup with a precise error. The in-tree example is the content package's own: `mods/test_scene/config.toml` ships `renderer.texture_directory`, so the renderer finds the package's texture sets in every configuration that does not set the key itself; the assembly can override it from `engine.toml`.
 
 ### Provenance
 
-Every effective value records the layer and source that provided it. `./engine --provenance` validates and then prints the full map:
+Every effective value records the layer and source that provided it; `ConfigurationStore::provenanceReport()` prints the full map (the kernel surfaces it after a validation pass):
 
 ```
 configuration provenance (the layer that provided each effective value):
   renderer.texture_directory <- mod defaults 'test_scene'
-  scene.camera.fov <- command line (--set)
+  scene.camera.fov <- staged override
   scene.objects <- scene file '/opt/engine/runtime/mods/test_scene/scene.toml'
   window.title <- engine configuration '/opt/engine/runtime/config/engine.toml'
   ...
 ```
 
-The same records power the unknown-key warnings: when `--validate` reports `unknown configuration key 'renderer.exposur' (from 'config/engine.toml')`, the source is the provenance of the offending value.
+The same records power the unknown-key warnings: when startup reports `unknown configuration key 'renderer.exposur' (from 'config/engine.toml')`, the source is the provenance of the offending value.
 
 ### Known keys
 
-Every component declares the configuration keys it reads — modules in their manifest (`knownConfigKeys`), mods as `config_keys` in `mod.toml` — and the kernel adds its own assembly/host keys (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`, `[leak_test]`). `--validate` walks the effective table and reports anything nobody declares:
+Every component declares the configuration keys it reads — modules in their manifest (`knownConfigKeys`), mods as `config_keys` in `mod.toml` — and the kernel adds its own assembly keys (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`). Startup validation walks the effective table and reports anything nobody declares:
 
 ```
 warning: unknown configuration key 'renderer.exposur' (from 'config/engine.toml')
@@ -58,17 +58,16 @@ This document covers the GLOBAL and SHARED sections. Each module owns the docume
 | Section | Documented in |
 |---|---|
 | `[engine]`, `[providers]`, `[permissions]` | here (assembly: graph wiring and grants) |
-| `[logging]` | `../modules/logging/README.md` |
-| `[window]` | `../modules/window/README.md` |
-| `[input]` | `../modules/input/README.md` |
-| `[renderer]` | `../modules/renderer/README.md` |
-| `[screenshot]` | `../modules/screenshot/README.md` |
+| `[logging]` | `../modules/logging_stdout/README.md` |
+| `[window]` | `../modules/window_glfw/README.md` |
+| `[input]` | `../modules/input_glfw/README.md` |
+| `[renderer]` | `../modules/renderer_vulkan/README.md` |
+| `[screenshot]` | `../modules/screenshot_png/README.md` |
 | `[diagnostics]` | here (host-owned opt-in reporting) |
 | `[lighting]` (shared hand-off key `max_roughness`), `[lighting.pbr]` | `../modules/pbr/README.md` |
 | `[lighting.radiance_cascades]` | `../modules/radiance_cascades/README.md` |
 | `[lighting.ray_reflections]` | `../modules/ray_reflections/README.md` |
 | `[scene]` | here (shared world content — read by several modules) |
-| `[leak_test]` | here (host-only, consumed by `--leak-check`) |
 
 Sections other than a component's own are read-only shared configuration by convention: the module that owns a section reads it, everyone else treats it as data.
 
@@ -84,7 +83,7 @@ There is no module list and no demand list. Modules are activated purely by the 
 
 ## [providers]
 
-Picks one implementation when several provide the same capability, e.g. `renderer = "renderer"`. The key is the capability name - a family such as `renderer` when the candidates are its implementation-bound members (`renderer.vulkan` and friends), or an exact name shared by several providers. Values are component names. Several providers with no selection fails startup, naming the candidates and the key that resolves them.
+Picks one implementation when several provide the same capability, e.g. `physics = "physics_builtin"`. The key is the capability name - a family such as `physics` when the candidates are its implementation-bound members (`physics.builtin` and friends), or an exact name shared by several providers. Values are component names. Several providers with no selection fails startup, naming the candidates and the key that resolves them.
 
 ## [permissions]
 
@@ -100,7 +99,7 @@ Modules and mods are both subject to denials; a denied permission fails startup 
 |---|---|---|---|
 | `latency_report` | bool | `false` | record event dispatch latencies and print the per-channel report plus frame-time percentiles at shutdown |
 
-Diagnostics are opt-in: with recording disabled the event bus never reads a clock, so a normal run pays nothing and stays quiet. The same report is available per run with `--latency-report`.
+Diagnostics are opt-in: with recording disabled the event bus never reads a clock, so a normal run pays nothing and stays quiet.
 
 ## [scene]
 
@@ -118,57 +117,17 @@ Shared world content, read by the renderer (rasterization) and the lighting modu
 | `camera.fly_speed` / `camera.fly_boost` | float | `4` / `4` | base speed (world units per second) and the Shift boost multiplier (>= 1) |
 | `camera.look_sensitivity` | float | `0.0022` | yaw/pitch radians per cursor pixel |
 | `sun.direction` / `sun.color` / `sun.intensity` | float[3]/float[3]/float | off | seeds the directional light and the sky's sun disk (`direction` points towards the scene) |
-| `objects` | array of tables | `[]` | scene objects (max 32) |
+| `objects` | array of tables | `[]` | scene objects (max 256, the GPU primitive buffer's capacity) |
 
 Each `[[scene.objects]]` row: `type` (`box`, `sphere`, or `plane` - authoring sugar for a thin box so rasterized and traced geometry stay the same primitive), `position`, `size` (box half extents / sphere radius), `rotation_y` (degrees), `albedo`, `roughness`, `metallic`, `emissive_strength` (emissive radiance is albedo times this value), `texture` (name of a PBR texture set under `[renderer].texture_directory` as `<name>/` - a folder with `Color.png`, `NormalGL.png`, `Roughness.png` and optional `Metalness.png`; all sets used by one scene must share one resolution), and `uv_scale` (world meters per texture tile, default 1). An object with a texture set takes albedo/roughness/metallic/normal from its maps; the flat values are the fallback. Point lights can be seeded with `[[scene.point_lights]]` rows (`position`, `color`, `intensity`, `radius`).
 
-Where the world itself comes from is a configuration-source question, not a `[scene]` key: the shipped demo world lives in the content mod (`mods/test_scene/scene.toml`, declared through the manifest's `scene` key), and an assembly or `--scene` file that defines `[scene]` replaces it wholesale (precedence in "The layer stack"). The content package also ships the texture sets and the `renderer.texture_directory` default pointing at them; a scene naming texture sets with no directory configured fails with a precise error instead of rendering flat materials.
+Where the world itself comes from is a configuration-source question, not a `[scene]` key: the shipped demo world lives in the content mod (`mods/test_scene/scene.toml`, declared through the manifest's `scene` key), and an assembly that defines its own `[scene]` replaces it wholesale (precedence in "The layer stack"). The content package also ships the texture sets and the `renderer.texture_directory` default pointing at them; a scene naming texture sets with no directory configured fails with a precise error instead of rendering flat materials.
 
 The demo scene ships five CC0 texture sets from [ambientCG](https://ambientcg.com): `WoodFloor055`, `Plaster001`, `Bricks070`, `Concrete034`, `Metal049A`.
 
-## Minimal example
+## Swapping the world
 
-An assembly wires the runtime layout and the shared sections; the capability demand comes from the mods:
-
-```toml
-[engine]
-disabled_mods = []
-
-[window]
-title = "my demo"
-
-[renderer]
-enable_validation = false
-```
-
-```toml
-# mods/my_game/mod.toml — the demand side of the same run
-id = "my_game"
-engine_api = 1
-type = "script"
-entry = "main.lua"
-host_capability = "scripting"
-capabilities = ["scripting", "logging", "window", "input", "renderer"]
-```
-
-The mod's requirement list is what pulls the providers in — the script host, the logger, the window, the input aggregator and the renderer (the renderer's own requirements bring `logging` and `window` transitively, so the explicit entries are documentation as much as wiring). The assembly defines no `[scene]`, so an installed content mod's world renders if one is present. Removing `input` from the demand list and restarting keeps the input module dormant entirely: startup gets faster and the camera stays at its configured pose.
-
-## Layered one-liners
-
-The same assembly, without touching any file:
-
-```sh
-# A different world: the scene file owns [scene] wholesale.
-./engine --scene my_world.toml
-
-# Command-line tweaks on top of any assembly - repeatable, highest layer.
-./engine --set window.title="My Room" --set scene.sun.intensity=5.0 --set scene.camera.fov=90
-
-# Which layer provided what (validates first).
-./engine --validate --provenance
-```
-
-A `--scene` file holds exactly the `[scene]` section — copy any assembly-side key (the camera pose, for instance) into it that the swapped world should keep:
+An assembly that wants a different world defines its own `[scene]` section — copy any content-mod-side key (the camera pose, for instance) into it that the swapped world should keep. A composition root can also stage a `[scene]`-only scene file through the kernel, which swaps the section wholesale:
 
 ```toml
 [scene]

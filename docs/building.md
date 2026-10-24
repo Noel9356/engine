@@ -5,28 +5,24 @@ Requirements: CMake 3.24+, a C++20 compiler, a Vulkan loader, and `glslangValida
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-./build/runtime/engine --validate
+./build/runtime/engine
 ```
 
 If the Vulkan loader is not on the default linker path, add `-DCMAKE_PREFIX_PATH=/your/prefix`. On Windows the build defines `WIN32_LEAN_AND_MEAN` and `NOMINMAX` once for the whole tree (engine targets and in-tree mods alike), so no source file defines them itself.
 
-## Runtime verification without a display
+## Running
 
-`engine --validate` is a pure dry run - configuration, manifests, graph resolution, permission pass - and touches no backend, so it runs anywhere and is the first check after every configuration or manifest edit.
+The executable takes no command line input: it loads the layered configuration, resolves the component graph, and runs the frame loop until the window closes. An invalid configuration (a missing provider for a demanded capability, a denied permission, an unknown configuration key) fails startup with a precise report; a graphics-backend validation error observed during the run exits with code 3. The kernel's `validate()` is a pure dry run - configuration, manifests, graph resolution, permission pass - and touches no backend; an embedder can call it as the first check after every configuration or manifest edit.
 
-`engine --smoke-frames <n>` renders exactly `n` frames, queues one screenshot through the screenshot module halfway through (exercising the readback and PNG write), shuts down cleanly and reports through exit codes: `0` clean, `1` the frame loop threw, `2` bad usage, `3` the graphics backend observed validation errors during the run, `4` the leak check failed (`--leak-check`). The renderer observes backend errors through the debug messenger, so a broken pipeline or a disabled feature fails the run even when the driver would have carried on. Communication latency and frame-time reporting is opt-in (`[diagnostics] latency_report = true` or `--latency-report`); a normal run stays quiet at shutdown.
+Communication latency and frame-time reporting is opt-in (`[diagnostics] latency_report = true`); a normal run stays quiet at shutdown.
 
-On a display-less machine the smoke run needs a Vulkan ICD; any software ICD works, for example Mesa lavapipe (`mesa-vulkan-drivers`) with the Khronos validation layer (`vulkan-validationlayers`), discovered through the standard loader variables:
+On a display-less machine a run needs a Vulkan ICD; any software ICD works, for example Mesa lavapipe (`mesa-vulkan-drivers`), discovered through the standard loader variables:
 
 ```bash
 export VK_DRIVER_FILES=/path/to/lvp_icd.json   # or VK_ICD_FILENAMES on older loaders
-export VK_LAYER_PATH=/path/to/explicit_layer.d
-./build/runtime/engine --smoke-frames 30
 ```
 
-The `--leak-check` flag evaluates the captured frame against the `[leak_test]` section of the configuration (a sealed region that must stay dark and, optionally, a lit region that must receive light - together they catch both light leaks and a silently dead GI path) and exits 4 on failure. The shipped `config/engine.toml` defines no `[leak_test]`; an assembly that wants the check adds the section itself.
-
-Screenshots are written to a `screenshots` folder in the process working directory by default - the project root for the documented quick start (`./build/runtime/engine` from the engine tree) - so captures land where the user actually looks; `[screenshot] output_directory` overrides this (relative paths also resolve against the working directory, absolute paths as-is; see `modules/screenshot/README.md`).
+Screenshots are written to a `screenshots` folder in the process working directory by default - the project root for the documented quick start (`./build/runtime/engine` from the engine tree) - so captures land where the user actually looks; `[screenshot] output_directory` overrides this (relative paths also resolve against the working directory, absolute paths as-is; see `modules/screenshot_png/README.md`).
 
 ## Dependencies
 
@@ -69,13 +65,13 @@ Header-only dependencies the engine wraps itself (Vulkan-Hpp, sol2, toml++) are 
 - `FETCHCONTENT_SOURCE_DIR_<NAME>` points any dependency at a local source tree.
 - One online configure, then offline reconfigures forever after. To vendor, drop the source into `third_party/<name>/` (directory does not exist in a fresh checkout; create it).
 
-### TLS failures on downloads
+### Download integrity
 
-MinGW CMake bundles curl/GnuTLS without a CA trust store, so HTTPS downloads can fail with `SSL peer certificate ... not OK` while git clones succeed (git uses the OS trust store). Hash-checked downloads (Lua tarball, stb header) retry automatically without certificate verification — integrity is guaranteed by the SHA256 check, not by TLS. Alternative fixes: install `curl-ca-bundle.crt` next to your `cmake.exe`, or vendor the dependencies.
+Integrity of downloaded dependencies is guaranteed by SHA256 checks, not by TLS: the hash-checked downloads (Lua tarball, stb header) retry without certificate verification, which keeps them working under toolchains without a CA trust store (MinGW's bundled curl/GnuTLS). Under a toolchain with a trust store, installing `curl-ca-bundle.crt` next to `cmake.exe` enables verified TLS as well; vendoring under `third_party/<name>/` avoids downloads altogether.
 
 ## Options
 
-Each module has an option: `ENGINE_BUILD_MODULE_LOGGING`, `..._WINDOW`, `..._INPUT`, `..._RENDERER`, `..._SCREENSHOT`, `..._LUA_SCRIPTING`, `..._PBR`, `..._RADIANCE_CASCADES`, `..._RAY_REFLECTIONS`. Excluding a module removes its code and its third-party dependencies; a run that then demands a capability only it provides fails startup with a precise diagnostic naming the consumer, never a link error. Each module's build surface (its option, its dependencies, its shaders) is described in its own `modules/<name>/README.md`.
+Each module has an option, named after the module directory: `ENGINE_BUILD_MODULE_BVH`, `..._LOGGING_STDOUT`, `..._WINDOW_GLFW`, `..._INPUT_GLFW`, `..._RENDERER_VULKAN`, `..._SCREENSHOT_PNG`, `..._SCENE_REGISTRY`, `..._ANIMATION_TWEEN`, `..._ASSET_GLTF`, `..._PHYSICS_BUILTIN`, `..._AUDIO_MINIAUDIO`, `..._PERSISTENCE_TOML`, `..._UI_IMGUI`, `..._NET_TCP`, `..._HOT_RELOAD_WATCHER`, `..._LUA_SCRIPTING`, `..._PBR`, `..._RADIANCE_CASCADES`, `..._RAY_REFLECTIONS`. Excluding a module removes its code and its third-party dependencies; a run that then demands a capability only it provides fails startup with a precise diagnostic naming the consumer, never a link error. Each module's build surface (its option, its dependencies, its shaders) is described in its own `modules/<name>/README.md`.
 
 `ENGINE_BUILD_DEMO=OFF` removes the host executable and the runtime layout assembly (configs and mod packages).
 
@@ -85,4 +81,4 @@ After building, `build/runtime/` is relocatable: `engine` (executable), `config/
 
 ## Shaders
 
-Shaders are module code, not content: the renderer keeps GLSL in `modules/renderer/shaders/` and compiles it via the shared `engine_compile_module_shaders` helper into `runtime/shaders/`. There is no project-root shader directory and no engine-side shader asset tree. A missing `glslangValidator` is a precise configure-time error.
+Shaders are module code, not content: the renderer keeps GLSL in `modules/renderer_vulkan/shaders/` and compiles it via the shared `engine_compile_module_shaders` helper into `runtime/shaders/`. There is no project-root shader directory and no engine-side shader asset tree. A missing `glslangValidator` is a precise configure-time error.

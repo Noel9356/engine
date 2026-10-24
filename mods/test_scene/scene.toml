@@ -1,7 +1,7 @@
 # The test scene: the world content of the test_scene mod.
 #
-# This file may define only [scene] (the kernel enforces it, exactly like a
-# --scene file). It is applied wholesale, so partial configurations can never
+# This file may define only [scene] (the kernel enforces it). It is applied
+# wholesale, so partial configurations can never
 # merge with it. The same section documents the world's tuning decisions -
 # they were verified against captures, not guessed.
 

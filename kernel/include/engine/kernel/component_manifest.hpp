@@ -48,8 +48,8 @@ struct ComponentManifest
 
     // Configuration keys the component reads, as "<section>.<dotted path>"
     // ("scene.camera.fov"). The kernel aggregates these
-    // into the known-key registry behind --validate's unknown-key warnings:
-    // a key the assembly or the command line sets that nobody declares is
+    // into the known-key registry behind the unknown-key warnings:
+    // a key the assembly or a staged override sets that nobody declares is
     // dead configuration and gets reported as a warning. Arrays of tables are
     // declared by the array's path ("scene.objects") - rows are authored
     // wholesale, so their inner keys need no individual declaration. Modules

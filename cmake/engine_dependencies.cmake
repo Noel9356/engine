@@ -388,6 +388,41 @@ if(NOT TARGET engine_stb_bindings)
     target_include_directories(engine_stb_bindings SYSTEM INTERFACE "${ENGINE_STB_DIR}")
 endif()
 
+# ---- Dear ImGui (debug overlay, ui module) -------------------------------------
+# The immediate mode GUI for the module "ui"'s debug overlay. The repository
+# has no CMakeLists.txt - the same populate-only pattern as tomlplusplus, with
+# the engine wrapping the core sources plus the Vulkan backend into one static
+# library. The overlay is a shipped module, but the dependency stays fetched
+# (pinned): vendoring ~1.5 MB of third party GUI sources next to a kernel that
+# preaches capability hygiene buys nothing.
+
+engine_acquire_dependency(imgui engine_imgui_bindings
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.91.9b
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR cmake_placeholder # populate only: no add_subdirectory
+)
+
+if(NOT TARGET engine_imgui_bindings)
+    add_library(engine_imgui_bindings STATIC
+        "${imgui_SOURCE_DIR}/imgui.cpp"
+        "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+        "${imgui_SOURCE_DIR}/imgui_tables.cpp"
+        "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+        "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp"
+    )
+    # SYSTEM: third-party GUI sources; their warnings must not leak into the
+    # engine's warning-clean build either.
+    target_include_directories(engine_imgui_bindings SYSTEM PUBLIC
+        "${imgui_SOURCE_DIR}"
+        "${imgui_SOURCE_DIR}/backends"
+    )
+    # The Vulkan backend compiles against the same headers the renderer uses
+    # and resolves vk* entry points through the loader the engine already
+    # links (see the vulkan section above).
+    target_link_libraries(engine_imgui_bindings PUBLIC engine_vulkan_hpp_bindings)
+endif()
+
 # ---- miniaudio (audio playback, vendored pinned single header) -----------------
 # The header is part of the repository (third_party/miniaudio): audio is a
 # shipped module, not an optional fetch, and a missing file here is a broken

@@ -5,6 +5,7 @@
 #include "asset_capability.hpp"
 #include "audio_capability.hpp"
 #include "hot_reload_capability.hpp"
+#include "persistence_capability.hpp"
 #include "physics_capability.hpp"
 #include "input_capability.hpp"
 #include "lighting_capability.hpp"
@@ -12,6 +13,7 @@
 #include "renderer_capability.hpp"
 #include "scene_capability.hpp"
 #include "screenshot_capability.hpp"
+#include "ui_capability.hpp"
 #include "window_capability.hpp"
 #include "engine/kernel/component_interface.hpp"
 #include "engine/kernel/event_bus.hpp"
@@ -129,13 +131,23 @@ public:
     // Content import (capability "asset", per-call re-checked). Returns the
     // number of spawned objects; a failed import returns 0 and logs the
     // precise reason (the script sees the count, not an exception - import
-    // failures are content problems, not script bugs).
-    std::uint32_t importGltfForScripts(const std::string &path);
+    // failures are content problems, not script bugs). Fidelity: "mesh"
+    // (default) registers the triangles; "bbox" spawns the bounding-box
+    // proxies of the v1 contract.
+    std::uint32_t importGltfForScripts(const std::string &path, const std::string &fidelity);
+
+    // Persistence (capability "persistence", per-call re-checked).
+    bool          saveSceneForScripts(const std::string &path);
+    std::uint32_t loadSceneForScripts(const std::string &path);
+    bool          clearSceneForScripts();
 
     // Physics (capability "physics", per-call re-checked).
     // Audio (capability "audio", per-call re-checked).
     void          playSoundForScripts(const std::string &path, double volume);
     void          setMasterVolumeForScripts(double volume);
+    void          playSound3DForScripts(const std::string &path, float x, float y, float z, double volume);
+    void          setListenerPositionForScripts(float x, float y, float z);
+    void          setListenerOrientationForScripts(float fx, float fy, float fz, float ux, float uy, float uz);
 
     std::uint32_t    addPhysicsBodyForScripts(std::uint32_t objectHandle, const sol::table &body);
     bool             removePhysicsBodyForScripts(std::uint32_t bodyHandle);
@@ -143,6 +155,10 @@ public:
     sol::object      bodyVelocityForScripts(std::uint32_t bodyHandle, sol::this_state state);
     void             setGravityForScripts(float x, float y, float z);
     std::uint32_t    physicsBodyCountForScripts();
+    bool             setBodySleepingForScripts(std::uint32_t bodyHandle, bool sleeping);
+    bool             isBodyAwakeForScripts(std::uint32_t bodyHandle);
+    sol::object      raycastForScripts(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistance,
+                                       sol::this_state state);
 
 private:
     bool ensureScreenshotCapability();
@@ -235,6 +251,10 @@ private:
     bool                              physicsWarnedUnavailable = false;
     int                               audioResolutionState = 0;
     bool                              audioWarnedUnavailable = false;
+    int                               uiResolutionState = 0;
+    bool                              uiWarnedUnavailable = false;
+    int                               persistenceResolutionState = 0;
+    bool                              persistenceWarnedUnavailable = false;
     std::unordered_map<std::string, AudioCapability::SoundHandle> soundHandlesByPath;
     EventSubscription                 keyPressedSubscription;
     EventSubscription                 keyReleasedSubscription;
@@ -244,7 +264,7 @@ private:
 
     void forwardTextInput(const TextInputEvent &event);
 
-    // Hot reload (modules/hot_reload): reloads the named script mod's state.
+    // Hot reload (modules/hot_reload_watcher): reloads the named script mod's state.
     void handleHotReload(const HotReloadEvent &event);
     void reloadScriptMod(const std::string &modId);
     std::vector<ScriptModDescription> pendingScripts;

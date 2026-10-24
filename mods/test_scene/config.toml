@@ -1,7 +1,7 @@
 # Shipped defaults of the test scene mod. Defaults fill only what the
 # assembly left unset (docs/configuration.md): every configuration that does
 # not set renderer.texture_directory inherits the path into this package,
-# and any assembly or --set value wins over it. [scene] is deliberately
+# and any assembly value wins over it. [scene] is deliberately
 # absent here - world content has a dedicated channel (scene.toml, declared
 # through the manifest's scene key), and a defaults file defining [scene]
 # fails startup with a precise error.

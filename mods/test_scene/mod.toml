@@ -38,12 +38,16 @@ host_capability = "scripting"
 #   scene             the runtime object registry (the orb spawn below)
 #   animation         tween drivers (the bobbing orb below)
 #   physics           the builtin rigid body provider (the dropped ball below)
+#   persistence       the registry save/load (the overlay's save/load buttons)
+#   ui                the debug overlay (F1; F12 still captures, overlay shows)
+#   asset             the glTF importer (the Stanford dragon below)
 capabilities = ["scripting", "logging", "window", "input", "renderer", "lighting", "scene", "animation", "physics",
-                "direct_diffuse", "indirect_diffuse", "indirect_specular", "screenshot"]
+                "direct_diffuse", "indirect_diffuse", "indirect_specular", "screenshot",
+                "persistence", "ui", "asset"]
 
 permissions = ["logging.write"]
 
-# The world content this package ships. Applied when no --scene flag is
-# given and the configuration defines no [scene] section of its own
-# (precedence: --scene > assembly [scene] > this file > code defaults).
+# The world content this package ships. Applied when the configuration
+# defines no [scene] section of its own
+# (precedence: an explicitly staged scene file > assembly [scene] > this file > code defaults).
 scene = "scene.toml"

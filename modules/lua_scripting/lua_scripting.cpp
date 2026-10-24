@@ -176,6 +176,8 @@ void installEngineBridge(
             return std::make_tuple(0.0, 0.0);
         }
     );
+    engineTable.set_function("action_strength", [&module](const std::string &actionName)
+                             { return module.actionStrengthForScripts(actionName); });
 
     // Scene objects: the runtime registry (capability "scene").
     engineTable.set_function("spawn_object", [&module](const sol::table &description)
@@ -222,8 +224,12 @@ void installEngineBridge(
                              { return module.cancelTweenForScripts(handle); });
 
     // Content import (capability "asset").
-    engineTable.set_function("import_gltf", [&module](const std::string &path)
-                             { return module.importGltfForScripts(path); });
+    engineTable.set_function("import_gltf",
+                             [&module](const std::string &path, sol::object fidelity)
+                             {
+                                 return module.importGltfForScripts(
+                                     path, fidelity.valid() ? fidelity.as<std::string>() : std::string("mesh"));
+                             });
 
     // Physics (capability "physics").
     engineTable.set_function("add_physics_body", [&module](std::uint32_t handle, const sol::table &body)
@@ -237,12 +243,42 @@ void installEngineBridge(
     engineTable.set_function("set_gravity", [&module](float x, float y, float z)
                              { module.setGravityForScripts(x, y, z); });
     engineTable.set_function("body_count", [&module]() { return module.physicsBodyCountForScripts(); });
+    engineTable.set_function("set_body_sleeping", [&module](std::uint32_t handle, bool sleeping)
+                             { return module.setBodySleepingForScripts(handle, sleeping); });
+    engineTable.set_function("is_body_awake", [&module](std::uint32_t handle)
+                             { return module.isBodyAwakeForScripts(handle); });
+    engineTable.set_function("raycast",
+                             [&module](float ox, float oy, float oz, float dx, float dy, float dz, sol::object maxDistance,
+                                       sol::this_state state)
+                             {
+                                 return module.raycastForScripts(
+                                     ox, oy, oz, dx, dy, dz,
+                                     maxDistance.valid() ? static_cast<float>(maxDistance.as<double>()) : 100.0f, state);
+                             });
 
     // Audio (capability "audio").
     engineTable.set_function("play_sound", [&module](const std::string &path, sol::object volume)
                              { module.playSoundForScripts(path, volume.valid() ? volume.as<double>() : 1.0); });
     engineTable.set_function("set_master_volume", [&module](double volume)
                              { module.setMasterVolumeForScripts(volume); });
+    engineTable.set_function("play_sound_3d",
+                             [&module](const std::string &path, float x, float y, float z, sol::object volume)
+                             {
+                                 module.playSound3DForScripts(
+                                     path, x, y, z, volume.valid() ? volume.as<double>() : 1.0);
+                             });
+    engineTable.set_function("set_listener_position", [&module](float x, float y, float z)
+                             { module.setListenerPositionForScripts(x, y, z); });
+    engineTable.set_function("set_listener_orientation",
+                             [&module](float fx, float fy, float fz, float ux, float uy, float uz)
+                             { module.setListenerOrientationForScripts(fx, fy, fz, ux, uy, uz); });
+
+    // Persistence (capability "persistence").
+    engineTable.set_function("save_scene", [&module](const std::string &path)
+                             { return module.saveSceneForScripts(path); });
+    engineTable.set_function("load_scene", [&module](const std::string &path)
+                             { return module.loadSceneForScripts(path); });
+    engineTable.set_function("clear_scene", [&module]() { return module.clearSceneForScripts(); });
 }
 
 } // namespace
@@ -263,7 +299,7 @@ LuaScriptingModule::LuaScriptingModule()
     componentManifest.requiredPermissions  = {"capability.logging", "capability.window", "capability.screenshot",
                                               "capability.input", "capability.scene", "capability.lighting",
                                               "capability.renderer", "capability.animation", "capability.asset",
-                                              "capability.physics", "capability.audio"};
+                                              "capability.physics", "capability.audio", "capability.ui"};
 }
 
 LuaScriptingModule::~LuaScriptingModule()
@@ -504,11 +540,20 @@ bool LuaScriptingModule::consumeMouseDeltaForScripts(
     double &deltaX, double &deltaY
 )
 {
+    deltaX = deltaY = 0.0;
+    // The ui module's overlay claims the pointer while it is visible (the
+    // modal rule on UiCapability): scripts read a settled 0 motion while a
+    // debug window is up, deterministically - no reliance on event or
+    // subscription order between the bridge and the overlay's own drain.
+    UiCapability *ui = resolveCapabilityForScripts<UiCapability>(uiResolutionState, uiWarnedUnavailable);
+    if (ui != nullptr && ui->wantsMouse())
+    {
+        return true; // motion consumed by the overlay; scripts read zero
+    }
     InputCapability *input =
         resolveCapabilityForScripts<InputCapability>(inputResolutionState, inputWarnedUnavailable);
     if (input == nullptr)
     {
-        deltaX = deltaY = 0.0;
         return false;
     }
     input->consumeMouseDelta(deltaX, deltaY);
@@ -519,11 +564,17 @@ bool LuaScriptingModule::consumeScrollDeltaForScripts(
     double &deltaX, double &deltaY
 )
 {
+    deltaX = deltaY = 0.0;
+    // Same modal rule as the cursor deltas above.
+    UiCapability *ui = resolveCapabilityForScripts<UiCapability>(uiResolutionState, uiWarnedUnavailable);
+    if (ui != nullptr && ui->wantsMouse())
+    {
+        return true;
+    }
     InputCapability *input =
         resolveCapabilityForScripts<InputCapability>(inputResolutionState, inputWarnedUnavailable);
     if (input == nullptr)
     {
-        deltaX = deltaY = 0.0;
         return false;
     }
     input->consumeScrollDelta(deltaX, deltaY);
@@ -953,6 +1004,98 @@ void LuaScriptingModule::setMasterVolumeForScripts(
     }
 }
 
+void LuaScriptingModule::playSound3DForScripts(
+    const std::string &path, float x, float y, float z, double volume
+)
+{
+    AudioCapability *audio =
+        resolveCapabilityForScripts<AudioCapability>(audioResolutionState, audioWarnedUnavailable);
+    if (audio == nullptr)
+    {
+        return;
+    }
+    audio->playSound3D(path, {x, y, z}, static_cast<float>(volume));
+}
+
+void LuaScriptingModule::setListenerPositionForScripts(
+    float x, float y, float z
+)
+{
+    AudioCapability *audio =
+        resolveCapabilityForScripts<AudioCapability>(audioResolutionState, audioWarnedUnavailable);
+    if (audio != nullptr)
+    {
+        audio->setListenerPosition({x, y, z});
+    }
+}
+
+void LuaScriptingModule::setListenerOrientationForScripts(
+    float fx, float fy, float fz, float ux, float uy, float uz
+)
+{
+    AudioCapability *audio =
+        resolveCapabilityForScripts<AudioCapability>(audioResolutionState, audioWarnedUnavailable);
+    if (audio != nullptr)
+    {
+        audio->setListenerOrientation({fx, fy, fz}, {ux, uy, uz});
+    }
+}
+
+bool LuaScriptingModule::saveSceneForScripts(
+    const std::string &path
+)
+{
+    PersistenceCapability *persistence =
+        resolveCapabilityForScripts<PersistenceCapability>(persistenceResolutionState, persistenceWarnedUnavailable);
+    if (persistence == nullptr)
+    {
+        return false;
+    }
+    std::string errorReport;
+    const bool  saved = persistence->saveScene(path, errorReport);
+    if (!errorReport.empty() && logger != nullptr)
+    {
+        logger->logMessage(LogLevel::Error, errorReport);
+    }
+    return saved;
+}
+
+std::uint32_t LuaScriptingModule::loadSceneForScripts(
+    const std::string &path
+)
+{
+    PersistenceCapability *persistence =
+        resolveCapabilityForScripts<PersistenceCapability>(persistenceResolutionState, persistenceWarnedUnavailable);
+    if (persistence == nullptr)
+    {
+        return 0;
+    }
+    std::string errorReport;
+    const std::uint32_t loaded = persistence->loadScene(path, errorReport);
+    if (!errorReport.empty() && logger != nullptr)
+    {
+        logger->logMessage(LogLevel::Error, errorReport);
+    }
+    return loaded;
+}
+
+bool LuaScriptingModule::clearSceneForScripts()
+{
+    PersistenceCapability *persistence =
+        resolveCapabilityForScripts<PersistenceCapability>(persistenceResolutionState, persistenceWarnedUnavailable);
+    if (persistence == nullptr)
+    {
+        return false;
+    }
+    std::string errorReport;
+    const bool  cleared = persistence->clearScene(errorReport);
+    if (!errorReport.empty() && logger != nullptr)
+    {
+        logger->logMessage(LogLevel::Error, errorReport);
+    }
+    return cleared;
+}
+
 std::uint32_t LuaScriptingModule::addPhysicsBodyForScripts(
     std::uint32_t objectHandle, const sol::table &body
 )
@@ -1021,8 +1164,57 @@ std::uint32_t LuaScriptingModule::physicsBodyCountForScripts()
     return physics != nullptr ? physics->bodyCount() : 0u;
 }
 
+bool LuaScriptingModule::setBodySleepingForScripts(
+    std::uint32_t bodyHandle, bool sleeping
+)
+{
+    PhysicsCapability *physics =
+        resolveCapabilityForScripts<PhysicsCapability>(physicsResolutionState, physicsWarnedUnavailable);
+    return physics != nullptr ? physics->setBodySleeping(bodyHandle, sleeping) : false;
+}
+
+bool LuaScriptingModule::isBodyAwakeForScripts(
+    std::uint32_t bodyHandle
+)
+{
+    PhysicsCapability *physics =
+        resolveCapabilityForScripts<PhysicsCapability>(physicsResolutionState, physicsWarnedUnavailable);
+    return physics != nullptr ? physics->isBodyAwake(bodyHandle) : false;
+}
+
+sol::object LuaScriptingModule::raycastForScripts(
+    float ox, float oy, float oz, float dx, float dy, float dz, float maxDistance, sol::this_state state
+)
+{
+    PhysicsCapability *physics =
+        resolveCapabilityForScripts<PhysicsCapability>(physicsResolutionState, physicsWarnedUnavailable);
+    if (physics == nullptr)
+    {
+        return sol::make_object(state, sol::nil);
+    }
+    RaycastResult result;
+    if (!physics->raycast({ox, oy, oz}, {dx, dy, dz}, maxDistance, result))
+    {
+        return sol::make_object(state, sol::nil); // a miss is nil, not a table of defaults
+    }
+    sol::state_view view(state);
+    sol::table hit      = view.create_table();
+    hit["body"]         = result.bodyHandle;
+    hit["object"]       = result.objectHandle;
+    hit["distance"]     = result.distance;
+    hit["point"]        = view.create_table();
+    hit["point"][1]     = result.point[0];
+    hit["point"][2]     = result.point[1];
+    hit["point"][3]     = result.point[2];
+    hit["normal"]       = view.create_table();
+    hit["normal"][1]    = result.normal[0];
+    hit["normal"][2]    = result.normal[1];
+    hit["normal"][3]    = result.normal[2];
+    return sol::make_object(view, hit);
+}
+
 std::uint32_t LuaScriptingModule::importGltfForScripts(
-    const std::string &path
+    const std::string &path, const std::string &fidelity
 )
 {
     AssetCapability *asset =
@@ -1031,8 +1223,24 @@ std::uint32_t LuaScriptingModule::importGltfForScripts(
     {
         return 0;
     }
+    std::uint32_t fidelityValue = asset_fidelity::full_mesh;
+    if (fidelity == "bbox")
+    {
+        fidelityValue = asset_fidelity::bounding_proxies;
+    }
+    else if (fidelity != "mesh")
+    {
+        if (logger != nullptr)
+        {
+            logger->logMessage(
+                LogLevel::Error,
+                "import_gltf: unknown fidelity '" + fidelity + "' (use \"mesh\" or \"bbox\")"
+            );
+        }
+        return 0;
+    }
     std::string errorReport;
-    const std::uint32_t spawned = asset->importGltfIntoScene(path, errorReport);
+    const std::uint32_t spawned = asset->importGltfIntoScene(path, fidelityValue, errorReport);
     if (!errorReport.empty() && logger != nullptr)
     {
         logger->logMessage(LogLevel::Error, errorReport);

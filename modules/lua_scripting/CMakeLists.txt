@@ -16,6 +16,8 @@ target_link_libraries(engine_module_lua_scripting
     PUBLIC engine_capability_asset
     PUBLIC engine_capability_physics
     PUBLIC engine_capability_audio
+    PUBLIC engine_capability_ui
+    PUBLIC engine_capability_persistence
     PUBLIC engine_capability_hot_reload
     PRIVATE engine_sol2_bindings
 )

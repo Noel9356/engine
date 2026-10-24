@@ -4,15 +4,14 @@
 #
 # This file is the second-highest configuration layer: shipped defaults (a
 # module's module.toml, a mod package's config.toml) only fill keys it leaves
-# unset, --scene replaces the world ([scene]) wholesale, and --set key=value
-# overrides anything from the command line. The precedence rules and the
+# unset. The precedence rules and the
 # provenance report are documented in docs/configuration.md.
 #
 # The world content lives with the content mod: mods/test_scene declares
 # scene.toml in its manifest, and this file deliberately defines no [scene]
 # section - the demo room, camera and sun come from that package. An assembly
 # that wants its own world defines [scene] here (it then wins over every
-# installed content mod) or passes --scene (it wins over everything).
+# installed content mod).
 
 [engine]
 # Modules are NOT listed here and there is no demand list either: the active
@@ -50,7 +49,7 @@
 # component name that should win. Only needed when more than one
 # implementation is present in the build.
 [providers]
-# renderer = "renderer"
+# physics = "physics_builtin"
 
 # Permission denials. Each entry denies one declared permission of one
 # component (module, native mod or script mod); denied permissions fail
@@ -85,8 +84,7 @@ release_cursor = "Escape"
 # Validation layers off for interactive runs: every dispatch pays a large
 # CPU tax under the layer, which starves the window's message pump on slower
 # machines (the OS then marks the window "not responding" during heavy
-# frames). The automated runs re-enable it: config/smoke.toml and
-# config/leak_test.toml keep enable_validation = true.
+# frames). Diagnostics-oriented assemblies re-enable it.
 enable_validation = false
 vsync = true
 prefer_discrete_device = true
@@ -95,7 +93,7 @@ prefer_discrete_device = true
 # the frame loop serializes execution: each frame waits for both in-flight
 # fences before recording. max_frames_in_flight therefore decouples command
 # buffers and swapchain acquisition, not GPU execution - frames cannot
-# overlap without racing the shared targets (docs/robustness.md, problem 38).
+# overlap without racing the shared targets (docs/robustness.md, invariant 38).
 max_frames_in_flight = 2
 # Compiled SPIR-V lands in runtime/shaders (module build output). The
 # texture directory is deliberately NOT set here: content belongs to the
@@ -178,6 +176,6 @@ key = "F12"
 # output_directory = "screenshots"
 
 # Diagnostics are opt-in: the shutdown communication latency and frame-time
-# report is a developer tool. Enable it here or per run with --latency-report.
+# report is a developer tool. Enable it here.
 [diagnostics]
 latency_report = false

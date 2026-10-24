@@ -57,16 +57,16 @@ public:
     // absolute. Loading happens during validate/construct.
     void setConfigurationFile(const std::filesystem::path &configurationPath);
 
-    // Scene file for --scene: replaces the assembly configuration's [scene]
+    // Scene file: replaces the assembly configuration's [scene]
     // section wholesale once every layer has merged (the file may define only
     // [scene]). Relative paths resolve against the executable directory, like
     // the configuration file.
     void setSceneFile(const std::filesystem::path &scenePath);
 
-    // --set: stages one "section.path=value" override. The assignment is
-    // parsed immediately so a malformed --set is a usage error before any
+    // Stages one "section.path=value" override. The assignment is
+    // parsed immediately so a malformed assignment is a usage error before any
     // backend starts; the value is applied after every configuration layer
-    // has merged, because the command line is the highest layer. Returns
+    // has merged, because staged overrides are the highest layer. Returns
     // false with error filled in when the assignment is malformed.
     bool addCommandLineOverride(const std::string &assignment, std::string &error);
 
@@ -190,8 +190,8 @@ private:
     std::vector<ComponentManifest>                               componentManifests() const;
     ComponentRecord                                             *findRecord(const std::string &name);
     // Applies the layers that must wait for mod discovery (the world content
-    // source: --scene, or the content mods' declared scene files when the
-    // assembly defines no [scene] of its own, then the staged --set
+    // source: the scene file, or the content mods' declared scene files when the
+    // assembly defines no [scene] of its own, then the staged
     // overrides), then applies [diagnostics] from the fully merged
     // configuration. Idempotent: the store guards its layers.
     bool finishConfiguration(std::string &report);

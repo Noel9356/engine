@@ -4,17 +4,17 @@ The script-mod host. This module embeds Lua 5.4 (via sol2) and implements the ke
 
 ## The bridge
 
-The `engine` table is the entire script ABI, and it grows deliberately: every function speaks capability-level concepts (log lines, key names, window pixel sizes, capture requests), never implementation vocabulary — that is what makes script mods implementation-, platform- and vendor-agnostic by construction (`mods/README.md`, section "Portability").
+The `engine` table is the entire script ABI, and every function speaks capability-level concepts (log lines, key names, window pixel sizes, capture requests), never implementation vocabulary — that is what makes script mods implementation-, platform- and vendor-agnostic by construction. The full function reference lives in `mods/README.md`, section "Scripts: the Lua bridge"; the table below lists the core surface.
 
 | Function | Effect |
 |---|---|
 | `engine.log_trace(msg)` / `log_debug` / `log_information` / `log_warning` / `log_error` | write through the logging capability |
-| `engine.subscribe_key_pressed(fn)` / `engine.subscribe_key_released(fn)` | call `fn(key_name)` on key events (published by the input module) |
+| `engine.subscribe_key_pressed(fn)` / `engine.subscribe_key_released(fn)` | call `fn(key_name)` on key events (published by the input_glfw module) |
 | `engine.subscribe_frame_begin(fn)` | call `fn(frame_index)` once per rendered frame (published by the renderer before it records) |
 | `engine.window_size()` | returns `width, height` of the main window |
-| `engine.request_screenshot()` | queues a screenshot through the screenshot module |
+| `engine.request_screenshot()` | queues a screenshot through the screenshot_png module |
 
-Isolation: each script runs in its own Lua state, so script mods cannot see each other's globals, and a crashing script surfaces as a load/call error diagnostic naming the mod instead of taking the host down. Permissions are enforced at the boundary: a script mod's declared grants (for example `logging.write` — see `mods/README.md`) are validated at startup, and a denied permission fails the run precisely; per-call re-checking inside the bridge is a roadmap item, not a shipped guarantee. The screenshot capability is resolved at the first bridge CALL, not at construct: this module only requires `logging` and `window`, so the kernel's construct order may run it before the screenshot module registers its capability, and a construct-time acquire would cache that failure for the process lifetime.
+Isolation: each script runs in its own Lua state, so script mods cannot see each other's globals, and a crashing script surfaces as a load/call error diagnostic naming the mod instead of taking the host down. Permissions are enforced at the boundary: a script mod's declared grants (for example `logging.write` — see `mods/README.md`) are validated at startup, and a denied permission fails the run precisely; every bridge call re-checks the calling mod's grants before it executes, so a mod without the grant gets a Lua error from the call, never a silent success. The screenshot capability is resolved at the first bridge CALL, not at construct: this module only requires `logging` and `window`, so the kernel's construct order may run it before the screenshot_png module registers its capability, and a construct-time acquire would cache that absence for the process lifetime.
 
 ## Wiring
 
@@ -22,7 +22,7 @@ Isolation: each script runs in its own Lua state, so script mods cannot see each
 |---|---|
 | provided capabilities | `scripting` (the script-host surface behind `ScriptModHost`) |
 | required capabilities | `logging`, `window` |
-| required permissions | `capability.logging`, `capability.window`, `capability.screenshot` |
+| required permissions | `capability.logging`, `capability.window`, plus `capability.<name>` for every capability the bridge can call into (`screenshot`, `input`, `scene`, `lighting`, `renderer`, `animation`, `asset`, `physics`, `audio`, `ui`) |
 
 The module activates on demand: a script mod whose `host_capability` is `scripting` pulls it into the run (nothing else does — a run with no script mods never loads it). The kernel orders every script mod after its host automatically, so a script can assume the modules its bridge calls into are started.
 

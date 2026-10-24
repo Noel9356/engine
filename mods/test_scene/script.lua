@@ -53,3 +53,19 @@ if ball ~= 0 then
     engine.set_body_velocity(body, 0.4, 0.0, -0.1)
     engine.log_information("test_scene: dropped physics ball (handle " .. ball .. ", body " .. body .. ")")
 end
+
+-- The Stanford dragon: the mesh pipeline's real-geometry proof. The scan
+-- (The Stanford 3D Scanning Repository, Stanford University Computer
+-- Graphics Laboratory) ships in this package as an embedded-buffer glTF;
+-- full-mesh import registers it as a registry mesh (deterministic name
+-- "Dragon#n0p0") and spawns the mesh object at the node's placement -
+-- 1.15 m tall, feet on the floor, beside the metal sphere. The analytic
+-- consumers (GI, reflections, shadows) see the mesh through its documented
+-- bounding-box proxy.
+local dragonSpawned = engine.import_gltf("mods/test_scene/assets/models/dragon.gltf", "mesh")
+if dragonSpawned > 0 then
+    engine.log_information("test_scene: imported the Stanford dragon ("
+        .. dragonSpawned .. " object, mesh Dragon#n0p0)")
+else
+    engine.log_warning("test_scene: dragon import failed or the asset_gltf module is absent")
+end

@@ -31,26 +31,26 @@ namespace engine
 
 // Where one effective configuration value came from. Recorded for every leaf
 // key while the layered configuration is assembled, surfaced by the
-// provenance report (--provenance) and by the unknown-key warnings of
-// --validate ("unknown key 'x', from '...'" only means something when the
+// provenance report and by the unknown-key warnings ("unknown key 'x', from
+// '...'" only means something when the
 // source layer is named).
 struct ConfigProvenance
 {
-    // Layers in decreasing precedence: the command line wins, the assembly
+    // Layers in decreasing precedence: a staged override wins, the assembly
     // file wins over everything that is shipped, shipped defaults fill only
     // what nobody above them provided.
     enum class Layer
     {
-        CommandLine,    // --set key=value
-        EngineConfig,   // config/engine.toml (or --config <path>)
-        SceneFile,      // --scene <path> (wholesale [scene] swap)
+        CommandLine,    // an override staged by the composition root
+        EngineConfig,   // the assembly configuration file
+        SceneFile,      // an applied scene file (wholesale [scene] swap)
         ModuleDefaults, // config/modules/<name>/module.toml
         ModDefaults     // <mod package>/config.toml
     };
 
     Layer layer = Layer::EngineConfig;
 
-    // File path, mod package directory name, module name or "--set".
+    // File path, mod package directory name, module name or "override".
     std::string source;
 
     std::string layerName() const;
@@ -64,9 +64,9 @@ struct ConfigProvenance
 // The layers, assembled in the order the kernel drives them (highest
 // precedence last):
 //
-//   1. loadFromFile            the assembly file (config/engine.toml or
-//                              --config <path>). Its values are final unless
-//                              --set overrides them.
+//   1. loadFromFile            the assembly file (config/engine.toml by
+//                              default). Its values are final unless
+//                              staged overrides replace them.
 //   2. mergeDefaultsFile       shipped defaults, scanned by the kernel: one
 //                              module.toml per module directory, one
 //                              config.toml per active mod package. Defaults
@@ -74,9 +74,10 @@ struct ConfigProvenance
 //                              never touched, tables merge recursively,
 //                              arrays and sub-tables are inserted only when
 //                              absent.
-//   3. applySceneFile          --scene <path>: replaces the [scene] section
-//                              wholesale. The file may define only [scene].
-//   4. applyCommandLineOverrides  the staged --set assignments, in the order
+//   3. applySceneFile          an explicit scene file: replaces the [scene]
+//                              section wholesale. The file may define only
+//                              [scene].
+//   4. applyCommandLineOverrides  the staged "key=value" assignments, in the order
 //                              they were given. Values use TOML syntax; a
 //                              bare word becomes a literal string.
 //
@@ -98,15 +99,7 @@ public:
     static constexpr const char *providersSectionName   = "providers";
     static constexpr const char *permissionsSectionName = "permissions";
     static constexpr const char *diagnosticsSectionName = "diagnostics";
-    static constexpr const char *leakTestSectionName    = "leak_test";
     static constexpr const char *sceneSectionName       = "scene";
-
-    // [leak_test] keys: the host's render-QA contract. The kernel declares
-    // them known so shipped defaults cannot own them; the host reads them.
-    static constexpr const char *leakTestMaxLuminanceKey    = "max_luminance";
-    static constexpr const char *leakTestRegionKey          = "region";
-    static constexpr const char *leakTestLitRegionKey       = "lit_region";
-    static constexpr const char *leakTestMinLitLuminanceKey = "min_lit_luminance";
 
     // [diagnostics] keys.
     static constexpr const char *diagnosticsLatencyReportKey = "latency_report";
@@ -137,11 +130,11 @@ public:
     // Layer 2: merges one shipped defaults file (module.toml or config.toml).
     // Defaults fill gaps only, as described in the class comment. Assembly and
     // host authority sections ([engine], [providers], [permissions],
-    // [diagnostics], [leak_test]) are rejected with a precise error: a shipped
+    // [diagnostics]) are rejected with a precise error: a shipped
     // package must not be able to grow a module list or deny permissions.
     // The [scene] section is rejected for the same authority reason: world
     // content has a dedicated channel (a mod's declared scene file or the
-    // assembly's [scene], replaced wholesale by --scene). A defaults file that
+    // assembly's [scene]). A defaults file that
     // could drip scene keys into configurations that do not define them would
     // silently change OTHER configurations' worlds (a sealed-room test config
     // that does not name a sky gradient must not inherit one from an installed
@@ -162,10 +155,10 @@ public:
     bool applySceneFile(const std::filesystem::path &path, std::string &errorMessage);
 
     // Layer 4, staging: parses one "section.path=value" assignment now, so a
-    // malformed --set is a usage error before any backend starts. The value
+    // malformed assignment is a usage error before any backend starts. The value
     // side is parsed as TOML (numbers, booleans, quoted strings, arrays,
     // inline tables); anything that does not parse as a TOML value becomes a
-    // literal string, so --set scene.note=My Title works without quotes.
+    // literal string, so scene.note=My Title works without quotes.
     bool stageCommandLineOverride(const std::string &assignment, std::string &errorMessage);
 
     // Layer 4, application: writes the staged assignments into the effective
@@ -228,8 +221,8 @@ public:
     // ---- provenance -----------------------------------------------------------------
 
     // The layer and source that provided the value at the given path, for
-    // example provenanceFor("scene", "sun.intensity") after
-    // --set scene.sun.intensity=2. Arrays are tracked at the array's path,
+    // example provenanceFor("scene", "sun.intensity") after staging the
+    // override scene.sun.intensity=2. Arrays are tracked at the array's path,
     // not per element. Empty when the key is absent.
     std::optional<ConfigProvenance> provenanceFor(const std::string &sectionName, const std::string &path) const;
 
@@ -249,13 +242,13 @@ public:
     // startup problems.
     bool declareKnownConfigKey(const std::string &dottedKeyPath);
 
-    // The assembly- and host-owned sections the kernel itself reads:
-    // [engine], [providers], [permissions], [diagnostics] and [leak_test].
+    // The assembly-owned sections the kernel itself reads:
+    // [engine], [providers], [permissions] and [diagnostics].
     void declareAssemblyKnownKeys();
 
     // One diagnostic per effective key that no component declares and no
-    // shipped default owns. Warnings only: --validate prints them and still
-    // succeeds, because dead keys are noise, not breakage. Keys that only a
+    // shipped default owns. Warnings only: they are printed at startup and
+    // startup still succeeds, because dead keys are noise, not breakage. Keys that only a
     // shipped defaults file provided are exempt - a package owns the keys it
     // ships.
     std::vector<std::string> unknownKeyWarnings() const;

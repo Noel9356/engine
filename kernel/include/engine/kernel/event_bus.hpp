@@ -86,7 +86,7 @@ public:
     EventChannel &operator=(const EventChannel &) = delete;
 
     // Subscribe a raw handler: a function taking user data plus the event.
-    // Used by free function adapters and by tests.
+    // Used by free function adapters.
     SubscriptionToken subscribe(
         HandlerFunction handler, void *userData
     )
@@ -278,7 +278,7 @@ public:
     // report on shutdown. Disabled (the default) the bus never reads a clock
     // for measurement; enabled it records into the per-channel bounded rings
     // that latencyReport() prints. The host enables it from [diagnostics]
-    // latency_report or the --latency-report command line flag.
+    // latency_report configuration key.
     void setLatencyRecordingEnabled(
         bool enabled
     )

@@ -31,7 +31,7 @@ The manifest is authoritative for the mod's identity and wiring; the kernel vali
 | `host_capability`  | script   | which ONE required capability's provider hosts the script runtime |
 | `permissions`      | no       | extra permission grants beyond the derived ones (deniable in configuration) |
 | `requires`         | no       | component names to order after (any mod type) |
-| `config_keys`      | no       | configuration keys the mod reads, `"<section>.<dotted path>"` each; feeds the known-key registry so `--validate` recognizes them |
+| `config_keys`      | no       | configuration keys the mod reads, `"<section>.<dotted path>"` each; feeds the known-key registry so startup validation recognizes them |
 | `scene`            | no       | world content file the mod ships, relative to the package (see "Scenes") |
 
 The shipped `mods/test_scene/mod.toml` is the reference example. A minimal behavior mod:
@@ -63,13 +63,13 @@ Every capability acquisition is gated by the permission system. Requiring a capa
 denied = [["my_mod", "capability.screenshot"]]
 ```
 
-A denied permission fails startup with a precise diagnostic naming the component and the permission. Every bridge call in the scripting module re-checks the calling mod's grants (per-call re-checking, shipped since the bridge expansion): a mod that declares `scene` can spawn objects; a mod that does not gets a Lua error from the bridge call, never a silent success and never a crash.
+A denied permission fails startup with a precise diagnostic naming the component and the permission. Every bridge call in the scripting module re-checks the calling mod's grants before it executes (per-call re-checking): a mod that declares `scene` can spawn objects; a mod that does not gets a Lua error from the bridge call, never a silent success and never a crash.
 
 ## Scenes: `scene.toml`
 
-A package's optional `scene` key points at a `[scene]`-only TOML file. The kernel enforces that the file defines ONLY the `[scene]` section (exactly like a `--scene` file), and applies it wholesale - partial configurations can never merge. Precedence: `--scene` flag > the assembly's own `[scene]` section in `engine.toml` > a single claimed content mod's scene file > code defaults. Two or more mods claiming a scene with no explicit world source is a startup error (the world would be ambiguous).
+A package's optional `scene` key points at a `[scene]`-only TOML file. The kernel enforces that the file defines ONLY the `[scene]` section, and applies it wholesale - partial configurations can never merge. Precedence: an explicitly staged scene file > the assembly's own `[scene]` section in `engine.toml` > a single claimed content mod's scene file > code defaults. Two or more mods claiming a scene with no explicit world source is a startup error (the world would be ambiguous).
 
-The section's shape (see `modules/test_scene/scene.toml` for a fully tuned example): `[scene]` carries the flat `sky_radiance` plus the objects array; `[scene.sky]` the vertical gradient and sun disk; `[scene.camera]` the starting pose and free-fly tuning; `[scene.sun]` the directional light. Objects are spheres and boxes (a `plane` is normalized into a thin box at parse time so rasterized and traced geometry can never disagree):
+The section's shape (see `mods/test_scene/scene.toml` for a fully tuned example): `[scene]` carries the flat `sky_radiance` plus the objects array; `[scene.sky]` the vertical gradient and sun disk; `[scene.camera]` the starting pose and free-fly tuning; `[scene.sun]` the directional light. Objects are spheres and boxes (a `plane` is normalized into a thin box at parse time so rasterized and traced geometry can never disagree):
 
 ```toml
 [scene]
@@ -93,9 +93,9 @@ uv_scale = 0.9
 
 Through the SCRIPT bridge (`engine.spawn_object`) the shape is friendlier: `radius = 0.5` for spheres and `half_extents = {0.5, 1, 0.5}` for boxes are accepted there and normalized into the same descriptor.
 
-Run the host with `--validate` to check a package without opening a window: validation failure exits with code 3 and prints the offending file, table and key.
+The kernel's `validate()` checks a package without opening a window or a backend: failure prints the offending file, table and key.
 
-The static `[scene]` world is the INITIAL state. The `scene` capability (new in the scene module) is the runtime object registry: scripts and native mods spawn, transform and remove objects through it, and the renderer plus the lighting techniques rebuild their GPU data incrementally (see `modules/scene/README.md`).
+The static `[scene]` world is the INITIAL state. The `scene` capability is the runtime object registry: scripts and native mods spawn, transform and remove objects through it, and the renderer plus the lighting techniques rebuild their GPU data incrementally (see `modules/scene_registry/README.md`).
 
 ## Scripts: the Lua bridge
 
@@ -105,7 +105,7 @@ A script mod runs inside an isolated Lua state created by the scripting module. 
 
 **Input** (requires `input`): `engine.is_key_down("W")`, `engine.is_mouse_down("left")` - polled state, safe to call from any callback; `engine.consume_mouse_delta()` and `engine.consume_scroll_delta()` return the accumulated motion since the last call (two numbers each, x right / y down); `engine.window_size()` returns `[width, height]`.
 
-**Scene objects** (requires `scene`): `engine.spawn_object(table)` returns a handle - the table accepts `type` (`"sphere"` / `"box"`), `position`, `radius` or `half_extents`, `rotation` (radians around Y), `albedo`, `roughness`, `metallic`, `emissive`, `uv_scale`; `engine.remove_object(handle)`; `engine.set_object_position(handle, x, y, z)`; `engine.set_object_rotation(handle, radians)`; `engine.set_object_material(handle, table)` (same material fields as spawn); `engine.object_count()`. Changes rebuild the GPU scene data incrementally at the start of the next frame (see the scene module README for the cost model).
+**Scene objects** (requires `scene`): `engine.spawn_object(table)` returns a handle - the table accepts `type` (`"sphere"` / `"box"`), `position`, `radius` or `half_extents`, `rotation` (radians around Y), `albedo`, `roughness`, `metallic`, `emissive`, `uv_scale`; `engine.remove_object(handle)`; `engine.set_object_position(handle, x, y, z)`; `engine.set_object_rotation(handle, radians)`; `engine.set_object_material(handle, table)` (same material fields as spawn); `engine.object_count()`. Changes rebuild the GPU scene data incrementally at the start of the next frame (see the scene_registry module README for the cost model).
 
 **Lights** (requires `lighting`): `engine.set_sun_light(table)` with `direction` (towards the scene), `color`, `intensity`; `engine.clear_sun_light()`; `engine.add_point_light(table)` with `position`, `color`, `intensity`, `radius` returns a handle; `engine.remove_point_light(handle)`.
 
@@ -117,13 +117,17 @@ A script mod runs inside an isolated Lua state created by the scripting module. 
 
 **Screenshots** (requires `screenshot`): `engine.request_screenshot()` queues one capture of the next rendered frame.
 
+**glTF import** (requires `asset`): `engine.import_gltf(path, fidelity)` imports one `.gltf` file into the registry and returns the spawned object count. Fidelity is `"mesh"` (the default - real triangles registered as a registry mesh plus one mesh object per primitive) or `"bbox"` (the bounding-proxies contract). A failed import returns 0 and logs precisely.
+
+**Persistence** (requires `persistence`): `engine.save_scene(path)` writes every live object to one TOML file, `engine.load_scene(path)` spawns the rows of a file back as NEW objects (returns the count; mesh objects restore by registered mesh name, so re-import the model before loading a save that references it), and `engine.clear_scene()` removes every live object (meshes stay - they are assets, not instances).
+
 Key events (requires `input`): `engine.subscribe_key_pressed(callback)` and `engine.subscribe_key_released(callback)` receive the key name (`"W"`, `"Escape"`, ...); `engine.subscribe_frame_begin(callback)` receives the frame index. Subscriptions are released automatically when the mod's state is destroyed.
 
 Scripts must not error on the hot path: an error in a frame handler is logged and the handler skipped for the rest of the run, but an error at load time fails startup with a precise report naming the mod and the script.
 
 ## Configuration and assets
 
-A package may ship `config.toml` - its defaults layer under the assembly's `engine.toml` (the layer stack is documented in `docs/configuration.md`). Content assets live under `assets/` inside the package and are read through the filesystem capability's read permission; the demo package's shipped defaults point the renderer at its texture directory that way.
+A package may ship `config.toml` - its defaults layer under the assembly's `engine.toml` (the layer stack is documented in `docs/configuration.md`). Content assets live under `assets/` inside the package and reach the runtime layout with the rest of it (the build copies the package whole); the modules that consume them open the files - the demo package's shipped defaults point the renderer at its texture directory, and the demo script passes the package-relative dragon path to `engine.import_gltf`.
 
 ## Packaging checklist
 
@@ -133,12 +137,12 @@ A package may ship `config.toml` - its defaults layer under the assembly's `engi
 4. `mods/my_mod/config.toml` - optional shipped configuration defaults.
 5. `mods/my_mod/assets/` - optional content assets (textures, sounds).
 6. Rebuild (or re-run the build) so the packaging rule copies the package into `build/runtime/mods/my_mod/`.
-7. `./engine --validate` - validate without a window; exit code 0 means the package is well-formed.
+7. `validate()` - the kernel's dry run; success means the package is well-formed.
 
 ## Portability
 
 Script mods are held to a portability contract: everything under the `engine` table is implementation-, platform- and vendor-agnostic, so a script cannot tell whether the window behind it is GLFW or something else, and whether the renderer is Vulkan today or another API tomorrow. Native (C++) mods are not held to this: they may consume engine internals directly, at the cost of portability. The capability headers published by each module (`*_capability.hpp`) are the mod-facing surface; the per-module purity guard in every module's CMakeLists enforces that these headers stay free of platform and vendor includes mechanically.
 
-## Roadmap
+## Extensibility
 
-The capability-family pattern (`[providers]` swapping) is designed so upcoming providers slot in without touching existing mods: a physics provider stepping scene bodies, an animation provider tweening object transforms and lights, an audio provider playing into the event bus, and an asset provider importing glTF content into the scene registry. Module hot-swap stays out of scope by design: the ABI gate (kernel refuses any plugin whose reported ABI version differs) trades in-place swapping for the absence of an entire mismatched-vtable bug class.
+The capability-family pattern (`[providers]` swapping) keeps the provider set open: a physics provider stepping scene bodies, an animation provider tweening object transforms and lights, an audio provider playing into the event bus, an asset provider importing glTF content into the scene registry — each slots in as another family member without touching existing mods. Module hot-swap stays out of scope by design: the ABI gate (kernel refuses any plugin whose reported ABI version differs) trades in-place swapping for the absence of an entire mismatched-vtable bug class.

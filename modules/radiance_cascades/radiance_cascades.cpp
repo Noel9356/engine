@@ -469,7 +469,7 @@ private:
         // buffers and samplers. Pipelines embed their layouts and layouts
         // embed the descriptor set layouts, so a layout must never die while
         // a pipeline that references it is alive (docs/robustness.md,
-        // problem 25).
+        // invariant 25).
         gatherSet.reset();
         gatherPool.reset();
         denoiseSet.reset();

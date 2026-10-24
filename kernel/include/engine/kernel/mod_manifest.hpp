@@ -70,14 +70,14 @@ struct ModManifest
     std::vector<std::string> requiresComponents;
     // Configuration keys the mod reads, "<section>.<dotted path>" each. They
     // become the component manifest's knownConfigKeys, so keys the assembly
-    // sets for the mod are recognized by --validate instead of warned about
+    // sets for the mod are recognized instead of warned about
     // as unknown. Optional; a mod that reads no configuration declares none.
     std::vector<std::string> configKeys;
 
     // World content the mod ships: a [scene]-only TOML file relative to the
-    // package directory. When no --scene flag is given and the assembly
-    // defines no [scene] section of its own, this file provides the world
-    // (precedence: --scene > assembly [scene] > the single claimed content
+    // package directory. When the assembly configuration defines no [scene]
+    // section of its own, this file provides the world
+    // (precedence: an explicitly staged scene file > assembly [scene] > the single claimed content
     // mod's scene file > code defaults). Several active mods may declare
     // scenes freely; only a claim that would be applied without an explicit
     // world source is checked for existence, and two or more claims with no

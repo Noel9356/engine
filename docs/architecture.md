@@ -2,26 +2,9 @@
 
 The kernel owns three concerns: component lifecycle, the event bus and the permission system. Everything else is a module behind a capability it publishes, and mods consume exactly the same capabilities. No kernel file knows GLFW, Vulkan, or windows exist — and no kernel file knows any module by name or any capability by meaning: modules are anonymous capability providers that describe themselves through static plugin descriptors, mods are anonymous consumers, and the kernel only mediates between them. Nothing is registered anywhere — neither modules nor capabilities; a module exists in a run exactly when an active mod requires a capability it provides. This document is the system map and the cross-cutting models; every module's internals live next to its code in `modules/<name>/README.md`.
 
-## Documentation index
-
-| Document | Contents |
-|---|---|
-| `../mods/README.md` | mod packages, the `mod.toml` schema, authoring guides, portability rules |
-| `../modules/logging/README.md` | the logging service and its capability surface |
-| `../modules/window/README.md` | windowing backend, presentation surface factory, resize events |
-| `../modules/input/README.md` | input aggregation, consumed deltas, capture mode, the free-fly consumer reference |
-| `../modules/renderer/README.md` | the frame pipeline, G-buffer, materials and textures, camera, synchronization |
-| `../modules/screenshot/README.md` | capture paths and the correctness model |
-| `../modules/lua_scripting/README.md` | the script host, the `engine` bridge, script isolation |
-| `../modules/pbr/README.md` | analytic direct lighting, the `LightingCapability`, SDF soft shadows |
-| `../modules/radiance_cascades/README.md` | the GI technique: cascades, anchoring, gather, leak guard, cost model |
-| `../modules/ray_reflections/README.md` | ray-traced glossy reflections, self-hit handling, specular partition |
-| `configuration.md` | global and shared configuration sections ([engine], [providers], [permissions], [scene], [diagnostics]); per-module keys live in the module docs |
-| `building.md` | configure/build, dependency tiers, `_deps` layout, offline controls, module options |
-
 ## Capability surfaces
 
-A capability is a pure virtual interface plus a stable name, e.g. `LoggerCapability` with `capabilityName == "logging"`. The capability's vocabulary lives in a header published by the module that PROVIDES it — `modules/logging/logging_capability.hpp`, `modules/window/window_capability.hpp`, and so on. There is no central contract directory: the provider owns its types, consumers include the provider's header directly, and the header is the single source of truth on both sides. Adding a capability means touching the module that provides it, never a shared tree. In CMake each module declares an `engine_capability_<name>` INTERFACE target that carries its include path and nothing else: a consumer links that target to compile against the capability without linking the provider's implementation binary, so the include graph in the build files IS the capability graph. A consumer compiles against a capability even when the provider that implements it is excluded from the build — the demand then fails at startup with a precise diagnostic instead of a compile error.
+A capability is a pure virtual interface plus a stable name, e.g. `LoggerCapability` with `capabilityName == "logging"`. The capability's vocabulary lives in a header published by the module that PROVIDES it — `modules/logging_stdout/logging_capability.hpp`, `modules/window_glfw/window_capability.hpp`, and so on. There is no central contract directory: the provider owns its types, consumers include the provider's header directly, and the header is the single source of truth on both sides. Adding a capability means touching the module that provides it, never a shared tree. In CMake each module declares an `engine_capability_<name>` INTERFACE target that carries its include path and nothing else: a consumer links that target to compile against the capability without linking the provider's implementation binary, so the include graph in the build files IS the capability graph. A consumer compiles against a capability even when the provider that implements it is excluded from the build — the demand then fails at startup with a precise diagnostic instead of a compile error.
 
 ### Families and implementations
 
@@ -70,7 +53,7 @@ The bus is single threaded by contract. Unsubscribing during dispatch is deferre
 The engine prioritises communication latency over decoupling, by measured design:
 
 - **Module-to-module, mod-to-module and mod-to-mod calls.** Capability calls are direct virtual calls on a pointer acquired from the provider (one vtable indirection, no lookup, no locking). The event bus is the only fan-out medium and dispatches synchronously on the caller's stack. Both paths are the minimum achievable for in-process, same-thread communication.
-- **Measured, not assumed - and opt-in.** Recording is off by default (a normal run publishes thousands of events per second and its user does not want a data dump on shutdown; disabled, the bus never reads a clock, so measurement costs nothing). With `[diagnostics] latency_report = true` or the `--latency-report` flag, every `publish()` records its dispatch duration into a per-channel fixed-size ring (no heap growth) and the host prints a per-channel mean/p50/p95/p99/max report plus the frame-time percentiles at shutdown.
+- **Measured, not assumed - and opt-in.** Recording is off by default (a normal run publishes thousands of events per second and its user does not want a data dump on shutdown; disabled, the bus never reads a clock, so measurement costs nothing). With `[diagnostics] latency_report = true`, every `publish()` records its dispatch duration into a per-channel fixed-size ring (no heap growth) and the host prints a per-channel mean/p50/p95/p99/max report plus the frame-time percentiles at shutdown.
 - **Evaluated and rejected alternatives.** Message queues add queueing latency and memory for decoupling no current feature needs; a threaded or async bus adds synchronization on every publish and re-opens the data-race surface the single-thread contract closed; an ECS would change data layout, not communication latency. The architecture stays.
 
 ## Lifecycle
@@ -85,21 +68,7 @@ A component may only acquire capabilities it declared (`capability.<name>`) and 
 
 ### Mod risk advisories
 
-The permission system enforces what it can; what it cannot enforce structurally, it makes visible. At discovery the kernel prints one warning per mod whose request is structurally sensitive - the signals are generic, never capability semantics: the mod runs native machine code, it requests permissions outside the `capability.*` namespace (direct environment access such as `filesystem.write`), or it acquires a broad set of capabilities. The advisories print on every normal run and in `--validate`, so a user installs third-party mods knowing exactly what they asked for.
-
-## Startup diagnostics
-
-All checks accumulate into one report before failing. Diagnosed cases, each naming the relevant components:
-
-- unknown capability (with the list of available ones)
-- ambiguous provider (with candidates and the `[providers]` key that resolves it)
-- dependency cycles (with the full participant chain)
-- permission denials
-- module manifest/descriptor drift (a rebuilt module disagreeing with its static declaration)
-- mod interface version mismatches, duplicate mod ids, missing mod libraries
-- script mods whose declared host capability has no active provider, Lua script load failures
-
-`engine --validate` exits 0 and prints `engine configuration is valid` on success.
+The permission system enforces what it can; what it cannot enforce structurally, it makes visible. At discovery the kernel prints one warning per mod whose request is structurally sensitive - the signals are generic, never capability semantics: the mod runs native machine code, it requests permissions outside the `capability.*` namespace (direct environment access such as `filesystem.write`), or it acquires a broad set of capabilities. The advisories print on every run, so a user installs third-party mods knowing exactly what they asked for.
 
 ## Extending
 
@@ -108,17 +77,13 @@ All checks accumulate into one report before failing. Diagnosed cases, each nami
 - New backend for an existing family: implement the same published interface, provide the family member name in the descriptor, ship both providers; `[providers]` picks one at runtime (installing only one implementation needs no selection at all).
 - New mod: create `mods/<id>/` with a `mod.toml`; see `../mods/README.md`.
 
-## Conventions
-
-Functions and variables `camelCase`, types `PascalCase`, files `snake_case`, Allman braces (every brace on its own line). Module sources drop the `_module` suffix - the directory already names the module (`modules/renderer/renderer.cpp`, `modules/pbr/pbr.cpp`). Members are declared in destruction-safe order: a component's library outlives its instance, and its heap-anchored context outlives every callback that may still hold it. Vulkan objects inside a pass destroy in strict reverse dependency order (sets, pools, pipelines, layouts, descriptor set layouts).
-
 ### Documentation structure
 
 Documentation lives next to the code it describes, in exactly two shapes: **one `README.md` per component** (each module and the content package) plus the mod authoring guide (`mods/README.md`), and **`docs/` for the cross-cutting guides** (architecture, building, configuration). A `README.md` documents identity, wiring, configuration keys with their shipped defaults and files; it stays a single-file guide. Content that serves several components at once never goes into a component README; it belongs in `docs/` where the other components can cite it.
 
 ### Configuration format: TOML, deliberately
 
-Every configuration surface - `config/engine.toml`, `--scene` files, mod scene files, mod manifests and mod `config.toml` - is TOML, and it stays TOML. The reasons are structural, not taste: comments carry load-bearing reasoning in the shipped configs (every demo knob documents why its value is what it is - JSON has no comment syntax); the dotted-path addressing (`--set scene.sun.intensity=5.0`, the in-kernel `stringAtPath` readers) maps one-to-one onto TOML tables; array-of-tables rows (`[[scene.objects]]`) are authored wholesale and replaced wholesale, which the merge semantics are built on; and the kernel carries exactly one parser (toml++) whose type errors report file and line. JSON would forfeit the comments, fork the configuration languages between configs and manifests, and buy nothing the engine needs.
+Every configuration surface - `config/engine.toml`, scene files, mod manifests and mod `config.toml` - is TOML, and it stays TOML. The reasons are structural, not taste: comments carry load-bearing reasoning in the shipped configs (every demo knob documents why its value is what it is - JSON has no comment syntax); the dotted-path addressing (the in-kernel `stringAtPath` readers) maps one-to-one onto TOML tables; array-of-tables rows (`[[scene.objects]]`) are authored wholesale and replaced wholesale, which the merge semantics are built on; and the kernel carries exactly one parser (toml++) whose type errors report file and line. JSON would forfeit the comments, fork the configuration languages between configs and manifests, and buy nothing the engine needs.
 
 ### Mod system policy: the restriction set is the correctness minimum
 
@@ -130,14 +95,6 @@ The engine tree (kernel, modules, host, build scripts) is code only. Content liv
 
 - **Content assets belong to mods.** Texture sets, world definitions and the defaults that point the renderer at them live in `mods/<id>/` (`assets/`, `scene.toml`, `config.toml`). The build copies each package's content into the runtime layout next to its entry; there is no engine-owned asset directory at all. A build without packages is a working engine that renders whatever the configuration defines - an empty sky by default.
 - **Shaders are not assets.** A shader is the implementation of a rendering technique: it is written next to the module that owns the algorithm, compiled by CMake at build time, and fails the build loudly when broken. The runtime layout reflects this: SPIR-V lands in `runtime/shaders/` (build output, like the executable), not under any `assets` name.
-- **The world has exactly one source.** A run's `[scene]` comes from `--scene`, from the assembly, or from the single active content mod's declared scene file - never merged across sources (see `docs/configuration.md`, "The layer stack"), and never from a defaults file, which cannot define `[scene]` at all. Content mods coexist freely; the one-world rule fails startup only when no explicit source exists and two or more active packages claim the world - ambiguity is reported, never resolved silently.
+- **The world has exactly one source.** A run's `[scene]` comes from an explicitly staged scene file, from the assembly, or from the single active content mod's declared scene file - never merged across sources (see `docs/configuration.md`, "The layer stack"), and never from a defaults file, which cannot define `[scene]` at all. Content mods coexist freely; the one-world rule fails startup only when no explicit source exists and two or more active packages claim the world - ambiguity is reported, never resolved silently.
 
 The shipped `test_scene` package is the worked example: it owns the demo world, its texture sets, and the `renderer.texture_directory` default, and nothing in `modules/` or `kernel/` names it.
-
-### Code hygiene: no hardcoding, no dead code, no god objects
-
-Three standing rules, applied as a full-tree audit and kept as the bar every change is held to:
-
-- **No hardcoding.** No baked-in world content (the engine's own fallback is an empty scene - content belongs to mods, see above); no unnamed magic numbers (timeouts, budgets, binding numbers, formats and thresholds are named constants at the top of their file, each with the reason for its value); no repeated path or name literals (the default configuration path is named once and quoted by the usage text; the "mods" and "shaders" directories live in one constant each). A number or a path that appears twice without sharing a name is a defect, because the two sites can drift silently.
-- **No dead code.** Unused API surface, leftover compatibility mappings and stale references are deleted, not kept "just in case". The same audit that introduced capability demand removed the module registration API, the `[engine].modules` list and the `[lighting].techniques` selector; the assembly demand list went the same way once mods became the sole demand source. Removing a compatibility shim is announced in the docs the same way adding one is: a mod's requirement list is the only spelling of what a run loads.
-- **No god objects.** A type or file that accretes several concerns is split by concern before it hardens. `RendererState` (one struct covering device creation, scene resources, pipelines, recording and the frame loop) is one state across five translation units split by concern - `renderer_device.cpp`, `renderer_scene.cpp`, `renderer_pipelines.cpp`, `renderer_frames.cpp`, and a slim `renderer.cpp` for the module lifecycle - with the module-private `renderer_state.hpp` as the only place they meet; the kernel's mod-package discovery (directory scan, native library loading) lives in `mod_discovery.cpp`, leaving the kernel's gather phase policy-only; the host's leak-check policy lives in `leak_check.cpp`, leaving the composition root with wiring and reporting. The split is structural, not architectural churn: one state struct, zero behavior change, and every concern owns a file whose name says what it does.

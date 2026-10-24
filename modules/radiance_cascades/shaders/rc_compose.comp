@@ -70,7 +70,7 @@ void main()
     {
         // The last cascade interval ends in open space: escaped rays see the
         // sky. Zero sky radiance therefore closes the scene completely, which
-        // the leak test relies on. Gradient sky WITHOUT the sun disk: the
+        // the relight consumers rely on. Gradient sky WITHOUT the sun disk: the
         // transport field must stay smooth (see the header comment).
         farRadiance = skyBase(cascadeDirections[directionIndex].xyz);
     }

@@ -111,8 +111,8 @@ bool EngineKernel::addCommandLineOverride(
     const std::string &assignment, std::string &error
 )
 {
-    // Parsed (not applied) immediately: a malformed --set must fail at the
-    // composition root with exit code 2, before any backend starts.
+    // Parsed (not applied) immediately: a malformed assignment must fail at
+    // the composition root before any backend starts.
     return configurationStore.stageCommandLineOverride(assignment, error);
 }
 
@@ -228,13 +228,13 @@ bool EngineKernel::loadModuleDefaults(
     return true;
 }
 
-// The world content source and the --set overrides: the layers that must
-// wait for mod discovery. Precedence, highest first: the --scene flag (the
-// composition root's explicit world), the assembly's own [scene] section,
+// The world content source and the staged overrides: the layers that must
+// wait for mod discovery. Precedence, highest first: the composition root's
+// explicit scene file, the assembly's own [scene] section,
 // the one content mod's declared scene file, the components' built-in
-// defaults. After the scene is final the staged --set overrides are written
+// defaults. After the scene is final the staged overrides are written
 // on top. Then the configuration is complete, and [diagnostics] is applied
-// from the fully merged stack - a --set diagnostics.latency_report=true is
+// from the fully merged stack - a staged diagnostics.latency_report=true is
 // honored exactly like the configuration key.
 bool EngineKernel::finishConfiguration(
     std::string &report
@@ -261,7 +261,7 @@ bool EngineKernel::finishConfiguration(
     {
         // The assembly defines no world of its own and exactly one active
         // content mod claims it: that claim provides the world, through the
-        // same wholesale [scene] swap --scene uses, so partial assembly
+        // same wholesale [scene] swap an explicit scene file uses, so partial assembly
         // scenes can never merge with mod scenes.
         const ModSceneClaim &claim = modSceneClaims.front();
         if (!std::filesystem::exists(claim.sceneFile))
@@ -290,7 +290,7 @@ bool EngineKernel::finishConfiguration(
         {
             report += " '" + claim.sceneFile.string() + "' (" + claim.ownerId + ")";
         }
-        report += "; give the run a world with --scene or a [scene] section in the configuration, "
+        report += "; give the run a world: a [scene] section in the configuration, "
                   "or disable all but one of these mods.\n";
         return false;
     }
@@ -316,9 +316,9 @@ bool EngineKernel::finishConfiguration(
     // Diagnostics are opt-in: the communication latency report is a developer
     // tool and must stay invisible (and free) for normal runs. Applied after
     // every layer is merged so the whole run - module constructs included -
-    // is covered once the flag is set; a --latency-report command line flag
-    // set before construct is preserved (the flag can only turn recording ON,
-    // never off).
+    // is covered once the key is set; recording enabled by the composition
+    // root before construct is preserved (the configuration can only turn
+    // recording ON, never off).
     bus.setLatencyRecordingEnabled(
         bus.latencyRecordingEnabled()
         || configurationStore
@@ -332,14 +332,14 @@ bool EngineKernel::prepareComponents(
     std::string &report
 )
 {
-    // The command line is the highest configuration layer, but two of the
-    // keys it can override ([engine].mod_directory, [engine].disabled_mods)
+    // Staged overrides are the highest configuration layer, but two of the
+    // keys they can override ([engine].mod_directory, [engine].disabled_mods)
     // are consumed by mod discovery, which must run before the scene file is
     // resolved (a content mod's scene claim needs the discovered packages
     // first). The staged assignments are therefore applied once here, so
     // discovery sees the final runtime layout, and again after the scene
     // layer in finishConfiguration, where the general precedence contract
-    // (command line above everything) is decided. Re-applying the same
+    // (overrides above everything) is decided. Re-applying the same
     // assignments is idempotent: each write replaces exactly the value it
     // names.
     if (!loadConfiguration(report))
@@ -469,7 +469,7 @@ void EngineKernel::gatherModPackages(
 
         // World content claims: collected, never resolved here. Content mods
         // may coexist freely; finishConfiguration decides - an explicit world
-        // source (--scene or the assembly's [scene]) makes the claims
+        // source (an explicit scene file or the assembly's [scene]) makes the claims
         // irrelevant, a single claim provides the world, and two or more
         // claims without an explicit source are a startup error (the world
         // would be ambiguous - never a silent pick of whichever package the
@@ -1090,7 +1090,7 @@ bool EngineKernel::validate(
 
     // Unknown-key warnings never fail validation: a key nobody reads is dead
     // configuration (usually a typo), and the report should say so - but the
-    // graph above it is fine. Normal runs stay quiet; --validate is the place
+    // graph above it is fine. Normal runs stay quiet; validate() is the place
     // where the author is looking.
     for (const std::string &warning : configurationStore.unknownKeyWarnings())
     {
