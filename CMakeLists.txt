@@ -23,32 +23,6 @@ if(WIN32)
     add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 
-# ---- Options: runtime module selection -----------------------------------------
-# Every module can be excluded from the build; its plugin binary is then not
-# produced, and a run whose mods demand a capability only it provides fails
-# startup with a precise diagnostic naming the consumer.
-
-option(ENGINE_BUILD_MODULE_BVH "Include the bvh (binary median-split hierarchy) module in the build" ON)
-option(ENGINE_BUILD_MODULE_LOGGING_STDOUT "Include the logging (stdout/file provider) module in the build" ON)
-option(ENGINE_BUILD_MODULE_WINDOW_GLFW "Include the window module in the build" ON)
-option(ENGINE_BUILD_MODULE_INPUT_GLFW "Include the input module in the build" ON)
-option(ENGINE_BUILD_MODULE_RENDERER_VULKAN "Include the renderer module in the build" ON)
-option(ENGINE_BUILD_MODULE_SCREENSHOT_PNG "Include the screenshot module in the build" ON)
-option(ENGINE_BUILD_MODULE_SCENE_REGISTRY "Include the scene (runtime object registry) module in the build" ON)
-option(ENGINE_BUILD_MODULE_ANIMATION_TWEEN "Include the animation (tween drivers) module in the build" ON)
-option(ENGINE_BUILD_MODULE_ASSET_GLTF "Include the asset (glTF import) module in the build" ON)
-option(ENGINE_BUILD_MODULE_PHYSICS_BUILTIN "Include the physics (builtin rigid body provider) module in the build" ON)
-option(ENGINE_BUILD_MODULE_AUDIO_MINIAUDIO "Include the audio (miniaudio provider) module in the build" ON)
-option(ENGINE_BUILD_MODULE_PERSISTENCE_TOML "Include the persistence (registry save/load) module in the build" ON)
-option(ENGINE_BUILD_MODULE_UI_IMGUI "Include the ui (debug overlay) module in the build" ON)
-option(ENGINE_BUILD_MODULE_NET_TCP "Include the net (tcp transport) module in the build" ON)
-option(ENGINE_BUILD_MODULE_HOT_RELOAD_WATCHER "Include the hot reload (filesystem watcher) module in the build" ON)
-option(ENGINE_BUILD_MODULE_LUA_SCRIPTING "Include the lua scripting module in the build" ON)
-option(ENGINE_BUILD_MODULE_PBR "Include the pbr lighting technique module in the build" ON)
-option(ENGINE_BUILD_MODULE_RADIANCE_CASCADES "Include the radiance cascades lighting technique module in the build" ON)
-option(ENGINE_BUILD_MODULE_RAY_REFLECTIONS "Include the ray traced reflections lighting technique module in the build" ON)
-option(ENGINE_BUILD_DEMO "Build the demo host" ON)
-
 # ---- Runtime layout -------------------------------------------------------------
 # Every engine runtime artifact lands in build/runtime/: the executable, the
 # kernel shared library, the GLFW runtime the window and input plugins share,
@@ -82,63 +56,25 @@ include(capability_header_guard)
 
 add_subdirectory(kernel)
 
-if(ENGINE_BUILD_MODULE_BVH)
-    add_subdirectory(modules/bvh)
-endif()
-if(ENGINE_BUILD_MODULE_LOGGING_STDOUT)
-    add_subdirectory(modules/logging_stdout)
-endif()
-if(ENGINE_BUILD_MODULE_WINDOW_GLFW)
-    add_subdirectory(modules/window_glfw)
-endif()
-if(ENGINE_BUILD_MODULE_INPUT_GLFW)
-    add_subdirectory(modules/input_glfw)
-endif()
-if(ENGINE_BUILD_MODULE_RENDERER_VULKAN)
-    add_subdirectory(modules/renderer_vulkan)
-endif()
-if(ENGINE_BUILD_MODULE_SCREENSHOT_PNG)
-    add_subdirectory(modules/screenshot_png)
-endif()
-if(ENGINE_BUILD_MODULE_SCENE_REGISTRY)
-    add_subdirectory(modules/scene_registry)
-endif()
-if(ENGINE_BUILD_MODULE_ANIMATION_TWEEN)
-    add_subdirectory(modules/animation_tween)
-endif()
-if(ENGINE_BUILD_MODULE_ASSET_GLTF)
-    add_subdirectory(modules/asset_gltf)
-endif()
-if(ENGINE_BUILD_MODULE_PHYSICS_BUILTIN)
-    add_subdirectory(modules/physics_builtin)
-endif()
-if(ENGINE_BUILD_MODULE_AUDIO_MINIAUDIO)
-    add_subdirectory(modules/audio_miniaudio)
-endif()
-if(ENGINE_BUILD_MODULE_PERSISTENCE_TOML)
-    add_subdirectory(modules/persistence_toml)
-endif()
-if(ENGINE_BUILD_MODULE_UI_IMGUI)
-    add_subdirectory(modules/ui_imgui)
-endif()
-if(ENGINE_BUILD_MODULE_NET_TCP)
-    add_subdirectory(modules/net_tcp)
-endif()
-if(ENGINE_BUILD_MODULE_HOT_RELOAD_WATCHER)
-    add_subdirectory(modules/hot_reload_watcher)
-endif()
-if(ENGINE_BUILD_MODULE_LUA_SCRIPTING)
-    add_subdirectory(modules/lua_scripting)
-endif()
-if(ENGINE_BUILD_MODULE_PBR)
-    add_subdirectory(modules/pbr)
-endif()
-if(ENGINE_BUILD_MODULE_RADIANCE_CASCADES)
-    add_subdirectory(modules/radiance_cascades)
-endif()
-if(ENGINE_BUILD_MODULE_RAY_REFLECTIONS)
-    add_subdirectory(modules/ray_reflections)
-endif()
+# ---- Modules: discovered, not listed ----------------------------------------------
+# Every modules/<name>/ directory that carries a CMakeLists.txt joins the
+# build automatically; each module's own CMakeLists declares its
+# ENGINE_BUILD_MODULE_<NAME> option (the upper-cased directory name). Adding
+# a module therefore means creating its directory - no shared build file
+# lists modules or capabilities anywhere, matching the runtime side, where
+# the kernel scans the deployed modules directory and reads each plugin's
+# static descriptor. The loop runs after include(capability_header_guard)
+# because the modules call that guard for the headers they publish.
+
+file(GLOB ENGINE_MODULE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/modules/*")
+list(SORT ENGINE_MODULE_DIRECTORIES)
+foreach(moduleDirectory IN LISTS ENGINE_MODULE_DIRECTORIES)
+    if(EXISTS "${moduleDirectory}/CMakeLists.txt")
+        add_subdirectory("${moduleDirectory}")
+    endif()
+endforeach()
+
+option(ENGINE_BUILD_DEMO "Build the demo host" ON)
 
 if(ENGINE_BUILD_DEMO)
     add_subdirectory(host)
@@ -152,6 +88,18 @@ endif()
 # (assets/) when it ships any - the engine itself ships no content.
 
 if(ENGINE_BUILD_DEMO)
+    # Native mods are discovered too: a mods/<id>/ directory that carries a
+    # CMakeLists.txt is a self-contained build (it links the kernel and the
+    # capability targets it consumes and lands its library in
+    # runtime/mods/<id>/ through LIBRARY_OUTPUT_DIRECTORY). Adding a native
+    # mod therefore means creating its package directory - the manifest is
+    # copied by the packaging rule below, the library is built here.
+    file(GLOB ENGINE_NATIVE_MOD_PROJECTS "${CMAKE_CURRENT_SOURCE_DIR}/mods/*/CMakeLists.txt")
+    foreach(nativeModProject IN LISTS ENGINE_NATIVE_MOD_PROJECTS)
+        get_filename_component(nativeModDirectory "${nativeModProject}" DIRECTORY)
+        add_subdirectory("${nativeModDirectory}")
+    endforeach()
+
     set(ENGINE_MOD_PACKAGE_COMMANDS)
     file(GLOB ENGINE_MOD_PACKAGE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/mods/*")
     foreach(modPackageDirectory IN LISTS ENGINE_MOD_PACKAGE_DIRS)

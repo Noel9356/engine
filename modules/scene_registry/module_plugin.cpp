@@ -16,7 +16,7 @@ engine::ModuleInterface *createscenePluginModule()
 
 const engine::EngineModulePluginEntry scenePluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "scene_registry",
+    .moduleName              = "scene",
     .createModule            = &createscenePluginModule,
     .providedCapabilities    = sceneProvidedCapabilities,
     .providedCapabilityCount = 1,

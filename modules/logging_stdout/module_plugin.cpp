@@ -19,7 +19,7 @@ engine::ModuleInterface *createloggingPluginModule()
 
 const engine::EngineModulePluginEntry loggingPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "logging_stdout",
+    .moduleName              = "logging",
     .createModule            = &createloggingPluginModule,
     .providedCapabilities    = loggingProvidedCapabilities,
     .providedCapabilityCount = 1,

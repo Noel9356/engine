@@ -20,7 +20,7 @@ engine::ModuleInterface *createinputPluginModule()
 
 const engine::EngineModulePluginEntry inputPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "input_glfw",
+    .moduleName              = "input",
     .createModule            = &createinputPluginModule,
     .providedCapabilities    = inputProvidedCapabilities,
     .providedCapabilityCount = 1,

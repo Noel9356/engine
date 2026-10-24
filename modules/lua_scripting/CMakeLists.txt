@@ -1,3 +1,13 @@
+# The module's own build switch, declared here so everything about the module
+# lives in its directory: the root build discovers this CMakeLists and the
+# option arrives with it. OFF keeps every target defined - consumers still
+# compile against the published capability header below, and an in-tree
+# consumer that links the implementation still pulls it - but removes the
+# plugin binary from the default build; a run whose mods then demand a
+# capability only this module provides fails startup with a precise
+# diagnostic naming the consumer, never a link error.
+option(ENGINE_BUILD_MODULE_LUA_SCRIPTING "Include the lua_scripting module in the build" ON)
+
 add_library(engine_module_lua_scripting SHARED
     module_plugin.cpp
     lua_scripting.cpp
@@ -53,3 +63,11 @@ endif()
 # every script state (mods/README.md), and the kernel reaches the hosting
 # surface through the kernel-owned ScriptModHost interface. Nothing here
 # needs a header-only include target.
+
+# Excluded from the default build when the option is OFF: the target stays
+# defined for consumers, but nothing builds the plugin binary unless an
+# in-tree consumer actually links it (the runtime then simply does not see
+# the plugin, and a demand for its capability fails startup precisely).
+if(NOT ENGINE_BUILD_MODULE_LUA_SCRIPTING)
+    set_target_properties(engine_module_lua_scripting PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()

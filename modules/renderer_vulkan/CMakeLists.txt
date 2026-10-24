@@ -1,3 +1,24 @@
+# The module's own build switch, declared here so everything about the module
+# lives in its directory: the root build discovers this CMakeLists and the
+# option arrives with it. OFF keeps every target defined - consumers still
+# compile against the published capability header below, and an in-tree
+# consumer that links the implementation still pulls it - but removes the
+# plugin binary from the default build; a run whose mods then demand a
+# capability only this module provides fails startup with a precise
+# diagnostic naming the consumer, never a link error.
+option(ENGINE_BUILD_MODULE_RENDERER_VULKAN "Include the renderer_vulkan module in the build" ON)
+# The published capability surface of this module: a header-only INTERFACE
+# target. Consumers link it to include renderer_capability.hpp WITHOUT linking this module's
+# implementation - the capability graph stays explicit in the target links,
+# and no consumer binary depends on another module's symbols at load time.
+add_library(engine_capability_renderer INTERFACE)
+target_include_directories(engine_capability_renderer INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# The portability guard: the published header must stay implementation-,
+# platform- and vendor-agnostic (see cmake/capability_header_guard.cmake).
+engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/renderer_capability.hpp")
+engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/renderer_overlay_capability.hpp")
+
 # One state struct (renderer_state.hpp, module-private), several translation
 # units split by concern: device/swapchain creation, scene resources, pipelines,
 # frame recording, and the module lifecycle.
@@ -29,7 +50,7 @@ target_link_libraries(engine_module_renderer_vulkan
 # The renderer owns the scene rasterization and composite shaders. The shared
 # SDF/PBR include directory is consumed by the lighting modules through
 # INCLUDE_DIRS, so one geometry truth backs rasterization and tracing.
-if(ENGINE_BUILD_DEMO)
+if(ENGINE_BUILD_DEMO AND ENGINE_BUILD_MODULE_RENDERER_VULKAN)
     include("${CMAKE_SOURCE_DIR}/cmake/shader_compilation.cmake")
     engine_compile_module_shaders(TARGET engine_module_renderer_vulkan
                                   SOURCES shaders/scene.vert
@@ -67,15 +88,10 @@ if(MINGW)
     target_link_options(engine_module_renderer_vulkan PRIVATE -Wl,--export-all-symbols)
 endif()
 
-
-# The published capability surface of this module: a header-only INTERFACE
-# target. Consumers link it to include renderer_capability.hpp WITHOUT linking this module's
-# implementation - the capability graph stays explicit in the target links,
-# and no consumer binary depends on another module's symbols at load time.
-add_library(engine_capability_renderer INTERFACE)
-target_include_directories(engine_capability_renderer INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-
-# The portability guard: the published header must stay implementation-,
-# platform- and vendor-agnostic (see cmake/capability_header_guard.cmake).
-engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/renderer_capability.hpp")
-engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/renderer_overlay_capability.hpp")
+# Excluded from the default build when the option is OFF: the target stays
+# defined for consumers, but nothing builds the plugin binary unless an
+# in-tree consumer actually links it (the runtime then simply does not see
+# the plugin, and a demand for its capability fails startup precisely).
+if(NOT ENGINE_BUILD_MODULE_RENDERER_VULKAN)
+    set_target_properties(engine_module_renderer_vulkan PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()

@@ -1,3 +1,13 @@
+# The module's own build switch, declared here so everything about the module
+# lives in its directory: the root build discovers this CMakeLists and the
+# option arrives with it. OFF keeps every target defined - consumers still
+# compile against the published capability header below, and an in-tree
+# consumer that links the implementation still pulls it - but removes the
+# plugin binary from the default build; a run whose mods then demand a
+# capability only this module provides fails startup with a precise
+# diagnostic naming the consumer, never a link error.
+option(ENGINE_BUILD_MODULE_RADIANCE_CASCADES "Include the radiance_cascades module in the build" ON)
+
 add_library(engine_module_radiance_cascades SHARED
     module_plugin.cpp
     radiance_cascades.cpp
@@ -12,7 +22,7 @@ target_link_libraries(engine_module_radiance_cascades
     PRIVATE engine_vulkan_hpp_bindings
 )
 
-if(ENGINE_BUILD_DEMO)
+if(ENGINE_BUILD_DEMO AND ENGINE_BUILD_MODULE_RADIANCE_CASCADES)
     include("${CMAKE_SOURCE_DIR}/cmake/shader_compilation.cmake")
     engine_compile_module_shaders(TARGET engine_module_radiance_cascades
                                   SOURCES shaders/rc_march.comp
@@ -55,3 +65,11 @@ endif()
 # render_interface.hpp, an in-tree integration that is deliberately not a
 # capability). Consumers demand the marker; nothing includes a header here,
 # so no header-only include target exists.
+
+# Excluded from the default build when the option is OFF: the target stays
+# defined for consumers, but nothing builds the plugin binary unless an
+# in-tree consumer actually links it (the runtime then simply does not see
+# the plugin, and a demand for its capability fails startup precisely).
+if(NOT ENGINE_BUILD_MODULE_RADIANCE_CASCADES)
+    set_target_properties(engine_module_radiance_cascades PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()

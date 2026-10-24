@@ -1,3 +1,13 @@
+# The module's own build switch, declared here so everything about the module
+# lives in its directory: the root build discovers this CMakeLists and the
+# option arrives with it. OFF keeps every target defined - consumers still
+# compile against the published capability header below, and an in-tree
+# consumer that links the implementation still pulls it - but removes the
+# plugin binary from the default build; a run whose mods then demand a
+# capability only this module provides fails startup with a precise
+# diagnostic naming the consumer, never a link error.
+option(ENGINE_BUILD_MODULE_HOT_RELOAD_WATCHER "Include the hot_reload_watcher module in the build" ON)
+
 add_library(engine_module_hot_reload_watcher SHARED
     module_plugin.cpp
     hot_reload.cpp
@@ -26,3 +36,11 @@ add_library(engine_capability_hot_reload INTERFACE)
 target_include_directories(engine_capability_hot_reload INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/hot_reload_capability.hpp")
+
+# Excluded from the default build when the option is OFF: the target stays
+# defined for consumers, but nothing builds the plugin binary unless an
+# in-tree consumer actually links it (the runtime then simply does not see
+# the plugin, and a demand for its capability fails startup precisely).
+if(NOT ENGINE_BUILD_MODULE_HOT_RELOAD_WATCHER)
+    set_target_properties(engine_module_hot_reload_watcher PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()

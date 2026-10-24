@@ -9,7 +9,7 @@ A mod is a directory containing a `mod.toml` manifest plus its content: Lua scri
 Two kinds of mods exist:
 
 1. **Script mods** (`type = "script"`): the manifest names a host capability (`host_capability`, usually `scripting`) among its required capabilities; the kernel hands the package to that capability's provider, which runs the script inside an isolated Lua state. This is the normal way to add gameplay behavior.
-2. **Native mods** (`type = "native"`): a CMake target that links the kernel and exports the same plugin entry point a module uses (`engine/kernel/module_api.hpp`). The manifest's `entry` is the library base name (`lib<entry>.so` / `<entry>.dll`); native mods are built into the runtime `mods/` directory through their own CMake rules (`LIBRARY_OUTPUT_DIRECTORY`) and are loaded by the same plugin scanner as engine modules. Use this for content or features that need compiled code.
+2. **Native mods** (`type = "native"`): a CMake target that links the kernel and exports the same plugin entry point a module uses (`engine/kernel/module_api.hpp`). The manifest's `entry` is the library base name (`lib<entry>.so` / `<entry>.dll`); a package that ships its own `CMakeLists.txt` is discovered by the root build the same way module directories are, and its library lands in the package's runtime directory through `LIBRARY_OUTPUT_DIRECTORY` - the same plugin scanner that finds engine modules loads it. Use this for content or features that need compiled code.
 
 Mods never name a module: they name the **capabilities** they require, and the dependency graph picks the providers. Which providers win when several implementations of one capability family are present is decided by the `[providers]` section of the configuration.
 

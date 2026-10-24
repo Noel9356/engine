@@ -1,3 +1,23 @@
+# The module's own build switch, declared here so everything about the module
+# lives in its directory: the root build discovers this CMakeLists and the
+# option arrives with it. OFF keeps every target defined - consumers still
+# compile against the published capability header below, and an in-tree
+# consumer that links the implementation still pulls it - but removes the
+# plugin binary from the default build; a run whose mods then demand a
+# capability only this module provides fails startup with a precise
+# diagnostic naming the consumer, never a link error.
+option(ENGINE_BUILD_MODULE_SCREENSHOT_PNG "Include the screenshot_png module in the build" ON)
+# The published capability surface of this module: a header-only INTERFACE
+# target. Consumers link it to include screenshot_capability.hpp WITHOUT linking this module's
+# implementation - the capability graph stays explicit in the target links,
+# and no consumer binary depends on another module's symbols at load time.
+add_library(engine_capability_screenshot INTERFACE)
+target_include_directories(engine_capability_screenshot INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# The portability guard: the published header must stay implementation-,
+# platform- and vendor-agnostic (see cmake/capability_header_guard.cmake).
+engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/screenshot_capability.hpp")
+
 add_library(engine_module_screenshot_png SHARED
     module_plugin.cpp
     screenshot.cpp
@@ -39,14 +59,10 @@ if(MINGW)
     target_link_options(engine_module_screenshot_png PRIVATE -Wl,--export-all-symbols)
 endif()
 
-
-# The published capability surface of this module: a header-only INTERFACE
-# target. Consumers link it to include screenshot_capability.hpp WITHOUT linking this module's
-# implementation - the capability graph stays explicit in the target links,
-# and no consumer binary depends on another module's symbols at load time.
-add_library(engine_capability_screenshot INTERFACE)
-target_include_directories(engine_capability_screenshot INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-
-# The portability guard: the published header must stay implementation-,
-# platform- and vendor-agnostic (see cmake/capability_header_guard.cmake).
-engine_guard_capability_header("${CMAKE_CURRENT_SOURCE_DIR}/screenshot_capability.hpp")
+# Excluded from the default build when the option is OFF: the target stays
+# defined for consumers, but nothing builds the plugin binary unless an
+# in-tree consumer actually links it (the runtime then simply does not see
+# the plugin, and a demand for its capability fails startup precisely).
+if(NOT ENGINE_BUILD_MODULE_SCREENSHOT_PNG)
+    set_target_properties(engine_module_screenshot_png PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()

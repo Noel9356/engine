@@ -16,7 +16,7 @@ engine::ModuleInterface *createphysicsPluginModule()
 
 const engine::EngineModulePluginEntry physicsPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "physics_builtin",
+    .moduleName              = "physics",
     .createModule            = &createphysicsPluginModule,
     .providedCapabilities    = physicsProvidedCapabilities,
     .providedCapabilityCount = 1,

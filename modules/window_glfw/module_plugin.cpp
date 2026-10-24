@@ -20,7 +20,7 @@ engine::ModuleInterface *createwindowPluginModule()
 
 const engine::EngineModulePluginEntry windowPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "window_glfw",
+    .moduleName              = "window",
     .createModule            = &createwindowPluginModule,
     .providedCapabilities    = windowProvidedCapabilities,
     .providedCapabilityCount = 1,

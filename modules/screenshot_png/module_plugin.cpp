@@ -20,7 +20,7 @@ engine::ModuleInterface *createscreenshotPluginModule()
 
 const engine::EngineModulePluginEntry screenshotPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "screenshot_png",
+    .moduleName              = "screenshot",
     .createModule            = &createscreenshotPluginModule,
     .providedCapabilities    = screenshotProvidedCapabilities,
     .providedCapabilityCount = 1,

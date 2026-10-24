@@ -20,7 +20,7 @@ engine::ModuleInterface *createrendererPluginModule()
 
 const engine::EngineModulePluginEntry rendererPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "renderer_vulkan",
+    .moduleName              = "renderer",
     .createModule            = &createrendererPluginModule,
     .providedCapabilities    = rendererProvidedCapabilities,
     .providedCapabilityCount = 2,

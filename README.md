@@ -24,4 +24,4 @@ Documentation lives NEXT TO THE CODE IT DESCRIBES: every module and the content 
 | `docs/building.md` | configure/build, dependency tiers, `_deps` layout, offline controls, module options |
 | `docs/configuration.md` | global and shared `engine.toml` sections ([engine], [providers], [permissions], [scene], [diagnostics]); per-module keys are documented by their owning module |
 | `mods/README.md` | mod packages: the `mod.toml` schema, capability demand, world content, script and native authoring, portability rules |
-| `modules/<name>/README.md` | one guide per module (nineteen total): capability wiring, its configuration keys with shipped defaults, implementation notes |
+| `modules/<name>/README.md` | one guide per module (twenty total): capability wiring, its configuration keys with shipped defaults, implementation notes |

@@ -16,7 +16,7 @@ engine::ModuleInterface *createhot_reloadPluginModule()
 
 const engine::EngineModulePluginEntry hotReloadPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "hot_reload_watcher",
+    .moduleName              = "hot_reload",
     .createModule            = &createhot_reloadPluginModule,
     .providedCapabilities    = hotReloadProvidedCapabilities,
     .providedCapabilityCount = 1,

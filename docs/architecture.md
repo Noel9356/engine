@@ -73,9 +73,9 @@ The permission system enforces what it can; what it cannot enforce structurally,
 ## Extending
 
 - New capability: publish its header from the module that provides it (`modules/<name>/<name>_capability.hpp`), implement it, and let consumers include that header. If several implementations of one family will exist, provide the implementation-bound member name in the plugin descriptor and let consumers demand the family.
-- New module: create `modules/<name>` with its own `README.md` (plus `shaders/` if it owns GLSL), add a CMake option and subdirectory, and declare the module's name, factory and static capability lists in its `module_plugin.cpp` descriptor. No registration exists anywhere: mods activate it by requiring its capabilities.
+- New module: create `modules/<name>` with its own `README.md`, its `CMakeLists.txt` (plus `shaders/` if it owns GLSL), and declare the module's name, factory and static capability lists in its `module_plugin.cpp` descriptor. That is the whole change: the build discovers every module directory (the module's CMakeLists brings its own `ENGINE_BUILD_MODULE_<NAME>` build switch), and the kernel discovers the built plugin at runtime by scanning the modules directory and reading the descriptor. No shared file lists modules, and no registration exists anywhere: mods activate the module by requiring its capabilities. The descriptor's module name must equal the name the module's manifest reports - the kernel verifies the agreement at startup.
 - New backend for an existing family: implement the same published interface, provide the family member name in the descriptor, ship both providers; `[providers]` picks one at runtime (installing only one implementation needs no selection at all).
-- New mod: create `mods/<id>/` with a `mod.toml`; see `../mods/README.md`.
+- New mod: create `mods/<id>/` with a `mod.toml`; see `../mods/README.md`. A native mod adds its own self-contained `CMakeLists.txt` to the package directory - the build discovers it the same way module directories are discovered, and the kernel loads the built library from the package through the same plugin contract a module uses.
 
 ### Documentation structure
 

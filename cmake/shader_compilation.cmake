@@ -82,5 +82,11 @@ function(engine_compile_module_shaders)
         list(APPEND ENGINE_SHADER_OUTPUTS "${shaderOutput}")
     endforeach()
 
-    add_custom_target(engine_shaders_${ARG_TARGET} ALL DEPENDS ${ENGINE_SHADER_OUTPUTS})
+    # The shader steps ride the owning module's binary, not the global ALL
+    # target: a module excluded from the build (ENGINE_BUILD_MODULE_<NAME>=OFF)
+    # compiles no shaders, and an in-tree consumer that pulls an excluded
+    # module's implementation (the lighting techniques link the renderer)
+    # brings the shaders along with it.
+    add_custom_target(engine_shaders_${ARG_TARGET} DEPENDS ${ENGINE_SHADER_OUTPUTS})
+    add_dependencies(${ARG_TARGET} engine_shaders_${ARG_TARGET})
 endfunction()

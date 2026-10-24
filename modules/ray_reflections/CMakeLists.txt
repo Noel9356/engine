@@ -1,3 +1,13 @@
+# The module's own build switch, declared here so everything about the module
+# lives in its directory: the root build discovers this CMakeLists and the
+# option arrives with it. OFF keeps every target defined - consumers still
+# compile against the published capability header below, and an in-tree
+# consumer that links the implementation still pulls it - but removes the
+# plugin binary from the default build; a run whose mods then demand a
+# capability only this module provides fails startup with a precise
+# diagnostic naming the consumer, never a link error.
+option(ENGINE_BUILD_MODULE_RAY_REFLECTIONS "Include the ray_reflections module in the build" ON)
+
 add_library(engine_module_ray_reflections SHARED
     module_plugin.cpp
     ray_reflections.cpp
@@ -12,7 +22,7 @@ target_link_libraries(engine_module_ray_reflections
     PRIVATE engine_vulkan_hpp_bindings
 )
 
-if(ENGINE_BUILD_DEMO)
+if(ENGINE_BUILD_DEMO AND ENGINE_BUILD_MODULE_RAY_REFLECTIONS)
     include("${CMAKE_SOURCE_DIR}/cmake/shader_compilation.cmake")
     engine_compile_module_shaders(TARGET engine_module_ray_reflections
                                   SOURCES shaders/ray_reflections.comp
@@ -51,3 +61,11 @@ endif()
 # render_interface.hpp, an in-tree integration that is deliberately not a
 # capability). Consumers demand the marker; nothing includes a header here,
 # so no header-only include target exists.
+
+# Excluded from the default build when the option is OFF: the target stays
+# defined for consumers, but nothing builds the plugin binary unless an
+# in-tree consumer actually links it (the runtime then simply does not see
+# the plugin, and a demand for its capability fails startup precisely).
+if(NOT ENGINE_BUILD_MODULE_RAY_REFLECTIONS)
+    set_target_properties(engine_module_ray_reflections PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()

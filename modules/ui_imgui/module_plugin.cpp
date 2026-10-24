@@ -16,7 +16,7 @@ engine::ModuleInterface *createuiPluginModule()
 
 const engine::EngineModulePluginEntry uiPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "ui_imgui",
+    .moduleName              = "ui",
     .createModule            = &createuiPluginModule,
     .providedCapabilities    = uiProvidedCapabilities,
     .providedCapabilityCount = 1,

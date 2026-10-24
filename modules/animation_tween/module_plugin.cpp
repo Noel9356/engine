@@ -16,7 +16,7 @@ engine::ModuleInterface *createanimationPluginModule()
 
 const engine::EngineModulePluginEntry animationPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "animation_tween",
+    .moduleName              = "animation",
     .createModule            = &createanimationPluginModule,
     .providedCapabilities    = animationProvidedCapabilities,
     .providedCapabilityCount = 1,

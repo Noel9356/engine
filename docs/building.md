@@ -71,9 +71,11 @@ Integrity of downloaded dependencies is guaranteed by SHA256 checks, not by TLS:
 
 ## Options
 
-Each module has an option, named after the module directory: `ENGINE_BUILD_MODULE_BVH`, `..._LOGGING_STDOUT`, `..._WINDOW_GLFW`, `..._INPUT_GLFW`, `..._RENDERER_VULKAN`, `..._SCREENSHOT_PNG`, `..._SCENE_REGISTRY`, `..._ANIMATION_TWEEN`, `..._ASSET_GLTF`, `..._PHYSICS_BUILTIN`, `..._AUDIO_MINIAUDIO`, `..._PERSISTENCE_TOML`, `..._UI_IMGUI`, `..._NET_TCP`, `..._HOT_RELOAD_WATCHER`, `..._LUA_SCRIPTING`, `..._PBR`, `..._RADIANCE_CASCADES`, `..._RAY_REFLECTIONS`. Excluding a module removes its code and its third-party dependencies; a run that then demands a capability only it provides fails startup with a precise diagnostic naming the consumer, never a link error. Each module's build surface (its option, its dependencies, its shaders) is described in its own `modules/<name>/README.md`.
+Modules are discovered, not listed: every `modules/<name>/` directory that carries a `CMakeLists.txt` joins the build, and each module's own CMakeLists declares its option, named after the directory (`ENGINE_BUILD_MODULE_BVH`, `..._LOGGING_STDOUT`, `..._WINDOW_GLFW`, `..._PROFILER`, ... - the upper-cased directory name). Adding a module means creating its directory; no shared build file enumerates modules. Excluding a module (`-DENGINE_BUILD_MODULE_<NAME>=OFF`) removes its plugin binary from the default build and the shader steps with it; its published capability header stays compilable, and a run that then demands a capability only it provides fails startup with a precise diagnostic naming the consumer, never a link error. Each module's build surface (its dependencies, its shaders) is described in its own `modules/<name>/README.md`.
 
-`ENGINE_BUILD_DEMO=OFF` removes the host executable and the runtime layout assembly (configs and mod packages).
+Native mod packages are discovered the same way: a `mods/<id>/` directory that carries a `CMakeLists.txt` is added as a subdirectory and builds its library straight into the package's runtime directory.
+
+`ENGINE_BUILD_DEMO=OFF` removes the host executable, the runtime layout assembly (configs and mod packages) and the native mod builds.
 
 ## Runtime layout
 

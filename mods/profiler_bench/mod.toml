@@ -1,0 +1,27 @@
+# Manifest of the profiler_bench mod: a native mod that exercises the
+# profiler capability end to end. It is the tree's worked example of the
+# full extensibility path: a brand-new module (modules/profiler) publishes a
+# brand-new capability, and this package - added without touching the kernel,
+# the host or any other module - is the demand root that activates it.
+#
+# Mods never name a module: they name the capabilities they require, and the
+# dependency graph picks the providers. Requiring "profiler" here is what
+# pulls modules/profiler into the run; "logging" is its own report sink and
+# this mod's log line channel.
+
+id = "profiler_bench"
+version = "1.0.0"
+engine_api = 1
+type = "native"
+entry = "profiler_bench"
+
+display_name = "Profiler Bench"
+description = "Exercises the profiler capability: records counters and scoped lifecycle samples, and lets the profiler module's shutdown report print them."
+author = "engine authors"
+
+# What this run consumes, and therefore what loads:
+#   logging  the mod's log lines and the profiler report's sink
+#   profiler the instrumentation capability this mod demonstrates
+capabilities = ["logging", "profiler"]
+
+permissions = []

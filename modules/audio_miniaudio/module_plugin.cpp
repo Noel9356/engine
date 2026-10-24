@@ -16,7 +16,7 @@ engine::ModuleInterface *createaudioPluginModule()
 
 const engine::EngineModulePluginEntry audioPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "audio_miniaudio",
+    .moduleName              = "audio",
     .createModule            = &createaudioPluginModule,
     .providedCapabilities    = audioProvidedCapabilities,
     .providedCapabilityCount = 1,

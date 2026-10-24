@@ -16,7 +16,7 @@ engine::ModuleInterface *createassetPluginModule()
 
 const engine::EngineModulePluginEntry assetPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "asset_gltf",
+    .moduleName              = "asset",
     .createModule            = &createassetPluginModule,
     .providedCapabilities    = assetProvidedCapabilities,
     .providedCapabilityCount = 1,

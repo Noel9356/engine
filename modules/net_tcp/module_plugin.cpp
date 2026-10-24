@@ -16,7 +16,7 @@ engine::ModuleInterface *createnetPluginModule()
 
 const engine::EngineModulePluginEntry netPluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "net_tcp",
+    .moduleName              = "net",
     .createModule            = &createnetPluginModule,
     .providedCapabilities    = netProvidedCapabilities,
     .providedCapabilityCount = 1,

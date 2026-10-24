@@ -16,7 +16,7 @@ engine::ModuleInterface *createpersistencePluginModule()
 
 const engine::EngineModulePluginEntry persistencePluginEntry{
     .abiVersion              = engine::engineModulePluginAbiVersion,
-    .moduleName              = "persistence_toml",
+    .moduleName              = "persistence",
     .createModule            = &createpersistencePluginModule,
     .providedCapabilities    = persistenceProvidedCapabilities,
     .providedCapabilityCount = 1,
