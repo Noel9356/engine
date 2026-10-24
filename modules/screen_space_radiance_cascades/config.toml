@@ -1,0 +1,39 @@
+# Shipped defaults of the screen_space_radiance_cascades module (the
+# screen-space global illumination technique).
+#
+# The module's own configuration layer: the kernel merges it as the lowest
+# defaults layer, so config/engine.toml (and staged overrides) win over
+# anything written here. Defaults FILL: a key a higher layer already
+# provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[lighting.screen_space_radiance_cascades]
+cascades = 5
+interval_base = 0.5
+interval_factor = 3.0
+probe_stride = 8
+base_rays = 128
+# Angular mapping of the field's directional domain:
+#   "octahedron"          - octahedral map texel grid (default; ~base_rays
+#                           directions, each with its exact solid angle)
+#   "cubemap"             - six cube face grids (~base_rays directions)
+#   "spherical_harmonic"  - the gather projects the field onto the real
+#                           spherical harmonics through band 2 and evaluates
+#                           the irradiance analytically: band-limited, softly
+#                           smoothed GI at the same march cost
+mapping = "octahedron"
+# Light transport bounces per frame: 1 = direct lighting only inside the GI;
+# every extra bounce re-runs the cascade sequence and relights the march's
+# hit points with the previous bounce's gathered transport (screen-space;
+# cost linear in bounces).
+bounces = 1
+gather_visibility = true
+los_steps = 16
+march_steps = 48
+relight_shadows = true
+shadow_steps = 24
+# Edge-aware spatial filter radius on the gathered GI (pixels, 0 = off).
+# Removes the probe grid's spatial scale; depth/normal weights keep edges hard.
+# One probe cell spans 8 pixels, so the radius must average ACROSS cells.
+spatial_filter = 10

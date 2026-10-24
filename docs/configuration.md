@@ -2,6 +2,18 @@
 
 Default file: `config/engine.toml`, resolved relative to the executable. The executable takes no command line input; everything a run can vary lives in the configuration layers below. Parsed with toml++, so type errors report file and line. Startup performs the full load/resolve/permission pass and warns about keys that no component declares; the kernel's `validate()` runs the same pass without opening a window (an embedder's dry run).
 
+## Where the settings live
+
+The engine's configuration is distributed: every module owns its settings and ships them next to its code, and the assembly file only owns what an assembly owns.
+
+| Layer | File | Owns |
+|---|---|---|
+| assembly configuration | `config/engine.toml` | runtime layout, provider wiring, permission policy, and (optionally) overrides of anything below |
+| module defaults | `modules/<name>/config.toml`, shipped by every module | the module's own settings |
+| mod defaults | `mods/<id>/config.toml`, per active package | the package's content-scale settings and bindings |
+
+`config/engine.toml` deliberately defines no module sections: every module runs on its own shipped defaults without a single line in the assembly file. To tune a module for one assembly, add its section to `engine.toml` — anything written there wins over every defaults file. To change a module's out-of-the-box behavior everywhere, edit the module's own `config.toml`. The header of `config/engine.toml` lists where each module's settings live.
+
 ## The layer stack
 
 The effective configuration is assembled from layers, in decreasing precedence:
@@ -11,21 +23,21 @@ The effective configuration is assembled from layers, in decreasing precedence:
 | staged overrides | assignments a composition root stages through the kernel before `construct()`; the shipped executable stages none | replaces; highest authority |
 | engine configuration | `config/engine.toml` | replaces |
 | scene file | the world source: a composition root's explicit scene file, or a content mod's declared scene file when the assembly defines no `[scene]` of its own (see below) | replaces the whole `[scene]` section, nothing else |
-| module defaults | `config/modules/<name>/module.toml`, when a module ships one | fills gaps only |
+| module defaults | `modules/<name>/config.toml`, one shipped by every module | fills gaps only |
 | mod defaults | `<mod package>/config.toml`, per active package | fills gaps only |
 | code defaults | each component's `value_or(...)` in source | reached when no layer above provided the key |
 
 Rules the stack guarantees:
 
-- **The engine configuration always wins over shipped files.** A `module.toml` or a mod's `config.toml` can never override a value the assembly provides; defaults only FILL keys nobody above them set. Between two defaults files providing the same key, the first merge wins — module defaults before mod defaults, each group in sorted name order.
+- **The engine configuration always wins over shipped files.** A module's `config.toml` or a mod's `config.toml` can never override a value the assembly provides; defaults only FILL keys nobody above them set. Between two defaults files providing the same key, the first merge wins — module defaults before mod defaults, each group in sorted name order.
 - **Tables deep-merge; arrays and `[[scene.objects]]` rows replace wholesale.** A higher layer that sets `[[scene.objects]]` replaces the entire object list, never appends to it. That is what keeps scene authoring predictable: the objects a run uses are the objects the winning layer lists.
-- **The scene file owns `[scene]`, and the world has exactly one source.** Precedence: an explicitly staged scene file (a composition root's explicit intent) > the assembly's own `[scene]` > an installed content mod's declared scene file (`scene = ...` in `mod.toml`) > code defaults. A scene file swaps the world section out from under the assembly configuration wholesale: a key the assembly's `[scene]` had is gone unless the scene file lists it too. A scene file may define ONLY `[scene]` (sub-tables and array-of-tables rows included); any other top-level key, or a missing/`[scene]`-as-value, is a precise startup error. This is how an assembly replaces the shipped demo world: the content mod's demo objects do not leak into your world. Content mods may coexist freely: with an explicit world source their claims are simply not applied (a warning says so), and only claims that would decide the world must be unambiguous — two or more active claims with no explicit source fail startup with a report naming every claim. World content never arrives through a defaults layer: a `config.toml` or `module.toml` that defines `[scene]` fails startup with a precise error, because per-key default merging would drip scene values into configurations that did not ask for them (a sealed room whose zero sky must stay zero no matter what content is installed).
+- **The scene file owns `[scene]`, and the world has exactly one source.** Precedence: an explicitly staged scene file (a composition root's explicit intent) > the assembly's own `[scene]` > an installed content mod's declared scene file (`scene = ...` in `mod.toml`) > code defaults. A scene file swaps the world section out from under the assembly configuration wholesale: a key the assembly's `[scene]` had is gone unless the scene file lists it too. A scene file may define ONLY `[scene]` (sub-tables and array-of-tables rows included); any other top-level key, or a missing/`[scene]`-as-value, is a precise startup error. This is how an assembly replaces the shipped demo world: the content mod's demo objects do not leak into your world. Content mods may coexist freely: with an explicit world source their claims are simply not applied (a warning says so), and only claims that would decide the world must be unambiguous — two or more active claims with no explicit source fail startup with a report naming every claim. World content never arrives through a defaults layer: a `config.toml` that defines `[scene]` fails startup with a precise error, because per-key default merging would drip scene values into configurations that did not ask for them (a sealed room whose zero sky must stay zero no matter what content is installed).
 - **Staged overrides are absolute.** A composition root stages `section.path=value` assignments before any backend starts (a malformed assignment fails right there) and they are applied after every other layer. The shipped executable stages nothing — an assembly's world is what its files say — but the layer exists so an embedder can vary a run without rewriting files. Keys are dotted paths of bare segments (`scene.sun.intensity`); values use TOML syntax — numbers, booleans, quoted strings, arrays, inline tables — and any raw value TOML rejects becomes a literal string, so `window.title=My Room` works without quotes.
 - **No hot reload.** The stack is assembled once, before any component constructs.
 
 ### Shipped defaults
 
-A module directory may carry `module.toml` and a mod package may carry `config.toml` next to its `mod.toml`; the build copies both into the runtime layout and the kernel merges them as the two defaults layers above. Defaults files may only define sections, and never the assembly-owned ones (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`) — a package that could relocate the runtime layout or deny permissions would break the authority model — and never `[scene]` (world content has a dedicated channel, see the layer rules above). Any such file fails startup with a precise error. The in-tree example is the content package's own: `mods/test_scene/config.toml` ships `renderer.texture_directory`, so the renderer finds the package's texture sets in every configuration that does not set the key itself; the assembly can override it from `engine.toml`.
+Every module directory carries a `config.toml` (its shipped defaults) and a mod package may carry one next to its `mod.toml`; the build copies both into the runtime layout (`modules/<name>/config.toml` lands in `config/modules/<name>/config.toml`) and the kernel merges them as the two defaults layers above. Defaults files may only define sections, and never the assembly-owned ones (`[engine]`, `[providers]`, `[permissions]`, `[diagnostics]`) — a package that could relocate the runtime layout or deny permissions would break the authority model — and never `[scene]` (world content has a dedicated channel, see the layer rules above). Any such file fails startup with a precise error. The content package's own `mods/test_scene/config.toml` ships the `renderer.texture_directory` default that points the renderer at the package's texture sets and the `[input.actions]` bindings its content reads; the assembly can override both from `engine.toml`.
 
 ### Provenance
 
@@ -65,8 +77,10 @@ This document covers the GLOBAL and SHARED sections. Each module owns the docume
 | `[screenshot]` | `../modules/screenshot_png/README.md` |
 | `[diagnostics]` | here (host-owned opt-in reporting) |
 | `[lighting]` (shared hand-off key `max_roughness`), `[lighting.pbr]` | `../modules/pbr/README.md` |
-| `[lighting.radiance_cascades]` | `../modules/radiance_cascades/README.md` |
+| `[lighting.screen_space_radiance_cascades]` | `../modules/screen_space_radiance_cascades/README.md` |
 | `[lighting.ray_reflections]` | `../modules/ray_reflections/README.md` |
+| `[physics]` | `../modules/physics_builtin/README.md` |
+| `[bvh]` | `../modules/bvh/README.md` |
 | `[scene]` | here (shared world content — read by several modules) |
 
 Sections other than a component's own are read-only shared configuration by convention: the module that owns a section reads it, everyone else treats it as data.
@@ -103,7 +117,7 @@ Diagnostics are opt-in: with recording disabled the event bus never reads a cloc
 
 ## [scene]
 
-Shared world content, read by the renderer (rasterization) and the lighting modules (the exact analytic SDF the GI traces — one geometry truth). Object and light details also live in the technique docs: `../modules/pbr/README.md` (light seeding), `../modules/radiance_cascades/README.md` and `../modules/ray_reflections/README.md` (how the world is traced).
+Shared world content, read by the renderer (rasterization) and the lighting modules (the exact analytic SDF the GI traces — one geometry truth). Object and light details also live in the technique docs: `../modules/pbr/README.md` (light seeding), `../modules/screen_space_radiance_cascades/README.md` and `../modules/ray_reflections/README.md` (how the world is traced).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|

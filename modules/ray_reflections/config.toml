@@ -1,0 +1,19 @@
+# Shipped defaults of the ray_reflections module (the ray traced glossy
+# reflection technique).
+#
+# The module's own configuration layer: the kernel merges it as the lowest
+# defaults layer, so config/engine.toml (and staged overrides) win over
+# anything written here. Defaults FILL: a key a higher layer already
+# provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[lighting.ray_reflections]
+# One SDF reflection ray per pixel where the Fresnel weight justifies one.
+# Surfaces rougher than the shared hand-off point ([lighting].max_roughness,
+# shipped by the pbr module) fade out (a single ray cannot carry a wide
+# glossy lobe). The direct pass dims its analytic specular by the same
+# Fresnel weight, so the two layers split the specular energy instead of
+# drawing the sun twice (see pbr_lighting.comp reflectionWeight).
+max_distance = 40.0
+march_steps = 64

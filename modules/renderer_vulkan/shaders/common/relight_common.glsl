@@ -9,8 +9,11 @@
 // Deliberate limits (documented in docs/architecture.md):
 // - normal maps do not perturb the relight (the SDF gives the geometric
 //   normal; the bounce difference is second order);
-// - the relight is the FIRST bounce only - light arriving at the hit point
-//   from other surfaces comes from the cascade field, not from here.
+// - the function itself is the DIRECT term only - light arriving at the hit
+//   point from other surfaces comes from the cascade field. The radiance
+//   cascades' multi-bounce mode ([lighting.screen_space_radiance_cascades].bounces > 1)
+//   adds the previous bounce's gathered transport at the hit point in the
+//   march shader, on top of what this function returns.
 
 #ifndef ENGINE_RELIGHT_COMMON_GLSL
 #define ENGINE_RELIGHT_COMMON_GLSL

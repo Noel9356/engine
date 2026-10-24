@@ -27,6 +27,8 @@ The module provides two capabilities: `lighting` (the scene light state every li
 
 ## Configuration
 
+The module ships these values in its own `config.toml` (the lowest configuration layer — `config/engine.toml` and staged overrides win over them, see `docs/configuration.md`).
+
 The sun and point lights are seeded from `[scene.sun]` and `[[scene.point_lights]]` (see `docs/configuration.md`, section "[scene]").
 
 | Key | Type | Default | Meaning |

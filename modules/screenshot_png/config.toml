@@ -1,0 +1,16 @@
+# Shipped defaults of the screenshot_png module.
+#
+# The module's own configuration layer: the kernel merges it as the lowest
+# defaults layer, so config/engine.toml (and staged overrides) win over
+# anything written here. Defaults FILL: a key a higher layer already
+# provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[screenshot]
+key = "F12"
+# Captures are written to a 'screenshots' folder in the process working
+# directory - the project root for the documented quick start. Any relative
+# path here resolves against the working directory too; absolute paths are
+# used as-is. e.g. output_directory = "captures"
+# output_directory = "screenshots"

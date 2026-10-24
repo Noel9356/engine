@@ -44,7 +44,7 @@ struct ConfigProvenance
         CommandLine,    // an override staged by the composition root
         EngineConfig,   // the assembly configuration file
         SceneFile,      // an applied scene file (wholesale [scene] swap)
-        ModuleDefaults, // config/modules/<name>/module.toml
+        ModuleDefaults, // config/modules/<name>/config.toml
         ModDefaults     // <mod package>/config.toml
     };
 
@@ -68,7 +68,7 @@ struct ConfigProvenance
 //                              default). Its values are final unless
 //                              staged overrides replace them.
 //   2. mergeDefaultsFile       shipped defaults, scanned by the kernel: one
-//                              module.toml per module directory, one
+//                              config.toml per module directory, one
 //                              config.toml per active mod package. Defaults
 //                              FILL: a key the assembly already provided is
 //                              never touched, tables merge recursively,
@@ -87,8 +87,13 @@ struct ConfigProvenance
 class ConfigurationStore final
 {
 public:
-    // File names the kernel looks for when scanning shipped defaults.
-    static constexpr const char *moduleDefaultsFileName = "module.toml";
+    // File names the kernel looks for when scanning shipped defaults. Both
+    // component kinds ship the same file name: a module's defaults live at
+    // config/modules/<name>/config.toml, a mod package's next to its
+    // mod.toml. One name, one meaning: "this file holds defaults", never
+    // identity (the module's identity is its compiled manifest, the mod's is
+    // its mod.toml).
+    static constexpr const char *moduleDefaultsFileName = "config.toml";
     static constexpr const char *modDefaultsFileName    = "config.toml";
 
     // Section names shared by the kernel, the host and the authority policy.
@@ -105,7 +110,7 @@ public:
     static constexpr const char *diagnosticsLatencyReportKey = "latency_report";
 
     // Directory scanned for per-module shipped defaults, relative to the
-    // executable directory (one module.toml per subdirectory).
+    // executable directory (one config.toml per subdirectory).
     static constexpr const char *moduleDefaultsDirectory = "config/modules";
 
     // Declared here, defined in the .cpp: the staged-override vector holds a
@@ -127,7 +132,8 @@ public:
     // source location.
     bool loadFromFile(const std::filesystem::path &path, std::string &errorMessage);
 
-    // Layer 2: merges one shipped defaults file (module.toml or config.toml).
+    // Layer 2: merges one shipped defaults file (a module's or a mod
+    // package's config.toml).
     // Defaults fill gaps only, as described in the class comment. Assembly and
     // host authority sections ([engine], [providers], [permissions],
     // [diagnostics]) are rejected with a precise error: a shipped

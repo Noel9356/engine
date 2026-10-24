@@ -33,12 +33,14 @@ A requirement no available component satisfies fails startup with one precise di
 
 ## Components, modules, mods
 
-Modules and mods are both *components* in one dependency graph. Each declares a `ComponentManifest`: provided capabilities, required capabilities, required permissions. The resolver treats every component uniformly, so all four dependency directions work:
+Modules and mods are both *components* in one dependency graph. Each declares a `ComponentManifest`: provided capabilities, required capabilities, optional capabilities, required permissions. The resolver treats every component uniformly, so all four dependency directions work:
 
 - module depends on module (screenshot requires renderer)
 - mod depends on module (a native mod requiring logging and input)
 - module depends on mod (a module may require a capability only a mod provides)
 - mod depends on mod (two mods sharing one capability)
+
+**Optional capabilities** (`optionalCapabilities`, `optional_capabilities` in `mod.toml`) state a *use-if-present* dependency: the component functions without the capability. They resolve through the same machinery as requirements — one provider, or the configuration's `[providers]` choice among several, with an ambiguous optional capability being the same startup error (a silent pick would depend on scan order) — and an existing provider is ordered before the consumer exactly like a requirement's. The differences: zero providers is a valid outcome (no edge, no diagnostic), the capability never joins the demand closure (an optional use never pulls its provider into a run that has no required use for it), and the derived `capability.<name>` permission still covers the acquisition. The consumer probes availability at construct time with `ComponentContext::isCapabilityAvailable` and degrades gracefully when the answer is no. The shipped worked example: the lighting technique modules list `lighting` as optional and render emissive + sky transport when no light provider is active.
 
 A mod is therefore not a second-class plugin mechanism: it gets the same construction order, permission enforcement, and diagnostics as a compiled-in module. Packages and the `mod.toml` schema: `../mods/README.md`.
 

@@ -32,7 +32,7 @@ host_capability = "scripting"
 #   renderer          frame rendering
 #   lighting          the scene light state the lighting passes read
 #   direct_diffuse    the analytic direct PBR pass
-#   indirect_diffuse  the radiance-cascades GI
+#   indirect_diffuse  the screen-space radiance cascades GI
 #   indirect_specular the ray-traced reflections
 #   screenshot        key-triggered captures
 #   scene             the runtime object registry (the orb spawn below)

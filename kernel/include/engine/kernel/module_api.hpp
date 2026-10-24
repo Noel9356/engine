@@ -17,7 +17,11 @@ namespace engine
 // requiredCapabilities): the kernel resolves the capability demand closure
 // from this metadata BEFORE instantiating anything, so a module whose
 // capabilities nobody requires is never created and its binary is released.
-inline constexpr std::uint32_t engineModulePluginAbiVersion = 2u;
+// Version 3 added optionalCapabilities: capabilities the module uses when a
+// provider is active and functions without otherwise (the resolver orders the
+// provider first and the manifest must agree with the descriptor, like the
+// required set).
+inline constexpr std::uint32_t engineModulePluginAbiVersion = 3u;
 
 // The descriptor every module plugin returns from its single exported entry
 // point. Plain data and plain function pointers: nothing that crosses the
@@ -41,6 +45,10 @@ struct EngineModulePluginEntry
     std::uint32_t      providedCapabilityCount;
     const char *const *requiredCapabilities;
     std::uint32_t      requiredCapabilityCount;
+    // Capabilities used when a provider is active, never demanded: a missing
+    // provider is a valid state. Same agreement rule as the required set.
+    const char *const *optionalCapabilities;
+    std::uint32_t      optionalCapabilityCount;
 };
 
 } // namespace engine

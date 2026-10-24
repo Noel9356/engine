@@ -56,18 +56,24 @@ std::string describeComponentKind(
 }
 
 // Effective permission grants of one component: the permissions it declared
-// plus one "capability.<name>" grant per required capability. Requiring a
-// capability and being authorized to acquire it are the same statement, so a
-// component says it once; the explicit permissions list remains for grants
-// that are not capability acquisitions (filesystem.write, or a capability
-// acquired lazily without a graph edge). Configuration denials still win
-// over every grant, declared or derived.
+// plus one "capability.<name>" grant per required OR optional capability.
+// Requiring a capability and being authorized to acquire it are the same
+// statement, and an optional capability states the same intent with the one
+// difference that the provider may be absent - the grant covers the
+// acquisition the component will make when the provider is active. The
+// explicit permissions list remains for grants that are not capability
+// acquisitions (filesystem.write). Configuration denials still win over every
+// grant, declared or derived.
 std::vector<std::string> effectivePermissions(
     const ComponentManifest &manifest
 )
 {
     std::set<std::string> unique(manifest.requiredPermissions.begin(), manifest.requiredPermissions.end());
     for (const std::string &capabilityName : manifest.requiredCapabilities)
+    {
+        unique.insert(std::string(capabilityPermissionPrefix) + capabilityName);
+    }
+    for (const std::string &capabilityName : manifest.optionalCapabilities)
     {
         unique.insert(std::string(capabilityPermissionPrefix) + capabilityName);
     }
@@ -173,7 +179,7 @@ bool EngineKernel::loadConfiguration(
     // installed content mod's scene file. Defaults files can never define
     // [scene] (rejected at merge), so the check stays exact.
     assemblyDefinesScene = configurationStore.hasSection(ConfigurationStore::sceneSectionName);
-    // Shipped module defaults (config/modules/<name>/module.toml) fill the
+    // Shipped module defaults (config/modules/<name>/config.toml) fill the
     // gaps the assembly left; a broken defaults file is a startup problem.
     if (!loadModuleDefaults(report))
     {
@@ -184,7 +190,7 @@ bool EngineKernel::loadConfiguration(
 }
 
 // Scans the runtime module defaults directory: every config/modules/<name>/
-// that contains a module.toml contributes that module's shipped defaults as
+// that contains a config.toml contributes that module's shipped defaults as
 // the lowest configuration layer. Discovery is sorted by name so behavior
 // never depends on filesystem iteration order; when two defaults files
 // provide the same key, the alphabetically first module wins (defaults fill
@@ -520,6 +526,7 @@ void EngineKernel::gatherModPackages(
             // the compiled manifest only had to agree on the name.
             record.manifest.name                 = modManifest.id;
             record.manifest.requiredCapabilities = modManifest.capabilities;
+            record.manifest.optionalCapabilities = modManifest.optionalCapabilities;
             record.manifest.requiredPermissions  = modManifest.permissions;
             record.manifest.requiredComponents   = modManifest.requiresComponents;
             record.manifest.knownConfigKeys      = modManifest.configKeys;
@@ -538,6 +545,7 @@ void EngineKernel::gatherModPackages(
             record.manifest.kind                 = ComponentKind::ScriptMod;
             record.manifest.name                 = modManifest.id;
             record.manifest.requiredCapabilities = modManifest.capabilities;
+            record.manifest.optionalCapabilities = modManifest.optionalCapabilities;
             record.manifest.requiredPermissions  = modManifest.permissions;
             record.manifest.requiredComponents   = modManifest.requiresComponents;
             record.manifest.knownConfigKeys      = modManifest.configKeys;
@@ -559,6 +567,12 @@ void EngineKernel::gatherModPackages(
 // no demand: no module plugin is instantiated. Capability names are never
 // interpreted: the kernel only matches strings between consumer requirements
 // and provider declarations.
+//
+// Optional capabilities deliberately stay OUT of the closure: an optional use
+// must never pull a provider into a run that has no required use for it. A
+// consumer that declared an optional capability probes availability at
+// construct time (ComponentContext::isCapabilityAvailable) and degrades
+// gracefully when the provider never joined the assembly.
 void EngineKernel::computeDemandClosure()
 {
     demandedCapabilities.clear();
@@ -781,6 +795,13 @@ void EngineKernel::loadModulePlugins(
                 record.requiredCapabilities.emplace_back(pluginEntry->requiredCapabilities[index]);
             }
         }
+        for (std::uint32_t index = 0; index < pluginEntry->optionalCapabilityCount; ++index)
+        {
+            if (pluginEntry->optionalCapabilities != nullptr && pluginEntry->optionalCapabilities[index] != nullptr)
+            {
+                record.optionalCapabilities.emplace_back(pluginEntry->optionalCapabilities[index]);
+            }
+        }
 
         if (std::find_if(
                 modulePlugins.begin(),
@@ -846,6 +867,14 @@ bool EngineKernel::instantiateActiveModules(
         {
             report += "- module '" + plugin.name
                     + "' declares different required capabilities in its manifest than in its plugin descriptor; "
+                      "rebuild the plugin with this kernel.\n";
+            successful = false;
+            continue;
+        }
+        if (!sameStringSet(record.manifest.optionalCapabilities, plugin.optionalCapabilities))
+        {
+            report += "- module '" + plugin.name
+                    + "' declares different optional capabilities in its manifest than in its plugin descriptor; "
                       "rebuild the plugin with this kernel.\n";
             successful = false;
             continue;
@@ -1207,20 +1236,23 @@ bool EngineKernel::runConstructPhase(
     return true;
 }
 
-// The pull behind ComponentContext::acquireCapability. Resolves the requested
-// capability name against the constructed components: exact declarations first,
-// then - for a family request - the single active member of that family. Every
-// resolved pointer comes straight from the declaring provider's
-// capabilityPointerFor hook at call time; nothing is cached here between
-// requests. A request that cannot resolve to exactly one implementation throws
-// with a precise diagnostic.
-void *EngineKernel::resolveCapabilityPointer(
-    const std::string & /*requesterName*/, const std::string &capabilityName
+// The provider classification behind both capability questions the kernel
+// answers at runtime: resolveCapabilityPointer (throwing acquire) and
+// hasSingleCapabilityProvider (non-throwing probe). Walks the constructed
+// records once and collects the exact providers of the name plus the family
+// members whose name satisfies the family request. Sharing the walk is the
+// point: the acquire and its probe can never disagree about what is
+// available.
+void EngineKernel::classifyCapabilityProviders(
+    const std::string           &capabilityName,
+    std::vector<ComponentRecord *> &exactProviders,
+    std::vector<ComponentRecord *> &memberProviders,
+    std::string                  &memberName
 )
 {
-    std::vector<ComponentRecord *> exactProviders;
-    std::vector<ComponentRecord *> memberProviders;
-    std::string                    memberName;
+    exactProviders.clear();
+    memberProviders.clear();
+    memberName.clear();
     for (ComponentRecord &record : records)
     {
         if (!record.constructed)
@@ -1240,6 +1272,23 @@ void *EngineKernel::resolveCapabilityPointer(
             }
         }
     }
+}
+
+// The pull behind ComponentContext::acquireCapability. Resolves the requested
+// capability name against the constructed components: exact declarations first,
+// then - for a family request - the single active member of that family. Every
+// resolved pointer comes straight from the declaring provider's
+// capabilityPointerFor hook at call time; nothing is cached here between
+// requests. A request that cannot resolve to exactly one implementation throws
+// with a precise diagnostic.
+void *EngineKernel::resolveCapabilityPointer(
+    const std::string & /*requesterName*/, const std::string &capabilityName
+)
+{
+    std::vector<ComponentRecord *> exactProviders;
+    std::vector<ComponentRecord *> memberProviders;
+    std::string                    memberName;
+    classifyCapabilityProviders(capabilityName, exactProviders, memberProviders, memberName);
 
     if (!exactProviders.empty())
     {
@@ -1288,6 +1337,29 @@ void *EngineKernel::resolveCapabilityPointer(
         + "' has no active provider; a component acquired it without a "
           "requirement whose provider is available in this run"
     );
+}
+
+// The non-throwing probe behind ComponentContext::isCapabilityAvailable.
+// Shares the classification walk with the acquire above, so "available" here
+// means exactly "the acquire would return an implementation": one exact
+// provider, or no exact provider and exactly one family member. Ambiguity
+// and absence both read as unavailable - the consumer degrades instead of
+// throwing, and a diagnostic for the ambiguous case already reached the
+// startup report through the resolver (an ambiguous optional capability is a
+// startup error, so a run that got here resolved it).
+bool EngineKernel::hasSingleCapabilityProvider(
+    const std::string &capabilityName
+)
+{
+    std::vector<ComponentRecord *> exactProviders;
+    std::vector<ComponentRecord *> memberProviders;
+    std::string                    memberName;
+    classifyCapabilityProviders(capabilityName, exactProviders, memberProviders, memberName);
+    if (!exactProviders.empty())
+    {
+        return exactProviders.size() == 1;
+    }
+    return memberProviders.size() == 1;
 }
 
 // Asks one component for the implementation behind a capability name it

@@ -14,6 +14,15 @@ namespace engine
 // resolve to a single provider, and every failure mode produces one precise
 // diagnostic instead of a vague error.
 //
+// Optional capabilities (ComponentManifest::optionalCapabilities) ride the
+// same resolution machinery as required ones - exact providers first, then
+// family members, then the configuration's [providers] choice, and an
+// ambiguous optional capability is the same startup error, because a silent
+// pick would make behavior depend on scan order. The one difference: zero
+// providers resolve to "not available" instead of an error, and no edge is
+// added. When a provider DOES exist, the edge is added like a requirement's -
+// the consumer acquires the implementation during construct.
+//
 // The resolver is a pure function over manifests: it holds no backend state and
 // never touches component instances, which is what makes the kernel startup
 // validation a dry run.

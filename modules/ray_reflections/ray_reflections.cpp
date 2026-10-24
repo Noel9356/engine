@@ -111,7 +111,7 @@ public:
 private:
     // Light uniform for the SDF relight (own copy: the module fills it from
     // the optional lighting capability every frame, exactly like the
-    // radiance cascades relight does).
+    // screen-space radiance cascades relight does).
     void updateLightUniform()
     {
         GpuLightUniform             uniform;
@@ -353,14 +353,18 @@ RayReflectionsModule::RayReflectionsModule()
     // it when the reflection pass should attach to the renderer.
     componentManifest.providedCapabilities = {"indirect_specular"};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
-    // capability.lighting is optional at acquire time (a missing or denied
-    // provider only strips the direct relight from reflection hits - they
-    // keep emissive + sky), but the PERMISSION must still be declared:
-    // acquireCapability throws on an undeclared permission, the construct
-    // catch turned that into a PERMANENT null lighting pointer, and every
-    // reflection then rendered lightless (black mirror ball) - exactly the
-    // silent failure mode the permission system exists to make precise.
-    componentManifest.requiredPermissions = {"capability.logging", "capability.renderer", "capability.lighting"};
+    // "lighting" is OPTIONAL: a missing or denied provider only strips the
+    // direct relight from reflection hits - they keep emissive + sky. It is
+    // declared through optionalCapabilities, which derives the
+    // capability.<name> permission (the engine once needed the explicit
+    // permission entry below because acquireCapability throws on an
+    // undeclared permission, and a denied provider then rendered every
+    // reflection lightless - the silent failure mode the permission system
+    // exists to make precise) and orders the lighting provider before this
+    // module when one is active, so the construct-time probe is a property
+    // of the assembly, never of plugin scan order.
+    componentManifest.optionalCapabilities = {"lighting"};
+    componentManifest.requiredPermissions  = {"capability.logging", "capability.renderer"};
     // The pass settings the module reads from [lighting.ray_reflections]
     // plus the shared specular hand-off key ([lighting].max_roughness) it
     // splits the glossy energy with the direct pass through.
@@ -400,16 +404,15 @@ void RayReflectionsModule::construct(
         throw std::runtime_error("ray_reflections module: max_roughness and max_distance must be > 0");
     }
 
-    // The lighting capability is optional: without a provider the relight
-    // sees no lights and reflections carry emissive + sky only.
+    // The lighting capability is optional (declared in the manifest): the
+    // resolver ordered the provider before this module when one is active,
+    // so the probe is a stable answer, never scan-order luck. Without a
+    // provider the relight sees no lights and reflections carry emissive +
+    // sky only.
     LightingCapability *lighting = nullptr;
-    try
+    if (context.isCapabilityAvailable(LightingCapability::capabilityName))
     {
         lighting = &context.acquireCapability<LightingCapability>();
-    }
-    catch (const ComponentAccessError &)
-    {
-        lighting = nullptr;
     }
 
     // Attachment follows demand: this module only activates when the run
@@ -449,7 +452,7 @@ void *RayReflectionsModule::capabilityPointerFor(
 {
     // "indirect_specular" is a demand marker: it carries no call interface, so
     // the implementation behind it is the module object itself (see the
-    // radiance cascades module for the reasoning).
+    // screen-space radiance cascades module for the reasoning).
     if (capabilityName == "indirect_specular")
     {
         return this;

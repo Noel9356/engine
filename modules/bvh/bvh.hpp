@@ -16,10 +16,13 @@ namespace engine
 // "bvh.binary").
 //
 // The module IS the capability: BvhCapability's contract is stateless spatial
-// queries, and the implementation answers them from a median-split binary
-// BVH built per call (see binary_bvh.hpp). There is no runtime state to
-// keep coherent - the caller's box list is the truth, the hierarchy is a
-// per-call snapshot of it.
+// queries, and the implementation answers them from a binary BVH built per
+// call (see binary_bvh.hpp). There is no runtime state to keep coherent - the
+// caller's box list is the truth, the hierarchy is a per-call snapshot of it.
+//
+// The split strategy is configuration ([bvh].split: median | midpoint | sah,
+// default midpoint - the benchmark winner, see binary_bvh.hpp) read once at
+// construct and applied to every build the capability serves.
 class BvhModule final : public ModuleInterface, public BvhCapability
 {
 public:
@@ -51,6 +54,9 @@ public:
 private:
     ComponentManifest componentManifest;
     LoggerCapability *logger = nullptr;
+    // The split strategy [bvh].split selected at construct; every hierarchy
+    // the capability builds uses it.
+    BvhSplitMethod    splitMethod = BvhSplitMethod::Midpoint;
 };
 
 } // namespace engine

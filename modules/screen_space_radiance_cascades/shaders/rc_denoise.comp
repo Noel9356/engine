@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Radiance cascades, spatial filter stage.
+// Screen-space screen-space radiance cascades, spatial filter stage.
 //
 // The gather output carries the probe grid's spatial scale: probes sit every
 // probe_stride pixels and their LOS-gated blend, surface anchoring and the

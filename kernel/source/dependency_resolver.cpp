@@ -85,12 +85,20 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
     };
 
     // Apply provider selections and report ambiguity or bad selections.
+    // Requirement names cover BOTH declaration kinds: a required capability
+    // and an optional capability resolve through the identical machinery
+    // (exact providers, then family members, then the [providers] choice) so
+    // the graph's determinism never depends on how the consumer declared the
+    // dependency. The ONE difference lives in the edge phase below: a
+    // requirement with zero providers is an error for a required consumer and
+    // a plain "not available" for an optional one.
     std::map<std::string, ManifestIndex> selectedProvider; // requirement -> provider index
     {
         std::set<std::string> requirementNames;
         for (const ComponentManifest &manifest : manifests_)
         {
             requirementNames.insert(manifest.requiredCapabilities.begin(), manifest.requiredCapabilities.end());
+            requirementNames.insert(manifest.optionalCapabilities.begin(), manifest.optionalCapabilities.end());
         }
         for (const std::string &requirement : requirementNames)
         {
@@ -218,6 +226,36 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
                 diagnostic.involvementChain.push_back(consumer.name);
                 diagnostic.involvementChain.push_back(capabilityName);
                 result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+            if (provider->second != consumerIndex)
+            {
+                edges.emplace_back(provider->second, consumerIndex);
+            }
+        }
+
+        // Optional capabilities add the SAME ordering edge when a provider
+        // resolved (the consumer will acquire the implementation during its
+        // construct phase, so the provider must exist by then), and resolve
+        // to plain "not available" when none did: a missing entry in
+        // selectedProvider means zero providers, which is the valid optional
+        // outcome - never a diagnostic. A capability declared both required
+        // and optional keeps only the required edge.
+        for (const std::string &capabilityName : consumer.optionalCapabilities)
+        {
+            const bool alsoRequired = std::find(
+                                          consumer.requiredCapabilities.begin(),
+                                          consumer.requiredCapabilities.end(),
+                                          capabilityName
+                                      )
+                                   != consumer.requiredCapabilities.end();
+            if (alsoRequired)
+            {
+                continue;
+            }
+            const auto provider = selectedProvider.find(capabilityName);
+            if (provider == selectedProvider.end())
+            {
                 continue;
             }
             if (provider->second != consumerIndex)

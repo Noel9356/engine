@@ -33,6 +33,15 @@ namespace engine
 //                                        # permission, so acquisitions need no
 //                                        # second list. Mods never name a module;
 //                                        # they name the capabilities they consume.
+//   optional_capabilities = ["..."]      # capabilities the mod uses when a
+//                                        # provider is active and functions
+//                                        # without otherwise: a missing provider
+//                                        # is a valid state, the capability is
+//                                        # never demanded (its provider is not
+//                                        # pulled into the run), and each entry
+//                                        # still grants its capability.<name>
+//                                        # permission and orders an existing
+//                                        # provider before this mod.
 //   host_capability = "example_capability" # script mods only: which ONE required
 //                                        # capability's provider hosts the script
 //                                        # runtime. The kernel resolves that
@@ -61,6 +70,12 @@ struct ModManifest
     std::string              description;
     std::string              author;
     std::vector<std::string> capabilities;
+    // Capabilities used when a provider is active, never demanded. Wired into
+    // the component manifest's optionalCapabilities: the resolver orders an
+    // existing provider before this mod, the permission is derived, and a
+    // missing provider degrades instead of failing startup. The mod probes
+    // availability at construct time through ComponentContext.
+    std::vector<std::string> optionalCapabilities;
     // Script mods only: the required capability whose provider hosts the
     // script. Package data, like the rest of the manifest - the kernel
     // resolves the provider of this capability but never interprets the name

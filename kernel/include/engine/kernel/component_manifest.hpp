@@ -36,6 +36,23 @@ struct ComponentManifest
     // modules may depend on mods and mods may depend on modules.
     std::vector<std::string> requiredCapabilities;
 
+    // Capability names the component USES when a provider is present but does
+    // not need to function: a missing provider is a valid state, never a
+    // startup problem. The resolver applies the same determinism rules as for
+    // required capabilities (a single provider, or the [providers] choice
+    // among several - an ambiguous optional capability is still a startup
+    // error, because silently picking one would depend on scan order); the
+    // ONE difference is that zero providers resolves to "not available"
+    // instead of an error. When a provider exists it is ordered before this
+    // component (the same graph edge a requirement creates), and the derived
+    // "capability.<name>" permission grant covers the acquisition. The
+    // consumer probes availability at construct time through
+    // ComponentContext::isCapabilityAvailable and acquires only then.
+    // Optional capabilities deliberately do NOT join the demand closure:
+    // using something optionally must never pull its provider into a run
+    // that has no other use for it.
+    std::vector<std::string> optionalCapabilities;
+
     // Component names this component must be ordered after, regardless of
     // capabilities. Rarely needed: capability requirements already order
     // providers before consumers.

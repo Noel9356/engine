@@ -1,11 +1,18 @@
-# engine runtime configuration.
+# engine runtime configuration - the ASSEMBLY layer.
 #
 # Paths are resolved relative to the engine executable directory.
 #
-# This file is the second-highest configuration layer: shipped defaults (a
-# module's module.toml, a mod package's config.toml) only fill keys it leaves
-# unset. The precedence rules and the
-# provenance report are documented in docs/configuration.md.
+# This file is the highest file-backed configuration layer, and it owns
+# exactly what an assembly owns: the runtime layout, the provider wiring and
+# the permission policy. It deliberately holds NO module settings: every
+# module ships its own defaults in modules/<name>/config.toml (copied to
+# runtime/config/modules/<name>/config.toml by the build), and every content
+# package ships its own in mods/<id>/config.toml. Those defaults FILL every
+# key this file leaves unset - anything written HERE wins over them, which
+# is the whole override story: to tune a module for this assembly, add its
+# section here; to change what a module does everywhere, edit the module's
+# own config.toml. The precedence rules and the provenance report are
+# documented in docs/configuration.md.
 #
 # The world content lives with the content mod: mods/test_scene declares
 # scene.toml in its manifest, and this file deliberately defines no [scene]
@@ -22,7 +29,7 @@
 # stays dormant: its plugin is never instantiated. This assembly's demo
 # pipeline is demanded by the shipped content mod (mods/test_scene): camera
 # input, frame rendering, the scene light state, the direct PBR pass, the
-# radiance-cascades GI, the ray-traced reflections and key-triggered
+# screen-space radiance cascades GI, the ray-traced reflections and key-triggered
 # captures.
 
 # Mod packages are discovered on disk, not listed here: every subdirectory of
@@ -57,125 +64,43 @@
 [permissions]
 # denied = [["example_cpp_mod", "capability.input"]]
 
-[logging]
-level = "information"
-# file = "engine.log"
-
-[window]
-title = "engine demo"
-width = 1280
-height = 720
-resizable = true
-
-[input]
-
-# Action mapping: bind by MEANING, not by device. Consumers query
-# actionStrength("jump") and stay agnostic of which control fires it; a
-# rebinding is a configuration edit, no code. Multiple bindings per action
-# are comma separated; "gamepad:<control>" names gamepad buttons/axes
-# (A, DpadUp, LeftTrigger, ...), "mouse:<button>" the mouse, everything else
-# a key by its stable name.
-[input.actions]
-boost = "LeftShift, gamepad:A"
-release_cursor = "Escape"
-# Custom actions are free-form; scripts read engine.action_strength("...").
-
-[renderer]
-# Validation layers off for interactive runs: every dispatch pays a large
-# CPU tax under the layer, which starves the window's message pump on slower
-# machines (the OS then marks the window "not responding" during heavy
-# frames). Diagnostics-oriented assemblies re-enable it.
-enable_validation = false
-vsync = true
-prefer_discrete_device = true
-# Transient render targets (G-buffer, radiance layers, cascade fields) and
-# the host-written uniforms are single-buffered and shared by every slot, so
-# the frame loop serializes execution: each frame waits for both in-flight
-# fences before recording. max_frames_in_flight therefore decouples command
-# buffers and swapchain acquisition, not GPU execution - frames cannot
-# overlap without racing the shared targets (docs/robustness.md, invariant 38).
-max_frames_in_flight = 2
-# Compiled SPIR-V lands in runtime/shaders (module build output). The
-# texture directory is deliberately NOT set here: content belongs to the
-# content mod, whose shipped defaults point the renderer at the package's
-# own assets (mods/test_scene/config.toml).
-shader_directory = "shaders"
-exposure = 1.15
-tonemap = "aces"
-
-# Bloom (post-processing): an opt-in HDR glow. The bright pass lifts
-# radiance above bloom_threshold into a half-resolution chain, a separable
-# Gaussian spreads it, and the final stage adds it back before the tonemap -
-# the same operators the composite uses, so a bloom run and a non-bloom run
-# of the same scene match outside the glow.
-bloom = true
-bloom_threshold = 1.0
-bloom_strength = 0.15
-
-# Lighting composition. There is no technique list anymore: each lighting
-# technique module provides a radiance-layer capability (direct_diffuse,
-# indirect_diffuse, indirect_specular) and is activated exactly when a mod
-# demands that capability. The layers the composite reads follow from what
-# attached, in a fixed order:
-# direct + albedo * (1 - metallic) * diffuseGI + specular + emissive.
-#
-# max_roughness is the specular hand-off point shared by the direct pass and
-# the reflection pass (both read it, so the two sides of the hand-off can
-# never drift apart: below the threshold the analytic specular draws the sun,
-# above it the reflection ray does).
-[lighting]
-max_roughness = 0.5
-
-# Direct lighting technique settings (pbr module).
-[lighting.pbr]
-shadows = true
-penumbra = 12.0
-shadow_steps = 24
-
-# Radiance cascades GI settings (radiance_cascades module).
-#
-# Cost model: the march dispatches (extent/stride)^2 * rays * march_steps
-# scene-SDF evaluations per frame, and the SDF is linear in the object
-# count. probe_stride 2 at 1280x720 launched 29 million sphere-tracing
-# invocations per frame - multi-second frames that starved the message pump
-# ("not responding"). stride 8 with the same ray count is a 16x cheaper
-# march; the LOS-guarded gather, the soft cascade blend and the spatial
-# filter carry the smoothness instead of probe density.
-[lighting.radiance_cascades]
-cascades = 5
-interval_base = 0.5
-interval_factor = 3.0
-probe_stride = 8
-base_rays = 128
-gather_visibility = true
-los_steps = 16
-march_steps = 48
-relight_shadows = true
-shadow_steps = 24
-# Edge-aware spatial filter radius on the gathered GI (pixels, 0 = off).
-# Removes the probe grid's spatial scale; depth/normal weights keep edges hard.
-# One probe cell spans 8 pixels, so the radius must average ACROSS cells.
-spatial_filter = 10
-
-# Ray traced glossy reflections: one SDF reflection ray per pixel where the
-# Fresnel weight justifies one. Surfaces rougher than the shared hand-off
-# point ([lighting].max_roughness above) fade out (a single ray cannot carry a
-# wide glossy lobe). The direct pass dims its analytic specular by the same
-# Fresnel weight, so the two layers split the specular energy instead of
-# drawing the sun twice (see pbr_lighting.comp reflectionWeight).
-[lighting.ray_reflections]
-max_distance = 40.0
-march_steps = 64
-
-[screenshot]
-key = "F12"
-# Captures are written to a 'screenshots' folder in the process working
-# directory - the project root for the documented quick start. Any relative
-# path here resolves against the working directory too; absolute paths are
-# used as-is. e.g. output_directory = "captures"
-# output_directory = "screenshots"
-
 # Diagnostics are opt-in: the shutdown communication latency and frame-time
 # report is a developer tool. Enable it here.
 [diagnostics]
 latency_report = false
+
+# ---------------------------------------------------------------------------
+# Module overrides (all optional - every module runs on its own shipped
+# defaults without a single line here). A section written below replaces the
+# module defaults key by key, never wholesale: tables deep-merge, so a
+# one-key override leaves the module's other defaults standing.
+#
+# Where each module's settings live:
+#
+#   [logging]                     modules/logging_stdout/config.toml
+#   [window]                      modules/window_glfw/config.toml
+#   [input] / [input.actions]     modules/input_glfw/config.toml (+ the
+#                                 content mod's config.toml for its bindings)
+#   [renderer]                    modules/renderer_vulkan/config.toml
+#   [lighting] (max_roughness)    modules/pbr/config.toml
+#   [lighting.pbr]                modules/pbr/config.toml
+#   [lighting.screen_space_radiance_cascades]  modules/screen_space_radiance_cascades/config.toml
+#   [lighting.ray_reflections]    modules/ray_reflections/config.toml
+#   [physics]                     modules/physics_builtin/config.toml
+#   [bvh]                         modules/bvh/config.toml
+#   [screenshot]                  modules/screenshot_png/config.toml
+#
+# Examples - uncomment to override:
+#
+# [renderer]
+# exposure = 1.4
+#
+# [lighting.screen_space_radiance_cascades]
+# mapping = "cubemap"        # octahedron (default) | cubemap | spherical_harmonic
+# bounces = 2                # screen-space GI bounce count (default 1)
+#
+# [bvh]
+# split = "sah"              # midpoint (default) | median | sah
+#
+# [input.actions]
+# boost = "RightShift, gamepad:A"

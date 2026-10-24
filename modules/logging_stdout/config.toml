@@ -1,0 +1,15 @@
+# Shipped defaults of the logging_stdout module.
+#
+# This file is the module's own configuration layer: the kernel merges it as
+# the lowest defaults layer (docs/configuration.md, "The layer stack"), so
+# every assembly configuration - config/engine.toml or a staged override -
+# wins over anything written here. Defaults FILL: a key a higher layer
+# already provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[logging]
+# "debug" | "information" | "warning" | "error"
+level = "information"
+# Uncomment to mirror every line into a log file next to the executable.
+# file = "engine.log"

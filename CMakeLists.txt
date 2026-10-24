@@ -143,19 +143,19 @@ if(ENGINE_BUILD_DEMO)
         endif()
     endforeach()
 
-    # Shipped module defaults: a module directory may carry a module.toml; the
-    # kernel scans runtime/config/modules/<name>/module.toml and merges it as
-    # the lowest configuration layer (docs/configuration.md, "The layer
-    # stack"). No in-tree module ships one today; the rule keeps the runtime
-    # layout correct the day one does.
-    file(GLOB ENGINE_MODULE_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/modules/*/module.toml")
+    # Shipped module defaults: every module carries a config.toml next to its
+    # code; the kernel scans runtime/config/modules/<name>/config.toml and
+    # merges it as the lowest configuration layer (docs/configuration.md, "The
+    # layer stack"). The assembly configuration (config/engine.toml) wins over
+    # every defaults file.
+    file(GLOB ENGINE_MODULE_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/modules/*/config.toml")
     foreach(moduleDefaultsFile IN LISTS ENGINE_MODULE_DEFAULTS)
         get_filename_component(moduleDefaultsDirectory "${moduleDefaultsFile}" DIRECTORY)
         get_filename_component(moduleDefaultsName "${moduleDefaultsDirectory}" NAME)
         list(APPEND ENGINE_MOD_PACKAGE_COMMANDS
              COMMAND ${CMAKE_COMMAND} -E copy_if_different
                      "${moduleDefaultsFile}"
-                     "${CMAKE_BINARY_DIR}/runtime/config/modules/${moduleDefaultsName}/module.toml")
+                     "${CMAKE_BINARY_DIR}/runtime/config/modules/${moduleDefaultsName}/config.toml")
     endforeach()
 
     add_custom_target(engine_runtime_layout ALL

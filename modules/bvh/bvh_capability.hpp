@@ -9,8 +9,10 @@
 //
 // Provider model: this header is the family contract ("bvh"). The provider
 // in this module is the implementation-bound member "bvh.binary" - a binary
-// bounding volume hierarchy built by median split on the longest axis. A
-// different spatial index (a grid, a dynamic BVH) declares its own member of
+// bounding volume hierarchy over caller-supplied boxes, its split strategy
+// configurable ([bvh].split, default "midpoint": the benchmark winner, see
+// modules/bvh/binary_bvh.hpp). A different spatial index (a grid, a dynamic
+// BVH) declares its own member of
 // the family and wins through the [providers] configuration section; consumers
 // keep demanding "bvh" and notice nothing but the answers.
 

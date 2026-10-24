@@ -75,6 +75,12 @@ public:
     // resolved (no provider, several providers, or a provider that returned
     // no implementation).
     virtual void *resolveCapabilityPointer(const std::string &requesterName, const std::string &capabilityName) = 0;
+
+    // The non-throwing probe behind ComponentContext::isCapabilityAvailable:
+    // true when exactly one constructed provider resolves the name right now
+    // (an exact declaration, or a single family member). Ambiguous or absent
+    // resolutions return false - the acquire above would fail either way.
+    virtual bool hasSingleCapabilityProvider(const std::string &capabilityName) = 0;
 };
 
 // Everything a module or a mod may touch from the kernel. The context enforces
@@ -147,6 +153,27 @@ public:
     {
         return demandedCapabilities_ != nullptr
             && demandedCapabilities_->find(capabilityName) != demandedCapabilities_->end();
+    }
+
+    // Whether the named capability can be acquired right now: the permission
+    // is granted AND exactly one constructed provider resolves the name. This
+    // is the probe for a manifest-declared OPTIONAL capability
+    // (ComponentManifest::optionalCapabilities): construct asks before
+    // acquiring, because a missing provider is a valid state for an optional
+    // dependency, not a failure. The resolver ordered this component after
+    // the provider when one exists, so the answer is a property of the
+    // assembly - never of scan order. Ambiguous or absent -> false; the
+    // acquire would fail either way.
+    bool isCapabilityAvailable(
+        const std::string &capabilityName
+    ) const
+    {
+        const std::string permissionName = std::string(capabilityPermissionPrefix) + capabilityName;
+        if (!permissionSystem_.isGranted(componentName_, permissionName))
+        {
+            return false;
+        }
+        return capabilityResolver_.hasSingleCapabilityProvider(capabilityName);
     }
 
     // Typed configuration access into the component's own section.

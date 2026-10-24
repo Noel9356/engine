@@ -1,10 +1,11 @@
-# radiance_cascades module
+# screen_space_radiance_cascades module
 
-The global-illumination technique. The module attaches a multi-stage compute pipeline to the renderer (march, gather, compose, denoise) that transports radiance through per-cascade view-depth slabs against the exact analytic scene SDF, composes the cascades front to back, and gathers per-pixel indirect diffuse irradiance into the INDIRECT DIFFUSE radiance layer.
+The screen-space global-illumination technique: the transport's input domain is the visible frame itself (the depth buffer and the G-buffer), so a hit whose projection lands off screen carries the direct term only. The module attaches a multi-stage compute pipeline to the renderer (march, gather, compose, denoise) that transports radiance through per-cascade view-depth slabs against the exact analytic scene SDF, composes the cascades front to back, and gathers per-pixel indirect diffuse irradiance into the INDIRECT DIFFUSE radiance layer.
 
 ## How the transport is organized
 
 - **Cascade partition.** The interval partition is measured along the VIEW ray and split into slabs that grow by `interval_factor` per cascade. The shipped 3.0 puts room-depth surfaces on probe grids two to four times finer than a doubling schedule at the same march cost — the probe STRIDE doubles per cascade while the slab grows faster.
+- **Angular mapping.** The field's directional domain is configurable (`mapping`): the direction set of an OCTAHEDRAL map texel grid (the default), the six CUBE FACE grids, or a SPHERICAL HARMONIC representation through band 2. Every mode spends approximately `base_rays` directions; each direction's exact solid angle is computed once per rebuild on the CPU and uploaded with the direction table, so the march and compose stages are identical in all three modes — only the direction set and the gather's irradiance evaluation differ. The texel mappings integrate the field by direct quadrature; the SH mapping projects the composed field onto the real spherical harmonics and evaluates the irradiance analytically (the Ramamoorthi-Hanrahan truncated cosine-lobe convolution), which band-limits the field: softly smoothed GI at the same march cost.
 - **Anchoring.** Cascade 0 anchors its probes on the visible surfaces (the depth buffer) and marches each direction until the ray's view depth leaves cascade 0's slab, so near-contact transport is exact. Coarser cascades anchor probes ON THE CAMERA RAY at their slab start — pulled just in front of the cell's own surface whenever that surface sits before the slab start (a continuous pull from the cell centre's view depth; a quantized anchor would put staircase bands along iso-depth contours) — and march the slab in view depth. Anchoring every coarse cascade on unrelated surfaces mixes incompatible fields along one view ray, and probing from inside geometry blocks light instead of guarding it.
 - **March.** The per-direction march range is EXACTLY the ray's segment inside the slab: forward directions march until the ray's view depth reaches the slab end; BACKWARD directions (viewCosine <= 0) march only down to the camera plane. Letting backward rays run a fixed budget past the camera plane fills every probe's field with arbitrary far geometry, and every pixel sampling those directions inherits the per-probe variance as blocky staircases.
 - **Compose.** Front-to-back composition stays geometrically consistent: every slab starts exactly where the finer slab ended along the same view ray. The compose base uses the sky GRADIENT only, never the sun disk — a sub-pixel disk would alias into the coarse angular texels and put sparkle into every GI sample. Emissive panels are visible to coarse cascades through their direct radiance seeding (the panel's outgoing radiance is part of the transported field).
@@ -12,10 +13,11 @@ The global-illumination technique. The module attaches a multi-stage compute pip
 - **The leak guard.** The line-of-sight weighted probe blend is THE leak guard: its result feeds the probe weight directly. Both LOS endpoints are checked against the SDF, and an offset pushed inside geometry by a normal-mapped normal falls back to an unperturbed start (a perturbed normal can collapse a whole neighbourhood's coverage to zero), so the guard's shape is kept simple and its input data flow direct - every input the guard reads exists on every path. Probe contributions renormalize by their ACTUAL surviving bilinear weight sum — a clamped floor amplifies every partially blocked pixel and draws bright rims riding contact silhouettes. Coarse-cell anchoring is CONTINUOUS: the mixed/pure cell classification ramps smoothly between the slab-start anchor and the far-surface anchor instead of branching, because neighbouring cells classified differently carry disagreeing fields and the compose bilinear interpolates rectangular stair steps between them.
 - **Denoise.** An edge-aware bilateral filter (radius configurable, shipped at 10; the shader clamps at 16 to stay useful at probe stride 8) removes the probe grid's spatial scale before the composite. Its depth band is measured in LINEARIZED VIEW depth (the near/far planes ride the filter's push constants): a band compared against raw buffer depths is a hyperbola in world space — centimetres near the camera, metres far away — and would average GI across distant parallel surfaces. Its normal weight is power 8: higher powers reject too many taps on normal-mapped surfaces and the probe grid survives the filter.
 - **Relight.** Ray hits are relit with the surface's textured material through the shared `surfaceOutgoingRadiance` (`relight_common.glsl`) — one material truth shared with the reflection technique — plus shadows budgeted identically to the direct pass (`shadow_steps` in both; an under-budgeted relight shadow ray returns partial light inside sealed rooms and the probe grid amplifies the error into blocky patches). The relight's energy unit is LAMBERTIAN radiance and the gather integrates it into irradiance over pi, with the composite multiplying albedo exactly once.
+- **Bounces.** `bounces` (default 1) sets the light transport depth per frame: bounce 0 is the historical single bounce (march hits relit by the direct lights only); every extra bounce re-runs the march/compose/gather sequence and relights the march's hit points with the PREVIOUS bounce's gathered transport, sampled at the hit's screen position and added through the same albedo/pi chain as the direct term. The transport is screen-space: a hit whose projection lands off screen carries the direct term only. Intermediate bounces run the gather in pure-transport mode (no starved-pixel direct fallback), so direct light is never counted twice along the chain; the last bounce's gather feeds the composite and keeps the fallback. Cost is linear in bounces — every bounce pays the full march/compose/gather sequence.
 
 ## Cost model
 
-The march dispatches `(extent/stride)^2 * rays * march_steps` scene-SDF evaluations per frame, and the SDF is linear in the object count. `probe_stride` and `base_rays` dominate the cost: stride 2 at 720p launches 29 million sphere-tracing invocations per frame — multi-second frames that starve the OS message pump and get the window marked "not responding". The shipped stride 8 with the same ray count is a 16x cheaper march; smoothness comes from the LOS-guarded gather, the soft cascade blend and the spatial filter instead of probe density.
+The march dispatches `(extent/stride)^2 * rays * march_steps` scene-SDF evaluations per frame (times `bounces`), and the SDF is linear in the object count. `probe_stride` and `base_rays` dominate the cost: stride 2 at 720p launches 29 million sphere-tracing invocations per frame — multi-second frames that starve the OS message pump and get the window marked "not responding". The shipped stride 8 with the same ray count is a 16x cheaper march; smoothness comes from the LOS-guarded gather, the soft cascade blend and the spatial filter instead of probe density.
 
 ## Wiring
 
@@ -23,25 +25,30 @@ The march dispatches `(extent/stride)^2 * rays * march_steps` scene-SDF evaluati
 |---|---|
 | provided capabilities | `indirect_diffuse` (this technique's radiance layer) |
 | required capabilities | `logging`, `renderer` |
-| required permissions | `capability.logging`, `capability.renderer`, `capability.lighting` |
+| optional capabilities | `lighting` — used when a provider is active, the pass degrades to emissive + sky transport without one |
+| required permissions | `capability.logging`, `capability.renderer` (`capability.lighting` is derived from the optional declaration) |
 
-The `lighting` acquisition is deliberate but optional: the technique reads the scene light state (see `modules/pbr/README.md`) when a provider exists, and degrades to emissive + sky transport without one. A run activates this module exactly when an active mod demands `indirect_diffuse`; an active module always attaches its pass.
+The `lighting` acquisition is the engine's worked example of an OPTIONAL capability (declared in `optionalCapabilities`, not `requiredCapabilities`): the technique reads the scene light state (see `modules/pbr/README.md`) when a provider exists, and degrades to emissive + sky transport without one. The resolver orders the lighting provider before this module when one is active (construct's acquire is a property of the assembly, never of plugin scan order), the capability never joins the demand closure (an optional use does not pull a light provider into a run that has no other use for one), and `construct` probes availability with `ComponentContext::isCapabilityAvailable` before acquiring. A run activates this module exactly when an active mod demands `indirect_diffuse`; an active module always attaches its pass.
 
 ## Configuration
+
+The module ships these values in its own `config.toml` (the lowest configuration layer — `config/engine.toml` and staged overrides win over them, see `docs/configuration.md`):
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `cascades` | integer | `5` | cascade count (1..8); the last interval ends at `interval_base * interval_factor^(cascades-1)` world units |
 | `interval_base` | float | `0.5` | cascade 0 interval length (near-field detail) |
 | `interval_factor` | float | `3.0` | interval growth per cascade; growth above 2 puts room-depth surfaces on finer probe grids (the stride doubles per cascade while the slab grows by this factor) |
-| `probe_stride` | integer | `4` | cascade 0 probes every Nth pixel; each coarser cascade doubles the stride. Dominates the cost — see the cost model above (the shipped demo uses 8) |
-| `base_rays` | integer | `32` | ray count per probe (azimuth x elevation derived), identical for every cascade; this and `probe_stride` dominate the cost (the shipped demo uses 128) |
+| `probe_stride` | integer | `8` | cascade 0 probes every Nth pixel; each coarser cascade doubles the stride. Dominates the cost — see the cost model above |
+| `base_rays` | integer | `128` | approximate direction budget per probe, identical for every cascade; this and `probe_stride` dominate the cost |
+| `mapping` | string | `"octahedron"` | angular mapping of the field's directional domain: `"octahedron"` (octahedral map texel grid), `"cubemap"` (six cube face grids) or `"spherical_harmonic"` (band-2 SH projection + analytic cosine-lobe evaluation: band-limited, smoothed GI at the same march cost). An unknown spelling fails startup precisely |
+| `bounces` | integer | `1` | light transport bounces per frame; every bounce re-runs the cascade sequence and adds the previous bounce's gathered transport at the march's hit points — cost linear in bounces. No upper bound: the bounce count is a quality/performance trade the configuration owns (the only floor is `>= 1`, because 0 would disable the transport the pass exists for) |
 | `gather_visibility` | bool | `true` | line-of-sight weighted probe blend (the leak guard); `false` trades leaks for speed |
-| `los_steps` | integer | `24` | SDF steps per gather line-of-sight march (the shipped demo uses 16) |
+| `los_steps` | integer | `16` | SDF steps per gather line-of-sight march |
 | `march_steps` | integer | `48` | sphere-tracing steps per probe ray |
-| `relight_shadows` | bool | `true` | shadows for the first-bounce relight at ray hits |
-| `shadow_steps` | integer | `16` | relight shadow march steps; keep in step with the pbr pass (`[lighting.pbr].shadow_steps`, default 24) — the shipped demo uses 24 |
-| `spatial_filter` | integer | `5` | edge-aware bilateral filter radius (pixels) on the gathered GI, 0 = off (both the module and the shader clamp at 16). Size it to span at least one probe cell (`probe_stride` pixels) — a radius below the stride cannot average across the grid; the shipped `config/engine.toml` uses 10 |
+| `relight_shadows` | bool | `true` | shadows for the relight at ray hits |
+| `shadow_steps` | integer | `24` | relight shadow march steps; keep in step with the pbr pass (`[lighting.pbr].shadow_steps`) |
+| `spatial_filter` | integer | `10` | edge-aware bilateral filter radius (pixels) on the gathered GI, 0 = off (both the module and the shader clamp at 16). Size it to span at least one probe cell (`probe_stride` pixels) — a radius below the stride cannot average across the grid |
 
 ## Sealing the no-leak property
 
@@ -49,7 +56,8 @@ The no-leak property is a design invariant, not a tuned parameter: every probe w
 
 ## Files
 
-- `radiance_cascades.hpp` / `radiance_cascades.cpp` — the technique module and its pass attachment
-- `shaders/rc_march.comp` / `rc_gather.comp` / `rc_compose.comp` / `rc_denoise.comp` — the four pipeline stages
+- `screen_space_radiance_cascades.hpp` / `screen_space_radiance_cascades.cpp` — the technique module, its pass attachment and the per-mapping direction tables
+- `shaders/rc_march.comp` / `rc_gather.comp` / `rc_compose.comp` / `rc_denoise.comp` — the four pipeline stages (the march relights hits with the previous bounce's transport; the gather evaluates texel quadrature or the SH projection per `mapping`)
+- `config.toml` — the module's shipped defaults (the lowest configuration layer)
 - `module_plugin.cpp` — the static plugin descriptor (name, factory, provided capabilities)
-- `CMakeLists.txt` — target and option wiring (`ENGINE_BUILD_MODULE_RADIANCE_CASCADES`)
+- `CMakeLists.txt` — target and option wiring (`ENGINE_BUILD_MODULE_SCREEN_SPACE_RADIANCE_CASCADES`)

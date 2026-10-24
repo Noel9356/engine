@@ -211,6 +211,7 @@ bool ModManifestLoader::loadFromFile(
         return false;
     }
     if (!readStringArray(table, "capabilities", outManifest.capabilities, manifestPath, errorMessage)
+        || !readStringArray(table, "optional_capabilities", outManifest.optionalCapabilities, manifestPath, errorMessage)
         || !readStringArray(table, "permissions", outManifest.permissions, manifestPath, errorMessage)
         || !readStringArray(table, "requires", outManifest.requiresComponents, manifestPath, errorMessage)
         || !readStringArray(table, "config_keys", outManifest.configKeys, manifestPath, errorMessage))

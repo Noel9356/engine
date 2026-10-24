@@ -6,14 +6,14 @@
 # plugin binary from the default build; a run whose mods then demand a
 # capability only this module provides fails startup with a precise
 # diagnostic naming the consumer, never a link error.
-option(ENGINE_BUILD_MODULE_RADIANCE_CASCADES "Include the radiance_cascades module in the build" ON)
+option(ENGINE_BUILD_MODULE_SCREEN_SPACE_RADIANCE_CASCADES "Include the screen_space_radiance_cascades module in the build" ON)
 
-add_library(engine_module_radiance_cascades SHARED
+add_library(engine_module_screen_space_radiance_cascades SHARED
     module_plugin.cpp
-    radiance_cascades.cpp
+    screen_space_radiance_cascades.cpp
 )
 
-target_link_libraries(engine_module_radiance_cascades
+target_link_libraries(engine_module_screen_space_radiance_cascades
     PUBLIC engine_kernel
     PUBLIC engine_capability_logging
     PUBLIC engine_capability_renderer
@@ -22,9 +22,9 @@ target_link_libraries(engine_module_radiance_cascades
     PRIVATE engine_vulkan_hpp_bindings
 )
 
-if(ENGINE_BUILD_DEMO AND ENGINE_BUILD_MODULE_RADIANCE_CASCADES)
+if(ENGINE_BUILD_DEMO AND ENGINE_BUILD_MODULE_SCREEN_SPACE_RADIANCE_CASCADES)
     include("${CMAKE_SOURCE_DIR}/cmake/shader_compilation.cmake")
-    engine_compile_module_shaders(TARGET engine_module_radiance_cascades
+    engine_compile_module_shaders(TARGET engine_module_screen_space_radiance_cascades
                                   SOURCES shaders/rc_march.comp
                                           shaders/rc_compose.comp
                                           shaders/rc_gather.comp
@@ -36,12 +36,12 @@ endif()
 
 # Module plugin deployment: the binary lands in runtime/modules/, the directory
 # the kernel scans for plugins (see engine_kernel.cpp loadModulePlugins).
-# PREFIX keeps one naming scheme on every platform (libengine_module_radiance_cascades.dll
-# on Windows, libengine_module_radiance_cascades.so on POSIX); the $ORIGIN entries resolve
+# PREFIX keeps one naming scheme on every platform (libengine_module_screen_space_radiance_cascades.dll
+# on Windows, libengine_module_screen_space_radiance_cascades.so on POSIX); the $ORIGIN entries resolve
 # the sibling plugins and $ORIGIN/.. the kernel and GLFW runtimes in runtime/;
 # WINDOWS_EXPORT_ALL_SYMBOLS publishes the module's C++ surface to the other
 # plugins that consume it across the boundary.
-set_target_properties(engine_module_radiance_cascades PROPERTIES
+set_target_properties(engine_module_screen_space_radiance_cascades PROPERTIES
     PREFIX "lib"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime/modules"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime/modules"
@@ -55,7 +55,7 @@ set_target_properties(engine_module_radiance_cascades PROPERTIES
 # module's C++ surface to the other plugins' import libraries (the lighting
 # techniques reach RendererModule::attachLightingTechnique directly).
 if(MINGW)
-    target_link_options(engine_module_radiance_cascades PRIVATE -Wl,--export-all-symbols)
+    target_link_options(engine_module_screen_space_radiance_cascades PRIVATE -Wl,--export-all-symbols)
 endif()
 
 
@@ -70,6 +70,6 @@ endif()
 # defined for consumers, but nothing builds the plugin binary unless an
 # in-tree consumer actually links it (the runtime then simply does not see
 # the plugin, and a demand for its capability fails startup precisely).
-if(NOT ENGINE_BUILD_MODULE_RADIANCE_CASCADES)
-    set_target_properties(engine_module_radiance_cascades PROPERTIES EXCLUDE_FROM_ALL ON)
+if(NOT ENGINE_BUILD_MODULE_SCREEN_SPACE_RADIANCE_CASCADES)
+    set_target_properties(engine_module_screen_space_radiance_cascades PROPERTIES EXCLUDE_FROM_ALL ON)
 endif()

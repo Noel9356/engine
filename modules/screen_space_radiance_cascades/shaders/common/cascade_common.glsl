@@ -1,28 +1,30 @@
-// Math shared by the radiance cascades march and gather stages.
+// Math shared by the screen-space radiance cascades march and gather stages.
 //
 // Two things live here because both stages previously carried byte-identical
 // copies that had to be kept in sync by comment alone (a mismatch would
 // desynchronize the line-of-sight check from the field the probe actually
 // carries). One definition removes the failure mode instead of policing it:
 //
-// - The precomputed direction table (see the buffer below): the equirect
+// - The precomputed direction table (see the buffer below): the angular
 //   schedule used to be a function here that every consumer re-evaluated with
-//   4-5 transcendentals per direction - the gather inside a per-pixel
-//   per-probe quadrature loop (~1000+ evaluations per pixel), the march once
-//   per invocation, the compose once per coarsest-cascade texel. The schedule
-//   is a pure function of the angular schedule, constant across cascades AND
-//   frames, so it is now computed once per rebuild on the CPU
-//   (RadianceCascadesPass::rebuild builds the identical equirectangular
-//   schedule) and uploaded as this buffer.
+//   4-5 transcendentals per direction. The schedule is a pure function of the
+//   configured angular mapping ([lighting.screen_space_radiance_cascades].mapping:
+//   octahedron, cubemap or spherical_harmonic) and the ray budget, constant
+//   across cascades AND frames, so it is computed once per rebuild on the CPU
+//   (ScreenSpaceRadianceCascadesPass::rebuild -> buildDirectionTable: octahedron texel
+//   centers, cube face texel centers, or the octahedron grid again for the SH
+//   projection - each texel with its EXACT solid angle) and uploaded as this
+//   buffer.
 
 #ifndef ENGINE_CASCADE_COMMON_GLSL
 #define ENGINE_CASCADE_COMMON_GLSL
 
-// Precomputed direction table, one vec4 per (azimuth x elevation) direction in
-// the march's image-layer order (azimuth-major: index = azIndex * elCount +
-// elIndex): xyz the unit direction, w the direction's equirectangular solid
-// angle (2*pi/azCount) * (pi/elCount) * cos(elevation) - the exact quadrature
-// weight the gather's probeIrradiance previously recomputed per pixel.
+// Precomputed direction table, one vec4 per direction in the march's
+// image-layer order: xyz the unit direction, w the direction's EXACT solid
+// angle (the texel's spherical area under the configured mapping - octahedron
+// and cubemap texels are computed from their corner geometry, so the gather's
+// quadrature stays exact in every mode; the spherical_harmonic mapping uses
+// the same weights for its projection).
 layout(std430, set = 0, binding = 7) readonly buffer CascadeDirectionTable
 {
     vec4 cascadeDirections[];

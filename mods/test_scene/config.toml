@@ -12,3 +12,13 @@
 # runtime/mods/test_scene/assets/textures/. The path resolves relative to
 # the engine executable, like every runtime path.
 texture_directory = "mods/test_scene/assets/textures"
+
+# The action bindings this package's content reads (the shipped free-fly
+# demo). Actions bind by MEANING, not by device (see
+# modules/input_glfw/README.md): the script and the camera controller query
+# actionStrength(name), and a rebinding is a configuration edit, no code.
+# An assembly overrides any binding from its own [input.actions] - the
+# assembly layer always wins over this one.
+[input.actions]
+boost = "LeftShift, gamepad:A"
+release_cursor = "Escape"

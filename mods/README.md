@@ -28,6 +28,7 @@ The manifest is authoritative for the mod's identity and wiring; the kernel vali
 | `description`      | no       | free text |
 | `author`           | no       | free text |
 | `capabilities`     | for graph| required capabilities (graph edges); each also derives its `capability.<name>` permission grant |
+| `optional_capabilities` | no  | capabilities used when a provider is active, never demanded: a missing provider is a valid state, an existing one is ordered before the mod, and each entry still derives its `capability.<name>` grant. The mod probes availability at construct time (`ComponentContext::isCapabilityAvailable`) |
 | `host_capability`  | script   | which ONE required capability's provider hosts the script runtime |
 | `permissions`      | no       | extra permission grants beyond the derived ones (deniable in configuration) |
 | `requires`         | no       | component names to order after (any mod type) |
@@ -52,7 +53,7 @@ capabilities = ["scripting", "logging", "scene"]
 permissions = []
 ```
 
-The `capabilities` list is the demand root of the whole run: every capability a mod requires pulls its provider module (and that module's own requirements pull further providers transitively). A capability nobody requires stays dormant - its plugin binary is never even instantiated. The demo run works this way: the `test_scene` package demands the camera input, the renderer, the lighting layers and the screenshot capability, and exactly those modules load.
+The `capabilities` list is the demand root of the whole run: every capability a mod requires pulls its provider module (and that module's own requirements pull further providers transitively). A capability nobody requires stays dormant - its plugin binary is never even instantiated. `optional_capabilities` deliberately stay out of this: an optional use never pulls a provider into the run. The demo run works this way: the `test_scene` package demands the camera input, the renderer, the lighting layers and the screenshot capability, and exactly those modules load.
 
 ## Permissions
 

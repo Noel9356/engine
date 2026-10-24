@@ -109,6 +109,9 @@ public:
     // capabilityPointerFor hook at acquisition time. Nothing is stored.
     void *resolveCapabilityPointer(const std::string &requesterName, const std::string &capabilityName) override;
 
+    // The non-throwing probe behind ComponentContext::isCapabilityAvailable.
+    bool hasSingleCapabilityProvider(const std::string &capabilityName) override;
+
     const ConfigurationStore &configuration() const
     {
         return configurationStore;
@@ -140,6 +143,7 @@ private:
         ModuleInterface *(*createModule)() = nullptr;
         std::vector<std::string>        providedCapabilities;
         std::vector<std::string>        requiredCapabilities;
+        std::vector<std::string>        optionalCapabilities;
         std::unique_ptr<DynamicLibrary> library;
         bool                            active = false;
     };
@@ -177,7 +181,18 @@ private:
     // capability name it declared; shared by the exact and the family path of
     // resolveCapabilityPointer.
     void *capabilityPointerOf(ComponentRecord &provider, const std::string &capabilityName);
-    // Scans config/modules/<name>/module.toml shipped defaults; the lowest
+    // Walks the constructed records and classifies the providers of one
+    // capability name: exact declarations, family members (with the member
+    // name that satisfied the request) and the counts behind the probe.
+    // Shared by resolveCapabilityPointer and hasSingleCapabilityProvider so
+    // the acquire and its non-throwing probe can never disagree.
+    void classifyCapabilityProviders(
+        const std::string             &capabilityName,
+        std::vector<ComponentRecord *> &exactProviders,
+        std::vector<ComponentRecord *> &memberProviders,
+        std::string                    &memberName
+    );
+    // Scans config/modules/<name>/config.toml shipped defaults; the lowest
     // configuration layer (defaults fill gaps, they never override).
     bool loadModuleDefaults(std::string &report);
     // The front-door sequence validate and construct share: load the layered

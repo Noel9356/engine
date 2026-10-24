@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Radiance cascades, final gather.
+// Screen-space screen-space radiance cascades, final gather.
 //
 // Per pixel diffuse irradiance from the composed cascades:
 //
@@ -72,8 +72,8 @@ layout(set = 1, binding = 10, rgba16f) uniform restrict writeonly image2D giImag
 layout(push_constant) uniform GatherPush
 {
     layout(offset = 0) uvec4 counts;   // x primitiveCount, y losSteps, z visibilityEnabled, w cascadeCount
-    layout(offset = 16) vec4 schedule; // x intervalBase, y intervalFactor, z probeStride, w unused
-    layout(offset = 32) uvec4 dirs;    // x azCount, y elCount
+    layout(offset = 16) vec4 schedule; // x intervalBase, y intervalFactor, z probeStride, w pureTransport (1 = no direct fallback: intermediate bounces)
+    layout(offset = 32) uvec4 dirs;    // x directionCount, y mappingMode (0 octahedron, 1 cubemap, 2 spherical_harmonic)
 } push_;
 
 // Anchor of one probe of `cascade` in the pixel's neighbourhood. Cascade 0
@@ -118,14 +118,70 @@ vec3 probeAnchor(ivec2 probe, uint cascade, ivec2 extent, out vec3 surfaceNormal
 }
 
 // Diffuse irradiance of one probe of one cascade for the given surface
-// normal. Quadrature over the cascade's direction texels with equirectangular
-// solid angles - both the directions and their solid angles come from the
-// precomputed table (cascade_common.glsl): this loop runs 4 probes x up to 3
-// cascade gathers per pixel, where the former per-direction trig (four
-// transcendentals plus a cosine for the solid angle) dominated the pass.
+// normal. Two evaluation modes over the SAME direction table (the march and
+// compose stages are identical in both):
+//
+// - Texel quadrature (octahedron, cubemap): sum over the cascade's direction
+//   texels with their exact solid angles - directions and weights come from
+//   the precomputed table (cascade_common.glsl), so no per-direction trig
+//   runs here; this loop executes 4 probes x up to 3 cascade gathers per
+//   pixel.
+// - spherical_harmonic: the composed field is PROJECTED onto the real
+//   spherical harmonics through band 2 (quadrature over the same table) and
+//   the irradiance is evaluated analytically from the coefficients - the
+//   Ramamoorthi & Hanrahan truncated cosine-lobe convolution. Band limiting
+//   smooths the field: softly blurred GI at the same march cost.
+vec3 probeIrradianceSphericalHarmonic(sampler2DArray cascadeSampler, ivec2 probe, vec3 normal)
+{
+    const uint directionCount = push_.dirs.x;
+
+    // Band-2 real SH basis constants (sqrt(1/4pi), sqrt(3/4pi), sqrt(15/4pi),
+    // sqrt(5/16pi), sqrt(15/16pi)); projection and evaluation share the same
+    // basis order: 0 = Y00, 1..3 = the Y1 band, 4..8 = the Y2 band.
+    vec3 coefficients[9];
+    for (uint bandIndex = 0u; bandIndex < 9u; ++bandIndex)
+    {
+        coefficients[bandIndex] = vec3(0.0);
+    }
+    for (uint directionIndex = 0u; directionIndex < directionCount; ++directionIndex)
+    {
+        const vec4 directionData = cascadeDirections[directionIndex];
+        const vec3 radiance = texelFetch(cascadeSampler, ivec3(probe.x, probe.y, int(directionIndex)), 0).rgb;
+        const vec3 d = directionData.xyz;
+        const float weight = directionData.w;
+        coefficients[0] += radiance * (0.2820947918 * weight);
+        coefficients[1] += radiance * (0.4886025119 * d.y * weight);
+        coefficients[2] += radiance * (0.4886025119 * d.z * weight);
+        coefficients[3] += radiance * (0.4886025119 * d.x * weight);
+        coefficients[4] += radiance * (1.0925484306 * d.x * d.y * weight);
+        coefficients[5] += radiance * (1.0925484306 * d.y * d.z * weight);
+        coefficients[6] += radiance * (0.3153915652 * (3.0 * d.z * d.z - 1.0) * weight);
+        coefficients[7] += radiance * (1.0925484306 * d.x * d.z * weight);
+        coefficients[8] += radiance * (0.5462742153 * (d.x * d.x - d.y * d.y) * weight);
+    }
+
+    // Cosine-lobe evaluation at the surface normal: A0 = pi, A1 = 2pi/3,
+    // A2 = pi/4 (bands 3+ contribute nothing to the clamped cosine).
+    const vec3 n = normal;
+    return 3.1415926536 * coefficients[0] * 0.2820947918
+         + 2.0943951024 * (coefficients[1] * (0.4886025119 * n.y)
+                         + coefficients[2] * (0.4886025119 * n.z)
+                         + coefficients[3] * (0.4886025119 * n.x))
+         + 0.7853981634 * (coefficients[4] * (1.0925484306 * n.x * n.y)
+                         + coefficients[5] * (1.0925484306 * n.y * n.z)
+                         + coefficients[6] * (0.3153915652 * (3.0 * n.z * n.z - 1.0))
+                         + coefficients[7] * (1.0925484306 * n.x * n.z)
+                         + coefficients[8] * (0.5462742153 * (n.x * n.x - n.y * n.y)));
+}
+
 vec3 probeIrradiance(sampler2DArray cascadeSampler, ivec2 probe, vec3 normal)
 {
-    const uint directionCount = push_.dirs.x * push_.dirs.y;
+    if (push_.dirs.y == 2u)
+    {
+        return probeIrradianceSphericalHarmonic(cascadeSampler, probe, normal);
+    }
+
+    const uint directionCount = push_.dirs.x;
 
     vec3 sum = vec3(0.0);
     for (uint directionIndex = 0u; directionIndex < directionCount; ++directionIndex)
@@ -388,8 +444,14 @@ void main()
                     fallbackCoverage = cascade0Coverage;
                 }
             }
-            if (fallbackCoverage < 0.001)
+            if (fallbackCoverage < 0.001 && push_.schedule.w < 0.5)
             {
+                // The direct fallback is the LAST bounce's privilege: an
+                // intermediate bounce's gather feeds the next march's
+                // relight, whose surfaceOutgoingRadiance already carries the
+                // direct term - a direct fallback here would count the
+                // direct light twice along the bounce chain (schedule.w =
+                // pureTransport).
                 fallback = directIrradianceOverPi(position, normal, push_.counts.x);
             }
             const float trust = smoothstep(0.0, 0.3, coverage);
@@ -400,8 +462,9 @@ void main()
     // Everything starved: both cascades occluded (or empty) while the pixel
     // may sit on a directly lit surface. Its own direct radiance is exact and
     // leak-free; a dark pixel evaluates to dark because its own direct light
-    // is dark.
-    if (all(lessThan(gi, vec3(1e-5))))
+    // is dark. Pure-transport mode (intermediate bounces) skips the fallback:
+    // the next march's relight owns the direct term.
+    if (all(lessThan(gi, vec3(1e-5))) && push_.schedule.w < 0.5)
     {
         gi = directIrradianceOverPi(position, normal, push_.counts.x);
     }

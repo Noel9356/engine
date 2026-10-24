@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Radiance cascades, compose stage.
+// Screen-space screen-space radiance cascades, compose stage.
 //
 // Front-to-back composition of the interval partitioning, coarsest cascade
 // first:
@@ -41,8 +41,8 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
 layout(push_constant) uniform ComposePush
 {
     layout(offset = 0) vec4 coarsestFlag;   // w 1 when this is the coarsest cascade (sky base)
-    layout(offset = 16) uvec4 fineGrid;     // x gridW, y gridH, z azCount, w elCount (cascade being written)
-    layout(offset = 32) uvec4 coarseGrid;   // x gridW, y gridH, z azCount, w elCount (cascade c+1)
+    layout(offset = 16) uvec4 fineGrid;     // x gridW, y gridH, z directionCount (cascade being written)
+    layout(offset = 32) uvec4 coarseGrid;   // x gridW, y gridH, z directionCount (cascade c+1)
 } push_;
 
 // Direction of one cascade texel: the precomputed direction table the march
@@ -56,7 +56,7 @@ void main()
     const uint probeX = gl_GlobalInvocationID.x;
     const uint probeY = gl_GlobalInvocationID.y;
     const uint directionIndex = gl_GlobalInvocationID.z;
-    if (probeX >= push_.fineGrid.x || probeY >= push_.fineGrid.y || directionIndex >= push_.fineGrid.z * push_.fineGrid.w)
+    if (probeX >= push_.fineGrid.x || probeY >= push_.fineGrid.y || directionIndex >= push_.fineGrid.z)
     {
         return;
     }

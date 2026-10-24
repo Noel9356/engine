@@ -12,7 +12,7 @@ The ray-traced glossy reflection technique. The module attaches one compute pass
 - **Miss.** A miss sees the shared sky WITH the sun disk (`environment_common.glsl`), matching what the camera itself sees for that direction.
 - **Specular partition.** The output is pre-multiplied by a Fresnel factor with a `pow(1 - roughness/max, 1.5)` roughness fade: smooth surfaces hand over fully, mid-roughness surfaces fall off smoothly (a squared fade crushes a polished metal's room reflection to a fifth of its Fresnel weight). The pbr pass dims its analytic specular by the same weight, so the two layers PARTITION the specular channel instead of double-counting it — without the partition the sun draws twice on every glossy pixel.
 
-The pass reads the scene light state through the `LightingCapability` (capability `lighting`, provided by the pbr module) so relit hits see the same sun and point lights as everything else. The acquire is guarded: without a granted provider the relight sees no lights and reflections carry emissive + sky only — but the permission must still be declared, because an undeclared grant would make even the guarded acquire a startup-visible contract breach.
+The pass reads the scene light state through the `LightingCapability` (capability `lighting`, provided by the pbr module) so relit hits see the same sun and point lights as everything else. The acquire is guarded by `ComponentContext::isCapabilityAvailable`: without an active provider the relight sees no lights and reflections carry emissive + sky only.
 
 ## Wiring
 
@@ -20,16 +20,19 @@ The pass reads the scene light state through the `LightingCapability` (capabilit
 |---|---|
 | provided capabilities | `indirect_specular` (this technique's radiance layer) |
 | required capabilities | `logging`, `renderer` |
-| required permissions | `capability.logging`, `capability.renderer`, `capability.lighting` |
+| optional capabilities | `lighting` — used when a provider is active, reflections degrade to emissive + sky without one |
+| required permissions | `capability.logging`, `capability.renderer` (`capability.lighting` is derived from the optional declaration) |
 
-The `lighting` acquisition is deliberate but optional: the relight reads the scene light state (see `modules/pbr/README.md`) when a provider exists, and reflections degrade to emissive + sky without one. A run activates this module exactly when an active mod demands `indirect_specular`; an active module always attaches its pass.
+The `lighting` acquisition is an OPTIONAL capability (declared in `optionalCapabilities`, like `screen_space_radiance_cascades`'): the relight reads the scene light state (see `modules/pbr/README.md`) when a provider exists, and reflections degrade to emissive + sky without one. The resolver orders the lighting provider before this module when one is active, and the capability never joins the demand closure. A run activates this module exactly when an active mod demands `indirect_specular`; an active module always attaches its pass.
 
 ## Configuration
+
+The module ships these values in its own `config.toml` (the lowest configuration layer — `config/engine.toml` and staged overrides win over them, see `docs/configuration.md`):
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `max_distance` | float | `40.0` | reflection ray bound in world units |
-| `march_steps` | integer | `96` | sphere-tracing steps per reflection ray |
+| `march_steps` | integer | `64` | sphere-tracing steps per reflection ray (the pass's built-in fallback is 96; the shipped default is the interactive-run budget) |
 
 `max_roughness` is not in this section: the hand-off point is the shared `[lighting].max_roughness` key, read by both this pass and the direct pass so the two sides of the specular partition can never drift apart.
 
@@ -37,6 +40,7 @@ The `lighting` acquisition is deliberate but optional: the relight reads the sce
 
 - `ray_reflections.hpp` / `ray_reflections.cpp` — the technique module and its pass attachment
 - `shaders/ray_reflections.comp` — the reflection compute pass
+- `config.toml` — the module's shipped defaults (the lowest configuration layer)
 - `module_plugin.cpp` — the static plugin descriptor (name, factory, provided capabilities)
 - `CMakeLists.txt` — target and option wiring (`ENGINE_BUILD_MODULE_RAY_REFLECTIONS`)
 

@@ -285,7 +285,7 @@ void RendererState::createDeviceAndSurface(
             logPrefix + "software rasterizer detected (" + deviceName
                 + ") - expect seconds per frame at full quality, and the window may be reported as 'not "
                   "responding' while a frame renders. For interactive exploration lower [window] width/height "
-                  "(e.g. 960x540), [lighting.radiance_cascades] probe_stride (e.g. 12) and spatial_filter "
+                  "(e.g. 960x540), [lighting.screen_space_radiance_cascades] probe_stride (e.g. 12) and spatial_filter "
                   "(e.g. 6), and disable the mod that demands the indirect_specular capability in this run."
         );
     }

@@ -1,0 +1,20 @@
+# Shipped defaults of the bvh module (the binary bounding volume hierarchy
+# provider).
+#
+# The module's own configuration layer: the kernel merges it as the lowest
+# defaults layer, so config/engine.toml (and staged overrides) win over
+# anything written here. Defaults FILL: a key a higher layer already
+# provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[bvh]
+# The split strategy of every hierarchy the module builds:
+#   "median"   - longest axis at the object median: perfectly balanced,
+#                deterministic down to the index tiebreak
+#   "midpoint" - longest axis at the range's centroid midpoint (default:
+#                the benchmark winner, see modules/bvh/benchmark.cpp - the
+#                lowest build + query total at every measured box count)
+#   "sah"      - binned surface area heuristic: the best query throughput
+#                at larger box counts, at a markedly higher build cost
+split = "midpoint"

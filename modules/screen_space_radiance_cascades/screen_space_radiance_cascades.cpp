@@ -1,4 +1,4 @@
-#include "radiance_cascades.hpp"
+#include "screen_space_radiance_cascades.hpp"
 
 #include "lighting_capability.hpp"
 #include "light_uniform.hpp"
@@ -26,10 +26,10 @@ namespace engine
 namespace
 {
 
-constexpr std::string_view moduleContext = "radiance_cascades module";
+constexpr std::string_view moduleContext = "screen_space_radiance_cascades module";
 
 // Technique settings defaults. The Settings struct's member initializers and
-// the [lighting.radiance_cascades] fallbacks state the same numbers through
+// the [lighting.screen_space_radiance_cascades] fallbacks state the same numbers through
 // these constants: the struct defaults previously drifted from the config
 // fallbacks (probeStride 8 vs 4, baseRays 64 vs 32, losSteps 16 vs 24) -
 // unreachable but a silent trap for the first direct construction. The
@@ -43,6 +43,77 @@ constexpr std::uint32_t defaultLosSteps            = 24;
 constexpr std::uint32_t defaultMarchSteps          = 48;
 constexpr std::uint32_t defaultShadowSteps         = 16;
 constexpr std::uint32_t defaultSpatialFilterRadius = 5;
+
+// Angular mapping of the cascade field's directional domain. Every mode
+// stores one image layer per direction (the march/compose stages are
+// mapping-agnostic - they read the precomputed direction table), the modes
+// differ in WHICH directions cover the sphere and how the gather integrates
+// them into irradiance:
+//
+// - octahedron: the direction set of an octahedral equal-basis map texel
+//   grid (N x N texels over the sphere, ~base_rays directions). The gather
+//   integrates the field with each texel's exact solid angle. DEFAULT -
+//   even texel areas keep the quadrature free of the equirect schedule's
+//   pole clustering, at the same direction budget.
+// - cubemap:    six face grids (6 * F^2 directions, ~base_rays). The gather
+//   integrates with each cube texel's exact solid angle.
+// - spherical_harmonic: the march runs on the octahedral direction set, but
+//   the gather PROJECTS the composed field onto the real spherical harmonics
+//   through band 2 and evaluates the irradiance from the coefficients
+//   (the Ramamoorthi-Hanrahan truncated cosine-lobe convolution). The field
+//   is band-limited: smoother than any texel quadrature, which reads as
+//   softly blurred GI at the same march cost.
+enum class CascadeAngularMapping : std::uint32_t
+{
+    Octahedron        = 0,
+    Cubemap           = 1,
+    SphericalHarmonic = 2,
+};
+
+// The [lighting.screen_space_radiance_cascades].mapping spellings.
+constexpr const char *defaultMappingName = "octahedron";
+
+bool parseMappingName(
+    const std::string &name, CascadeAngularMapping &outMapping
+)
+{
+    if (name == "octahedron")
+    {
+        outMapping = CascadeAngularMapping::Octahedron;
+        return true;
+    }
+    if (name == "cubemap")
+    {
+        outMapping = CascadeAngularMapping::Cubemap;
+        return true;
+    }
+    if (name == "spherical_harmonic")
+    {
+        outMapping = CascadeAngularMapping::SphericalHarmonic;
+        return true;
+    }
+    return false;
+}
+
+// Light transport bounces inside one frame: bounce 0 relights march hits
+// with the direct lights only; bounce b > 0 adds the previous bounce's
+// gathered transport at the hit point (the march samples the gather image of
+// bounce b-1 through the hit's screen position). 1 = the historical single
+// bounce; every extra bounce re-runs the whole cascade sequence, so the cost
+// is linear in bounces.
+constexpr std::uint32_t defaultBounces = 1;
+
+// Direction table ceiling: Vulkan only guarantees maxImageArrayLayers >= 256,
+// and every cascade image carries one layer per direction. The octahedron
+// grid stays within that (16 x 16 = 256); the cubemap grid is clamped to six
+// texels per face (6 * 36 = 216). The octahedron floor of 3 texels per axis
+// keeps every texel's corner quad free of antipodal vertex pairs (with 2 the
+// corner texels span both poles, where the spherical-triangle solid angle
+// formula degenerates); the cubemap texel formula is exact at any size.
+constexpr std::uint32_t maxOctahedronTexelsPerAxis   = 16;
+constexpr std::uint32_t minOctahedronTexelsPerAxis   = 3;
+constexpr std::uint32_t maxCubemapFaceTexels         = 6;
+constexpr std::uint32_t minCubemapFaceTexels         = 1;
 
 // Push-constant blocks as the .comp shaders see them (file scope so the
 // pipeline layouts size their ranges with sizeof; the static_asserts pin the
@@ -86,6 +157,192 @@ static_assert(sizeof(FilterPush) == 32, "rc_denoise.comp expects a 32-byte push 
 constexpr std::int32_t filterNormalPower      = 8;
 constexpr std::int32_t filterDepthBandPercent = 4;
 
+// ---- direction tables ----------------------------------------------------------------
+//
+// One vec4 per direction: xyz the unit direction, w the texel's exact solid
+// angle (the gather's quadrature weight). Built once per rebuild on the CPU
+// and uploaded to the storage buffer bound at shared set 0 / binding 7
+// (cascade_common.glsl); layer order matches the march image layers.
+
+// Solid angle of the spherical triangle spanned by three unit vectors
+// (Van Oosterom & Strackee): tan(Omega/2) = |a . (b x c)| / (1 + a.b + b.c + c.a).
+float sphericalTriangleSolidAngle(
+    const std::array<float, 3> &a, const std::array<float, 3> &b, const std::array<float, 3> &c
+)
+{
+    const float crossBC[3] = {
+        b[1] * c[2] - b[2] * c[1],
+        b[2] * c[0] - b[0] * c[2],
+        b[0] * c[1] - b[1] * c[0],
+    };
+    const float numerator   = std::abs(a[0] * crossBC[0] + a[1] * crossBC[1] + a[2] * crossBC[2]);
+    const float denominator = 1.0f + (a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
+                            + (b[0] * c[0] + b[1] * c[1] + b[2] * c[2])
+                            + (c[0] * a[0] + c[1] * a[1] + c[2] * a[2]);
+    return 2.0f * std::atan2(numerator, denominator);
+}
+
+// Octahedral decode: the square [-1,1]^2 folds onto the octahedron (and
+// normalized, onto the sphere). Texel centers land strictly inside the
+// square; corners may sit on the fold, where the decode is continuous.
+std::array<float, 3> octahedronDecode(
+    float u, float v
+)
+{
+    float x = u;
+    float y = v;
+    float z = 1.0f - std::abs(u) - std::abs(v);
+    if (z < 0.0f)
+    {
+        // The lower pyramid: fold the corner triangles back up.
+        const float signX = u >= 0.0f ? 1.0f : -1.0f;
+        const float signY = v >= 0.0f ? 1.0f : -1.0f;
+        x = signX * (1.0f - std::abs(v));
+        y = signY * (1.0f - std::abs(u));
+    }
+    const float length = std::sqrt(x * x + y * y + z * z);
+    return {x / length, y / length, z / length};
+}
+
+// Octahedron mapping: texelsPerAxis^2 directions, one per texel center of
+// the octahedral square. Each texel's solid angle is the exact area of its
+// spherical quadrilateral (two spherical triangles over the decoded
+// corners) - the octahedral map is only approximately equal-area, so the
+// quadrature weights must not be assumed uniform.
+std::vector<std::array<float, 4>> buildOctahedronDirections(
+    std::uint32_t texelsPerAxis
+)
+{
+    const float                          inverseAxis = 1.0f / static_cast<float>(texelsPerAxis);
+    std::vector<std::array<float, 4>>    directions;
+    directions.reserve(static_cast<std::size_t>(texelsPerAxis) * texelsPerAxis);
+    for (std::uint32_t texelY = 0; texelY < texelsPerAxis; ++texelY)
+    {
+        for (std::uint32_t texelX = 0; texelX < texelsPerAxis; ++texelX)
+        {
+            // Texel center direction.
+            const float u = (static_cast<float>(texelX) + 0.5f) * 2.0f * inverseAxis - 1.0f;
+            const float v = (static_cast<float>(texelY) + 0.5f) * 2.0f * inverseAxis - 1.0f;
+            const std::array<float, 3> center = octahedronDecode(u, v);
+            // Corner grid over the square, mapped exactly like the decode.
+            const std::array<float, 3> corner00 = octahedronDecode(
+                static_cast<float>(texelX) * 2.0f * inverseAxis - 1.0f,
+                static_cast<float>(texelY) * 2.0f * inverseAxis - 1.0f);
+            const std::array<float, 3> corner10 = octahedronDecode(
+                static_cast<float>(texelX + 1) * 2.0f * inverseAxis - 1.0f,
+                static_cast<float>(texelY) * 2.0f * inverseAxis - 1.0f);
+            const std::array<float, 3> corner11 = octahedronDecode(
+                static_cast<float>(texelX + 1) * 2.0f * inverseAxis - 1.0f,
+                static_cast<float>(texelY + 1) * 2.0f * inverseAxis - 1.0f);
+            const std::array<float, 3> corner01 = octahedronDecode(
+                static_cast<float>(texelX) * 2.0f * inverseAxis - 1.0f,
+                static_cast<float>(texelY + 1) * 2.0f * inverseAxis - 1.0f);
+            const float solidAngle = sphericalTriangleSolidAngle(corner00, corner10, corner11)
+                                   + sphericalTriangleSolidAngle(corner00, corner11, corner01);
+            directions.push_back({center[0], center[1], center[2], solidAngle});
+        }
+    }
+    return directions;
+}
+
+// Cubemap mapping: six faces of faceSize^2 texels. A face texel's solid
+// angle is the exact solid angle of its square on the face plane z = 1
+// (the closed form of the 1/(1+x^2+y^2)^(3/2) integral over the rectangle).
+std::vector<std::array<float, 4>> buildCubemapDirections(
+    std::uint32_t faceSize
+)
+{
+    const float inverseFace = 1.0f / static_cast<float>(faceSize);
+    // Face axes: (forward, uBasis, vBasis) per cube face.
+    const std::array<std::array<float, 3>, 6> faceForward = {{
+        {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+    }};
+    const std::array<std::array<float, 3>, 6> faceUBasis = {{
+        {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f, 1.0f},
+        {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+    }};
+    const std::array<std::array<float, 3>, 6> faceVBasis = {{
+        {0.0f, -1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+        {0.0f, -1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+    }};
+    std::vector<std::array<float, 4>> directions;
+    directions.reserve(static_cast<std::size_t>(6) * faceSize * faceSize);
+    for (std::uint32_t face = 0; face < 6; ++face)
+    {
+        for (std::uint32_t texelY = 0; texelY < faceSize; ++texelY)
+        {
+            for (std::uint32_t texelX = 0; texelX < faceSize; ++texelX)
+            {
+                const float u = (static_cast<float>(texelX) + 0.5f) * 2.0f * inverseFace - 1.0f;
+                const float v = (static_cast<float>(texelY) + 0.5f) * 2.0f * inverseFace - 1.0f;
+                const std::array<float, 3> &forward = faceForward[face];
+                const std::array<float, 3> &uBasis  = faceUBasis[face];
+                const std::array<float, 3> &vBasis  = faceVBasis[face];
+                const std::array<float, 3>  direction = {
+                    forward[0] + u * uBasis[0] + v * vBasis[0],
+                    forward[1] + u * uBasis[1] + v * vBasis[1],
+                    forward[2] + u * uBasis[2] + v * vBasis[2],
+                };
+                const float length = std::sqrt(
+                    direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]
+                );
+                // Exact texel solid angle: atan2 terms over the rectangle's
+                // corners on the unit face plane.
+                const float u0 = static_cast<float>(texelX) * 2.0f * inverseFace - 1.0f;
+                const float u1 = static_cast<float>(texelX + 1) * 2.0f * inverseFace - 1.0f;
+                const float v0 = static_cast<float>(texelY) * 2.0f * inverseFace - 1.0f;
+                const float v1 = static_cast<float>(texelY + 1) * 2.0f * inverseFace - 1.0f;
+                const auto  cornerTerm = [](float a, float b)
+                {
+                    return std::atan2(a * b, std::sqrt(1.0f + a * a + b * b));
+                };
+                const float solidAngle = cornerTerm(u1, v1) - cornerTerm(u0, v1)
+                                       - cornerTerm(u1, v0) + cornerTerm(u0, v0);
+                directions.push_back({
+                    direction[0] / length, direction[1] / length, direction[2] / length, solidAngle
+                });
+            }
+        }
+    }
+    return directions;
+}
+
+// Direction count and grid resolution of one mapping at the configured ray
+// budget: every mode spends approximately base_rays directions. Returns the
+// ready-to-upload direction table.
+std::vector<std::array<float, 4>> buildDirectionTable(
+    CascadeAngularMapping mapping, std::uint32_t baseRays
+)
+{
+    switch (mapping)
+    {
+    case CascadeAngularMapping::Cubemap:
+    {
+        const auto faceSize = std::clamp<std::uint32_t>(
+            static_cast<std::uint32_t>(std::lround(std::sqrt(static_cast<double>(baseRays) / 6.0))),
+            minCubemapFaceTexels,
+            maxCubemapFaceTexels
+        );
+        return buildCubemapDirections(faceSize);
+    }
+    case CascadeAngularMapping::Octahedron:
+    case CascadeAngularMapping::SphericalHarmonic:
+    default:
+    {
+        const auto texelsPerAxis = std::clamp<std::uint32_t>(
+            static_cast<std::uint32_t>(std::lround(std::sqrt(static_cast<double>(baseRays)))),
+            minOctahedronTexelsPerAxis,
+            maxOctahedronTexelsPerAxis
+        );
+        return buildOctahedronDirections(texelsPerAxis);
+    }
+    }
+}
+
 struct CascadeImage
 {
     std::unique_ptr<vk::raii::Image>        image;
@@ -95,10 +352,10 @@ struct CascadeImage
 
 } // namespace
 
-// The radiance cascades pass: march (per cascade interval), compose
+// The screen-space radiance cascades pass: march (per cascade interval), compose
 // (front-to-back interval chaining, coarsest first), gather (leak-proof
 // visibility weighted probe blend). See the .comp files for the technique.
-class RadianceCascadesPass final : public LightingTechniquePass
+class ScreenSpaceRadianceCascadesPass final : public LightingTechniquePass
 {
 public:
     struct Settings
@@ -123,9 +380,19 @@ public:
         // pass-through copy). Removes the probe grid's spatial scale; the
         // depth/normal weights keep silhouettes hard.
         std::uint32_t spatialFilterRadius = defaultSpatialFilterRadius;
+        // Angular mapping of the field's directional domain (see the enum's
+        // comment): octahedron texel grid, cubemap face grid, or SH projection
+        // evaluated in the gather. The direction budget stays ~base_rays in
+        // every mode.
+        CascadeAngularMapping mapping = CascadeAngularMapping::Octahedron;
+        // Light transport bounces per frame (1 = the historical single
+        // bounce). Every bounce re-runs march + compose + gather; the march
+        // of bounce b > 0 adds the previous bounce's gathered transport at
+        // its hit points.
+        std::uint32_t bounces = defaultBounces;
     };
 
-    RadianceCascadesPass(
+    ScreenSpaceRadianceCascadesPass(
         Settings settings, LightingCapability *lightingCapability
     )
         : settings(settings), lighting(lightingCapability)
@@ -134,7 +401,7 @@ public:
 
     const char *techniqueName() const override
     {
-        return "radiance_cascades";
+        return "screen_space_radiance_cascades";
     }
 
     LightingTarget targets() const override
@@ -160,8 +427,7 @@ public:
         // former per-cascade halving with a 2x3 floor handed the entire far
         // field six directions, which is where the composed field's angular
         // structure (giant soft blobs) came from.
-        const auto azimuthCount   = [this](std::uint32_t) { return azimuthBase; };
-        const auto elevationCount = [this](std::uint32_t) { return elevationBase; };
+        const std::uint32_t directions = directionCount;
         const auto gridWidth      = [this, &context](std::uint32_t cascade)
         {
             const std::uint32_t stride = settings.probeStride << cascade;
@@ -181,123 +447,132 @@ public:
         const auto intervalEnd = [this](std::uint32_t cascade)
         { return settings.intervalBase * std::pow(settings.intervalFactor, static_cast<float>(cascade)); };
 
-        // ---- March: every cascade traces its own interval. ----------------
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **marchPipeline);
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 0, **sharedSet, {});
-        for (std::uint32_t cascade = 0; cascade < cascades; ++cascade)
+        // ---- Light transport: one march -> compose -> gather sequence per
+        // bounce. Bounce 0 relights march hits with the direct lights; every
+        // later bounce also adds the PREVIOUS bounce's gathered transport at
+        // the hit point (the march samples the gather output through the
+        // hit's screen position). The gather of the LAST bounce runs with the
+        // starved-pixel direct fallback (it feeds the composite); earlier
+        // bounces run in pure-transport mode so direct light is never
+        // counted twice along the bounce chain.
+        for (std::uint32_t bounce = 0; bounce < settings.bounces; ++bounce)
         {
-            commandBuffer.bindDescriptorSets(
-                vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 1, **marchSets[cascade], {}
+            const bool lastBounce = bounce + 1 == settings.bounces;
+
+            // ---- March: every cascade traces its own interval. ---------
+            commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **marchPipeline);
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 0, **sharedSet, {});
+            for (std::uint32_t cascade = 0; cascade < cascades; ++cascade)
+            {
+                commandBuffer.bindDescriptorSets(
+                    vk::PipelineBindPoint::eCompute, **marchPipelineLayout, 1, **marchSets[cascade], {}
+                );
+                const MarchPush pushValue{
+                    .interval = {intervalStart(cascade), intervalEnd(cascade), 0.0f, 0.0f},
+                    .flags    = {context.primitiveCount, settings.marchSteps, cascade > 0 ? 1u : 0u, bounce},
+                    .grid     = {gridWidth(cascade), gridHeight(cascade), directions, 0u},
+                    .extentStride = {
+                        context.extent.width,
+                        context.extent.height,
+                        settings.probeStride << cascade,
+                        settings.probeStride << cascade
+                    }
+                };
+                commandBuffer.pushConstants(
+                    **marchPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
+                );
+                commandBuffer.dispatch(
+                    (gridWidth(cascade) + 3) / 4,
+                    (gridHeight(cascade) + 3) / 4,
+                    directions
+                );
+            }
+
+            // march[c] writes -> compose reads.
+            marchBarriers(cascadeImageScratch);
+            barrierCascades(
+                commandBuffer,
+                cascadeImageScratch,
+                vk::PipelineStageFlagBits2::eComputeShader,
+                vk::PipelineStageFlagBits2::eComputeShader
             );
-            const MarchPush pushValue{
-                .interval = {intervalStart(cascade), intervalEnd(cascade), 0.0f, 0.0f},
-                .flags    = {context.primitiveCount, settings.marchSteps, cascade > 0 ? 1u : 0u, 0u},
-                .grid     = {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
-                .extentStride = {
-                    context.extent.width,
-                    context.extent.height,
-                    settings.probeStride << cascade,
-                    settings.probeStride << cascade
-                }
+
+            // ---- Compose: front-to-back interval chaining. -------------
+            commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **composePipeline);
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **composePipelineLayout, 0, **sharedSet, {});
+            for (std::uint32_t cascade = cascades; cascade-- > 0;)
+            {
+                commandBuffer.bindDescriptorSets(
+                    vk::PipelineBindPoint::eCompute, **composePipelineLayout, 1, **composeSets[cascade], {}
+                );
+                const ComposePush pushValue{
+                    .coarsestFlag = {0.0f, 0.0f, 0.0f, cascade == cascades - 1 ? 1.0f : 0.0f},
+                    .fineGrid   = {gridWidth(cascade), gridHeight(cascade), directions, 0u},
+                    .coarseGrid = {
+                        gridWidth(cascade + 1),
+                        gridHeight(cascade + 1),
+                        directions,
+                        0u
+                    }
+                };
+                commandBuffer.pushConstants(
+                    **composePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
+                );
+                commandBuffer.dispatch(
+                    (gridWidth(cascade) + 3) / 4,
+                    (gridHeight(cascade) + 3) / 4,
+                    directions
+                );
+
+                // full[c] write -> full[c-1] read in the next iteration.
+                std::array<vk::ImageMemoryBarrier2, 1> barrier;
+                barrier[0].setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+                barrier[0].setSrcAccessMask(vk::AccessFlagBits2::eShaderStorageWrite);
+                barrier[0].setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+                barrier[0].setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+                barrier[0].setOldLayout(vk::ImageLayout::eGeneral);
+                barrier[0].setNewLayout(vk::ImageLayout::eGeneral);
+                barrier[0].setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+                barrier[0].setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+                barrier[0].setImage(**fullImages[cascade].image);
+                barrier[0].setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
+                vk::DependencyInfo dependency;
+                dependency.setImageMemoryBarriers(barrier);
+                commandBuffer.pipelineBarrier2(dependency);
+            }
+
+            // ---- Gather: per pixel diffuse irradiance from cascade 0. ---
+            // The gather writes the module temp image; the NEXT bounce's
+            // march reads it as its transport source (bounce > 0), and the
+            // spatial filter of the last bounce turns the final one into the
+            // renderer-owned indirect target.
+            commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **gatherPipeline);
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 0, **sharedSet, {});
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 1, **gatherSet, {});
+            const GatherPush gatherPush{
+                .counts = {context.primitiveCount, settings.losSteps, settings.gatherVisibility ? 1u : 0u, cascades},
+                .schedule =
+                    {settings.intervalBase, settings.intervalFactor, static_cast<float>(settings.probeStride),
+                     lastBounce ? 0.0f : 1.0f},
+                .dirs = {directions, static_cast<std::uint32_t>(settings.mapping), 0u, 0u}
             };
             commandBuffer.pushConstants(
-                **marchPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
+                **gatherPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(gatherPush), &gatherPush
             );
-            commandBuffer.dispatch(
-                (gridWidth(cascade) + 3) / 4,
-                (gridHeight(cascade) + 3) / 4,
-                azimuthCount(cascade) * elevationCount(cascade)
+            commandBuffer.dispatch((context.extent.width + 7) / 8, (context.extent.height + 7) / 8, 1);
+
+            // gather write -> next reader (the next bounce's march, or the
+            // spatial filter below on the last bounce).
+            barrierGatherTemp(
+                commandBuffer,
+                vk::AccessFlagBits2::eShaderStorageWrite,
+                vk::AccessFlagBits2::eShaderRead
             );
         }
-
-        // march[c] writes -> compose reads.
-        marchBarriers(cascadeImageScratch);
-        barrierCascades(
-            commandBuffer,
-            cascadeImageScratch,
-            vk::PipelineStageFlagBits2::eComputeShader,
-            vk::PipelineStageFlagBits2::eComputeShader
-        );
-
-        // ---- Compose: front-to-back interval chaining. --------------------
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **composePipeline);
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **composePipelineLayout, 0, **sharedSet, {});
-        for (std::uint32_t cascade = cascades; cascade-- > 0;)
-        {
-            commandBuffer.bindDescriptorSets(
-                vk::PipelineBindPoint::eCompute, **composePipelineLayout, 1, **composeSets[cascade], {}
-            );
-            const ComposePush pushValue{
-                .coarsestFlag = {0.0f, 0.0f, 0.0f, cascade == cascades - 1 ? 1.0f : 0.0f},
-                .fineGrid   = {gridWidth(cascade), gridHeight(cascade), azimuthCount(cascade), elevationCount(cascade)},
-                .coarseGrid = {
-                    gridWidth(cascade + 1),
-                    gridHeight(cascade + 1),
-                    azimuthCount(cascade + 1),
-                    elevationCount(cascade + 1)
-                }
-            };
-            commandBuffer.pushConstants(
-                **composePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushValue), &pushValue
-            );
-            commandBuffer.dispatch(
-                (gridWidth(cascade) + 3) / 4,
-                (gridHeight(cascade) + 3) / 4,
-                azimuthCount(cascade) * elevationCount(cascade)
-            );
-
-            // full[c] write -> full[c-1] read in the next iteration.
-            std::array<vk::ImageMemoryBarrier2, 1> barrier;
-            barrier[0].setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
-            barrier[0].setSrcAccessMask(vk::AccessFlagBits2::eShaderStorageWrite);
-            barrier[0].setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
-            barrier[0].setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
-            barrier[0].setOldLayout(vk::ImageLayout::eGeneral);
-            barrier[0].setNewLayout(vk::ImageLayout::eGeneral);
-            barrier[0].setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            barrier[0].setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            barrier[0].setImage(**fullImages[cascade].image);
-            barrier[0].setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
-            vk::DependencyInfo dependency;
-            dependency.setImageMemoryBarriers(barrier);
-            commandBuffer.pipelineBarrier2(dependency);
-        }
-
-        // ---- Gather: per pixel diffuse irradiance from cascade 0. ---------
-        // The gather writes a module-owned temp image; the spatial filter
-        // below removes the probe grid's spatial scale and writes the final
-        // indirect target.
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **gatherPipeline);
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 0, **sharedSet, {});
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **gatherPipelineLayout, 1, **gatherSet, {});
-        const GatherPush gatherPush{
-            .counts = {context.primitiveCount, settings.losSteps, settings.gatherVisibility ? 1u : 0u, cascades},
-            .schedule =
-                {settings.intervalBase, settings.intervalFactor, static_cast<float>(settings.probeStride), 0.0f},
-            .dirs = {azimuthCount(0), elevationCount(0), 0u, 0u}
-        };
-        commandBuffer.pushConstants(
-            **gatherPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(gatherPush), &gatherPush
-        );
-        commandBuffer.dispatch((context.extent.width + 7) / 8, (context.extent.height + 7) / 8, 1);
 
         // ---- Spatial filter: edge-aware cleanup of the gather output. -----
-        {
-            std::array<vk::ImageMemoryBarrier2, 1> barrier;
-            barrier[0].setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
-            barrier[0].setSrcAccessMask(vk::AccessFlagBits2::eShaderStorageWrite);
-            barrier[0].setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
-            barrier[0].setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
-            barrier[0].setOldLayout(vk::ImageLayout::eGeneral);
-            barrier[0].setNewLayout(vk::ImageLayout::eGeneral);
-            barrier[0].setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            barrier[0].setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            barrier[0].setImage(**gatherTemp.image);
-            barrier[0].setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
-            vk::DependencyInfo dependency;
-            dependency.setImageMemoryBarriers(barrier);
-            commandBuffer.pipelineBarrier2(dependency);
-        }
+        // (Runs once, on the last bounce's gather output - intermediate
+        // bounces feed the transport chain, not the composite.)
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **denoisePipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **denoisePipelineLayout, 0, **sharedSet, {});
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, **denoisePipelineLayout, 1, **denoiseSet, {});
@@ -363,6 +638,32 @@ private:
         {
             images.push_back(**cascade.image);
         }
+    }
+
+    // One image memory barrier on the gather temp (the bounce ping-pong
+    // image): every gather writes it, the next bounce's march samples it as
+    // its transport source and the last bounce's spatial filter reads it.
+    void barrierGatherTemp(
+        vk::raii::CommandBuffer &commandBuffer,
+        vk::AccessFlagBits2      sourceAccess,
+        vk::AccessFlagBits2      destinationAccess
+    )
+    {
+        vk::ImageMemoryBarrier2 barrier;
+        barrier.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+        barrier.setSrcAccessMask(sourceAccess);
+        barrier.setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+        barrier.setDstAccessMask(destinationAccess);
+        barrier.setOldLayout(vk::ImageLayout::eGeneral);
+        barrier.setNewLayout(vk::ImageLayout::eGeneral);
+        barrier.setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+        barrier.setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+        barrier.setImage(**gatherTemp.image);
+        barrier.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
+        std::array<vk::ImageMemoryBarrier2, 1> barriers{barrier};
+        vk::DependencyInfo                     dependency;
+        dependency.setImageMemoryBarriers(barriers);
+        commandBuffer.pipelineBarrier2(dependency);
     }
 
     void createCascadeImage(
@@ -515,61 +816,26 @@ private:
         nearestSampler.reset();
 
         const std::uint32_t cascades = cascadeCount();
-        // Direction table floors: 2 azimuth x 3 elevation is the minimum that
-        // still covers overhead/underhead transport (an elevation floor of 2
-        // missed a ceiling panel at ~70 degrees during bring-up).
-        azimuthBase = std::max(
-            2u, static_cast<std::uint32_t>(std::lround(std::sqrt(static_cast<double>(settings.baseRays) * 2.0)))
-        );
-        elevationBase = std::max(3u, settings.baseRays / azimuthBase);
-
-        // Direction table: one vec4 per (azimuth x elevation) direction, the
-        // equirectangular schedule the shaders previously recomputed with 4-5
-        // transcendentals per direction per pixel (the gather's quadrature
-        // loop) or per invocation (the march). The schedule is constant across
-        // cascades and frames, so it is built once per rebuild and uploaded to
-        // the host-visible storage buffer bound at shared set 0 / binding 7
-        // (cascade_common.glsl). Layer order matches the march's image layers:
-        // index = azIndex * elevationBase + elIndex.
+        // Direction table per angular mapping (Settings.mapping): every mode
+        // spends approximately base_rays directions - the octahedron texel
+        // grid, the cubemap face grid, or the octahedron grid again for the
+        // SH projection (the march always runs on discrete directions; the
+        // mapping only changes the gather's irradiance evaluation). One vec4
+        // per direction - xyz the unit direction, w the exact solid angle -
+        // uploaded to the host-visible storage buffer bound at shared set 0 /
+        // binding 7 (cascade_common.glsl). Layer order matches the march's
+        // image layers.
+        const std::vector<std::array<float, 4>> directionTable =
+            buildDirectionTable(settings.mapping, settings.baseRays);
+        directionCount = static_cast<std::uint32_t>(directionTable.size());
         {
-            constexpr double                  directionTablePi    = 3.14159265358979323846;
-            constexpr double                  directionTableTwoPi = 6.28318530717958647692;
-            const std::uint32_t               directionCount      = azimuthBase * elevationBase;
-            std::vector<std::array<float, 4>> directions(directionCount);
-            for (std::uint32_t azimuthIndex = 0; azimuthIndex < azimuthBase; ++azimuthIndex)
-            {
-                for (std::uint32_t elevationIndex = 0; elevationIndex < elevationBase; ++elevationIndex)
-                {
-                    const float azimuth = static_cast<float>(
-                        (static_cast<double>(azimuthIndex) + 0.5) / static_cast<double>(azimuthBase)
-                        * directionTableTwoPi
-                    );
-                    const float elevation = static_cast<float>(
-                        (static_cast<double>(elevationIndex) + 0.5) / static_cast<double>(elevationBase)
-                            * directionTablePi
-                        - 0.5 * directionTablePi
-                    );
-                    const float cosElevation = std::cos(elevation);
-                    const float solidAngle   = static_cast<float>(
-                                                   directionTableTwoPi / static_cast<double>(azimuthBase)
-                                                   * directionTablePi / static_cast<double>(elevationBase)
-                                               )
-                                             * cosElevation;
-                    directions[azimuthIndex * elevationBase + elevationIndex] = {
-                        cosElevation * std::cos(azimuth),
-                        std::sin(elevation),
-                        cosElevation * std::sin(azimuth),
-                        solidAngle
-                    };
-                }
-            }
             directionStorage = createMappedHostVisibleBuffer(
                 context.device,
                 context.physicalDevice,
-                static_cast<vk::DeviceSize>(directions.size() * sizeof(std::array<float, 4>)),
+                static_cast<vk::DeviceSize>(directionTable.size() * sizeof(std::array<float, 4>)),
                 vk::BufferUsageFlagBits::eStorageBuffer
             );
-            std::memcpy(directionStorage.mapped, directions.data(), directions.size() * sizeof(std::array<float, 4>));
+            std::memcpy(directionStorage.mapped, directionTable.data(), directionTable.size() * sizeof(std::array<float, 4>));
         }
 
         const auto gridWidth = [this, &context](std::uint32_t cascade)
@@ -582,7 +848,7 @@ private:
             const std::uint32_t stride = settings.probeStride << cascade;
             return std::max(1u, (context.extent.height + stride - 1) / stride);
         };
-        const auto layers = [this](std::uint32_t) { return azimuthBase * elevationBase; };
+        const auto layers = [this](std::uint32_t) { return directionCount; };
 
         // Cascade storage: march (radiance + transmittance) and full (composed
         // radiance) per cascade. Sized to the cascade grid, so memory decays
@@ -609,7 +875,7 @@ private:
         composeSampler = std::make_unique<vk::raii::Sampler>(context.device, linearInfo);
 
         // Light uniform buffer (own copy: the GI relight configures shadow
-        // behaviour from [lighting.radiance_cascades], independent of the
+        // behaviour from [lighting.screen_space_radiance_cascades], independent of the
         // direct module).
         lightStorage = createMappedHostVisibleBuffer(
             context.device, context.physicalDevice, sizeof(GpuLightUniform), vk::BufferUsageFlagBits::eUniformBuffer
@@ -650,7 +916,12 @@ private:
             sharedSetLayout = std::make_unique<vk::raii::DescriptorSetLayout>(context.device, setInfo);
         }
         {
-            std::array<vk::DescriptorSetLayoutBinding, 3> bindings;
+            // March role set: depth, normal (sampled), the cascade storage
+            // image (written), and (bounce > 0) the previous bounce's gather
+            // output as the transport source (sampled). Bounce 0 never reads
+            // it (the push flag gates the sample), but the binding must stay
+            // valid.
+            std::array<vk::DescriptorSetLayoutBinding, 4> bindings;
             for (std::uint32_t binding = 0; binding < 2; ++binding)
             {
                 bindings[binding]
@@ -661,6 +932,8 @@ private:
             }
             bindings[2].setBinding(2).setDescriptorType(vk::DescriptorType::eStorageImage).setDescriptorCount(1);
             bindings[2].setStageFlags(vk::ShaderStageFlagBits::eCompute);
+            bindings[3].setBinding(3).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+            bindings[3].setStageFlags(vk::ShaderStageFlagBits::eCompute);
             vk::DescriptorSetLayoutCreateInfo setInfo;
             setInfo.setBindings(bindings);
             marchSetLayout = std::make_unique<vk::raii::DescriptorSetLayout>(context.device, setInfo);
@@ -859,7 +1132,7 @@ private:
         marchSets.resize(cascades);
         {
             std::array<vk::DescriptorPoolSize, 2> poolSizes{
-                vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, cascades * 2),
+                vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, cascades * 3),
                 vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, cascades)
             };
             vk::DescriptorPoolCreateInfo poolInfo;
@@ -880,7 +1153,11 @@ private:
                 vk::DescriptorImageInfo outInfo(
                     **nearestSampler, *marchImages[cascade].view, vk::ImageLayout::eGeneral
                 );
-                std::array<vk::WriteDescriptorSet, 3> writes;
+                // The bounce source: the gather temp (full extent 2D view).
+                // Bounce 0's march never samples it - the push flags.w gates
+                // the read - but the descriptor stays bound.
+                vk::DescriptorImageInfo bounceSourceInfo(**nearestSampler, *gatherTemp.view, vk::ImageLayout::eGeneral);
+                std::array<vk::WriteDescriptorSet, 4> writes;
                 writes[0]
                     .setDstSet(**marchSets[cascade])
                     .setDstBinding(0)
@@ -896,6 +1173,11 @@ private:
                     .setDstBinding(2)
                     .setDescriptorType(vk::DescriptorType::eStorageImage);
                 writes[2].setImageInfo(outInfo);
+                writes[3]
+                    .setDstSet(**marchSets[cascade])
+                    .setDstBinding(3)
+                    .setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+                writes[3].setImageInfo(bounceSourceInfo);
                 context.device.updateDescriptorSets(writes, {});
             }
         }
@@ -1051,8 +1333,10 @@ private:
     Settings            settings;
     LightingCapability *lighting = nullptr;
 
-    std::uint32_t azimuthBase   = 0;
-    std::uint32_t elevationBase = 0;
+    // Direction count of the active angular mapping (the direction table's
+    // size): the march/compose third dispatch dimension, the cascade image
+    // layer count, and the gather's quadrature loop bound.
+    std::uint32_t directionCount = 0;
     vk::Extent2D  cachedExtent{};
     bool          needsRecreate = false;
 
@@ -1098,81 +1382,94 @@ private:
 
 // ---- Module lifecycle ---------------------------------------------------------------
 
-RadianceCascadesModule::RadianceCascadesModule()
+ScreenSpaceRadianceCascadesModule::ScreenSpaceRadianceCascadesModule()
 {
-    componentManifest.name = "radiance_cascades";
+    componentManifest.name = "screen_space_radiance_cascades";
     componentManifest.kind = ComponentKind::Module;
     // "indirect_diffuse" is this technique's radiance layer: the run demands
     // it when the GI transport pass should attach to the renderer.
     componentManifest.providedCapabilities = {"indirect_diffuse"};
     componentManifest.requiredCapabilities = {"logging", "renderer"};
-    // capability.lighting is optional here: without a light provider there
-    // are no lights, and GI degrades to emissive + sky transport.
-    componentManifest.requiredPermissions = {"capability.logging", "capability.renderer", "capability.lighting"};
-    // The pass settings the module reads from [lighting.radiance_cascades].
+    // "lighting" is OPTIONAL (the first manifest use of the mechanism): the
+    // pass relights march hits with the scene lights when a provider is
+    // active and degrades to emissive + sky transport without one. Declaring
+    // it through optionalCapabilities gives the module everything the old
+    // hand-rolled pattern (an explicit capability.lighting permission plus a
+    // try/catch around the acquire) could not: the resolver orders this
+    // module after the lighting provider when one exists - construct's
+    // acquire below is a property of the assembly, never of plugin scan
+    // order - and the capability.<name> permission is derived from the
+    // declaration. Optional capabilities never join the demand closure, so
+    // this declaration does not pull a light provider into runs that have no
+    // other use for one.
+    componentManifest.optionalCapabilities = {"lighting"};
+    componentManifest.requiredPermissions  = {"capability.logging", "capability.renderer"};
+    // The pass settings the module reads from [lighting.screen_space_radiance_cascades].
     componentManifest.knownConfigKeys = {
-        "lighting.radiance_cascades.cascades",
-        "lighting.radiance_cascades.interval_base",
-        "lighting.radiance_cascades.interval_factor",
-        "lighting.radiance_cascades.probe_stride",
-        "lighting.radiance_cascades.base_rays",
-        "lighting.radiance_cascades.gather_visibility",
-        "lighting.radiance_cascades.los_steps",
-        "lighting.radiance_cascades.march_steps",
-        "lighting.radiance_cascades.relight_shadows",
-        "lighting.radiance_cascades.shadow_steps",
-        "lighting.radiance_cascades.spatial_filter",
+        "lighting.screen_space_radiance_cascades.cascades",
+        "lighting.screen_space_radiance_cascades.interval_base",
+        "lighting.screen_space_radiance_cascades.interval_factor",
+        "lighting.screen_space_radiance_cascades.probe_stride",
+        "lighting.screen_space_radiance_cascades.base_rays",
+        "lighting.screen_space_radiance_cascades.mapping",
+        "lighting.screen_space_radiance_cascades.bounces",
+        "lighting.screen_space_radiance_cascades.gather_visibility",
+        "lighting.screen_space_radiance_cascades.los_steps",
+        "lighting.screen_space_radiance_cascades.march_steps",
+        "lighting.screen_space_radiance_cascades.relight_shadows",
+        "lighting.screen_space_radiance_cascades.shadow_steps",
+        "lighting.screen_space_radiance_cascades.spatial_filter",
     };
 }
 
-RadianceCascadesModule::~RadianceCascadesModule()
+ScreenSpaceRadianceCascadesModule::~ScreenSpaceRadianceCascadesModule()
 {
     stop();
 }
 
-void RadianceCascadesModule::construct(
+void ScreenSpaceRadianceCascadesModule::construct(
     ComponentContext &context
 )
 {
     logger = &context.acquireCapability<LoggerCapability>();
 
-    RadianceCascadesPass::Settings settings;
+    ScreenSpaceRadianceCascadesPass::Settings settings;
     settings.cascades         = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.cascades").value_or(defaultCascades), 1, 8
+        context.configurationIntegerInSection("lighting", "screen_space_radiance_cascades.cascades").value_or(defaultCascades), 1, 8
     ));
     settings.intervalBase     = static_cast<float>(context
-            .configurationFloatingInSection("lighting", "radiance_cascades.interval_base")
+            .configurationFloatingInSection("lighting", "screen_space_radiance_cascades.interval_base")
             .value_or(defaultIntervalBase));
     settings.intervalFactor   = static_cast<float>(context
-            .configurationFloatingInSection("lighting", "radiance_cascades.interval_factor")
+            .configurationFloatingInSection("lighting", "screen_space_radiance_cascades.interval_factor")
             .value_or(defaultIntervalFactor));
     settings.probeStride      = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.probe_stride")
+        context.configurationIntegerInSection("lighting", "screen_space_radiance_cascades.probe_stride")
             .value_or(defaultProbeStride),
         1,
         64
     ));
     settings.baseRays         = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.base_rays").value_or(defaultBaseRays),
+        context.configurationIntegerInSection("lighting", "screen_space_radiance_cascades.base_rays").value_or(defaultBaseRays),
         4,
         256
     ));
-    settings.gatherVisibility = context.configurationBooleanInSection("lighting", "radiance_cascades.gather_visibility")
+    settings.gatherVisibility = context.configurationBooleanInSection("lighting", "screen_space_radiance_cascades.gather_visibility")
                                     .value_or(true);
     settings.losSteps         = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.los_steps").value_or(defaultLosSteps),
+        context.configurationIntegerInSection("lighting", "screen_space_radiance_cascades.los_steps").value_or(defaultLosSteps),
         4,
         256
     ));
     settings.marchSteps       = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.march_steps").value_or(defaultMarchSteps),
+        context.configurationIntegerInSection("lighting", "screen_space_radiance_cascades.march_steps").value_or(defaultMarchSteps),
         4,
         512
     ));
-    settings.relightShadows   = context.configurationBooleanInSection("lighting", "radiance_cascades.relight_shadows")
+    settings.relightShadows   = context.configurationBooleanInSection("lighting", "screen_space_radiance_cascades.relight_shadows")
                                     .value_or(true);
     settings.shadowSteps      = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.shadow_steps")
+        context.configurationIntegerInSection("lighting", "screen_space_radiance_cascades.shadow_steps")
             .value_or(defaultShadowSteps),
         4,
         256
@@ -1183,26 +1480,62 @@ void RadianceCascadesModule::construct(
     // applied 8 for 10 - the same stale dense-probe-era limit the shader side
     // already shed.
     settings.spatialFilterRadius = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        context.configurationIntegerInSection("lighting", "radiance_cascades.spatial_filter")
+        context.configurationIntegerInSection("lighting", "screen_space_radiance_cascades.spatial_filter")
             .value_or(defaultSpatialFilterRadius),
         0,
         16
     ));
+    // Angular mapping: octahedron (default), cubemap, or spherical_harmonic.
+    // An unknown spelling is a precise startup error, not a silent fallback:
+    // the mapping changes the GI's look, so a typo must never quietly render
+    // with a different one.
+    const std::string mappingName = context.configurationStringInSection(
+                                        "lighting", "screen_space_radiance_cascades.mapping"
+    )
+                                        .value_or(defaultMappingName);
+    if (!parseMappingName(mappingName, settings.mapping))
+    {
+        throw std::runtime_error(
+            "screen_space_radiance_cascades module: [lighting.screen_space_radiance_cascades] mapping '" + mappingName
+            + "' is not a known mapping (octahedron, cubemap, spherical_harmonic)"
+        );
+    }
+    // Light transport bounces: 1 reproduces the historical single bounce;
+    // every extra bounce re-runs the cascade sequence (cost linear in
+    // bounces). There is NO upper bound by design: the bounce count is a
+    // quality/performance trade the configuration owns. The engine states
+    // the cost here and reports the configured value at start; it does not
+    // second-guess the machine the run executes on. The only validation is
+    // the structural floor - 0 bounces would disable the transport this pass
+    // exists for, and negative counts are a typo.
+    const std::int64_t configuredBouncesValue = context.configurationIntegerInSection(
+                                                    "lighting", "screen_space_radiance_cascades.bounces"
+    )
+                                                    .value_or(defaultBounces);
+    if (configuredBouncesValue < 1)
+    {
+        throw std::runtime_error(
+            "screen_space_radiance_cascades module: [lighting.screen_space_radiance_cascades] bounces must be >= 1 (0 would disable the "
+            "light transport; drop the indirect_diffuse demand instead of configuring the pass empty)"
+        );
+    }
+    settings.bounces = static_cast<std::uint32_t>(configuredBouncesValue);
+    // Start-log reporting copies (the pass keeps the authoritative settings).
+    configuredMappingName = mappingName;
+    configuredBounces     = settings.bounces;
     if (settings.intervalBase <= 0.0f || settings.intervalFactor < 1.0f)
     {
-        throw std::runtime_error("radiance_cascades module: interval_base must be > 0 and interval_factor >= 1");
+        throw std::runtime_error("screen_space_radiance_cascades module: interval_base must be > 0 and interval_factor >= 1");
     }
 
-    // The lighting capability is optional (see the manifest comment): a
-    // denied or missing provider only disables the first-bounce relight.
+    // The lighting capability is optional (declared in the manifest): the
+    // resolver ordered this module after the provider when one is active, so
+    // the probe below is a stable answer, never scan-order luck. A denied or
+    // missing provider only disables the first-bounce relight.
     LightingCapability *lighting = nullptr;
-    try
+    if (context.isCapabilityAvailable(LightingCapability::capabilityName))
     {
         lighting = &context.acquireCapability<LightingCapability>();
-    }
-    catch (const ComponentAccessError &)
-    {
-        lighting = nullptr;
     }
 
     // Attachment follows demand: this module only activates when the run
@@ -1212,7 +1545,7 @@ void RadianceCascadesModule::construct(
     passAttached      = context.isCapabilityDemanded("indirect_diffuse");
     lightingAvailable = lighting != nullptr;
 
-    pass = std::make_shared<RadianceCascadesPass>(settings, lighting);
+    pass = std::make_shared<ScreenSpaceRadianceCascadesPass>(settings, lighting);
     if (passAttached)
     {
         RendererCapability &rendererCapability = context.acquireCapability<RendererCapability>();
@@ -1221,24 +1554,26 @@ void RadianceCascadesModule::construct(
     }
 }
 
-void RadianceCascadesModule::start()
+void ScreenSpaceRadianceCascadesModule::start()
 {
     logger->logMessage(
         LogLevel::Information,
-        std::string("radiance_cascades module started; technique ")
+        std::string("screen_space_radiance_cascades module started; technique ")
             + (passAttached ? "attached (indirect radiance)" : "indirect_diffuse not demanded; idle")
             + ", light capability " + (lightingAvailable ? "present" : "absent (no first-bounce relight)")
+            + ", mapping " + configuredMappingName
+            + ", bounces " + std::to_string(configuredBounces)
     );
 }
 
-void RadianceCascadesModule::stop()
+void ScreenSpaceRadianceCascadesModule::stop()
 {
     passAttached = false;
     pass.reset();
     logger = nullptr;
 }
 
-void *RadianceCascadesModule::capabilityPointerFor(
+void *ScreenSpaceRadianceCascadesModule::capabilityPointerFor(
     const std::string &capabilityName
 )
 {

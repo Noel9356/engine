@@ -112,7 +112,7 @@ inline constexpr float         defaultReflectionMaxDistance  = 40.0f;
 inline constexpr std::uint32_t defaultReflectionMarchSteps   = 96;
 
 // One lighting technique implementation (for example the PBR analytic pass or
-// the radiance cascades transport pass). record appends the technique's
+// the screen-space radiance cascades transport pass). record appends the technique's
 // dispatches for one frame; it may read the G-buffer and scene data and must
 // leave its declared targets in a shader-readable state.
 class LightingTechniquePass

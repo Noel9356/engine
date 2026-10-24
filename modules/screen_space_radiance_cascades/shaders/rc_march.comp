@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Radiance cascades, march stage.
+// Screen-space screen-space radiance cascades, march stage.
 //
 // One invocation per (probe, direction). Two anchoring modes:
 //
@@ -38,12 +38,15 @@ layout(set = 1, binding = 0) uniform sampler2D depthSampler;
 layout(set = 1, binding = 1) uniform sampler2D normalSampler;
 layout(set = 1, binding = 2, rgba16f) uniform restrict writeonly image2DArray cascadeMarch;
 // rgb = surface radiance seen by the ray inside the interval, a = transmittance (1 unoccluded, 0 hit)
+layout(set = 1, binding = 3) uniform sampler2D prevGi;
+// The previous bounce's gathered transport (irradiance over pi, full screen
+// extent). Unbound data at bounce 0 - the push flags.w gates every read.
 
 layout(push_constant) uniform MarchPush
 {
     layout(offset = 0) vec4 interval;       // x tStart, y tEnd (view depth, from the camera)
-    layout(offset = 16) uvec4 flags;        // x primitiveCount, y maxSteps, z cameraAnchored, w unused
-    layout(offset = 32) uvec4 grid;         // x gridW, y gridH, z azCount, w elCount
+    layout(offset = 16) uvec4 flags;        // x primitiveCount, y maxSteps, z cameraAnchored, w bounce index
+    layout(offset = 32) uvec4 grid;         // x gridW, y gridH, z directionCount
     layout(offset = 48) uvec4 extentStride; // x extentW, y extentH, z strideX, w strideY
 } push_;
 
@@ -140,7 +143,7 @@ void main()
     const uint probeX = gl_GlobalInvocationID.x;
     const uint probeY = gl_GlobalInvocationID.y;
     const uint directionIndex = gl_GlobalInvocationID.z;
-    if (probeX >= push_.grid.x || probeY >= push_.grid.y || directionIndex >= push_.grid.z * push_.grid.w)
+    if (probeX >= push_.grid.x || probeY >= push_.grid.y || directionIndex >= push_.grid.z)
     {
         return;
     }
@@ -235,12 +238,31 @@ void main()
         normal *= -sign(dot(normal, direction));
         // Diffuse relight at the hit point: sun + point lights with the hit
         // surface's TEXTURED material (shared relight_common.glsl). This is
-        // the one direct bounce the cascades carry; higher order bounces
-        // would need iterating the merge (documented limit).
-        vec3 unusedAlbedo;
+        // the direct term of the transport; from the second bounce on the
+        // previous bounce's indirect arrives below.
+        vec3 materialAlbedo;
         // The hit's owning primitive comes from the trace itself (the arg-min
         // at the hit step) - no post-hit ownership scan needed.
-        const vec3 radiance = surfaceOutgoingRadianceOwned(hitPoint, normal, hitOwner, push_.flags.x, unusedAlbedo);
+        vec3 radiance = surfaceOutgoingRadianceOwned(hitPoint, normal, hitOwner, push_.flags.x, materialAlbedo);
+        // Multi-bounce transport (flags.w = bounce index, 0 = direct only):
+        // the previous bounce's gather image carries that bounce's indirect
+        // irradiance over pi at every screen pixel, and the hit adds it
+        // through the same Lambertian albedo/pi * E chain as the direct term.
+        // The transport is SCREEN-SPACE: a hit whose projection lands off
+        // screen (or behind the camera) finds no previous-bounce data and
+        // degrades to the direct relight - a documented second-order limit.
+        if (push_.flags.w > 0u)
+        {
+            const vec4 hitClip = viewProjection * vec4(hitPoint, 1.0);
+            if (hitClip.w > 0.0)
+            {
+                const vec2 hitUv = hitClip.xy / hitClip.w * 0.5 + vec2(0.5);
+                if (all(greaterThan(hitUv, vec2(0.0))) && all(lessThan(hitUv, vec2(1.0))))
+                {
+                    radiance += materialAlbedo * textureLod(prevGi, hitUv, 0.0).rgb;
+                }
+            }
+        }
         result = vec4(radiance, 0.0);
     }
 

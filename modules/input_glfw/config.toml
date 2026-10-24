@@ -1,0 +1,25 @@
+# Shipped defaults of the input_glfw module.
+#
+# The module's own configuration layer: the kernel merges it as the lowest
+# defaults layer, so config/engine.toml (and staged overrides) win over
+# anything written here. Defaults FILL: a key a higher layer already
+# provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[input]
+# The module itself has no fixed settings; everything it consumes is the
+# action map below.
+
+# Action mapping: bind by MEANING, not by device. Consumers query
+# actionStrength("jump") and stay agnostic of which control fires it; a
+# rebinding is a configuration edit, no code. Multiple bindings per action
+# are comma separated; "gamepad:<control>" names gamepad buttons/axes
+# (A, DpadUp, LeftTrigger, ...), "mouse:<button>" the mouse, everything else
+# a key by its stable name.
+#
+# The action keys are user-authored data, not schema: an assembly or a mod
+# config declares the actions its scripts and controllers read. The shipped
+# example bindings (boost, release_cursor) belong to the demo content - the
+# test_scene package ships them in its config.toml, since the actions that
+# matter are the ones the active content queries.

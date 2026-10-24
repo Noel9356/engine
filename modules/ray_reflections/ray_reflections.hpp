@@ -14,7 +14,7 @@ class LoggerCapability;
 // Module "ray_reflections": ray traced glossy reflections against the exact
 // analytic scene SDF, attached to the renderer as the "ray_reflections"
 // lighting technique (algorithm naming rule, like "pbr" and
-// "radiance_cascades"). Writes the renderer's indirect specular radiance
+// "screen_space_radiance_cascades"). Writes the renderer's indirect specular radiance
 // layer; the composite sums it after direct light and diffuse GI.
 class RayReflectionsModule final : public ModuleInterface
 {

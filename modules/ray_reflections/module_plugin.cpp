@@ -12,6 +12,9 @@ namespace
 {
 const char *const ray_reflectionsProvidedCapabilities[] = {"indirect_specular"};
 const char *const ray_reflectionsRequiredCapabilities[] = {"logging", "renderer"};
+// "lighting" is used when a provider is active and reflections carry
+// emissive + sky without one (see the module manifest).
+const char *const ray_reflectionsOptionalCapabilities[] = {"lighting"};
 
 engine::ModuleInterface *createray_reflectionsPluginModule()
 {
@@ -25,7 +28,9 @@ const engine::EngineModulePluginEntry ray_reflectionsPluginEntry{
     .providedCapabilities    = ray_reflectionsProvidedCapabilities,
     .providedCapabilityCount = 1,
     .requiredCapabilities    = ray_reflectionsRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = 2,
+    .optionalCapabilities    = ray_reflectionsOptionalCapabilities,
+    .optionalCapabilityCount = 1
 };
 } // namespace
 

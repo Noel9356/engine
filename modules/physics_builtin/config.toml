@@ -1,0 +1,18 @@
+# Shipped defaults of the physics_builtin module.
+#
+# The module's own configuration layer: the kernel merges it as the lowest
+# defaults layer, so config/engine.toml (and staged overrides) win over
+# anything written here. Defaults FILL: a key a higher layer already
+# provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[physics]
+gravity = [0.0, -9.81, 0.0]
+ground_enabled = true
+ground_height = 0.0
+# Integrator clamp per forward step (1/30 second).
+max_step_seconds = 0.033333333333333
+# A body at rest below sleep_speed for sleep_delay seconds stops simulating.
+sleep_speed = 0.15
+sleep_delay = 2.0

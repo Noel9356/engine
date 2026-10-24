@@ -1,0 +1,40 @@
+# Shipped defaults of the renderer_vulkan module.
+#
+# The module's own configuration layer: the kernel merges it as the lowest
+# defaults layer, so config/engine.toml (and staged overrides) win over
+# anything written here. Defaults FILL: a key a higher layer already
+# provided is never touched.
+#
+# Documented in README.md next to this file.
+
+[renderer]
+# Validation layers off for interactive runs: every dispatch pays a large
+# CPU tax under the layer, which starves the window's message pump on slower
+# machines (the OS then marks the window "not responding" during heavy
+# frames). Diagnostics-oriented assemblies re-enable it.
+enable_validation = false
+vsync = true
+prefer_discrete_device = true
+# Transient render targets (G-buffer, radiance layers, cascade fields) and
+# the host-written uniforms are single-buffered and shared by every slot, so
+# the frame loop serializes execution: each frame waits for both in-flight
+# fences before recording. max_frames_in_flight therefore decouples command
+# buffers and swapchain acquisition, not GPU execution - frames cannot
+# overlap without racing the shared targets (docs/robustness.md, invariant 38).
+max_frames_in_flight = 2
+# Compiled SPIR-V lands in runtime/shaders (module build output). The
+# texture directory is deliberately NOT set here: content belongs to the
+# content mod, whose shipped defaults point the renderer at the package's
+# own assets (mods/test_scene/config.toml).
+shader_directory = "shaders"
+exposure = 1.15
+tonemap = "aces"
+
+# Bloom (post-processing): an opt-in HDR glow. The bright pass lifts
+# radiance above bloom_threshold into a half-resolution chain, a separable
+# Gaussian spreads it, and the final stage adds it back before the tonemap -
+# the same operators the composite uses, so a bloom run and a non-bloom run
+# of the same scene match outside the glow.
+bloom = true
+bloom_threshold = 1.0
+bloom_strength = 0.15
