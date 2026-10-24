@@ -6,6 +6,8 @@
 // one of its capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "screen_space_radiance_cascades.hpp"
 
 namespace
@@ -26,11 +28,11 @@ const engine::EngineModulePluginEntry screen_space_radiance_cascadesPluginEntry{
     .moduleName              = "screen_space_radiance_cascades",
     .createModule            = &createscreen_space_radiance_cascadesPluginModule,
     .providedCapabilities    = screen_space_radiance_cascadesProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(screen_space_radiance_cascadesProvidedCapabilities),
     .requiredCapabilities    = screen_space_radiance_cascadesRequiredCapabilities,
-    .requiredCapabilityCount = 2,
+    .requiredCapabilityCount = std::size(screen_space_radiance_cascadesRequiredCapabilities),
     .optionalCapabilities    = screen_space_radiance_cascadesOptionalCapabilities,
-    .optionalCapabilityCount = 1
+    .optionalCapabilityCount = std::size(screen_space_radiance_cascadesOptionalCapabilities)
 };
 } // namespace
 

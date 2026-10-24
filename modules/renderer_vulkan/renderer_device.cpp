@@ -34,7 +34,7 @@ namespace
 // Debug messenger callback in the vk-namespace signature: passing it to
 // setPfnUserCallback selects the typed setter instead of the one deprecated
 // for C function pointer types. Errors are also remembered in the renderer
-// state so hosts and automated runs can observe them through the capability
+// state so the app and automated runs can observe them through the capability
 // contract instead of having to scrape the log.
 VKAPI_ATTR vk::Bool32 VKAPI_CALL debugMessageCallback(
     vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -271,7 +271,7 @@ void RendererState::createDeviceAndSurface(
     );
 
     // Software rasterizers render every frame on the CPU: the shipped demo
-    // configuration takes seconds per frame there, and the host loop polls
+    // configuration takes seconds per frame there, and the app loop polls
     // window events only between frames - the OS marks the window "not
     // responding" within its hang-detection window (~5 s). Name the situation
     // and the exact knobs instead of leaving the user with a frozen-looking

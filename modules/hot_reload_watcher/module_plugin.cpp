@@ -2,6 +2,8 @@
 // the kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "hot_reload.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry hotReloadPluginEntry{
     .moduleName              = "hot_reload",
     .createModule            = &createhot_reloadPluginModule,
     .providedCapabilities    = hotReloadProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(hotReloadProvidedCapabilities),
     .requiredCapabilities    = hotReloadRequiredCapabilities,
-    .requiredCapabilityCount = 1
+    .requiredCapabilityCount = std::size(hotReloadRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

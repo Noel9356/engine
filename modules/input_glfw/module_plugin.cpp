@@ -6,6 +6,8 @@
 // capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "input.hpp"
 
 namespace
@@ -23,9 +25,11 @@ const engine::EngineModulePluginEntry inputPluginEntry{
     .moduleName              = "input",
     .createModule            = &createinputPluginModule,
     .providedCapabilities    = inputProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(inputProvidedCapabilities),
     .requiredCapabilities    = inputRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(inputRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

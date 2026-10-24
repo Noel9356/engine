@@ -27,6 +27,16 @@ inline constexpr std::uint32_t engineModulePluginAbiVersion = 3u;
 // point. Plain data and plain function pointers: nothing that crosses the
 // library boundary assumes more than one heap for the whole process (one CRT
 // on Windows, a shared libstdc++ on POSIX), which this build guarantees.
+//
+// The capability lists are fixed-size arrays of literals paired with an
+// explicit count, not std::vector or std::span, on purpose. The kernel reads
+// this object straight out of the plugin binary's static storage: a container
+// member would put the shared struct layout under STL implementation details,
+// would allocate and free across the boundary, and would give the descriptor
+// dynamic construction plus destruction-order state at unload. The count of
+// each array is derived in module_plugin.cpp with std::size(array) - the same
+// "always matches the container" property as vector::size() - so a count can
+// never silently drift from the array it describes.
 struct EngineModulePluginEntry
 {
     // Must equal engineModulePluginAbiVersion at the time of loading.

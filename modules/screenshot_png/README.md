@@ -9,7 +9,7 @@ All of them end in the same queue, so captures are serialized and never interlea
 - the configured hotkey (`[screenshot].key`, default `F12`) — the module subscribes `KeyPressedEvent` on the event bus, which is why the key names it accepts are the same names the input_glfw module publishes;
 - script mods calling `engine.request_screenshot()` through the Lua bridge;
 - C++ consumers calling `requestFrameCapture()` on the `RendererCapability` (the screenshot_png module forwards it into the same queue);
-- the host composition root, which may queue a capture at any point to exercise the readback and PNG write.
+- the app composition root, which may queue a capture at any point to exercise the readback and PNG write.
 
 ## Correctness model
 

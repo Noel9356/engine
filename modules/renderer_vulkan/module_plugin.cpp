@@ -6,6 +6,8 @@
 // capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "renderer.hpp"
 
 namespace
@@ -23,9 +25,11 @@ const engine::EngineModulePluginEntry rendererPluginEntry{
     .moduleName              = "renderer",
     .createModule            = &createrendererPluginModule,
     .providedCapabilities    = rendererProvidedCapabilities,
-    .providedCapabilityCount = 2,
+    .providedCapabilityCount = std::size(rendererProvidedCapabilities),
     .requiredCapabilities    = rendererRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(rendererRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

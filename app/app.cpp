@@ -1,10 +1,15 @@
-// The composition root includes the published capability headers of the
-// modules it acquires from - the providers themselves own and publish their
-// capability types; there is no central contract directory.
+// The composition root implementation (engine::App, declared in app.hpp):
+// the frame loop, the capability acquisition and the shutdown sequence. The
+// process entry point in main.cpp is deliberately thin; everything a run
+// does lives here.
+#include "app.hpp"
+
+// The app includes the published capability headers of the modules it
+// acquires from - the providers themselves own and publish their capability
+// types; there is no central contract directory.
 #include "input_capability.hpp"
 #include "renderer_capability.hpp"
 #include "window_capability.hpp"
-#include "engine/kernel/engine_kernel.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +18,9 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+
+namespace engine
+{
 
 namespace
 {
@@ -27,9 +35,8 @@ constexpr const char *defaultConfigurationFile = "config/engine.toml";
 
 } // namespace
 
-int main()
+int App::run()
 {
-    engine::EngineKernel kernel;
     kernel.setConfigurationFile(defaultConfigurationFile);
 
     // Module availability is runtime, not compile time: the kernel scans
@@ -57,36 +64,36 @@ int main()
 
     // The frame loop belongs to the composition root, not to the kernel: the
     // kernel only mediates communication, it never owns a window or a frame.
-    // The host is a consumer like any other: it acquires the capabilities the
+    // The app is a consumer like any other: it acquires the capabilities the
     // active mods have pulled in, and a capability no mod demanded is simply
     // absent - the run degrades instead of assuming a backend exists.
-    std::unique_ptr<engine::ComponentContext> hostContext = kernel.createHostContext();
+    std::unique_ptr<ComponentContext> appContext = kernel.createAppContext();
 
-    engine::WindowCapability *window = nullptr;
+    WindowCapability *window = nullptr;
     try
     {
-        window = &hostContext->acquireCapability<engine::WindowCapability>();
+        window = &appContext->acquireCapability<WindowCapability>();
     }
     catch (const std::exception &)
     {
         std::cout << "window capability is not available in this run; nothing to drive\n";
     }
 
-    engine::RendererCapability *renderer = nullptr;
+    RendererCapability *renderer = nullptr;
     try
     {
-        renderer = &hostContext->acquireCapability<engine::RendererCapability>();
+        renderer = &appContext->acquireCapability<RendererCapability>();
     }
     catch (const std::exception &)
     {
         std::cout << "renderer capability is not available in this build; running without frames\n";
     }
 
-    const std::vector<engine::WindowIdentifier> windowIdentifiers = window != nullptr
-                                                                      ? window->windowIdentifiers()
-                                                                      : std::vector<engine::WindowIdentifier>{};
-    const engine::WindowIdentifier              mainWindow = windowIdentifiers.empty() ? engine::invalidWindowIdentifier
-                                                                                       : windowIdentifiers.front();
+    const std::vector<WindowIdentifier> windowIdentifiers = window != nullptr
+                                                              ? window->windowIdentifiers()
+                                                              : std::vector<WindowIdentifier>{};
+    const WindowIdentifier mainWindow = windowIdentifiers.empty() ? invalidWindowIdentifier
+                                                                  : windowIdentifiers.front();
 
     // A failure anywhere in the frame loop (a missing shader asset, a backend
     // that refuses a pipeline, a mod that throws during dispatch) must produce
@@ -110,7 +117,7 @@ int main()
     const bool  diagnosticsEnabled = !frameSamples.empty();
     try
     {
-        while (window != nullptr && mainWindow != engine::invalidWindowIdentifier
+        while (window != nullptr && mainWindow != invalidWindowIdentifier
                && !window->windowCloseRequested(mainWindow))
         {
             window->pollEvents();
@@ -168,7 +175,7 @@ int main()
     {
         if (kernel.eventBus().latencyRecordingEnabled())
         {
-            const std::string latencyReport = hostContext->eventBus().latencyReport();
+            const std::string latencyReport = appContext->eventBus().latencyReport();
             if (!latencyReport.empty())
             {
                 std::cout << "communication latency report (event bus, direct dispatch):\n" << latencyReport;
@@ -200,3 +207,5 @@ int main()
     kernel.stop();
     return exitCode;
 }
+
+} // namespace engine

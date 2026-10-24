@@ -424,7 +424,7 @@ void PbrLightingModule::construct(
     {
         RendererCapability &rendererCapability = context.acquireCapability<RendererCapability>();
         // In-tree wiring: the renderer capability of this build is implemented
-        // by RendererModule (see host/main.cpp, composition root). Script mods
+        // by RendererModule (see app/main.cpp, composition root). Script mods
         // keep working through the agnostic contracts only.
         auto *rendererModule = static_cast<RendererModule *>(&rendererCapability);
         rendererModule->attachLightingTechnique(pass);

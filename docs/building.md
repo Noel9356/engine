@@ -75,7 +75,7 @@ Modules are discovered, not listed: every `modules/<name>/` directory that carri
 
 Native mod packages are discovered the same way: a `mods/<id>/` directory that carries a `CMakeLists.txt` is added as a subdirectory and builds its library straight into the package's runtime directory.
 
-`ENGINE_BUILD_DEMO=OFF` removes the host executable, the runtime layout assembly (configs and mod packages) and the native mod builds.
+`ENGINE_BUILD_DEMO=OFF` removes the app executable, the runtime layout assembly (configs and mod packages) and the native mod builds.
 
 ## Runtime layout
 

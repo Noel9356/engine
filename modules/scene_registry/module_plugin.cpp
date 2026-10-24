@@ -2,6 +2,8 @@
 // kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "scene.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry scenePluginEntry{
     .moduleName              = "scene",
     .createModule            = &createscenePluginModule,
     .providedCapabilities    = sceneProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(sceneProvidedCapabilities),
     .requiredCapabilities    = sceneRequiredCapabilities,
-    .requiredCapabilityCount = 1
+    .requiredCapabilityCount = std::size(sceneRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

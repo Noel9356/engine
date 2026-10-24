@@ -1,5 +1,5 @@
 // The profiler_bench native mod: the worked example of consuming a
-// brand-new capability without touching the kernel, the host or any other
+// brand-new capability without touching the kernel, the app or any other
 // module. The package declares its requirements in mod.toml ("logging",
 // "profiler"); the kernel activates the provider modules, derives the
 // "capability.<name>" grants from the same list and orders this mod after

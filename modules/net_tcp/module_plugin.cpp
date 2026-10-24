@@ -2,6 +2,8 @@
 // kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "net.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry netPluginEntry{
     .moduleName              = "net",
     .createModule            = &createnetPluginModule,
     .providedCapabilities    = netProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(netProvidedCapabilities),
     .requiredCapabilities    = netRequiredCapabilities,
-    .requiredCapabilityCount = 1
+    .requiredCapabilityCount = std::size(netRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

@@ -2,6 +2,8 @@
 // hands the kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "persistence.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry persistencePluginEntry{
     .moduleName              = "persistence",
     .createModule            = &createpersistencePluginModule,
     .providedCapabilities    = persistenceProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(persistenceProvidedCapabilities),
     .requiredCapabilities    = persistenceRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(persistenceRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

@@ -2,7 +2,7 @@
 #define ENGINE_MODULES_RENDERER_RENDERER_OVERLAY_CAPABILITY_HPP
 
 // The published capability surface of the renderer's overlay seam. Every
-// consumer - other modules, native mods, the host - includes THIS header, from
+// consumer - other modules, native mods, the app - includes THIS header, from
 // the module that provides the capability. Like every published capability
 // header this stays implementation-, platform- and vendor-agnostic: no Vulkan,
 // GLFW or platform header may appear here (the capability header guard,

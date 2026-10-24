@@ -2,6 +2,8 @@
 // the kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "animation.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry animationPluginEntry{
     .moduleName              = "animation",
     .createModule            = &createanimationPluginModule,
     .providedCapabilities    = animationProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(animationProvidedCapabilities),
     .requiredCapabilities    = animationRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(animationRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

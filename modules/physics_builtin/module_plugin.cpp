@@ -2,6 +2,8 @@
 // the kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "physics.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry physicsPluginEntry{
     .moduleName              = "physics",
     .createModule            = &createphysicsPluginModule,
     .providedCapabilities    = physicsProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(physicsProvidedCapabilities),
     .requiredCapabilities    = physicsRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(physicsRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

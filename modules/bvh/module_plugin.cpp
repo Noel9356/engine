@@ -2,6 +2,8 @@
 // kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "bvh.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry bvhPluginEntry{
     .moduleName              = "bvh",
     .createModule            = &createbvhPluginModule,
     .providedCapabilities    = bvhProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(bvhProvidedCapabilities),
     .requiredCapabilities    = bvhRequiredCapabilities,
-    .requiredCapabilityCount = 1
+    .requiredCapabilityCount = std::size(bvhRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

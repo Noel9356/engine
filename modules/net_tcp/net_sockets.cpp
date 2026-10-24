@@ -51,18 +51,9 @@ bool wouldBlock()
 // Wire frame: [uint32 LE topic length][topic bytes][uint32 LE payload length]
 // [payload bytes]. Length-prefixed, binary safe, trivially parseable by any
 // test client; maximum sizes keep a rogue length prefix from OOMing the run.
+// (The send side encodes the same shape in net.cpp.)
 constexpr std::uint32_t maxTopicLength   = 256;
 constexpr std::uint32_t maxPayloadLength = 1024 * 1024;
-
-void appendUint32(
-    std::vector<std::uint8_t> &buffer, std::uint32_t value
-)
-{
-    buffer.push_back(static_cast<std::uint8_t>(value & 0xFF));
-    buffer.push_back(static_cast<std::uint8_t>((value >> 8) & 0xFF));
-    buffer.push_back(static_cast<std::uint8_t>((value >> 16) & 0xFF));
-    buffer.push_back(static_cast<std::uint8_t>((value >> 24) & 0xFF));
-}
 
 bool readUint32(
     const std::vector<std::uint8_t> &buffer, std::size_t offset, std::uint32_t &value
@@ -157,15 +148,23 @@ SocketHandle openListener(
 )
 {
 #if defined(_WIN32)
-    SOCKET raw = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // The invalid check compares in SOCKET space against INVALID_SOCKET,
+    // like acceptClient below: SOCKET is an unsigned type, so the signed
+    // invalidSocket sentinel must never meet it in one comparison.
+    const SOCKET raw = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (raw == INVALID_SOCKET)
+    {
+        errorReport = "socket() failed: " + std::string(std::strerror(errno));
+        return invalidSocket;
+    }
 #else
-    SocketHandle raw = ::socket(AF_INET, SOCK_STREAM, 0);
-#endif
+    const SocketHandle raw = ::socket(AF_INET, SOCK_STREAM, 0);
     if (raw == invalidSocket)
     {
         errorReport = "socket() failed: " + std::string(std::strerror(errno));
         return invalidSocket;
     }
+#endif
 
     // REUSEADDR: a restart within the TIME_WAIT window must not need a
     // minute of patience - a debug transport restarts often.
@@ -323,7 +322,11 @@ bool drainClient(
     clients.erase(clients.begin() + static_cast<std::ptrdiff_t>(index));
     clientIds.erase(clientIds.begin() + static_cast<std::ptrdiff_t>(index));
     clientBuffers.erase(clientBuffers.begin() + static_cast<std::ptrdiff_t>(index));
+    // Both flags exist for the call sites' readability: why the client goes
+    // (a recv error or a corrupt stream) and which sink a disconnect never
+    // fills (the frames belong to live connections only).
     (void)corruptStream;
+    (void)receivedFrames;
     return false;
 }
 

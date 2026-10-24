@@ -125,9 +125,9 @@ public:
         return startupWarnings_;
     }
 
-    // Trusted context for the composition root (the frame loop). The host may
+    // Trusted context for the composition root (the frame loop). The app may
     // acquire every available capability.
-    std::unique_ptr<ComponentContext> createHostContext();
+    std::unique_ptr<ComponentContext> createAppContext();
 
 private:
     // One module plugin binary found in the modules directory, described by

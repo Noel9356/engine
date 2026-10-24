@@ -2,6 +2,8 @@
 // kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "ui.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry uiPluginEntry{
     .moduleName              = "ui",
     .createModule            = &createuiPluginModule,
     .providedCapabilities    = uiProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(uiProvidedCapabilities),
     .requiredCapabilities    = uiRequiredCapabilities,
-    .requiredCapabilityCount = 5
+    .requiredCapabilityCount = std::size(uiRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

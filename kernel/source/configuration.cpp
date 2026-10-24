@@ -192,7 +192,7 @@ bool ConfigurationStore::mergeDefaultsFile(
         if (isAssemblyOwnedSection(sectionName))
         {
             errorMessage = "shipped defaults file '" + path.string() + "' must not define the '" + sectionName
-                         + "' section: assembly and host sections belong to the engine configuration and the host";
+                         + "' section: assembly and app sections belong to the engine configuration and the app";
             return false;
         }
         if (sectionName == sceneSectionName)

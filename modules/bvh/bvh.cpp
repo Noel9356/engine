@@ -63,9 +63,10 @@ const char *nameOfSplitMethod(
 
 } // namespace
 
-void BvhModule::construct(
-    ComponentContext &context
-)
+// The manifest is ready at instantiation time: the kernel verifies it against
+// the plugin descriptor right after creating the instance, before any
+// construct phase runs.
+BvhModule::BvhModule()
 {
     componentManifest.name                  = "bvh";
     componentManifest.kind                  = ComponentKind::Module;
@@ -76,7 +77,12 @@ void BvhModule::construct(
     componentManifest.requiredCapabilities  = {"logging"};
     componentManifest.requiredPermissions   = {"capability.logging"};
     componentManifest.knownConfigKeys       = {"bvh.split"};
+}
 
+void BvhModule::construct(
+    ComponentContext &context
+)
+{
     logger = &context.acquireCapability<LoggerCapability>();
 
     // Split strategy: [bvh].split, one of median | midpoint | sah. The

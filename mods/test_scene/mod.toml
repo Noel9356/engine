@@ -27,7 +27,7 @@ host_capability = "scripting"
 # What this run consumes, and therefore what loads:
 #   scripting         the script host (host_capability above)
 #   logging           the script's log lines and every provider's diagnostics
-#   window            the demo window the host frame loop drives
+#   window            the demo window the app frame loop drives
 #   input             the free-fly camera
 #   renderer          frame rendering
 #   lighting          the scene light state the lighting passes read

@@ -6,6 +6,8 @@
 // one of its capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "screenshot.hpp"
 
 namespace
@@ -23,9 +25,11 @@ const engine::EngineModulePluginEntry screenshotPluginEntry{
     .moduleName              = "screenshot",
     .createModule            = &createscreenshotPluginModule,
     .providedCapabilities    = screenshotProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(screenshotProvidedCapabilities),
     .requiredCapabilities    = screenshotRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(screenshotRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

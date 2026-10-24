@@ -2,6 +2,8 @@
 // kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "asset.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry assetPluginEntry{
     .moduleName              = "asset",
     .createModule            = &createassetPluginModule,
     .providedCapabilities    = assetProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(assetProvidedCapabilities),
     .requiredCapabilities    = assetRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(assetRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

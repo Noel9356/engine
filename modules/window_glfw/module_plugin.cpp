@@ -6,6 +6,8 @@
 // capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "window.hpp"
 
 namespace
@@ -23,9 +25,11 @@ const engine::EngineModulePluginEntry windowPluginEntry{
     .moduleName              = "window",
     .createModule            = &createwindowPluginModule,
     .providedCapabilities    = windowProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(windowProvidedCapabilities),
     .requiredCapabilities    = windowRequiredCapabilities,
-    .requiredCapabilityCount = 1
+    .requiredCapabilityCount = std::size(windowRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

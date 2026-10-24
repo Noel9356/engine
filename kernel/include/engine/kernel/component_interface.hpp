@@ -93,8 +93,8 @@ public:
     // demandedCapabilities is the kernel's demand-closure set (which capability
     // names some component of this run actually requires). It carries no
     // meaning to the kernel; providers consult it to learn whether one of
-    // THEIR OWN capabilities is wanted before contributing work. The host
-    // context receives null (the host never contributes capability work).
+    // THEIR OWN capabilities is wanted before contributing work. The app
+    // context receives null (the app never contributes capability work).
     ComponentContext(
         EventBus                              &eventBus,
         CapabilityResolver                    &capabilityResolver,
@@ -146,7 +146,7 @@ public:
     // The kernel treats capability names as opaque strings; the question is
     // only meaningful to a provider asking about one of its OWN capabilities
     // ("should I contribute the work this capability stands for?"). Returns
-    // false when the context has no demand set (the host context).
+    // false when the context has no demand set (the app context).
     bool isCapabilityDemanded(
         const std::string &capabilityName
     ) const
@@ -184,7 +184,7 @@ public:
 
     // Typed configuration access into a named shared section (for example the
     // world content in [scene]). Read-only by convention: components may read
-    // shared content, only the host authors it.
+    // shared content, only the app authors it.
     std::optional<std::string> configurationStringInSection(const std::string &section, const std::string &path) const;
     std::vector<std::string>
     configurationStringArrayInSection(const std::string &section, const std::string &path) const;

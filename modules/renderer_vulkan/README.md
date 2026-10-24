@@ -4,7 +4,7 @@ The graphics backend and the owner of the frame. The renderer is a Vulkan 1.3 im
 
 ## Contract
 
-`RendererCapability` is intentionally small: `renderFrame()` renders one frame, `waitUntilIdle()` drains the device (used before teardown and before offscreen reads), `requestFrameCapture()` queues the capture path (the screenshot_png module's programmatic entry point), and `validationErrorsObserved()` reports whether the debug messenger saw a validation error — the flag the host frame loop turns into exit code 3. The published header carries no Vulkan vocabulary; the published-header guard (`cmake/capability_header_guard.cmake`, called from this module's `CMakeLists.txt`) fails the configure if it ever does.
+`RendererCapability` is intentionally small: `renderFrame()` renders one frame, `waitUntilIdle()` drains the device (used before teardown and before offscreen reads), `requestFrameCapture()` queues the capture path (the screenshot_png module's programmatic entry point), and `validationErrorsObserved()` reports whether the debug messenger saw a validation error — the flag the app frame loop turns into exit code 3. The published header carries no Vulkan vocabulary; the published-header guard (`cmake/capability_header_guard.cmake`, called from this module's `CMakeLists.txt`) fails the configure if it ever does.
 
 ## The technique attach point
 
@@ -45,8 +45,8 @@ The module publishes a second capability member, `renderer.vulkan.overlay` (`ren
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `enable_validation` | bool | `true` | Vulkan validation layers plus debug messenger. Keep interactive runs at `false`: the layer taxes every dispatch heavily on the CPU, and the host loop polls window events only between frames — multi-second frames starve the message pump and the OS marks the window "not responding". Automated runs keep it `true` so VUID violations fail through exit code 3 |
-| `fail_on_validation_error` | bool | `false` | abort the frame loop with a diagnostic at the first observed validation error instead of continuing (development runs; the host frame loop surfaces the same condition through its exit code without this key) |
+| `enable_validation` | bool | `true` | Vulkan validation layers plus debug messenger. Keep interactive runs at `false`: the layer taxes every dispatch heavily on the CPU, and the app loop polls window events only between frames — multi-second frames starve the message pump and the OS marks the window "not responding". Automated runs keep it `true` so VUID violations fail through exit code 3 |
+| `fail_on_validation_error` | bool | `false` | abort the frame loop with a diagnostic at the first observed validation error instead of continuing (development runs; the app frame loop surfaces the same condition through its exit code without this key) |
 | `vsync` | bool | `true` | present mode selection |
 | `prefer_discrete_device` | bool | `true` | device selection: `true` scores discrete GPUs highest, `false` prefers integrated GPUs; CPU/software devices always score lowest |
 | `max_frames_in_flight` | integer | `2` | frame slots (command buffers, fences, acquire semaphores). Frames do NOT overlap on the GPU: transient targets and host-written uniforms are single-buffered, so the loop serializes execution by waiting both fences before recording; the second slot only decouples recording from the presentation engine |

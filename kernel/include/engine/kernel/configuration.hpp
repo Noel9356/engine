@@ -96,9 +96,9 @@ public:
     static constexpr const char *moduleDefaultsFileName = "config.toml";
     static constexpr const char *modDefaultsFileName    = "config.toml";
 
-    // Section names shared by the kernel, the host and the authority policy.
+    // Section names shared by the kernel, the app and the authority policy.
     // Named once because each is spelled at several sites (assembly-authority
-    // checks, typed accessors, the host's readers) and a misspelling would
+    // checks, typed accessors, the app's readers) and a misspelling would
     // silently read the wrong section.
     static constexpr const char *engineSectionName      = "engine";
     static constexpr const char *providersSectionName   = "providers";
@@ -135,7 +135,7 @@ public:
     // Layer 2: merges one shipped defaults file (a module's or a mod
     // package's config.toml).
     // Defaults fill gaps only, as described in the class comment. Assembly and
-    // host authority sections ([engine], [providers], [permissions],
+    // app authority sections ([engine], [providers], [permissions],
     // [diagnostics]) are rejected with a precise error: a shipped
     // package must not be able to grow a module list or deny permissions.
     // The [scene] section is rejected for the same authority reason: world
@@ -206,7 +206,7 @@ public:
 
     // Dotted-path access into one section, for example floatingAtPath(
     // "scene", "sun.intensity") or nested array-of-table rows such as
-    // "objects[0].position". Shared world content ([scene]) and host-only
+    // "objects[0].position". Shared world content ([scene]) and app-only
     // sections live outside any single component's own section; these helpers
     // keep that readable without exposing the TOML parser to modules.
     std::optional<std::string>  stringAtPath(const std::string &sectionName, const std::string &path) const;

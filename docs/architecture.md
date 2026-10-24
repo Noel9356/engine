@@ -22,7 +22,7 @@ Published capability headers are held to a portability rule, enforced mechanical
 
 ## Capability demand: how modules get activated
 
-There is no module list and no registration anywhere — not in the host, not in the kernel, not in a configuration file. Activation is demand-driven, computed once at startup from static declarations:
+There is no module list and no registration anywhere — not in the app, not in the kernel, not in a configuration file. Activation is demand-driven, computed once at startup from static declarations:
 
 1. **Module plugins describe themselves.** Every plugin binary in the modules directory exports one descriptor (name, factory, static provided/required capability lists). The kernel reads descriptors without creating instances.
 2. **Mods are the sole demand roots.** Every active mod package becomes a component; its `capabilities` list states what it consumes, and a script mod's `host_capability` names which requirement its host must satisfy.
@@ -55,7 +55,7 @@ The bus is single threaded by contract. Unsubscribing during dispatch is deferre
 The engine prioritises communication latency over decoupling, by measured design:
 
 - **Module-to-module, mod-to-module and mod-to-mod calls.** Capability calls are direct virtual calls on a pointer acquired from the provider (one vtable indirection, no lookup, no locking). The event bus is the only fan-out medium and dispatches synchronously on the caller's stack. Both paths are the minimum achievable for in-process, same-thread communication.
-- **Measured, not assumed - and opt-in.** Recording is off by default (a normal run publishes thousands of events per second and its user does not want a data dump on shutdown; disabled, the bus never reads a clock, so measurement costs nothing). With `[diagnostics] latency_report = true`, every `publish()` records its dispatch duration into a per-channel fixed-size ring (no heap growth) and the host prints a per-channel mean/p50/p95/p99/max report plus the frame-time percentiles at shutdown.
+- **Measured, not assumed - and opt-in.** Recording is off by default (a normal run publishes thousands of events per second and its user does not want a data dump on shutdown; disabled, the bus never reads a clock, so measurement costs nothing). With `[diagnostics] latency_report = true`, every `publish()` records its dispatch duration into a per-channel fixed-size ring (no heap growth) and the app prints a per-channel mean/p50/p95/p99/max report plus the frame-time percentiles at shutdown.
 - **Evaluated and rejected alternatives.** Message queues add queueing latency and memory for decoupling no current feature needs; a threaded or async bus adds synchronization on every publish and re-opens the data-race surface the single-thread contract closed; an ECS would change data layout, not communication latency. The architecture stays.
 
 ## Lifecycle
@@ -66,7 +66,7 @@ Destructors are defensive: `stop()` no-ops when `construct` never ran, and the k
 
 ## Permissions
 
-A component may only acquire capabilities it declared (`capability.<name>`) and may only write files with `filesystem.write`. The configuration can deny individual permissions per component; denial fails startup with a precise diagnostic. The host composition root is trusted; mods are subject to the same declared-grant model as modules. An acquisition without a grant is **blocked**: the engine refuses the access with a `ComponentAccessError` naming the component, the capability and the missing permission - during startup that fails the construct phase with the diagnostic, and at runtime it surfaces through the frame loop's error handling instead of ever handing out the capability.
+A component may only acquire capabilities it declared (`capability.<name>`) and may only write files with `filesystem.write`. The configuration can deny individual permissions per component; denial fails startup with a precise diagnostic. The app composition root is trusted; mods are subject to the same declared-grant model as modules. An acquisition without a grant is **blocked**: the engine refuses the access with a `ComponentAccessError` naming the component, the capability and the missing permission - during startup that fails the construct phase with the diagnostic, and at runtime it surfaces through the frame loop's error handling instead of ever handing out the capability.
 
 ### Mod risk advisories
 
@@ -93,7 +93,7 @@ Mods face as few restrictions as possible, and every restriction that exists mus
 
 ### Asset ownership: the engine ships no content
 
-The engine tree (kernel, modules, host, build scripts) is code only. Content lives in mod packages, and the split is enforced structurally, not by convention alone:
+The engine tree (kernel, modules, app, build scripts) is code only. Content lives in mod packages, and the split is enforced structurally, not by convention alone:
 
 - **Content assets belong to mods.** Texture sets, world definitions and the defaults that point the renderer at them live in `mods/<id>/` (`assets/`, `scene.toml`, `config.toml`). The build copies each package's content into the runtime layout next to its entry; there is no engine-owned asset directory at all. A build without packages is a working engine that renders whatever the configuration defines - an empty sky by default.
 - **Shaders are not assets.** A shader is the implementation of a rendering technique: it is written next to the module that owns the algorithm, compiled by CMake at build time, and fails the build loudly when broken. The runtime layout reflects this: SPIR-V lands in `runtime/shaders/` (build output, like the executable), not under any `assets` name.

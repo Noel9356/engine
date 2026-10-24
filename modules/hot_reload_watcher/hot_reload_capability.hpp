@@ -2,7 +2,7 @@
 #define ENGINE_MODULES_HOT_RELOAD_HOT_RELOAD_CAPABILITY_HPP
 
 // The published capability surface of the hot reload module. Every consumer -
-// other modules, native mods, the host - includes THIS header, from the
+// other modules, native mods, the app - includes THIS header, from the
 // module that provides the capability. Like every published capability header
 // this stays implementation-, platform- and vendor-agnostic.
 

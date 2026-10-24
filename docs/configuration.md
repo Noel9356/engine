@@ -75,7 +75,7 @@ This document covers the GLOBAL and SHARED sections. Each module owns the docume
 | `[input]` | `../modules/input_glfw/README.md` |
 | `[renderer]` | `../modules/renderer_vulkan/README.md` |
 | `[screenshot]` | `../modules/screenshot_png/README.md` |
-| `[diagnostics]` | here (host-owned opt-in reporting) |
+| `[diagnostics]` | here (app-owned opt-in reporting) |
 | `[lighting]` (shared hand-off key `max_roughness`), `[lighting.pbr]` | `../modules/pbr/README.md` |
 | `[lighting.screen_space_radiance_cascades]` | `../modules/screen_space_radiance_cascades/README.md` |
 | `[lighting.ray_reflections]` | `../modules/ray_reflections/README.md` |

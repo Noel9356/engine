@@ -8,6 +8,8 @@
 // and refuses a drifting plugin with a precise diagnostic.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "profiler.hpp"
 
 namespace
@@ -25,9 +27,11 @@ const engine::EngineModulePluginEntry profilerPluginEntry{
     .moduleName              = "profiler",
     .createModule            = &createprofilerPluginModule,
     .providedCapabilities    = profilerProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(profilerProvidedCapabilities),
     .requiredCapabilities    = profilerRequiredCapabilities,
-    .requiredCapabilityCount = 1
+    .requiredCapabilityCount = std::size(profilerRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

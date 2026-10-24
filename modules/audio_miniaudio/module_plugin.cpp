@@ -2,6 +2,8 @@
 // kernel this binary's static descriptor (engine/kernel/module_api.hpp).
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "audio.hpp"
 
 namespace
@@ -19,9 +21,11 @@ const engine::EngineModulePluginEntry audioPluginEntry{
     .moduleName              = "audio",
     .createModule            = &createaudioPluginModule,
     .providedCapabilities    = audioProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(audioProvidedCapabilities),
     .requiredCapabilities    = audioRequiredCapabilities,
-    .requiredCapabilityCount = 1
+    .requiredCapabilityCount = std::size(audioRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

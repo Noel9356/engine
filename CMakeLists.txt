@@ -47,7 +47,7 @@ find_package(Threads REQUIRED)
 include(capability_header_guard)
 
 # ---- Engine targets ---------------------------------------------------------------
-# The tree is flat by design: kernel/, modules/<name>/, host/ and mods/ are
+# The tree is flat by design: kernel/, modules/<name>/, app/ and mods/ are
 # siblings at the root. A module directory is self-contained (sources, its
 # published capability headers, shaders); a mod directory is a runtime package
 # (mod.toml plus entry sources). There is no central capability directory: a
@@ -74,10 +74,10 @@ foreach(moduleDirectory IN LISTS ENGINE_MODULE_DIRECTORIES)
     endif()
 endforeach()
 
-option(ENGINE_BUILD_DEMO "Build the demo host" ON)
+option(ENGINE_BUILD_DEMO "Build the demo app" ON)
 
 if(ENGINE_BUILD_DEMO)
-    add_subdirectory(host)
+    add_subdirectory(app)
 endif()
 
 # ---- Runtime layout -----------------------------------------------------------

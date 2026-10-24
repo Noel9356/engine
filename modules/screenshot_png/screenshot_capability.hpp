@@ -2,7 +2,7 @@
 #define ENGINE_MODULES_SCREENSHOT_SCREENSHOT_CAPABILITY_HPP
 
 // The published capability surface of the screenshot module. Every consumer -
-// other modules, native mods, the host - includes THIS header, from the
+// other modules, native mods, the app - includes THIS header, from the
 // module that provides the capability: the provider owns and publishes its
 // own capability vocabulary, so there is no central contract directory and
 // no mirrored copy that could drift. Like every published capability header

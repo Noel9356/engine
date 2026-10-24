@@ -41,7 +41,7 @@ public:
         permissionSet.insert(permissions.begin(), permissions.end());
     }
 
-    // Marks a component as trusted: the composition root (the host executable)
+    // Marks a component as trusted: the composition root (the app executable)
     // drives the frame loop and may acquire every available capability.
     void grantAllPermissions(
         const std::string &componentName

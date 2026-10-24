@@ -17,9 +17,9 @@ namespace engine
 namespace
 {
 
-const std::string &hostContextName()
+const std::string &appContextName()
 {
-    static const std::string name = "<host>";
+    static const std::string name = "<app>";
     return name;
 }
 
@@ -137,11 +137,11 @@ EngineKernel::~EngineKernel()
     stop();
 }
 
-std::unique_ptr<ComponentContext> EngineKernel::createHostContext()
+std::unique_ptr<ComponentContext> EngineKernel::createAppContext()
 {
-    permissionSystem_.grantAllPermissions(hostContextName());
+    permissionSystem_.grantAllPermissions(appContextName());
     return std::make_unique<ComponentContext>(
-        bus, *this, permissionSystem_, configurationStore, hostContextName(), nullptr
+        bus, *this, permissionSystem_, configurationStore, appContextName(), nullptr
     );
 }
 
@@ -588,7 +588,7 @@ void EngineKernel::computeDemandClosure()
     {
         // At this point records holds exactly the active mods: the sole
         // demand roots of the run. Nothing else - not the configuration, not
-        // the host - can pull a module in.
+        // the app - can pull a module in.
         for (const std::string &capabilityName : record.manifest.requiredCapabilities)
         {
             worklist.push_back(capabilityName);
@@ -1504,6 +1504,13 @@ void EngineKernel::stop()
     }
     started     = false;
     constructed = false;
+
+    // The bus's channels die HERE, while every provider library is still
+    // loaded: a channel's concrete destructor is code inside the plugin
+    // binary that created it (event_bus.hpp, releaseChannels), and the
+    // record destruction right below unloads those binaries. The kernel
+    // destructor's own bus teardown afterwards works on an empty map.
+    bus.releaseChannels();
 
     records.clear();
     componentStartOrder.clear();

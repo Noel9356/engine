@@ -7,6 +7,8 @@
 // script mod requires the scripting capability it provides.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "lua_scripting.hpp"
 
 namespace
@@ -24,9 +26,11 @@ const engine::EngineModulePluginEntry lua_scriptingPluginEntry{
     .moduleName              = "lua_scripting",
     .createModule            = &createlua_scriptingPluginModule,
     .providedCapabilities    = lua_scriptingProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(lua_scriptingProvidedCapabilities),
     .requiredCapabilities    = lua_scriptingRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(lua_scriptingRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

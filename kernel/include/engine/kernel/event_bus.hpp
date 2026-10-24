@@ -277,7 +277,7 @@ public:
     // run publishes thousands of events per second and its users do not want a
     // report on shutdown. Disabled (the default) the bus never reads a clock
     // for measurement; enabled it records into the per-channel bounded rings
-    // that latencyReport() prints. The host enables it from [diagnostics]
+    // that latencyReport() prints. The app enables it from [diagnostics]
     // latency_report configuration key.
     void setLatencyRecordingEnabled(
         bool enabled
@@ -325,6 +325,19 @@ public:
         {
             found->second->unsubscribe(token);
         }
+    }
+
+    // Destroys every channel now, at an explicitly chosen point. A channel's
+    // concrete destructor is code inside the plugin binary that first created
+    // it (the channel<Event> template instantiates in the consumer that
+    // called it), so the channels must die while every provider library is
+    // still loaded: stop() releases the component records - and with them the
+    // plugin libraries - right after draining, and the implicit bus teardown
+    // at kernel destruction then works on an already empty map instead of
+    // calling into unloaded code.
+    void releaseChannels()
+    {
+        channels.clear();
     }
 
     // Human readable communication latency report: one line per active

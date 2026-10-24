@@ -6,6 +6,8 @@
 // capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "pbr.hpp"
 
 namespace
@@ -23,9 +25,11 @@ const engine::EngineModulePluginEntry pbrPluginEntry{
     .moduleName              = "pbr",
     .createModule            = &createpbrPluginModule,
     .providedCapabilities    = pbrProvidedCapabilities,
-    .providedCapabilityCount = 2,
+    .providedCapabilityCount = std::size(pbrProvidedCapabilities),
     .requiredCapabilities    = pbrRequiredCapabilities,
-    .requiredCapabilityCount = 2
+    .requiredCapabilityCount = std::size(pbrRequiredCapabilities),
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

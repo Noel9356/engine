@@ -26,7 +26,7 @@ namespace engine
 class BvhModule final : public ModuleInterface, public BvhCapability
 {
 public:
-    BvhModule() = default;
+    BvhModule();
     ~BvhModule() override = default;
 
     const ComponentManifest &manifest() const override

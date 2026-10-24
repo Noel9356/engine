@@ -2,7 +2,7 @@
 # profiler capability end to end. It is the tree's worked example of the
 # full extensibility path: a brand-new module (modules/profiler) publishes a
 # brand-new capability, and this package - added without touching the kernel,
-# the host or any other module - is the demand root that activates it.
+# the app or any other module - is the demand root that activates it.
 #
 # Mods never name a module: they name the capabilities they require, and the
 # dependency graph picks the providers. Requiring "profiler" here is what

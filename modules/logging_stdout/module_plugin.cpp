@@ -6,6 +6,8 @@
 // capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "logging.hpp"
 
 namespace
@@ -22,9 +24,11 @@ const engine::EngineModulePluginEntry loggingPluginEntry{
     .moduleName              = "logging",
     .createModule            = &createloggingPluginModule,
     .providedCapabilities    = loggingProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(loggingProvidedCapabilities),
     .requiredCapabilities    = nullptr,
-    .requiredCapabilityCount = 0
+    .requiredCapabilityCount = 0,
+    .optionalCapabilities    = nullptr,
+    .optionalCapabilityCount = 0
 };
 } // namespace
 

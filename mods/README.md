@@ -4,7 +4,7 @@ This guide explains how to build a mod for the engine: what a package looks like
 
 ## What a mod is
 
-A mod is a directory containing a `mod.toml` manifest plus its content: Lua scripts, a TOML scene, and (optionally) packaged assets under `assets/`. The kernel discovers mod packages on disk: every subdirectory of the configured mod directory (`[engine].mod_directory`, default `mods`) that contains a `mod.toml` is a mod. During the build, the root CMakeLists copies every `mods/<id>/` directory that contains a `mod.toml` into `build/runtime/mods/<id>/`, including its `scene.toml`, `config.toml`, `*.lua` files and `assets/` content. The engine itself ships no content; everything the demo host shows comes from the `test_scene` package.
+A mod is a directory containing a `mod.toml` manifest plus its content: Lua scripts, a TOML scene, and (optionally) packaged assets under `assets/`. The kernel discovers mod packages on disk: every subdirectory of the configured mod directory (`[engine].mod_directory`, default `mods`) that contains a `mod.toml` is a mod. During the build, the root CMakeLists copies every `mods/<id>/` directory that contains a `mod.toml` into `build/runtime/mods/<id>/`, including its `scene.toml`, `config.toml`, `*.lua` files and `assets/` content. The engine itself ships no content; everything the demo app shows comes from the `test_scene` package.
 
 Two kinds of mods exist:
 

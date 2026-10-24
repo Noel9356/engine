@@ -6,6 +6,8 @@
 // one of its capabilities.
 #include "engine/kernel/module_api.hpp"
 
+#include <iterator>
+
 #include "ray_reflections.hpp"
 
 namespace
@@ -26,11 +28,11 @@ const engine::EngineModulePluginEntry ray_reflectionsPluginEntry{
     .moduleName              = "ray_reflections",
     .createModule            = &createray_reflectionsPluginModule,
     .providedCapabilities    = ray_reflectionsProvidedCapabilities,
-    .providedCapabilityCount = 1,
+    .providedCapabilityCount = std::size(ray_reflectionsProvidedCapabilities),
     .requiredCapabilities    = ray_reflectionsRequiredCapabilities,
-    .requiredCapabilityCount = 2,
+    .requiredCapabilityCount = std::size(ray_reflectionsRequiredCapabilities),
     .optionalCapabilities    = ray_reflectionsOptionalCapabilities,
-    .optionalCapabilityCount = 1
+    .optionalCapabilityCount = std::size(ray_reflectionsOptionalCapabilities)
 };
 } // namespace
 
