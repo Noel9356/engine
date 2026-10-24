@@ -556,6 +556,8 @@ void RendererState::createFrameResources()
         vk::ImageLayout::eGeneral
     );
 
+    createBloomResources();
+
     // The dummy stands in for disabled lighting targets: the composite
     // descriptor layout always declares the bindings, the flags in the push
     // constants decide whether they are read.
@@ -589,7 +591,30 @@ void RendererState::releaseFrameResources()
     indirectSpecularImage = FrameImage{};
     depthImage            = FrameImage{};
     dummyImage            = FrameImage{};
+    // The bloom chain is extent scoped like every frame image.
+    hdrSceneImage         = FrameImage{};
+    bloomImageA           = FrameImage{};
+    bloomImageB           = FrameImage{};
     linearSampler.reset();
+}
+
+void RendererState::createBloomResources()
+{
+    if (!bloomEnabled)
+    {
+        return;
+    }
+    // The HDR intermediate carries the untonemapped composite output; the
+    // bloom chain runs at half extent (the glow does not need full
+    // resolution - the blur is the point).
+    const vk::Extent2D extent       = swapchainExtent;
+    const vk::Extent2D halfExtent{std::max(extent.width / 2, 1u), std::max(extent.height / 2, 1u)};
+    constexpr auto     hdrUsage     = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage
+                                    | vk::ImageUsageFlagBits::eColorAttachment;
+    constexpr auto     aspectColor  = vk::ImageAspectFlagBits::eColor;
+    createFrameImage(hdrSceneImage, extent, hdrColorFormat, hdrUsage, aspectColor, vk::ImageLayout::eGeneral);
+    createFrameImage(bloomImageA, halfExtent, hdrColorFormat, hdrUsage, aspectColor, vk::ImageLayout::eGeneral);
+    createFrameImage(bloomImageB, halfExtent, hdrColorFormat, hdrUsage, aspectColor, vk::ImageLayout::eGeneral);
 }
 
 void RendererState::clearFrameImage(

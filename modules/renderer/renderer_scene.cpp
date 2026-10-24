@@ -71,37 +71,113 @@ void RendererState::uploadToDeviceLocal(
     graphicsQueue.waitIdle();
 }
 
-void RendererState::createSceneGeometry()
+void RendererState::copyIntoDeviceLocal(
+    GeometryBuffer &target, const void *data, vk::DeviceSize byteSize
+)
 {
-    const MeshData box    = buildBoxMesh();
-    const MeshData sphere = buildSphereMesh(sphereMeshSlices, sphereMeshStacks);
-
-    auto uploadMesh = [this](const MeshData &mesh, GeometryBuffer &target)
+    // Content-only re-upload into an ALREADY allocated device-local buffer:
+    // the incremental scene rebuild path. The target's handle stays valid, so
+    // every descriptor set that binds it stays valid - no technique ever
+    // rebuilds because of a scene edit. Requires TransferDst on the target
+    // and a capacity of at least byteSize (both guaranteed by
+    // allocateSceneDataBuffers for the primitive/material buffers).
+    if (target.buffer == nullptr || target.memory == nullptr)
     {
-        const vk::DeviceSize      vertexBytes = mesh.vertices.size() * sizeof(float);
-        const vk::DeviceSize      indexBytes  = mesh.indices.size() * sizeof(std::uint32_t);
-        std::vector<std::uint8_t> combined(static_cast<std::size_t>(vertexBytes + indexBytes));
-        std::memcpy(combined.data(), mesh.vertices.data(), static_cast<std::size_t>(vertexBytes));
-        std::memcpy(combined.data() + vertexBytes, mesh.indices.data(), static_cast<std::size_t>(indexBytes));
-        uploadToDeviceLocal(
-            target,
-            combined.data(),
-            static_cast<vk::DeviceSize>(combined.size()),
-            vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer
-        );
-        target.indexCount       = static_cast<std::uint32_t>(mesh.indices.size());
-        target.indexOffsetBytes = static_cast<std::size_t>(vertexBytes);
-    };
-    uploadMesh(box, boxMesh);
-    uploadMesh(sphere, sphereMesh);
+        throw std::runtime_error(logPrefix + "copyIntoDeviceLocal called before the target buffer was allocated");
+    }
+    vk::BufferCreateInfo stagingInfo;
+    stagingInfo.setSize(byteSize);
+    stagingInfo.setUsage(vk::BufferUsageFlagBits::eTransferSrc);
+    stagingInfo.setSharingMode(vk::SharingMode::eExclusive);
+    vk::raii::Buffer             stagingBuffer(*device, stagingInfo);
+    const vk::MemoryRequirements stagingRequirements = stagingBuffer.getMemoryRequirements();
+    vk::MemoryAllocateInfo       stagingAllocate;
+    stagingAllocate.setAllocationSize(stagingRequirements.size);
+    stagingAllocate.setMemoryTypeIndex(findMemoryType(
+        **physicalDevice,
+        stagingRequirements.memoryTypeBits,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+    ));
+    vk::raii::DeviceMemory stagingMemory(*device, stagingAllocate);
+    stagingBuffer.bindMemory(*stagingMemory, 0);
+    void *mapped = stagingMemory.mapMemory(0, stagingRequirements.size);
+    std::memcpy(mapped, data, static_cast<std::size_t>(byteSize));
+    stagingMemory.unmapMemory();
 
+    vk::CommandBufferAllocateInfo commandAllocateInfo;
+    commandAllocateInfo.setCommandPool(**commandPool);
+    commandAllocateInfo.setLevel(vk::CommandBufferLevel::ePrimary);
+    commandAllocateInfo.setCommandBufferCount(1);
+    vk::raii::CommandBuffer setupBuffer = std::move(vk::raii::CommandBuffers(*device, commandAllocateInfo).front());
+    setupBuffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+    vk::BufferCopy copyRegion(0, 0, byteSize);
+    setupBuffer.copyBuffer(*stagingBuffer, *target.buffer, copyRegion);
+    setupBuffer.end();
+    vk::SubmitInfo submitInfo;
+    submitInfo.setCommandBuffers(*setupBuffer);
+    graphicsQueue.submit(submitInfo);
+    graphicsQueue.waitIdle();
+}
+
+void RendererState::allocateSceneDataBuffers()
+{
+    // One allocation per buffer, at FULL registry capacity, for the process
+    // lifetime: the incremental scene rebuild swaps content, never buffers.
+    // The capacity constant is shared with the scene module (its registry cap
+    // is the same number) and with the SDF shaders (scene_common.glsl).
+    static_assert(
+        SceneCapability::maxObjects == maxSceneObjects,
+        "the scene registry cap and the renderer's GPU primitive capacity must agree"
+    );
+    constexpr vk::DeviceSize primitivesCapacity =
+        static_cast<vk::DeviceSize>(SceneCapability::maxObjects) * sizeof(GpuScenePrimitive);
+    constexpr vk::DeviceSize materialsCapacity =
+        static_cast<vk::DeviceSize>(SceneCapability::maxObjects) * sizeof(GpuSceneMaterial);
+
+    // Allocation without content: a degenerate stand-in fills the buffer in
+    // uploadSceneData right after, so only this function may leave them
+    // uncopyable-empty.
+    {
+        vk::BufferCreateInfo bufferInfo;
+        bufferInfo.setSize(primitivesCapacity);
+        bufferInfo.setUsage(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst);
+        bufferInfo.setSharingMode(vk::SharingMode::eExclusive);
+        primitivesBuffer.buffer                    = std::make_unique<vk::raii::Buffer>(*device, bufferInfo);
+        const vk::MemoryRequirements requirements   = primitivesBuffer.buffer->getMemoryRequirements();
+        vk::MemoryAllocateInfo       allocateInfo;
+        allocateInfo.setAllocationSize(requirements.size);
+        allocateInfo.setMemoryTypeIndex(
+            findMemoryType(**physicalDevice, requirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
+        );
+        primitivesBuffer.memory = std::make_unique<vk::raii::DeviceMemory>(*device, allocateInfo);
+        primitivesBuffer.buffer->bindMemory(*primitivesBuffer.memory, 0);
+    }
+    {
+        vk::BufferCreateInfo bufferInfo;
+        bufferInfo.setSize(materialsCapacity);
+        bufferInfo.setUsage(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst);
+        bufferInfo.setSharingMode(vk::SharingMode::eExclusive);
+        materialsBuffer.buffer                     = std::make_unique<vk::raii::Buffer>(*device, bufferInfo);
+        const vk::MemoryRequirements requirements   = materialsBuffer.buffer->getMemoryRequirements();
+        vk::MemoryAllocateInfo       allocateInfo;
+        allocateInfo.setAllocationSize(requirements.size);
+        allocateInfo.setMemoryTypeIndex(
+            findMemoryType(**physicalDevice, requirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal)
+        );
+        materialsBuffer.memory = std::make_unique<vk::raii::DeviceMemory>(*device, allocateInfo);
+        materialsBuffer.buffer->bindMemory(*materialsBuffer.memory, 0);
+    }
+}
+
+void RendererState::uploadSceneData()
+{
     // Analytic primitives for the lighting modules' SDF: the exact same
-    // objects the meshes above render (scene_description.hpp documents the
-    // std430 layout the shaders mirror). Always at least one entry: the buffer
-    // is handed to the lighting passes even for an empty scene.
+    // objects the geometry pass renders (scene_description.hpp documents the
+    // std430 layout the shaders mirror). Always at least one entry: the
+    // buffer is handed to the lighting passes even for an empty scene.
     std::vector<GpuScenePrimitive> primitives;
-    primitives.reserve(std::max<std::size_t>(scene.objects.size(), 1));
-    for (const SceneObject &object : scene.objects)
+    primitives.reserve(std::max<std::size_t>(activeObjects.size(), 1));
+    for (const SceneObject &object : activeObjects)
     {
         GpuScenePrimitive primitive;
         primitive.positionType = {
@@ -134,21 +210,27 @@ void RendererState::createSceneGeometry()
             }
         );
     }
-    uploadToDeviceLocal(
-        primitivesBuffer,
-        primitives.data(),
-        static_cast<vk::DeviceSize>(primitives.size() * sizeof(GpuScenePrimitive)),
-        vk::BufferUsageFlagBits::eStorageBuffer
+    if (primitives.size() > SceneCapability::maxObjects)
+    {
+        throw std::runtime_error(
+            logPrefix + "scene data exceeds the GPU primitive capacity ("
+                + std::to_string(SceneCapability::maxObjects) + "): the scene registry must enforce the cap"
+        );
+    }
+    copyIntoDeviceLocal(
+        primitivesBuffer, primitives.data(), static_cast<vk::DeviceSize>(primitives.size() * sizeof(GpuScenePrimitive))
     );
 
     // Material table: one entry per primitive, resolving each object's
     // texture set name into array layer indices (materials_common.glsl
     // consumes this on the tracing side; the geometry pass receives the same
-    // numbers through push constants).
-    createTextureArrays();
+    // numbers through push constants). Texture sets are the static [scene]
+    // world's list: runtime-spawned objects reference the registered sets by
+    // name or render flat - new GPU texture layers require a real asset
+    // upload path, which the incremental rebuild deliberately does not have.
     std::vector<GpuSceneMaterial> materialTable;
-    materialTable.reserve(std::max<std::size_t>(scene.objects.size(), 1));
-    for (const SceneObject &object : scene.objects)
+    materialTable.reserve(std::max<std::size_t>(activeObjects.size(), 1));
+    for (const SceneObject &object : activeObjects)
     {
         GpuSceneMaterial material;
         material.layers        = {-1, -1, 0, 0};
@@ -168,10 +250,16 @@ void RendererState::createSceneGeometry()
     {
         materialTable.push_back(GpuSceneMaterial{.layers = {-1, -1, 0, 0}, .scaleAndFlags = {1.0f, 0.0f, 0.0f, 0.0f}});
     }
+    copyIntoDeviceLocal(
+        materialsBuffer, materialTable.data(), static_cast<vk::DeviceSize>(materialTable.size() * sizeof(GpuSceneMaterial))
+    );
+
     // Material diagnostics: which texture set resolved to which array layer,
     // and the loaded data statistics of each set (roughness/metallic means).
     // Without this, a silently failed set registration renders the object
     // with flat defaults and the only symptom is a wrong-looking material.
+    // Logged once per upload: the log is the audit trail of every runtime
+    // material change, capped by the registry capacity.
     if (runtimeLogger != nullptr)
     {
         for (std::size_t index = 0; index < scene.textureSets.size(); ++index)
@@ -179,22 +267,22 @@ void RendererState::createSceneGeometry()
             const float roughMean = index < textureSetDataMeans.size() ? textureSetDataMeans[index][0] : -1.0f;
             const float metalMean = index < textureSetDataMeans.size() ? textureSetDataMeans[index][1] : -1.0f;
             runtimeLogger->logMessage(
-                LogLevel::Information,
+                LogLevel::Debug,
                 logPrefix + "texture set '" + scene.textureSets[index] + "' -> layer " + std::to_string(index)
                     + " (mean roughness " + std::to_string(roughMean) + ", mean metallic " + std::to_string(metalMean)
                     + ")"
             );
         }
-        for (std::size_t index = 0; index < scene.objects.size(); ++index)
+        for (std::size_t index = 0; index < activeObjects.size(); ++index)
         {
-            const SceneObject &object = scene.objects[index];
+            const SceneObject &object = activeObjects[index];
             if (!object.textureSet.empty())
             {
                 const auto registered = std::find(
                     scene.textureSets.begin(), scene.textureSets.end(), object.textureSet
                 );
                 runtimeLogger->logMessage(
-                    LogLevel::Information,
+                    LogLevel::Debug,
                     logPrefix + "object " + std::to_string(index) + " texture '" + object.textureSet + "' -> layer "
                         + (registered != scene.textureSets.end()
                                 ? std::to_string(registered - scene.textureSets.begin())
@@ -203,12 +291,111 @@ void RendererState::createSceneGeometry()
             }
         }
     }
-    uploadToDeviceLocal(
-        materialsBuffer,
-        materialTable.data(),
-        static_cast<vk::DeviceSize>(materialTable.size() * sizeof(GpuSceneMaterial)),
-        vk::BufferUsageFlagBits::eStorageBuffer
-    );
+}
+
+void RendererState::refreshSceneRegistry()
+{
+    // One frame-at-most re-sync: scene events only set the dirty flag; the
+    // work happens here, once per dirty frame, on the serialized frame path
+    // (device idle per docs/robustness.md, problem 38 - the staging copies
+    // race nothing).
+    if (sceneCapability != nullptr)
+    {
+        const std::vector<SceneObjectDescriptor> snapshot = sceneCapability->objectSnapshot();
+        activeObjects.clear();
+        activeObjects.reserve(snapshot.size());
+        for (const SceneObjectDescriptor &descriptor : snapshot)
+        {
+            activeObjects.push_back(sceneObjectFromDescriptor(descriptor));
+        }
+    }
+    else
+    {
+        activeObjects = scene.objects;
+    }
+    uploadSceneData();
+}
+
+SceneObject RendererState::sceneObjectFromDescriptor(
+    const SceneObjectDescriptor &object
+)
+{
+    SceneObject converted;
+    converted.type             = object.type == scene_object_type::sphere ? SceneObjectType::Sphere
+                                                                                          : SceneObjectType::Box;
+    converted.position         = object.position;
+    converted.size             = object.size;
+    converted.rotationYRadians = object.rotationYRadians;
+    converted.albedo           = object.albedo;
+    converted.roughness        = object.roughness;
+    converted.metallic         = object.metallic;
+    converted.emissiveStrength = object.emissiveStrength;
+    converted.textureSet       = object.textureSet;
+    converted.uvScale          = object.uvScale;
+    return converted;
+}
+
+SceneObjectDescriptor RendererState::sceneObjectToDescriptor(
+    const SceneObject &object
+)
+{
+    SceneObjectDescriptor converted;
+    converted.type             = static_cast<std::uint32_t>(object.type);
+    converted.position         = object.position;
+    converted.size             = object.size;
+    converted.rotationYRadians = object.rotationYRadians;
+    converted.albedo           = object.albedo;
+    converted.roughness        = object.roughness;
+    converted.metallic         = object.metallic;
+    converted.emissiveStrength = object.emissiveStrength;
+    converted.textureSet       = object.textureSet;
+    converted.uvScale          = object.uvScale;
+    return converted;
+}
+
+void RendererState::createSceneGeometry()
+{
+    const MeshData box    = buildBoxMesh();
+    const MeshData sphere = buildSphereMesh(sphereMeshSlices, sphereMeshStacks);
+
+    auto uploadMesh = [this](const MeshData &mesh, GeometryBuffer &target)
+    {
+        const vk::DeviceSize      vertexBytes = mesh.vertices.size() * sizeof(float);
+        const vk::DeviceSize      indexBytes  = mesh.indices.size() * sizeof(std::uint32_t);
+        std::vector<std::uint8_t> combined(static_cast<std::size_t>(vertexBytes + indexBytes));
+        std::memcpy(combined.data(), mesh.vertices.data(), static_cast<std::size_t>(vertexBytes));
+        std::memcpy(combined.data() + vertexBytes, mesh.indices.data(), static_cast<std::size_t>(indexBytes));
+        uploadToDeviceLocal(
+            target,
+            combined.data(),
+            static_cast<vk::DeviceSize>(combined.size()),
+            vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer
+        );
+        target.indexCount       = static_cast<std::uint32_t>(mesh.indices.size());
+        target.indexOffsetBytes = static_cast<std::size_t>(vertexBytes);
+    };
+    uploadMesh(box, boxMesh);
+    uploadMesh(sphere, sphereMesh);
+
+    // The static [scene] world is the initial active object list; when the
+    // scene capability connects (start phase), the registry takes over and
+    // this vector is re-synced from it (refreshSceneRegistry).
+    if (activeObjects.empty())
+    {
+        activeObjects = scene.objects;
+    }
+
+    // Primitive and material buffers: allocated ONCE at full registry
+    // capacity, content re-uploaded on every scene change (the incremental
+    // rebuild contract in scene_capability.hpp).
+    allocateSceneDataBuffers();
+
+    // Analytic primitives + material table: uploaded from activeObjects (the
+    // static world now, the registry snapshot once the scene capability
+    // connected). uploadSceneData is called again on every scene change; only
+    // the buffer CONTENT changes, never the buffer handles.
+    createTextureArrays();
+    uploadSceneData();
 
     buildEnvironmentBuffer();
 

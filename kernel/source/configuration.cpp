@@ -980,6 +980,19 @@ std::vector<std::string> ConfigurationStore::stringArrayAtPath(
     return values;
 }
 
+std::vector<std::string> ConfigurationStore::tableKeysAtPath(
+    const std::string &sectionName, const std::string &path
+) const
+{
+    std::vector<std::string> keys;
+    const toml::node        *node = resolvePath(sectionTable(sectionName), path);
+    if (const auto *table = node == nullptr ? nullptr : node->as_table())
+    {
+        table->for_each([&keys](const toml::key &key, const toml::node &) { keys.emplace_back(key.str()); });
+    }
+    return keys;
+}
+
 std::optional<std::int64_t> ConfigurationStore::integerAtPath(
     const std::string &sectionName, const std::string &path
 ) const

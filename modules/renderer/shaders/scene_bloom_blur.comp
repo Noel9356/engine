@@ -1,0 +1,40 @@
+// Bloom blur (compute): one separable Gaussian pass over the bloom chain.
+//
+// Dispatched twice per frame - horizontal into the pong image, vertical back
+// into the ping image - with the direction carried in the push constant. The
+// 9-tap kernel at half resolution approximates a wide, cheap glow; the
+// engine's look tuning lives in the [renderer] bloom keys, not here.
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D sourceSampler;   // rgba16f
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D destinationImage;
+
+layout(push_constant) uniform BlurPush
+{
+    layout(offset = 0) vec4 directionTexel; // xy direction (1,0 or 0,1) in texels, z/w unused
+} blur;
+
+void main()
+{
+    ivec2 target = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = imageSize(destinationImage);
+    if (target.x >= extent.x || target.y >= extent.y)
+    {
+        return;
+    }
+    vec2 uv = (vec2(target) + vec2(0.5)) / vec2(extent);
+    vec2 step = blur.directionTexel.xy / vec2(extent);
+
+    // 9-tap Gaussian, sigma ~ 2 texels. Weights normalized to sum 1.
+    const float weights[5] = float[](0.2270270270, 0.1945945946, 0.1216216216, 0.0540540541, 0.0162162162);
+    vec3 sum = texture(sourceSampler, uv).rgb * weights[0];
+    for (int tap = 1; tap < 5; ++tap)
+    {
+        sum += texture(sourceSampler, uv + step * float(tap)).rgb * weights[tap];
+        sum += texture(sourceSampler, uv - step * float(tap)).rgb * weights[tap];
+    }
+    imageStore(destinationImage, target, vec4(sum, 1.0));
+}

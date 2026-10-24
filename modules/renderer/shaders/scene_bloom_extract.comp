@@ -1,0 +1,52 @@
+// Bloom bright-pass (compute): extracts HDR energy above the threshold into
+// the half-resolution bloom chain.
+//
+// inUv -> sample the linear HDR scene (the composite's untonemapped output),
+// apply a soft-knee threshold (the shoulder keeps mid-bright surfaces from
+// popping in and out of the bloom set as exposure shifts), and write the
+// filtered radiance. The blur passes (scene_bloom_blur.comp) spread it; the
+// final composite (scene_composite_final.frag) adds it back before tonemap.
+
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D hdrSampler;      // linear HDR scene
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D bloomImage;
+
+layout(push_constant) uniform ExtractPush
+{
+    layout(offset = 0) vec4 thresholdKnee; // x threshold, y knee width (fraction of threshold), z/w unused
+} extract;
+
+void main()
+{
+    ivec2 target = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = imageSize(bloomImage);
+    if (target.x >= extent.x || target.y >= extent.y)
+    {
+        return;
+    }
+    // Half-resolution source fetch: the texel scale of the destination image
+    // maps one bloom texel to a 2x2 block of scene texels; sampling at the
+    // texel center keeps the bright-pass cheap without a separate downsample
+    // pass (the linear sampler's bilinear fetch averages the block).
+    vec2 sourceUv = (vec2(target) + vec2(0.5)) / vec2(extent);
+    vec3 color = texture(hdrSampler, sourceUv).rgb;
+
+    const float threshold = extract.thresholdKnee.x;
+    const float knee      = max(extract.thresholdKnee.y, 1e-4f) * threshold;
+    // Soft knee (from the standard filmic bright-pass formulation): below
+    // (threshold - knee) nothing passes, above threshold everything passes,
+    // between them the response ramps smoothly.
+    const float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    const float soft      = luminance - threshold + knee;
+    const float ramp      = clamp(soft / (2.0 * knee + 1e-6), 0.0, 1.0);
+    const float weight    = max(soft * soft / max(4.0 * knee, 1e-6), 0.0) > 0.0 ? max(ramp * soft / max(luminance, 1e-6), 0.0) : 0.0;
+    // Above the threshold the weight saturates at 1: the pass keeps the full
+    // radiance there (HDR bloom, not a luminance-keyed LDR effect).
+    const float pass      = luminance > threshold ? 1.0 : weight;
+
+    imageStore(bloomImage, target, vec4(color * pass, 1.0));
+}

@@ -48,6 +48,7 @@ public:
     bool                        hasSunLight() const override;
     DirectionalLightDescription sunLight() const override;
     PointLightHandle            addPointLight(const PointLightDescription &light) override;
+    void                        updatePointLight(PointLightHandle handle, const PointLightDescription &light) override;
     void                        removePointLight(PointLightHandle handle) override;
     void                        clearPointLights() override;
     std::uint32_t               pointLightCount() const override;

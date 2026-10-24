@@ -19,6 +19,8 @@ target_link_libraries(engine_module_renderer
     PUBLIC engine_capability_window
     PUBLIC engine_capability_input
     PUBLIC engine_capability_pbr
+    PUBLIC engine_capability_scene
+    PUBLIC engine_capability_hot_reload
     PRIVATE engine_vulkan_hpp_bindings
     PRIVATE engine_stb_bindings
 )
@@ -33,6 +35,9 @@ if(ENGINE_BUILD_DEMO)
                                           shaders/scene.frag
                                           shaders/scene_composite.vert
                                           shaders/scene_composite.frag
+                                          shaders/scene_bloom_extract.comp
+                                          shaders/scene_bloom_blur.comp
+                                          shaders/scene_composite_final.frag
                                   INCLUDE_DIRS shaders/common)
 endif()
 

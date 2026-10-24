@@ -128,6 +128,117 @@ struct KeyReleasedEvent
     KeyCode keyCode = KeyCode::Unknown;
 };
 
+// Published when the platform delivered a text character (the text-input
+// path: layout-aware, modifiers applied - "Shift+a" arrives as 'A', not as
+// two key events). The codepoint is Unicode; scripts receive it as a number
+// (and can convert with the Lua utf8 library).
+struct TextInputEvent
+{
+    std::uint32_t codepoint = 0;
+};
+
+// Published when a gamepad was plugged in / unplugged (the first gamepad;
+// connection state is re-polled lazily, so the events may lag the hardware
+// event by one query).
+struct GamepadConnectedEvent
+{
+};
+
+struct GamepadDisconnectedEvent
+{
+};
+
+// Gamepad buttons with stable values (the enum intentionally matches the
+// GLFW gamepad button order; a different backend maps onto these).
+enum class GamepadButton : std::int32_t
+{
+    A            = 0,
+    B            = 1,
+    X            = 2,
+    Y            = 3,
+    LeftBumper   = 4,
+    RightBumper  = 5,
+    Back         = 6,
+    Start        = 7,
+    Guide        = 8,
+    LeftStick    = 9,
+    RightStick   = 10,
+    DpadUp       = 11,
+    DpadRight    = 12,
+    DpadDown     = 13,
+    DpadLeft     = 14
+};
+
+// Gamepad axes with stable values. Sticks are -1..1 (y grows DOWN on the
+// standard layout, matching cursor conventions); triggers 0..1.
+enum class GamepadAxis : std::int32_t
+{
+    LeftX        = 0,
+    LeftY        = 1,
+    RightX       = 2,
+    RightY       = 3,
+    LeftTrigger  = 4,
+    RightTrigger = 5
+};
+
+namespace detail
+{
+
+struct GamepadNameEntry
+{
+    const char    *name;
+    std::int32_t   code;
+    bool           isButton; // true: button table, false: axis table
+};
+
+inline const GamepadNameEntry *gamepadNameEntries()
+{
+    static constexpr GamepadNameEntry entries[] = {
+        {.name = "A", .code = 0, .isButton = true},
+        {.name = "B", .code = 1, .isButton = true},
+        {.name = "X", .code = 2, .isButton = true},
+        {.name = "Y", .code = 3, .isButton = true},
+        {.name = "LeftBumper", .code = 4, .isButton = true},
+        {.name = "RightBumper", .code = 5, .isButton = true},
+        {.name = "Back", .code = 6, .isButton = true},
+        {.name = "Start", .code = 7, .isButton = true},
+        {.name = "Guide", .code = 8, .isButton = true},
+        {.name = "LeftStick", .code = 9, .isButton = true},
+        {.name = "RightStick", .code = 10, .isButton = true},
+        {.name = "DpadUp", .code = 11, .isButton = true},
+        {.name = "DpadRight", .code = 12, .isButton = true},
+        {.name = "DpadDown", .code = 13, .isButton = true},
+        {.name = "DpadLeft", .code = 14, .isButton = true},
+        {.name = "LeftX", .code = 0, .isButton = false},
+        {.name = "LeftY", .code = 1, .isButton = false},
+        {.name = "RightX", .code = 2, .isButton = false},
+        {.name = "RightY", .code = 3, .isButton = false},
+        {.name = "LeftTrigger", .code = 4, .isButton = false},
+        {.name = "RightTrigger", .code = 5, .isButton = false},
+    };
+    return entries;
+}
+
+} // namespace detail
+
+// Parses a gamepad control name ("A", "DpadUp", "LeftTrigger") into its
+// button/axis code. Returns false when the name is not recognized.
+inline bool gamepadControlFromName(
+    const std::string &name, std::int32_t &outCode, bool &outIsButton
+)
+{
+    for (const detail::GamepadNameEntry *entry = detail::gamepadNameEntries(); entry->name != nullptr; ++entry)
+    {
+        if (name == entry->name)
+        {
+            outCode     = entry->code;
+            outIsButton = entry->isButton;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Mouse buttons with stable values (the enum intentionally matches GLFW).
 enum class MouseButton : std::int32_t
 {
@@ -315,6 +426,36 @@ public:
 
     // Whether the cursor is currently captured.
     virtual bool isCursorCaptured() const = 0;
+
+    // ---- gamepad -----------------------------------------------------------------
+
+    // Whether a gamepad is currently connected (the system's first gamepad;
+    // connection state changes publish GamepadConnectedEvent /
+    // GamepadDisconnectedEvent on the bus).
+    virtual bool isGamepadConnected() = 0;
+
+    // Current polled state of one gamepad button. False without a gamepad.
+    virtual bool isGamepadButtonDown(GamepadButton button) = 0;
+
+    // Current value of one gamepad axis (sticks -1..1, triggers 0..1).
+    // 0.0 without a gamepad.
+    virtual float gamepadAxis(GamepadAxis axis) = 0;
+
+    // ---- action mapping ----------------------------------------------------------
+
+    // Bind-by-name input: the assembly (or a mod's shipped defaults) maps
+    // action names onto device bindings in [input.actions]
+    //
+    //   [input.actions]
+    //   jump = "Space, gamepad:A"
+    //   fire = "mouse:left, gamepad:RightTrigger"
+    //
+    // and consumers query by MEANING, never by device: actionStrength("jump")
+    // is 1.0 while any bound control is held (analog for trigger bindings),
+    // 0.0 otherwise. Unknown action names return 0.0 - a script asking for an
+    // unconfigured action gets "not pressed", and the startup log names the
+    // actions that resolved to no binding at all.
+    virtual float actionStrength(const std::string &actionName) = 0;
 };
 
 } // namespace engine

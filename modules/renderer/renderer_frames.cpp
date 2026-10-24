@@ -86,6 +86,13 @@ void RendererState::recreateSwapchain(
     createFrameResources();
     updateCameraBuffer();
     writeCompositeDescriptors();
+    if (bloomEnabled)
+    {
+        // The bloom sets bind the recreated frame images; the pipelines are
+        // format-independent (only the final pass's rendering info carries
+        // the swapchain format, rebuilt only when the format changed below).
+        writeBloomDescriptors();
+    }
     if (swapchainFormat != previousFormat)
     {
         createPipelines();
@@ -200,7 +207,7 @@ void RendererState::recordGeometryPass(
     );
 
     const GeometryBuffer *currentMesh = nullptr;
-    for (const SceneObject &object : scene.objects)
+    for (const SceneObject &object : activeObjects)
     {
         Mat4 model = modelMatrix(object.position.data(), object.rotationYRadians, object.size.data());
         // Material layers resolve the object's texture set the same way the
@@ -456,18 +463,19 @@ void RendererState::recordSwapchainCaptureAndPresentTransitions(
     }
 }
 
-void RendererState::recordCompositePass(
-    vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex
+void RendererState::recordCompositeIntoTarget(
+    vk::raii::CommandBuffer &commandBuffer, const vk::ImageView &targetView, vk::Extent2D extent,
+    std::int32_t tonemapModeValue
 )
 {
     vk::RenderingAttachmentInfo colorAttachment;
-    colorAttachment.setImageView(swapchainImageViews[imageIndex]);
+    colorAttachment.setImageView(targetView);
     colorAttachment.setImageLayout(vk::ImageLayout::eColorAttachmentOptimal);
     colorAttachment.setLoadOp(vk::AttachmentLoadOp::eDontCare);
     colorAttachment.setStoreOp(vk::AttachmentStoreOp::eStore);
 
     vk::RenderingInfo renderingInfo;
-    renderingInfo.setRenderArea(vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
+    renderingInfo.setRenderArea(vk::Rect2D(vk::Offset2D(0, 0), extent));
     renderingInfo.setLayerCount(1);
     renderingInfo.setColorAttachmentCount(1);
     renderingInfo.setPColorAttachments(&colorAttachment);
@@ -478,7 +486,7 @@ void RendererState::recordCompositePass(
         std::array<std::int32_t, 4> modeFlags;
     } pushValue{
         {0.0f, 0.0f, 0.0f, exposure},
-        {tonemapMode == "aces" ? tonemapAces : (tonemapMode == "reinhard" ? tonemapReinhard : tonemapNone),
+        {tonemapModeValue,
             hasDirectRadianceTarget ? 1 : 0,
             hasIndirectDiffuseTarget ? 1 : 0,
             hasIndirectSpecularTarget ? 1 : 0}
@@ -487,15 +495,153 @@ void RendererState::recordCompositePass(
     commandBuffer.beginRendering(renderingInfo);
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, **compositePipeline);
     const vk::Viewport viewport(
-        0.0f, 0.0f, static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height), 0.0f, 1.0f
+        0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f
     );
     commandBuffer.setViewport(0, viewport);
-    commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
+    commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), extent));
     commandBuffer.bindDescriptorSets(
         vk::PipelineBindPoint::eGraphics, **compositePipelineLayout, 0, **compositeDescriptorSet, {}
     );
     commandBuffer.pushConstants(
         **compositePipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(pushValue), &pushValue
+    );
+    commandBuffer.draw(3, 1, 0, 0);
+    commandBuffer.endRendering();
+}
+
+void RendererState::recordCompositePass(
+    vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex
+)
+{
+    const std::int32_t mode =
+        tonemapMode == "aces" ? tonemapAces : (tonemapMode == "reinhard" ? tonemapReinhard : tonemapNone);
+    recordCompositeIntoTarget(commandBuffer, swapchainImageViews[imageIndex], swapchainExtent, mode);
+}
+
+void RendererState::recordBloomPass(
+    vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex
+)
+{
+    // The bloom path: composite (UNTONEMAPPED) -> hdrSceneImage, bright
+    // extract -> half-res A, blur H (A -> B), blur V (B -> A), final
+    // (tonemap + add) -> swapchain. All frame images persist in GENERAL;
+    // every hand-off is an access barrier, never a layout transition.
+    const std::int32_t mode =
+        tonemapMode == "aces" ? tonemapAces : (tonemapMode == "reinhard" ? tonemapReinhard : tonemapNone);
+
+    // 1. Composite the lit scene into the HDR intermediate, no tonemap.
+    recordCompositeIntoTarget(commandBuffer, *hdrSceneImage.view, swapchainExtent, tonemapNone);
+
+    // HDR composite writes -> extract reads.
+    vk::MemoryBarrier2 hdrBarrier;
+    hdrBarrier.setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+    hdrBarrier.setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite);
+    hdrBarrier.setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+    hdrBarrier.setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+    vk::DependencyInfo hdrDependency;
+    hdrDependency.setMemoryBarriers(hdrBarrier);
+    commandBuffer.pipelineBarrier2(hdrDependency);
+
+    const vk::Extent2D halfExtent{
+        std::max(swapchainExtent.width / 2, 1u), std::max(swapchainExtent.height / 2, 1u)};
+
+    // 2. Bright extract (compute, 8x8 groups over the half-res target).
+    struct ExtractPush
+    {
+        std::array<float, 4> thresholdKnee;
+    } extractPush{{bloomThreshold, 0.5f, 0.0f, 0.0f}};
+    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **bloomExtractPipeline);
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eCompute, **bloomExtractPipelineLayout, 0, **bloomExtractDescriptorSet, {}
+    );
+    commandBuffer.pushConstants(
+        **bloomExtractPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(extractPush), &extractPush
+    );
+    commandBuffer.dispatch((halfExtent.width + 7) / 8, (halfExtent.height + 7) / 8, 1);
+
+    // Extract writes -> blur H reads.
+    vk::MemoryBarrier2 extractBarrier;
+    extractBarrier.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+    extractBarrier.setSrcAccessMask(vk::AccessFlagBits2::eShaderStorageWrite);
+    extractBarrier.setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+    extractBarrier.setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+    vk::DependencyInfo extractDependency;
+    extractDependency.setMemoryBarriers(extractBarrier);
+    commandBuffer.pipelineBarrier2(extractDependency);
+
+    // 3. Separable blur: horizontal (A -> B), then vertical (B -> A).
+    struct BlurPush
+    {
+        std::array<float, 4> directionTexel;
+    };
+    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, **bloomBlurPipeline);
+    BlurPush horizontal{{1.0f, 0.0f, 0.0f, 0.0f}};
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eCompute, **bloomBlurPipelineLayout, 0, **bloomBlurSetA, {}
+    );
+    commandBuffer.pushConstants(
+        **bloomBlurPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(horizontal), &horizontal
+    );
+    commandBuffer.dispatch((halfExtent.width + 7) / 8, (halfExtent.height + 7) / 8, 1);
+
+    vk::MemoryBarrier2 blurHBarrier;
+    blurHBarrier.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+    blurHBarrier.setSrcAccessMask(vk::AccessFlagBits2::eShaderStorageWrite);
+    blurHBarrier.setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+    blurHBarrier.setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+    vk::DependencyInfo blurHDependency;
+    blurHDependency.setMemoryBarriers(blurHBarrier);
+    commandBuffer.pipelineBarrier2(blurHDependency);
+
+    BlurPush vertical{{0.0f, 1.0f, 0.0f, 0.0f}};
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eCompute, **bloomBlurPipelineLayout, 0, **bloomBlurSetB, {}
+    );
+    commandBuffer.pushConstants(
+        **bloomBlurPipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(vertical), &vertical
+    );
+    commandBuffer.dispatch((halfExtent.width + 7) / 8, (halfExtent.height + 7) / 8, 1);
+
+    // Blur writes -> final fragment reads.
+    vk::MemoryBarrier2 blurVBarrier;
+    blurVBarrier.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader);
+    blurVBarrier.setSrcAccessMask(vk::AccessFlagBits2::eShaderStorageWrite);
+    blurVBarrier.setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader);
+    blurVBarrier.setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+    vk::DependencyInfo blurVDependency;
+    blurVDependency.setMemoryBarriers(blurVBarrier);
+    commandBuffer.pipelineBarrier2(blurVDependency);
+
+    // 4. Final composite: tonemap(hdr + bloom * strength) into the swapchain.
+    vk::RenderingAttachmentInfo colorAttachment;
+    colorAttachment.setImageView(swapchainImageViews[imageIndex]);
+    colorAttachment.setImageLayout(vk::ImageLayout::eColorAttachmentOptimal);
+    colorAttachment.setLoadOp(vk::AttachmentLoadOp::eDontCare);
+    colorAttachment.setStoreOp(vk::AttachmentStoreOp::eStore);
+    vk::RenderingInfo renderingInfo;
+    renderingInfo.setRenderArea(vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
+    renderingInfo.setLayerCount(1);
+    renderingInfo.setColorAttachmentCount(1);
+    renderingInfo.setPColorAttachments(&colorAttachment);
+
+    struct FinalPush
+    {
+        std::array<float, 4>        flagsExposure;
+        std::array<std::int32_t, 4> modeFlags;
+    } finalPush{{bloomStrength, 0.0f, 0.0f, exposure}, {mode, 0, 0, 0}};
+
+    commandBuffer.beginRendering(renderingInfo);
+    commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, **bloomFinalPipeline);
+    const vk::Viewport viewport(
+        0.0f, 0.0f, static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height), 0.0f, 1.0f
+    );
+    commandBuffer.setViewport(0, viewport);
+    commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eGraphics, **bloomFinalPipelineLayout, 0, **bloomFinalDescriptorSet, {}
+    );
+    commandBuffer.pushConstants(
+        **bloomFinalPipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(finalPush), &finalPush
     );
     commandBuffer.draw(3, 1, 0, 0);
     commandBuffer.endRendering();
@@ -524,7 +670,7 @@ void RendererState::recordFrameCommands(
         .indirectRadianceView = hasIndirectDiffuseTarget ? *indirectRadianceImage.view : *dummyImage.view,
         .indirectSpecularView = hasIndirectSpecularTarget ? *indirectSpecularImage.view : *dummyImage.view,
         .primitivesBuffer     = **primitivesBuffer.buffer,
-        .primitiveCount       = static_cast<std::uint32_t>(scene.objects.size()),
+        .primitiveCount       = static_cast<std::uint32_t>(activeObjects.size()),
         .materialsBuffer      = **materialsBuffer.buffer,
         .albedoArrayView      = *albedoArrayImage.view,
         .dataArrayView        = *dataArrayImage.view,
@@ -588,9 +734,20 @@ void RendererState::recordFrameCommands(
     }
 
     recordRadianceToCompositeBarrier(commandBuffer);
-    recordSwapchainEnterTransition(commandBuffer, imageIndex);
 
-    recordCompositePass(commandBuffer, imageIndex);
+    if (bloomEnabled && bloomFinalPipeline != nullptr)
+    {
+        // The bloom path: the swapchain enter transition happens INSIDE
+        // recordBloomPass's final stage ordering (the compute chain runs
+        // first, then the final pass targets the swapchain image).
+        recordSwapchainEnterTransition(commandBuffer, imageIndex);
+        recordBloomPass(commandBuffer, imageIndex);
+    }
+    else
+    {
+        recordSwapchainEnterTransition(commandBuffer, imageIndex);
+        recordCompositePass(commandBuffer, imageIndex);
+    }
 
     recordSwapchainCaptureAndPresentTransitions(commandBuffer, imageIndex);
 
@@ -766,6 +923,16 @@ void RendererState::renderFrame(
     if (!waitForFrameSerializationGuarded(logger))
     {
         return;
+    }
+
+    // Scene edits (scripts, physics, animation) only flagged the registry
+    // dirty; the one re-sync per dirty frame happens here, on the serialized
+    // frame path with the device idle - the staging copies race nothing
+    // (docs/robustness.md, problem 38).
+    if (sceneRegistryDirty)
+    {
+        sceneRegistryDirty = false;
+        refreshSceneRegistry();
     }
 
     // Only now is the device idle with respect to this renderer: writing the

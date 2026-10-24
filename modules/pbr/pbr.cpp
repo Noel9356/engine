@@ -508,6 +508,19 @@ LightingCapability::PointLightHandle PbrLightingModule::addPointLight(
     return static_cast<LightingCapability::PointLightHandle>(state->pointLights.size());
 }
 
+void PbrLightingModule::updatePointLight(
+    LightingCapability::PointLightHandle handle, const PointLightDescription &light
+)
+{
+    if (handle == LightingCapability::invalidPointLight || handle > state->pointLights.size())
+    {
+        return;
+    }
+    // In place: the handle's index mapping survives, so animation drivers can
+    // move a light every frame without renumbering the others.
+    state->pointLights[handle - 1] = light;
+}
+
 void PbrLightingModule::removePointLight(
     LightingCapability::PointLightHandle handle
 )

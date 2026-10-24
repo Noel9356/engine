@@ -35,7 +35,10 @@ host_capability = "scripting"
 #   indirect_diffuse  the radiance-cascades GI
 #   indirect_specular the ray-traced reflections
 #   screenshot        key-triggered captures
-capabilities = ["scripting", "logging", "window", "input", "renderer", "lighting",
+#   scene             the runtime object registry (the orb spawn below)
+#   animation         tween drivers (the bobbing orb below)
+#   physics           the builtin rigid body provider (the dropped ball below)
+capabilities = ["scripting", "logging", "window", "input", "renderer", "lighting", "scene", "animation", "physics",
                 "direct_diffuse", "indirect_diffuse", "indirect_specular", "screenshot"]
 
 permissions = ["logging.write"]

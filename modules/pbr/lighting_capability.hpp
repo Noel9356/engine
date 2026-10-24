@@ -63,6 +63,9 @@ public:
     virtual DirectionalLightDescription sunLight() const                                      = 0;
 
     virtual PointLightHandle      addPointLight(const PointLightDescription &light) = 0;
+    // Replaces one point light's description in place: the handle survives,
+    // so tween/animation drivers can move a light without renumbering.
+    virtual void                  updatePointLight(PointLightHandle handle, const PointLightDescription &light) = 0;
     virtual void                  removePointLight(PointLightHandle handle)         = 0;
     virtual void                  clearPointLights()                                = 0;
     virtual std::uint32_t         pointLightCount() const                           = 0;

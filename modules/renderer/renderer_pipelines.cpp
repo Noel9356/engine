@@ -325,6 +325,264 @@ void RendererState::createCompositePipeline()
         );
         writeCompositeDescriptors();
     }
+
+    if (bloomEnabled)
+    {
+        createBloomPipelines();
+    }
+}
+
+void RendererState::createBloomPipelines()
+{
+    // Strict reverse-order teardown first (docs/robustness.md, problem 25):
+    // sets, pools, pipelines, layouts, set layouts.
+    bloomExtractDescriptorSet.reset();
+    bloomBlurSetA.reset();
+    bloomBlurSetB.reset();
+    bloomExtractDescriptorPool.reset();
+    bloomBlurDescriptorPool.reset();
+    bloomExtractPipeline.reset();
+    bloomBlurPipeline.reset();
+    bloomExtractPipelineLayout.reset();
+    bloomBlurPipelineLayout.reset();
+    bloomExtractSetLayout.reset();
+    bloomBlurSetLayout.reset();
+    bloomFinalDescriptorSet.reset();
+    bloomFinalDescriptorPool.reset();
+    bloomFinalPipeline.reset();
+    bloomFinalPipelineLayout.reset();
+    bloomFinalSetLayout.reset();
+
+    // ---- bright extract (compute) --------------------------------------------
+    {
+        std::array<vk::DescriptorSetLayoutBinding, 2> bindings;
+        bindings[0].setBinding(0).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+        bindings[0].setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        bindings[1].setBinding(1).setDescriptorType(vk::DescriptorType::eStorageImage).setDescriptorCount(1);
+        bindings[1].setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        vk::DescriptorSetLayoutCreateInfo setInfo;
+        setInfo.setBindings(bindings);
+        bloomExtractSetLayout = std::make_unique<vk::raii::DescriptorSetLayout>(*device, setInfo);
+
+        vk::PushConstantRange pushRange;
+        pushRange.setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        pushRange.setOffset(0);
+        pushRange.setSize(sizeof(vk::DeviceSize) > 0 ? 16 : 16); // one vec4
+        vk::PipelineLayoutCreateInfo layoutInfo;
+        layoutInfo.setSetLayouts(**bloomExtractSetLayout);
+        layoutInfo.setPushConstantRanges(pushRange);
+        bloomExtractPipelineLayout = std::make_unique<vk::raii::PipelineLayout>(*device, layoutInfo);
+
+        vk::raii::ShaderModule module = createShaderModuleFromDevice(
+            *device, resolvedShaderDirectory / "scene_bloom_extract.comp.spv"
+        );
+        vk::PipelineShaderStageCreateInfo stage;
+        stage.setStage(vk::ShaderStageFlagBits::eCompute).setModule(*module).setPName("main");
+        vk::ComputePipelineCreateInfo pipelineInfo;
+        pipelineInfo.setStage(stage);
+        pipelineInfo.setLayout(**bloomExtractPipelineLayout);
+        bloomExtractPipeline = std::make_unique<vk::raii::Pipeline>(*device, nullptr, pipelineInfo);
+    }
+
+    // ---- separable blur (compute) ---------------------------------------------
+    {
+        std::array<vk::DescriptorSetLayoutBinding, 2> bindings;
+        bindings[0].setBinding(0).setDescriptorType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(1);
+        bindings[0].setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        bindings[1].setBinding(1).setDescriptorType(vk::DescriptorType::eStorageImage).setDescriptorCount(1);
+        bindings[1].setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        vk::DescriptorSetLayoutCreateInfo setInfo;
+        setInfo.setBindings(bindings);
+        bloomBlurSetLayout = std::make_unique<vk::raii::DescriptorSetLayout>(*device, setInfo);
+
+        vk::PushConstantRange pushRange;
+        pushRange.setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        pushRange.setOffset(0);
+        pushRange.setSize(16); // one vec4
+        vk::PipelineLayoutCreateInfo layoutInfo;
+        layoutInfo.setSetLayouts(**bloomBlurSetLayout);
+        layoutInfo.setPushConstantRanges(pushRange);
+        bloomBlurPipelineLayout = std::make_unique<vk::raii::PipelineLayout>(*device, layoutInfo);
+
+        vk::raii::ShaderModule module = createShaderModuleFromDevice(
+            *device, resolvedShaderDirectory / "scene_bloom_blur.comp.spv"
+        );
+        vk::PipelineShaderStageCreateInfo stage;
+        stage.setStage(vk::ShaderStageFlagBits::eCompute).setModule(*module).setPName("main");
+        vk::ComputePipelineCreateInfo pipelineInfo;
+        pipelineInfo.setStage(stage);
+        pipelineInfo.setLayout(**bloomBlurPipelineLayout);
+        bloomBlurPipeline = std::make_unique<vk::raii::Pipeline>(*device, nullptr, pipelineInfo);
+    }
+
+    // ---- final composite (graphics, into the swapchain) -----------------------
+    {
+        std::array<vk::DescriptorSetLayoutBinding, 2> bindings;
+        for (std::uint32_t binding = 0; binding < 2; ++binding)
+        {
+            bindings[binding].setBinding(binding).setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+            bindings[binding].setDescriptorCount(1);
+            bindings[binding].setStageFlags(vk::ShaderStageFlagBits::eFragment);
+        }
+        vk::DescriptorSetLayoutCreateInfo setInfo;
+        setInfo.setBindings(bindings);
+        bloomFinalSetLayout = std::make_unique<vk::raii::DescriptorSetLayout>(*device, setInfo);
+
+        vk::PushConstantRange pushRange;
+        pushRange.setStageFlags(vk::ShaderStageFlagBits::eFragment);
+        pushRange.setOffset(0);
+        pushRange.setSize(sizeof(CompositePush));
+        vk::PipelineLayoutCreateInfo layoutInfo;
+        layoutInfo.setSetLayouts(**bloomFinalSetLayout);
+        layoutInfo.setPushConstantRanges(pushRange);
+        bloomFinalPipelineLayout = std::make_unique<vk::raii::PipelineLayout>(*device, layoutInfo);
+
+        vk::raii::ShaderModule vertexModule = createShaderModuleFromDevice(
+            *device, resolvedShaderDirectory / "scene_composite.vert.spv"
+        );
+        vk::raii::ShaderModule fragmentModule = createShaderModuleFromDevice(
+            *device, resolvedShaderDirectory / "scene_composite_final.frag.spv"
+        );
+        vk::PipelineShaderStageCreateInfo vertexStage;
+        vertexStage.setStage(vk::ShaderStageFlagBits::eVertex).setModule(*vertexModule).setPName("main");
+        vk::PipelineShaderStageCreateInfo fragmentStage;
+        fragmentStage.setStage(vk::ShaderStageFlagBits::eFragment).setModule(*fragmentModule).setPName("main");
+        const std::array<vk::PipelineShaderStageCreateInfo, 2> stages = {vertexStage, fragmentStage};
+
+        vk::PipelineVertexInputStateCreateInfo   vertexInput;
+        vk::PipelineInputAssemblyStateCreateInfo inputAssembly;
+        inputAssembly.setTopology(vk::PrimitiveTopology::eTriangleList);
+        vk::PipelineViewportStateCreateInfo viewportState;
+        viewportState.setViewportCount(1).setScissorCount(1);
+        vk::PipelineRasterizationStateCreateInfo rasterization;
+        rasterization.setPolygonMode(vk::PolygonMode::eFill);
+        rasterization.setCullMode(vk::CullModeFlagBits::eNone);
+        rasterization.setLineWidth(1.0f);
+        vk::PipelineMultisampleStateCreateInfo multisampling;
+        multisampling.setRasterizationSamples(vk::SampleCountFlagBits::e1);
+        std::array<vk::PipelineColorBlendAttachmentState, 1> blendAttachments;
+        blendAttachments[0].setBlendEnable(false);
+        blendAttachments[0].setColorWriteMask(
+            vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB
+            | vk::ColorComponentFlagBits::eA
+        );
+        vk::PipelineColorBlendStateCreateInfo colorBlend;
+        colorBlend.setAttachmentCount(1).setPAttachments(blendAttachments.data());
+        std::array<vk::DynamicState, 2>    dynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+        vk::PipelineDynamicStateCreateInfo dynamicState;
+        dynamicState.setDynamicStates(dynamicStates);
+
+        vk::PipelineRenderingCreateInfo renderingInfo;
+        renderingInfo.setColorAttachmentFormats(swapchainFormat);
+
+        vk::GraphicsPipelineCreateInfo pipelineInfo;
+        pipelineInfo.setPNext(&renderingInfo);
+        pipelineInfo.setStages(stages);
+        pipelineInfo.setPVertexInputState(&vertexInput);
+        pipelineInfo.setPInputAssemblyState(&inputAssembly);
+        pipelineInfo.setPViewportState(&viewportState);
+        pipelineInfo.setPRasterizationState(&rasterization);
+        pipelineInfo.setPMultisampleState(&multisampling);
+        pipelineInfo.setPColorBlendState(&colorBlend);
+        pipelineInfo.setPDynamicState(&dynamicState);
+        pipelineInfo.setLayout(**bloomFinalPipelineLayout);
+        bloomFinalPipeline = std::make_unique<vk::raii::Pipeline>(*device, nullptr, pipelineInfo);
+    }
+
+    writeBloomDescriptors();
+}
+
+void RendererState::writeBloomDescriptors()
+{
+    if (bloomExtractSetLayout == nullptr || hdrSceneImage.image == nullptr)
+    {
+        return;
+    }
+    // Extract: read the HDR scene, write bloom A.
+    {
+        vk::DescriptorPoolSize poolSize(vk::DescriptorType::eCombinedImageSampler, 1);
+        vk::DescriptorPoolSize storageSize(vk::DescriptorType::eStorageImage, 1);
+        std::array<vk::DescriptorPoolSize, 2> poolSizes{poolSize, storageSize};
+        vk::DescriptorPoolCreateInfo poolInfo;
+        poolInfo.setMaxSets(1).setPoolSizes(poolSizes);
+        bloomExtractDescriptorPool = std::make_unique<vk::raii::DescriptorPool>(*device, poolInfo);
+        vk::DescriptorSetAllocateInfo setAllocate;
+        setAllocate.setDescriptorPool(**bloomExtractDescriptorPool);
+        setAllocate.setSetLayouts(**bloomExtractSetLayout);
+        bloomExtractDescriptorSet = std::make_unique<vk::raii::DescriptorSet>(
+            std::move(vk::raii::DescriptorSets(*device, setAllocate).front())
+        );
+        std::array<vk::WriteDescriptorSet, 2> writes;
+        vk::DescriptorImageInfo hdrInfo(**linearSampler, *hdrSceneImage.view, vk::ImageLayout::eGeneral);
+        writes[0].setDstSet(**bloomExtractDescriptorSet).setDstBinding(0);
+        writes[0].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+        writes[0].setImageInfo(hdrInfo);
+        vk::DescriptorImageInfo writeAInfo(vk::Sampler{nullptr}, *bloomImageA.view, vk::ImageLayout::eGeneral);
+        writes[1].setDstSet(**bloomExtractDescriptorSet).setDstBinding(1);
+        writes[1].setDescriptorType(vk::DescriptorType::eStorageImage);
+        writes[1].setImageInfo(writeAInfo);
+        device->updateDescriptorSets(writes, {});
+    }
+    // Blur: two sets (read A -> write B, read B -> write A).
+    {
+        std::array<vk::DescriptorPoolSize, 2> poolSizes{
+            vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 2),
+            vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 2)};
+        vk::DescriptorPoolCreateInfo poolInfo;
+        poolInfo.setMaxSets(2).setPoolSizes(poolSizes);
+        bloomBlurDescriptorPool = std::make_unique<vk::raii::DescriptorPool>(*device, poolInfo);
+        std::array<vk::DescriptorSetLayout, 2> layouts{**bloomBlurSetLayout, **bloomBlurSetLayout};
+        vk::DescriptorSetAllocateInfo setAllocate;
+        setAllocate.setDescriptorPool(**bloomBlurDescriptorPool);
+        setAllocate.setSetLayouts(layouts);
+        std::vector<vk::raii::DescriptorSet> sets =
+            vk::raii::DescriptorSets(*device, setAllocate);
+        bloomBlurSetA = std::make_unique<vk::raii::DescriptorSet>(std::move(sets.front()));
+        bloomBlurSetB = std::make_unique<vk::raii::DescriptorSet>(std::move(sets.back()));
+
+        std::array<vk::WriteDescriptorSet, 4> writes;
+        vk::DescriptorImageInfo readAInfo(**linearSampler, *bloomImageA.view, vk::ImageLayout::eGeneral);
+        vk::DescriptorImageInfo writeBInfo(vk::Sampler{nullptr}, *bloomImageB.view, vk::ImageLayout::eGeneral);
+        vk::DescriptorImageInfo readBInfo(**linearSampler, *bloomImageB.view, vk::ImageLayout::eGeneral);
+        vk::DescriptorImageInfo writeAInfo(vk::Sampler{nullptr}, *bloomImageA.view, vk::ImageLayout::eGeneral);
+        writes[0].setDstSet(**bloomBlurSetA).setDstBinding(0);
+        writes[0].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+        writes[0].setImageInfo(readAInfo);
+        writes[1].setDstSet(**bloomBlurSetA).setDstBinding(1);
+        writes[1].setDescriptorType(vk::DescriptorType::eStorageImage);
+        writes[1].setImageInfo(writeBInfo);
+        writes[2].setDstSet(**bloomBlurSetB).setDstBinding(0);
+        writes[2].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+        writes[2].setImageInfo(readBInfo);
+        writes[3].setDstSet(**bloomBlurSetB).setDstBinding(1);
+        writes[3].setDescriptorType(vk::DescriptorType::eStorageImage);
+        writes[3].setImageInfo(writeAInfo);
+        device->updateDescriptorSets(writes, {});
+    }
+    // Final: read the HDR scene + the blurred result.
+    {
+        std::array<vk::DescriptorPoolSize, 1> poolSizes{
+            vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, 2)};
+        vk::DescriptorPoolCreateInfo poolInfo;
+        poolInfo.setMaxSets(1).setPoolSizes(poolSizes);
+        bloomFinalDescriptorPool = std::make_unique<vk::raii::DescriptorPool>(*device, poolInfo);
+        vk::DescriptorSetAllocateInfo setAllocate;
+        setAllocate.setDescriptorPool(**bloomFinalDescriptorPool);
+        setAllocate.setSetLayouts(**bloomFinalSetLayout);
+        bloomFinalDescriptorSet = std::make_unique<vk::raii::DescriptorSet>(
+            std::move(vk::raii::DescriptorSets(*device, setAllocate).front())
+        );
+        std::array<vk::WriteDescriptorSet, 2> writes;
+        vk::DescriptorImageInfo hdrInfo(**linearSampler, *hdrSceneImage.view, vk::ImageLayout::eGeneral);
+        vk::DescriptorImageInfo bloomInfo(**linearSampler, *bloomImageA.view, vk::ImageLayout::eGeneral);
+        writes[0].setDstSet(**bloomFinalDescriptorSet).setDstBinding(0);
+        writes[0].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+        writes[0].setImageInfo(hdrInfo);
+        writes[1].setDstSet(**bloomFinalDescriptorSet).setDstBinding(1);
+        writes[1].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+        writes[1].setImageInfo(bloomInfo);
+        device->updateDescriptorSets(writes, {});
+    }
 }
 
 void RendererState::writeCompositeDescriptors()

@@ -219,6 +219,11 @@ public:
     // Number of elements of an array at the path (array-of-tables rows or
     // plain arrays); 0 when absent.
     std::size_t arraySizeAtPath(const std::string &sectionName, const std::string &path) const;
+    // Key names of the TABLE at the path (dynamic-key sections such as
+    // [input.actions]); empty when the path is absent or not a table. This is
+    // how a module consumes a section whose keys the assembly authors freely
+    // (the keys themselves are data, not schema).
+    std::vector<std::string> tableKeysAtPath(const std::string &sectionName, const std::string &path) const;
 
     // ---- provenance -----------------------------------------------------------------
 

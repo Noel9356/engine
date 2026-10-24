@@ -6,8 +6,11 @@
 #include "window_capability.hpp"
 #include "engine/kernel/component_interface.hpp"
 
+#include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -43,6 +46,11 @@ public:
     void setCursorCaptured(bool captured) override;
     bool isCursorCaptured() const override;
 
+    bool  isGamepadConnected() override;
+    bool  isGamepadButtonDown(GamepadButton button) override;
+    float gamepadAxis(GamepadAxis axis) override;
+    float actionStrength(const std::string &actionName) override;
+
 private:
     static void keyCallback(
         GLFWwindow  *window,
@@ -53,6 +61,12 @@ private:
     );
     static void cursorPositionCallback(GLFWwindow *window, double x, double y);
     static void scrollCallback(GLFWwindow *window, double x, double y);
+    static void characterCallback(GLFWwindow *window, unsigned int codepoint);
+    static void gamepadConnectionCallback(int joystickId, int event);
+
+    // Polls the first gamepad; publishes connect/disconnect events on state
+    // flips and caches the GLFW state for the query calls.
+    bool        pollGamepad();
 
     ComponentManifest componentManifest;
     ComponentContext *boundContext     = nullptr;
@@ -72,6 +86,31 @@ private:
     bool   cursorPositionKnown = false;
     double lastCursorX         = 0.0;
     double lastCursorY         = 0.0;
+
+    // Gamepad state: refreshed on every query (the GLFW gamepad API polls the
+    // device synchronously); the connection cache flips publish the bus
+    // events. GLFW_GAMEPAD_STATE - the struct lives in glfw3.h, so the
+    // member is kept as the raw button/axis arrays to avoid leaking GLFW
+    // types through this header.
+    bool                          gamepadConnectedCache = false;
+    std::array<float, 6>          gamepadAxes{};
+    std::array<unsigned char, 15> gamepadButtons{};
+
+    // Action map ([input.actions]): action name -> device bindings.
+    struct ActionBinding
+    {
+        enum class Kind
+        {
+            Key,
+            MouseButton,
+            GamepadButton,
+            GamepadAxis // analog: triggers contribute their 0..1 value
+        };
+        Kind        kind    = Kind::Key;
+        std::int32_t code   = 0;
+    };
+    std::unordered_map<std::string, std::vector<ActionBinding>> actions;
+    void loadActionMap();
 };
 
 } // namespace engine

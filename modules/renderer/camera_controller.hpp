@@ -185,6 +185,53 @@ public:
         }
     }
 
+    // Camera pose access for script bridges and modules: the free-fly state
+    // is the one camera truth, so external setters mutate IT (not a copy) and
+    // the controller keeps integrating input around the new pose.
+    std::array<float, 3> position() const
+    {
+        return position_;
+    }
+
+    // The current look target: one world unit along the forward direction
+    // from the position (the same point applyToCamera writes into
+    // SceneCamera::lookAt).
+    std::array<float, 3> lookTarget() const
+    {
+        const float forwardX = std::cos(pitch_) * std::sin(yaw_);
+        const float forwardY = std::sin(pitch_);
+        const float forwardZ = -std::cos(pitch_) * std::cos(yaw_);
+        return {position_[0] + forwardX, position_[1] + forwardY, position_[2] + forwardZ};
+    }
+
+    void setPosition(
+        const std::array<float, 3> &worldPosition
+    )
+    {
+        position_ = worldPosition;
+    }
+
+    // Keeps the position, re-derives yaw/pitch from position -> target (the
+    // same inverse syncFromCamera uses; the pitch clamp keeps the controller
+    // out of the straight-up/down degeneracy).
+    void lookAtPoint(
+        const std::array<float, 3> &target
+    )
+    {
+        float forward[3] = {
+            target[0] - position_[0], target[1] - position_[1], target[2] - position_[2]
+        };
+        const float length = std::sqrt(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
+        if (length > 1e-6f)
+        {
+            forward[0] /= length;
+            forward[1] /= length;
+            forward[2] /= length;
+        }
+        pitch_ = std::asin(std::clamp(forward[1], -1.0f, 1.0f));
+        yaw_   = std::atan2(forward[0], -forward[2]);
+    }
+
 private:
     static constexpr float maxPitch = 1.55334f; // just under 89 degrees
     static constexpr float minSpeed = 0.1f;

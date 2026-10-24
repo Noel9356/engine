@@ -31,6 +31,13 @@
 # (mods/test_scene) arrives with the runtime.
 # mod_directory = "mods"
 
+# Hot reload (development loop): add "hot_reload" to a mod's required
+# capabilities and the watcher joins the run - shader, script and config
+# changes surface as events while the engine is running. Demand-driven like
+# every module: a run whose mods do not demand it never pays for it.
+# [hot_reload]
+# watch_interval_ms = 250
+
 # Mod ids listed here are skipped during discovery; useful to keep a package
 # installed but inactive without deleting it. Disabling the content mod also
 # removes its world: the run then renders an empty scene unless the assembly
@@ -63,6 +70,17 @@ resizable = true
 
 [input]
 
+# Action mapping: bind by MEANING, not by device. Consumers query
+# actionStrength("jump") and stay agnostic of which control fires it; a
+# rebinding is a configuration edit, no code. Multiple bindings per action
+# are comma separated; "gamepad:<control>" names gamepad buttons/axes
+# (A, DpadUp, LeftTrigger, ...), "mouse:<button>" the mouse, everything else
+# a key by its stable name.
+[input.actions]
+boost = "LeftShift, gamepad:A"
+release_cursor = "Escape"
+# Custom actions are free-form; scripts read engine.action_strength("...").
+
 [renderer]
 # Validation layers off for interactive runs: every dispatch pays a large
 # CPU tax under the layer, which starves the window's message pump on slower
@@ -86,6 +104,15 @@ max_frames_in_flight = 2
 shader_directory = "shaders"
 exposure = 1.15
 tonemap = "aces"
+
+# Bloom (post-processing): an opt-in HDR glow. The bright pass lifts
+# radiance above bloom_threshold into a half-resolution chain, a separable
+# Gaussian spreads it, and the final stage adds it back before the tonemap -
+# the same operators the composite uses, so a bloom run and a non-bloom run
+# of the same scene match outside the glow.
+bloom = true
+bloom_threshold = 1.0
+bloom_strength = 0.15
 
 # Lighting composition. There is no technique list anymore: each lighting
 # technique module provides a radiance-layer capability (direct_diffuse,

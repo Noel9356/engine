@@ -28,7 +28,12 @@ RendererModule::RendererModule()
     // builds). The permission is still declared so an acquisition attempt
     // passes the permission gate when the capability exists.
     componentManifest.requiredCapabilities = {"logging", "window"};
-    componentManifest.requiredPermissions  = {"capability.logging", "capability.window", "capability.input"};
+    // "capability.scene" is declared WITHOUT a graph edge on "scene": the
+    // renderer degrades to the static [scene] world when the scene module is
+    // absent (minimal builds), exactly like the optional input acquisition
+    // above. When the module IS present, the lazy acquisition at start
+    // passes the permission gate because of this declaration.
+    componentManifest.requiredPermissions  = {"capability.logging", "capability.window", "capability.input", "capability.scene"};
     // Every configuration key the renderer reads (its own section and the
     // [scene] world content it rasterizes) - the known-key registry behind
     // --validate's unknown-key warnings is built from these declarations.
@@ -40,6 +45,9 @@ RendererModule::RendererModule()
         "renderer.max_frames_in_flight",
         "renderer.exposure",
         "renderer.tonemap",
+        "renderer.bloom",
+        "renderer.bloom_threshold",
+        "renderer.bloom_strength",
         "renderer.shader_directory",
         "renderer.texture_directory",
         "scene.sky_radiance",
@@ -73,6 +81,7 @@ void RendererModule::construct(
     ComponentContext &context
 )
 {
+    boundContext     = &context;
     logger           = &context.acquireCapability<LoggerCapability>();
     windowCapability = &context.acquireCapability<WindowCapability>();
 
@@ -104,6 +113,11 @@ void RendererModule::construct(
     state->maxFramesInFlight = static_cast<std::uint32_t>(std::clamp<std::int64_t>(frames, 1, maxFramesInFlightLimit));
     state->exposure          = static_cast<float>(context.configurationFloating("exposure").value_or(1.0));
     state->tonemapMode       = context.configurationString("tonemap").value_or("aces");
+    // Bloom (post-processing): opt-in, thresholded HDR bright pass + separable
+    // blur, added back pre-tonemap (scene_composite_final.frag).
+    state->bloomEnabled   = context.configurationBoolean("bloom").value_or(false);
+    state->bloomThreshold = static_cast<float>(context.configurationFloating("bloom_threshold").value_or(1.0));
+    state->bloomStrength  = static_cast<float>(context.configurationFloating("bloom_strength").value_or(0.15));
     if (state->tonemapMode != "aces" && state->tonemapMode != "reinhard" && state->tonemapMode != "none")
     {
         throw std::runtime_error(
@@ -131,6 +145,16 @@ void RendererModule::construct(
         typeid(WindowResizedEvent),
         resizedChannel.subscribe<RendererModule, &RendererModule::handleWindowResized>(this)
     );
+
+    // Hot reload (optional module): shader change events re-create the
+    // pipelines from the re-compiled SPIR-V. The subscription is free when
+    // the module is absent (nobody publishes the event).
+    EventChannel<HotReloadEvent> &hotReloadChannel = context.eventBus().channel<HotReloadEvent>();
+    hotReloadSubscription                          = EventSubscription(
+        &context.eventBus(),
+        typeid(HotReloadEvent),
+        hotReloadChannel.subscribe<RendererModule, &RendererModule::handleHotReload>(this)
+    );
 }
 
 void RendererModule::start()
@@ -142,6 +166,12 @@ void RendererModule::start()
                                         ? (executableDirectory() / state->textureDirectory)
                                         : state->textureDirectory;
     state->initialize(*windowCapability, *logger);
+
+    // Scene registry connection: after initialize (all GPU resources exist,
+    // including the capacity-sized primitive buffers) but before any frame.
+    // The static world is pushed into the registry here, so scripts see the
+    // configured room through the same handles they spawn with.
+    connectSceneRegistry();
 
     if (state->lightingTechniques.empty())
     {
@@ -174,11 +204,15 @@ void RendererModule::start()
 void RendererModule::stop()
 {
     resizeSubscription.release();
+    sceneAddedSubscription.release();
+    sceneRemovedSubscription.release();
+    sceneChangedSubscription.release();
     if (state != nullptr && state->device != nullptr)
     {
         state->device->waitIdle();
     }
     state.reset();
+    boundContext         = nullptr;
     frameBeginChannel    = nullptr;
     frameRenderedChannel = nullptr;
     windowCapability     = nullptr;
@@ -258,6 +292,131 @@ void RendererModule::handleWindowResized(
     }
 }
 
+void RendererModule::connectSceneRegistry()
+{
+    if (boundContext == nullptr || state == nullptr)
+    {
+        return;
+    }
+    // Tri-state resolution at START time: every component has constructed by
+    // now, so an available scene module registered its capability. Absent
+    // module (or denied permission) means the world stays the static [scene]
+    // array - a precise, logged decision, not a silent mode change.
+    if (sceneResolutionState == 0)
+    {
+        try
+        {
+            state->sceneCapability = &boundContext->acquireCapability<SceneCapability>();
+            sceneResolutionState   = 1;
+        }
+        catch (const std::exception &error)
+        {
+            state->sceneCapability = nullptr;
+            sceneResolutionState   = -1;
+            logger->logMessage(
+                LogLevel::Information,
+                logPrefix + std::string("scene capability not available; the world stays the static [scene] ")
+                    + "configuration (" + error.what() + ")"
+            );
+        }
+    }
+    if (sceneResolutionState != 1 || state->sceneCapability == nullptr)
+    {
+        return;
+    }
+
+    // Subscribe BEFORE pushing the world: any mutation from here on - by
+    // scripts whose top level runs during another module's start, or by
+    // sibling modules - marks the data dirty for the first frame.
+    EventBus                             &bus        = boundContext->eventBus();
+    EventChannel<SceneObjectAddedEvent>    &addedChannel    = bus.channel<SceneObjectAddedEvent>();
+    EventChannel<SceneObjectRemovedEvent>  &removedChannel  = bus.channel<SceneObjectRemovedEvent>();
+    EventChannel<SceneObjectChangedEvent>  &changedChannel  = bus.channel<SceneObjectChangedEvent>();
+    sceneAddedSubscription = EventSubscription(
+        &bus, typeid(SceneObjectAddedEvent), addedChannel.subscribe<RendererModule, &RendererModule::handleSceneAdded>(this)
+    );
+    sceneRemovedSubscription = EventSubscription(
+        &bus,
+        typeid(SceneObjectRemovedEvent),
+        removedChannel.subscribe<RendererModule, &RendererModule::handleSceneRemoved>(this)
+    );
+    sceneChangedSubscription = EventSubscription(
+        &bus, typeid(SceneObjectChangedEvent), changedChannel.subscribe<RendererModule, &RendererModule::handleSceneChanged>(this)
+    );
+
+    // Push the static world into the registry: one handle per configured
+    // object, in scene order. From here the registry is the single source of
+    // truth for OBJECTS; the configured camera, sun, sky and texture sets
+    // stay the renderer's own.
+    state->registryHandles.clear();
+    state->registryHandles.reserve(state->scene.objects.size());
+    for (const SceneObject &object : state->scene.objects)
+    {
+        const SceneCapability::ObjectHandle handle =
+            state->sceneCapability->addObject(RendererState::sceneObjectToDescriptor(object));
+        state->registryHandles.push_back(handle);
+    }
+
+    // Initial sync: adopt the registry (which now holds the static world plus
+    // anything registered before the renderer started) and upload once. The
+    // first frame then renders exactly what the registry holds.
+    state->sceneRegistryDirty = false;
+    state->refreshSceneRegistry();
+    logger->logMessage(
+        LogLevel::Information,
+        logPrefix + "scene registry connected: " + std::to_string(state->activeObjects.size())
+            + " object(s) live, capacity " + std::to_string(SceneCapability::maxObjects)
+    );
+}
+
+void RendererModule::handleSceneAdded(
+    const SceneObjectAddedEvent & /*event*/
+)
+{
+    if (state != nullptr)
+    {
+        state->sceneRegistryDirty = true;
+    }
+}
+
+void RendererModule::handleSceneRemoved(
+    const SceneObjectRemovedEvent & /*event*/
+)
+{
+    if (state != nullptr)
+    {
+        state->sceneRegistryDirty = true;
+    }
+}
+
+void RendererModule::handleSceneChanged(
+    const SceneObjectChangedEvent & /*event*/
+)
+{
+    if (state != nullptr)
+    {
+        state->sceneRegistryDirty = true;
+    }
+}
+
+void RendererModule::handleHotReload(
+    const HotReloadEvent &event
+)
+{
+    if (state == nullptr)
+    {
+        return;
+    }
+    if (event.kind == hot_reload_kind::shader)
+    {
+        // Any .spv change re-creates every renderer pipeline: the modules
+        // are loaded from disk at creation, and a partial reload (one
+        // pipeline, the changed one) would need per-pipeline change
+        // tracking for no dev-loop gain.
+        shadersNeedReload = true;
+    }
+}
+
 void RendererModule::renderFrame()
 {
     if (state == nullptr || state->swapchain == nullptr)
@@ -276,6 +435,18 @@ void RendererModule::renderFrame()
     if (state->framebufferResized)
     {
         state->recreateSwapchain(*windowCapability, *logger);
+    }
+
+    // Hot reloaded shaders: re-create the pipelines from the re-compiled
+    // SPIR-V. The device is idle here (frame serialization, problem 38), and
+    // createPipelines re-reads the shader files from disk and rebuilds every
+    // descriptor set that binds frame images.
+    if (shadersNeedReload && state->device != nullptr)
+    {
+        shadersNeedReload = false;
+        state->device->waitIdle();
+        state->createPipelines();
+        logger->logMessage(LogLevel::Information, logPrefix + "shaders reloaded: pipelines re-created");
     }
 
     state->renderFrame(*logger);
@@ -317,6 +488,36 @@ void RendererModule::requestFrameCapture()
 bool RendererModule::validationErrorsObserved() const
 {
     return state != nullptr && state->validationErrorSeen.load();
+}
+
+std::array<float, 3> RendererModule::cameraPosition() const
+{
+    return state != nullptr ? state->flyCamera.position() : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+}
+
+std::array<float, 3> RendererModule::cameraLookAt() const
+{
+    return state != nullptr ? state->flyCamera.lookTarget() : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+}
+
+void RendererModule::setCameraPosition(
+    const std::array<float, 3> &position
+)
+{
+    if (state != nullptr)
+    {
+        state->flyCamera.setPosition(position);
+    }
+}
+
+void RendererModule::setCameraLookAt(
+    const std::array<float, 3> &lookAt
+)
+{
+    if (state != nullptr)
+    {
+        state->flyCamera.lookAtPoint(lookAt);
+    }
 }
 
 } // namespace engine

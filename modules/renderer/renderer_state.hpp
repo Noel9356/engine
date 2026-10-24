@@ -10,6 +10,7 @@
 #include "camera_controller.hpp"
 #include "frame_sync_policy.hpp"
 #include "render_interface.hpp"
+#include "scene_capability.hpp"
 #include "scene_description.hpp"
 #include "scene_math.hpp"
 #include "logging_capability.hpp"
@@ -202,8 +203,31 @@ struct RendererState
     std::filesystem::path resolvedTextureDirectory;
     float                 exposure     = 1.0f;
     std::string           tonemapMode  = "aces";
+    // Bloom (post-processing) configuration. Off by default: it is a look
+    // choice, and the honest default is the scene as authored.
+    bool                  bloomEnabled   = false;
+    float                 bloomThreshold = 1.0f;
+    float                 bloomStrength  = 0.15f;
     WindowIdentifier      targetWindow = invalidWindowIdentifier;
     SceneDescription      scene;
+
+    // Dynamic scene support (modules/scene): the object list the geometry
+    // pass and the SDF passes actually consume. It starts as the static
+    // [scene] world; when the scene capability connects, the registry becomes
+    // the source of truth and this vector is re-synced whenever a scene event
+    // marked the data dirty. Kept separate from scene.objects so the
+    // configured world (camera, sun, sky, texture sets) always survives:
+    // only the OBJECTS are runtime mutable.
+    std::vector<SceneObject> activeObjects;
+    // Set by the scene event handlers (renderer module); consumed once per
+    // frame by refreshSceneRegistry before recording.
+    bool sceneRegistryDirty = false;
+    // Tri-state resolved during start: null = scene module absent from this
+    // build (the world stays the static [scene] array forever).
+    SceneCapability *sceneCapability = nullptr;
+    // Handles the static world's objects got in the registry, in
+    // scene.objects order; lets scripts address the demo room's objects.
+    std::vector<SceneCapability::ObjectHandle> registryHandles;
 
     // Vulkan objects in destruction-reverse-safe declaration order: members
     // destroy in reverse, so the instance always outlives the device and the
@@ -233,6 +257,12 @@ struct RendererState
     FrameImage indirectSpecularImage; // RGBA16F: reflection radiance (only with a technique writing it)
     FrameImage depthImage;            // D32_SFLOAT
     FrameImage dummyImage;            // 1x1 RGBA16F bound where a lighting target is absent
+    // Bloom chain (post-processing; [renderer] bloom): the HDR intermediate
+    // the composite writes pre-tonemap, and the half-resolution bright-pass
+    // ping/pong pair. Recreated with the swapchain like every frame image.
+    FrameImage hdrSceneImage;         // RGBA16F: linear HDR scene (bloom path only)
+    FrameImage bloomImageA;           // half extent: bright pass / vertical blur output
+    FrameImage bloomImageB;           // half extent: horizontal blur output
     std::unique_ptr<vk::raii::Sampler> linearSampler;
 
     // Material texture arrays (one albedo layer pair per texture set, built
@@ -266,6 +296,26 @@ struct RendererState
     std::unique_ptr<vk::raii::DescriptorSetLayout> compositeSetLayout;
     std::unique_ptr<vk::raii::DescriptorPool>      compositeDescriptorPool;
     std::unique_ptr<vk::raii::DescriptorSet>       compositeDescriptorSet;
+
+    // Bloom passes: two compute stages (bright extract, separable blur) and
+    // the final tonemap-and-add graphics pass. Declared after the composite
+    // objects so reverse destruction tears them down first.
+    std::unique_ptr<vk::raii::PipelineLayout>      bloomExtractPipelineLayout;
+    std::unique_ptr<vk::raii::Pipeline>            bloomExtractPipeline;
+    std::unique_ptr<vk::raii::DescriptorSetLayout> bloomExtractSetLayout;
+    std::unique_ptr<vk::raii::DescriptorPool>      bloomExtractDescriptorPool;
+    std::unique_ptr<vk::raii::DescriptorSet>       bloomExtractDescriptorSet;
+    std::unique_ptr<vk::raii::PipelineLayout>      bloomBlurPipelineLayout;
+    std::unique_ptr<vk::raii::Pipeline>            bloomBlurPipeline;
+    std::unique_ptr<vk::raii::DescriptorSetLayout> bloomBlurSetLayout;
+    std::unique_ptr<vk::raii::DescriptorPool>      bloomBlurDescriptorPool;
+    std::unique_ptr<vk::raii::DescriptorSet>       bloomBlurSetA;   // read A, write B (horizontal)
+    std::unique_ptr<vk::raii::DescriptorSet>       bloomBlurSetB;   // read B, write A (vertical)
+    std::unique_ptr<vk::raii::PipelineLayout>      bloomFinalPipelineLayout;
+    std::unique_ptr<vk::raii::Pipeline>            bloomFinalPipeline;
+    std::unique_ptr<vk::raii::DescriptorSetLayout> bloomFinalSetLayout;
+    std::unique_ptr<vk::raii::DescriptorPool>      bloomFinalDescriptorPool;
+    std::unique_ptr<vk::raii::DescriptorSet>       bloomFinalDescriptorSet;
 
     // Scene geometry: device-local buffers uploaded once through staging.
     struct GeometryBuffer
@@ -375,6 +425,20 @@ struct RendererState
     void createFrameResources();
     void releaseFrameResources();
     void createSceneGeometry();
+    // Dynamic scene data: allocate the primitive and material buffers ONCE at
+    // full registry capacity, then re-upload only their content whenever the
+    // registry changed. Content-only updates keep every descriptor set, and
+    // with it every technique pipeline, valid across scene edits
+    // (scene_capability.hpp documents the contract).
+    void allocateSceneDataBuffers();
+    void uploadSceneData();
+    void copyIntoDeviceLocal(GeometryBuffer &target, const void *data, vk::DeviceSize byteSize);
+    // Syncs activeObjects from the connected scene registry (or the static
+    // scene when no registry exists) and re-uploads the GPU content. Called
+    // from the frame path when sceneRegistryDirty was set.
+    void refreshSceneRegistry();
+    static SceneObject sceneObjectFromDescriptor(const SceneObjectDescriptor &object);
+    static SceneObjectDescriptor sceneObjectToDescriptor(const SceneObject &object);
     void createTextureArrays();
     // createTextureArrays phases: load/pack the sets from disk, then create
     // the arrays, then upload layers and build the mip chain.
@@ -388,6 +452,18 @@ struct RendererState
     void createPipelines();
     void createScenePipeline();
     void createCompositePipeline();
+    // Bloom (post-processing): frame images follow createFrameResources,
+    // pipelines/descriptors follow createPipelines.
+    void createBloomResources();
+    void createBloomPipelines();
+    void writeBloomDescriptors();
+    void recordBloomPass(vk::raii::CommandBuffer &commandBuffer, std::uint32_t imageIndex);
+    // The composite pass into an arbitrary HDR target (the bloom path's
+    // pre-tonemap write); imageIndex < 0 means a non-swapchain target.
+    void recordCompositeIntoTarget(
+        vk::raii::CommandBuffer &commandBuffer, const vk::ImageView &targetView,
+        vk::Extent2D extent, std::int32_t tonemapModeValue
+    );
     void writeCompositeDescriptors();
     void createCommandAndSyncObjects();
     void createRenderFinishedSemaphores();

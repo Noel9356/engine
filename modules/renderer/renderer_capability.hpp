@@ -12,6 +12,7 @@
 // events carry only primitive types. See mods/README.md, section
 // "Portability".
 
+#include <array>
 #include <cstdint>
 
 namespace engine
@@ -71,6 +72,18 @@ public:
     // provider keeps rendering after such errors, so automated runs and
     // embedders poll this to turn silent backend failures into exit codes.
     virtual bool validationErrorsObserved() const = 0;
+
+    // Camera pose queries and moves. The pose is the free-fly controller's
+    // state: a script that sets it teleports the camera, and the controller
+    // keeps integrating input around the new pose afterwards (the look
+    // direction is re-derived from position -> lookAt; a set position keeps
+    // the current look direction). Values are plain world-space floats - the
+    // implementation behind the capability may move the camera any way it
+    // likes, the contract is the pose, not the controller.
+    virtual std::array<float, 3> cameraPosition() const = 0;
+    virtual std::array<float, 3> cameraLookAt() const    = 0;
+    virtual void                 setCameraPosition(const std::array<float, 3> &position) = 0;
+    virtual void                 setCameraLookAt(const std::array<float, 3> &lookAt)     = 0;
 };
 
 } // namespace engine

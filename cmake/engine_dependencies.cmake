@@ -388,6 +388,23 @@ if(NOT TARGET engine_stb_bindings)
     target_include_directories(engine_stb_bindings SYSTEM INTERFACE "${ENGINE_STB_DIR}")
 endif()
 
+# ---- miniaudio (audio playback, vendored pinned single header) -----------------
+# The header is part of the repository (third_party/miniaudio): audio is a
+# shipped module, not an optional fetch, and a missing file here is a broken
+# checkout rather than a dependency resolution question.
+
+if(NOT TARGET engine_miniaudio_bindings)
+    if(EXISTS "${ENGINE_THIRD_PARTY_DIR}/miniaudio/miniaudio.h")
+        add_library(engine_miniaudio_bindings INTERFACE)
+        target_include_directories(engine_miniaudio_bindings SYSTEM INTERFACE "${ENGINE_THIRD_PARTY_DIR}/miniaudio")
+        engine_report_dependency_origin(miniaudio "vendored single header third_party/miniaudio")
+    else()
+        message(FATAL_ERROR
+                "miniaudio is missing: third_party/miniaudio/miniaudio.h must be present "
+                "(it ships with the repository; restore it from the source tree)")
+    endif()
+endif()
+
 # ---- Origin report -------------------------------------------------------------
 # One consolidated configure-time summary: for every third party dependency,
 # where it came from and whether the network was involved. Air-gapped or

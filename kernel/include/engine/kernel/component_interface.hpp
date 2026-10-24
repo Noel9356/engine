@@ -167,6 +167,9 @@ public:
     std::optional<double> configurationFloatingInSection(const std::string &section, const std::string &path) const;
     std::vector<double> configurationFloatingArrayInSection(const std::string &section, const std::string &path) const;
     std::size_t         configurationArraySizeInSection(const std::string &section, const std::string &path) const;
+    // Key names of the table at the path (dynamic-key sections, e.g. the
+    // input module's [input.actions] action map); empty when absent.
+    std::vector<std::string> configurationTableKeysInSection(const std::string &section, const std::string &path) const;
 
 private:
     EventBus                              &eventBus_;

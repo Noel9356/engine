@@ -36,6 +36,7 @@ target_include_directories(engine_kernel
 
 target_link_libraries(engine_kernel
     PRIVATE engine_tomlplusplus_bindings
+    PRIVATE Threads::Threads
 )
 
 if(MSVC)

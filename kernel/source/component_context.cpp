@@ -101,6 +101,13 @@ std::size_t ComponentContext::configurationArraySizeInSection(
     return configuration_.arraySizeAtPath(section, path);
 }
 
+std::vector<std::string> ComponentContext::configurationTableKeysInSection(
+    const std::string &section, const std::string &path
+) const
+{
+    return configuration_.tableKeysAtPath(section, path);
+}
+
 // Strips compiler mangling from a typeid name so channel reports read the same
 // on every toolchain: GCC/Clang emit Itanium names ("17FrameBeginEvent" or the
 // nested "N6engine15FrameBeginEventE"), MSVC prefixes "struct " / "class " and
