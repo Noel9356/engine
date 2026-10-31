@@ -11,12 +11,15 @@
 #include <engine/kernel/mod_api.hpp>
 #include <engine/kernel/mod_discovery.hpp>
 #include <engine/kernel/mod_manifest.hpp>
+#include <engine/kernel/module_plugin_cache.hpp>
 #include <engine/kernel/permission_system.hpp>
 
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -36,6 +39,13 @@ struct ComponentTrustAdvisory
     ComponentKind kind = ComponentKind::Module;
 
     std::string name;
+
+    std::string version;
+
+    // Lowercase SHA-256 of the component's content (its binary or its
+    // scripts + manifest), when it could be computed. Trust bindings may
+    // pin this digest; empty means the content was not hashable.
+    std::string sha256;
 
     std::vector<std::string> reasons;
 };
@@ -62,6 +72,14 @@ public:
     void addModsDirectory(const std::filesystem::path &modsDirectory);
 
     void setApplicationRequirements(const std::vector<std::string> &capabilities);
+
+    // The app-declared active mod set: only the listed mod ids may activate.
+    // An empty list means "no mods". Until set (or until the configuration
+    // declares engine.active_mods), every discovered mod minus the disabled
+    // list is a candidate.
+    void setActiveMods(const std::vector<std::string> &modIds);
+
+    void clearActiveMods();
 
     bool validate(std::string &report);
 
@@ -136,6 +154,10 @@ private:
     {
         std::string name;
 
+        std::string version;
+
+        std::string contentSha256;
+
         std::filesystem::path libraryPath;
         ModuleInterface *(*createModule)() = nullptr;
         std::vector<std::string> providedCapabilities;
@@ -145,6 +167,19 @@ private:
         std::vector<std::string>        declaredPermissions;
         std::unique_ptr<DynamicLibrary> library;
         bool                            active = false;
+    };
+
+    // A plugin library with no data descriptor (no module.toml next to it and
+    // no cached descriptor). The kernel never executes its code during
+    // planning; scanning it (to extract a descriptor) is a trust decision.
+    struct UndescribedPlugin
+    {
+        std::filesystem::path libraryPath;
+
+        std::uintmax_t sizeBytes         = 0;
+        std::uintmax_t modificationStamp = 0;
+
+        std::string contentSha256;
     };
 
     struct ComponentRecord
@@ -216,12 +251,27 @@ private:
 
     void loadModulePlugins(std::string &report);
 
+    // Consent gate for undescribed plugins: scanning one means executing its
+    // code. Runs after the data-only scan, before the demand closure.
+    void resolveUndescribedPlugins(std::string &report, bool enforceTrust);
+
+    bool scanUndescribedPluginDescriptor(
+        const UndescribedPlugin &candidate,
+        ModulePluginRecord      &outRecord,
+        ModulePluginCacheEntry  &outCacheEntry,
+        std::string             &report
+    );
+
     bool loadPluginLibrary(
         ModulePluginRecord &plugin,
         std::string        &report
     );
 
     bool instantiateActiveModules(std::string &report);
+
+    // validate()-only: declares active modules in the graph from their
+    // descriptors, without loading any plugin binary.
+    void appendDeclaredModuleRecords();
 
     bool runConstructPhase(
         const DependencyResolver::ResolutionResult &resolution,
@@ -256,6 +306,8 @@ private:
 
     std::vector<std::string> applicationRequiredCapabilities;
 
+    std::optional<std::vector<std::string>> applicationActiveMods;
+
     std::filesystem::path configurationFilePath;
     std::filesystem::path sceneFilePath;
     std::filesystem::path explicitModsDirectory;
@@ -280,6 +332,8 @@ private:
     TrustConsentHandler                 trustConsentHandler_;
 
     std::vector<DiscoveredModPackage> pendingNativeModPackages_;
+
+    std::vector<UndescribedPlugin> undescribedPlugins_;
 
     bool               nativeModLibrariesLoaded_ = false;
     ConfigurationStore configurationStore;

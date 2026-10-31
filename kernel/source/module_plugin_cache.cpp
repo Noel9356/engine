@@ -73,7 +73,7 @@ void ModulePluginCache::load()
     }
 
     std::string line;
-    if (!std::getline(cacheStream, line) || line != "format 2")
+    if (!std::getline(cacheStream, line) || line != "format 3")
     {
         return;
     }
@@ -116,6 +116,12 @@ void ModulePluginCache::load()
         } else if (key == "name")
         {
             pending.moduleName = value;
+        } else if (key == "version")
+        {
+            pending.moduleVersion = value;
+        } else if (key == "sha256")
+        {
+            pending.contentSha256 = value;
         } else if (key == "provided")
         {
             if (!value.empty())
@@ -203,7 +209,7 @@ void ModulePluginCache::save() const
         {
             return;
         }
-        cacheStream << "format 2\n";
+        cacheStream << "format 3\n";
         for (const auto *entry : ordered)
         {
             cacheStream << "record\n";
@@ -211,6 +217,8 @@ void ModulePluginCache::save() const
             cacheStream << "mtime " << entry->second.modificationStamp << "\n";
             cacheStream << "path " << entry->first << "\n";
             cacheStream << "name " << entry->second.moduleName << "\n";
+            cacheStream << "version " << entry->second.moduleVersion << "\n";
+            cacheStream << "sha256 " << entry->second.contentSha256 << "\n";
             for (const std::string &capability : entry->second.providedCapabilities)
             {
                 cacheStream << "provided " << capability << "\n";

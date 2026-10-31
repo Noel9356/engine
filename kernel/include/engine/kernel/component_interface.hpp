@@ -37,6 +37,16 @@ struct ScriptModDescription
     std::filesystem::path scriptPath;
 
     std::string hostCapability;
+
+    // What the mod declared in mod.toml. The host module owns the script
+    // sandbox: these lists are the per-mod grant surface the host is expected
+    // to enforce (a capability is callable only when listed here; a
+    // permission-gated bridge function checks the permission list).
+    std::vector<std::string> declaredCapabilities;
+
+    std::vector<std::string> declaredPermissions;
+
+    std::string version;
 };
 
 class ScriptModHost

@@ -562,6 +562,7 @@ void ConfigurationStore::declareAssemblyKnownKeys()
     declareKnownConfigKey("engine.mod_directory");
     declareKnownConfigKey("engine.modules_directory");
     declareKnownConfigKey("engine.disabled_mods");
+    declareKnownConfigKey(std::string(engineSectionName) + "." + engineActiveModsKey);
     declareKnownConfigKey(std::string(engineSectionName) + "." + engineExtraModDirectoriesKey);
 
     declareKnownConfigKey("engine.max_fps");
@@ -868,10 +869,31 @@ std::vector<std::string> ConfigurationStore::disabledMods() const
     {
         return ids;
     }
-    if (const toml::array *disabledArray = engineTable->get_as<toml::array>("disabled_mods"))
+    if (const toml::array *disabledArray = engineTable->get_as<toml::array>(engineDisabledModsKey))
     {
         disabledArray->for_each([&ids](const toml::value<std::string> &element) { ids.push_back(element.get()); });
     }
+    return ids;
+}
+
+std::optional<std::vector<std::string>> ConfigurationStore::activeMods() const
+{
+    if (parsedTable == nullptr)
+    {
+        return std::nullopt;
+    }
+    const toml::table *engineTable = parsedTable->get_as<toml::table>(engineSectionName);
+    if (engineTable == nullptr)
+    {
+        return std::nullopt;
+    }
+    const toml::array *activeArray = engineTable->get_as<toml::array>(engineActiveModsKey);
+    if (activeArray == nullptr)
+    {
+        return std::nullopt;
+    }
+    std::vector<std::string> ids;
+    activeArray->for_each([&ids](const toml::value<std::string> &element) { ids.push_back(element.get()); });
     return ids;
 }
 
@@ -937,6 +959,77 @@ bool ConfigurationStore::trustSectionBoolean(const std::string &key) const
     return false;
 }
 
+std::vector<TrustBinding> ConfigurationStore::trustSectionBindings(const std::string &key) const
+{
+    std::vector<TrustBinding> bindings;
+    if (parsedTable == nullptr)
+    {
+        return bindings;
+    }
+    const toml::table *trustTable = parsedTable->get_as<toml::table>(trustSectionName);
+    if (trustTable == nullptr)
+    {
+        return bindings;
+    }
+    const toml::array *valueArray = trustTable->get_as<toml::array>(key);
+    if (valueArray == nullptr)
+    {
+        return bindings;
+    }
+    for (const toml::node &element : *valueArray)
+    {
+        if (const auto *nameValue = element.as_string())
+        {
+            TrustBinding binding;
+            binding.name = nameValue->get();
+            bindings.push_back(std::move(binding));
+            continue;
+        }
+        const auto *bindingTable = element.as_table();
+        if (bindingTable == nullptr)
+        {
+            continue;
+        }
+        TrustBinding binding;
+        if (const toml::node *nameNode = bindingTable->get("id"); nameNode != nullptr)
+        {
+            if (const auto *nameString = nameNode->as_string())
+            {
+                binding.name = nameString->get();
+            }
+        }
+        if (binding.name.empty())
+        {
+            if (const toml::node *nameNode = bindingTable->get("name"); nameNode != nullptr)
+            {
+                if (const auto *nameString = nameNode->as_string())
+                {
+                    binding.name = nameString->get();
+                }
+            }
+        }
+        if (const toml::node *versionNode = bindingTable->get("version"); versionNode != nullptr)
+        {
+            if (const auto *versionString = versionNode->as_string())
+            {
+                binding.version = versionString->get();
+            }
+        }
+        if (const toml::node *shaNode = bindingTable->get("sha256"); shaNode != nullptr)
+        {
+            if (const auto *shaString = shaNode->as_string())
+            {
+                binding.sha256 = shaString->get();
+            }
+        }
+        if (!binding.name.empty())
+        {
+            bindings.push_back(std::move(binding));
+        }
+    }
+    return bindings;
+}
+
 std::vector<std::string> ConfigurationStore::trustedMods() const
 {
     return trustSectionStringArray(trustModsKey);
@@ -955,6 +1048,16 @@ std::vector<std::string> ConfigurationStore::trustedModules() const
 bool ConfigurationStore::trustAllModules() const
 {
     return trustSectionBoolean(trustAllModulesKey);
+}
+
+std::vector<TrustBinding> ConfigurationStore::trustedModBindings() const
+{
+    return trustSectionBindings(trustModsKey);
+}
+
+std::vector<TrustBinding> ConfigurationStore::trustedModuleBindings() const
+{
+    return trustSectionBindings(trustModulesKey);
 }
 
 std::vector<std::pair<

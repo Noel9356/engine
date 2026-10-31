@@ -8,13 +8,16 @@
 namespace engine
 {
 
-inline constexpr std::uint32_t engineModulePluginAbiVersion = 7u;
+inline constexpr std::uint32_t engineModulePluginAbiVersion = 8u;
 
 struct EngineModulePluginEntry
 {
     std::uint32_t abiVersion;
 
     const char *moduleName;
+
+    // May be null; the kernel prefers a descriptor version when present.
+    const char *moduleVersion;
 
     ModuleInterface *(*createModule)();
 

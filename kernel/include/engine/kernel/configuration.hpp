@@ -25,6 +25,20 @@ class node;
 namespace engine
 {
 
+// One entry of the [trust] configuration. A binding may be name-only
+// (legacy), or bind trust to the exact content: when 'sha256' is set, the
+// component's content digest must match, so replaced binaries or scripts
+// with the same name no longer inherit old trust. 'version', when set, must
+// match as well. Empty version/sha256 mean "any".
+struct TrustBinding
+{
+    std::string name;
+
+    std::string version;
+
+    std::string sha256;
+};
+
 struct ConfigProvenance
 {
     enum class Layer
@@ -60,6 +74,9 @@ public:
     static constexpr const char *trustAllModsKey    = "trustAllMods";
     static constexpr const char *trustModulesKey    = "trustModules";
     static constexpr const char *trustAllModulesKey = "trustAllModules";
+
+    static constexpr const char *engineActiveModsKey = "active_mods";
+    static constexpr const char *engineDisabledModsKey = "disabled_mods";
 
     static constexpr const char *diagnosticsLatencyReportKey = "latency_report";
     static constexpr const char *diagnosticsFrameHistoryKey  = "frame_history";
@@ -131,6 +148,12 @@ public:
     std::string              modulesDirectory() const;
     std::vector<std::string> disabledMods() const;
 
+    // The app-declared active mod set: engine.active_mods in the
+    // configuration. Absent means "no allow-list was declared" (all
+    // discovered mods are candidates, minus disabled_mods); present - even
+    // empty - means only the listed mod ids may activate.
+    std::optional<std::vector<std::string>> activeMods() const;
+
     std::vector<DependencyResolver::ProviderSelection> providerSelections() const;
 
     std::vector<std::pair<
@@ -142,6 +165,13 @@ public:
     bool                     trustAllMods() const;
     std::vector<std::string> trustedModules() const;
     bool                     trustAllModules() const;
+
+    // [trust] entries that may bind name + version + sha256. Plain strings
+    // become name-only bindings; inline tables accept id/name, version and
+    // sha256 keys.
+    std::vector<TrustBinding> trustedModBindings() const;
+
+    std::vector<TrustBinding> trustedModuleBindings() const;
 
     std::optional<std::string> stringValue(
         const std::string &sectionName,
@@ -211,8 +241,9 @@ public:
 private:
     const toml::table *sectionTable(const std::string &sectionName) const;
 
-    std::vector<std::string> trustSectionStringArray(const std::string &key) const;
-    bool                     trustSectionBoolean(const std::string &key) const;
+    std::vector<std::string>  trustSectionStringArray(const std::string &key) const;
+    std::vector<TrustBinding> trustSectionBindings(const std::string &key) const;
+    bool                      trustSectionBoolean(const std::string &key) const;
 
     static std::string leafValueRepr(const toml::node &value);
 

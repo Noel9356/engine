@@ -5,11 +5,15 @@
 #include <engine/kernel/mod_api.hpp>
 #include <engine/kernel/mod_discovery.hpp>
 #include <engine/kernel/module_api.hpp>
+#include <engine/kernel/module_manifest.hpp>
 #include <engine/kernel/module_plugin_cache.hpp>
+#include <engine/kernel/sha256.hpp>
 
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -35,6 +39,182 @@ std::filesystem::path resolveAgainstExecutableDirectory(const std::filesystem::p
         return path;
     }
     return executableDirectory() / path;
+}
+
+// " (version 1.2.3, sha256 <hex>)" pieces for report lines, omitting what is
+// unknown.
+std::string advisoryIdentitySuffix(const ComponentTrustAdvisory &advisory)
+{
+    std::string suffix;
+    if (!advisory.version.empty())
+    {
+        suffix += " (version " + advisory.version;
+        if (!advisory.sha256.empty())
+        {
+            suffix += ", sha256 " + advisory.sha256;
+        }
+        suffix += ")";
+    } else if (!advisory.sha256.empty())
+    {
+        suffix += " (sha256 " + advisory.sha256 + ")";
+    }
+    return suffix;
+}
+
+bool trustBindingMatches(const TrustBinding &binding, const ComponentTrustAdvisory &advisory)
+{
+    if (binding.name != advisory.name)
+    {
+        return false;
+    }
+    if (!binding.version.empty() && binding.version != advisory.version)
+    {
+        return false;
+    }
+    // A checksum-pinned binding never matches content without a digest: an
+    // unhashable component must not inherit content-bound trust.
+    if (!binding.sha256.empty()
+        && (advisory.sha256.empty() || !sha256HexDigestsEqual(binding.sha256, advisory.sha256)))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool anyTrustBindingMatches(
+    const std::vector<TrustBinding>    &bindings,
+    const ComponentTrustAdvisory       &advisory,
+    std::vector<std::string>           &warnings
+)
+{
+    for (const TrustBinding &binding : bindings)
+    {
+        if (!binding.sha256.empty() && !isValidSha256HexDigest(binding.sha256))
+        {
+            warnings.push_back("the [trust] entry for '" + binding.name
+                             + "' carries a malformed sha256 (must be 64 hexadecimal characters); it is treated "
+                               "as name-only trust for this run");
+            continue;
+        }
+        if (trustBindingMatches(binding, advisory))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Content hash of a native mod: the digest of its entry library, before any
+// of its code is loaded. Empty when no library file exists (the load would
+// fail later anyway).
+std::string nativeModContentHash(const ModManifest &modManifest)
+{
+    for (const std::filesystem::path &candidate :
+         nativeModLibraryCandidates(modManifest.directory, modManifest.entry))
+    {
+        std::error_code statError;
+        if (!std::filesystem::is_regular_file(candidate, statError) || statError)
+        {
+            continue;
+        }
+        std::string hashError;
+        const std::string digest = Sha256::fileHexDigest(candidate, hashError);
+        if (!digest.empty())
+        {
+            return digest;
+        }
+    }
+    return {};
+}
+
+// Content hash of a script mod: the manifest plus every .lua file in the
+// package, ordered by relative path, each prefixed with its path and size so
+// the digest cannot be rearranged. Scripts are data until the host module
+// runs them, so this stays inside the no-code-before-the-gate invariant.
+std::string scriptModContentHash(const ModManifest &modManifest)
+{
+    struct HashedFile
+    {
+        std::string           relativePath;
+        std::filesystem::path path;
+    };
+
+    std::vector<HashedFile> files;
+    std::error_code         scanError;
+    std::filesystem::recursive_directory_iterator iterator(
+        modManifest.directory,
+        std::filesystem::directory_options::skip_permission_denied,
+        scanError
+    );
+    if (!scanError)
+    {
+        for (const std::filesystem::directory_entry &entry : iterator)
+        {
+            std::error_code statError;
+            if (statError || !entry.is_regular_file(statError) || statError)
+            {
+                continue;
+            }
+            const std::string extension = entry.path().extension().string();
+            if (extension != ".lua")
+            {
+                continue;
+            }
+            std::string relative = std::filesystem::relative(entry.path(), modManifest.directory, statError).string();
+            if (statError)
+            {
+                relative = entry.path().filename().string();
+            }
+            files.push_back(HashedFile{std::move(relative), entry.path()});
+        }
+    }
+    std::sort(files.begin(), files.end(), [](const HashedFile &left, const HashedFile &right) {
+        return left.relativePath < right.relativePath;
+    });
+
+    Sha256     hasher;
+    const auto feed = [&hasher](const void *data, std::size_t size) {
+        hasher.update(data, size);
+    };
+    const auto feedText = [&feed](const std::string &text) {
+        std::uint64_t size = static_cast<std::uint64_t>(text.size());
+        feed(&size, sizeof(size));
+        feed(text.data(), text.size());
+    };
+
+    feedText("engine-script-mod-hash-v1");
+    feedText("mod.toml");
+    {
+        std::ifstream manifestStream(modManifest.directory / ModManifestLoader::manifestFileName, std::ios::in | std::ios::binary);
+        if (manifestStream.is_open())
+        {
+            std::string manifestBytes((std::istreambuf_iterator<char>(manifestStream)), std::istreambuf_iterator<char>());
+            feedText(manifestBytes);
+        }
+    }
+    for (const HashedFile &file : files)
+    {
+        feedText(file.relativePath);
+        std::ifstream scriptStream(file.path, std::ios::in | std::ios::binary);
+        if (!scriptStream.is_open())
+        {
+            return {};
+        }
+        std::string scriptBytes((std::istreambuf_iterator<char>(scriptStream)), std::istreambuf_iterator<char>());
+        feedText(scriptBytes);
+    }
+
+    std::uint8_t digest[Sha256::digestSize];
+    hasher.finish(digest);
+    std::string hex;
+    hex.reserve(Sha256::hexDigestSize);
+    static const char digits[] = "0123456789abcdef";
+    for (const std::uint8_t byte : digest)
+    {
+        hex.push_back(digits[byte >> 4]);
+        hex.push_back(digits[byte & 0x0F]);
+    }
+    return hex;
 }
 
 std::string describeComponentKind(ComponentKind kind)
@@ -147,6 +327,18 @@ void EngineKernel::setApplicationRequirements(const std::vector<std::string> &ca
 {
     applicationRequiredCapabilities = capabilities;
     componentsGathered              = false;
+}
+
+void EngineKernel::setActiveMods(const std::vector<std::string> &modIds)
+{
+    applicationActiveMods = modIds;
+    componentsGathered    = false;
+}
+
+void EngineKernel::clearActiveMods()
+{
+    applicationActiveMods.reset();
+    componentsGathered = false;
 }
 
 EngineKernel::~EngineKernel()
@@ -397,6 +589,8 @@ bool EngineKernel::gatherComponents(
 
     gatherModPackages(startupWarnings_);
 
+    resolveUndescribedPlugins(report, enforceTrust);
+
     computeDemandClosure();
 
     for (const ModulePluginRecord &plugin : modulePlugins)
@@ -416,11 +610,16 @@ bool EngineKernel::gatherComponents(
     {
         loadNativeModLibraries(startupWarnings_);
         nativeModLibrariesLoaded_ = true;
-    }
-
-    if (!instantiateActiveModules(report))
+        if (!instantiateActiveModules(report))
+        {
+            return false;
+        }
+    } else
     {
-        return false;
+        // validate() is a dry run: it must never execute plugin code. Declare
+        // active modules from their descriptors so the dependency graph can
+        // be resolved; the real instantiation happens during construct.
+        appendDeclaredModuleRecords();
     }
 
     for (std::size_t outer = 0; outer < records.size(); ++outer)
@@ -488,6 +687,30 @@ void EngineKernel::gatherModPackages(std::string &report)
         }
     }
 
+    // The app declares the active mod set (API first, then the
+    // configuration's engine.active_mods). Mods never activate on their own
+    // initiative: an undeclared mod is reported and skipped, not an error.
+    std::optional<std::vector<std::string>> activeSet = applicationActiveMods;
+    if (!activeSet)
+    {
+        activeSet = configurationStore.activeMods();
+    }
+    if (activeSet)
+    {
+        std::vector<DiscoveredModPackage> activated;
+        for (DiscoveredModPackage &package : packages)
+        {
+            if (std::find(activeSet->begin(), activeSet->end(), package.manifest.id) == activeSet->end())
+            {
+                report += "- mod '" + package.manifest.id
+                        + "' was not activated: it is not in the app's active mod set.\n";
+                continue;
+            }
+            activated.push_back(std::move(package));
+        }
+        packages = std::move(activated);
+    }
+
     for (const DiscoveredModPackage &package : packages)
     {
         const ModManifest &modManifest = package.manifest;
@@ -545,9 +768,12 @@ void EngineKernel::gatherModPackages(std::string &report)
             record.manifest.requiredPermissions  = modManifest.permissions;
             record.manifest.requiredComponents   = modManifest.requiresComponents;
             record.manifest.knownConfigKeys      = modManifest.configKeys;
-            record.scriptMod.modId               = modManifest.id;
-            record.scriptMod.scriptPath          = modManifest.directory / modManifest.entry;
-            record.scriptMod.hostCapability      = modManifest.hostCapability;
+            record.scriptMod.modId                  = modManifest.id;
+            record.scriptMod.scriptPath             = modManifest.directory / modManifest.entry;
+            record.scriptMod.hostCapability         = modManifest.hostCapability;
+            record.scriptMod.declaredCapabilities   = modManifest.capabilities;
+            record.scriptMod.declaredPermissions    = modManifest.permissions;
+            record.scriptMod.version                = modManifest.version;
             appendModRiskWarning(modManifest, false);
             records.push_back(std::move(record));
         }
@@ -653,6 +879,7 @@ void EngineKernel::computeDemandClosure()
 void EngineKernel::loadModulePlugins(std::string &report)
 {
     modulePlugins.clear();
+    undescribedPlugins_.clear();
 
     std::filesystem::path       modulesDirectory = configurationStore.modulesDirectory();
     const std::filesystem::path resolvedDirectory
@@ -669,31 +896,92 @@ void EngineKernel::loadModulePlugins(std::string &report)
         return;
     }
 
-    std::vector<std::filesystem::path> pluginPaths;
+    // Candidate plugin libraries live in the modules directory or one of its
+    // immediate subdirectories; each is remembered with its directory so a
+    // sidecar module.toml can be matched to it.
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> pluginPaths;
+    const auto collectLibraries
+        = [&pluginPaths, &scanError](const std::filesystem::directory_iterator &iterator) {
+              for (const std::filesystem::directory_entry &entry : iterator)
+              {
+                  std::error_code statError;
+                  if (statError || !entry.is_regular_file())
+                  {
+                      continue;
+                  }
+                  const std::filesystem::path libraryPath = entry.path();
+                  const std::string           extension   = libraryPath.extension().string();
+
+                  if (extension == ".dll" || extension == ".so")
+                  {
+                      pluginPaths.emplace_back(libraryPath, libraryPath.parent_path());
+                  }
+              }
+          };
+    collectLibraries(plugin);
     for (const std::filesystem::directory_entry &entry : plugin)
     {
         std::error_code statError;
-        if (statError || !entry.is_regular_file())
+        if (statError || !entry.is_directory())
         {
             continue;
         }
-        const std::filesystem::path libraryPath = entry.path();
-        const std::string           extension   = libraryPath.extension().string();
-
-        if (extension == ".dll" || extension == ".so" || extension == ".dylib")
+        std::filesystem::directory_iterator nested{
+            entry.path(), std::filesystem::directory_options::skip_permission_denied, statError
+        };
+        if (statError)
         {
-            pluginPaths.push_back(libraryPath);
+            continue;
         }
+        collectLibraries(nested);
     }
 
     std::sort(pluginPaths.begin(), pluginPaths.end());
+
+    std::map<std::string, std::size_t> librariesPerDirectory;
+    for (const auto &[libraryPath, directory] : pluginPaths)
+    {
+        ++librariesPerDirectory[directory.string()];
+    }
+
+    // A module.toml beside the library is a data descriptor: it lets the
+    // kernel plan the plugin without executing any of its code. Parsed once
+    // per directory.
+    struct DirectorySidecar
+    {
+        bool          attempted = false;
+        bool          present   = false;
+        ModuleManifest manifest;
+    };
+    std::map<std::string, DirectorySidecar> sidecarsByDirectory;
+    const auto sidecarFor = [&](const std::filesystem::path &directory) -> DirectorySidecar & {
+        auto [iterator, inserted] = sidecarsByDirectory.try_emplace(directory.string());
+        if (inserted)
+        {
+            iterator->second.attempted = true;
+            const std::filesystem::path manifestPath = directory / ModuleManifestLoader::manifestFileName;
+            std::error_code             existsError;
+            if (std::filesystem::exists(manifestPath, existsError) && !existsError)
+            {
+                std::string parseError;
+                if (ModuleManifestLoader{}.loadFromFile(manifestPath, iterator->second.manifest, parseError))
+                {
+                    iterator->second.present = true;
+                } else
+                {
+                    report += "- " + parseError + "\n";
+                }
+            }
+        }
+        return iterator->second;
+    };
 
     ModulePluginCache descriptorCache;
     descriptorCache.setCacheFile(executableDirectory() / modulePluginCacheFileName);
     descriptorCache.load();
     bool cacheChanged = false;
 
-    for (const std::filesystem::path &libraryPath : pluginPaths)
+    for (const auto &[libraryPath, libraryDirectory] : pluginPaths)
     {
         std::error_code      statError;
         const std::uintmax_t sizeBytes = std::filesystem::file_size(libraryPath, statError);
@@ -711,11 +999,21 @@ void EngineKernel::loadModulePlugins(std::string &report)
             continue;
         }
 
+        std::string hashError;
+        const std::string contentSha256 = Sha256::fileHexDigest(libraryPath, hashError);
+        if (contentSha256.empty())
+        {
+            report += "- '" + libraryPath.string() + "' cannot be hashed for the trust gate: " + hashError + "\n";
+            continue;
+        }
+
         ModulePluginRecord            record;
         const ModulePluginCacheEntry *remembered = descriptorCache.find(libraryPath, sizeBytes, modificationStamp);
         if (remembered != nullptr)
         {
             record.name                 = remembered->moduleName;
+            record.version              = remembered->moduleVersion;
+            record.contentSha256        = contentSha256;
             record.libraryPath          = libraryPath;
             record.providedCapabilities = remembered->providedCapabilities;
             record.requiredCapabilities = remembered->requiredCapabilities;
@@ -723,76 +1021,46 @@ void EngineKernel::loadModulePlugins(std::string &report)
             record.declaredPermissions  = remembered->declaredPermissions;
         } else
         {
-            auto        library = std::make_unique<DynamicLibrary>();
-            std::string loadError;
-            if (!library->load(libraryPath, loadError))
+            // No cached descriptor: the only way to plan this plugin without
+            // running its code is a sidecar module.toml. Without one, the
+            // plugin stays undescribed and the trust gate decides whether the
+            // kernel may execute it to extract a descriptor.
+            const DirectorySidecar &sidecar = sidecarFor(libraryDirectory);
+            bool                    describedBySidecar = false;
+            if (sidecar.present)
             {
-                report += "- " + loadError + "\n";
+                const bool namesThisLibrary
+                    = !sidecar.manifest.library.empty() && sidecar.manifest.library == libraryPath.filename().string();
+                const bool coversDirectory = sidecar.manifest.library.empty()
+                                          && librariesPerDirectory[libraryDirectory.string()] == 1;
+                describedBySidecar = namesThisLibrary || coversDirectory;
+            }
+            if (!describedBySidecar)
+            {
+                UndescribedPlugin candidate;
+                candidate.libraryPath       = libraryPath;
+                candidate.sizeBytes         = sizeBytes;
+                candidate.modificationStamp = modificationStamp;
+                candidate.contentSha256     = contentSha256;
+                undescribedPlugins_.push_back(std::move(candidate));
                 continue;
             }
 
-            const auto query = reinterpret_cast<const EngineModulePluginEntry *(*)()>(
-                library->resolveSymbol("engineQueryModulePlugin")
-            );
-            if (query == nullptr)
-            {
-                report += "- '" + libraryPath.string()
-                        + "' exports no engineQueryModulePlugin entry point; not a module plugin.\n";
-                continue;
-            }
-
-            const EngineModulePluginEntry *pluginEntry = query();
-            if (pluginEntry == nullptr || pluginEntry->abiVersion != engineModulePluginAbiVersion)
-            {
-                report += "- '" + libraryPath.string()
-                        + "' was built against a different module plugin ABI (expected version "
-                        + std::to_string(engineModulePluginAbiVersion) + "); rebuild the plugin with this kernel.\n";
-                continue;
-            }
-            if (pluginEntry->moduleName == nullptr || pluginEntry->createModule == nullptr)
-            {
-                report += "- '" + libraryPath.string() + "' returns an incomplete plugin descriptor.\n";
-                continue;
-            }
-
-            record.name         = pluginEntry->moduleName;
-            record.libraryPath  = libraryPath;
-            record.createModule = pluginEntry->createModule;
-            for (std::uint32_t index = 0; index < pluginEntry->providedCapabilityCount; ++index)
-            {
-                if (pluginEntry->providedCapabilities != nullptr && pluginEntry->providedCapabilities[index] != nullptr)
-                {
-                    record.providedCapabilities.emplace_back(pluginEntry->providedCapabilities[index]);
-                }
-            }
-            for (std::uint32_t index = 0; index < pluginEntry->requiredCapabilityCount; ++index)
-            {
-                if (pluginEntry->requiredCapabilities != nullptr && pluginEntry->requiredCapabilities[index] != nullptr)
-                {
-                    record.requiredCapabilities.emplace_back(pluginEntry->requiredCapabilities[index]);
-                }
-            }
-            for (std::uint32_t index = 0; index < pluginEntry->optionalCapabilityCount; ++index)
-            {
-                if (pluginEntry->optionalCapabilities != nullptr && pluginEntry->optionalCapabilities[index] != nullptr)
-                {
-                    record.optionalCapabilities.emplace_back(pluginEntry->optionalCapabilities[index]);
-                }
-            }
-            for (std::uint32_t index = 0; index < pluginEntry->declaredPermissionCount; ++index)
-            {
-                if (pluginEntry->declaredPermissions != nullptr && pluginEntry->declaredPermissions[index] != nullptr)
-                {
-                    record.declaredPermissions.emplace_back(pluginEntry->declaredPermissions[index]);
-                }
-            }
-
-            record.library = std::move(library);
+            record.name                 = sidecar.manifest.name;
+            record.version              = sidecar.manifest.version;
+            record.contentSha256        = contentSha256;
+            record.libraryPath          = libraryPath;
+            record.providedCapabilities = sidecar.manifest.providedCapabilities;
+            record.requiredCapabilities = sidecar.manifest.requiredCapabilities;
+            record.optionalCapabilities = sidecar.manifest.optionalCapabilities;
+            record.declaredPermissions  = sidecar.manifest.declaredPermissions;
 
             ModulePluginCacheEntry cacheEntry;
             cacheEntry.sizeBytes            = sizeBytes;
             cacheEntry.modificationStamp    = modificationStamp;
             cacheEntry.moduleName           = record.name;
+            cacheEntry.moduleVersion        = record.version;
+            cacheEntry.contentSha256        = record.contentSha256;
             cacheEntry.providedCapabilities = record.providedCapabilities;
             cacheEntry.requiredCapabilities = record.requiredCapabilities;
             cacheEntry.optionalCapabilities = record.optionalCapabilities;
@@ -820,6 +1088,229 @@ void EngineKernel::loadModulePlugins(std::string &report)
     {
         descriptorCache.save();
     }
+}
+
+void EngineKernel::resolveUndescribedPlugins(std::string &report, bool enforceTrust)
+{
+    if (undescribedPlugins_.empty())
+    {
+        return;
+    }
+
+    std::vector<ComponentTrustAdvisory> scanAdvisories;
+    scanAdvisories.reserve(undescribedPlugins_.size());
+    for (const UndescribedPlugin &candidate : undescribedPlugins_)
+    {
+        ComponentTrustAdvisory advisory;
+        advisory.kind    = ComponentKind::Module;
+        advisory.name    = candidate.libraryPath.filename().string();
+        advisory.sha256  = candidate.contentSha256;
+        advisory.reasons.push_back(
+            "the kernel has no data descriptor for it (no module.toml beside the library and no cached "
+            "descriptor); identifying this plugin requires executing its code"
+        );
+        scanAdvisories.push_back(std::move(advisory));
+    }
+
+    if (!enforceTrust)
+    {
+        for (const ComponentTrustAdvisory &advisory : scanAdvisories)
+        {
+            startupWarnings_ += "note: module plugin '" + advisory.name + advisoryIdentitySuffix(advisory)
+                              + "' was not scanned: validate never executes plugin code and this plugin has no "
+                                "data descriptor; construct will ask for a trust decision, or ship a module.toml "
+                                "next to the library.\n";
+        }
+        undescribedPlugins_.clear();
+        return;
+    }
+
+    const std::vector<TrustBinding> moduleBindings  = configurationStore.trustedModuleBindings();
+    const bool                      trustAllModules = configurationStore.trustAllModules();
+
+    std::vector<std::string> bindingWarnings;
+    std::vector<std::size_t> approvedIndexes;
+    std::vector<std::size_t> undecidedIndexes;
+    for (std::size_t index = 0; index < undescribedPlugins_.size(); ++index)
+    {
+        if (trustAllModules || anyTrustBindingMatches(moduleBindings, scanAdvisories[index], bindingWarnings))
+        {
+            approvedIndexes.push_back(index);
+        } else
+        {
+            undecidedIndexes.push_back(index);
+        }
+    }
+    for (const std::string &warning : bindingWarnings)
+    {
+        startupWarnings_ += "warning: " + warning + "\n";
+    }
+
+    if (!undecidedIndexes.empty() && trustConsentHandler_ != nullptr)
+    {
+        std::vector<ComponentTrustAdvisory> untrusted;
+        untrusted.reserve(undecidedIndexes.size());
+        for (const std::size_t index : undecidedIndexes)
+        {
+            untrusted.push_back(scanAdvisories[index]);
+        }
+        if (trustConsentHandler_(untrusted))
+        {
+            std::string names;
+            for (const ComponentTrustAdvisory &advisory : untrusted)
+            {
+                if (!names.empty())
+                {
+                    names += ", ";
+                }
+                names += "'" + advisory.name + "'";
+            }
+            startupWarnings_ += "agreement granted at startup: scanning " + names + " for this run.\n";
+            approvedIndexes.insert(approvedIndexes.end(), undecidedIndexes.begin(), undecidedIndexes.end());
+            undecidedIndexes.clear();
+        } else
+        {
+            startupWarnings_ += "agreement was not granted at startup: no undescribed plugin was scanned.\n";
+        }
+    }
+
+    ModulePluginCache descriptorCache;
+    descriptorCache.setCacheFile(executableDirectory() / modulePluginCacheFileName);
+    descriptorCache.load();
+    bool cacheChanged = false;
+
+    for (const std::size_t index : approvedIndexes)
+    {
+        ModulePluginRecord    record;
+        ModulePluginCacheEntry cacheEntry;
+        if (!scanUndescribedPluginDescriptor(undescribedPlugins_[index], record, cacheEntry, report))
+        {
+            continue;
+        }
+        if (std::find_if(
+                modulePlugins.begin(),
+                modulePlugins.end(),
+                [&record](const ModulePluginRecord &existing) { return existing.name == record.name; }
+            )
+            != modulePlugins.end())
+        {
+            report += "- module '" + record.name + "' is provided by more than one plugin binary; '"
+                    + record.libraryPath.string() + "' is ignored.\n";
+            continue;
+        }
+        descriptorCache.record(record.libraryPath, cacheEntry);
+        cacheChanged = true;
+        modulePlugins.push_back(std::move(record));
+    }
+    for (const std::size_t index : undecidedIndexes)
+    {
+        const ComponentTrustAdvisory &advisory = scanAdvisories[index];
+        startupWarnings_ += "note: module plugin '" + advisory.name + advisoryIdentitySuffix(advisory)
+                          + "' was not scanned: identifying it would execute its code and no trust decision covers "
+                            "it. Ship a module.toml beside the library, or trust it under [trust] (or agree at "
+                            "startup); until then the plugin stays unloaded.\n";
+    }
+    if (cacheChanged)
+    {
+        descriptorCache.save();
+    }
+    undescribedPlugins_.clear();
+}
+
+bool EngineKernel::scanUndescribedPluginDescriptor(
+    const UndescribedPlugin &candidate,
+    ModulePluginRecord      &outRecord,
+    ModulePluginCacheEntry  &outCacheEntry,
+    std::string             &report
+)
+{
+    // Scanning executes code inside the plugin binary; the caller has already
+    // obtained the trust decision that authorizes this.
+    outRecord                  = ModulePluginRecord{};
+    outRecord.libraryPath      = candidate.libraryPath;
+    outRecord.contentSha256    = candidate.contentSha256;
+
+    auto        library = std::make_unique<DynamicLibrary>();
+    std::string loadError;
+    if (!library->load(candidate.libraryPath, loadError))
+    {
+        report += "- " + loadError + "\n";
+        return false;
+    }
+
+    const auto query = reinterpret_cast<const EngineModulePluginEntry *(*)()>(
+        library->resolveSymbol("engineQueryModulePlugin")
+    );
+    if (query == nullptr)
+    {
+        report += "- '" + candidate.libraryPath.string()
+                + "' exports no engineQueryModulePlugin entry point; not a module plugin.\n";
+        return false;
+    }
+
+    const EngineModulePluginEntry *pluginEntry = query();
+    if (pluginEntry == nullptr || pluginEntry->abiVersion != engineModulePluginAbiVersion)
+    {
+        report += "- '" + candidate.libraryPath.string()
+                + "' was built against a different module plugin ABI (expected version "
+                + std::to_string(engineModulePluginAbiVersion) + "); rebuild the plugin with this kernel.\n";
+        return false;
+    }
+    if (pluginEntry->moduleName == nullptr || pluginEntry->createModule == nullptr)
+    {
+        report += "- '" + candidate.libraryPath.string() + "' returns an incomplete plugin descriptor.\n";
+        return false;
+    }
+
+    outRecord.name = pluginEntry->moduleName;
+    if (pluginEntry->moduleVersion != nullptr)
+    {
+        outRecord.version = pluginEntry->moduleVersion;
+    }
+    outRecord.createModule = pluginEntry->createModule;
+    for (std::uint32_t capabilityIndex = 0; capabilityIndex < pluginEntry->providedCapabilityCount; ++capabilityIndex)
+    {
+        if (pluginEntry->providedCapabilities != nullptr && pluginEntry->providedCapabilities[capabilityIndex] != nullptr)
+        {
+            outRecord.providedCapabilities.emplace_back(pluginEntry->providedCapabilities[capabilityIndex]);
+        }
+    }
+    for (std::uint32_t capabilityIndex = 0; capabilityIndex < pluginEntry->requiredCapabilityCount; ++capabilityIndex)
+    {
+        if (pluginEntry->requiredCapabilities != nullptr && pluginEntry->requiredCapabilities[capabilityIndex] != nullptr)
+        {
+            outRecord.requiredCapabilities.emplace_back(pluginEntry->requiredCapabilities[capabilityIndex]);
+        }
+    }
+    for (std::uint32_t capabilityIndex = 0; capabilityIndex < pluginEntry->optionalCapabilityCount; ++capabilityIndex)
+    {
+        if (pluginEntry->optionalCapabilities != nullptr && pluginEntry->optionalCapabilities[capabilityIndex] != nullptr)
+        {
+            outRecord.optionalCapabilities.emplace_back(pluginEntry->optionalCapabilities[capabilityIndex]);
+        }
+    }
+    for (std::uint32_t permissionIndex = 0; permissionIndex < pluginEntry->declaredPermissionCount; ++permissionIndex)
+    {
+        if (pluginEntry->declaredPermissions != nullptr && pluginEntry->declaredPermissions[permissionIndex] != nullptr)
+        {
+            outRecord.declaredPermissions.emplace_back(pluginEntry->declaredPermissions[permissionIndex]);
+        }
+    }
+
+    // The library is released on purpose: the plugin is instantiated later
+    // through loadPluginLibrary, after the demand closure chose the active set.
+    library->release();
+
+    outCacheEntry.sizeBytes            = candidate.sizeBytes;
+    outCacheEntry.modificationStamp    = candidate.modificationStamp;
+    outCacheEntry.moduleName           = outRecord.name;
+    outCacheEntry.moduleVersion        = outRecord.version;
+    outCacheEntry.contentSha256        = outRecord.contentSha256;
+    outCacheEntry.providedCapabilities = outRecord.providedCapabilities;
+    outCacheEntry.requiredCapabilities = outRecord.requiredCapabilities;
+    outCacheEntry.optionalCapabilities = outRecord.optionalCapabilities;
+    outCacheEntry.declaredPermissions  = outRecord.declaredPermissions;
+    return true;
 }
 
 bool EngineKernel::loadPluginLibrary(
@@ -858,7 +1349,11 @@ bool EngineKernel::loadPluginLibrary(
         return false;
     }
 
-    plugin.name         = pluginEntry->moduleName;
+    plugin.name = pluginEntry->moduleName;
+    if (pluginEntry->moduleVersion != nullptr)
+    {
+        plugin.version = pluginEntry->moduleVersion;
+    }
     plugin.createModule = pluginEntry->createModule;
     plugin.providedCapabilities.clear();
     plugin.requiredCapabilities.clear();
@@ -940,6 +1435,14 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
             successful = false;
             continue;
         }
+        if (!plugin.version.empty() && !record.manifest.version.empty() && plugin.version != record.manifest.version)
+        {
+            report += "- module '" + plugin.name + "' descriptor version '" + plugin.version
+                    + "' differs from its manifest version '" + record.manifest.version
+                    + "'; the descriptor and the manifest must agree.\n";
+            successful = false;
+            continue;
+        }
         if (!sameStringSet(record.manifest.providedCapabilities, plugin.providedCapabilities))
         {
             report += "- module '" + plugin.name
@@ -996,6 +1499,27 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
     return successful;
 }
 
+void EngineKernel::appendDeclaredModuleRecords()
+{
+    for (const ModulePluginRecord &plugin : modulePlugins)
+    {
+        if (!plugin.active)
+        {
+            continue;
+        }
+        ComponentRecord record;
+        record.name                          = plugin.name;
+        record.manifest.kind                 = ComponentKind::Module;
+        record.manifest.name                 = plugin.name;
+        record.manifest.version              = plugin.version.empty() ? "0.1.0" : plugin.version;
+        record.manifest.providedCapabilities = plugin.providedCapabilities;
+        record.manifest.requiredCapabilities = plugin.requiredCapabilities;
+        record.manifest.optionalCapabilities = plugin.optionalCapabilities;
+        record.manifest.requiredPermissions  = plugin.declaredPermissions;
+        records.push_back(std::move(record));
+    }
+}
+
 void EngineKernel::appendModRiskWarning(
     const ModManifest &modManifest,
     bool               isNativeMod
@@ -1040,6 +1564,8 @@ void EngineKernel::appendModRiskWarning(
     ComponentTrustAdvisory advisory;
     advisory.kind    = modManifest.isNative() ? ComponentKind::SharedLibraryMod : ComponentKind::ScriptMod;
     advisory.name    = modManifest.id;
+    advisory.version = modManifest.version;
+    advisory.sha256  = isNativeMod ? nativeModContentHash(modManifest) : scriptModContentHash(modManifest);
     advisory.reasons = reasons;
     trustAdvisories_.push_back(std::move(advisory));
     std::string joined;
@@ -1051,7 +1577,8 @@ void EngineKernel::appendModRiskWarning(
         }
         joined += reason;
     }
-    startupWarnings_ += "warning: mod '" + modManifest.id + "' requests elevated trust: " + joined
+    startupWarnings_ += "warning: mod '" + modManifest.id + advisoryIdentitySuffix(trustAdvisories_.back())
+                      + " requests elevated trust: " + joined
                       + ". Review this mod before trusting it with sensitive data.\n";
 }
 
@@ -1091,6 +1618,8 @@ void EngineKernel::appendModuleRiskWarning(const ModulePluginRecord &plugin)
     ComponentTrustAdvisory advisory;
     advisory.kind    = ComponentKind::Module;
     advisory.name    = plugin.name;
+    advisory.version = plugin.version;
+    advisory.sha256  = plugin.contentSha256;
     advisory.reasons = reasons;
     trustAdvisories_.push_back(std::move(advisory));
     std::string joined;
@@ -1102,7 +1631,8 @@ void EngineKernel::appendModuleRiskWarning(const ModulePluginRecord &plugin)
         }
         joined += reason;
     }
-    startupWarnings_ += "warning: module '" + plugin.name + "' requests elevated trust: " + joined
+    startupWarnings_ += "warning: module '" + plugin.name + advisoryIdentitySuffix(trustAdvisories_.back())
+                      + " requests elevated trust: " + joined
                       + ". Review this module before trusting it with sensitive data.\n";
 }
 
@@ -1116,19 +1646,17 @@ bool EngineKernel::evaluateTrustGate(
         return true;
     }
 
-    const std::vector<std::string> trustedModNames    = configurationStore.trustedMods();
-    const std::vector<std::string> trustedModuleNames = configurationStore.trustedModules();
-    const bool                     allMods            = configurationStore.trustAllMods();
-    const bool                     allModules         = configurationStore.trustAllModules();
-    const auto                     isTrusted          = [&](const ComponentTrustAdvisory &advisory) {
+    const std::vector<TrustBinding> modBindings    = configurationStore.trustedModBindings();
+    const std::vector<TrustBinding> moduleBindings = configurationStore.trustedModuleBindings();
+    const bool                      allMods        = configurationStore.trustAllMods();
+    const bool                      allModules     = configurationStore.trustAllModules();
+    std::vector<std::string>        bindingWarnings;
+    const auto                      isTrusted = [&](const ComponentTrustAdvisory &advisory) {
         if (advisory.kind == ComponentKind::Module)
         {
-            return allModules
-                || std::find(trustedModuleNames.begin(), trustedModuleNames.end(), advisory.name)
-                       != trustedModuleNames.end();
+            return allModules || anyTrustBindingMatches(moduleBindings, advisory, bindingWarnings);
         }
-        return allMods
-            || std::find(trustedModNames.begin(), trustedModNames.end(), advisory.name) != trustedModNames.end();
+        return allMods || anyTrustBindingMatches(modBindings, advisory, bindingWarnings);
     };
 
     std::vector<ComponentTrustAdvisory> untrusted;
@@ -1138,6 +1666,10 @@ bool EngineKernel::evaluateTrustGate(
         {
             untrusted.push_back(advisory);
         }
+    }
+    for (const std::string &warning : bindingWarnings)
+    {
+        startupWarnings_ += "warning: " + warning + "\n";
     }
     if (untrusted.empty())
     {
@@ -1151,12 +1683,16 @@ bool EngineKernel::evaluateTrustGate(
         {
             names += ", ";
         }
-        names += describeComponentKind(advisory.kind) + " '" + advisory.name + "'";
+        names += describeComponentKind(advisory.kind) + " '" + advisory.name + "'"
+               + advisoryIdentitySuffix(advisory);
     }
     const char *trustInstructions
         = "To proceed without being asked, trust the components in the configuration's [trust] section:\n"
           "  trustMods = [\"<mod id>\"]       (or trustAllMods = true)\n"
-          "  trustModules = [\"<module name>\"] (or trustAllModules = true)\n";
+          "  trustModules = [\"<module name>\"] (or trustAllModules = true)\n"
+          "Bind trust to content so replaced binaries or scripts cannot inherit it:\n"
+          "  trustMods = [{ id = \"<mod id>\", version = \"1.2.3\", sha256 = \"<64 hex characters>\" }]\n"
+          "  trustModules = [{ name = \"<module name>\", sha256 = \"<64 hex characters>\" }]\n";
 
     if (!enforce)
     {

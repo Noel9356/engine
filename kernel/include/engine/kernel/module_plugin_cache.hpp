@@ -18,6 +18,8 @@ struct ModulePluginCacheEntry
     std::uintmax_t modificationStamp = 0;
 
     std::string              moduleName;
+    std::string              moduleVersion;
+    std::string              contentSha256;
     std::vector<std::string> providedCapabilities;
     std::vector<std::string> requiredCapabilities;
     std::vector<std::string> optionalCapabilities;

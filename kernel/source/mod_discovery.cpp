@@ -77,6 +77,22 @@ std::vector<DiscoveredModPackage> discoverModPackages(
     return packages;
 }
 
+std::vector<std::filesystem::path> nativeModLibraryCandidates(
+    const std::filesystem::path &packageDirectory,
+    const std::string           &entry
+)
+{
+    std::vector<std::filesystem::path> libraryCandidates;
+#if defined(_WIN32)
+    libraryCandidates.push_back(packageDirectory / (entry + ".dll"));
+    libraryCandidates.push_back(packageDirectory / ("lib" + entry + ".dll"));
+#else
+    libraryCandidates.push_back(packageDirectory / ("lib" + entry + ".so"));
+    libraryCandidates.push_back(packageDirectory / (entry + ".so"));
+#endif
+    return libraryCandidates;
+}
+
 bool loadNativeModEntry(
     const DiscoveredModPackage &package,
     NativeModLoad              &load,
@@ -86,21 +102,8 @@ bool loadNativeModEntry(
     const std::filesystem::path packageDirectory = package.manifest.directory;
     const ModManifest          &modManifest      = package.manifest;
 
-    std::vector<std::filesystem::path> libraryCandidates;
-#if defined(_WIN32)
-    libraryCandidates.push_back(packageDirectory / (modManifest.entry + ".dll"));
-    libraryCandidates.push_back(packageDirectory / ("lib" + modManifest.entry + ".dll"));
-#elif defined(__APPLE__)
-    libraryCandidates.push_back(packageDirectory / ("lib" + modManifest.entry + ".dylib"));
-    libraryCandidates.push_back(packageDirectory / ("lib" + modManifest.entry + ".so"));
-    libraryCandidates.push_back(packageDirectory / (modManifest.entry + ".so"));
-#else
-    libraryCandidates.push_back(packageDirectory / ("lib" + modManifest.entry + ".so"));
-    libraryCandidates.push_back(packageDirectory / (modManifest.entry + ".so"));
-#endif
-
     std::filesystem::path libraryPath;
-    for (const std::filesystem::path &candidate : libraryCandidates)
+    for (const std::filesystem::path &candidate : nativeModLibraryCandidates(packageDirectory, modManifest.entry))
     {
         if (std::filesystem::exists(candidate))
         {
@@ -111,7 +114,8 @@ bool loadNativeModEntry(
     if (libraryPath.empty())
     {
         std::string expectedNames;
-        for (const std::filesystem::path &candidate : libraryCandidates)
+        for (const std::filesystem::path &candidate :
+             nativeModLibraryCandidates(packageDirectory, modManifest.entry))
         {
             expectedNames += (expectedNames.empty() ? "" : ", ") + candidate.filename().string();
         }

@@ -28,6 +28,14 @@ std::vector<DiscoveredModPackage> discoverModPackages(
     std::string                    &report
 );
 
+// The library file names a native mod may use for its 'entry', in preference
+// order. The trust gate uses this to hash the mod's binary content before any
+// native code is loaded; the loader uses the same list when it loads.
+std::vector<std::filesystem::path> nativeModLibraryCandidates(
+    const std::filesystem::path &packageDirectory,
+    const std::string           &entry
+);
+
 struct NativeModLoad
 {
     std::unique_ptr<DynamicLibrary> library;
