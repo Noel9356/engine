@@ -1,7 +1,7 @@
 #ifndef ENGINE_KERNEL_CONFIGURATION_HPP
 #define ENGINE_KERNEL_CONFIGURATION_HPP
 
-#include "./dependency_resolver.hpp"
+#include <engine/kernel/dependency_resolver.hpp>
 
 #include <cstdint>
 #include <filesystem>

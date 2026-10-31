@@ -1,7 +1,7 @@
-#include "engine/kernel/component_interface.hpp"
+#include <engine/kernel/component_interface.hpp>
 
-#include "engine/kernel/configuration.hpp"
-#include "engine/kernel/permission_system.hpp"
+#include <engine/kernel/configuration.hpp>
+#include <engine/kernel/permission_system.hpp>
 
 #include <algorithm>
 #include <charconv>

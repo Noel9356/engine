@@ -1,7 +1,7 @@
 #ifndef ENGINE_KERNEL_ASYNC_TASK_DISPATCHER_HPP
 #define ENGINE_KERNEL_ASYNC_TASK_DISPATCHER_HPP
 
-#include "./parallel_for.hpp"
+#include <engine/kernel/parallel_for.hpp>
 
 #include <algorithm>
 #include <atomic>

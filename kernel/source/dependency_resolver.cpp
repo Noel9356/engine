@@ -1,6 +1,6 @@
-#include "engine/kernel/dependency_resolver.hpp"
+#include <engine/kernel/dependency_resolver.hpp>
 
-#include "engine/kernel/capability_name.hpp"
+#include <engine/kernel/capability_name.hpp>
 
 #include <algorithm>
 #include <functional>

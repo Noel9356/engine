@@ -1,7 +1,7 @@
 #ifndef ENGINE_KERNEL_MOD_MANIFEST_HPP
 #define ENGINE_KERNEL_MOD_MANIFEST_HPP
 
-#include "./mod_api.hpp"
+#include <engine/kernel/mod_api.hpp>
 
 #include <cstdint>
 #include <filesystem>

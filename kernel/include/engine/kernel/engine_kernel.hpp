@@ -1,17 +1,17 @@
 #ifndef ENGINE_KERNEL_ENGINE_KERNEL_HPP
 #define ENGINE_KERNEL_ENGINE_KERNEL_HPP
 
-#include "./component_interface.hpp"
-#include "./component_manifest.hpp"
-#include "./configuration.hpp"
-#include "./dependency_resolver.hpp"
-#include "./dynamic_library.hpp"
-#include "./event_bus.hpp"
-#include "./main_thread_scheduler.hpp"
-#include "./mod_api.hpp"
-#include "./mod_discovery.hpp"
-#include "./mod_manifest.hpp"
-#include "./permission_system.hpp"
+#include <engine/kernel/component_interface.hpp>
+#include <engine/kernel/component_manifest.hpp>
+#include <engine/kernel/configuration.hpp>
+#include <engine/kernel/dependency_resolver.hpp>
+#include <engine/kernel/dynamic_library.hpp>
+#include <engine/kernel/event_bus.hpp>
+#include <engine/kernel/main_thread_scheduler.hpp>
+#include <engine/kernel/mod_api.hpp>
+#include <engine/kernel/mod_discovery.hpp>
+#include <engine/kernel/mod_manifest.hpp>
+#include <engine/kernel/permission_system.hpp>
 
 #include <deque>
 #include <filesystem>
@@ -25,9 +25,11 @@
 namespace engine
 {
 
-struct EngineStartupCompletedEvent;
+struct EngineStartupCompletedEvent
+{};
 
-struct EngineShutdownStartedEvent;
+struct EngineShutdownStartedEvent
+{};
 
 struct ComponentTrustAdvisory
 {
@@ -58,6 +60,8 @@ public:
 
     void setModsDirectory(const std::filesystem::path &modsDirectory);
     void addModsDirectory(const std::filesystem::path &modsDirectory);
+
+    void setApplicationRequirements(const std::vector<std::string> &capabilities);
 
     bool validate(std::string &report);
 
@@ -249,6 +253,8 @@ private:
         const std::vector<DependencyResolver::ResolutionDiagnostic> &diagnostics,
         std::string                                                 &report
     ) const;
+
+    std::vector<std::string> applicationRequiredCapabilities;
 
     std::filesystem::path configurationFilePath;
     std::filesystem::path sceneFilePath;

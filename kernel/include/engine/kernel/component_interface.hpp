@@ -1,10 +1,10 @@
 #ifndef ENGINE_KERNEL_COMPONENT_INTERFACE_HPP
 #define ENGINE_KERNEL_COMPONENT_INTERFACE_HPP
 
-#include "./component_manifest.hpp"
-#include "./event_bus.hpp"
-#include "./main_thread_scheduler.hpp"
-#include "./permission_system.hpp"
+#include <engine/kernel/component_manifest.hpp>
+#include <engine/kernel/event_bus.hpp>
+#include <engine/kernel/main_thread_scheduler.hpp>
+#include <engine/kernel/permission_system.hpp>
 
 #include <cstdint>
 #include <filesystem>

@@ -1,7 +1,7 @@
 #ifndef ENGINE_KERNEL_MODULE_API_HPP
 #define ENGINE_KERNEL_MODULE_API_HPP
 
-#include "./component_interface.hpp"
+#include <engine/kernel/component_interface.hpp>
 
 #include <cstdint>
 

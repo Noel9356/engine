@@ -1,9 +1,9 @@
 #ifndef ENGINE_KERNEL_MOD_DISCOVERY_HPP
 #define ENGINE_KERNEL_MOD_DISCOVERY_HPP
 
-#include "./dynamic_library.hpp"
-#include "./mod_api.hpp"
-#include "./mod_manifest.hpp"
+#include <engine/kernel/dynamic_library.hpp>
+#include <engine/kernel/mod_api.hpp>
+#include <engine/kernel/mod_manifest.hpp>
 
 #include <filesystem>
 #include <memory>

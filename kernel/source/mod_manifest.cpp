@@ -1,4 +1,4 @@
-#include "engine/kernel/mod_manifest.hpp"
+#include <engine/kernel/mod_manifest.hpp>
 
 #include <toml.hpp>
 

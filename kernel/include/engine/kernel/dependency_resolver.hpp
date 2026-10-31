@@ -1,7 +1,7 @@
 #ifndef ENGINE_KERNEL_DEPENDENCY_RESOLVER_HPP
 #define ENGINE_KERNEL_DEPENDENCY_RESOLVER_HPP
 
-#include "./component_manifest.hpp"
+#include <engine/kernel/component_manifest.hpp>
 
 #include <string>
 #include <vector>

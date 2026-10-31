@@ -1,4 +1,4 @@
-#include "engine/kernel/configuration.hpp"
+#include <engine/kernel/configuration.hpp>
 
 #include <toml.hpp>
 

@@ -1,6 +1,6 @@
-#include "engine/kernel/mod_discovery.hpp"
+#include <engine/kernel/mod_discovery.hpp>
 
-#include "engine/kernel/configuration.hpp"
+#include <engine/kernel/configuration.hpp>
 
 #include <algorithm>
 #include <set>

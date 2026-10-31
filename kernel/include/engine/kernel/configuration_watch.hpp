@@ -1,7 +1,7 @@
 #ifndef ENGINE_KERNEL_CONFIGURATION_WATCH_HPP
 #define ENGINE_KERNEL_CONFIGURATION_WATCH_HPP
 
-#include "./component_interface.hpp"
+#include <engine/kernel/component_interface.hpp>
 
 #include <cstdint>
 #include <functional>

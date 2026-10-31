@@ -1,10 +1,11 @@
-#include "engine/kernel/engine_kernel.hpp"
+#include <engine/kernel/engine_kernel.hpp>
 
-#include "engine/kernel/capability_name.hpp"
-#include "engine/kernel/filesystem_utilities.hpp"
-#include "engine/kernel/mod_api.hpp"
-#include "engine/kernel/mod_discovery.hpp"
-#include "engine/kernel/module_api.hpp"
+#include <engine/kernel/capability_name.hpp>
+#include <engine/kernel/filesystem_utilities.hpp>
+#include <engine/kernel/mod_api.hpp>
+#include <engine/kernel/mod_discovery.hpp>
+#include <engine/kernel/module_api.hpp>
+#include <engine/kernel/module_plugin_cache.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -140,6 +141,12 @@ void EngineKernel::addModsDirectory(const std::filesystem::path &modsDirectory)
 {
     explicitExtraModsDirectories.push_back(modsDirectory);
     componentsGathered = false;
+}
+
+void EngineKernel::setApplicationRequirements(const std::vector<std::string> &capabilities)
+{
+    applicationRequiredCapabilities = capabilities;
+    componentsGathered              = false;
 }
 
 EngineKernel::~EngineKernel()
@@ -371,6 +378,17 @@ bool EngineKernel::gatherComponents(
     if (!records.empty() || !modulePlugins.empty())
     {
         stop();
+    }
+
+    if (!applicationRequiredCapabilities.empty())
+    {
+        ComponentRecord applicationRecord;
+        applicationRecord.name                          = appContextName();
+        applicationRecord.manifest.kind                 = ComponentKind::Application;
+        applicationRecord.manifest.name                 = appContextName();
+        applicationRecord.manifest.requiredCapabilities = applicationRequiredCapabilities;
+        records.push_back(std::move(applicationRecord));
+        permissionSystem_.grantAllPermissions(appContextName());
     }
 
     trustAdvisories_.clear();
