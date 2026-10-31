@@ -1,0 +1,112 @@
+---
+Language:    Cpp
+Standard:    c++20
+ColumnLimit: 120
+TabWidth:    4
+UseTab:      Never
+
+IndentWidth:             4
+ContinuationIndentWidth: 4
+
+NamespaceIndentation: None
+
+BasedOnStyle: LLVM
+
+AlignAfterOpenBracket: DontAlign
+
+# ================================================================
+# Bin pack
+# ================================================================
+
+BinPackArguments:  false
+
+BinPackParameters: AlwaysOnePerLine
+
+# ================================================================
+# Braces
+# ================================================================
+
+BreakBeforeBraces: Custom
+
+BraceWrapping:
+    AfterFunction:         true
+    AfterClass:            true
+    AfterControlStatement: Always
+    AfterEnum:             true
+    AfterStruct:           true
+    AfterUnion:            true
+    AfterNamespace:        true
+    AfterObjCDeclaration:  true
+    AfterExternBlock:      true
+    BeforeElse:            false
+    BeforeCatch:           false
+    BeforeWhile:           false
+    IndentBraces:          false
+    SplitEmptyFunction:    false
+    SplitEmptyRecord:      false
+    SplitEmptyNamespace:   false
+
+Cpp11BracedListStyle: true
+
+BreakAfterOpenBracketBracedList: true
+
+BreakBeforeCloseBracketBracedList: true
+
+# ================================================================
+# Functions
+# ================================================================
+
+BreakAfterOpenBracketFunction: true
+
+BreakBeforeCloseBracketFunction: true
+
+BreakFunctionDeclarationParameters: false
+
+BreakFunctionDefinitionParameters: false
+
+AllowShortFunctionsOnASingleLine: None
+
+# ================================================================
+# Operators
+# ================================================================
+
+BreakBeforeBinaryOperators: All
+
+AlignOperands: AlignAfterOperator
+
+# ================================================================
+# Pointers
+# ================================================================
+
+PointerAlignment: Right
+
+DerivePointerAlignment: false
+
+# ================================================================
+# Template
+# ================================================================
+
+BreakTemplateDeclarations: Yes
+
+# ================================================================
+# Others
+# ================================================================
+
+AlignConsecutiveAssignments: Consecutive
+
+AlignConsecutiveDeclarations: Consecutive
+
+AccessModifierOffset: -4
+
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine:        false
+AllowShortCaseLabelsOnASingleLine:   false
+AllowShortBlocksOnASingleLine:       Never
+
+BreakConstructorInitializers: BeforeColon
+
+IncludeBlocks:                    Preserve
+FixNamespaceComments:             true
+MaxEmptyLinesToKeep:              1
+KeepEmptyLinesAtTheStartOfBlocks: false
+InsertNewlineAtEOF:               true
