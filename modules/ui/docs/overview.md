@@ -35,7 +35,7 @@ Consumers still need the kernel's `capability.ui` permission to acquire the capa
 | File | Purpose |
 | --- | --- |
 | `module.toml` | Module descriptor (name, version, provided capability). Read by kernel module discovery. |
-| `config.toml` | Empty placeholder; the module reads no configuration (see `configuration.md`). |
+| `config.toml` | Default `[ui]` layout-persistence setting (see `configuration.md`). |
 | `include/engine/ui/capabilities.hpp` | Public capability types: ABI, handles, error/key/style enums, vertex/command/draw-data structs, `UiCapability` function-pointer table. |
 | `source/ui.cpp` | The whole implementation: ImGui context records, key/flag/color mapping, frame lifecycle, draw-data flattening, module entry table. |
 
@@ -58,7 +58,7 @@ The module is conditionally functional: without the `ENGINE_UI_BACKEND_IMGUI` bu
 
 ## Configuration
 
-The module reads no configuration; `config.toml` ships empty. See `configuration.md`.
+The module reads `ui.save_window_layout` once during `construct()`. It is disabled by default to avoid synchronous ini persistence in frame execution; see `configuration.md`.
 
 ## Integration
 

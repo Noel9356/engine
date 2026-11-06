@@ -22,6 +22,7 @@ From `module.toml`:
 | --- | --- |
 | provides | `input_actions` |
 | requires | (none) |
+| optional_capabilities | `script_runtime` |
 
 From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryModuleEntryTable`, kernel ABI `engineModuleAbiVersion = 8`):
 
@@ -30,7 +31,7 @@ From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryMo
 | moduleName / version | `input_actions` / `0.1.0` |
 | providedCapabilities | `input_actions` (1) |
 | requiredCapabilities | none (0) |
-| optionalCapabilities | none (0) |
+| optionalCapabilities | `script_runtime` (1) |
 | declaredPermissions | none (0) |
 
 ## Architecture
@@ -40,7 +41,8 @@ From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryMo
 | `module.toml` | On-disk descriptor: name, version, provided capability, and the declared `config_keys` documenting the configuration surface. Copied next to the built .so by CMake. |
 | `config.toml` | Default values for the `[input_actions]` section (see `configuration.md`). |
 | `include/engine/input_actions/capabilities.hpp` | Public capability types: ABI constant, handles, event/control/action enums, description and state structs, and the function-pointer vtable. |
-| `source/input_actions.cpp` | The whole implementation: per-device state, contexts/actions/bindings, the per-frame evaluation pipeline, capability binding, module entry table. |
+| `source/input_actions.cpp` | The implementation: per-device state, contexts/actions/bindings, the per-frame evaluation pipeline, synchronized capability calls, optional Lua bridge registration, capability binding, module entry table. |
+| `source/lua_bridge.cpp`, `source/lua_bridge.hpp` | Optional `script_runtime` bridge for context/action creation, binding, event submission, frame advancement, and action-state queries. |
 | `docs/` | This documentation. |
 
 ## How it works
@@ -77,9 +79,13 @@ From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryMo
 
 `bindAction` validates the control enum, finite scalars, deadzone in [-1, 1), exponent in (0, 8], and the per-type component rules: Button actions accept only digital controls with component 0 (analog axes are rejected), Axis1D requires component 0, and Axis2D accepts components 0 and 1. `createAction` additionally rejects duplicate action names within a context, thresholds outside [0, 1], and smoothing above the configured cap. `setContextEnabled(false)` clears the context's action states, so no stale pressed/released edges are observed while it is off.
 
+## Lua bridge
+
+When `script_runtime` is present, Lua runtimes receive `input_actions.*` functions for context/action management, binding, raw event submission, frame advancement, and state queries. String selectors are `"button"`, `"axis1d"`, `"axis2d"`; combine modes are `"sum"`, `"maximum"`, `"last"`; controls and event kinds use the names accepted by the bridge. The capability serializes calls internally, so script and native callers share one coherent state. The bridge is omitted when `script_runtime` is unavailable.
+
 ## Threading and lifetime
 
-The module has no internal locking. All capability calls must come from one thread (typically the main or input thread the kernel drives `advanceFrame` from). State persists across frames: device snapshots, bindings, and the last computed action states live until `destroyContext`, `removeAction`, `resetDeviceState`, or module `stop()` (which clears contexts and device state; the context order is rebuilt on the next frame). Action handles stay valid until their action or context is destroyed; action names can be fetched via `copyActionName` (buffer includes the terminating NUL).
+The module serializes every capability entry point with one mutex. This permits calls from the input thread and Lua callbacks without concurrent mutation of device maps or action contexts; event producers should still batch events before `advanceFrame` to keep frame ordering deterministic. State persists across frames: device snapshots, bindings, and the last computed action states live until `destroyContext`, `removeAction`, `resetDeviceState`, or module `stop()` (which clears contexts and device state; the context order is rebuilt on the next frame). Action handles stay valid until their action or context is destroyed; action names can be fetched via `copyActionName` (buffer includes the terminating NUL).
 
 ## Configuration
 

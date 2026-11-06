@@ -7,3 +7,4 @@ maximum_total_memory_mb  = 1024
 maximum_native_functions = 256
 maximum_native_arguments = 32
 maximum_native_results   = 16
+maximum_runtime_initializers = 64

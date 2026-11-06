@@ -137,7 +137,8 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
     std::uint32_t framesInFlight, std::uint32_t maxPendingUploads, std::uint32_t memoryBudgetUpdateIntervalFrames,
     DevicePreference devicePreference, bool frustumCullingEnabled, bool backFaceCullingEnabled,
     bool gpuTimestampsEnabled, std::uint32_t instanceStreamMegabytes, bool textureMipmapsEnabled, float anisotropyLevel,
-    std::uint32_t msaaSamples, bool srgbOutput, window::VulkanSurfaceCapability *vulkanSurface, RenderError *error)
+    std::uint32_t msaaSamples, bool srgbOutput, std::uint32_t maximumTextures, std::uint32_t maximumMaterialSets,
+    std::size_t pipelineCacheMaxBytes, window::VulkanSurfaceCapability *vulkanSurface, RenderError *error)
 {
     auto backend                               = std::unique_ptr<VulkanBackend>(new VulkanBackend());
     backend->surfaceHandle_                    = surface;
@@ -190,6 +191,7 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
 
     backend->pipeline_ = std::make_unique<VulkanPipeline>();
     backend->pipeline_->setCullBackFaces(backFaceCullingEnabled);
+    backend->pipeline_->setPipelineCacheMaxBytes(pipelineCacheMaxBytes);
     if (!backend->pipeline_->build(
             *backend->device_, backend->swapchain_->format(), backend->swapchain_->depthFormat()))
     {
@@ -217,7 +219,9 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
             backend->pipeline_->frameSetLayout(),
             backend->pipeline_->materialSetLayout(),
             textureMipmapsEnabled,
-            backend->anisotropyLevel_))
+            backend->anisotropyLevel_,
+            maximumTextures,
+            maximumMaterialSets))
     {
         reportError(error, RenderError::CreationFailed);
         return nullptr;

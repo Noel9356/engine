@@ -1,7 +1,7 @@
 // direct_lighting module implementation.
 //
-// Keeps a fixed-size registry of validated, direction-normalized lights under
-// one mutex and maintains a priority-sorted "active" snapshot for renderers.
+// Keeps a capacity-limited registry of validated, direction-normalized lights
+// under one mutex and maintains a priority-sorted "active" snapshot for renderers.
 // copyLights plus an atomic version counter let consumers detect changes
 // cheaply; resolveProfile maps a render::DeviceProfile to a light budget.
 
@@ -11,7 +11,6 @@
 #include <engine/kernel/participant_manifest.hpp>
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -19,6 +18,8 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace engine
 {
@@ -131,6 +132,15 @@ public:
         // in resolveProfile, hard max in createLight). Values above
         // maxDirectLights are clamped; negatives are ignored.
         configuredMaxLights_ = 0;
+        configuredMaximumRegisteredLights_ = 256;
+        if (const auto value = context.configurationIntegerInSection("direct_lighting", "maximum_registered_lights");
+            value.has_value() && *value >= 1 && *value <= 65536)
+        {
+            configuredMaximumRegisteredLights_ = static_cast<std::uint32_t>(*value);
+        }
+        lights_.reserve(configuredMaximumRegisteredLights_);
+        snapshot_.reserve(configuredMaximumRegisteredLights_);
+        lightIndices_.reserve(configuredMaximumRegisteredLights_);
         if (const auto value = context.configurationIntegerInSection("direct_lighting", "max_lights");
             value.has_value() && *value >= 0)
         {
@@ -147,6 +157,9 @@ public:
         // Clears the registry and snapshot; the version bump makes copyLights
         // consumers observe the (empty) change.
         std::lock_guard<std::mutex> lock(mutex_);
+        lights_.clear();
+        snapshot_.clear();
+        lightIndices_.clear();
         lightCount_    = 0;
         snapshotCount_ = 0;
         version_.fetch_add(1u, std::memory_order_release);
@@ -195,8 +208,12 @@ private:
             return invalidDirectLight;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        // configuredMaxLights_ == 0 selects the hard max.
-        const std::uint32_t configuredCapacity = configuredMaxLights_ == 0 ? maxDirectLights : configuredMaxLights_;
+        // max_lights preserves its legacy registry cap when explicitly set;
+        // otherwise the separate registry budget may exceed the renderer cap.
+        const std::uint32_t configuredCapacity
+            = configuredMaxLights_ == 0
+                ? configuredMaximumRegisteredLights_
+                : std::min(configuredMaxLights_, configuredMaximumRegisteredLights_);
         if (lightCount_ >= configuredCapacity)
         {
             setError(error, DirectLightingError::CapacityReached);
@@ -210,7 +227,19 @@ private:
             return invalidDirectLight;
         }
         const DirectLightHandle handle = nextHandle_++;
-        lights_[lightCount_++] = DirectLight{.handle = handle, .description = normalizeDescription(*description)};
+        try
+        {
+            lights_.push_back(DirectLight{.handle = handle, .description = normalizeDescription(*description)});
+            lightIndices_.emplace(handle, lightCount_);
+        }
+        catch (...)
+        {
+            if (lights_.size() > lightCount_)
+                lights_.pop_back();
+            setError(error, DirectLightingError::CapacityReached);
+            return invalidDirectLight;
+        }
+        ++lightCount_;
         rebuildSnapshotLocked();
         version_.fetch_add(1u, std::memory_order_release);
         setError(error, DirectLightingError::None);
@@ -277,11 +306,17 @@ private:
         }
         // Swap-remove: the registry is unordered; the snapshot is what
         // consumers read.
-        --lightCount_;
-        if (index != lightCount_)
+        const std::uint32_t lastIndex = lightCount_ - 1u;
+        lightIndices_.erase(handle);
+        if (index != lastIndex)
         {
-            lights_[index] = lights_[lightCount_];
+            lights_[index] = lights_[lastIndex];
+            const auto moved = lightIndices_.find(lights_[index].handle);
+            if (moved != lightIndices_.end())
+                moved->second = index;
         }
+        lights_.pop_back();
+        --lightCount_;
         rebuildSnapshotLocked();
         version_.fetch_add(1u, std::memory_order_release);
         return true;
@@ -329,17 +364,14 @@ private:
         return count;
     }
 
-    // Linear scan returning lightCount_ (the one-past slot) as "not found".
+    // The handle index keeps registry updates O(1) as the configured registry
+    // grows beyond the renderer's per-draw light limit.
     std::uint32_t findLightLocked(DirectLightHandle handle) const
     {
-        for (std::uint32_t index = 0; index < lightCount_; ++index)
-        {
-            if (lights_[index].handle == handle)
-            {
-                return index;
-            }
-        }
-        return lightCount_;
+        const auto found = lightIndices_.find(handle);
+        return found != lightIndices_.end() && found->second < lightCount_
+                ? found->second
+                : lightCount_;
     }
 
     // Rebuilds the renderer-facing snapshot: only enabled lights with
@@ -347,7 +379,7 @@ private:
     // descending priority then ascending handle for a stable order.
     void rebuildSnapshotLocked()
     {
-        snapshotCount_ = 0;
+        snapshot_.clear();
         for (std::uint32_t index = 0; index < lightCount_; ++index)
         {
             const DirectLight            &light       = lights_[index];
@@ -357,11 +389,12 @@ private:
                && (description.color[0] > 0.0f || description.color[1] > 0.0f || description.color[2] > 0.0f);
             if (description.enabled && hasRadiance)
             {
-                snapshot_[snapshotCount_++] = light;
+                snapshot_.push_back(light);
             }
         }
+        snapshotCount_ = static_cast<std::uint32_t>(snapshot_.size());
         std::sort(snapshot_.begin(),
-            snapshot_.begin() + snapshotCount_,
+            snapshot_.end(),
             [](const DirectLight &left, const DirectLight &right)
             {
                 if (left.description.priority != right.description.priority)
@@ -425,13 +458,15 @@ private:
     // Authoritative registry (swap-remove order) and the sorted renderer
     // view. nextHandle_ never reuses ids; version_ bumps on every mutation.
     mutable std::mutex                       mutex_;
-    std::array<DirectLight, maxDirectLights> lights_{};
-    std::array<DirectLight, maxDirectLights> snapshot_{};
+    std::vector<DirectLight>                 lights_;
+    std::vector<DirectLight>                 snapshot_;
+    std::unordered_map<DirectLightHandle, std::uint32_t> lightIndices_;
     std::uint32_t                            lightCount_    = 0;
     std::uint32_t                            snapshotCount_ = 0;
     DirectLightHandle                        nextHandle_    = 1;
     std::atomic<std::uint64_t>               version_{1};
     std::uint32_t                            configuredMaxLights_ = 0;
+    std::uint32_t                            configuredMaximumRegisteredLights_ = 256;
 };
 
 } // namespace

@@ -46,7 +46,7 @@ Note: the `render.vulkan` entries only work when the module was built with `ENGI
 | `source/vulkan_device.hpp/.cpp` | `VulkanDeviceContext`: instance/surface/device/VMA bring-up, device profile, async staging-upload queue. |
 | `source/vulkan_frames.hpp/.cpp` | `VulkanFrameScheduler`: frames-in-flight slots, fences/semaphores, GPU timestamp queries. |
 | `source/vulkan_pipeline.hpp/.cpp` | `VulkanPipeline`: render pass, descriptor layouts, PBR mesh pipeline, overlay pipeline, disk-backed pipeline cache. |
-| `source/vulkan_resources.hpp/.cpp` | `VulkanResources`: frame uniform ring, mesh buffers, texture images/samplers, material descriptor-set cache. |
+| `source/vulkan_resources.hpp/.cpp` | `VulkanResources`: frame uniform ring, mesh buffers, texture images/samplers, material descriptor-set cache with per-renderer capacity limits. |
 | `source/vulkan_swapchain.hpp/.cpp` | `VulkanSwapchain`: format/present-mode selection, image views, framebuffers, recreation, PPM readback. |
 | `shaders/mesh.vert`, `shaders/mesh.frag` | GLSL sources of the PBR pipeline (the fragment shader is the reference twin of the CPU shading in `render_shared.hpp`). |
 | `shaders/ui.vert`, `shaders/ui.frag` | GLSL sources of the overlay pipeline. |
@@ -115,7 +115,7 @@ The headless backend's frame is the same shape minus the GPU: `beginFrame` (re)a
 
 `createMesh` first runs `prepareMeshData` (render_data.cpp), which validates and normalizes the description into the module's canonical vertex: 11 interleaved floats (position, normal, color, uv; 44-byte stride) and UInt32 indices. Strided attribute-list input is repacked per semantic, missing normals are generated from triangle geometry, unaligned or 16-bit index data is converted, and already-canonical input is borrowed instead of copied. Every index is range-checked; malformed input fails with `RenderError::InvalidMesh` and never reaches a backend.
 
-`createTexture` runs `prepareTextureData`, which converts any supported pixel format/origin into tightly packed top-left RGBA8 (the canonical case is passed through). The Vulkan backend uploads via the async staging queue, generates the full mip chain by linear blits (when `[render] texture_mipmaps` is on and the device supports RGBA8 blitting), and creates a sampler from the requested filter/address/anisotropy; the headless backend keeps a float RGB copy with box-filtered CPU mips. A material without a map samples the neutral 1x1 stand-ins (white, or the flat normal (0.5, 0.5, 1.0)). The Vulkan backend caps at 256 textures and 256 material descriptor sets per renderer.
+`createTexture` runs `prepareTextureData`, which converts any supported pixel format/origin into tightly packed top-left RGBA8 (the canonical case is passed through). The Vulkan backend uploads via the async staging queue, generates the full mip chain by linear blits (when `[render] texture_mipmaps` is on and the device supports RGBA8 blitting), and creates a sampler from the requested filter/address/anisotropy; the headless backend keeps a float RGB copy with box-filtered CPU mips. A material without a map samples the neutral 1x1 stand-ins (white, or the flat normal (0.5, 0.5, 1.0)). The Vulkan backend defaults to 256 textures and 256 material descriptor sets per renderer; both ceilings are configurable from 1 to 65536. The persistent pipeline-cache disk budget defaults to 64 MiB and accepts 0 to disable disk loading/saving while retaining the in-memory Vulkan cache.
 
 ### Material model
 

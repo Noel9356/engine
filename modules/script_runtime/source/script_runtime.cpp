@@ -15,7 +15,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
 #include <algorithm>
@@ -28,13 +32,11 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <mutex>
 #include <random>
 #include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 extern "C"
 {
@@ -48,6 +50,13 @@ namespace engine::script_runtime
 {
 namespace
 {
+
+struct RuntimeInitializerRecord
+{
+    ScriptRuntimeInitializerHandle handle   = invalidScriptRuntimeInitializer;
+    ScriptRuntimeInitializer       callback = nullptr;
+    void                          *userData = nullptr;
+};
 
 // Writes an error code through an optional out-parameter.
 void setError(ScriptError *output, ScriptError value)
@@ -75,6 +84,110 @@ bool copyText(const std::string &text, char *output, std::uint32_t capacity, std
         return false;
     std::memcpy(output, text.c_str(), required);
     return true;
+}
+
+// Resolve a dotted global path without invoking Lua metamethods. The function
+// leaves the final value on the stack; missing or non-table namespace segments
+// restore the original stack top and return false.
+bool pushGlobalPath(lua_State *state, const char *name)
+{
+    if (state == nullptr || name == nullptr || name[0] == '\0')
+        return false;
+    const std::string_view path(name);
+    if (path.find('.') == std::string_view::npos)
+    {
+        lua_getglobal(state, name);
+        return true;
+    }
+
+    const int base = lua_gettop(state);
+    lua_pushglobaltable(state);
+    int parent = lua_absindex(state, -1);
+    std::size_t begin = 0;
+    while (begin < path.size())
+    {
+        const std::size_t separator = path.find('.', begin);
+        const std::size_t end = separator == std::string_view::npos ? path.size() : separator;
+        if (end == begin)
+        {
+            lua_settop(state, base);
+            return false;
+        }
+        lua_pushlstring(state, path.data() + begin, end - begin);
+        lua_rawget(state, parent);
+        if (separator == std::string_view::npos)
+        {
+            lua_remove(state, parent);
+            return true;
+        }
+        if (!lua_istable(state, -1))
+        {
+            lua_settop(state, base);
+            return false;
+        }
+        lua_remove(state, parent);
+        parent = lua_absindex(state, -1);
+        begin = separator + 1u;
+    }
+    lua_settop(state, base);
+    return false;
+}
+
+// Assign a value to a global path. Namespace tables are created lazily; an
+// existing non-table namespace is treated as a collision, not overwritten.
+bool setGlobalPath(lua_State *state, const char *name, int valueIndex)
+{
+    if (state == nullptr || name == nullptr || name[0] == '\0')
+        return false;
+    const std::string_view path(name);
+    valueIndex = lua_absindex(state, valueIndex);
+    if (path.find('.') == std::string_view::npos)
+    {
+        lua_pushvalue(state, valueIndex);
+        lua_setglobal(state, name);
+        return true;
+    }
+
+    const int base = lua_gettop(state);
+    lua_pushglobaltable(state);
+    int parent = lua_absindex(state, -1);
+    std::size_t begin = 0;
+    for (;;)
+    {
+        const std::size_t separator = path.find('.', begin);
+        const std::size_t end = separator == std::string_view::npos ? path.size() : separator;
+        if (end == begin)
+        {
+            lua_settop(state, base);
+            return false;
+        }
+        lua_pushlstring(state, path.data() + begin, end - begin);
+        if (separator == std::string_view::npos)
+        {
+            lua_pushvalue(state, valueIndex);
+            lua_rawset(state, parent);
+            lua_pop(state, 1);
+            return true;
+        }
+
+        lua_rawget(state, parent);
+        if (lua_isnil(state, -1))
+        {
+            lua_pop(state, 1);
+            lua_newtable(state);
+            lua_pushlstring(state, path.data() + begin, end - begin);
+            lua_pushvalue(state, -2);
+            lua_rawset(state, parent);
+        }
+        else if (!lua_istable(state, -1))
+        {
+            lua_settop(state, base);
+            return false;
+        }
+        lua_remove(state, parent);
+        parent = lua_absindex(state, -1);
+        begin = separator + 1u;
+    }
 }
 
 // One registered native function. The record is owned by the runtime so the
@@ -422,6 +535,9 @@ public:
         if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_native_results");
             value && *value >= 1 && *value <= 16)
             maximumNativeResults_ = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_runtime_initializers");
+            value && *value >= 1 && *value <= 4096)
+            maximumRuntimeInitializers_ = static_cast<std::size_t>(*value);
     }
 
     void start() override
@@ -440,6 +556,10 @@ public:
         {
             std::lock_guard lock(hostedMutex_);
             hostedMods_.clear();
+        }
+        {
+            std::lock_guard lock(initializersMutex_);
+            initializers_.clear();
         }
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
         std::lock_guard lock(runtimesMutex_);
@@ -630,10 +750,87 @@ private:
         ENGINE_SCRIPT_RUNTIME_BIND(getGlobalString, getGlobalStringImpl);
         ENGINE_SCRIPT_RUNTIME_BIND(collectGarbage, collectGarbageImpl);
         ENGINE_SCRIPT_RUNTIME_BIND(hostedRuntime, hostedRuntimeImpl);
+        ENGINE_SCRIPT_RUNTIME_BIND(registerRuntimeInitializer, registerRuntimeInitializerImpl);
+        ENGINE_SCRIPT_RUNTIME_BIND(unregisterRuntimeInitializer, unregisterRuntimeInitializerImpl);
 #undef ENGINE_SCRIPT_RUNTIME_BIND
     }
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
+    ScriptRuntimeInitializerHandle registerRuntimeInitializerImpl(
+        ScriptRuntimeInitializer initializer, void *userData)
+    {
+        if (initializer == nullptr)
+            return invalidScriptRuntimeInitializer;
+
+        std::lock_guard initializerLock(initializersMutex_);
+        if (initializers_.size() >= maximumRuntimeInitializers_
+            || nextInitializer_ == invalidScriptRuntimeInitializer
+            || nextInitializer_ == std::numeric_limits<ScriptRuntimeInitializerHandle>::max())
+            return invalidScriptRuntimeInitializer;
+
+        const ScriptRuntimeInitializerHandle handle = nextInitializer_++;
+        try
+        {
+            initializers_.push_back(RuntimeInitializerRecord{handle, initializer, userData});
+        }
+        catch (...)
+        {
+            return invalidScriptRuntimeInitializer;
+        }
+
+        // Apply newly registered bridges to existing runtimes as well. The
+        // initializer mutex serializes this with createRuntimeImpl so a
+        // runtime cannot miss an initializer or receive it twice.
+        std::vector<ScriptRuntimeHandle> handles;
+        try
+        {
+            std::lock_guard runtimeLock(runtimesMutex_);
+            handles.reserve(runtimes_.size());
+            for (const auto &[runtimeHandle, runtime] : runtimes_)
+            {
+                (void)runtime;
+                handles.push_back(runtimeHandle);
+            }
+        }
+        catch (...)
+        {
+            initializers_.pop_back();
+            return invalidScriptRuntimeInitializer;
+        }
+
+        for (const ScriptRuntimeHandle runtime : handles)
+        {
+            bool initialized = false;
+            try
+            {
+                initialized = initializer(userData, runtime);
+            }
+            catch (...)
+            {
+                initialized = false;
+            }
+            if (!initialized)
+            {
+                initializers_.pop_back();
+                return invalidScriptRuntimeInitializer;
+            }
+        }
+        return handle;
+    }
+
+    bool unregisterRuntimeInitializerImpl(ScriptRuntimeInitializerHandle handle)
+    {
+        if (handle == invalidScriptRuntimeInitializer)
+            return false;
+        std::lock_guard lock(initializersMutex_);
+        const auto found = std::find_if(initializers_.begin(), initializers_.end(),
+            [handle](const RuntimeInitializerRecord &record) { return record.handle == handle; });
+        if (found == initializers_.end())
+            return false;
+        initializers_.erase(found);
+        return true;
+    }
+
     std::shared_ptr<RuntimeRecord> findRuntime(ScriptRuntimeHandle handle)
     {
         std::lock_guard lock(runtimesMutex_);
@@ -655,16 +852,11 @@ private:
             setError(error, ScriptError::InvalidArgument);
             return invalidScriptRuntime;
         }
-        std::lock_guard lock(runtimesMutex_);
-        if (runtimes_.size() >= maximumRuntimes_)
-        {
-            setError(error, ScriptError::CapacityExceeded);
-            return invalidScriptRuntime;
-        }
-        auto runtime                    = std::make_shared<RuntimeRecord>(settings);
-        runtime->globalMemoryUsed       = &totalMemoryUsed_;
+        std::lock_guard initializerLock(initializersMutex_);
+        auto runtime = std::make_shared<RuntimeRecord>(settings);
+        runtime->globalMemoryUsed = &totalMemoryUsed_;
         runtime->globalMemoryLimitBytes = maximumTotalMemoryBytes_;
-        runtime->state                  = lua_newstate(luaAllocator, runtime.get(), luaHashSeed());
+        runtime->state = lua_newstate(luaAllocator, runtime.get(), luaHashSeed());
         if (runtime->state == nullptr)
         {
             setError(error, ScriptError::MemoryLimitExceeded);
@@ -672,10 +864,47 @@ private:
         }
         *static_cast<RuntimeRecord **>(lua_getextraspace(runtime->state)) = runtime.get();
         openLibraries(runtime->state, settings.enabledLibraries);
-        ScriptRuntimeHandle handle = nextHandle_++;
-        if (handle == invalidScriptRuntime)
+
+        ScriptRuntimeHandle handle = invalidScriptRuntime;
+        {
+            std::lock_guard runtimeLock(runtimesMutex_);
+            if (runtimes_.size() >= maximumRuntimes_ || nextHandle_ == invalidScriptRuntime
+                || nextHandle_ == std::numeric_limits<ScriptRuntimeHandle>::max())
+            {
+                setError(error, ScriptError::CapacityExceeded);
+                return invalidScriptRuntime;
+            }
             handle = nextHandle_++;
-        runtimes_.emplace(handle, std::move(runtime));
+            try
+            {
+                runtimes_.emplace(handle, runtime);
+            }
+            catch (...)
+            {
+                setError(error, ScriptError::MemoryLimitExceeded);
+                return invalidScriptRuntime;
+            }
+        }
+
+        for (const RuntimeInitializerRecord &initializer : initializers_)
+        {
+            bool initialized = false;
+            try
+            {
+                initialized = initializer.callback != nullptr && initializer.callback(initializer.userData, handle);
+            }
+            catch (...)
+            {
+                initialized = false;
+            }
+            if (!initialized)
+            {
+                std::lock_guard runtimeLock(runtimesMutex_);
+                runtimes_.erase(handle);
+                setError(error, ScriptError::RuntimeFailed);
+                return invalidScriptRuntime;
+            }
+        }
         return handle;
     }
 
@@ -814,7 +1043,11 @@ private:
         }
         std::lock_guard lock(runtime->mutex);
         lua_State      *state = runtime->state;
-        lua_getglobal(state, functionName);
+        if (!pushGlobalPath(state, functionName))
+        {
+            setError(error, ScriptError::TypeMismatch);
+            return copyText("global value is not a function", errorText, errorCapacity, errorRequired);
+        }
         if (!lua_isfunction(state, -1))
         {
             lua_pop(state, 1);
@@ -857,7 +1090,13 @@ private:
         NativeFunctionRecord *functionPointer = function.get();
         lua_pushlightuserdata(runtime->state, functionPointer);
         lua_pushcclosure(runtime->state, invokeNativeFunction, 1);
-        lua_setglobal(runtime->state, name);
+        const int functionIndex = lua_absindex(runtime->state, -1);
+        if (!setGlobalPath(runtime->state, name, functionIndex))
+        {
+            lua_pop(runtime->state, 1);
+            return false;
+        }
+        lua_pop(runtime->state, 1);
         runtime->nativeFunctions.push_back(std::move(function));
         return true;
     }
@@ -869,8 +1108,10 @@ private:
             return false;
         std::lock_guard lock(runtime->mutex);
         lua_pushnumber(runtime->state, value);
-        lua_setglobal(runtime->state, name);
-        return true;
+        const int valueIndex = lua_absindex(runtime->state, -1);
+        const bool assigned = setGlobalPath(runtime->state, name, valueIndex);
+        lua_pop(runtime->state, 1);
+        return assigned;
     }
 
     bool getGlobalNumberImpl(ScriptRuntimeHandle handle, const char *name, double *output)
@@ -879,7 +1120,8 @@ private:
         if (!runtime || name == nullptr || output == nullptr)
             return false;
         std::lock_guard lock(runtime->mutex);
-        lua_getglobal(runtime->state, name);
+        if (!pushGlobalPath(runtime->state, name))
+            return false;
         if (!lua_isnumber(runtime->state, -1))
         {
             lua_pop(runtime->state, 1);
@@ -897,8 +1139,10 @@ private:
             return false;
         std::lock_guard lock(runtime->mutex);
         lua_pushstring(runtime->state, value);
-        lua_setglobal(runtime->state, name);
-        return true;
+        const int valueIndex = lua_absindex(runtime->state, -1);
+        const bool assigned = setGlobalPath(runtime->state, name, valueIndex);
+        lua_pop(runtime->state, 1);
+        return assigned;
     }
 
     bool getGlobalStringImpl(
@@ -908,7 +1152,8 @@ private:
         if (!runtime || name == nullptr)
             return false;
         std::lock_guard lock(runtime->mutex);
-        lua_getglobal(runtime->state, name);
+        if (!pushGlobalPath(runtime->state, name))
+            return false;
         std::size_t length = 0;
         const char *value  = lua_tolstring(runtime->state, -1, &length);
         if (value == nullptr || length >= UINT32_MAX)
@@ -982,6 +1227,14 @@ private:
     {
         return false;
     }
+    ScriptRuntimeInitializerHandle registerRuntimeInitializerImpl(ScriptRuntimeInitializer, void *)
+    {
+        return invalidScriptRuntimeInitializer;
+    }
+    bool unregisterRuntimeInitializerImpl(ScriptRuntimeInitializerHandle)
+    {
+        return false;
+    }
 #endif
 
     ParticipantManifest      manifest_;
@@ -997,6 +1250,9 @@ private:
 
     std::mutex             hostedMutex_;
     std::vector<HostedMod> hostedMods_;
+    std::mutex initializersMutex_;
+    std::vector<RuntimeInitializerRecord> initializers_;
+    ScriptRuntimeInitializerHandle nextInitializer_ = 1;
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
     std::mutex                                                              runtimesMutex_;
     std::unordered_map<ScriptRuntimeHandle, std::shared_ptr<RuntimeRecord>> runtimes_;
@@ -1008,6 +1264,7 @@ private:
     std::atomic<std::uint64_t> totalMemoryUsed_{0};
     std::uint32_t              maximumNativeArguments_ = 32;
     std::uint32_t              maximumNativeResults_   = 16;
+    std::size_t                maximumRuntimeInitializers_ = 64;
 };
 
 } // namespace

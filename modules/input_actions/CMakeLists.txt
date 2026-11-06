@@ -11,11 +11,17 @@ add_library(
     engine_module_input_actions
     MODULE
     source/input_actions.cpp
+    source/lua_bridge.cpp
 )
 target_compile_definitions(
     engine_module_input_actions
     PRIVATE ENGINE_INPUT_ACTIONS_MODULE_VERSION="0.1.0"
 )
+target_include_directories(
+    engine_module_input_actions
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../script_runtime/include"
+)
+
 target_link_libraries(
     engine_module_input_actions
     PRIVATE engine_kernel

@@ -13,13 +13,20 @@
 namespace engine::script_runtime
 {
 
-// Script runtime capability ABI. Bump when the capability layout changes so
-// participants can reject mismatched providers. Version 2 added hostedRuntime().
-inline constexpr std::uint32_t scriptRuntimeCapabilityAbi = 2u;
+// Script runtime capability ABI. Version 2 added hostedRuntime(); version 3
+// adds module runtime initializers so optional modules can install Lua bridges.
+inline constexpr std::uint32_t scriptRuntimeCapabilityAbi = 3u;
 
 using ScriptRuntimeHandle = std::uint32_t;
 // Handles are never reused; 0 is reserved so "no runtime" stays unambiguous.
 inline constexpr ScriptRuntimeHandle invalidScriptRuntime = 0;
+
+using ScriptRuntimeInitializerHandle = std::uint64_t;
+inline constexpr ScriptRuntimeInitializerHandle invalidScriptRuntimeInitializer = 0;
+
+// Called once for every runtime, including runtimes created before registration.
+// Initializers may register native functions through ScriptRuntimeCapability.
+using ScriptRuntimeInitializer = bool (*)(void *userData, ScriptRuntimeHandle runtime) noexcept;
 
 // Coarse failure classification for execute/call functions. Their calling
 // convention: the boolean return reports usage problems (bad handles, bad
@@ -111,6 +118,12 @@ struct ScriptRuntimeCapability
     bool (*getGlobalString)(void *, ScriptRuntimeHandle, const char *name, char *output, std::uint32_t capacity,
         std::uint32_t *outRequired);
     bool (*collectGarbage)(void *, ScriptRuntimeHandle);
+
+    // Optional module hooks. Registering an initializer also applies it to
+    // runtimes that already exist; unregister prevents future applications.
+    ScriptRuntimeInitializerHandle (*registerRuntimeInitializer)(
+        void *, ScriptRuntimeInitializer initializer, void *userData);
+    bool (*unregisterRuntimeInitializer)(void *, ScriptRuntimeInitializerHandle initializer);
 };
 
 } // namespace engine::script_runtime

@@ -6,10 +6,11 @@ Every value is read once in `construct()`. A value outside its documented range 
 
 | Key | Type | Valid range (validated in `construct()`) | Default (`config.toml`) | Effect |
 | --- | --- | --- | --- | --- |
-| `direct_lighting.max_lights` | integer | `>= 0` (negative values are ignored); values above 32 are clamped to `maxDirectLights` = 32 | `0` | Upper bound on simultaneously existing lights enforced by `createLight` (excess creation fails with `CapacityReached`). `0` means "automatic": the hard maximum of 32 for `createLight`, and the device-dependent budget from `resolveProfile` (8, or 16/24/32 by Vulkan device class, further capped by the uniform-buffer budget). |
+| `direct_lighting.max_lights` | integer | `>= 0` (negative values are ignored); values above 32 are clamped to `maxDirectLights` = 32 | `0` | Legacy explicit cap on both registry creation and `resolveProfile`. `0` uses the separate registry capacity and the automatic device budget. |
+| `direct_lighting.maximum_registered_lights` | integer | 1..65536 | `256` | Maximum number of light descriptions retained by the module. The registry uses dynamically sized storage and O(1) handle lookup; renderers still clamp each draw to the shader/device budget. |
 
-Out-of-range / invalid values: a negative `max_lights` is not assigned, so the built-in default `0` (automatic) stays active; a value above 32 is clamped down to 32 rather than rejected. There is no warning message from the module itself for out-of-range values.
+Out-of-range / invalid values: a negative `max_lights` is ignored; a value above 32 is clamped to 32. An invalid `maximum_registered_lights` is ignored and leaves the default capacity of 256 active. There is no warning message from the module itself for out-of-range values.
 
 `module.toml` `config_keys` mirrors the keys above for documentation; unknown `direct_lighting.*` keys are silently accepted by the kernel.
 
-Note that the configured value caps the *registry* (`createLight` uses `max_lights == 0 ? 32 : max_lights`) and also acts as an upper bound on the `DirectLightingProfile::maxLights` that `resolveProfile` reports — an explicit value can lower the automatic budget, but never exceed the hardware-derived limit.
+The renderer-facing `maxDirectLights` constant remains 32 because the current shader/uniform layout has 32 slots. `maximum_registered_lights` controls the CPU-side registry and snapshot independently. An explicit non-zero `max_lights` retains the previous behavior by also limiting creation; leave it at `0` to use the larger registry capacity.

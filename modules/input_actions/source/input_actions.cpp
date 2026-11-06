@@ -6,9 +6,11 @@
 // controls so overlapping context stacks behave predictably.
 
 #include <engine/input_actions/capabilities.hpp>
+#include "lua_bridge.hpp"
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +18,8 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,7 +93,7 @@ struct ContextRecord
 
 // ModuleInterface implementation; state persists across frames in the device
 // snapshots and action states, and the module is safe only for single-thread
-// use (no internal locking).
+// use; capability entry points serialize access with an internal mutex.
 class InputActionsModule final : public ModuleInterface
 {
 public:
@@ -138,11 +142,32 @@ public:
         if (const auto value = context.configurationFloatingInSection("input_actions", "maximum_frame_delta_seconds");
             value && std::isfinite(*value) && *value > 0.0 && *value <= 1.0)
             maximumFrameDeltaSeconds_ = static_cast<float>(*value);
+
+        scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
+        if (scriptRuntime_ != nullptr && scriptRuntime_->abi == script_runtime::scriptRuntimeCapabilityAbi
+            && scriptRuntime_->registerRuntimeInitializer != nullptr)
+        {
+            luaBridgeContext_.scriptRuntime = scriptRuntime_;
+            luaBridgeContext_.inputActions = &capability_;
+            runtimeInitializer_ = scriptRuntime_->registerRuntimeInitializer(
+                scriptRuntime_->self, initializeInputActionsLuaRuntime, &luaBridgeContext_);
+        }
     }
     void start() override
     {}
     void stop() override
     {
+        if (scriptRuntime_ != nullptr && runtimeInitializer_ != script_runtime::invalidScriptRuntimeInitializer
+            && scriptRuntime_->unregisterRuntimeInitializer != nullptr)
+        {
+            scriptRuntime_->unregisterRuntimeInitializer(scriptRuntime_->self, runtimeInitializer_);
+            runtimeInitializer_ = script_runtime::invalidScriptRuntimeInitializer;
+        }
+        {
+            std::lock_guard bridgeLock(luaBridgeContext_.apiMutex);
+            luaBridgeContext_.inputActions = nullptr;
+        }
+        std::lock_guard lock(mutex_);
         // Drop all contexts and device state; the next frame rebuilds order.
         contexts_.clear();
         devices_.clear();
@@ -161,14 +186,19 @@ private:
             .name                 = "input_actions",
             .kind                 = ParticipantKind::EngineModule,
             .version              = "0.1.0",
-            .providedCapabilities = {"input_actions"}};
+            .providedCapabilities = {"input_actions"},
+            .optionalCapabilities = {"script_runtime"}};
     }
     void assignCapabilityPointers()
     {
         capability_.self = this;
 #define ENGINE_INPUT_ACTIONS_BIND(field, method)                                                                       \
     capability_.field = [](void *self, auto... args) -> decltype(auto)                                                 \
-    { return static_cast<InputActionsModule *>(self)->method(args...); }
+    {                                                                                                                   \
+        auto *module = static_cast<InputActionsModule *>(self);                                                         \
+        std::lock_guard lock(module->mutex_);                                                                           \
+        return module->method(args...);                                                                                 \
+    }
         ENGINE_INPUT_ACTIONS_BIND(createContext, createContextImpl);
         ENGINE_INPUT_ACTIONS_BIND(destroyContext, destroyContextImpl);
         ENGINE_INPUT_ACTIONS_BIND(setContextEnabled, setContextEnabledImpl);
@@ -199,10 +229,10 @@ private:
     {
         if (contexts_.size() >= maximumContexts_)
             return invalidInputContext;
+        if (nextContext_ == invalidInputContext || nextContext_ == std::numeric_limits<InputContextHandle>::max())
+            return invalidInputContext;
         auto context    = std::make_unique<ContextRecord>();
         context->handle = nextContext_++;
-        if (context->handle == invalidInputContext)
-            context->handle = nextContext_++;
         context->name = description != nullptr && description->name != nullptr ? description->name : "input_context";
         if (description != nullptr)
         {
@@ -257,10 +287,10 @@ private:
             if (action.name == description->name)
                 return invalidInputAction;
         }
+        if (nextAction_ == invalidInputAction || nextAction_ == std::numeric_limits<InputActionHandle>::max())
+            return invalidInputAction;
         ActionRecord action{};
         action.handle = nextAction_++;
-        if (action.handle == invalidInputAction)
-            action.handle = nextAction_++;
         action.name                    = description->name;
         action.type                    = description->type;
         action.threshold               = description->activationThreshold;
@@ -586,6 +616,11 @@ private:
     // capability calls, which the module assumes come from a single thread.
     ParticipantManifest                                                    manifest_;
     InputActionsCapability                                                 capability_{};
+    std::mutex                                                              mutex_;
+    script_runtime::ScriptRuntimeCapability                                *scriptRuntime_ = nullptr;
+    script_runtime::ScriptRuntimeInitializerHandle runtimeInitializer_
+        = script_runtime::invalidScriptRuntimeInitializer;
+    InputActionsLuaBridgeContext luaBridgeContext_{};
     std::unordered_map<InputContextHandle, std::unique_ptr<ContextRecord>> contexts_;
     std::unordered_map<std::uint32_t, DeviceState>                         devices_;
     std::vector<ContextRecord *>                                           orderedContexts_;
@@ -613,6 +648,7 @@ private:
 extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQueryModuleEntryTable()
 {
     static const char *const                    provided[] = {"input_actions"};
+    static const char *const                    optional[] = {"script_runtime"};
     static const engine::EngineModuleEntryTable entry      = {
         .abiVersion    = engine::engineModuleAbiVersion,
         .moduleName    = "input_actions",
@@ -622,8 +658,8 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
         .providedCapabilityCount = 1,
         .requiredCapabilities    = nullptr,
         .requiredCapabilityCount = 0,
-        .optionalCapabilities    = nullptr,
-        .optionalCapabilityCount = 0,
+        .optionalCapabilities    = optional,
+        .optionalCapabilityCount = 1,
         .declaredPermissions     = nullptr,
         .declaredPermissionCount = 0};
     return &entry;

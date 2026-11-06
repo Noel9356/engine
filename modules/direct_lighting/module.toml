@@ -3,4 +3,7 @@ version  = "0.1.0"
 provides = ["direct_lighting"]
 requires = []
 
-config_keys = ["direct_lighting.max_lights"]
+config_keys = [
+    "direct_lighting.max_lights",
+    "direct_lighting.maximum_registered_lights",
+]

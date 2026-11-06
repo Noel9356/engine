@@ -46,6 +46,10 @@ public:
     {
         cullBackFaces_ = enabled;
     }
+    void setPipelineCacheMaxBytes(std::size_t maximumBytes) noexcept
+    {
+        pipelineCacheMaxBytes_ = maximumBytes;
+    }
 
     // Creates render pass, descriptor layouts (set 0: frame uniform buffer;
     // set 1: five combined image samplers), pipeline layout, mesh pipeline,

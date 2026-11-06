@@ -1,4 +1,5 @@
 [camera]
+maximum_cameras     = 256
 mode                = "fly"
 move_speed          = 4.0
 look_speed          = 60.0

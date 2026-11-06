@@ -10,19 +10,20 @@ Entries: `createCamera`/`destroyCamera`, `setLookAt`, `setControlMode`, `setOrbi
 
 ## Provided / required / optional capabilities
 
-- `module.toml`: `provides = ["camera"]`, `requires = []`.
-- Entry table (bottom of `source/camera.cpp`): `providedCapabilities = {"camera"}`, `requiredCapabilities = nullptr` (count 0), `optionalCapabilities = nullptr` (count 0), `declaredPermissions = nullptr` (count 0).
+- `module.toml`: `provides = ["camera"]`, `requires = []`, `optional_capabilities = ["script_runtime"]`.
+- Entry table (bottom of `source/camera.cpp`): `providedCapabilities = {"camera"}`, `requiredCapabilities = nullptr` (count 0), `optionalCapabilities = {"script_runtime"}` (count 1), `declaredPermissions = nullptr` (count 0).
 
-The module has no capability dependencies and declares no permissions.
+The module optionally acquires `script_runtime` to register its Lua bridge. The camera capability remains usable without a scripting backend and declares no permissions.
 
 ## Architecture
 
 | File | Role |
 | --- | --- |
-| `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys` (26 keys). Read by kernel module discovery. |
+| `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys` (27 keys). Read by kernel module discovery. |
 | `config.toml` | Default values for the `[camera]` configuration section (see `configuration.md`). |
 | `include/engine/camera/capabilities.hpp` | Public capability types: ABI, handle/error enums, control modes and projection types, input/settings/parameters/view-state structs, function-pointer table. |
-| `source/camera.cpp` | The whole implementation: built-in defaults, per-camera record, configuration and hot-reload, control-mode integration, cached matrix building with glm, capability binding, module entry table. |
+| `source/camera.cpp` | The implementation: capacity-limited camera records, configuration and hot-reload, control-mode integration, cached matrix building with glm, optional Lua bridge registration, capability binding, module entry table. |
+| `source/lua_bridge.cpp`, `source/lua_bridge.hpp` | Optional `script_runtime` bridge for creation, destruction, pose/projection changes, per-frame updates, and eye-position queries. |
 
 ## How it works
 
@@ -31,6 +32,10 @@ The module has no capability dependencies and declares no permissions.
 - **Integration (`update`).** Input axes are clamped to [-1, 1] with non-finite values counting as 0; mouse deltas are magnitude-clamped to 10000 px; `deltaSeconds` is clamped to `maxDeltaSeconds` so a pause or debugger break cannot teleport the camera. Orbit mode treats the move axes as rotation input and zoom as radius change (floor 0.5), re-placing the eye on the orbit sphere after any change; fly mode moves along the view/right/ up directions and rotates from axis or mouse input, with yaw wrapped mod 360 and pitch clamped to `pitchLimitDegrees`.
 - **Matrix caching (`viewState`).** Each record caches the `ViewState` (column-major 4x4 view and projection, plus eye position). The view matrix rebuilds when the pose changed (`viewDirty`); the projection rebuilds when its inputs changed (`projectionDirty`) or when the viewport size differs from the cached one. A zero viewport falls back to aspect 1. `setProjection` applies changes on a copy and commits only when something actually changed, so equal calls do not invalidate the cache.
 - **Mode transitions.** Entering orbit from fly re-derives the orbit radius from the current pose; leaving orbit for fly intentionally keeps the pose.
+
+## Lua bridge
+
+When `script_runtime` is present, each Lua runtime receives the `camera.*` functions: `create`, `destroy`, `set_mode`, `look_at`, `set_projection`, `update`, `view_position`, and `set_control_settings`. Camera handles and viewport dimensions are numeric arguments; modes are `"fixed"`, `"orbit"`, or `"fly"`, and projection names are `"perspective"` or `"orthographic"`. The bridge serializes its own camera calls, but direct C++ capability calls must still obey the camera module's single-thread rule. The bridge is omitted when `script_runtime` is unavailable.
 
 ## Threading and lifetime
 

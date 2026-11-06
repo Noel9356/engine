@@ -26,6 +26,7 @@
 #include "vulkan_swapchain.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <glm/ext/vector_float4.hpp>
 #include <memory>
@@ -55,6 +56,7 @@ public:
         DevicePreference devicePreference, bool frustumCullingEnabled, bool backFaceCullingEnabled,
         bool gpuTimestampsEnabled, std::uint32_t instanceStreamMegabytes, bool textureMipmapsEnabled,
         float anisotropyLevel, std::uint32_t msaaSamples, bool srgbOutput,
+        std::uint32_t maximumTextures, std::uint32_t maximumMaterialSets, std::size_t pipelineCacheMaxBytes,
         window::VulkanSurfaceCapability *vulkanSurface, RenderError *error);
 
     ~VulkanBackend() override;

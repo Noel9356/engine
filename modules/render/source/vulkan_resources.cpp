@@ -42,12 +42,14 @@ namespace render
 // device cannot do them.
 bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t framesInFlight,
     VkDescriptorSetLayout frameSetLayout, VkDescriptorSetLayout materialSetLayout, bool mipmapsEnabled,
-    float anisotropyLevel)
+    float anisotropyLevel, std::uint32_t maximumTextures, std::uint32_t maximumMaterialSets)
 {
-    device_            = &device;
-    materialSetLayout_ = materialSetLayout;
-    mipmapsEnabled_    = mipmapsEnabled;
-    anisotropyLevel_   = anisotropyLevel;
+    device_                = &device;
+    materialSetLayout_     = materialSetLayout;
+    mipmapsEnabled_        = mipmapsEnabled;
+    anisotropyLevel_       = anisotropyLevel;
+    maximumTextures_       = std::max(1u, maximumTextures);
+    maximumMaterialSets_   = std::max(1u, maximumMaterialSets);
     VkFormatProperties rgba8Properties{};
     vkGetPhysicalDeviceFormatProperties(device.physicalDevice(), VK_FORMAT_R8G8B8A8_UNORM, &rgba8Properties);
     constexpr VkFormatFeatureFlags mipmapFeatures = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT
@@ -61,8 +63,8 @@ bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t fr
     const VkDevice vulkanDevice = device.device();
 
     meshes_.reserve(64);
-    textures_.reserve(maxTexturesPerRenderer);
-    materialSets_.reserve(maxMaterialSetsPerRenderer);
+    textures_.reserve(maximumTextures_);
+    materialSets_.reserve(maximumMaterialSets_);
 
     frameUniformBuffers_.resize(framesInFlight, VK_NULL_HANDLE);
     frameUniformAllocations_.resize(framesInFlight, nullptr);
@@ -90,12 +92,12 @@ bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t fr
         const VkDescriptorPoolSize poolSizes[2]
             = {{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = framesInFlight},
                 {.type               = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 5 * (maxMaterialSetsPerRenderer + 1)}};
+                    .descriptorCount = 5 * (maximumMaterialSets_ + 1)}};
         const VkDescriptorPoolCreateInfo poolInfo{
             .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext         = nullptr,
             .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-            .maxSets       = framesInFlight + maxMaterialSetsPerRenderer + 1,
+            .maxSets       = framesInFlight + maximumMaterialSets_ + 1,
             .poolSizeCount = 2,
             .pPoolSizes    = poolSizes,
         };
@@ -694,12 +696,12 @@ bool VulkanResources::createTexture(TextureHandle id, const TextureDescription &
         reportError(error, RenderError::InvalidTexture);
         return false;
     }
-    if (textures_.size() >= maxTexturesPerRenderer)
+    if (textures_.size() >= maximumTextures_)
     {
-        // Hard ceiling (vulkan_resources.hpp); no eviction - creation fails.
+        // Configured per-renderer ceiling; no eviction - creation fails.
         std::fprintf(stderr,
             "render module: renderer already holds %u textures; texture creation rejected\n",
-            (unsigned)maxTexturesPerRenderer);
+            (unsigned)maximumTextures_);
         reportError(error, RenderError::CreationFailed);
         return false;
     }
@@ -845,11 +847,11 @@ VkDescriptorSet VulkanResources::materialSet(const MeshMaterial &material)
         hasLastMaterialSet_ = true;
         return found->second;
     }
-    if (materialSets_.size() >= maxMaterialSetsPerRenderer)
+    if (materialSets_.size() >= maximumMaterialSets_)
     {
         std::fprintf(stderr,
             "render module: renderer already holds %u material sets; binding the neutral set\n",
-            (unsigned)maxMaterialSetsPerRenderer);
+            (unsigned)maximumMaterialSets_);
         return fullyNeutralSet_;
     }
 

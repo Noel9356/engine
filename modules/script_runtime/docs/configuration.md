@@ -14,6 +14,7 @@ Every value is read once in `construct()`. A value outside its documented range 
 | `maximum_native_functions` | integer | 1 – 4096 | `256` | Maximum registered native functions per runtime. |
 | `maximum_native_arguments` | integer | 1 – 32 | `32` | Maximum arguments a native function accepts from Lua. |
 | `maximum_native_results` | integer | 1 – 16 | `16` | Maximum results a native function may return to Lua. |
+| `maximum_runtime_initializers` | integer | 1 – 4096 | `64` | Maximum optional-module Lua bridge initializers that may be registered. Each initializer is applied to existing runtimes and to runtimes created later. |
 
 Notes:
 

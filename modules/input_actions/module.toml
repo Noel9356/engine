@@ -2,6 +2,7 @@ name     = "input_actions"
 version  = "0.1.0"
 provides = ["input_actions"]
 requires = []
+optional_capabilities = ["script_runtime"]
 
 config_keys = [
     "input_actions.maximum_contexts",

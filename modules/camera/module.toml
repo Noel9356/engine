@@ -2,9 +2,11 @@ name     = "camera"
 version  = "0.1.0"
 provides = ["camera"]
 requires = []
+optional_capabilities = ["script_runtime"]
 
 config_keys = [
     "camera.mode",
+    "camera.maximum_cameras",
     "camera.move_speed",
     "camera.look_speed",
     "camera.mouse_sensitivity",

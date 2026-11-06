@@ -29,11 +29,17 @@ add_library(
     engine_module_camera
     MODULE
     source/camera.cpp
+    source/lua_bridge.cpp
 )
 
 target_compile_definitions(
     engine_module_camera
     PRIVATE ENGINE_CAMERA_MODULE_VERSION="0.1.0"
+)
+
+target_include_directories(
+    engine_module_camera
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../script_runtime/include"
 )
 
 target_link_libraries(

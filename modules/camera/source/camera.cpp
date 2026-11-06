@@ -7,9 +7,11 @@
 // kernel publishes ConfigurationReloadedEvent.
 
 #include <engine/camera/capabilities.hpp>
+#include "lua_bridge.hpp"
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -153,7 +155,6 @@ public:
     CameraModule()
         : manifest_(makeManifest())
     {
-        cameras_.reserve(16);
         assignCapabilityPointers();
     }
 
@@ -167,6 +168,23 @@ public:
         // Reads [camera] defaults and subscribes for configuration hot-reload.
         context_ = &context;
         readConfiguration();
+        try
+        {
+            cameras_.reserve(maximumCameras_);
+        }
+        catch (...)
+        {
+            // Capacity remains enforced even when the initial reservation fails.
+        }
+        scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
+        if (scriptRuntime_ != nullptr && scriptRuntime_->abi == script_runtime::scriptRuntimeCapabilityAbi
+            && scriptRuntime_->registerRuntimeInitializer != nullptr)
+        {
+            luaBridgeContext_.scriptRuntime = scriptRuntime_;
+            luaBridgeContext_.camera = &capability_;
+            runtimeInitializer_ = scriptRuntime_->registerRuntimeInitializer(
+                scriptRuntime_->self, initializeCameraLuaRuntime, &luaBridgeContext_);
+        }
         reloadSubscription_ = context.eventBus()
                                   .channel<ConfigurationReloadedEvent>()
                                   .subscribe<CameraModule, &CameraModule::onConfigurationReloaded>(this);
@@ -177,7 +195,17 @@ public:
 
     void stop() override
     {
-        cameras_.clear();
+        if (scriptRuntime_ != nullptr && runtimeInitializer_ != script_runtime::invalidScriptRuntimeInitializer
+            && scriptRuntime_->unregisterRuntimeInitializer != nullptr)
+        {
+            scriptRuntime_->unregisterRuntimeInitializer(scriptRuntime_->self, runtimeInitializer_);
+            runtimeInitializer_ = script_runtime::invalidScriptRuntimeInitializer;
+        }
+        {
+            std::lock_guard bridgeLock(luaBridgeContext_.apiMutex);
+            luaBridgeContext_.camera = nullptr;
+            cameras_.clear();
+        }
         if (reloadSubscription_ != 0 && context_ != nullptr)
         {
             context_->eventBus().channel<ConfigurationReloadedEvent>().unsubscribe(reloadSubscription_);
@@ -220,6 +248,12 @@ private:
         defaultSprintMultiplier_    = defaultSprintMultiplier;
         defaultMaximumDeltaSeconds_ = defaultMaximumDeltaSeconds;
         defaultPitchLimitDegrees_   = defaultPitchLimitDegrees;
+        maximumCameras_             = 256;
+        if (const auto value = context.configurationIntegerInSection("camera", "maximum_cameras");
+            value && *value > 0 && *value <= 65536)
+        {
+            maximumCameras_ = static_cast<std::size_t>(*value);
+        }
 
         const std::optional<std::string> mode = context.configurationStringInSection("camera", "mode");
         if (mode.has_value())
@@ -326,7 +360,8 @@ private:
             .kind                 = ParticipantKind::EngineModule,
             .version              = "0.1.0",
             .providedCapabilities = {"camera"},
-            .requiredCapabilities = {}};
+            .requiredCapabilities = {},
+            .optionalCapabilities = {"script_runtime"}};
     }
 
     CameraRecord *recordFor(CameraHandle camera)
@@ -368,6 +403,11 @@ private:
     // target; the up vector is rejected when degenerate.
     CameraHandle createCameraImpl(const CameraParameters *parameters, CameraError *error)
     {
+        if (cameras_.size() >= maximumCameras_)
+        {
+            reportError(error, CameraError::CreationFailed);
+            return invalidCamera;
+        }
         CameraRecord record;
         record.id                 = nextCameraId_;
         record.mode               = defaultMode_;
@@ -932,6 +972,11 @@ private:
 
     ParticipantContext *context_            = nullptr;
     SubscriptionToken   reloadSubscription_ = 0;
+    script_runtime::ScriptRuntimeCapability *scriptRuntime_ = nullptr;
+    script_runtime::ScriptRuntimeInitializerHandle runtimeInitializer_
+        = script_runtime::invalidScriptRuntimeInitializer;
+    CameraLuaBridgeContext luaBridgeContext_{};
+    std::size_t maximumCameras_ = 256;
 
     // Live cameras; mutable because viewStateImpl rebuilds per-record caches
     // on const access.
@@ -973,6 +1018,7 @@ using camera::CameraModule;
 extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQueryModuleEntryTable()
 {
     static const char *const providedCapabilities[] = {"camera"};
+    static const char *const optionalCapabilities[] = {"script_runtime"};
 
     static const engine::EngineModuleEntryTable entry = {
         .abiVersion              = engine::engineModuleAbiVersion,
@@ -983,8 +1029,8 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
         .providedCapabilityCount = 1,
         .requiredCapabilities    = nullptr,
         .requiredCapabilityCount = 0,
-        .optionalCapabilities    = nullptr,
-        .optionalCapabilityCount = 0,
+        .optionalCapabilities    = optionalCapabilities,
+        .optionalCapabilityCount = 1,
         .declaredPermissions     = nullptr,
         .declaredPermissionCount = 0,
     };

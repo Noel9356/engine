@@ -197,8 +197,11 @@ private:
         vsync_                                   = true;
         validation_                              = false;
         maxFramesInFlight_                       = 2;
-        maxPendingUploads_                       = 64;
-        memoryBudgetUpdateIntervalFrames_        = 120;
+        maxPendingUploads_                = 64;
+        maximumTexturesPerRenderer_       = 256;
+        maximumMaterialSetsPerRenderer_   = 256;
+        pipelineCacheMaximumBytes_        = 64u * 1024u * 1024u;
+        memoryBudgetUpdateIntervalFrames_ = 120;
         configuredClearColor_                    = {0.0f, 0.0f, 0.0f, 1.0f};
         headlessTransformCacheBudgetBytes_       = 32u * 1024u * 1024u;
         frustumCulling_                          = true;
@@ -274,6 +277,38 @@ private:
                     static_cast<long long>(*pendingUploads));
             }
             maxPendingUploads_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*pendingUploads, 1, 4096));
+        }
+
+        const auto readResourceLimit = [&context](const char *key, std::uint32_t &destination)
+        {
+            const auto value = context.configurationIntegerInSection("render", key);
+            if (!value.has_value())
+            {
+                return;
+            }
+            if (*value < 1 || *value > 65536)
+            {
+                std::fprintf(stderr,
+                    "render module: clamping [render] %s %lld to range 1..65536\n",
+                    key,
+                    static_cast<long long>(*value));
+            }
+            destination = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*value, 1, 65536));
+        };
+        readResourceLimit("max_textures_per_renderer", maximumTexturesPerRenderer_);
+        readResourceLimit("max_material_sets_per_renderer", maximumMaterialSetsPerRenderer_);
+
+        if (const auto cacheMegabytes = context.configurationIntegerInSection("render", "pipeline_cache_mb");
+            cacheMegabytes.has_value())
+        {
+            if (*cacheMegabytes < 0 || *cacheMegabytes > 512)
+            {
+                std::fprintf(stderr,
+                    "render module: clamping [render] pipeline_cache_mb %lld to range 0..512\n",
+                    static_cast<long long>(*cacheMegabytes));
+            }
+            pipelineCacheMaximumBytes_
+                = static_cast<std::size_t>(std::clamp<std::int64_t>(*cacheMegabytes, 0, 512)) * 1024u * 1024u;
         }
 
         if (const auto interval
@@ -502,6 +537,9 @@ private:
                     anisotropyLevel_,
                     msaaSamples_,
                     srgbOutput_,
+                    maximumTexturesPerRenderer_,
+                    maximumMaterialSetsPerRenderer_,
+                    pipelineCacheMaximumBytes_,
                     vulkanSurface_,
                     error),
                 error);
@@ -1264,8 +1302,11 @@ private:
     bool              validation_        = false;
 
     std::uint32_t        maxFramesInFlight_                 = 2;
-    std::uint32_t        maxPendingUploads_                 = 64;
-    std::uint32_t        memoryBudgetUpdateIntervalFrames_  = 120;
+    std::uint32_t        maxPendingUploads_                = 64;
+    std::uint32_t        maximumTexturesPerRenderer_       = 256;
+    std::uint32_t        maximumMaterialSetsPerRenderer_   = 256;
+    std::size_t          pipelineCacheMaximumBytes_        = 64u * 1024u * 1024u;
+    std::uint32_t        memoryBudgetUpdateIntervalFrames_ = 120;
     std::array<float, 4> configuredClearColor_              = {0.0f, 0.0f, 0.0f, 1.0f};
     std::size_t          headlessTransformCacheBudgetBytes_ = 32u * 1024u * 1024u;
     bool                 frustumCulling_                    = true;

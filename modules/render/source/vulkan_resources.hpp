@@ -56,14 +56,6 @@ struct FrameUniformData
 };
 static_assert(sizeof(FrameUniformData) == 2224, "FrameData must match the shader's std140 layout");
 
-// Fixed per-renderer resource ceilings; both back off gracefully (creation
-// fails / neutral set binds) when exceeded. Declared config keys
-// render.max_textures_per_renderer / max_material_sets_per_renderer exist but
-// are not read yet, so these constants are the effective values.
-inline std::uint32_t maxTexturesPerRenderer = 256;
-
-inline std::uint32_t maxMaterialSetsPerRenderer = 256;
-
 class VulkanResources
 {
 public:
@@ -73,7 +65,8 @@ public:
     // framesInFlight + material sets, the frame-uniform descriptor sets, and
     // the neutral white/flat-normal stand-in textures.
     bool create(const VulkanDeviceContext &device, std::uint32_t framesInFlight, VkDescriptorSetLayout frameSetLayout,
-        VkDescriptorSetLayout materialSetLayout, bool mipmapsEnabled, float anisotropyLevel);
+        VkDescriptorSetLayout materialSetLayout, bool mipmapsEnabled, float anisotropyLevel,
+        std::uint32_t maximumTextures, std::uint32_t maximumMaterialSets);
 
     void destroy();
 
@@ -191,9 +184,11 @@ private:
     bool            hasLastMaterialSet_ = false;
 
     VkDescriptorSetLayout materialSetLayout_   = VK_NULL_HANDLE;
-    bool                  mipmapsEnabled_      = true;  // [render] texture_mipmaps
-    bool                  mipmapBlitSupported_ = false; // device supports linear blit on RGBA8
-    float                 anisotropyLevel_     = 1.0f;
+    bool                  mipmapsEnabled_          = true;  // [render] texture_mipmaps
+    bool                  mipmapBlitSupported_     = false; // device supports linear blit on RGBA8
+    float                 anisotropyLevel_         = 1.0f;
+    std::uint32_t         maximumTextures_         = 256;
+    std::uint32_t         maximumMaterialSets_     = 256;
 };
 
 } // namespace render

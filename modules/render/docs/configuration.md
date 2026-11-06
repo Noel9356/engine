@@ -28,8 +28,11 @@ All keys live in the `[render]` section. Default values are in `modules/render/c
 | `render.parallel_triangle_threshold` | integer | no range check (used as-is) | `4096` | Headless: triangles per draw before splitting across task-scheduler workers. Read at renderer creation. |
 | `render.pixels_per_lock_group` | integer | no range check (used as-is) | `16` | Headless: pixels per depth lock group during parallel rasterization. Read at renderer creation. |
 | `render.lod_min_triangles` | integer | no range check (used as-is; the headless backend's LOD generation uses a fixed 4096*3 index threshold) | `4096` | Headless: meshes below this triangle count get no LOD chain. Read at renderer creation. |
+| `render.max_textures_per_renderer` | integer | clamped to 1..65536 | `256` | Vulkan: maximum number of textures held by each renderer. Rejection occurs when the cap is reached; textures are not evicted automatically. |
+| `render.max_material_sets_per_renderer` | integer | clamped to 1..65536 | `256` | Vulkan: maximum number of cached material descriptor sets per renderer. The Vulkan descriptor pool is sized from this limit. |
+| `render.pipeline_cache_mb` | integer | clamped to 0..512 MiB | `64` | Vulkan: maximum persistent pipeline-cache data loaded from or saved to disk. `0` disables disk persistence while keeping the in-memory Vulkan cache active. |
 
-Formerly declared, now removed keys: `anisotropy_level`, `msaa_samples`, `srgb_output`, `z_prepass`, `max_textures_per_renderer`, `max_material_sets_per_renderer`, and `pipeline_cache_mb` used to be listed in `config_keys` although no reader existed anywhere in the module; they have been dropped from the declared surface. Setting them in a configuration is harmless (module sections are not known-key validated) and has no effect: the effective behavior stays the module's hard-coded values (anisotropy 1.0, `VK_SAMPLE_COUNT_1_BIT`, UNORM swapchain formats, no depth prepass, and the 256 texture / 256 material-set / 64 MiB pipeline-cache constants in the Vulkan backend).
+The remaining legacy keys `anisotropy_level`, `msaa_samples`, `srgb_output`, and `z_prepass` are not read by the current module and have no effect. The active resource and persistent pipeline-cache limits are configurable through the three keys documented above.
 
 ## Out-of-range and malformed values
 

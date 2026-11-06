@@ -6,6 +6,7 @@ Every value is read once per `readConfiguration()` (in `construct()`, and again 
 
 | Key | Type | Valid range (validated in `readConfiguration()`) | Default (`config.toml`) | Effect |
 | --- | --- | --- | --- | --- |
+| `camera.maximum_cameras` | integer | 1..65536 | `256` | Maximum simultaneously live camera records. Existing cameras survive a lower hot-reloaded limit; new cameras are refused until the live count drops below it. |
 | `camera.mode` | string | `"fly"`, `"orbit"`, or `"fixed"` | `"fly"` | Default `CameraControlMode` for newly created cameras. An unknown value prints `unknown [camera] mode ...` and falls back to `"fly"`. |
 | `camera.move_speed` | float | finite, `(0, 1.0e6]` | `4.0` | Fly-mode movement speed in units per second (`defaultMoveSpeed_`). |
 | `camera.look_speed` | float | finite, `(0, 3600]` | `60.0` | Rotation speed in degrees per second for axis-driven look input. |

@@ -27,4 +27,7 @@ config_keys = [
     "render.parallel_triangle_threshold",
     "render.pixels_per_lock_group",
     "render.lod_min_triangles",
+    "render.max_textures_per_renderer",
+    "render.max_material_sets_per_renderer",
+    "render.pipeline_cache_mb",
 ]

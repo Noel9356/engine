@@ -4,7 +4,7 @@ script_runtime gives the engine an embedded scripting layer: sandboxed Lua 5.5 r
 
 ## Capability surface
 
-The module provides the `script_runtime` capability (ABI 2, see `include/engine/script_runtime/capabilities.hpp`). All calls take the runtime handle first; handles are never reused and `0` (`invalidScriptRuntime`) means "none".
+The module provides the `script_runtime` capability (ABI 3, see `include/engine/script_runtime/capabilities.hpp`). All calls take the runtime handle first; handles are never reused and `0` (`invalidScriptRuntime`) means "none".
 
 | Function | Purpose |
 | --- | --- |
@@ -14,12 +14,18 @@ The module provides the `script_runtime` capability (ABI 2, see `include/engine/
 | `executeString(handle, source, chunkName, ...)` | Compiles and runs a source buffer (`"t"` text chunks only). |
 | `executeFile(handle, path, ...)` | Reads a file (size-checked against the script size limit) and runs it. |
 | `callFunction(handle, name, ...)` | Calls a global function with no arguments. |
-| `registerNativeFunction(handle, name, fn, userData)` | Exposes a C++ function to the script as a global. |
+| `registerNativeFunction(handle, name, fn, userData)` | Exposes a C++ function to the script as a global; dotted names create nested tables (for example, `audio.create_engine` becomes `audio.create_engine`). |
 | `setGlobalNumber/String`, `getGlobalNumber/String` | Primitive global exchange. |
 | `collectGarbage(handle)` | Forces a full Lua GC cycle. |
 | `hostedRuntime(modId)` | Handle of the runtime hosting a kernel script mod (v2). |
+| `registerRuntimeInitializer(fn, userData)` | Installs a module-owned bridge into every existing runtime and every runtime created later (v3). |
+| `unregisterRuntimeInitializer(handle)` | Stops applying that initializer to runtimes created later. Existing native functions remain registered until their runtime is destroyed. |
 
 **Error convention (important):** for `executeString`, `executeFile`, and `callFunction` the boolean return only reports usage problems (bad handle, bad argument, non-function global) or a truncated error text. Compilation and runtime failures are reported by setting the `ScriptError` out-parameter and filling `errorText`; with a large enough buffer the boolean return is `true` even for a failed script. Callers that need to detect script failures must check the `ScriptError` out-parameter.
+
+## Optional module bridges
+
+Modules may declare `script_runtime` as an optional capability and register a runtime initializer during `construct()`. The initializer receives each runtime handle and can register that module's native functions with `registerNativeFunction`. Registration also visits runtimes that already exist; future runtimes receive the initializer before `createRuntime()` returns. The configured `maximum_runtime_initializers` limits registered module hooks. Unregister the hook during module shutdown. It does not remove native functions already installed into existing Lua states, so bridge callbacks must remain safe for the lifetime of those states.
 
 ## Sandbox
 

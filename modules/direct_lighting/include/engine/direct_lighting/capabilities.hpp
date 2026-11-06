@@ -22,8 +22,9 @@ namespace direct_lighting
 inline constexpr std::uint32_t directLightingCapabilityAbi = 1u;
 using DirectLightHandle                                    = std::uint32_t;
 inline constexpr DirectLightHandle invalidDirectLight      = 0;
-// Hard upper bound on registered lights; also the size of the module's
-// internal storage arrays.
+// Renderer-facing per-draw limit used by the current fixed shader layout.
+// The module registry can hold more lights; copyLights may return a larger
+// sorted snapshot when maximum_registered_lights is configured above this cap.
 inline constexpr std::uint32_t maxDirectLights = 32u;
 
 // Light kinds: Directional shines from infinity along direction, Point

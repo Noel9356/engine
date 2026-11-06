@@ -11,4 +11,5 @@ config_keys = [
     "script_runtime.maximum_native_functions",
     "script_runtime.maximum_native_arguments",
     "script_runtime.maximum_native_results",
+    "script_runtime.maximum_runtime_initializers",
 ]
