@@ -119,6 +119,17 @@ struct HeadlessBackendOptions
     std::size_t    pixelsPerLockGroup        = 16;      // pixels per depth lock during parallel rasterization
     std::size_t    lodMinTriangles
         = 4096; // plumbed in but currently unused; LOD generation uses a fixed 4096*3-index threshold
+
+    // Draws with at most this many triangles are split by framebuffer bands
+    // instead of triangle ranges: full-screen, few-triangle draws (floor,
+    // sky dome) have no parallelism without it, and their per-pixel shading
+    // dominates the frame. 0 disables band splitting.
+    std::uint32_t bandSplitTriangleThreshold = 4096;
+
+    // A draw only pays for a band split when its projected screen extent is
+    // at least this fraction of the framebuffer height (small far geometry
+    // would spend more on the fork/join than it saves).
+    float bandSplitMinimumScreenFraction = 0.125f;
 };
 
 // All entry points are main-thread only. drawMeshInstances is implemented as
@@ -135,6 +146,8 @@ public:
           backFaceCullingEnabled_(options.backFaceCullingEnabled),
           lodEnabled_(options.lodEnabled),
           taskScheduler_(options.taskScheduler),
+          bandSplitTriangleThreshold_(options.bandSplitTriangleThreshold),
+          bandSplitMinimumScreenFraction_(options.bandSplitMinimumScreenFraction),
           window_(windowCapability)
     {
         directLights_.reserve(direct_lighting::maxDirectLights);
@@ -278,9 +291,12 @@ private:
     // Rasterizes triangles [triStart, triEnd) with per-pixel depth testing.
     // With useAtomicDepth the thread takes a spin lock per pixel group
     // (pixelLocks_) before the depth/color update; single-threaded callers
-    // pass false and no result target.
+    // pass false and no result target. yBandBegin/yBandEnd (exclusive begin,
+    // inclusive end) restrict pixel rows so several workers can share one
+    // draw by splitting the framebuffer; the defaults cover every row.
     void rasterizeTriangles(const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triStart,
-        std::size_t triEnd, bool useAtomicDepth, StripResult *outResult);
+        std::size_t triEnd, bool useAtomicDepth, StripResult *outResult, std::uint32_t yBandBegin = 0,
+        std::uint32_t yBandEnd = 0xFFFFFFFFu);
 
     void rasterizeMesh(const HeadlessMesh &mesh, const float *modelMatrix, const MeshMaterial &material);
 
@@ -298,9 +314,11 @@ private:
 
     window::WindowCapability *window_ = nullptr; // borrowed; provides surface pixel lock/unlock
 
-    std::uint32_t parallelTriangleThreshold_ = 4096;
-    std::size_t   pixelsPerLockGroup_        = 16;
-    std::size_t   lodMinTriangles_           = 4096;
+    std::uint32_t parallelTriangleThreshold_      = 4096;
+    std::uint32_t bandSplitTriangleThreshold_     = 4096;
+    float         bandSplitMinimumScreenFraction_ = 0.125f;
+    std::size_t   pixelsPerLockGroup_             = 16;
+    std::size_t   lodMinTriangles_                = 4096;
     // LOD angular-size cutoffs (boundsRadius/dist): pick coarser LOD as the value shrinks.
     std::array<float, 4> lodThresholds_ = {0.02f, 0.05f, 0.1f, 0.2f};
 
@@ -327,6 +345,11 @@ private:
     std::uint32_t             framebufferHeight = 0;
 
     std::vector<std::uint8_t> pixelLocks;
+
+    // Reused across parallel draws: per-worker partial rasterized-triangle
+    // counts. Member (not local) so a frame with many parallel draws does
+    // not hit the allocator 60+ times (allocation spikes land in the P99).
+    std::vector<StripResult> rasterResultScratch_;
 
     std::unordered_map<MeshHandle, HeadlessMesh> meshes;
 

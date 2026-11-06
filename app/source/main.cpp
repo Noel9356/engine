@@ -1137,7 +1137,13 @@ int main(int argc, char **argv)
 
     bool                                screenshotTaken = false;
     std::array<window::WindowEvent, 64> eventBuffer{};
-    engine::FramePacer framePacer({.targetFrameRateHz = static_cast<double>(std::max<std::int64_t>(maxFps, 0))});
+    // Paced runs sleep to just before the deadline and spin the remainder:
+    // OS sleep granularity (1-4 ms Windows, ~50 us timer slack on Linux)
+    // otherwise lands directly in the frame-time P99. Uncapped runs skip
+    // pacing entirely, so the spin window costs nothing there.
+    const std::uint32_t pacerSpinWindowMicroseconds = maxFps > 0 ? 1200u : 0u;
+    engine::FramePacer framePacer({.targetFrameRateHz = static_cast<double>(std::max<std::int64_t>(maxFps, 0)),
+        .spinWindowMicroseconds = pacerSpinWindowMicroseconds});
     framePacer.reset();
     demo::FrameTimeRecorder frameTimeRecorder;
 

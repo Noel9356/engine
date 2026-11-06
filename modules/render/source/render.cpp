@@ -570,6 +570,8 @@ private:
                 context_->configurationIntegerInSection("render", "pixels_per_lock_group").value_or(16));
             headlessOptions.lodMinTriangles = static_cast<std::size_t>(
                 context_->configurationIntegerInSection("render", "lod_min_triangles").value_or(4096));
+            headlessOptions.bandSplitTriangleThreshold = static_cast<std::uint32_t>(
+                context_->configurationIntegerInSection("render", "headless_band_split_triangles").value_or(4096));
             return registerRenderer(Backend::Headless,
                 surface,
                 std::make_unique<HeadlessBackend>(surface, window_, headlessOptions),

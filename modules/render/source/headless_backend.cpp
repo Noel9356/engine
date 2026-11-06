@@ -267,7 +267,8 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
 }
 
 // Presents: copies the CPU raster into the window surface's locked pixel
-// buffer (row-by-row because strides may differ).
+// buffer. Matching full-surface strides (the common case) move the frame in
+// one memcpy; mismatching strides fall back to a row-by-row copy.
 void HeadlessBackend::endFrame()
 {
     window::SurfacePixels pixels;
@@ -277,11 +278,19 @@ void HeadlessBackend::endFrame()
     }
     const std::uint32_t rows    = std::min(framebufferHeight, pixels.height);
     const std::uint32_t columns = std::min(framebufferWidth, pixels.width);
-    for (std::uint32_t y = 0; y < rows; ++y)
+    if (rows == framebufferHeight && columns == framebufferWidth
+        && pixels.strideBytes == static_cast<std::size_t>(framebufferWidth) * 4u)
     {
-        std::memcpy(pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes,
-            color.data() + static_cast<std::size_t>(y) * framebufferWidth * 4,
-            static_cast<std::size_t>(columns) * 4);
+        std::memcpy(pixels.rgba, color.data(), static_cast<std::size_t>(rows) * pixels.strideBytes);
+    }
+    else
+    {
+        for (std::uint32_t y = 0; y < rows; ++y)
+        {
+            std::memcpy(pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes,
+                color.data() + static_cast<std::size_t>(y) * framebufferWidth * 4,
+                static_cast<std::size_t>(columns) * 4);
+        }
     }
     window_->unlockSurfacePixels(window_->self, surface_);
     ++statistics_.framesRendered;
@@ -523,13 +532,147 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
     const std::uint32_t workers = parallelWorkerCount();
     const bool useParallel      = workers >= 2u && triCount >= parallelTriangleThreshold_ && taskScheduler_ != nullptr
                                && taskScheduler_->isRunning();
+
+    // Band splitting: draws with few triangles but large screen coverage
+    // (floor, sky dome) cannot be parallelized by triangle ranges - there is
+    // nothing to split. Their cost is per-pixel shading, so split the draw's
+    // projected row range into one band per worker; each worker scans the
+    // (small) triangle list and rasterizes only its band's rows. Splitting
+    // the extent (not the whole framebuffer) keeps the bands balanced when
+    // the draw covers only part of the screen - a floor that spans the
+    // bottom half would otherwise hand one worker every shaded pixel. Cheap
+    // far geometry is excluded by the screen-extent test.
+    bool  useBandParallel = false;
+    float extentMinY      = 0.0f;
+    float extentMaxY      = 0.0f;
+    if (!useParallel && workers >= 2u && triCount >= 2u && bandSplitTriangleThreshold_ != 0
+        && triCount <= bandSplitTriangleThreshold_ && setup.useTransformCache && taskScheduler_ != nullptr
+        && taskScheduler_->isRunning())
+    {
+        // Projected screen-space row extent from the cached clip positions
+        // (band candidates have few triangles, so this scan is cheap). The
+        // scan mirrors the rasterizer's near-plane clip exactly - including
+        // the interpolated crossings - so every row a clipped triangle can
+        // touch lands inside the band range. Skipping the crossings would
+        // under-report the extent for geometry near the camera and leave
+        // rows un-rasterized.
+        float minY = std::numeric_limits<float>::max();
+        float maxY = std::numeric_limits<float>::lowest();
+        bool  any  = false;
+        const auto includeScreenY = [&](float clipY, float clipW)
+        {
+            const float screenY
+                = (1.0f - (clipY / clipW * 0.5f + 0.5f)) * static_cast<float>(framebufferHeight);
+            if (!std::isfinite(screenY))
+            {
+                // Degenerate projection (w at/near zero): the rasterizer's
+                // bounding-box clamp keeps it inside the framebuffer, so
+                // treat the extent as the full height.
+                minY = 0.0f;
+                maxY = static_cast<float>(framebufferHeight);
+            }
+            else
+            {
+                minY = std::min(minY, screenY);
+                maxY = std::max(maxY, screenY);
+            }
+            any = true;
+        };
+        for (std::size_t index = 0; index + 2 < activeIndices->size(); index += 3)
+        {
+            glm::vec4 cornerClip[3];
+            bool      cornerValid[3];
+            for (std::uint32_t corner = 0; corner < 3; ++corner)
+            {
+                const std::uint32_t vertexIndex = (*activeIndices)[index + corner];
+                cornerValid[corner]             = vertexIndex < setup.vertexCount;
+                cornerClip[corner]              = cornerValid[corner] ? transformedVertices_[vertexIndex].clip : glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+            }
+            for (std::uint32_t corner = 0; corner < 3; ++corner)
+            {
+                if (!cornerValid[corner])
+                    continue;
+                const glm::vec4 &clip    = cornerClip[corner];
+                const float      dist    = clip.w + clip.z;
+                // Same inclusion rule as the rasterizer's clip walk: a corner
+                // at dist >= 0 survives clipping and is projected (whatever
+                // its w - degenerate values degrade to a full-height extent).
+                if (dist >= 0.0f)
+                {
+                    includeScreenY(clip.y, clip.w);
+                }
+                // Edge to the next corner: if it crosses the near plane, the
+                // interpolated crossing can project outside the surviving
+                // corners' hull (geometry close to the camera), so it must
+                // widen the extent.
+                const std::uint32_t next = (corner + 1u) % 3u;
+                if (!cornerValid[next])
+                    continue;
+                const glm::vec4 &nextClip = cornerClip[next];
+                const float      nextDist = nextClip.w + nextClip.z;
+                if ((dist >= 0.0f) != (nextDist >= 0.0f))
+                {
+                    const float t         = dist / (dist - nextDist);
+                    const float crossingY = glm::mix(clip.y, nextClip.y, t);
+                    const float crossingW = glm::mix(clip.w, nextClip.w, t);
+                    includeScreenY(crossingY, crossingW);
+                }
+            }
+        }
+        if (any)
+        {
+            const float extent = maxY - minY;
+            useBandParallel    = extent >= static_cast<float>(framebufferHeight) * bandSplitMinimumScreenFraction_;
+            extentMinY         = minY;
+            extentMaxY         = maxY;
+        }
+    }
+    if (useBandParallel)
+    {
+        if (rasterResultScratch_.size() < workers)
+            rasterResultScratch_.resize(workers);
+        TaskGroup group;
+        // Band boundaries over the projected extent, rounded outward so no
+        // coverage falls between bands; a short extent yields empty bands
+        // (their row loop starts past its end and exits immediately).
+        const std::uint32_t bandTop    = std::min<std::uint32_t>(framebufferHeight - 1u,
+            static_cast<std::uint32_t>(std::max(0.0f, std::floor(extentMinY))));
+        const std::uint32_t bandBottom = std::min(framebufferHeight - 1u,
+            static_cast<std::uint32_t>(std::ceil(extentMaxY)));
+        const std::uint32_t extentRows = bandBottom >= bandTop ? bandBottom - bandTop + 1u : 1u;
+        const std::uint32_t bandRows   = std::max<std::uint32_t>(1u, extentRows / workers);
+        for (std::uint32_t workerIndex = 1; workerIndex < workers; ++workerIndex)
+        {
+            const std::uint32_t begin = std::min<std::uint32_t>(framebufferHeight, bandTop + workerIndex * bandRows);
+            const std::uint32_t end   = workerIndex + 1u < workers ? std::min<std::uint32_t>(framebufferHeight, begin + bandRows)
+                                                                   : bandBottom + 1u;
+            taskScheduler_->schedule(group,
+                [this, &meshData, &setup, &triCount, begin, end, workerIndex]()
+                {
+                    rasterizeTriangles(meshData, setup, 0, triCount, true, &rasterResultScratch_[workerIndex], begin, end - 1u);
+                });
+        }
+        rasterizeTriangles(meshData, setup, 0, triCount, true, &rasterResultScratch_[0], bandTop,
+            std::min<std::uint32_t>(bandBottom, bandTop + bandRows - 1u));
+        group.wait(*taskScheduler_);
+        std::uint64_t totalRasterized = 0;
+        for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
+            totalRasterized += rasterResultScratch_[workerIndex].trianglesRasterized;
+        statistics_.trianglesRasterized += totalRasterized;
+        return;
+    }
+
     if (!useParallel)
     {
         rasterizeTriangles(meshData, setup, 0, triCount, false, nullptr);
         return;
     }
 
-    std::vector<StripResult> results(workers);
+    if (rasterResultScratch_.size() < workers)
+        rasterResultScratch_.resize(workers);
+    std::vector<StripResult> &results = rasterResultScratch_;
+    for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
+        results[workerIndex].trianglesRasterized = 0;
     const std::size_t        baseChunk = triCount / workers;
     const std::size_t        remainder = triCount % workers;
     std::size_t              triCursor = 0;
@@ -985,7 +1128,7 @@ void HeadlessBackend::rasterizeMesh(const HeadlessMesh &mesh, const float *model
 // bounding box testing barycentric coverage with edge-function increments.
 // Depth and color writes go through the pixel-group spin lock when parallel.
 void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triStart,
-    std::size_t triEnd, bool useAtomicDepth, StripResult *outResult)
+    std::size_t triEnd, bool useAtomicDepth, StripResult *outResult, std::uint32_t yBandBegin, std::uint32_t yBandEnd)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
@@ -996,6 +1139,9 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
         triStart = triEnd;
     if (triEnd > triangleCount)
         triEnd = triangleCount;
+    if (yBandBegin >= framebufferHeight)
+        return; // this band starts past the framebuffer: nothing to do
+    yBandEnd = std::min(yBandEnd, framebufferHeight - 1u);
 
     const glm::mat4  &model              = setup.model;
     const glm::mat4  &viewProjection     = setup.viewProjection;
@@ -1208,8 +1354,13 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
 
             const std::int32_t firstX = static_cast<std::int32_t>(minX);
             const std::int32_t lastX  = static_cast<std::int32_t>(maxX);
-            const std::int32_t firstY = static_cast<std::int32_t>(minY);
-            const std::int32_t lastY  = static_cast<std::int32_t>(maxY);
+            // Band restriction: clamp the row range to this worker's band.
+            const std::int32_t firstY = std::max<std::int32_t>(static_cast<std::int32_t>(minY), static_cast<std::int32_t>(yBandBegin));
+            const std::int32_t lastY  = std::min<std::int32_t>(static_cast<std::int32_t>(maxY), static_cast<std::int32_t>(yBandEnd));
+            if (firstX > lastX || firstY > lastY)
+            {
+                continue;
+            }
 
             const float inverseWA = 1.0f / clipW[cornerA];
             const float inverseWB = 1.0f / clipW[cornerB];

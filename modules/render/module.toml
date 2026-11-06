@@ -25,6 +25,7 @@ config_keys = [
     "render.instance_stream_mb",
     "render.texture_mipmaps",
     "render.parallel_triangle_threshold",
+    "render.headless_band_split_triangles",
     "render.pixels_per_lock_group",
     "render.lod_min_triangles",
     "render.max_textures_per_renderer",

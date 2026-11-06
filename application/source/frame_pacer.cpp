@@ -13,6 +13,10 @@
 #include <stdexcept>
 #include <thread>
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 #if defined(_WIN32)
 // Paced frames quantize to the OS scheduler tick; without a raised timer
 // resolution Sleep(1) on Windows can overshoot by up to ~15.6 ms, which lands
@@ -41,6 +45,18 @@ void FramePacer::setOptions(FramePacerOptions options)
         throw std::invalid_argument("target frame rate must be finite and non-negative");
     options.targetFrameRateHz      = std::min(options.targetFrameRateHz, 1000.0);
     options.spinWindowMicroseconds = std::min(options.spinWindowMicroseconds, 5000u);
+
+#if defined(__linux__)
+    // Linux default timer slack is 50 us: the kernel may delay every
+    // timed sleep by up to that much, which lands straight in the
+    // frame-time P99 of paced runs. Ask for the minimum slack (1 ns);
+    // best effort - failures just keep the default.
+    if (options.targetFrameRateHz > 0.0 && !timerSlackReduced_)
+    {
+        if (prctl(PR_SET_TIMERSLACK, 1ul, 0ul, 0ul, 0ul) == 0)
+            timerSlackReduced_ = true;
+    }
+#endif
 
 #if defined(_WIN32)
     const bool wantHighResolution = options.targetFrameRateHz > 0.0;
@@ -104,8 +120,10 @@ FramePacingSample FramePacer::pace(PerformanceProfiler *profiler)
     const auto sleepDeadline = nextDeadline_ - std::min<Clock::duration>(spinWindow, period / 2);
     if (Clock::now() < sleepDeadline)
         std::this_thread::sleep_until(sleepDeadline);
+    // Spin the remaining window with PAUSE hints: tighter than yield
+    // (no scheduler round trip) and keeps the core's pipelines quiet.
     while (Clock::now() < nextDeadline_ && options_.spinWindowMicroseconds != 0)
-        std::this_thread::yield();
+        engineSpinWaitHint();
 
     const auto finished = Clock::now();
     sample.paced        = true;

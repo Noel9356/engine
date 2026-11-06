@@ -56,6 +56,7 @@ private:
     Clock::time_point nextDeadline_{};
     bool              initialized_           = false;
     bool              timerResolutionRaised_ = false; // Windows only; see frame_pacer.cpp
+    bool              timerSlackReduced_     = false; // Linux only; see frame_pacer.cpp
 };
 
 } // namespace engine

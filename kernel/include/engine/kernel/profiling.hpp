@@ -14,6 +14,38 @@
 #include <cstddef>
 #include <cstdint>
 
+#if defined(_MSC_VER)
+#include <intrin.h> // _mm_pause
+#endif
+
+// Spin-wait hint: PAUSE on x86/x86_64 (with a plain compiler barrier
+// elsewhere). PAUSE keeps spin loops from wasting issue slots and memory-
+// order buffers, and measurably lowers wake latency versus a bare yield
+// loop in fork/join wait paths.
+inline void engineSpinWaitHint() noexcept
+{
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_ia32_pause();
+#elif defined(_MSC_VER)
+    _mm_pause();
+#else
+    volatile int spinSink = 0;
+    (void)spinSink;
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__)
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_arm_yield();
+#else
+    volatile int spinSink = 0;
+    (void)spinSink;
+#endif
+#else
+    volatile int spinSink = 0;
+    (void)spinSink;
+#endif
+}
+
 namespace engine
 {
 
