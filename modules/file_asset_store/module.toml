@@ -1,0 +1,20 @@
+name     = "file_asset_store"
+version  = "0.3.0"
+provides = ["file_asset_store"]
+requires = []
+
+config_keys = [
+    "file_asset_store.maximum_file_size_mb",
+    "file_asset_store.maximum_cached_assets",
+    "file_asset_store.maximum_pending_requests",
+    "file_asset_store.maximum_resident_memory_mb",
+    "file_asset_store.maximum_inflight_memory_mb",
+    "file_asset_store.maximum_path_bytes",
+    "file_asset_store.root_directory",
+    "file_asset_store.cooked_catalog_path",
+    "file_asset_store.cooked_object_directory",
+    "file_asset_store.verify_cooked_asset_hashes",
+    "file_asset_store.default_async_priority",
+    "file_asset_store.cache_unreferenced_assets",
+    "file_asset_store.cache_eviction_batch_mb",
+]

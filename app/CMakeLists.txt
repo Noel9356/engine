@@ -1,0 +1,22 @@
+engine_add_application(
+    demo
+    SOURCES
+    source/main.cpp
+    source/demo/diagnostics.cpp
+    source/demo/geometry.cpp
+    source/demo/menu_bridge.cpp
+    source/demo/options.cpp
+    CAPABILITIES
+    window
+    render
+    render_graph
+    pbr
+    camera
+    models
+    ui
+    script_runtime
+    LIBRARIES
+    engine_dep_glm
+    ASSET_DIRECTORY
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+)

@@ -1,0 +1,8 @@
+[ecs]
+maximum_worlds = 64
+
+[entity_world]
+initial_entity_capacity = 256
+maximum_entities        = 1000000
+maximum_hierarchy_depth = 256
+maximum_worlds          = 1024

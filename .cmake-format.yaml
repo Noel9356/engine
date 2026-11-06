@@ -1,0 +1,13 @@
+format:
+    tab_size: 4
+    use_tabchars: false
+
+    line_width: 120
+
+    dangle_parens: true
+    dangle_align: prefix
+
+    max_pargs_hwrap: 1
+    max_subgroups_hwrap: 1
+    max_rows_cmdline: 1
+    max_lines_hwrap: 1

@@ -1,0 +1,27 @@
+[camera]
+mode                = "fly"
+move_speed          = 4.0
+look_speed          = 60.0
+mouse_sensitivity   = 0.11
+fov_degrees         = 55.0
+near_z              = 0.1
+far_z               = 100.0
+orthographic_height = 10.0
+orbit_distance      = 6.0
+orbit_zoom_speed    = 4.0
+sprint_multiplier   = 3.0
+max_delta_seconds   = 0.25
+pitch_limit_degrees = 89.0
+move_forward_key    = "w"
+move_backward_key   = "s"
+move_left_key       = "a"
+move_right_key      = "d"
+move_up_key         = "space"
+move_down_key       = "left_control"
+orbit_zoom_in_key   = "space"
+orbit_zoom_out_key  = "left_control"
+sprint_key          = "left_shift"
+look_left_key       = "left"
+look_right_key      = "right"
+look_up_key         = "up"
+look_down_key       = "down"

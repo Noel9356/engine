@@ -1,0 +1,45 @@
+
+
+
+[engine]
+worker_count            = 0
+max_worker_count        = 32
+queue_source_fairness   = true
+priority_aging_ms       = 150
+max_outstanding_tasks   = 65536
+max_fps                 = 0
+max_frame_delta_seconds = 0.25
+
+[render]
+backend                              = "auto"
+device                               = "auto"
+vsync                                = false
+validation                           = false
+max_frames_in_flight                 = 3
+max_pending_uploads                  = 128
+memory_budget_update_interval_frames = 120
+frustum_culling                      = true
+gpu_timestamps_enabled               = false
+draw_sort_mode                       = "material_mesh"
+draw_sort_min_commands               = 2
+instance_batching                    = false
+instance_batch_min_count             = 4
+instance_stream_mb                   = 4
+texture_mipmaps                      = false
+headless_transform_cache_mb          = 64
+
+[render_graph]
+quality                 = "auto"
+transient_budget_mb     = 1024
+transient_aliasing      = true
+plan_cache_entries      = 0
+plan_cache_max_elements = 65536
+
+[file_asset_store]
+cache_unreferenced_assets  = true
+cache_eviction_batch_mb    = 128
+default_async_priority     = "low"
+maximum_cached_assets      = 8192
+maximum_pending_requests   = 8192
+maximum_resident_memory_mb = 2048
+maximum_inflight_memory_mb = 512

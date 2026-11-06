@@ -1,0 +1,33 @@
+name     = "camera"
+version  = "0.1.0"
+provides = ["camera"]
+requires = []
+
+config_keys = [
+    "camera.mode",
+    "camera.move_speed",
+    "camera.look_speed",
+    "camera.mouse_sensitivity",
+    "camera.fov_degrees",
+    "camera.near_z",
+    "camera.far_z",
+    "camera.orthographic_height",
+    "camera.orbit_distance",
+    "camera.orbit_zoom_speed",
+    "camera.sprint_multiplier",
+    "camera.max_delta_seconds",
+    "camera.pitch_limit_degrees",
+    "camera.move_forward_key",
+    "camera.move_backward_key",
+    "camera.move_left_key",
+    "camera.move_right_key",
+    "camera.move_up_key",
+    "camera.move_down_key",
+    "camera.orbit_zoom_in_key",
+    "camera.orbit_zoom_out_key",
+    "camera.sprint_key",
+    "camera.look_left_key",
+    "camera.look_right_key",
+    "camera.look_up_key",
+    "camera.look_down_key",
+]

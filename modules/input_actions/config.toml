@@ -1,0 +1,9 @@
+[input_actions]
+maximum_contexts            = 64
+maximum_actions_per_context = 1024
+maximum_bindings_per_action = 64
+maximum_devices             = 32
+maximum_controls_per_device = 4096
+default_deadzone            = 0.15
+maximum_smoothing_seconds   = 2.0
+maximum_frame_delta_seconds = 0.25

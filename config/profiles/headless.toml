@@ -1,0 +1,40 @@
+
+
+
+[engine]
+
+max_worker_count        = 16
+queue_source_fairness   = true
+priority_aging_ms       = 250
+worker_count            = 0
+max_fps                 = 0
+max_frame_delta_seconds = 0.25
+
+[render]
+backend                              = "headless"
+vsync                                = false
+validation                           = false
+max_pending_uploads                  = 16
+memory_budget_update_interval_frames = 120
+frustum_culling                      = true
+gpu_timestamps_enabled               = false
+draw_sort_mode                       = "mesh_material"
+draw_sort_min_commands               = 2
+instance_batching                    = true
+instance_batch_min_count             = 2
+instance_stream_mb                   = 4
+texture_mipmaps                      = false
+headless_transform_cache_mb          = 64
+
+
+[file_asset_store]
+cache_unreferenced_assets = true
+cache_eviction_batch_mb   = 32
+default_async_priority    = "normal"
+
+[render_graph]
+quality                 = "auto"
+transient_budget_mb     = 128
+transient_aliasing      = true
+plan_cache_entries      = 0
+plan_cache_max_elements = 8192

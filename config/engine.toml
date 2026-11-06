@@ -1,0 +1,29 @@
+
+
+
+[engine]
+active_mods = ["main_menu"]
+worker_count = 0
+max_worker_count = 16
+max_outstanding_tasks = 65536
+
+priority_aging_ms = 250
+queue_source_fairness = true
+max_fps = 0
+max_frame_delta_seconds = 0.25
+
+
+[render]
+clear_color = [0.18, 0.30, 0.50, 1.0]
+
+
+[pbr]
+sun_direction = [-0.55, 0.34, -0.76]
+
+
+[diagnostics]
+
+profiling_enabled = true
+
+[trust]
+trustMods = ["main_menu"]

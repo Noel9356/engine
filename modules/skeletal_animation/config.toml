@@ -1,0 +1,14 @@
+[skeletal_animation]
+maximum_joints                       = 4096
+maximum_clips                        = 4096
+maximum_players                      = 4096
+maximum_skeletons                    = 4096
+maximum_tracks_per_clip              = 4096
+maximum_keyframes_per_track          = 65536
+maximum_total_keyframes               = 8000000
+maximum_total_joints                  = 1000000
+maximum_blend_poses                   = 16
+sampling_cache_enabled                = true
+maximum_total_sampling_cache_entries  = 1000000
+maximum_cursor_walk                  = 8 # 0 forces binary search; larger values favor sequential playback.
+default_interpolation                 = "slerp" # "slerp", "nlerp", or "step"

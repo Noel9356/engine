@@ -1,0 +1,23 @@
+[models]
+search_paths          = ["assets/models"]
+scale                 = [1.0, 1.0, 1.0]
+translation           = [0.0, 0.0, 0.0]
+rotation              = [0.0, 0.0, 0.0, 1.0]
+pivot                 = [0.0, 0.0, 0.0]
+uv_scale              = [1.0, 1.0]
+uv_offset             = [0.0, 0.0]
+normal_mode           = "preserve_smooth_missing"
+format                = "auto"
+winding_mode          = "automatic"
+flip_texture_v        = true
+import_vertex_colors  = false
+weld_vertices         = true
+import_materials      = true
+optimize_mesh         = true
+optimize_vertex_cache = true
+optimize_overdraw     = true
+optimize_vertex_fetch = true
+overdraw_threshold    = 1.05
+material_search_path  = ""
+max_loaded_models     = 256
+max_file_size_mb      = 512

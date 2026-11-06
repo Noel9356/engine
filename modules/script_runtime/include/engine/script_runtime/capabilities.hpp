@@ -1,0 +1,118 @@
+// Public capability surface of the script_runtime module.
+//
+// The capability manages isolated Lua runtimes. Data crossing the boundary is
+// limited to four primitive value types; everything else (files, globals,
+// native functions) goes through explicit calls so the host stays in control
+// of what a script can reach.
+
+#ifndef ENGINE_SCRIPT_RUNTIME_CAPABILITIES_HPP
+#define ENGINE_SCRIPT_RUNTIME_CAPABILITIES_HPP
+
+#include <cstdint>
+
+namespace engine::script_runtime
+{
+
+// Script runtime capability ABI. Bump when the capability layout changes so
+// participants can reject mismatched providers. Version 2 added hostedRuntime().
+inline constexpr std::uint32_t scriptRuntimeCapabilityAbi = 2u;
+
+using ScriptRuntimeHandle = std::uint32_t;
+// Handles are never reused; 0 is reserved so "no runtime" stays unambiguous.
+inline constexpr ScriptRuntimeHandle invalidScriptRuntime = 0;
+
+// Coarse failure classification for execute/call functions. Their calling
+// convention: the boolean return reports usage problems (bad handles, bad
+// arguments), the ScriptError out-parameter reports compilation/runtime
+// failures.
+enum class ScriptError : std::uint32_t
+{
+    None = 0,
+    InvalidHandle,
+    InvalidArgument,
+    CapacityExceeded,
+    MemoryLimitExceeded,
+    InstructionLimitExceeded,
+    CompilationFailed,
+    RuntimeFailed,
+    IoFailed,
+    TypeMismatch
+};
+
+// The only value types a script and native code exchange.
+enum class ScriptValueType : std::uint32_t
+{
+    Nil = 0,
+    Boolean,
+    Number,
+    String
+};
+
+// A primitive value exchanged with a script. Strings are borrowed: stringData
+// points into Lua-owned memory (arguments) or caller memory (results) and is
+// only valid for the duration of the call.
+struct ScriptValue
+{
+    ScriptValueType type         = ScriptValueType::Nil;
+    bool            booleanValue = false;
+    double          numberValue  = 0.0;
+    const char     *stringData   = nullptr;
+    std::uint32_t   stringSize   = 0;
+};
+
+using ScriptNativeFunction = bool (*)(void *userData, const ScriptValue *arguments, std::uint32_t argumentCount,
+    ScriptValue *results, std::uint32_t resultCapacity, std::uint32_t *outResultCount);
+
+enum ScriptLibrary : std::uint32_t
+{
+    ScriptLibraryMath   = 1u << 0u,
+    ScriptLibraryString = 1u << 1u,
+    ScriptLibraryTable  = 1u << 2u,
+    ScriptLibraryUtf8   = 1u << 3u
+};
+
+struct ScriptRuntimeDescription
+{
+    std::uint64_t memoryLimitBytes   = 64ull * 1024ull * 1024ull;
+    std::uint64_t instructionLimit   = 10'000'000ull;
+    std::uint64_t maximumScriptBytes = 4ull * 1024ull * 1024ull;
+    std::uint32_t enabledLibraries   = ScriptLibraryMath | ScriptLibraryString | ScriptLibraryTable | ScriptLibraryUtf8;
+};
+
+struct ScriptRuntimeInfo
+{
+    std::uint64_t memoryUsedBytes    = 0;
+    std::uint64_t memoryLimitBytes   = 0;
+    std::uint64_t instructionLimit   = 0;
+    std::uint64_t maximumScriptBytes = 0;
+};
+
+struct ScriptRuntimeCapability
+{
+    static constexpr const char *capabilityName = "script_runtime";
+    std::uint32_t                abi            = scriptRuntimeCapabilityAbi;
+    void                        *self           = nullptr;
+
+    ScriptRuntimeHandle (*createRuntime)(void *, const ScriptRuntimeDescription *, ScriptError *);
+    void (*destroyRuntime)(void *, ScriptRuntimeHandle);
+    bool (*runtimeInfo)(void *, ScriptRuntimeHandle, ScriptRuntimeInfo *);
+    bool (*executeString)(void *, ScriptRuntimeHandle, const char *source, const char *chunkName, ScriptError *,
+        char *errorText, std::uint32_t errorCapacity, std::uint32_t *errorRequired);
+    bool (*executeFile)(void *, ScriptRuntimeHandle, const char *filePath, ScriptError *, char *errorText,
+        std::uint32_t errorCapacity, std::uint32_t *errorRequired);
+    bool (*callFunction)(void *, ScriptRuntimeHandle, const char *functionName, ScriptError *, char *errorText,
+        std::uint32_t errorCapacity, std::uint32_t *errorRequired);
+    bool (*registerNativeFunction)(void *, ScriptRuntimeHandle, const char *name, ScriptNativeFunction, void *userData);
+
+    ScriptRuntimeHandle (*hostedRuntime)(void *, const char *modId);
+    bool (*setGlobalNumber)(void *, ScriptRuntimeHandle, const char *name, double value);
+    bool (*getGlobalNumber)(void *, ScriptRuntimeHandle, const char *name, double *value);
+    bool (*setGlobalString)(void *, ScriptRuntimeHandle, const char *name, const char *value);
+    bool (*getGlobalString)(void *, ScriptRuntimeHandle, const char *name, char *output, std::uint32_t capacity,
+        std::uint32_t *outRequired);
+    bool (*collectGarbage)(void *, ScriptRuntimeHandle);
+};
+
+} // namespace engine::script_runtime
+
+#endif

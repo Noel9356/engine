@@ -1,0 +1,15 @@
+CC0 1.0 UNIVERSAL PUBLIC DOMAIN DEDICATION
+
+To the extent possible under law, Keenan Crane has waived all copyright and
+related or neighboring rights to Inigo the Dragon and all material in this
+archive.
+
+You may copy, modify, distribute, and perform the work, even for commercial
+purposes, without asking permission.  Attribution is appreciated but is not
+required.
+
+The complete CC0 1.0 Universal legal code is available at:
+https://creativecommons.org/publicdomain/zero/1.0/legalcode
+
+The human-readable deed is available at:
+https://creativecommons.org/publicdomain/zero/1.0/

@@ -1,0 +1,1414 @@
+// Headless backend implementation: a multithreaded CPU rasterizer.
+//
+// Pipeline per draw: prepareRasterization (culling, transform cache, texture
+// resolution) then rasterizeTriangles (Sutherland-Hodgman-style near clip,
+// scanline rasterization with perspective-correct interpolation, PBR shading
+// via render_shared.hpp, tile-locked depth updates when parallel). Frames are
+// blitted into the window module's locked surface pixels.
+
+#include "headless_backend.hpp"
+#include "engine/direct_lighting/capabilities.hpp"
+#include "engine/kernel/task_scheduler.hpp"
+#include "engine/render/capabilities.hpp"
+#include "engine/render/material.hpp"
+#include "engine/render/mesh.hpp"
+#include "engine/window/capabilities.hpp"
+#include "render_shared.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <glm/common.hpp>
+#include <glm/exponential.hpp>
+#include <glm/ext/matrix_float3x3.hpp>
+#include <glm/ext/matrix_float4x4.hpp>
+#include <glm/ext/vector_float2.hpp>
+#include <glm/ext/vector_float3.hpp>
+#include <glm/ext/vector_float4.hpp>
+#include <glm/geometric.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <limits>
+#include <new>
+#include <thread>
+#include <utility>
+#include <vector>
+
+// Helps the compiler keep color/depth pointers non-aliased in the rasterizer.
+#if defined(__GNUC__) || defined(__clang__)
+#define ENGINE_RESTRICT __restrict__
+#else
+#define ENGINE_RESTRICT
+#endif
+
+namespace engine
+{
+namespace render
+{
+
+// CPU texture sampler: wrap or clamp UVs, then nearest or bilinear filter
+// against the requested mip level (level 0 = the base image).
+glm::vec3 HeadlessTexture::sample(float u, float v, std::uint32_t mipLevel) const
+{
+    const float  *data;
+    std::uint32_t mipW, mipH;
+    if (mipLevel == 0 || mipLevel >= mipData.size() || mipData[0].empty())
+    {
+        data = pixelsRGB.data();
+        mipW = width;
+        mipH = height;
+    }
+    else
+    {
+        data = mipData[mipLevel].data();
+        mipW = mipWidths[mipLevel];
+        mipH = mipHeights[mipLevel];
+    }
+    if (mipW == 0 || mipH == 0 || data == nullptr)
+        return glm::vec3(1.0f);
+    if (mipW == 1 && mipH == 1)
+        return glm::vec3(data[0], data[1], data[2]);
+    if (address == TextureAddress::Repeat)
+    {
+        u -= std::floor(u);
+        v -= std::floor(v);
+    }
+    else
+    {
+        u = std::clamp(u, 0.0f, 1.0f);
+        v = std::clamp(v, 0.0f, 1.0f);
+    }
+    const float texelX    = u * static_cast<float>(mipW) - 0.5f;
+    const float texelY    = v * static_cast<float>(mipH) - 0.5f;
+    const auto  addrCoord = [&](std::int32_t cc, std::uint32_t e) -> std::uint32_t
+    {
+        const std::int32_t lim = static_cast<std::int32_t>(e);
+        if (address == TextureAddress::Repeat)
+        {
+            const std::int32_t w = cc % lim;
+            return static_cast<std::uint32_t>(w < 0 ? w + lim : w);
+        }
+        return static_cast<std::uint32_t>(std::clamp(cc, 0, lim - 1));
+    };
+    const auto pixelAt = [data, mipW](std::uint32_t x, std::uint32_t y) -> const float *
+    { return data + (static_cast<std::size_t>(y) * mipW + x) * 3; };
+    if (filter == TextureFilter::Nearest)
+    {
+        const auto   x = addrCoord(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), mipW);
+        const auto   y = addrCoord(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), mipH);
+        const float *p = pixelAt(x, y);
+        return glm::vec3(p[0], p[1], p[2]);
+    }
+    const auto          x0i = static_cast<std::int32_t>(std::floor(texelX));
+    const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
+    const float         fx  = texelX - static_cast<float>(x0i);
+    const float         fy  = texelY - static_cast<float>(y0i);
+    const std::uint32_t x0 = addrCoord(x0i, mipW), x1 = addrCoord(x0i + 1, mipW);
+    const std::uint32_t y0 = addrCoord(y0i, mipH), y1 = addrCoord(y0i + 1, mipH);
+    const float        *p00 = pixelAt(x0, y0), *p10 = pixelAt(x1, y0), *p01 = pixelAt(x0, y1), *p11 = pixelAt(x1, y1);
+    const float         omx = 1.0f - fx, omy = 1.0f - fy;
+    const float         w00 = omx * omy, w10 = fx * omy, w01 = omx * fy, w11 = fx * fy;
+    return glm::vec3(p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11,
+        p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11,
+        p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11);
+}
+
+// Precomputes shading inputs: radiance = color * intensity, inverse-squared
+// range falloff (range clamped away from zero), cone cosines for spots.
+void HeadlessBackend::setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count)
+{
+    count = std::min(count, direct_lighting::maxDirectLights);
+    directLights_.clear();
+    if (lights != nullptr && count != 0)
+    {
+        directLights_.resize(count);
+        for (std::uint32_t index = 0; index < count; ++index)
+        {
+            const direct_lighting::DirectLightDescription &source = lights[index].description;
+            PreparedDirectLight                           &target = directLights_[index];
+            target.type                                           = source.type;
+            target.position                                       = glm::make_vec3(source.position);
+            target.direction                                      = glm::make_vec3(source.direction);
+            target.radiance                                       = glm::make_vec3(source.color) * source.intensity;
+            const float safeRange                                 = std::max(source.range, 1.0e-3f);
+            target.inverseRangeSquared                            = 1.0f / (safeRange * safeRange);
+            target.innerConeCosine                                = std::cos(source.innerConeRadians);
+            target.outerConeCosine                                = std::cos(source.outerConeRadians);
+        }
+    }
+}
+
+// Caches the view-projection matrix and extracts the four side frustum
+// planes (Gribb-Hartmann rows) for later sphere culling. Identical camera
+// data short-circuits, which also keeps the frustum stable.
+void HeadlessBackend::setCamera(const CameraMatrices &camera)
+{
+    if (cameraInitialized_ && std::memcmp(&camera_, &camera, sizeof(CameraMatrices)) == 0)
+    {
+        return;
+    }
+
+    camera_            = camera;
+    cameraInitialized_ = true;
+    viewProjection_    = glm::make_mat4(camera.projection) * glm::make_mat4(camera.view);
+    cameraPosition_    = glm::make_vec3(camera.position);
+    const glm::vec4 row0(viewProjection_[0][0], viewProjection_[1][0], viewProjection_[2][0], viewProjection_[3][0]);
+    const glm::vec4 row1(viewProjection_[0][1], viewProjection_[1][1], viewProjection_[2][1], viewProjection_[3][1]);
+    const glm::vec4 row3(viewProjection_[0][3], viewProjection_[1][3], viewProjection_[2][3], viewProjection_[3][3]);
+
+    frustumPlanes_ = {row3 + row0, row3 - row0, row3 + row1, row3 - row1};
+    for (glm::vec4 &plane : frustumPlanes_)
+    {
+        const float length = glm::length(glm::vec3(plane));
+        if (std::isfinite(length) && length > 1e-8f)
+        {
+            plane /= length;
+        }
+        else
+        {
+            plane = glm::vec4(0.0f);
+        }
+    }
+}
+
+// (Re)allocates the CPU framebuffer when the viewport changed (all
+// overflow/bad_alloc paths leave the framebuffer empty, which silently skips
+// drawing), then clears color to the clear color, depth to 1.0, and the
+// parallel-rasterization lock bytes to 0.
+void HeadlessBackend::beginFrame(const FrameParameters &frame)
+{
+    std::uint32_t width  = viewportWidth;
+    std::uint32_t height = viewportHeight;
+    if (width == 0 || height == 0)
+    {
+        std::uint32_t surfaceWidth  = 0;
+        std::uint32_t surfaceHeight = 0;
+        window_->getFramebufferSize(window_->self, surface_, &surfaceWidth, &surfaceHeight);
+        if (width == 0)
+        {
+            width = surfaceWidth;
+        }
+        if (height == 0)
+        {
+            height = surfaceHeight;
+        }
+    }
+    if (width == 0 || height == 0)
+    {
+        return;
+    }
+    if (framebufferWidth != width || framebufferHeight != height)
+    {
+        const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+        if (static_cast<std::size_t>(width) > maximum / height
+            || static_cast<std::size_t>(width) * height > maximum / 4)
+        {
+            framebufferWidth = framebufferHeight = 0;
+            color.clear();
+            depth.clear();
+            return;
+        }
+        const std::size_t pixelCount = static_cast<std::size_t>(width) * height;
+        if (pixelCount * 4 > color.max_size() || pixelCount > depth.max_size())
+        {
+            framebufferWidth = framebufferHeight = 0;
+            color.clear();
+            depth.clear();
+            return;
+        }
+        try
+        {
+            std::vector<std::uint8_t> newColor(pixelCount * 4, 0);
+            std::vector<float>        newDepth(pixelCount, 1.0f);
+            const std::size_t         lockCount = (pixelCount + pixelsPerLockGroup_ - 1) / pixelsPerLockGroup_;
+            std::vector<std::uint8_t> newLocks(lockCount, 0);
+            color.swap(newColor);
+            depth.swap(newDepth);
+            pixelLocks.swap(newLocks);
+            framebufferWidth  = width;
+            framebufferHeight = height;
+        }
+        catch (const std::bad_alloc &)
+        {
+            framebufferWidth = framebufferHeight = 0;
+            color.clear();
+            depth.clear();
+            return;
+        }
+    }
+    const std::uint8_t red   = toByte(frame.clearColor[0]);
+    const std::uint8_t green = toByte(frame.clearColor[1]);
+    const std::uint8_t blue  = toByte(frame.clearColor[2]);
+    const std::uint8_t alpha = toByte(frame.clearColor[3]);
+
+    const std::uint32_t packed = static_cast<std::uint32_t>(red) | (static_cast<std::uint32_t>(green) << 8)
+                               | (static_cast<std::uint32_t>(blue) << 16) | (static_cast<std::uint32_t>(alpha) << 24);
+    if ((color.size() % sizeof(std::uint32_t)) == 0)
+    {
+        std::fill(reinterpret_cast<std::uint32_t *>(color.data()),
+            reinterpret_cast<std::uint32_t *>(color.data() + color.size()),
+            packed);
+    }
+    else
+    {
+        for (std::size_t pixel = 0; pixel < color.size() / 4; ++pixel)
+        {
+            color[pixel * 4 + 0] = red;
+            color[pixel * 4 + 1] = green;
+            color[pixel * 4 + 2] = blue;
+            color[pixel * 4 + 3] = alpha;
+        }
+    }
+    std::fill(depth.begin(), depth.end(), 1.0f);
+
+    std::fill(pixelLocks.begin(), pixelLocks.end(), 0);
+}
+
+// Presents: copies the CPU raster into the window surface's locked pixel
+// buffer (row-by-row because strides may differ).
+void HeadlessBackend::endFrame()
+{
+    window::SurfacePixels pixels;
+    if (!window_->lockSurfacePixels(window_->self, surface_, &pixels))
+    {
+        return;
+    }
+    const std::uint32_t rows    = std::min(framebufferHeight, pixels.height);
+    const std::uint32_t columns = std::min(framebufferWidth, pixels.width);
+    for (std::uint32_t y = 0; y < rows; ++y)
+    {
+        std::memcpy(pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes,
+            color.data() + static_cast<std::size_t>(y) * framebufferWidth * 4,
+            static_cast<std::size_t>(columns) * 4);
+    }
+    window_->unlockSurfacePixels(window_->self, surface_);
+    ++statistics_.framesRendered;
+}
+
+// Copies the interleaved vertices into planar arrays, computes the bounding
+// sphere (used for frustum culling, back-face heuristics, and LOD), and for
+// large meshes decimates LOD chains by keeping every 4th/16th/64th triangle.
+bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &description, RenderError *error)
+{
+    try
+    {
+        HeadlessMesh      mesh;
+        const auto       *src = static_cast<const float *>(description.vertices);
+        const auto       *idx = static_cast<const std::uint32_t *>(description.indices);
+        const std::size_t vc  = description.vertexCount;
+
+        mesh.positions.resize(vc * 3);
+        mesh.normals.resize(vc * 3);
+        mesh.colors.resize(vc * 3);
+        mesh.uvs.resize(vc * 2);
+        for (std::size_t v = 0; v < vc; ++v)
+        {
+            const float *s            = src + v * meshVertexFloatCount;
+            mesh.positions[v * 3 + 0] = s[0];
+            mesh.positions[v * 3 + 1] = s[1];
+            mesh.positions[v * 3 + 2] = s[2];
+            mesh.normals[v * 3 + 0]   = s[3];
+            mesh.normals[v * 3 + 1]   = s[4];
+            mesh.normals[v * 3 + 2]   = s[5];
+            mesh.colors[v * 3 + 0]    = s[6];
+            mesh.colors[v * 3 + 1]    = s[7];
+            mesh.colors[v * 3 + 2]    = s[8];
+            mesh.uvs[v * 2 + 0]       = s[9];
+            mesh.uvs[v * 2 + 1]       = s[10];
+        }
+        mesh.indices.assign(idx, idx + description.indexCount);
+
+        const float *pos = mesh.positions.data();
+        glm::vec3    minimum(std::numeric_limits<float>::max());
+        glm::vec3    maximum(std::numeric_limits<float>::lowest());
+        for (std::size_t v = 0; v < vc; ++v)
+        {
+            const glm::vec3 p(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]);
+            minimum = glm::min(minimum, p);
+            maximum = glm::max(maximum, p);
+        }
+        mesh.boundsCenter   = (minimum + maximum) * 0.5f;
+        float radiusSquared = 0.0f;
+        for (std::size_t v = 0; v < vc; ++v)
+        {
+            const glm::vec3 delta = glm::vec3(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]) - mesh.boundsCenter;
+            radiusSquared         = std::max(radiusSquared, glm::dot(delta, delta));
+        }
+        mesh.boundsRadius = std::sqrt(radiusSquared);
+        mesh.boundsValid  = std::isfinite(mesh.boundsRadius);
+
+        if (lodEnabled_ && mesh.indices.size() >= 4096 * 3)
+        {
+            // LOD 0 is the full mesh; each level strides over the triangle
+            // list, so quality drops 4x/16x/64x with no spatial coherence.
+            mesh.lodIndices.push_back(mesh.indices);
+            const std::size_t fullCount = mesh.indices.size();
+            const std::size_t strides[] = {4, 16, 64};
+            for (int level = 0; level < 3; ++level)
+            {
+                const std::size_t triStride   = strides[level];
+                const std::size_t triCount    = fullCount / 3;
+                const std::size_t lodTriCount = triCount / triStride;
+                if (lodTriCount < 1)
+                    break;
+                std::vector<std::uint32_t> lodIdx;
+                lodIdx.reserve(lodTriCount * 3);
+                for (std::size_t t = 0; t < triCount; t += triStride)
+                {
+                    lodIdx.push_back(mesh.indices[t * 3 + 0]);
+                    lodIdx.push_back(mesh.indices[t * 3 + 1]);
+                    lodIdx.push_back(mesh.indices[t * 3 + 2]);
+                }
+                if (lodIdx.size() >= 3)
+                    mesh.lodIndices.push_back(std::move(lodIdx));
+            }
+        }
+
+        meshes.emplace(id, std::move(mesh));
+        reportError(error, RenderError::None);
+        return true;
+    }
+    catch (const std::bad_alloc &)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+}
+
+void HeadlessBackend::destroyMesh(MeshHandle mesh)
+{
+    meshes.erase(mesh);
+}
+
+// Stores the RGBA8 copy and builds the float mip chain (box-filtered
+// quarters) used by the sampler.
+bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &description, RenderError *error)
+{
+    if (description.pixels == nullptr || description.width == 0 || description.height == 0)
+    {
+        reportError(error, RenderError::InvalidTexture);
+        return false;
+    }
+    try
+    {
+        HeadlessTexture texture;
+        texture.width   = description.width;
+        texture.height  = description.height;
+        texture.filter  = description.filter;
+        texture.address = description.address;
+        texture.pixels.assign(description.pixels,
+            description.pixels + static_cast<std::size_t>(description.width) * description.height * 4);
+        {
+            const std::size_t pc = static_cast<std::size_t>(description.width) * description.height;
+            texture.pixelsRGB.resize(pc * 3);
+            constexpr float inv = 1.0f / 255.0f;
+            for (std::size_t i = 0; i < pc; ++i)
+            {
+                texture.pixelsRGB[i * 3]     = static_cast<float>(description.pixels[i * 4]) * inv;
+                texture.pixelsRGB[i * 3 + 1] = static_cast<float>(description.pixels[i * 4 + 1]) * inv;
+                texture.pixelsRGB[i * 3 + 2] = static_cast<float>(description.pixels[i * 4 + 2]) * inv;
+            }
+            if (description.width > 1 && description.height > 1)
+            {
+                texture.mipData.push_back(texture.pixelsRGB);
+                texture.mipWidths.push_back(description.width);
+                texture.mipHeights.push_back(description.height);
+                std::uint32_t cw = description.width, ch = description.height;
+                while (cw > 1 || ch > 1)
+                {
+                    const std::uint32_t nw = std::max(1u, cw / 2), nh = std::max(1u, ch / 2);
+                    const auto         &prev = texture.mipData.back();
+                    std::vector<float>  nxt(static_cast<std::size_t>(nw) * nh * 3);
+                    for (std::uint32_t y = 0; y < nh; ++y)
+                        for (std::uint32_t x = 0; x < nw; ++x)
+                        {
+                            const std::uint32_t sx0 = x * 2, sy0 = y * 2, sx1 = std::min(sx0 + 1, cw - 1),
+                                                sy1 = std::min(sy0 + 1, ch - 1);
+                            for (int cc = 0; cc < 3; ++cc)
+                                nxt[(y * nw + x) * 3 + cc]
+                                    = (prev[(sy0 * cw + sx0) * 3 + cc] + prev[(sy0 * cw + sx1) * 3 + cc]
+                                          + prev[(sy1 * cw + sx0) * 3 + cc] + prev[(sy1 * cw + sx1) * 3 + cc])
+                                    * 0.25f;
+                        }
+                    texture.mipData.push_back(std::move(nxt));
+                    texture.mipWidths.push_back(nw);
+                    texture.mipHeights.push_back(nh);
+                    cw = nw;
+                    ch = nh;
+                }
+                texture.mipLevelCount = static_cast<std::uint32_t>(texture.mipData.size());
+            }
+        }
+        textures.emplace(id, std::move(texture));
+        reportError(error, RenderError::None);
+        return true;
+    }
+    catch (const std::bad_alloc &)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+}
+
+void HeadlessBackend::destroyTexture(TextureHandle texture)
+{
+    textures.erase(texture);
+}
+
+std::uint32_t HeadlessBackend::parallelWorkerCount() const noexcept
+{
+    const unsigned hardware = std::thread::hardware_concurrency();
+    if (hardware <= 1u)
+        return 1u;
+    if (taskScheduler_ != nullptr && taskScheduler_->isRunning())
+    {
+        const auto stats = taskScheduler_->statistics();
+
+        return stats.workerCount > 0 ? stats.workerCount + 1u : 1u;
+    }
+    return 1u;
+}
+
+// One draw: pick an LOD by the mesh's angular size (scaled bounds radius /
+// distance), then rasterize - splitting the triangle range across the task
+// scheduler when the draw is big enough (each worker depth-tests under a
+// pixel-group lock).
+void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material)
+{
+    const auto found = meshes.find(mesh);
+    if (found == meshes.end())
+    {
+        return;
+    }
+    const HeadlessMesh &meshData = found->second;
+
+    const std::vector<std::uint32_t> *activeIndices = &meshData.indices;
+    if (lodEnabled_ && !meshData.lodIndices.empty() && meshData.boundsValid && cameraInitialized_)
+    {
+        const glm::mat4 model        = glm::make_mat4(modelMatrix);
+        const glm::vec4 worldCenter4 = model * glm::vec4(meshData.boundsCenter, 1.0f);
+        const glm::vec3 worldCenter  = glm::vec3(worldCenter4);
+        const float     dist         = glm::distance(cameraPosition_, worldCenter);
+        const glm::vec3 basisX       = glm::vec3(model[0]);
+        const glm::vec3 basisY       = glm::vec3(model[1]);
+        const glm::vec3 basisZ       = glm::vec3(model[2]);
+        const float     worldScale
+            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+        const float worldRadius = meshData.boundsRadius * worldScale;
+        const float angularSize = dist > 0.0f ? worldRadius / dist : 1.0f; // ~screen fraction the mesh spans
+        int         lodLevel    = 0;
+        if (angularSize < lodThresholds_[0])
+            lodLevel = static_cast<int>(meshData.lodIndices.size()) - 1;
+        else if (angularSize < lodThresholds_[1])
+            lodLevel = std::min(3, static_cast<int>(meshData.lodIndices.size()) - 1);
+        else if (angularSize < lodThresholds_[2])
+            lodLevel = std::min(2, static_cast<int>(meshData.lodIndices.size()) - 1);
+        else if (angularSize < lodThresholds_[3])
+            lodLevel = std::min(1, static_cast<int>(meshData.lodIndices.size()) - 1);
+        if (lodLevel > 0)
+            activeIndices = &meshData.lodIndices[lodLevel];
+    }
+
+    const std::size_t triCount = activeIndices->size() / 3;
+    statistics_.trianglesSubmitted += triCount;
+
+    RasterSetup setup;
+    if (!prepareRasterization(meshData, modelMatrix, material, activeIndices->data(), activeIndices->size(), setup))
+    {
+        return;
+    }
+
+    const std::uint32_t workers = parallelWorkerCount();
+    const bool useParallel      = workers >= 2u && triCount >= parallelTriangleThreshold_ && taskScheduler_ != nullptr
+                               && taskScheduler_->isRunning();
+    if (!useParallel)
+    {
+        rasterizeTriangles(meshData, setup, 0, triCount, false, nullptr);
+        return;
+    }
+
+    std::vector<StripResult> results(workers);
+    const std::size_t        baseChunk = triCount / workers;
+    const std::size_t        remainder = triCount % workers;
+    std::size_t              triCursor = 0;
+    TaskGroup                group;
+    for (std::uint32_t i = 1; i < workers; ++i)
+    {
+        const std::size_t chunk    = baseChunk + (i < remainder ? 1 : 0);
+        const std::size_t triStart = triCursor;
+        triCursor += chunk;
+        const std::size_t triEnd = triCursor;
+        if (triStart >= triEnd)
+        {
+            continue;
+        }
+        const std::uint32_t workerIndex = i;
+        taskScheduler_->schedule(group,
+            [this, &meshData, &setup, triStart, triEnd, &results, workerIndex]()
+            { rasterizeTriangles(meshData, setup, triStart, triEnd, true, &results[workerIndex]); });
+    }
+
+    {
+        const std::size_t triStart = triCursor;
+        const std::size_t triEnd   = triCount;
+        rasterizeTriangles(meshData, setup, triStart, triEnd, true, &results[0]);
+    }
+    group.wait(*taskScheduler_);
+    std::uint64_t totalRasterized = 0;
+    for (const StripResult &r : results)
+    {
+        totalRasterized += r.trianglesRasterized;
+    }
+    statistics_.trianglesRasterized += totalRasterized;
+}
+
+// Instance draws are just repeated drawMesh calls on the CPU backend (the
+// transform cache still deduplicates the vertex shading).
+void HeadlessBackend::drawMeshInstances(
+    MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount, const MeshMaterial &material)
+{
+    if (modelMatrices == nullptr)
+    {
+        return;
+    }
+    for (std::uint32_t index = 0; index < instanceCount; ++index)
+    {
+        drawMesh(mesh, modelMatrices + static_cast<std::size_t>(index) * 16u, material);
+    }
+}
+
+// Software overlay rasterizer: maps display pixels to framebuffer pixels,
+// scissors each command's clip rectangle, then rasterizes indexed triangles
+// with barycentric coverage, texture sampling, vertex colors, and "over"
+// alpha blending into the color buffer.
+void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
+{
+    if (framebufferWidth == 0 || framebufferHeight == 0 || data.vertices == nullptr || data.indices == nullptr
+        || data.commands == nullptr || data.displaySize[0] <= 0.0f || data.displaySize[1] <= 0.0f
+        || data.framebufferScale[0] <= 0.0f || data.framebufferScale[1] <= 0.0f)
+    {
+        return;
+    }
+
+    const float scaleX  = data.framebufferScale[0];
+    const float scaleY  = data.framebufferScale[1];
+    const auto  channel = [](std::uint32_t colorValue, unsigned shift)
+    { return static_cast<float>((colorValue >> shift) & 0xffu) / 255.0f; };
+    const auto edge = [](float ax, float ay, float bx, float by, float px, float py)
+    { return (px - ax) * (by - ay) - (py - ay) * (bx - ax); };
+
+    for (std::uint32_t commandIndex = 0; commandIndex < data.commandCount; ++commandIndex)
+    {
+        const OverlayDrawCommand &draw = data.commands[commandIndex];
+        if (draw.elementCount < 3 || draw.indexOffset > data.indexCount
+            || draw.elementCount > data.indexCount - draw.indexOffset)
+        {
+            continue;
+        }
+
+        const float clipMinX = (draw.clipRectangle[0] - data.displayPosition[0]) * scaleX;
+        const float clipMinY = (draw.clipRectangle[1] - data.displayPosition[1]) * scaleY;
+        const float clipMaxX = (draw.clipRectangle[2] - data.displayPosition[0]) * scaleX;
+        const float clipMaxY = (draw.clipRectangle[3] - data.displayPosition[1]) * scaleY;
+        if (!std::isfinite(clipMinX) || !std::isfinite(clipMinY) || !std::isfinite(clipMaxX)
+            || !std::isfinite(clipMaxY))
+        {
+            continue;
+        }
+        const float        boundedLeft   = std::clamp(clipMinX, 0.0f, static_cast<float>(framebufferWidth));
+        const float        boundedTop    = std::clamp(clipMinY, 0.0f, static_cast<float>(framebufferHeight));
+        const float        boundedRight  = std::clamp(clipMaxX, 0.0f, static_cast<float>(framebufferWidth));
+        const float        boundedBottom = std::clamp(clipMaxY, 0.0f, static_cast<float>(framebufferHeight));
+        const std::int32_t clipLeft      = static_cast<std::int32_t>(std::floor(boundedLeft));
+        const std::int32_t clipTop       = static_cast<std::int32_t>(std::floor(boundedTop));
+        const std::int32_t clipRight     = static_cast<std::int32_t>(std::ceil(boundedRight));
+        const std::int32_t clipBottom    = static_cast<std::int32_t>(std::ceil(boundedBottom));
+        if (clipLeft >= clipRight || clipTop >= clipBottom)
+            continue;
+
+        const HeadlessTexture *texture = mapFor(draw.texture, neutralWhite_);
+        if (texture == nullptr || texture->width == 0 || texture->height == 0 || texture->pixels.size() < 4)
+            texture = &neutralWhite_;
+
+        const auto sampleRgba = [texture](float u, float v, float out[4])
+        {
+            if (texture->address == TextureAddress::Repeat)
+            {
+                u -= std::floor(u);
+                v -= std::floor(v);
+            }
+            u                   = std::clamp(u, 0.0f, 1.0f);
+            v                   = std::clamp(v, 0.0f, 1.0f);
+            const float tx      = u * static_cast<float>(texture->width - 1);
+            const float ty      = v * static_cast<float>(texture->height - 1);
+            const auto  pixelAt = [texture](std::uint32_t x, std::uint32_t y)
+            { return texture->pixels.data() + (static_cast<std::size_t>(y) * texture->width + x) * 4; };
+            if (texture->filter == TextureFilter::Nearest || (texture->width == 1 && texture->height == 1))
+            {
+                const std::uint32_t x = static_cast<std::uint32_t>(
+                    std::clamp(std::lround(tx), 0l, static_cast<long>(texture->width - 1)));
+                const std::uint32_t y = static_cast<std::uint32_t>(
+                    std::clamp(std::lround(ty), 0l, static_cast<long>(texture->height - 1)));
+                const std::uint8_t *pixel = pixelAt(x, y);
+                for (int c = 0; c < 4; ++c)
+                    out[c] = static_cast<float>(pixel[c]) / 255.0f;
+                return;
+            }
+            const std::uint32_t x0  = static_cast<std::uint32_t>(std::floor(tx));
+            const std::uint32_t y0  = static_cast<std::uint32_t>(std::floor(ty));
+            const std::uint32_t x1  = std::min(x0 + 1, texture->width - 1);
+            const std::uint32_t y1  = std::min(y0 + 1, texture->height - 1);
+            const float         fx  = tx - static_cast<float>(x0);
+            const float         fy  = ty - static_cast<float>(y0);
+            const std::uint8_t *p00 = pixelAt(x0, y0);
+            const std::uint8_t *p10 = pixelAt(x1, y0);
+            const std::uint8_t *p01 = pixelAt(x0, y1);
+            const std::uint8_t *p11 = pixelAt(x1, y1);
+            for (int c = 0; c < 4; ++c)
+            {
+                const float a = static_cast<float>(p00[c]) * (1.0f - fx) + static_cast<float>(p10[c]) * fx;
+                const float b = static_cast<float>(p01[c]) * (1.0f - fx) + static_cast<float>(p11[c]) * fx;
+                out[c]        = (a * (1.0f - fy) + b * fy) / 255.0f;
+            }
+        };
+
+        const std::uint32_t triangleCount = draw.elementCount / 3;
+        for (std::uint32_t triangle = 0; triangle < triangleCount; ++triangle)
+        {
+            const std::uint32_t indexBase = draw.indexOffset + triangle * 3;
+            const std::uint64_t ia64      = static_cast<std::uint64_t>(data.indices[indexBase]) + draw.vertexOffset;
+            const std::uint64_t ib64      = static_cast<std::uint64_t>(data.indices[indexBase + 1]) + draw.vertexOffset;
+            const std::uint64_t ic64      = static_cast<std::uint64_t>(data.indices[indexBase + 2]) + draw.vertexOffset;
+            if (ia64 >= data.vertexCount || ib64 >= data.vertexCount || ic64 >= data.vertexCount)
+                continue;
+            const OverlayVertex &a    = data.vertices[ia64];
+            const OverlayVertex &b    = data.vertices[ib64];
+            const OverlayVertex &c    = data.vertices[ic64];
+            const float          ax   = (a.position[0] - data.displayPosition[0]) * scaleX;
+            const float          ay   = (a.position[1] - data.displayPosition[1]) * scaleY;
+            const float          bx   = (b.position[0] - data.displayPosition[0]) * scaleX;
+            const float          by   = (b.position[1] - data.displayPosition[1]) * scaleY;
+            const float          cx   = (c.position[0] - data.displayPosition[0]) * scaleX;
+            const float          cy   = (c.position[1] - data.displayPosition[1]) * scaleY;
+            const float          area = edge(ax, ay, bx, by, cx, cy);
+            if (std::abs(area) <= 1.0e-8f)
+                continue;
+
+            const std::int32_t left = std::max(clipLeft, static_cast<std::int32_t>(std::floor(std::min({ax, bx, cx}))));
+            const std::int32_t top  = std::max(clipTop, static_cast<std::int32_t>(std::floor(std::min({ay, by, cy}))));
+            const std::int32_t right
+                = std::min(clipRight, static_cast<std::int32_t>(std::ceil(std::max({ax, bx, cx}))));
+            const std::int32_t bottom
+                = std::min(clipBottom, static_cast<std::int32_t>(std::ceil(std::max({ay, by, cy}))));
+            if (left >= right || top >= bottom)
+                continue;
+
+            for (std::int32_t y = top; y < bottom; ++y)
+            {
+                for (std::int32_t x = left; x < right; ++x)
+                {
+                    const float px = static_cast<float>(x) + 0.5f;
+                    const float py = static_cast<float>(y) + 0.5f;
+                    const float wa = edge(bx, by, cx, cy, px, py) / area;
+                    const float wb = edge(cx, cy, ax, ay, px, py) / area;
+                    const float wc = 1.0f - wa - wb;
+                    if (wa < -1.0e-5f || wb < -1.0e-5f || wc < -1.0e-5f)
+                        continue;
+
+                    const float u = a.uv[0] * wa + b.uv[0] * wb + c.uv[0] * wc;
+                    const float v = a.uv[1] * wa + b.uv[1] * wb + c.uv[1] * wc;
+                    float       texel[4]{};
+                    sampleRgba(u, v, texel);
+                    const float vertexColor[4]
+                        = {channel(a.color, 0) * wa + channel(b.color, 0) * wb + channel(c.color, 0) * wc,
+                            channel(a.color, 8) * wa + channel(b.color, 8) * wb + channel(c.color, 8) * wc,
+                            channel(a.color, 16) * wa + channel(b.color, 16) * wb + channel(c.color, 16) * wc,
+                            channel(a.color, 24) * wa + channel(b.color, 24) * wb + channel(c.color, 24) * wc};
+                    const float alpha = std::clamp(texel[3] * vertexColor[3], 0.0f, 1.0f);
+                    if (alpha <= 0.0f)
+                        continue;
+                    std::uint8_t *destination
+                        = color.data()
+                        + (static_cast<std::size_t>(y) * framebufferWidth + static_cast<std::uint32_t>(x)) * 4;
+                    for (std::uint32_t component = 0; component < 3; ++component)
+                    {
+                        const float source     = texel[component] * vertexColor[component];
+                        const float target     = static_cast<float>(destination[component]) / 255.0f;
+                        destination[component] = static_cast<std::uint8_t>(
+                            std::lround(std::clamp(source * alpha + target * (1.0f - alpha), 0.0f, 1.0f) * 255.0f));
+                    }
+                    const float destinationAlpha = static_cast<float>(destination[3]) / 255.0f;
+                    destination[3]
+                        = static_cast<std::uint8_t>(std::lround((alpha + destinationAlpha * (1.0f - alpha)) * 255.0f));
+                }
+            }
+            ++statistics_.trianglesSubmitted;
+            ++statistics_.trianglesRasterized;
+        }
+    }
+}
+
+// Textures resolve to neutral stand-ins instead of failing; `neutral`
+// picks which stand-in (white vs flat normal) fits the slot.
+const HeadlessTexture *HeadlessBackend::mapFor(TextureHandle handle, const HeadlessTexture &neutral) const
+{
+    if (handle == invalidTexture)
+    {
+        return &neutral;
+    }
+    const auto found = textures.find(handle);
+    return found != textures.end() ? &found->second : &neutral;
+}
+
+// Gathers everything rasterizeTriangles needs. Order matters: frustum cull,
+// transform the vertices (through the generation-stamped cache when it fits
+// the budget), resolve textures to stand-ins, then probe one triangle's
+// winding against its vertex normals to decide if back-face culling is safe
+// (only attempted when the whole mesh is in front of the camera).
+bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float *modelMatrix,
+    const MeshMaterial &material, const std::uint32_t *activeIndices, std::size_t activeIndexCount,
+    RasterSetup &outSetup)
+{
+    if (framebufferWidth == 0 || framebufferHeight == 0)
+    {
+        return false;
+    }
+
+    const std::size_t triangleCount = activeIndexCount / 3;
+
+    outSetup.triangleCount     = triangleCount;
+    outSetup.indexData         = activeIndices;
+    outSetup.model             = glm::make_mat4(modelMatrix);
+    outSetup.viewProjection    = viewProjection_ * outSetup.model;
+    outSetup.modelNormalMatrix = material.unlit ? glm::mat3(1.0f) : glm::mat3(outSetup.model);
+    outSetup.unlit             = material.unlit;
+
+    if (frustumCullingEnabled_ && cameraInitialized_ && mesh.boundsValid && triangleCount >= 4)
+    {
+        const glm::vec4 worldCenter = outSetup.model * glm::vec4(mesh.boundsCenter, 1.0f);
+        const glm::vec3 basisX      = glm::vec3(outSetup.model[0]);
+        const glm::vec3 basisY      = glm::vec3(outSetup.model[1]);
+        const glm::vec3 basisZ      = glm::vec3(outSetup.model[2]);
+        const float     worldScale
+            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+        const float worldRadius = mesh.boundsRadius * worldScale;
+        for (const glm::vec4 &plane : frustumPlanes_)
+        {
+            const float signedDistance = glm::dot(plane, worldCenter);
+            if (std::isfinite(signedDistance) && signedDistance < -worldRadius)
+            {
+                return false;
+            }
+        }
+    }
+
+    const std::size_t vertexCount         = mesh.vertexCount();
+    std::uint32_t     transformGeneration = transformGeneration_ + 1;
+    // Per-vertex cache cost: the transformed data plus its generation stamp.
+    constexpr std::size_t transformCacheEntryBytes = sizeof(TransformedVertex) + sizeof(std::uint32_t);
+    const bool transformCacheWithinBudget          = transformCacheBudgetBytes_ >= transformCacheEntryBytes
+                                                  && vertexCount <= transformCacheBudgetBytes_ / transformCacheEntryBytes;
+    outSetup.vertexCount                           = vertexCount;
+    outSetup.useTransformCache                     = false;
+    if (triangleCount >= 2 && activeIndexCount > vertexCount && transformCacheWithinBudget)
+    {
+        try
+        {
+            if (transformedVertices_.size() < vertexCount)
+            {
+                transformedVertices_.resize(vertexCount);
+            }
+            if (transformedVertexStamps_.size() < vertexCount)
+            {
+                transformedVertexStamps_.resize(vertexCount, 0);
+            }
+            if (transformGeneration == 0)
+            {
+                std::fill(transformedVertexStamps_.begin(), transformedVertexStamps_.end(), 0);
+                transformGeneration = 1;
+            }
+            transformGeneration_         = transformGeneration;
+            outSetup.transformGeneration = transformGeneration;
+            outSetup.useTransformCache   = true;
+
+            const glm::mat4  &model             = outSetup.model;
+            const glm::mat4  &viewProjection    = outSetup.viewProjection;
+            const glm::mat3  &modelNormalMatrix = outSetup.modelNormalMatrix;
+            const bool        unlit             = outSetup.unlit;
+            const float      *posData           = mesh.positions.data();
+            const float      *nrmData           = mesh.normals.data();
+            const std::size_t hwWorkers         = parallelWorkerCount();
+            const bool        parallelizeTransform
+                = hwWorkers >= 2u && vertexCount >= 8192u && taskScheduler_ != nullptr && taskScheduler_->isRunning();
+            auto transformRange = [&](std::size_t vStart, std::size_t vEnd)
+            {
+                for (std::size_t v = vStart; v < vEnd; ++v)
+                {
+                    // Stamp guard: vertices already transformed this draw (or
+                    // this generation) are reused instead of recomputed.
+                    if (transformedVertexStamps_[v] == transformGeneration)
+                    {
+                        continue;
+                    }
+                    const glm::vec4    localPos(posData[v * 3], posData[v * 3 + 1], posData[v * 3 + 2], 1.0f);
+                    TransformedVertex &out = transformedVertices_[v];
+                    out.clip               = viewProjection * localPos;
+                    out.worldPosition      = glm::vec3(model * localPos);
+                    if (!unlit)
+                    {
+                        const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + v * 3);
+                        const float     normalLengthSquared = glm::dot(normalRaw, normalRaw);
+                        out.worldNormal = normalLengthSquared > 0.0f && std::isfinite(normalLengthSquared)
+                                            ? normalRaw * glm::inversesqrt(normalLengthSquared)
+                                            : glm::vec3(0.0f, 1.0f, 0.0f);
+                    }
+                    transformedVertexStamps_[v] = transformGeneration;
+                }
+            };
+            if (parallelizeTransform)
+            {
+                taskScheduler_->parallelFor(vertexCount, 8192u, transformRange);
+            }
+            else
+            {
+                transformRange(0, vertexCount);
+            }
+        }
+        catch (const std::bad_alloc &)
+        {
+            outSetup.useTransformCache = false;
+        }
+    }
+
+    outSetup.baseColorMap         = mapFor(material.baseColorTexture, neutralWhite_);
+    outSetup.normalMap            = mapFor(material.normalTexture, flatNormal_);
+    outSetup.metallicRoughnessMap = mapFor(material.metallicRoughnessTexture, neutralWhite_);
+    outSetup.occlusionMap         = mapFor(material.occlusionTexture, neutralWhite_);
+    outSetup.emissiveMap          = mapFor(material.emissiveTexture, neutralWhite_);
+
+    outSetup.baseColorFactor         = glm::make_vec3(material.baseColor);
+    outSetup.metallicFactor          = material.metallicFactor;
+    outSetup.roughnessFactor         = material.roughnessFactor;
+    outSetup.normalScale             = material.normalScale;
+    outSetup.occlusionStrength       = material.occlusionStrength;
+    outSetup.emissiveColor           = glm::make_vec3(material.emissiveColor);
+    outSetup.hasBaseColorMap         = outSetup.baseColorMap != &neutralWhite_;
+    outSetup.hasNormalMap            = outSetup.normalMap != &flatNormal_;
+    outSetup.hasMetallicRoughnessMap = outSetup.metallicRoughnessMap != &neutralWhite_;
+    outSetup.hasEmissiveMap          = outSetup.emissiveMap != &neutralWhite_;
+    outSetup.hasEmissive
+        = outSetup.emissiveColor.x != 0.0f || outSetup.emissiveColor.y != 0.0f || outSetup.emissiveColor.z != 0.0f;
+    outSetup.hasOcclusion
+        = !outSetup.unlit && outSetup.occlusionStrength != 0.0f && outSetup.occlusionMap != &neutralWhite_;
+
+    outSetup.fallbackTangentNormal = glm::vec3(0.0f, 0.0f, 1.0f);
+    if (!outSetup.unlit && !outSetup.hasNormalMap)
+    {
+        const glm::vec3 normalMapSample = flatNormal_.sample(0.0f, 0.0f) * 2.0f - 1.0f;
+        outSetup.fallbackTangentNormal  = glm::normalize(glm::vec3(
+            normalMapSample.x * outSetup.normalScale, normalMapSample.y * outSetup.normalScale, normalMapSample.z));
+    }
+
+    outSetup.enableBackFaceCull = false;
+    outSetup.frontSign          = 0.0f;
+    if (backFaceCullingEnabled_ && !outSetup.unlit && outSetup.useTransformCache && cameraInitialized_
+        && mesh.boundsValid && triangleCount >= 4)
+    {
+        const glm::vec4 worldCenter4 = outSetup.model * glm::vec4(mesh.boundsCenter, 1.0f);
+        const glm::vec3 worldCenter  = glm::vec3(worldCenter4);
+        const glm::vec3 basisX       = glm::vec3(outSetup.model[0]);
+        const glm::vec3 basisY       = glm::vec3(outSetup.model[1]);
+        const glm::vec3 basisZ       = glm::vec3(outSetup.model[2]);
+        const float     worldScale
+            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+        const float worldRadius = mesh.boundsRadius * worldScale;
+        const float cameraDist  = glm::distance(cameraPosition_, worldCenter);
+        if (cameraDist > worldRadius)
+        {
+            const auto *indices = activeIndices;
+            for (std::size_t t = 0; t < triangleCount; ++t)
+            {
+                const std::uint32_t i0 = indices[t * 3 + 0];
+                const std::uint32_t i1 = indices[t * 3 + 1];
+                const std::uint32_t i2 = indices[t * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                    continue;
+                const glm::vec3 &wp0        = transformedVertices_[i0].worldPosition;
+                const glm::vec3 &wp1        = transformedVertices_[i1].worldPosition;
+                const glm::vec3 &wp2        = transformedVertices_[i2].worldPosition;
+                const glm::vec3  faceNormal = glm::cross(wp1 - wp0, wp2 - wp0);
+                const float      fnLen2     = glm::dot(faceNormal, faceNormal);
+                if (fnLen2 < 1e-12f)
+                    continue;
+                const glm::vec3 &wn0       = transformedVertices_[i0].worldNormal;
+                const glm::vec3 &wn1       = transformedVertices_[i1].worldNormal;
+                const glm::vec3 &wn2       = transformedVertices_[i2].worldNormal;
+                const glm::vec3  avgNormal = wn0 + wn1 + wn2;
+                const float      anLen2    = glm::dot(avgNormal, avgNormal);
+                if (anLen2 < 1e-12f)
+                    continue;
+                const float dotFN = glm::dot(faceNormal, avgNormal);
+                if (dotFN > 1e-6f)
+                    outSetup.frontSign = 1.0f;
+                else if (dotFN < -1e-6f)
+                    outSetup.frontSign = -1.0f;
+                if (outSetup.frontSign != 0.0f)
+                    break;
+            }
+            if (outSetup.frontSign != 0.0f)
+            {
+                outSetup.enableBackFaceCull = true; // winding convention confirmed; culling is safe
+            }
+        }
+    }
+    return true;
+}
+
+// Whole-mesh single-threaded rasterization wrapper (drawMesh uses the
+// parallel-split path above).
+void HeadlessBackend::rasterizeMesh(const HeadlessMesh &mesh, const float *modelMatrix, const MeshMaterial &material)
+{
+    statistics_.trianglesSubmitted += mesh.indices.size() / 3;
+    RasterSetup setup;
+    if (!prepareRasterization(mesh, modelMatrix, material, mesh.indices.data(), mesh.indices.size(), setup))
+    {
+        return;
+    }
+    rasterizeTriangles(mesh, setup, 0, setup.triangleCount, false, nullptr);
+}
+
+// The rasterizer core. For each triangle: shade/transform corners (reusing
+// the transform cache when allowed), clip against the near plane, project to
+// screen, build a screen-space tangent frame for normal maps, then scan the
+// bounding box testing barycentric coverage with edge-function increments.
+// Depth and color writes go through the pixel-group spin lock when parallel.
+void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triStart,
+    std::size_t triEnd, bool useAtomicDepth, StripResult *outResult)
+{
+    if (framebufferWidth == 0 || framebufferHeight == 0)
+    {
+        return;
+    }
+    const std::size_t triangleCount = setup.triangleCount;
+    if (triStart > triEnd)
+        triStart = triEnd;
+    if (triEnd > triangleCount)
+        triEnd = triangleCount;
+
+    const glm::mat4  &model              = setup.model;
+    const glm::mat4  &viewProjection     = setup.viewProjection;
+    const glm::mat3  &modelNormalMatrix  = setup.modelNormalMatrix;
+    const bool        unlit              = setup.unlit;
+    const bool        enableBackFaceCull = setup.enableBackFaceCull;
+    const float       frontSign          = setup.frontSign;
+    const bool        useTransformCache  = setup.useTransformCache;
+    const std::size_t vertexCount        = setup.vertexCount;
+
+    const float *const posData   = mesh.positions.data();
+    const float *const nrmData   = mesh.normals.data();
+    const float *const colorData = mesh.colors.data();
+    const float *const uvData    = mesh.uvs.data();
+
+    const HeadlessTexture *const baseColorMap            = setup.baseColorMap;
+    const HeadlessTexture *const normalMap               = setup.normalMap;
+    const HeadlessTexture *const metallicRoughnessMap    = setup.metallicRoughnessMap;
+    const HeadlessTexture *const occlusionMap            = setup.occlusionMap;
+    const HeadlessTexture *const emissiveMap             = setup.emissiveMap;
+    const glm::vec3              baseColorFactor         = setup.baseColorFactor;
+    const float                  metallicFactor          = setup.metallicFactor;
+    const float                  roughnessFactor         = setup.roughnessFactor;
+    const float                  normalScale             = setup.normalScale;
+    const float                  occlusionStrength       = setup.occlusionStrength;
+    const glm::vec3              emissiveColor           = setup.emissiveColor;
+    const bool                   hasBaseColorMap         = setup.hasBaseColorMap;
+    const bool                   hasNormalMap            = setup.hasNormalMap;
+    const bool                   hasMetallicRoughnessMap = setup.hasMetallicRoughnessMap;
+    const bool                   hasEmissiveMap          = setup.hasEmissiveMap;
+    const bool                   hasEmissive             = setup.hasEmissive;
+    const bool                   hasOcclusion            = setup.hasOcclusion;
+    const glm::vec3              fallbackTangentNormal   = setup.fallbackTangentNormal;
+
+    float *const ENGINE_RESTRICT        depthBuffer       = this->depth.data();
+    std::uint8_t *const ENGINE_RESTRICT colorBuffer       = this->color.data();
+    const std::uint32_t                 framebufferWidth  = this->framebufferWidth;
+    const std::uint32_t                 framebufferHeight = this->framebufferHeight;
+
+    for (std::size_t triangle = triStart; triangle < triEnd; ++triangle)
+    {
+        const std::uint32_t *index = setup.indexData + triangle * 3;
+
+        struct ClipVertex
+        {
+            glm::vec4 clip;
+            glm::vec3 worldPosition;
+            glm::vec3 worldNormal;
+            glm::vec3 color;
+            glm::vec2 uv;
+        };
+        ClipVertex corners[3];
+        for (std::uint32_t corner = 0; corner < 3; ++corner)
+        {
+            const std::uint32_t vertexIndex = index[corner];
+            if (useTransformCache && vertexIndex < vertexCount)
+            {
+                const TransformedVertex &transformed = transformedVertices_[vertexIndex];
+                corners[corner].clip                 = transformed.clip;
+                corners[corner].worldPosition        = transformed.worldPosition;
+                corners[corner].worldNormal          = unlit ? glm::vec3(0.0f) : transformed.worldNormal;
+                if (unlit)
+                    corners[corner].worldPosition = glm::vec3(0.0f);
+            }
+            else
+            {
+                const glm::vec4 localPosition(
+                    posData[vertexIndex * 3], posData[vertexIndex * 3 + 1], posData[vertexIndex * 3 + 2], 1.0f);
+                corners[corner].clip          = viewProjection * localPosition;
+                corners[corner].worldPosition = glm::vec3(model * localPosition);
+                if (!unlit)
+                {
+                    const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + vertexIndex * 3);
+                    const float     normalLengthSquared = glm::dot(normalRaw, normalRaw);
+                    corners[corner].worldNormal = normalLengthSquared > 0.0f && std::isfinite(normalLengthSquared)
+                                                    ? normalRaw * glm::inversesqrt(normalLengthSquared)
+                                                    : glm::vec3(0.0f, 1.0f, 0.0f);
+                }
+                else
+                {
+                    corners[corner].worldNormal   = glm::vec3(0.0f);
+                    corners[corner].worldPosition = glm::vec3(0.0f);
+                }
+            }
+            corners[corner].color = glm::make_vec3(colorData + vertexIndex * 3);
+            corners[corner].uv    = glm::make_vec2(uvData + vertexIndex * 2);
+        }
+
+        if (enableBackFaceCull)
+        {
+            const glm::vec3 faceNormal = glm::cross(corners[1].worldPosition - corners[0].worldPosition,
+                corners[2].worldPosition - corners[0].worldPosition);
+            const glm::vec3 viewDir    = cameraPosition_ - corners[0].worldPosition;
+            if (glm::dot(faceNormal, viewDir) * frontSign <= 0.0f)
+            {
+                continue;
+            }
+        }
+
+        ClipVertex    clipped[4];
+        std::uint32_t clippedCount = 0;
+        // Near-plane clip: w + z >= 0 is inside. Fully-inside triangles skip
+        // the Sutherland-Hodgman walk; otherwise emit inside corners and the
+        // interpolated edge crossings (max 4 vertices out).
+        const float dist0 = corners[0].clip.w + corners[0].clip.z;
+        const float dist1 = corners[1].clip.w + corners[1].clip.z;
+        const float dist2 = corners[2].clip.w + corners[2].clip.z;
+        if (dist0 >= 0.0f && dist1 >= 0.0f && dist2 >= 0.0f)
+        {
+            clipped[0]   = corners[0];
+            clipped[1]   = corners[1];
+            clipped[2]   = corners[2];
+            clippedCount = 3;
+        }
+        else
+        {
+            for (std::uint32_t current = 0; current < 3; ++current)
+            {
+                const std::uint32_t next      = (current + 1) % 3;
+                const ClipVertex   &edgeStart = corners[current];
+                const ClipVertex   &edgeEnd   = corners[next];
+
+                const float startDistance = edgeStart.clip.w + edgeStart.clip.z;
+                const float endDistance   = edgeEnd.clip.w + edgeEnd.clip.z;
+                const bool  startInside   = startDistance >= 0.0f;
+                const bool  endInside     = endDistance >= 0.0f;
+                if (startInside)
+                {
+                    clipped[clippedCount++] = edgeStart;
+                }
+                if (startInside != endInside)
+                {
+                    const float t          = startDistance / (startDistance - endDistance);
+                    ClipVertex &crossing   = clipped[clippedCount++];
+                    crossing.clip          = glm::mix(edgeStart.clip, edgeEnd.clip, t);
+                    crossing.worldPosition = glm::mix(edgeStart.worldPosition, edgeEnd.worldPosition, t);
+                    crossing.worldNormal   = glm::mix(edgeStart.worldNormal, edgeEnd.worldNormal, t);
+                    crossing.color         = glm::mix(edgeStart.color, edgeEnd.color, t);
+                    crossing.uv            = glm::mix(edgeStart.uv, edgeEnd.uv, t);
+                }
+            }
+        }
+        if (clippedCount < 3)
+        {
+            continue;
+        }
+
+        glm::vec3 screen[4];
+        float     depth[4];
+        float     clipW[4];
+        for (std::uint32_t vertex = 0; vertex < clippedCount; ++vertex)
+        {
+            clipW[vertex]        = clipped[vertex].clip.w;
+            const float inverseW = 1.0f / clipW[vertex];
+            const float ndcX     = clipped[vertex].clip.x * inverseW;
+            const float ndcY     = clipped[vertex].clip.y * inverseW;
+            const float ndcZ     = clipped[vertex].clip.z * inverseW;
+            screen[vertex]       = glm::vec3((ndcX * 0.5f + 0.5f) * static_cast<float>(framebufferWidth),
+                (1.0f - (ndcY * 0.5f + 0.5f)) * static_cast<float>(framebufferHeight),
+                0.0f);
+            depth[vertex]        = ndcZ * 0.5f + 0.5f;
+        }
+
+        glm::vec3 tangentVector(1.0f, 0.0f, 0.0f);
+        glm::vec3 bitangentVector(0.0f, 1.0f, 0.0f);
+        float     tangentInverseMax = 1.0f;
+        if (!unlit)
+        {
+            const glm::vec3 edge1         = corners[1].worldPosition - corners[0].worldPosition;
+            const glm::vec3 edge2         = corners[2].worldPosition - corners[0].worldPosition;
+            const glm::vec2 uvDelta1      = corners[1].uv - corners[0].uv;
+            const glm::vec2 uvDelta2      = corners[2].uv - corners[0].uv;
+            const float     uvDeterminant = uvDelta1.x * uvDelta2.y - uvDelta2.x * uvDelta1.y;
+            if (std::fabs(uvDeterminant) > 1e-12f)
+            {
+                const float uvScale = 1.0f / uvDeterminant;
+                tangentVector       = (edge1 * uvDelta2.y - edge2 * uvDelta1.y) * uvScale;
+                bitangentVector     = (edge2 * uvDelta1.x - edge1 * uvDelta2.x) * uvScale;
+            }
+            const float maximumTangentLengthSquared
+                = std::max(glm::dot(tangentVector, tangentVector), glm::dot(bitangentVector, bitangentVector));
+            tangentInverseMax = 1.0f / (std::sqrt(maximumTangentLengthSquared) + 1e-12f);
+        }
+
+        bool rasterized = false;
+        for (std::uint32_t fan = 1; fan + 1 < clippedCount; ++fan)
+        {
+            const std::uint32_t cornerA = 0;
+            const std::uint32_t cornerB = fan;
+            const std::uint32_t cornerC = fan + 1;
+
+            const float area = (screen[cornerB].x - screen[cornerA].x) * (screen[cornerC].y - screen[cornerA].y)
+                             - (screen[cornerC].x - screen[cornerA].x) * (screen[cornerB].y - screen[cornerA].y);
+            if (std::fabs(area) < 1e-9f)
+            {
+                continue;
+            }
+            const float inverseArea = 1.0f / area;
+
+            const float minX = std::max(0.0f, std::min({screen[cornerA].x, screen[cornerB].x, screen[cornerC].x}));
+            const float maxX = std::min(static_cast<float>(framebufferWidth) - 1.0f,
+                std::max({screen[cornerA].x, screen[cornerB].x, screen[cornerC].x}));
+            const float minY = std::max(0.0f, std::min({screen[cornerA].y, screen[cornerB].y, screen[cornerC].y}));
+            const float maxY = std::min(static_cast<float>(framebufferHeight) - 1.0f,
+                std::max({screen[cornerA].y, screen[cornerB].y, screen[cornerC].y}));
+            if (minX > maxX || minY > maxY)
+            {
+                continue;
+            }
+
+            const std::int32_t firstX = static_cast<std::int32_t>(minX);
+            const std::int32_t lastX  = static_cast<std::int32_t>(maxX);
+            const std::int32_t firstY = static_cast<std::int32_t>(minY);
+            const std::int32_t lastY  = static_cast<std::int32_t>(maxY);
+
+            const float inverseWA = 1.0f / clipW[cornerA];
+            const float inverseWB = 1.0f / clipW[cornerB];
+            const float inverseWC = 1.0f / clipW[cornerC];
+
+            const float weightADx = -(screen[cornerC].y - screen[cornerB].y) * inverseArea;
+            const float weightBDx = -(screen[cornerA].y - screen[cornerC].y) * inverseArea;
+            const float sampleX   = static_cast<float>(firstX) + 0.5f;
+            const float depthADx
+                = weightADx * depth[cornerA] + weightBDx * depth[cornerB] - (weightADx + weightBDx) * depth[cornerC];
+
+            for (std::int32_t y = firstY; y <= lastY; ++y)
+            {
+                const float sampleY  = static_cast<float>(y) + 0.5f;
+                const float offsetAX = sampleX - screen[cornerB].x;
+                const float offsetAY = sampleY - screen[cornerB].y;
+                const float offsetBX = sampleX - screen[cornerC].x;
+                const float offsetBY = sampleY - screen[cornerC].y;
+                float       weightA  = ((screen[cornerC].x - screen[cornerB].x) * offsetAY
+                                           - (screen[cornerC].y - screen[cornerB].y) * offsetAX)
+                                     * inverseArea;
+                float       weightB  = ((screen[cornerA].x - screen[cornerC].x) * offsetBY
+                                           - (screen[cornerA].y - screen[cornerC].y) * offsetBX)
+                                     * inverseArea;
+                float       pixelDepth
+                    = weightA * depth[cornerA] + weightB * depth[cornerB] + (1.0f - weightA - weightB) * depth[cornerC];
+                std::size_t pixelIndex = static_cast<std::size_t>(y) * framebufferWidth + firstX;
+
+                for (std::int32_t x = firstX; x <= lastX; ++x, ++pixelIndex)
+                {
+#if defined(__GNUC__) || defined(__clang__)
+                    __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+#endif
+                    const float weightC = 1.0f - weightA - weightB;
+                    if (weightA >= 0.0f && weightB >= 0.0f && weightC >= 0.0f)
+                    {
+                        const float currentDepth = depthBuffer[pixelIndex];
+                        if (pixelDepth >= currentDepth)
+                        {
+                            // Behind geometry: advance the edge functions now and
+                            // skip shading (covered pixels advance at the loop tail).
+                            weightA += weightADx;
+                            weightB += weightBDx;
+                            pixelDepth += depthADx;
+                            continue;
+                        }
+
+                        // Perspective-correct attributes: interpolate 1/w-weighted
+                        // varyings, then divide by the interpolated 1/w.
+                        const float inverseWSum = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
+                        const float inversePerspective = 1.0f / inverseWSum;
+                        const float correctedA         = weightA * inverseWA * inversePerspective;
+                        const float correctedB         = weightB * inverseWB * inversePerspective;
+                        const float correctedC         = 1.0f - correctedA - correctedB;
+
+                        const glm::vec2 interpolatedUv    = correctedA * clipped[cornerA].uv
+                                                          + correctedB * clipped[cornerB].uv
+                                                          + correctedC * clipped[cornerC].uv;
+                        const glm::vec3 interpolatedColor = correctedA * clipped[cornerA].color
+                                                          + correctedB * clipped[cornerB].color
+                                                          + correctedC * clipped[cornerC].color;
+                        glm::vec3       baseColor         = interpolatedColor * baseColorFactor;
+                        if (hasBaseColorMap)
+                        {
+                            baseColor *= baseColorMap->sample(interpolatedUv.x, interpolatedUv.y);
+                        }
+
+                        glm::vec3 shaded = baseColor;
+                        if (!unlit)
+                        {
+                            const glm::vec3 interpolatedPosition = correctedA * clipped[cornerA].worldPosition
+                                                                 + correctedB * clipped[cornerB].worldPosition
+                                                                 + correctedC * clipped[cornerC].worldPosition;
+                            const glm::vec3 interpolatedNormal   = correctedA * clipped[cornerA].worldNormal
+                                                                 + correctedB * clipped[cornerB].worldNormal
+                                                                 + correctedC * clipped[cornerC].worldNormal;
+                            const glm::vec3 geometryNormal       = glm::normalize(interpolatedNormal);
+
+                            glm::vec3 tangentNormal = fallbackTangentNormal;
+                            if (hasNormalMap)
+                            {
+                                const glm::vec3 normalMapSample
+                                    = normalMap->sample(interpolatedUv.x, interpolatedUv.y) * 2.0f - 1.0f;
+                                tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
+                                    normalMapSample.y * normalScale,
+                                    normalMapSample.z));
+                            }
+                            const glm::mat3 tbn(
+                                tangentVector * tangentInverseMax, bitangentVector * tangentInverseMax, geometryNormal);
+                            const glm::vec3 normal = glm::normalize(tbn * tangentNormal);
+
+                            float metallic  = metallicFactor;
+                            float roughness = roughnessFactor;
+                            if (hasMetallicRoughnessMap)
+                            {
+                                const glm::vec3 metallicRoughnessSample
+                                    = metallicRoughnessMap->sample(interpolatedUv.x, interpolatedUv.y);
+                                metallic *= metallicRoughnessSample.b;
+                                roughness *= metallicRoughnessSample.g;
+                            }
+                            metallic  = std::clamp(metallic, 0.0f, 1.0f);
+                            roughness = std::clamp(roughness, minimumRoughness, 1.0f);
+                            const float occlusion
+                                = hasOcclusion
+                                    ? 1.0f
+                                          - occlusionStrength
+                                                * (1.0f - occlusionMap->sample(interpolatedUv.x, interpolatedUv.y).r)
+                                    : 1.0f;
+                            shaded = pbrShade(normal,
+                                interpolatedPosition,
+                                cameraPosition_,
+                                lightDirection_,
+                                sunRadiance_,
+                                ambientSky_,
+                                ambientGround_,
+                                baseColor,
+                                metallic,
+                                roughness,
+                                occlusion,
+                                directLights_.data(),
+                                static_cast<std::uint32_t>(directLights_.size()));
+                        }
+
+                        if (hasEmissive)
+                        {
+                            if (hasEmissiveMap)
+                            {
+                                shaded += emissiveColor * emissiveMap->sample(interpolatedUv.x, interpolatedUv.y);
+                            }
+                            else
+                            {
+                                shaded += emissiveColor;
+                            }
+                        }
+                        // Output transform: tone map, then manual gamma (the CPU
+                        // raster always writes UNORM targets; see SRGB_OUTPUT in
+                        // mesh.frag for the GPU-side switch).
+                        shaded = toneMapColor(shaded, environment_.exposure, environment_.toneMapping);
+                        shaded = glm::pow(glm::max(shaded, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
+
+                        if (useAtomicDepth)
+                        {
+                            // Parallel path: one spin lock per pixel group keeps
+                            // depth-test/write pairs from interleaving.
+                            const std::size_t             lockIndex = pixelIndex / pixelsPerLockGroup_;
+                            std::atomic_ref<std::uint8_t> lockRef(pixelLocks[lockIndex]);
+                            std::uint8_t                  expected = 0;
+                            while (!lockRef.compare_exchange_weak(
+                                expected, 1, std::memory_order_acquire, std::memory_order_relaxed))
+                            {
+                                expected = 0;
+                            }
+
+                            if (pixelDepth < depthBuffer[pixelIndex])
+                            {
+                                depthBuffer[pixelIndex] = pixelDepth;
+                                std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
+                                pixel[0]                = toByte(shaded.x);
+                                pixel[1]                = toByte(shaded.y);
+                                pixel[2]                = toByte(shaded.z);
+                                pixel[3]                = 255;
+                                rasterized              = true;
+                            }
+                            lockRef.store(0, std::memory_order_release);
+                        }
+                        else
+                        {
+                            if (pixelDepth < depthBuffer[pixelIndex])
+                            {
+                                depthBuffer[pixelIndex] = pixelDepth;
+                                std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
+                                pixel[0]                = toByte(shaded.x);
+                                pixel[1]                = toByte(shaded.y);
+                                pixel[2]                = toByte(shaded.z);
+                                pixel[3]                = 255;
+                                rasterized              = true;
+                            }
+                        }
+                    }
+
+                    weightA += weightADx;
+                    weightB += weightBDx;
+                    pixelDepth += depthADx;
+                }
+            }
+        }
+        if (rasterized)
+        {
+            if (outResult != nullptr)
+            {
+                ++outResult->trianglesRasterized;
+            }
+            else
+            {
+                ++statistics_.trianglesRasterized;
+            }
+        }
+    }
+}
+
+} // namespace render
+} // namespace engine
