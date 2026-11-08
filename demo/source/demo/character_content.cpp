@@ -1,15 +1,15 @@
 // character_content.cpp - body parts for the customisation demo.
 //
-// Heads, torso, arms, legs, wings, and tail are cut from downloaded CC0
-// model packs (Quaternius Universal Base Characters / Ultimate Monsters /
-// Dinosaur pack) by scripts/build_character_parts.py and load from
-// assets/character_parts/*.obj with per-vertex colors and baked morph
-// blocks. Arms, wings, and the tail are rooted with a fused ball joint that
-// covers the parent's cut boundary; the neck transition piece is the one
-// procedural mesh: its radius is a shared junction function (neckRadius)
-// that the heads' neck_fit morphs and the torso's neck-band morphs are
-// baked to match, so the neck junction stays sealed at every parameter
-// value.
+// Heads, torso, arms, legs, and wings are cut from downloaded CC0 model
+// packs (Quaternius Universal Base Characters / Ultimate Monsters) by
+// scripts/build_character_parts.py and load from assets/character_parts/*.obj
+// with per-vertex colors and baked morph blocks. Arms and wings are rooted
+// with a fused ball joint that covers the parent's cut boundary; the neck
+// transition piece and the two-piece reptile tail are the procedural meshes
+// the pipeline generates (the tail along the tail_chain rig curve): the
+// neck's radius is a shared junction function (neckRadius) that the heads'
+// neck_fit morphs and the torso's neck-band morphs are baked to match, so
+// the neck junction stays sealed at every parameter value.
 //
 // Junction contract (see modules/character/docs/customization_design.md):
 // every ring away from a part origin is driven by baked morphs whose
@@ -663,8 +663,8 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .materialSlotCount     = 1,
         .tags                  = headTags,
         .tagCount              = 1,
-        .boundsCenter          = {0.0f, 0.10f, 0.06f},
-        .boundsRadius          = 0.26f,
+        .boundsCenter          = {0.0f, 0.065f, 0.10f},
+        .boundsRadius          = 0.34f,
         .triangleCount         = 0,
     };
     const PartDefinition dragonPart{
