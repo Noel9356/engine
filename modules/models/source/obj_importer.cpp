@@ -404,7 +404,7 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
         std::vector<std::uint32_t>                                        positionRemap;
         std::vector<float>                                                vertices;
         std::vector<std::uint32_t>                                        indices;
-        vertices.reserve(indexCount * render::meshVertexFloatCount);
+        vertices.reserve(indexCount * renderer::meshVertexFloatCount);
         indices.reserve(indexCount);
         const bool weldVertices = options.weldVertices && options.normalMode != ModelNormalMode::GenerateFlat;
 
@@ -496,7 +496,7 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
                 }
             }
 
-            const std::uint32_t localIndex = static_cast<std::uint32_t>(vertices.size() / render::meshVertexFloatCount);
+            const std::uint32_t localIndex = static_cast<std::uint32_t>(vertices.size() / renderer::meshVertexFloatCount);
             const tinyobj::real_t *position = attrib.vertices.data() + static_cast<std::size_t>(index.vertex_index) * 3;
             if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]))
             {
@@ -504,7 +504,7 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
                 return false;
             }
             const std::size_t vertexOffset = vertices.size();
-            vertices.resize(vertexOffset + render::meshVertexFloatCount);
+            vertices.resize(vertexOffset + renderer::meshVertexFloatCount);
             transformPosition(transform, position, vertices.data() + vertexOffset);
             if (!std::isfinite(vertices[vertexOffset + 0]) || !std::isfinite(vertices[vertexOffset + 1])
                 || !std::isfinite(vertices[vertexOffset + 2]))
@@ -616,7 +616,7 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
         {
             part.name = "part " + std::to_string(record.parts.size());
         }
-        for (std::size_t offset = 0; offset + 2 < part.vertices.size(); offset += render::meshVertexFloatCount)
+        for (std::size_t offset = 0; offset + 2 < part.vertices.size(); offset += renderer::meshVertexFloatCount)
         {
             const float x = part.vertices[offset + 0];
             const float y = part.vertices[offset + 1];

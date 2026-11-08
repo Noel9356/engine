@@ -1,0 +1,27 @@
+[renderer]
+auto_config                          = false
+back_face_culling                    = true
+backend                              = "auto"
+clear_color                          = [0.0, 0.0, 0.0, 1.0]
+device                               = "auto"
+draw_sort_min_commands               = 2
+draw_sort_mode                       = "mesh_material"
+frustum_culling                      = true
+gpu_timestamps_enabled               = false
+headless_transform_cache_mb          = 32
+instance_batch_min_count             = 4
+instance_batching                    = true
+instance_stream_mb                   = 4
+lod_enabled                          = true
+lod_min_triangles                    = 4096
+max_frames_in_flight                 = 2
+max_material_sets_per_renderer       = 256
+max_pending_uploads                  = 64
+max_textures_per_renderer            = 256
+memory_budget_update_interval_frames = 120
+parallel_triangle_threshold          = 4096
+pipeline_cache_mb                    = 64
+pixels_per_lock_group                = 16
+texture_mipmaps                      = true
+validation                           = false
+vsync                                = true

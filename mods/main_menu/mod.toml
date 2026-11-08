@@ -1,9 +1,9 @@
-id              = "main_menu"
-version         = "0.1.0"
+capabilities    = ["script_runtime", "ui", "renderer"]
+description     = "Toggles the main menu and displays frame-rate statistics."
+display_name    = "Main Menu"
 engine_api      = 1
-type            = "script"
 entry           = "main_menu.lua"
 host_capability = "script_runtime"
-display_name    = "Main Menu"
-description     = "Toggles the main menu and displays frame-rate statistics."
-capabilities    = ["script_runtime", "ui", "render"]
+id              = "main_menu"
+type            = "script"
+version         = "0.1.0"

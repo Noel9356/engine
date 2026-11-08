@@ -1,3 +1,3 @@
 [direct_lighting]
+max_lights                = 0
 maximum_registered_lights = 256
-max_lights = 0

@@ -204,6 +204,9 @@ public:
                     std::lock_guard lock(mutex_);
                     accepting_ = true;
                 }
+                // Publish the hint only after the workers exist and tasks are
+                // accepted: 0 means "do not submit parallel work".
+                runningWorkerCount_.store(workerCount, std::memory_order_release);
                 condition_.notify_all();
             }
             catch (...)
@@ -213,6 +216,7 @@ public:
                     accepting_ = false;
                     stopping_  = true;
                 }
+                runningWorkerCount_.store(0, std::memory_order_release);
                 condition_.notify_all();
                 for (std::thread &worker : workers_)
                     if (worker.joinable())
@@ -253,6 +257,9 @@ public:
             stopInProgress_ = true;
             accepting_      = false;
             stopping_       = true;
+            // Retract the parallel-work hint first: new parallel triggers see
+            // "no workers" and run inline while the drain completes.
+            runningWorkerCount_.store(0, std::memory_order_release);
             workers.swap(workers_);
         }
         condition_.notify_all();
@@ -275,6 +282,16 @@ public:
     {
         std::lock_guard lock(mutex_);
         return running_;
+    }
+
+    // Lock-free worker-count hint: the live worker count while running, 0
+    // otherwise. Published in an atomic at start/stop so per-frame callers
+    // (parallel rasterization triggers, parallelFor chunking) never need the
+    // scheduler mutexes - statistics() remains the exact, locking variant
+    // for diagnostics.
+    [[nodiscard]] std::uint32_t runningWorkerCountHint() const noexcept
+    {
+        return runningWorkerCount_.load(std::memory_order_acquire);
     }
 
     // Returns false (counting a rejection) when stopping, not running, or the
@@ -448,8 +465,10 @@ public:
         if (itemCount == 0)
             return;
         const std::uint32_t workers = workerCountHint();
-        if (!isRunning() || workers == 0)
+        if (workers == 0)
         {
+            // 0 = not running (lock-free hint), including the stop-drain
+            // window: run inline rather than submitting.
             body(0, itemCount);
             return;
         }
@@ -507,7 +526,11 @@ private:
     };
 
     // One worker's deques (index = TaskPriority) plus fairness cursors.
-    struct WorkerQueue
+    // alignas(64): each worker's queue gets its own cache line - the mutex
+    // is taken by the owner on every pop and by thieves on steal attempts,
+    // so adjacent queues sharing a line would have steal attempts evict the
+    // owner's mutex line.
+    struct alignas(64) WorkerQueue
     {
         std::mutex                          mutex;
         std::array<std::deque<WorkItem>, 4> tasks;
@@ -550,8 +573,10 @@ private:
 
     std::uint32_t workerCountHint() const noexcept
     {
-        std::lock_guard lock(lifecycleMutex_);
-        return static_cast<std::uint32_t>(workers_.size());
+        // Lock-free: the hint atomic is maintained by start()/stop(); the
+        // previous implementation locked lifecycleMutex_ on every call (it
+        // runs once per parallelFor - per render-graph frame in this engine).
+        return runningWorkerCount_.load(std::memory_order_acquire);
     }
 
     // Aging pass first: when several priorities are non-empty and the oldest
@@ -851,16 +876,27 @@ private:
     // waitIdle). queuedApprox = sitting-in-a-queue-but-not-popped (drives the
     // worker wake predicate without touching any mutex). Both are atomics so
     // the per-task completion path stays lock-free.
-    std::atomic<std::size_t>                  outstandingTasks_{0};
-    std::atomic<std::size_t>                  queuedApprox_{0};
-    std::size_t                               activeExternalHelpers_ = 0;
+    //
+    // Hot counters live on separate cache lines (alignas(64)): every task
+    // submission read-modify-writes outstandingTasks_/queuedApprox_/
+    // submittedTasks_ and every completion writes outstandingTasks_/
+    // completedTasks_ - independent writers sharing a line would pay a
+    // coherence round trip per task (false sharing). Padding is the remedy
+    // for these measured per-task counters only; the cold counters
+    // (rejectedTasks_, agedTasksDequeued_) stay packed together.
+    alignas(64) std::atomic<std::size_t>   outstandingTasks_{0};
+    alignas(64) std::atomic<std::size_t>   queuedApprox_{0};
+    alignas(64) std::atomic<std::uint64_t> submittedTasks_{0};
+    alignas(64) std::atomic<std::uint64_t> completedTasks_{0};
+    std::atomic<std::uint64_t>             rejectedTasks_{0};
+    std::atomic<std::uint64_t>             agedTasksDequeued_{0};
+    // Lock-free worker-count hint published by start()/stop() (0 = not
+    // running / stopping); see runningWorkerCountHint().
+    std::atomic<std::uint32_t>             runningWorkerCount_{0};
+    std::size_t                            activeExternalHelpers_ = 0;
     // Yield-retry budget before a worker parks on the condvar (0 = park
     // immediately, the historical behaviour).
     std::uint32_t                             workerSpinBeforePark_ = 8;
-    std::atomic<std::uint64_t>                submittedTasks_{0};
-    std::atomic<std::uint64_t>                completedTasks_{0};
-    std::atomic<std::uint64_t>                rejectedTasks_{0};
-    std::atomic<std::uint64_t>                agedTasksDequeued_{0};
     bool                                      running_        = false;
     bool                                      accepting_      = false;
     bool                                      stopping_       = false;

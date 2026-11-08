@@ -11,6 +11,7 @@
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/script_runtime/capabilities.hpp>
+#include <engine/util/hardware_info.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -511,6 +512,17 @@ public:
                                .channel<WindowKeyEvent>()
                                .subscribe<ScriptRuntimeModule, &ScriptRuntimeModule::onWindowKey>(this);
 
+        // auto_config = true: the script memory ceilings derive from
+        // installed RAM and the matching [script_runtime] keys have no
+        // effect. Everything else (instruction budget, script size,
+        // runtimes/native-function caps) bounds logic, not memory, and keeps
+        // its built-in default in both modes.
+        if (context.configurationBooleanInSection("script_runtime", "auto_config").value_or(false))
+        {
+            applyHardwareDerivedMemoryLimits();
+        }
+        else
+        {
         if (const auto value = context.configurationIntegerInSection("script_runtime", "memory_limit_mb");
             value && *value >= 1 && *value <= 4096)
             defaultDescription_.memoryLimitBytes = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
@@ -538,6 +550,7 @@ public:
         if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_runtime_initializers");
             value && *value >= 1 && *value <= 4096)
             maximumRuntimeInitializers_ = static_cast<std::size_t>(*value);
+        }
     }
 
     void start() override
@@ -1265,6 +1278,35 @@ private:
     std::uint32_t              maximumNativeArguments_ = 32;
     std::uint32_t              maximumNativeResults_   = 16;
     std::size_t                maximumRuntimeInitializers_ = 64;
+
+    // auto_config = true: per-runtime memory gets ~1.6% of installed RAM
+    // (16..256 MiB), the module-wide total ~12.5% (128..4096 MiB). Unknown
+    // RAM keeps the built-in ceilings (the conservative fallback). Every
+    // derived value stays inside the manual ranges, so switching
+    // auto_config off and hand-writing the derived numbers reproduces the
+    // same behavior exactly.
+    void applyHardwareDerivedMemoryLimits()
+    {
+        constexpr std::uint64_t mib = 1024ull * 1024ull;
+        constexpr std::uint64_t gib = 1024ull * mib;
+        const std::uint64_t     ram = util::physicalMemoryBytes();
+        if (ram == 0u)
+        {
+            std::fprintf(stderr,
+                "script_runtime: auto_config is on; installed RAM unknown, keeping built-in limits; "
+                "other tuning keys in [script_runtime] are ignored\n");
+            return;
+        }
+        defaultDescription_.memoryLimitBytes = std::clamp<std::uint64_t>(ram / 64u, 16u * mib, 256u * mib);
+        maximumTotalMemoryBytes_             = std::clamp<std::uint64_t>(ram / 8u, 128u * mib, 4096u * mib);
+        std::fprintf(stderr,
+            "script_runtime: auto_config is on; memory limits derived from %.1f GiB RAM "
+            "(memory_limit_mb=%llu, maximum_total_memory_mb=%llu); "
+            "other tuning keys in [script_runtime] are ignored\n",
+            static_cast<double>(ram) / static_cast<double>(gib),
+            (unsigned long long)(defaultDescription_.memoryLimitBytes / mib),
+            (unsigned long long)(maximumTotalMemoryBytes_ / mib));
+    }
 };
 
 } // namespace

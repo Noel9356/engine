@@ -1,0 +1,37 @@
+config_keys           = [
+    "renderer.anisotropy_level",
+    "renderer.auto_config",
+    "renderer.back_face_culling",
+    "renderer.backend",
+    "renderer.clear_color",
+    "renderer.device",
+    "renderer.draw_sort_min_commands",
+    "renderer.draw_sort_mode",
+    "renderer.frustum_culling",
+    "renderer.gpu_timestamps_enabled",
+    "renderer.headless_band_split_triangles",
+    "renderer.headless_tile_parallel",
+    "renderer.headless_transform_cache_mb",
+    "renderer.instance_batch_min_count",
+    "renderer.instance_batching",
+    "renderer.instance_stream_mb",
+    "renderer.lod_enabled",
+    "renderer.lod_min_triangles",
+    "renderer.max_frames_in_flight",
+    "renderer.max_material_sets_per_renderer",
+    "renderer.max_pending_uploads",
+    "renderer.max_textures_per_renderer",
+    "renderer.memory_budget_update_interval_frames",
+    "renderer.msaa_samples",
+    "renderer.parallel_triangle_threshold",
+    "renderer.pipeline_cache_mb",
+    "renderer.pixels_per_lock_group",
+    "renderer.texture_mipmaps",
+    "renderer.validation",
+    "renderer.vsync",
+]
+name                  = "renderer"
+optional_capabilities = ["window.vulkan", "pbr", "direct_lighting"]
+provides              = ["renderer", "renderer.vulkan", "renderer.headless"]
+requires              = ["window"]
+version               = "0.1.0"

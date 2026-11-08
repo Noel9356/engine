@@ -1,15 +1,16 @@
-name = "script_runtime"
-version = "0.1.0"
-provides = ["script_runtime"]
-requires = []
 config_keys = [
-    "script_runtime.memory_limit_mb",
+    "script_runtime.auto_config",
     "script_runtime.instruction_limit",
-    "script_runtime.maximum_script_size_mb",
-    "script_runtime.maximum_runtimes",
-    "script_runtime.maximum_total_memory_mb",
-    "script_runtime.maximum_native_functions",
     "script_runtime.maximum_native_arguments",
+    "script_runtime.maximum_native_functions",
     "script_runtime.maximum_native_results",
     "script_runtime.maximum_runtime_initializers",
+    "script_runtime.maximum_runtimes",
+    "script_runtime.maximum_script_size_mb",
+    "script_runtime.maximum_total_memory_mb",
+    "script_runtime.memory_limit_mb",
 ]
+name        = "script_runtime"
+provides    = ["script_runtime"]
+requires    = []
+version     = "0.1.0"

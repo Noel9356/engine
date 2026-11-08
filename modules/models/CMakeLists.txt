@@ -12,7 +12,7 @@ target_include_directories(
 target_link_libraries(
     engine_models_capabilities
     INTERFACE engine_model_types
-              engine_render_types
+              engine_renderer_types
 )
 
 engine_fetch_dependency(
@@ -89,7 +89,7 @@ target_link_libraries(
     PRIVATE engine_kernel
             engine_models_capabilities
             engine_model_types
-            engine_render_types
+            engine_renderer_types
             engine_dep_tinyobjloader
             engine_dep_cgltf
             meshoptimizer

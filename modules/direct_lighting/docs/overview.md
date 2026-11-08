@@ -1,6 +1,6 @@
 # direct_lighting module
 
-direct_lighting maintains the engine's registry of direct lights (directional, point, and spot) and hands renderers a stable, priority-sorted snapshot of the currently active lights each time they ask. It also resolves a per-device light budget from a `render::DeviceProfile`, so renderers can size their uniform buffers without knowing the hardware. The module is intentionally stateless beyond the registry: it does no lighting math itself.
+direct_lighting maintains the engine's registry of direct lights (directional, point, and spot) and hands renderers a stable, priority-sorted snapshot of the currently active lights each time they ask. It also resolves a per-device light budget from a `renderer::DeviceProfile`, so renderers can size their uniform buffers without knowing the hardware. The module is intentionally stateless beyond the registry: it does no lighting math itself.
 
 ## Capability
 
@@ -21,7 +21,7 @@ The module has no capability dependencies and declares no permissions.
 | --- | --- |
 | `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys` (`direct_lighting.max_lights` and `direct_lighting.maximum_registered_lights`). Read by kernel module discovery. |
 | `config.toml` | Default value for the `[direct_lighting]` configuration section (see `configuration.md`). |
-| `include/engine/direct_lighting/capabilities.hpp` | Public capability types: ABI, light handle/type/error, light description and snapshot entry, profile struct, function-pointer table. Includes `engine/render/device_profile.hpp` for the profile resolver's input type. |
+| `include/engine/direct_lighting/capabilities.hpp` | Public capability types: ABI, light handle/type/error, light description and snapshot entry, profile struct, function-pointer table. Includes `engine/renderer/device_profile.hpp` for the profile resolver's input type. |
 | `source/direct_lighting.cpp` | The whole implementation: description validation and normalization, mutex-guarded registry and snapshot, version counter, device budget resolution, capability binding, module entry table. |
 
 ## How it works
@@ -29,7 +29,7 @@ The module has no capability dependencies and declares no permissions.
 - **Registry and snapshot.** `lights_` and `snapshot_` are vectors reserved to the configured registry budget. An `unordered_map` maps stable handles to registry indices, so handle updates and lookups stay constant-time as the registry grows. `lights_` is the authoritative registry (insertion/swap-remove order, irrelevant to consumers), `snapshot_` is the renderer-facing view rebuilt by `rebuildSnapshotLocked()`. The snapshot contains only *active* lights — `enabled` with radiance, i.e. positive intensity and at least one non-zero color channel — sorted by descending `priority`, then ascending handle for a stable order.
 - **Validation and normalization.** `validDescription` requires every float to be finite, `range > 0`, `0 <= innerConeRadians <= outerConeRadians <= pi/2`, non-negative intensity and color, and a non-degenerate direction for directional/spot lights (length checked in double precision). `normalizeDescription` then normalizes that direction so consumers always see unit vectors.
 - **Update strategy.** `updateLight` compares the new (normalized) description with the old one: an exact match is a no-op; a change that alters activity (enabled/intensity/color) or priority triggers a snapshot rebuild, while purely positional changes patch the light in place inside the existing snapshot. Every accepted mutation bumps the atomic `version_` counter.
-- **Copy protocol.** `copyLights(output, capacity, outVersion)` copies the snapshot truncated to `capacity` and reports the current version. Called with a null/zero-capacity buffer it only reports the version, which lets a renderer detect changes cheaply every frame and copy only when the version moved. This is exactly the pattern the render module uses.
+- **Copy protocol.** `copyLights(output, capacity, outVersion)` copies the snapshot truncated to `capacity` and reports the current version. Called with a null/zero-capacity buffer it only reports the version, which lets a renderer detect changes cheaply every frame and copy only when the version moved. This is exactly the pattern the renderer module uses.
 - **Device budget (`resolveProfile`).** For Vulkan devices the automatic budget is 32 (discrete GPU), 24 (integrated), 16 (virtual), 8 otherwise; without compute shaders it is capped at 16. It is then capped by the uniform-buffer budget `(maxUniformBufferRange - 176) / 64` (176 bytes of fixed block data plus 64 bytes per light; a range below 176 means zero lights). Non-Vulkan devices get the base budget of 8. A configured `max_lights` of 0 selects the automatic value; an explicit value is capped by the hardware limit.
 
 ## Threading and lifetime
@@ -44,7 +44,7 @@ Configurable — see [configuration.md](configuration.md) for the `[direct_light
 
 The module does not touch the kernel event bus: it publishes no events and subscribes to none (no `eventBus` usage in the source). It declares no permissions (`declaredPermissions = nullptr` in the entry table).
 
-Consumer usage with the real API signatures (as the render module does in `modules/render/source/render.cpp`):
+Consumer usage with the real API signatures (as the renderer module does in `modules/renderer/source/renderer.cpp`):
 
 ```cpp
 // tryAcquireCapability returns nullptr when the module is absent.

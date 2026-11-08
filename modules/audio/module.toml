@@ -1,27 +1,27 @@
-name                 = "audio"
-version              = "0.3.0"
-provides              = ["audio"]
-requires              = []
-optional_capabilities = ["script_runtime"]
-
-config_keys = [
-    "audio.sample_rate",
+config_keys           = [
+    "audio.auto_config",
     "audio.channels",
-    "audio.listener_count",
-    "audio.master_volume",
-    "audio.share_resources",
-    "audio.resource_manager_job_threads",
-    "audio.decoded_format",
     "audio.decoded_channels",
+    "audio.decoded_format",
     "audio.decoded_sample_rate",
+    "audio.default_volume_smooth_time_in_frames",
+    "audio.gain_smooth_time_in_frames",
+    "audio.initial_bus_capacity",
     "audio.initial_engine_capacity",
     "audio.initial_sound_capacity",
-    "audio.initial_bus_capacity",
+    "audio.listener_count",
+    "audio.master_volume",
+    "audio.max_buses_per_engine",
     "audio.max_engines",
     "audio.max_sounds_per_engine",
-    "audio.max_buses_per_engine",
     "audio.period_size_in_frames",
-    "audio.gain_smooth_time_in_frames",
-    "audio.default_volume_smooth_time_in_frames",
     "audio.pre_mix_stack_size_in_bytes",
+    "audio.resource_manager_job_threads",
+    "audio.sample_rate",
+    "audio.share_resources",
 ]
+name                  = "audio"
+optional_capabilities = ["script_runtime"]
+provides              = ["audio"]
+requires              = []
+version               = "0.3.0"

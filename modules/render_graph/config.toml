@@ -1,8 +1,8 @@
 [render_graph]
-quality                 = "auto"
 max_passes              = 256
 max_resources           = 512
-transient_budget_mb     = 512
-transient_aliasing      = true
 plan_cache_entries      = 8
 plan_cache_max_elements = 16384
+quality                 = "auto"
+transient_aliasing      = true
+transient_budget_mb     = 512

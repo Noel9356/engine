@@ -1,20 +1,20 @@
-name = "skeletal_animation"
-version = "0.4.0"
-provides = ["skeletal_animation"]
-requires = []
-optional_capabilities = ["script_runtime"]
-config_keys = [
-    "skeletal_animation.maximum_joints",
+config_keys           = [
+    "skeletal_animation.default_interpolation",
+    "skeletal_animation.maximum_blend_poses",
     "skeletal_animation.maximum_clips",
+    "skeletal_animation.maximum_cursor_walk",
+    "skeletal_animation.maximum_joints",
+    "skeletal_animation.maximum_keyframes_per_track",
     "skeletal_animation.maximum_players",
     "skeletal_animation.maximum_skeletons",
-    "skeletal_animation.maximum_tracks_per_clip",
-    "skeletal_animation.maximum_keyframes_per_track",
-    "skeletal_animation.maximum_total_keyframes",
     "skeletal_animation.maximum_total_joints",
-    "skeletal_animation.maximum_blend_poses",
-    "skeletal_animation.sampling_cache_enabled",
+    "skeletal_animation.maximum_total_keyframes",
     "skeletal_animation.maximum_total_sampling_cache_entries",
-    "skeletal_animation.maximum_cursor_walk",
-    "skeletal_animation.default_interpolation",
+    "skeletal_animation.maximum_tracks_per_clip",
+    "skeletal_animation.sampling_cache_enabled",
 ]
+name                  = "skeletal_animation"
+optional_capabilities = ["script_runtime"]
+provides              = ["skeletal_animation"]
+requires              = []
+version               = "0.4.0"

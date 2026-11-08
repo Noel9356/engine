@@ -3,7 +3,7 @@
 // Keeps a capacity-limited registry of validated, direction-normalized lights
 // under one mutex and maintains a priority-sorted "active" snapshot for renderers.
 // copyLights plus an atomic version counter let consumers detect changes
-// cheaply; resolveProfile maps a render::DeviceProfile to a light budget.
+// cheaply; resolveProfile maps a renderer::DeviceProfile to a light budget.
 
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/kernel/module_api.hpp>
@@ -196,7 +196,7 @@ private:
         { return static_cast<DirectLightingModule *>(self)->setEnabledImpl(light, enabled); };
         capability_.copyLights = [](void *self, DirectLight *output, std::uint32_t capacity, std::uint64_t *version)
         { return static_cast<DirectLightingModule *>(self)->copyLightsImpl(output, capacity, version); };
-        capability_.resolveProfile = [](void *self, const render::DeviceProfile *device, DirectLightingProfile *output)
+        capability_.resolveProfile = [](void *self, const renderer::DeviceProfile *device, DirectLightingProfile *output)
         { return static_cast<DirectLightingModule *>(self)->resolveProfileImpl(device, output); };
     }
 
@@ -405,7 +405,7 @@ private:
             });
     }
 
-    bool resolveProfileImpl(const render::DeviceProfile *device, DirectLightingProfile *output) const
+    bool resolveProfileImpl(const renderer::DeviceProfile *device, DirectLightingProfile *output) const
     {
         if (device == nullptr || output == nullptr)
         {
@@ -418,13 +418,13 @@ private:
         {
             switch (device->deviceClass)
             {
-            case render::DeviceClass::DiscreteGpu:
+            case renderer::DeviceClass::DiscreteGpu:
                 automatic = 32;
                 break;
-            case render::DeviceClass::IntegratedGpu:
+            case renderer::DeviceClass::IntegratedGpu:
                 automatic = 24;
                 break;
-            case render::DeviceClass::VirtualGpu:
+            case renderer::DeviceClass::VirtualGpu:
                 automatic = 16;
                 break;
             default:

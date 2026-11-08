@@ -66,7 +66,7 @@ DependencyResolver::ResolutionResult DependencyResolver::resolve() const
     }
 
     // Exact name match first; otherwise any provided dotted capability whose
-    // family satisfies the requirement ("render" <- "render.vulkan").
+    // family satisfies the requirement ("renderer" <- "renderer.vulkan").
     const auto candidateProviders = [&capabilityProviders](const std::string &requirement)
     {
         std::vector<ManifestIndex> candidates;

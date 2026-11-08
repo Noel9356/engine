@@ -9,7 +9,7 @@ target_include_directories(
 target_link_libraries(
     engine_pbr_capabilities
     INTERFACE engine_model_types
-              engine_render_types
+              engine_renderer_types
 )
 
 add_library(
@@ -28,7 +28,7 @@ target_link_libraries(
     PRIVATE engine_kernel
             engine_pbr_capabilities
             engine_model_types
-            engine_render_types
+            engine_renderer_types
 )
 
 set_target_properties(

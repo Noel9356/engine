@@ -8,7 +8,7 @@
 -- Behaviour: Escape toggles the menu window, which reports frame-rate
 -- statistics gathered from the frame event stream. Window drawing goes through
 -- the "menu_*" bridge functions that the demo application installs into this
--- runtime after start; they wrap the ui and render capabilities on the C++ side.
+-- runtime after start; they wrap the ui and renderer capabilities on the C++ side.
 
 local MOD_ID = engine_mod_id or "main_menu"
 

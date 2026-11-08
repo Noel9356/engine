@@ -8,7 +8,7 @@ target_include_directories(
 )
 target_link_libraries(
     engine_render_graph_capabilities
-    INTERFACE engine_render_capabilities
+    INTERFACE engine_renderer_capabilities
 )
 
 add_library(

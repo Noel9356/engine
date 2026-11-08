@@ -11,6 +11,7 @@
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/kernel/sha256.hpp>
+#include <engine/util/hardware_info.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -94,6 +95,19 @@ public:
         cacheUnreferencedAssets_ = false;
         cacheEvictionBatchBytes_ = 64ull * 1024ull * 1024ull;
         defaultAsyncPriority_    = TaskPriority::Low;
+
+        // auto_config = true: the memory-shaped knobs derive from installed
+        // RAM and the matching [file_asset_store] tuning keys have no effect.
+        // Structural keys (maximum_path_bytes, cooked_catalog_path,
+        // cooked_object_directory, verify_cooked_asset_hashes,
+        // root_directory) describe the store's wiring, not the machine, and
+        // stay effective in both modes below.
+        if (context.configurationBooleanInSection("file_asset_store", "auto_config").value_or(false))
+        {
+            applyHardwareDerivedMemoryBudgets();
+        }
+        else
+        {
         // Per-file read cap; 1..16384 MiB.
         if (const auto value = context.configurationIntegerInSection("file_asset_store", "maximum_file_size_mb");
             value && *value >= 1 && *value <= 16384)
@@ -114,10 +128,6 @@ public:
         if (const auto value = context.configurationIntegerInSection("file_asset_store", "maximum_inflight_memory_mb");
             value && *value >= 1 && *value <= 65536)
             maximumInflightBytes_ = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
-        // Canonical path length cap; 64..65536 bytes.
-        if (const auto value = context.configurationIntegerInSection("file_asset_store", "maximum_path_bytes");
-            value && *value >= 64 && *value <= 65536)
-            maximumPathBytes_ = static_cast<std::size_t>(*value);
         // Keep zero-reference assets instead of freeing them immediately.
         cacheUnreferencedAssets_
             = context.configurationBooleanInSection("file_asset_store", "cache_unreferenced_assets").value_or(false);
@@ -140,6 +150,12 @@ public:
                 std::fprintf(
                     stderr, "file_asset_store: unknown default_async_priority '%s'; using low\n", value->c_str());
         }
+        }
+        // Canonical path length cap; 64..65536 bytes. Structural: honored in
+        // both modes.
+        if (const auto value = context.configurationIntegerInSection("file_asset_store", "maximum_path_bytes");
+            value && *value >= 64 && *value <= 65536)
+            maximumPathBytes_ = static_cast<std::size_t>(*value);
         // Cooked assets: load the binary catalog and index it by logical key;
         // objects are read from the catalog's directory unless
         // cooked_object_directory overrides it. A missing or corrupt catalog
@@ -186,6 +202,42 @@ public:
                 = !error && !rootDirectory_.empty() && std::filesystem::is_directory(rootDirectory_, error) && !error;
         }
     }
+
+private:
+    // auto_config = true: derive the cache's memory shape from installed RAM
+    // (unknown RAM keeps the built-in budgets, which are the conservative
+    // fallback). resident gets ~25% of RAM, in-flight ~12.5%, and the
+    // eviction overshoot ~3%; on machines with 8+ GiB the zero-reference
+    // cache stays warm so burst reloads re-serve from memory instead of
+    // re-reading files (fewer IO stalls on tail frames).
+    void applyHardwareDerivedMemoryBudgets()
+    {
+        constexpr std::uint64_t mib    = 1024ull * 1024ull;
+        constexpr std::uint64_t gib    = 1024ull * mib;
+        const std::uint64_t     ram    = util::physicalMemoryBytes();
+        if (ram == 0u)
+        {
+            std::fprintf(stderr,
+                "file_asset_store: auto_config is on; installed RAM unknown, keeping built-in budgets; "
+                "other tuning keys in [file_asset_store] are ignored\n");
+            return;
+        }
+        maximumResidentBytes_    = std::clamp<std::uint64_t>(ram / 4u, 256u * mib, 8192u * mib);
+        maximumInflightBytes_    = std::clamp<std::uint64_t>(ram / 8u, 128u * mib, 4096u * mib);
+        cacheEvictionBatchBytes_ = std::clamp<std::uint64_t>(ram * 3ull / 100ull, 32u * mib, 512u * mib);
+        cacheUnreferencedAssets_ = ram >= 8ull * gib;
+        std::fprintf(stderr,
+            "file_asset_store: auto_config is on; budgets derived from %.1f GiB RAM "
+            "(resident=%llu MiB, inflight=%llu MiB, eviction_batch=%llu MiB, cache_unreferenced=%s); "
+            "other tuning keys in [file_asset_store] are ignored\n",
+            static_cast<double>(ram) / static_cast<double>(gib),
+            (unsigned long long)(maximumResidentBytes_ / mib),
+            (unsigned long long)(maximumInflightBytes_ / mib),
+            (unsigned long long)(cacheEvictionBatchBytes_ / mib),
+            cacheUnreferencedAssets_ ? "on" : "off");
+    }
+
+public:
 
     void start() override
     {
@@ -316,27 +368,39 @@ private:
     }
 
     // Removes a record and its path-index entry, returning its bytes to the
-    // resident budget. Caller must hold recordsMutex_.
-    void eraseRecordLocked(std::unordered_map<AssetHandle, std::shared_ptr<AssetRecord>>::iterator iterator)
+    // resident budget and reporting the byte count actually freed. Caller
+    // must hold recordsMutex_.
+    std::uint64_t eraseRecordLocked(std::unordered_map<AssetHandle, std::shared_ptr<AssetRecord>>::iterator iterator)
     {
         const std::shared_ptr<AssetRecord> &record = iterator->second;
+        std::uint64_t                       byteCount = 0;
         {
-            std::lock_guard     dataLock(record->dataMutex);
-            const std::uint64_t byteCount = record->bytes.size();
+            std::lock_guard dataLock(record->dataMutex);
+            byteCount = record->bytes.size();
             residentBytes_ -= std::min(residentBytes_, byteCount);
             std::vector<std::uint8_t>().swap(record->bytes);
         }
         pathIndex_.erase(record->canonicalPath);
         records_.erase(iterator);
+        return byteCount;
     }
 
     // LRU eviction over unreferenced records that finished (Ready or Failed).
-    // Candidates are sorted by last-access tick, then re-validated under the
-    // lock before each removal. Continues until both the byte and count
-    // targets are met; purgeAll ignores the targets and evicts every
-    // candidate. Caller must hold recordsMutex_.
+    // Candidates are popped in ascending (last-access tick, handle) order -
+    // the exact order a full sort produced - but via a min-heap, so an
+    // eviction that meets its targets after a few removals never orders the
+    // rest of the cache: O(k + e log k) instead of O(k log k) while
+    // recordsMutex_ is held, which shortens the lock hold callers observe on
+    // the request/read paths. Each removal revalidates the record under the
+    // lock and returns its bytes through eraseRecordLocked (one dataMutex
+    // acquisition per eviction instead of two). Continues until both the
+    // byte and count targets are met; purgeAll ignores the targets and evicts
+    // every candidate. Caller must hold recordsMutex_.
     std::uint64_t evictUnusedLocked(std::uint64_t targetBytes, std::size_t targetCount = 0, bool purgeAll = false)
     {
+        // Percentile-relevant: this runs under recordsMutex_, so its duration
+        // is the lock-hold time every concurrent request/read waits behind.
+        const ScopedProfileTimer evictionTimer(profiler_, PerformanceMetric::AssetEviction);
         struct Candidate
         {
             std::uint64_t tick;
@@ -360,30 +424,30 @@ private:
         {
             return 0;
         }
-        std::sort(candidates.begin(),
-            candidates.end(),
-            [](const Candidate &lhs, const Candidate &rhs)
-            { return lhs.tick == rhs.tick ? lhs.handle < rhs.handle : lhs.tick < rhs.tick; });
+        // Max-heap on the reversed (tick, handle) order: the heap top is the
+        // least-recently-used candidate, so pop_heap hands it to the back and
+        // processing the back yields ascending (tick, handle) - identical to
+        // the previous std::sort order including the handle tie-break.
+        const auto leastRecentlyUsedFirst = [](const Candidate &lhs, const Candidate &rhs) noexcept
+        { return lhs.tick != rhs.tick ? lhs.tick > rhs.tick : lhs.handle > rhs.handle; };
+        std::make_heap(candidates.begin(), candidates.end(), leastRecentlyUsedFirst);
 
         std::uint64_t freedBytes   = 0;
         std::size_t   evictedCount = 0;
-        for (const Candidate &candidate : candidates)
+        while (!candidates.empty())
         {
             if (!purgeAll && freedBytes >= targetBytes && evictedCount >= targetCount)
                 break;
+            std::pop_heap(candidates.begin(), candidates.end(), leastRecentlyUsedFirst);
+            const Candidate candidate = candidates.back();
+            candidates.pop_back();
             const auto found = records_.find(candidate.handle);
             if (found == records_.end() || found->second->references.load(std::memory_order_acquire) != 0)
                 continue;
             const AssetState state = found->second->state.load(std::memory_order_acquire);
             if (state != AssetState::Ready && state != AssetState::Failed)
                 continue;
-            const std::uint64_t bytes = [&]
-            {
-                std::lock_guard dataLock(found->second->dataMutex);
-                return static_cast<std::uint64_t>(found->second->bytes.size());
-            }();
-            eraseRecordLocked(found);
-            freedBytes += bytes;
+            freedBytes += eraseRecordLocked(found);
             ++evictedCount;
         }
         return freedBytes;

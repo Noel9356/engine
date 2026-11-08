@@ -189,9 +189,9 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
             }
 
             const std::uint32_t localIndex
-                = static_cast<std::uint32_t>(part.vertices.size() / render::meshVertexFloatCount);
+                = static_cast<std::uint32_t>(part.vertices.size() / renderer::meshVertexFloatCount);
             const std::size_t offset = part.vertices.size();
-            part.vertices.resize(offset + render::meshVertexFloatCount);
+            part.vertices.resize(offset + renderer::meshVertexFloatCount);
             std::copy(position, position + 3, part.vertices.begin() + offset);
             std::copy(sourceNormal, sourceNormal + 3, part.vertices.begin() + offset + 3);
             part.vertices[offset + 6]  = 1.0f;
@@ -260,7 +260,7 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
             return false;
         }
         const std::size_t maximumVertices = static_cast<std::size_t>(binaryTriangleCount) * 3;
-        if (maximumVertices > std::vector<float>().max_size() / render::meshVertexFloatCount
+        if (maximumVertices > std::vector<float>().max_size() / renderer::meshVertexFloatCount
             || maximumVertices > std::vector<std::uint32_t>().max_size())
         {
             reportError(error, ModelLoadError::FileTooLarge);
@@ -270,7 +270,7 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
         constexpr std::size_t initialWeldCapacity = 262144;
         const std::size_t     initialVertexCapacity
             = canWeldVertices ? std::min(maximumVertices, initialWeldCapacity) : maximumVertices;
-        part.vertices.reserve(initialVertexCapacity * render::meshVertexFloatCount);
+        part.vertices.reserve(initialVertexCapacity * renderer::meshVertexFloatCount);
         part.indices.reserve(maximumVertices);
         if (canWeldVertices)
         {
@@ -454,10 +454,10 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
     {
         std::vector<float> smoothNormals;
         accumulateSmoothNormalsInterleaved(part.vertices, part.indices, smoothNormals);
-        for (std::size_t vertex = 0; vertex < part.vertices.size() / render::meshVertexFloatCount; ++vertex)
+        for (std::size_t vertex = 0; vertex < part.vertices.size() / renderer::meshVertexFloatCount; ++vertex)
         {
             std::copy_n(
-                smoothNormals.data() + vertex * 3, 3, part.vertices.data() + vertex * render::meshVertexFloatCount + 3);
+                smoothNormals.data() + vertex * 3, 3, part.vertices.data() + vertex * renderer::meshVertexFloatCount + 3);
         }
     }
     record.parts.push_back(std::move(part));

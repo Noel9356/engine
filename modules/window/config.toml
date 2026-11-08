@@ -1,10 +1,10 @@
 [window]
 backend              = "auto"
-width                = 1280
-height               = 720
-title                = "engine"
-minimum_width        = 0
-minimum_height       = 0
-maximum_width        = 0
-maximum_height       = 0
 event_queue_capacity = 4096
+height               = 720
+maximum_height       = 0
+maximum_width        = 0
+minimum_height       = 0
+minimum_width        = 0
+title                = "engine"
+width                = 1280

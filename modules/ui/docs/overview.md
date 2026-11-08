@@ -81,7 +81,7 @@ frame.deltaSeconds  = 1.0f / 60.0f;
 if (ui.beginFrame(ui.self, context, &frame, &error))
 {
     if (ui.beginWindow(ui.self, context, "Debug", nullptr,
-                       engine::ui::UiWindowFlags_None))
+        engine::ui::UiWindowFlags_None))
     {
         float value = 0.5f;
         ui.sliderFloat(ui.self, context, "speed", &value, 0.0f, 1.0f, "%.2f");

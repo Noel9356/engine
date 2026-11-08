@@ -1,43 +1,40 @@
-
-
-
 [engine]
-worker_count            = 0
-max_worker_count        = 6
-queue_source_fairness   = true
-priority_aging_ms       = 500
 max_frame_delta_seconds = 0.25
+max_worker_count        = 6
+priority_aging_ms       = 500
+queue_source_fairness   = true
+worker_count            = 0
 
-[render]
+[file_asset_store]
+cache_eviction_batch_mb    = 8
+cache_unreferenced_assets  = true
+default_async_priority     = "low"
+maximum_cached_assets      = 1024
+maximum_inflight_memory_mb = 32
+maximum_pending_requests   = 512
+maximum_resident_memory_mb = 256
+
+[render_graph]
+plan_cache_entries      = 0
+plan_cache_max_elements = 4096
+quality                 = "auto"
+transient_aliasing      = true
+transient_budget_mb     = 128
+
+[renderer]
 backend                              = "auto"
 device                               = "auto"
-vsync                                = true
-validation                           = false
+draw_sort_min_commands               = 2
+draw_sort_mode                       = "off"
+frustum_culling                      = true
+gpu_timestamps_enabled               = false
+headless_transform_cache_mb          = 8
+instance_batch_min_count             = 4
+instance_batching                    = false
+instance_stream_mb                   = 4
 max_frames_in_flight                 = 1
 max_pending_uploads                  = 8
 memory_budget_update_interval_frames = 120
-frustum_culling                      = true
-gpu_timestamps_enabled               = false
-draw_sort_mode                       = "off"
-draw_sort_min_commands               = 2
-instance_batching                    = false
-instance_batch_min_count             = 4
-instance_stream_mb                   = 4
 texture_mipmaps                      = false
-headless_transform_cache_mb          = 8
-
-[render_graph]
-quality                 = "auto"
-transient_budget_mb     = 128
-transient_aliasing      = true
-plan_cache_entries      = 0
-plan_cache_max_elements = 4096
-
-[file_asset_store]
-cache_unreferenced_assets  = true
-cache_eviction_batch_mb    = 8
-default_async_priority     = "low"
-maximum_cached_assets      = 1024
-maximum_pending_requests   = 512
-maximum_resident_memory_mb = 256
-maximum_inflight_memory_mb = 32
+validation                           = false
+vsync                                = true

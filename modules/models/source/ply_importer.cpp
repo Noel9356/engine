@@ -584,12 +584,12 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
     if (flat)
     {
         const std::size_t vertexCountOut = sourceIndices.size();
-        if (vertexCountOut > std::vector<float>().max_size() / render::meshVertexFloatCount)
+        if (vertexCountOut > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
         {
             reportError(error, ModelLoadError::FileTooLarge);
             return false;
         }
-        part.vertices.reserve(vertexCountOut * render::meshVertexFloatCount);
+        part.vertices.reserve(vertexCountOut * renderer::meshVertexFloatCount);
         part.indices.reserve(vertexCountOut);
         for (std::size_t triangle = 0; triangle < sourceIndices.size(); triangle += 3)
         {
@@ -616,7 +616,7 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
                 const auto         &source      = sourceVertices[sourceIndex];
                 const float        *position    = positions.data() + static_cast<std::size_t>(sourceIndex) * 3;
                 const std::size_t   offset      = part.vertices.size();
-                part.vertices.resize(offset + render::meshVertexFloatCount);
+                part.vertices.resize(offset + renderer::meshVertexFloatCount);
                 std::copy_n(position, 3, part.vertices.data() + offset);
                 std::copy_n(normal, 3, part.vertices.data() + offset + 3);
                 std::copy_n(source.data() + 6, 3, part.vertices.data() + offset + 6);
@@ -668,16 +668,16 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
             }
         }
         const std::size_t outputCount = static_cast<std::size_t>(vertexCount);
-        if (outputCount > std::vector<float>().max_size() / render::meshVertexFloatCount)
+        if (outputCount > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
         {
             reportError(error, ModelLoadError::FileTooLarge);
             return false;
         }
-        part.vertices.resize(outputCount * render::meshVertexFloatCount);
+        part.vertices.resize(outputCount * renderer::meshVertexFloatCount);
         for (std::size_t index = 0; index < outputCount; ++index)
         {
             const auto &source      = sourceVertices[index];
-            float      *destination = part.vertices.data() + index * render::meshVertexFloatCount;
+            float      *destination = part.vertices.data() + index * renderer::meshVertexFloatCount;
             std::copy_n(positions.data() + index * 3, 3, destination);
             if (generateSmooth)
             {
@@ -710,7 +710,7 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
         part.triangleMaterials.assign(part.indices.size() / 3, invalidMaterial);
     }
     bool haveBounds = false;
-    for (std::size_t offset = 0; offset + 2 < part.vertices.size(); offset += render::meshVertexFloatCount)
+    for (std::size_t offset = 0; offset + 2 < part.vertices.size(); offset += renderer::meshVertexFloatCount)
     {
         const float x = part.vertices[offset];
         const float y = part.vertices[offset + 1];

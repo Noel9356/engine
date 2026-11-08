@@ -23,7 +23,7 @@ namespace engine::models::detail
 {
 
 // One renderable piece of a loaded model. Vertices are interleaved with
-// render::meshVertexFloatCount (11) floats per vertex: position, normal, color,
+// renderer::meshVertexFloatCount (11) floats per vertex: position, normal, color,
 // uv. Indices are a uint32 triangle list; triangleMaterials has one entry per
 // triangle (index into ModelRecord::materials, or invalidMaterial).
 struct ModelPart
@@ -187,16 +187,16 @@ inline void reverseTriangleWinding(std::vector<std::uint32_t> &indices)
 inline void accumulateSmoothNormalsInterleaved(
     const std::vector<float> &vertices, const std::vector<std::uint32_t> &indices, std::vector<float> &outNormals)
 {
-    const std::size_t vertexCount = vertices.size() / render::meshVertexFloatCount;
+    const std::size_t vertexCount = vertices.size() / renderer::meshVertexFloatCount;
     outNormals.assign(vertexCount * 3, 0.0f);
     for (std::size_t corner = 0; corner + 2 < indices.size(); corner += 3)
     {
         const std::uint32_t indexA = indices[corner + 0];
         const std::uint32_t indexB = indices[corner + 1];
         const std::uint32_t indexC = indices[corner + 2];
-        const float        *a      = vertices.data() + static_cast<std::size_t>(indexA) * render::meshVertexFloatCount;
-        const float        *b      = vertices.data() + static_cast<std::size_t>(indexB) * render::meshVertexFloatCount;
-        const float        *c      = vertices.data() + static_cast<std::size_t>(indexC) * render::meshVertexFloatCount;
+        const float        *a      = vertices.data() + static_cast<std::size_t>(indexA) * renderer::meshVertexFloatCount;
+        const float        *b      = vertices.data() + static_cast<std::size_t>(indexB) * renderer::meshVertexFloatCount;
+        const float        *c      = vertices.data() + static_cast<std::size_t>(indexC) * renderer::meshVertexFloatCount;
         const float         ab[3]  = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
         const float         ac[3]  = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
         const float         normal[3]

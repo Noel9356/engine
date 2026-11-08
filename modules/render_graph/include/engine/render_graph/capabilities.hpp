@@ -8,7 +8,7 @@
 #ifndef ENGINE_RENDER_GRAPH_CAPABILITIES_HPP
 #define ENGINE_RENDER_GRAPH_CAPABILITIES_HPP
 
-#include <engine/render/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
 
 #include <cstdint>
 
@@ -45,7 +45,7 @@ enum class RenderGraphError : std::uint32_t
 // maxPasses/maxResources >= 1 and a transient budget up to 16 GiB.
 struct RenderGraphSettings
 {
-    render::QualityPreset quality                    = render::QualityPreset::Auto;
+    renderer::QualityPreset quality                    = renderer::QualityPreset::Auto;
     std::uint32_t         maxPasses                  = 256;
     std::uint32_t         maxResources               = 512;
     std::uint64_t         transientMemoryBudgetBytes = 512ull * 1024ull * 1024ull;
@@ -123,7 +123,7 @@ struct RenderGraphCapability
     const RenderGraphSettings *(*settings)(void *self);
     bool (*setSettings)(void *self, const RenderGraphSettings *settings);
     // Scales the configured limits for the given device into outProfile.
-    bool (*resolveProfile)(void *self, const render::DeviceProfile *device, RenderGraphProfile *outProfile);
+    bool (*resolveProfile)(void *self, const renderer::DeviceProfile *device, RenderGraphProfile *outProfile);
     // Orders passes topologically and assigns transient resources to
     // physical slots. outPassOrder/outResourceSlots need room for
     // passCount/resourceCount entries; on failure outError says why and the

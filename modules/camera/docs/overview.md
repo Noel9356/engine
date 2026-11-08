@@ -35,7 +35,7 @@ The module optionally acquires `script_runtime` to register its Lua bridge. The 
 
 ## Lua bridge
 
-When `script_runtime` is present, each Lua runtime receives the `camera.*` functions: `create`, `destroy`, `set_mode`, `look_at`, `set_projection`, `update`, `view_position`, and `set_control_settings`. Camera handles and viewport dimensions are numeric arguments; modes are `"fixed"`, `"orbit"`, or `"fly"`, and projection names are `"perspective"` or `"orthographic"`. The bridge serializes its own camera calls, but direct C++ capability calls must still obey the camera module's single-thread rule. The bridge is omitted when `script_runtime` is unavailable.
+When `script_runtime` is present, each Lua runtime receives the `camera.*` functions: `create`, `destroy`, `set_mode`, `look_at`, `set_projection`, `update`, `view_position`, and `set_control_settings`. Camera handles and viewport dimensions are numeric arguments; modes are `"fixed"`, `"orbit"`, or `"fly"`, and projection names are `"perspective"` or `"orthographic"`. The bridge serializes its own camera calls, but direct C++ capability calls must still obey the camera module's single-thread rule. The bridge is omitted when `script_runtime` is unavailable. The complete function reference lives in [lua_bridge.md](lua_bridge.md).
 
 ## Threading and lifetime
 
@@ -49,7 +49,7 @@ Configurable — see [configuration.md](configuration.md) for the `[camera]` key
 
 Events: the module subscribes to `ConfigurationReloadedEvent` (kernel event bus) in `construct()` and unsubscribes in `stop()`. The handler re-reads the `[camera]` section when any changed key starts with `"camera."`. It publishes no events of its own. Permissions: none declared (`declaredPermissions = nullptr` in the entry table).
 
-Consumer usage with the real API signatures (as the demo app does in `app/source/main.cpp`):
+Consumer usage with the real API signatures (as the demo app does in `demo/source/main.cpp`):
 
 ```cpp
 camera::CameraCapability &camera = context.acquireCapability<camera::CameraCapability>();

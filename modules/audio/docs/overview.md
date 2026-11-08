@@ -22,7 +22,7 @@ assert(sound ~= nil, sound_error)
 assert(audio.play(engine, sound))
 ```
 
-The bridge uses the `script_runtime` runtime-initializer extension. `script_runtime` is optional, so the C++ audio capability remains available without Lua.
+The bridge uses the `script_runtime` runtime-initializer extension. `script_runtime` is optional, so the C++ audio capability remains available without Lua. The complete function reference lives in [lua_bridge.md](lua_bridge.md).
 
 ## Provided / required / optional capabilities
 

@@ -6,7 +6,7 @@ The main_menu mod is a **script mod**: its behaviour lives entirely in `main_men
 
 | File | Purpose |
 | --- | --- |
-| `mod.toml` | Manifest. `type = "script"`, `entry = "main_menu.lua"`, `host_capability = "script_runtime"`. Script mods cannot `provides` capabilities; the three required capabilities (`script_runtime`, `ui`, `render`) only order construction and document what the mod depends on. |
+| `mod.toml` | Manifest. `type = "script"`, `entry = "main_menu.lua"`, `host_capability = "script_runtime"`. Script mods cannot `provides` capabilities; the three required capabilities (`script_runtime`, `ui`, `renderer`) only order construction and document what the mod depends on. |
 | `main_menu.lua` | The whole mod: visibility state, FPS statistics, and the drawing calls. |
 
 ## Runtime model
@@ -26,7 +26,7 @@ The main_menu mod is a **script mod**: its behaviour lives entirely in `main_men
 
 ## Drawing bridge
 
-The Lua script cannot call the `ui`/`render` capabilities directly. The demo application looks the hosted runtime up with `ScriptRuntimeCapability::hostedRuntime("main_menu")` and registers these natives into it:
+The Lua script cannot call the `ui`/`renderer` capabilities directly. The demo application looks the hosted runtime up with `ScriptRuntimeCapability::hostedRuntime("main_menu")` and registers these natives into it:
 
 | Function (Lua signature) | Effect |
 | --- | --- |

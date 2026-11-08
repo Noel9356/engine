@@ -82,7 +82,7 @@ local skeleton, skeleton_error = skeletal_animation.finish_skeleton(builder)
 assert(skeleton ~= nil, skeleton_error)
 ```
 
-`script_runtime` is an optional capability. Without it, the module remains fully usable through its C++ API.
+`script_runtime` is an optional capability. Without it, the module remains fully usable through its C++ API. The complete function reference lives in [lua_bridge.md](lua_bridge.md).
 
 ## Configuration
 

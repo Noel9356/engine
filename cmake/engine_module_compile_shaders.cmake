@@ -6,8 +6,8 @@
 # headers - no committed shader artifacts, no manual regeneration step, and
 # no shader code paths outside the module.
 #
-#     engine_module_compile_shaders(TARGET engine_module_render
-#         NAMESPACE engine render
+#     engine_module_compile_shaders(TARGET engine_module_renderer
+#         NAMESPACE engine renderer
 #         SHADERS mesh.vert mesh.frag
 #     )
 #

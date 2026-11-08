@@ -1,30 +1,21 @@
 [audio]
-# Output defaults. Zero sample rate/channels use the playback device's native format.
-sample_rate    = 0
-channels       = 0
-listener_count = 1
-master_volume  = 1.0
-
-# Resource-manager policy. Sharing avoids loading identical files more than once
-# across engines. Use per-engine managers when isolation is more important.
-share_resources              = false
-resource_manager_job_threads = 1
-decoded_format              = "native" # "native" or "f32"
-decoded_channels            = 0        # 0 preserves each source's channel count.
-decoded_sample_rate         = 0        # 0 preserves each source's sample rate.
-
-# Initial bucket reservations. These are not hard limits.
-initial_engine_capacity = 4
-initial_sound_capacity  = 64
-initial_bus_capacity    = 8
-
-# Optional hard limits. Zero means unlimited.
-max_engines            = 0
-max_sounds_per_engine  = 0
-max_buses_per_engine   = 0
-
-# Optional mixer graph / latency controls. Zero retains miniaudio defaults.
-period_size_in_frames                 = 0
-gain_smooth_time_in_frames            = 0
-default_volume_smooth_time_in_frames   = 0
-pre_mix_stack_size_in_bytes           = 0
+auto_config                          = false
+channels                             = 0
+decoded_channels                     = 0
+decoded_format                       = "native"
+decoded_sample_rate                  = 0
+default_volume_smooth_time_in_frames = 0
+gain_smooth_time_in_frames           = 0
+initial_bus_capacity                 = 8
+initial_engine_capacity              = 4
+initial_sound_capacity               = 64
+listener_count                       = 1
+master_volume                        = 1.0
+max_buses_per_engine                 = 0
+max_engines                          = 0
+max_sounds_per_engine                = 0
+period_size_in_frames                = 0
+pre_mix_stack_size_in_bytes          = 0
+resource_manager_job_threads         = 1
+sample_rate                          = 0
+share_resources                      = false

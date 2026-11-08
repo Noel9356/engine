@@ -81,7 +81,7 @@ From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryMo
 
 ## Lua bridge
 
-When `script_runtime` is present, Lua runtimes receive `input_actions.*` functions for context/action management, binding, raw event submission, frame advancement, and state queries. String selectors are `"button"`, `"axis1d"`, `"axis2d"`; combine modes are `"sum"`, `"maximum"`, `"last"`; controls and event kinds use the names accepted by the bridge. The capability serializes calls internally, so script and native callers share one coherent state. The bridge is omitted when `script_runtime` is unavailable.
+When `script_runtime` is present, Lua runtimes receive `input_actions.*` functions for context/action management, binding, raw event submission, frame advancement, and state queries. String selectors are `"button"`, `"axis1d"`, `"axis2d"`; combine modes are `"sum"`, `"maximum"`, `"last"`; controls and event kinds use the names accepted by the bridge. The capability serializes calls internally, so script and native callers share one coherent state. The bridge is omitted when `script_runtime` is unavailable. The complete function reference lives in [lua_bridge.md](lua_bridge.md).
 
 ## Threading and lifetime
 

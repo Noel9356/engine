@@ -424,7 +424,7 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
         return false;
     }
     const std::size_t vertexCount = static_cast<std::size_t>(positionAccessor->count);
-    if (vertexCount > std::vector<float>().max_size() / render::meshVertexFloatCount)
+    if (vertexCount > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
     {
         return false;
     }
@@ -456,7 +456,7 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
 
     ModelPart part;
     part.name = nodeName.empty() ? (mesh.name != nullptr ? mesh.name : "mesh") : nodeName;
-    part.vertices.resize(vertexCount * render::meshVertexFloatCount);
+    part.vertices.resize(vertexCount * renderer::meshVertexFloatCount);
     // Normals are preserved through the node matrix (inverse-transpose) unless the
     // mode forces generation; a failed node transform falls back to smooth normals.
     const bool preserveNormals  = normalAccessor != nullptr && options.normalMode != ModelNormalMode::GenerateSmooth
@@ -466,7 +466,7 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
     {
         const float *sourcePosition = positions.data() + index * 3;
         float        nodePosition[3]{};
-        float       *vertex = part.vertices.data() + index * render::meshVertexFloatCount;
+        float       *vertex = part.vertices.data() + index * renderer::meshVertexFloatCount;
         // Node world transform first, then the option transform on top.
         if (!transformNodePosition(nodeMatrix, sourcePosition, nodePosition))
         {
@@ -532,22 +532,22 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
         {
             std::copy_n(generatedNormals.data() + index * 3,
                 3,
-                part.vertices.data() + index * render::meshVertexFloatCount + 3);
+                part.vertices.data() + index * renderer::meshVertexFloatCount + 3);
         }
     }
     // Flat mode: expand to one vertex per corner carrying the face normal.
     if (options.normalMode == ModelNormalMode::GenerateFlat)
     {
         std::vector<float> flatVertices;
-        flatVertices.resize(part.indices.size() * render::meshVertexFloatCount);
+        flatVertices.resize(part.indices.size() * renderer::meshVertexFloatCount);
         for (std::size_t triangle = 0; triangle < part.indices.size(); triangle += 3)
         {
             const std::uint32_t indexA = part.indices[triangle + 0];
             const std::uint32_t indexB = part.indices[triangle + 1];
             const std::uint32_t indexC = part.indices[triangle + 2];
-            const float *a     = part.vertices.data() + static_cast<std::size_t>(indexA) * render::meshVertexFloatCount;
-            const float *b     = part.vertices.data() + static_cast<std::size_t>(indexB) * render::meshVertexFloatCount;
-            const float *c     = part.vertices.data() + static_cast<std::size_t>(indexC) * render::meshVertexFloatCount;
+            const float *a     = part.vertices.data() + static_cast<std::size_t>(indexA) * renderer::meshVertexFloatCount;
+            const float *b     = part.vertices.data() + static_cast<std::size_t>(indexB) * renderer::meshVertexFloatCount;
+            const float *c     = part.vertices.data() + static_cast<std::size_t>(indexC) * renderer::meshVertexFloatCount;
             const float  ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
             const float  ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
             float        normal[3] = {
@@ -560,14 +560,14 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
             {
                 const float *source
                     = part.vertices.data()
-                    + static_cast<std::size_t>(part.indices[triangle + corner]) * render::meshVertexFloatCount;
-                float *destination = flatVertices.data() + (triangle + corner) * render::meshVertexFloatCount;
-                std::copy_n(source, render::meshVertexFloatCount, destination);
+                    + static_cast<std::size_t>(part.indices[triangle + corner]) * renderer::meshVertexFloatCount;
+                float *destination = flatVertices.data() + (triangle + corner) * renderer::meshVertexFloatCount;
+                std::copy_n(source, renderer::meshVertexFloatCount, destination);
                 std::copy_n(normal, 3, destination + 3);
             }
         }
         part.vertices = std::move(flatVertices);
-        part.indices.resize(part.vertices.size() / render::meshVertexFloatCount);
+        part.indices.resize(part.vertices.size() / renderer::meshVertexFloatCount);
         for (std::size_t index = 0; index < part.indices.size(); ++index)
         {
             part.indices[index] = static_cast<std::uint32_t>(index);

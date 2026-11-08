@@ -14,7 +14,7 @@ The module provides the `render_graph` capability.
 | --- | --- |
 | `settings(self)` | Pointer to the current `RenderGraphSettings` (owned by the module). |
 | `setSettings(self, const RenderGraphSettings*)` | Validates against the accepted ranges; clears the plan cache on success; `false` for null or invalid settings. |
-| `resolveProfile(self, const render::DeviceProfile*, RenderGraphProfile*)` | Scales the configured limits down for the given device; `false` for null pointers. |
+| `resolveProfile(self, const renderer::DeviceProfile*, RenderGraphProfile*)` | Scales the configured limits down for the given device; `false` for null pointers. |
 | `compile(self, passes, passCount, resources, resourceCount, outPassOrder, passCapacity, outResourceSlots, resourceCapacity, outResult, outError)` | Orders passes and assigns transient slots; outputs need room for `passCount` / `resourceCount` entries; on failure `outError` explains and outputs are not meaningful. |
 | `execute(self, passes, passCount, resources, resourceCount, callback, userData, outError)` | Runs every pass in dependency order on the task scheduler; `callback(userData, passIndex)` fires once per pass with the original index; blocks until all callbacks finished. |
 
@@ -74,7 +74,7 @@ Configurable through the `[render_graph]` section; every key is documented in [c
 - **Events published:** none.
 - **Events subscribed:** none (the module does not touch the event bus; it reads configuration once in `construct()`).
 - **Permissions declared:** none in the entry table; acquisition of the capability is gated by the implicit `capability.render_graph` permission.
-- **Consumers:** the demo application (`app/source/main.cpp`) is a real consumer. It loads the module as part of its host options, acquires the capability optionally (with the `renderGraphCapabilityAbi` check), applies a device-tuned settings round (`settings` → render `deviceProfile` → `resolveProfile` → `setSettings`), `compile`s a fixed three-pass frame graph once (independent update passes for rocks, tori, and the wandering dragons, each writing a transient scratch resource), and `execute`s it every frame with callbacks dispatched by the original pass index. Any failure degrades to the same updates run inline on the main thread, so the demo keeps rendering without the capability.
+- **Consumers:** the demo application (`demo/source/main.cpp`) is a real consumer. It loads the module as part of its host options, acquires the capability optionally (with the `renderGraphCapabilityAbi` check), applies a device-tuned settings round (`settings` → render `deviceProfile` → `resolveProfile` → `setSettings`), `compile`s a fixed three-pass frame graph once (independent update passes for rocks, tori, and the wandering dragons, each writing a transient scratch resource), and `execute`s it every frame with callbacks dispatched by the original pass index. Any failure degrades to the same updates run inline on the main thread, so the demo keeps rendering without the capability.
 
 Consumer example (real signatures):
 

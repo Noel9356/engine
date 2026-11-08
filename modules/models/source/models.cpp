@@ -3,7 +3,7 @@
 //
 // Format parsing lives in the per-format importers and mesh optimization in
 // model_optimizer.cpp; this file owns the model registry and turns ModelRecords
-// into render::MeshDescription views for consumers.
+// into renderer::MeshDescription views for consumers.
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -507,7 +507,7 @@ private:
         record.statistics.materialCount       = static_cast<std::uint32_t>(record.materials.size());
         for (const ModelPart &part : record.parts)
         {
-            record.statistics.vertexCount += part.vertices.size() / render::meshVertexFloatCount;
+            record.statistics.vertexCount += part.vertices.size() / renderer::meshVertexFloatCount;
             record.statistics.indexCount += part.indices.size();
         }
 
@@ -593,7 +593,7 @@ private:
 
     // Hands out pointers into the record's own buffers; they stay valid until
     // destroyModel() or module stop (no copy is made for the renderer).
-    bool partImpl(ModelHandle model, std::uint32_t partIndex, render::MeshDescription *outDescription) const
+    bool partImpl(ModelHandle model, std::uint32_t partIndex, renderer::MeshDescription *outDescription) const
     {
         const auto found = models_.find(model);
         if (found == models_.end() || outDescription == nullptr || partIndex >= found->second.parts.size())
@@ -601,9 +601,9 @@ private:
             return false;
         }
         const ModelPart &part = found->second.parts[partIndex];
-        *outDescription       = render::MeshDescription{
+        *outDescription       = renderer::MeshDescription{
             .vertices    = part.vertices.data(),
-            .vertexCount = static_cast<std::uint32_t>(part.vertices.size() / render::meshVertexFloatCount),
+            .vertexCount = static_cast<std::uint32_t>(part.vertices.size() / renderer::meshVertexFloatCount),
             .indices     = part.indices.data(),
             .indexCount  = static_cast<std::uint32_t>(part.indices.size())};
         return true;
@@ -737,7 +737,7 @@ private:
         capability_.partCount = [](void *self, ModelHandle model)
         { return static_cast<const ModelsModule *>(self)->partCountImpl(model); };
         capability_.part
-            = [](void *self, ModelHandle model, std::uint32_t partIndex, render::MeshDescription *outDescription)
+            = [](void *self, ModelHandle model, std::uint32_t partIndex, renderer::MeshDescription *outDescription)
         { return static_cast<const ModelsModule *>(self)->partImpl(model, partIndex, outDescription); };
         capability_.partName = [](void *self, ModelHandle model, std::uint32_t partIndex)
         { return static_cast<const ModelsModule *>(self)->partNameImpl(model, partIndex); };

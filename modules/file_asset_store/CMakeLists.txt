@@ -39,6 +39,7 @@ target_link_libraries(
     engine_module_file_asset_store
     PRIVATE engine_file_asset_store_capabilities
             engine_asset_catalog
+            engine_util_types
             Threads::Threads
 )
 

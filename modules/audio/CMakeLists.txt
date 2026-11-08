@@ -209,6 +209,7 @@ target_link_libraries(
     engine_module_audio
     PRIVATE engine_kernel
             engine_audio_capabilities
+            engine_util_types
             Threads::Threads
 )
 

@@ -9,7 +9,7 @@
 #ifndef ENGINE_DIRECT_LIGHTING_CAPABILITIES_HPP
 #define ENGINE_DIRECT_LIGHTING_CAPABILITIES_HPP
 
-#include <engine/render/device_profile.hpp>
+#include <engine/renderer/device_profile.hpp>
 
 #include <cstdint>
 
@@ -102,7 +102,7 @@ struct DirectLightingCapability
     // callers can detect changes before sizing their buffer. Returns the
     // number of lights copied (priority-sorted, truncated to capacity).
     std::uint32_t (*copyLights)(void *self, DirectLight *output, std::uint32_t capacity, std::uint64_t *outVersion);
-    bool (*resolveProfile)(void *self, const render::DeviceProfile *device, DirectLightingProfile *outProfile);
+    bool (*resolveProfile)(void *self, const renderer::DeviceProfile *device, DirectLightingProfile *outProfile);
 };
 
 } // namespace direct_lighting

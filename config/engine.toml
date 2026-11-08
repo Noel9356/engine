@@ -1,29 +1,21 @@
-
-
+[diagnostics]
+profiling_enabled = true
 
 [engine]
-active_mods = ["main_menu"]
-worker_count = 0
-max_worker_count = 16
-max_outstanding_tasks = 65536
-
-priority_aging_ms = 250
-queue_source_fairness = true
-max_fps = 0
+active_mods             = ["main_menu"]
+max_fps                 = 60
 max_frame_delta_seconds = 0.25
-
-
-[render]
-clear_color = [0.18, 0.30, 0.50, 1.0]
-
+max_outstanding_tasks   = 65536
+max_worker_count        = 16
+priority_aging_ms       = 250
+queue_source_fairness   = true
+worker_count            = 0
 
 [pbr]
 sun_direction = [-0.55, 0.34, -0.76]
 
-
-[diagnostics]
-
-profiling_enabled = true
+[renderer]
+clear_color = [0.18, 0.3, 0.5, 1.0]
 
 [trust]
 trustMods = ["main_menu"]

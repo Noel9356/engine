@@ -9,7 +9,7 @@ target_include_directories(
 
 target_link_libraries(
     engine_direct_lighting_capabilities
-    INTERFACE engine_render_types
+    INTERFACE engine_renderer_types
 )
 add_library(
     engine_module_direct_lighting

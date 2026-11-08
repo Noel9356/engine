@@ -63,7 +63,7 @@ struct PendingSlotLater
 // the same limits.
 bool validSettings(const RenderGraphSettings &value)
 {
-    return value.quality <= render::QualityPreset::Ultra && value.maxPasses >= 1 && value.maxPasses <= 4096
+    return value.quality <= renderer::QualityPreset::Ultra && value.maxPasses >= 1 && value.maxPasses <= 4096
         && value.maxResources >= 1 && value.maxResources <= 8192
         && value.transientMemoryBudgetBytes <= (16ull * 1024ull * 1024ull * 1024ull);
 }
@@ -288,13 +288,13 @@ public:
         if (const auto value = context.configurationStringInSection("render_graph", "quality"); value.has_value())
         {
             if (*value == "low")
-                settings_.quality = render::QualityPreset::Low;
+                settings_.quality = renderer::QualityPreset::Low;
             else if (*value == "medium")
-                settings_.quality = render::QualityPreset::Medium;
+                settings_.quality = renderer::QualityPreset::Medium;
             else if (*value == "high")
-                settings_.quality = render::QualityPreset::High;
+                settings_.quality = renderer::QualityPreset::High;
             else if (*value == "ultra")
-                settings_.quality = render::QualityPreset::Ultra;
+                settings_.quality = renderer::QualityPreset::Ultra;
         }
         if (const auto value = context.configurationIntegerInSection("render_graph", "max_passes");
             value.has_value() && *value > 0)
@@ -350,7 +350,7 @@ private:
         { return &static_cast<RenderGraphModule *>(self)->settings_; };
         capability_.setSettings = [](void *self, const RenderGraphSettings *value)
         { return static_cast<RenderGraphModule *>(self)->setSettingsImpl(value); };
-        capability_.resolveProfile = [](void *self, const render::DeviceProfile *device, RenderGraphProfile *out)
+        capability_.resolveProfile = [](void *self, const renderer::DeviceProfile *device, RenderGraphProfile *out)
         { return static_cast<RenderGraphModule *>(self)->resolveProfileImpl(device, out); };
         capability_.compile = [](void                                  *self,
                                   const RenderGraphPassDescription     *passes,
@@ -393,16 +393,16 @@ private:
     // Auto quality derives a memory scale from the device class (non-Vulkan
     // gets 0.125); explicit presets scale by 0.25x/0.5x/1x/2x. Scaled limits
     // are clamped back to the configured settings; asyncCompute stays off.
-    bool resolveProfileImpl(const render::DeviceProfile *device, RenderGraphProfile *out) const
+    bool resolveProfileImpl(const renderer::DeviceProfile *device, RenderGraphProfile *out) const
     {
         if (device == nullptr || out == nullptr)
             return false;
         float memoryScale = 0.125f;
         if (device->isVulkan)
         {
-            if (device->deviceClass == render::DeviceClass::DiscreteGpu)
+            if (device->deviceClass == renderer::DeviceClass::DiscreteGpu)
                 memoryScale = 1.0f;
-            else if (device->deviceClass == render::DeviceClass::IntegratedGpu)
+            else if (device->deviceClass == renderer::DeviceClass::IntegratedGpu)
                 memoryScale = 0.5f;
             else
                 memoryScale = 0.25f;
@@ -413,22 +413,22 @@ private:
         float qualityScale = 1.0f;
         switch (settings_.quality)
         {
-        case render::QualityPreset::Low:
+        case renderer::QualityPreset::Low:
             qualityScale = 0.25f;
             break;
-        case render::QualityPreset::Medium:
+        case renderer::QualityPreset::Medium:
             qualityScale = 0.5f;
             break;
-        case render::QualityPreset::High:
+        case renderer::QualityPreset::High:
             qualityScale = 1.0f;
             break;
-        case render::QualityPreset::Ultra:
+        case renderer::QualityPreset::Ultra:
             qualityScale = 2.0f;
             break;
-        case render::QualityPreset::Auto:
+        case renderer::QualityPreset::Auto:
             break;
         }
-        const float scale = settings_.quality == render::QualityPreset::Auto ? memoryScale : qualityScale;
+        const float scale = settings_.quality == renderer::QualityPreset::Auto ? memoryScale : qualityScale;
         out->maxPasses
             = std::min(settings_.maxPasses, std::max(1u, static_cast<std::uint32_t>(settings_.maxPasses * scale)));
         out->maxResources = std::min(

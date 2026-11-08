@@ -1,26 +1,25 @@
-name     = "pbr"
-version  = "0.1.0"
-provides = ["pbr"]
-requires = []
-
 config_keys = [
-    "pbr.sun_direction",
-    "pbr.sun_color",
-    "pbr.sun_intensity",
-    "pbr.sun_enabled",
-    "pbr.ambient_sky_color",
-    "pbr.ambient_ground_color",
-    "pbr.ambient_mode",
     "pbr.ambient_color",
+    "pbr.ambient_ground_color",
     "pbr.ambient_intensity",
+    "pbr.ambient_mode",
+    "pbr.ambient_sky_color",
     "pbr.exposure",
-    "pbr.tone_mapping",
     "pbr.model_base_color_scale",
-    "pbr.model_emissive_scale",
-    "pbr.model_metallic_scale",
-    "pbr.model_roughness_scale",
-    "pbr.model_minimum_roughness",
-    "pbr.model_use_specular_as_metallic",
     "pbr.model_decode_base_color_srgb",
     "pbr.model_decode_emissive_srgb",
+    "pbr.model_emissive_scale",
+    "pbr.model_metallic_scale",
+    "pbr.model_minimum_roughness",
+    "pbr.model_roughness_scale",
+    "pbr.model_use_specular_as_metallic",
+    "pbr.sun_color",
+    "pbr.sun_direction",
+    "pbr.sun_enabled",
+    "pbr.sun_intensity",
+    "pbr.tone_mapping",
 ]
+name        = "pbr"
+provides    = ["pbr"]
+requires    = []
+version     = "0.1.0"

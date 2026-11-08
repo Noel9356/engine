@@ -1,13 +1,13 @@
-name = "render_graph"
-version = "0.1.0"
-provides = ["render_graph"]
-requires = []
 config_keys = [
-    "render_graph.quality",
     "render_graph.max_passes",
     "render_graph.max_resources",
-    "render_graph.transient_budget_mb",
-    "render_graph.transient_aliasing",
     "render_graph.plan_cache_entries",
     "render_graph.plan_cache_max_elements",
+    "render_graph.quality",
+    "render_graph.transient_aliasing",
+    "render_graph.transient_budget_mb",
 ]
+name        = "render_graph"
+provides    = ["render_graph"]
+requires    = []
+version     = "0.1.0"

@@ -10,8 +10,8 @@
 namespace engine
 {
 
-// Family capabilities (e.g. "render") match any implementation providing
-// a dotted sub-capability; dotted names (e.g. "render.vulkan") select one.
+// Family capabilities (e.g. "renderer") match any implementation providing
+// a dotted sub-capability; dotted names (e.g. "renderer.vulkan") select one.
 inline bool isImplementationBoundCapabilityName(const std::string &capabilityName)
 {
     return capabilityName.find('.') != std::string::npos;
@@ -31,7 +31,7 @@ inline std::string capabilityFamilyName(const std::string &capabilityName)
 }
 
 // Does provided satisfy requirement? Exact match, or requirement is
-// provided's family ("render" is satisfied by "render.vulkan").
+// provided's family ("renderer" is satisfied by "renderer.vulkan").
 inline bool capabilityRequirementSatisfiedBy(const std::string &requirement, const std::string &provided)
 {
     if (requirement == provided)

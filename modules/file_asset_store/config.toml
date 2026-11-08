@@ -1,14 +1,15 @@
 [file_asset_store]
-maximum_file_size_mb       = 512
-maximum_cached_assets      = 8192
-maximum_pending_requests   = 8192
-maximum_resident_memory_mb = 2048
-maximum_inflight_memory_mb = 512
-maximum_path_bytes         = 4096
-root_directory             = ""
+auto_config                = false
+cache_eviction_batch_mb    = 64
+cache_unreferenced_assets  = false
 cooked_catalog_path        = ""
 cooked_object_directory    = ""
-verify_cooked_asset_hashes = false
 default_async_priority     = "low"
-cache_unreferenced_assets  = false
-cache_eviction_batch_mb    = 64
+maximum_cached_assets      = 8192
+maximum_file_size_mb       = 512
+maximum_inflight_memory_mb = 512
+maximum_path_bytes         = 4096
+maximum_pending_requests   = 8192
+maximum_resident_memory_mb = 2048
+root_directory             = ""
+verify_cooked_asset_hashes = false

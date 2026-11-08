@@ -1,29 +1,28 @@
-name     = "models"
-version  = "0.1.0"
-provides = ["models"]
-requires = []
-
 config_keys = [
-    "models.search_paths",
-    "models.scale",
-    "models.translation",
-    "models.rotation",
-    "models.pivot",
-    "models.uv_scale",
-    "models.uv_offset",
-    "models.normal_mode",
-    "models.format",
-    "models.winding_mode",
     "models.flip_texture_v",
-    "models.import_vertex_colors",
-    "models.weld_vertices",
+    "models.format",
     "models.import_materials",
-    "models.optimize_mesh",
-    "models.optimize_vertex_cache",
-    "models.optimize_overdraw",
-    "models.optimize_vertex_fetch",
-    "models.overdraw_threshold",
+    "models.import_vertex_colors",
     "models.material_search_path",
     "models.max_file_size_mb",
     "models.max_loaded_models",
+    "models.normal_mode",
+    "models.optimize_mesh",
+    "models.optimize_overdraw",
+    "models.optimize_vertex_cache",
+    "models.optimize_vertex_fetch",
+    "models.overdraw_threshold",
+    "models.pivot",
+    "models.rotation",
+    "models.scale",
+    "models.search_paths",
+    "models.translation",
+    "models.uv_offset",
+    "models.uv_scale",
+    "models.weld_vertices",
+    "models.winding_mode",
 ]
+name        = "models"
+provides    = ["models"]
+requires    = []
+version     = "0.1.0"

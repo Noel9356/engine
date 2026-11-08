@@ -35,14 +35,14 @@ bool hasSingleTriangleMaterial(const ModelPart &part)
 // full opacity; alpha-blended or unassigned parts keep their triangle order.
 void optimizePart(ModelPart &part, const ModelRecord &record, const ModelOptimizationOptions &options)
 {
-    constexpr std::size_t vertexStride = render::meshVertexFloatCount * sizeof(float);
+    constexpr std::size_t vertexStride = renderer::meshVertexFloatCount * sizeof(float);
     if (part.indices.size() < 3 || part.indices.size() % 3 != 0 || part.vertices.empty()
-        || part.vertices.size() % render::meshVertexFloatCount != 0)
+        || part.vertices.size() % renderer::meshVertexFloatCount != 0)
     {
         return;
     }
 
-    const std::size_t vertexCount = part.vertices.size() / render::meshVertexFloatCount;
+    const std::size_t vertexCount = part.vertices.size() / renderer::meshVertexFloatCount;
     if (vertexCount > std::numeric_limits<unsigned int>::max()
         || part.indices.size() > std::numeric_limits<std::size_t>::max() / sizeof(unsigned int))
     {
@@ -123,7 +123,7 @@ void optimizePart(ModelPart &part, const ModelRecord &record, const ModelOptimiz
         }
     }
 
-    std::vector<float>         optimizedVertices(optimizedVertexCount * render::meshVertexFloatCount);
+    std::vector<float>         optimizedVertices(optimizedVertexCount * renderer::meshVertexFloatCount);
     std::vector<std::uint32_t> optimizedIndices(part.indices.size());
     meshopt_remapVertexBuffer(optimizedVertices.data(), part.vertices.data(), vertexCount, vertexStride, remap.data());
     meshopt_remapIndexBuffer(optimizedIndices.data(), part.indices.data(), part.indices.size(), remap.data());

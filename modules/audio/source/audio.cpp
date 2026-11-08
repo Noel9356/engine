@@ -10,6 +10,7 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/util/hardware_info.hpp>
 
 #include <atomic>
 #include <cmath>
@@ -274,18 +275,16 @@ public:
         configuredDefaultVolumeSmoothFrames_ = 0;
         configuredPreMixStackSizeInBytes_   = 0;
 
-        // A zero sample rate/channel count asks the selected playback device
-        // for its native format. Device-less engines must set both explicitly.
-        if (const auto value = context.configurationIntegerInSection("audio", "sample_rate");
-            value && *value >= 0 && *value <= std::numeric_limits<std::uint32_t>::max())
-        {
-            configuredSampleRate_ = static_cast<std::uint32_t>(*value);
-        }
-        if (const auto value = context.configurationIntegerInSection("audio", "channels");
-            value && *value >= 0 && *value <= 254)
-        {
-            configuredChannels_ = static_cast<std::uint32_t>(*value);
-        }
+        // auto_config = true: the module derives its tuning from the host
+        // hardware and the other [audio] tuning keys have no effect. The
+        // content keys (master_volume, listener_count) describe the mix, not
+        // the machine, and stay effective in both modes. Hardware inputs
+        // today: the logical processor count shapes the resource-manager
+        // worker pool; the output/decode format keys resolve to their
+        // device-native defaults (0 / "native") because the module cannot
+        // know the playback device better than miniaudio does.
+        const bool autoConfig = context.configurationBooleanInSection("audio", "auto_config").value_or(false);
+
         if (const auto value = context.configurationIntegerInSection("audio", "listener_count");
             value && *value >= 1 && static_cast<std::uint64_t>(*value) <= maximumSupportedListenerCount())
         {
@@ -297,55 +296,85 @@ public:
             configuredMasterVolume_ = static_cast<float>(*value);
         }
 
-        if (const auto value = context.configurationBooleanInSection("audio", "share_resources"); value)
+        if (autoConfig)
         {
-            configuredSharedResources_ = *value;
+            const std::uint32_t cores = util::logicalProcessorCount();
+            configuredResourceManagerThreads_ = cores >= 16u ? 4u : cores >= 8u ? 3u : cores >= 4u ? 2u : 1u;
+            std::fprintf(stderr,
+                "audio module: auto_config is on; resource_manager_job_threads=%u derived from %u logical "
+                "processor(s), device-native output/decode formats; other tuning keys in [audio] are ignored\n",
+                configuredResourceManagerThreads_,
+                cores);
         }
-        if (const auto value = context.configurationIntegerInSection("audio", "resource_manager_job_threads");
-            value && *value >= 1 && *value <= 64)
+        else
         {
-            configuredResourceManagerThreads_ = static_cast<std::uint32_t>(*value);
-        }
-        if (const auto value = context.configurationStringInSection("audio", "decoded_format"); value)
-        {
-            if (*value == "f32" || *value == "float32")
-            {
-                configuredDecodedFormatFloat32_ = true;
-            }
-            else if (*value == "native")
-            {
-                configuredDecodedFormatFloat32_ = false;
-            }
-        }
-        if (const auto value = context.configurationIntegerInSection("audio", "decoded_channels");
-            value && *value >= 0 && *value <= 32)
-        {
-            configuredDecodedChannels_ = static_cast<std::uint32_t>(*value);
-        }
-        if (const auto value = context.configurationIntegerInSection("audio", "decoded_sample_rate");
-            value && *value >= 0 && (*value == 0 || (*value >= 8000 && *value <= 384000)))
-        {
-            configuredDecodedSampleRate_ = static_cast<std::uint32_t>(*value);
-        }
+            // Manual path: overlay [audio] values that validate; out-of-range
+            // keys are ignored.
 
-        const auto readCapacity = [&context](const char *key, std::uint32_t &target, std::uint32_t maximum)
-        {
-            if (const auto value = context.configurationIntegerInSection("audio", key);
-                value && *value >= 0 && *value <= maximum)
+            // A zero sample rate/channel count asks the selected playback
+            // device for its native format. Device-less engines must set both
+            // explicitly.
+            if (const auto value = context.configurationIntegerInSection("audio", "sample_rate");
+                value && *value >= 0 && *value <= std::numeric_limits<std::uint32_t>::max())
             {
-                target = static_cast<std::uint32_t>(*value);
+                configuredSampleRate_ = static_cast<std::uint32_t>(*value);
             }
-        };
-        readCapacity("initial_engine_capacity", configuredInitialEngineCapacity_, 65536);
-        readCapacity("initial_sound_capacity", configuredInitialSoundCapacity_, 1048576);
-        readCapacity("initial_bus_capacity", configuredInitialBusCapacity_, 65536);
-        readCapacity("max_engines", configuredMaximumEngines_, 1048576);
-        readCapacity("max_sounds_per_engine", configuredMaximumSoundsPerEngine_, 1048576);
-        readCapacity("max_buses_per_engine", configuredMaximumBusesPerEngine_, 65536);
-        readCapacity("period_size_in_frames", configuredPeriodSizeInFrames_, std::numeric_limits<std::uint32_t>::max());
-        readCapacity("gain_smooth_time_in_frames", configuredGainSmoothTimeInFrames_, std::numeric_limits<std::uint32_t>::max());
-        readCapacity("default_volume_smooth_time_in_frames", configuredDefaultVolumeSmoothFrames_, std::numeric_limits<std::uint32_t>::max());
-        readCapacity("pre_mix_stack_size_in_bytes", configuredPreMixStackSizeInBytes_, std::numeric_limits<std::uint32_t>::max());
+            if (const auto value = context.configurationIntegerInSection("audio", "channels");
+                value && *value >= 0 && *value <= 254)
+            {
+                configuredChannels_ = static_cast<std::uint32_t>(*value);
+            }
+
+            if (const auto value = context.configurationBooleanInSection("audio", "share_resources"); value)
+            {
+                configuredSharedResources_ = *value;
+            }
+            if (const auto value = context.configurationIntegerInSection("audio", "resource_manager_job_threads");
+                value && *value >= 1 && *value <= 64)
+            {
+                configuredResourceManagerThreads_ = static_cast<std::uint32_t>(*value);
+            }
+            if (const auto value = context.configurationStringInSection("audio", "decoded_format"); value)
+            {
+                if (*value == "f32" || *value == "float32")
+                {
+                    configuredDecodedFormatFloat32_ = true;
+                }
+                else if (*value == "native")
+                {
+                    configuredDecodedFormatFloat32_ = false;
+                }
+            }
+            if (const auto value = context.configurationIntegerInSection("audio", "decoded_channels");
+                value && *value >= 0 && *value <= 32)
+            {
+                configuredDecodedChannels_ = static_cast<std::uint32_t>(*value);
+            }
+            if (const auto value = context.configurationIntegerInSection("audio", "decoded_sample_rate");
+                value && *value >= 0 && (*value == 0 || (*value >= 8000 && *value <= 384000)))
+            {
+                configuredDecodedSampleRate_ = static_cast<std::uint32_t>(*value);
+            }
+
+            const auto readCapacity = [&context](const char *key, std::uint32_t &target, std::uint32_t maximum)
+            {
+                if (const auto value = context.configurationIntegerInSection("audio", key);
+                    value && *value >= 0 && *value <= maximum)
+                {
+                    target = static_cast<std::uint32_t>(*value);
+                }
+            };
+            readCapacity("initial_engine_capacity", configuredInitialEngineCapacity_, 65536);
+            readCapacity("initial_sound_capacity", configuredInitialSoundCapacity_, 1048576);
+            readCapacity("initial_bus_capacity", configuredInitialBusCapacity_, 65536);
+            readCapacity("max_engines", configuredMaximumEngines_, 1048576);
+            readCapacity("max_sounds_per_engine", configuredMaximumSoundsPerEngine_, 1048576);
+            readCapacity("max_buses_per_engine", configuredMaximumBusesPerEngine_, 65536);
+            readCapacity("period_size_in_frames", configuredPeriodSizeInFrames_, std::numeric_limits<std::uint32_t>::max());
+            readCapacity("gain_smooth_time_in_frames", configuredGainSmoothTimeInFrames_, std::numeric_limits<std::uint32_t>::max());
+            readCapacity("default_volume_smooth_time_in_frames", configuredDefaultVolumeSmoothFrames_, std::numeric_limits<std::uint32_t>::max());
+            readCapacity("pre_mix_stack_size_in_bytes", configuredPreMixStackSizeInBytes_, std::numeric_limits<std::uint32_t>::max());
+        }
 
 #if defined(ENGINE_AUDIO_BACKEND_MINIAUDIO)
         std::lock_guard lock(enginesMutex_);

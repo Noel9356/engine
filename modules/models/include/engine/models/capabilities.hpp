@@ -8,7 +8,7 @@
 #define ENGINE_MODELS_CAPABILITIES_HPP
 
 #include <engine/models/material.hpp>
-#include <engine/render/mesh.hpp>
+#include <engine/renderer/mesh.hpp>
 
 #include <cstdint>
 
@@ -124,7 +124,7 @@ struct ModelsCapability
     std::uint32_t (*partCount)(void *self, ModelHandle model);
     // Fills a render-ready description of one part. The vertex/index pointers alias
     // module-owned buffers that stay valid until destroyModel(model) or module stop.
-    bool (*part)(void *self, ModelHandle model, std::uint32_t partIndex, render::MeshDescription *outDescription);
+    bool (*part)(void *self, ModelHandle model, std::uint32_t partIndex, renderer::MeshDescription *outDescription);
     const char *(*partName)(void *self, ModelHandle model, std::uint32_t partIndex);     // nullptr when out of range
     bool (*bounds)(void *self, ModelHandle model, float *outMinimum, float *outMaximum); // either out may be null
     ModelHandle (*loadModelWithOptions)(

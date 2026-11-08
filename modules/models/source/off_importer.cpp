@@ -236,11 +236,11 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
     }
 
     std::vector<float> interleaved;
-    interleaved.resize(static_cast<std::size_t>(vertexCount) * render::meshVertexFloatCount);
+    interleaved.resize(static_cast<std::size_t>(vertexCount) * renderer::meshVertexFloatCount);
     for (std::size_t index = 0; index < vertexCount; ++index)
     {
         std::copy(
-            vertices[index].begin(), vertices[index].end(), interleaved.begin() + index * render::meshVertexFloatCount);
+            vertices[index].begin(), vertices[index].end(), interleaved.begin() + index * renderer::meshVertexFloatCount);
     }
     // OFF has no normals: generate flat (unshared vertices) or smooth per
     // normal_mode; PreserveOnly keeps the +Y placeholder from the vertex defaults.
@@ -250,15 +250,15 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
         if (options.normalMode == ModelNormalMode::GenerateFlat)
         {
             std::vector<float> flatVertices;
-            flatVertices.reserve(indices.size() * render::meshVertexFloatCount);
+            flatVertices.reserve(indices.size() * renderer::meshVertexFloatCount);
             for (std::size_t corner = 0; corner + 2 < indices.size(); corner += 3)
             {
                 const std::uint32_t ia = indices[corner + 0];
                 const std::uint32_t ib = indices[corner + 1];
                 const std::uint32_t ic = indices[corner + 2];
-                const float *a     = interleaved.data() + static_cast<std::size_t>(ia) * render::meshVertexFloatCount;
-                const float *b     = interleaved.data() + static_cast<std::size_t>(ib) * render::meshVertexFloatCount;
-                const float *c     = interleaved.data() + static_cast<std::size_t>(ic) * render::meshVertexFloatCount;
+                const float *a     = interleaved.data() + static_cast<std::size_t>(ia) * renderer::meshVertexFloatCount;
+                const float *b     = interleaved.data() + static_cast<std::size_t>(ib) * renderer::meshVertexFloatCount;
+                const float *c     = interleaved.data() + static_cast<std::size_t>(ic) * renderer::meshVertexFloatCount;
                 const float  ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
                 const float  ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
                 float        normal[3]
@@ -268,15 +268,15 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
                 {
                     const std::uint32_t sourceIndex = indices[corner + triangleCorner];
                     const float        *source
-                        = interleaved.data() + static_cast<std::size_t>(sourceIndex) * render::meshVertexFloatCount;
+                        = interleaved.data() + static_cast<std::size_t>(sourceIndex) * renderer::meshVertexFloatCount;
                     const std::size_t base = flatVertices.size();
-                    flatVertices.insert(flatVertices.end(), source, source + render::meshVertexFloatCount);
+                    flatVertices.insert(flatVertices.end(), source, source + renderer::meshVertexFloatCount);
                     std::copy(normal, normal + 3, flatVertices.begin() + base + 3);
                 }
             }
             // Expanded vertices are addressed by sequential identity indices.
             interleaved = std::move(flatVertices);
-            indices.resize(interleaved.size() / render::meshVertexFloatCount);
+            indices.resize(interleaved.size() / renderer::meshVertexFloatCount);
             for (std::size_t index = 0; index < indices.size(); ++index)
             {
                 indices[index] = static_cast<std::uint32_t>(index);
@@ -288,7 +288,7 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
             for (std::size_t vertex = 0; vertex < normals.size() / 3; ++vertex)
             {
                 std::copy_n(
-                    normals.data() + vertex * 3, 3, interleaved.data() + vertex * render::meshVertexFloatCount + 3);
+                    normals.data() + vertex * 3, 3, interleaved.data() + vertex * renderer::meshVertexFloatCount + 3);
             }
         }
     }
@@ -297,7 +297,7 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
     part.vertices = std::move(interleaved);
     part.indices  = std::move(indices);
     part.name     = path.stem().string();
-    for (std::size_t offset = 0; offset < part.vertices.size(); offset += render::meshVertexFloatCount)
+    for (std::size_t offset = 0; offset < part.vertices.size(); offset += renderer::meshVertexFloatCount)
     {
         const float *position = part.vertices.data() + offset;
         if (offset == 0)

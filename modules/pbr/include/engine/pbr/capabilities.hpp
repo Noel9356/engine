@@ -8,7 +8,7 @@
 #define ENGINE_PBR_CAPABILITIES_HPP
 
 #include <engine/models/material.hpp>
-#include <engine/render/material.hpp>
+#include <engine/renderer/material.hpp>
 
 #include <cstdint>
 
@@ -73,12 +73,12 @@ struct ModelMaterialConversionOptions
     bool  decodeEmissiveSrgb    = false;  // decode emissive from sRGB before scaling
 };
 
-// Result of one conversion: the render::MeshMaterial the renderer consumes
+// Result of one conversion: the renderer::MeshMaterial the renderer consumes
 // plus the source's non-PBR scalar properties (opacity, sheen, clearcoat,
 // anisotropy, ...) preserved for consumers that still need them.
 struct ConvertedModelMaterial
 {
-    render::MeshMaterial material;
+    renderer::MeshMaterial material;
     float                ambientColor[3]    = {0.0f, 0.0f, 0.0f};
     float                transmittance[3]   = {0.0f, 0.0f, 0.0f};
     float                opacity            = 1.0f;

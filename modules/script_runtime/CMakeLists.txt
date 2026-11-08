@@ -97,6 +97,7 @@ target_link_libraries(
     engine_module_script_runtime
     PRIVATE engine_kernel
             engine_script_runtime_capabilities
+            engine_util_types
             Threads::Threads
 )
 if(ENGINE_SCRIPT_RUNTIME_ENABLE_LUA)

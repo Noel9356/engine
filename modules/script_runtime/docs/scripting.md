@@ -3,13 +3,13 @@
 A script mod is a package directory under a mods directory containing `mod.toml` and at least the entry script:
 
 ```toml
-id              = "my_mod"
-version         = "0.1.0"
+capabilities    = ["script_runtime"]
 engine_api      = 1
-type            = "script"
 entry           = "my_mod.lua"
 host_capability = "script_runtime"
-capabilities    = ["script_runtime"]
+id              = "my_mod"
+type            = "script"
+version         = "0.1.0"
 ```
 
 Rules enforced by the kernel:
@@ -28,6 +28,7 @@ The entry file runs once in its own sandboxed runtime. Available:
 - Libraries: `math`, `string`, `table`, `utf8`, and a trimmed `base` (`print` works; `dofile`/`loadfile`/`collectgarbage` do not exist; no `io`/`os`).
 - Functions registered by the hosting application (for example the demo's `menu_*` bridge) — check for existence if your mod must run in several games: `if menu_text ~= nil then ... end`.
 - Anything the application registered via `registerNativeFunction` on the runtime returned by `hostedRuntime(modId)`.
+- Functions installed by the optional modules' Lua bridges when those modules are active: `audio.*`, `camera.*`, `input_actions.*`, and `skeletal_animation.*`. Each module's `docs/lua_bridge.md` documents its exact function set.
 
 ## Callbacks
 

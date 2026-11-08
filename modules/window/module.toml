@@ -1,22 +1,20 @@
-name     = "window"
-version  = "0.1.0"
-provides = ["window", "window.vulkan", "window.glfw", "window.headless"]
-
-
 config_keys = [
     "window.backend",
-    "window.width",
-    "window.height",
-    "window.title",
-    "window.resizable",
-    "window.visible",
     "window.decorated",
-    "window.floating",
-    "window.minimum_width",
-    "window.minimum_height",
-    "window.maximum_width",
-    "window.maximum_height",
     "window.event_queue_capacity",
+    "window.floating",
+    "window.height",
+    "window.maximum_height",
+    "window.maximum_width",
+    "window.minimum_height",
+    "window.minimum_width",
     "window.position_x",
     "window.position_y",
+    "window.resizable",
+    "window.title",
+    "window.visible",
+    "window.width",
 ]
+name        = "window"
+provides    = ["window", "window.vulkan", "window.glfw", "window.headless"]
+version     = "0.1.0"

@@ -373,6 +373,7 @@ endif()
 
 set(ENGINE_MODULE_SELECTION_ALIASES
     "ecs=world"
+    "render=renderer"
     "entity_world=world"
     "environment_lighting=render_effects"
     "global_illumination=render_effects"
@@ -458,7 +459,7 @@ if(ENGINE_MODULES
         APPEND
         ENGINE_SELECTED_MODULES
         window
-        render
+        renderer
         pbr
         camera
         models
@@ -874,5 +875,5 @@ endif()
 include(engine_add_application)
 
 if(ENGINE_BUILD_DEMO)
-    add_subdirectory(app)
+    add_subdirectory(demo)
 endif()

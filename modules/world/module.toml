@@ -1,8 +1,3 @@
-name     = "world"
-version  = "0.1.0"
-provides = ["ecs", "entity_world"]
-requires = []
-
 config_keys = [
     "ecs.maximum_worlds",
     "entity_world.initial_entity_capacity",
@@ -10,3 +5,7 @@ config_keys = [
     "entity_world.maximum_hierarchy_depth",
     "entity_world.maximum_worlds",
 ]
+name        = "world"
+provides    = ["ecs", "entity_world"]
+requires    = []
+version     = "0.1.0"

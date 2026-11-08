@@ -5,7 +5,7 @@
 # adding a dependency to a module never touches files outside that module.
 #
 #     engine_fetch_dependency(glm
-#         OWNER render
+#         OWNER renderer
 #         GIT_REPOSITORY https://github.com/g-truc/glm.git
 #         GIT_TAG 1.0.1
 #         HEADER_ONLY
