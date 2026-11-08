@@ -7,6 +7,7 @@ device                               = "auto"
 draw_sort_min_commands               = 2
 draw_sort_mode                       = "mesh_material"
 frustum_culling                      = true
+gi_indirect_lighting                 = true
 gpu_timestamps_enabled               = false
 headless_transform_cache_mb          = 32
 instance_batch_min_count             = 4

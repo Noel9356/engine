@@ -6,9 +6,9 @@ The renderer module turns engine scene state into pixels. It provides a backend-
 
 | Capability | ABI | Header |
 | --- | --- | --- |
-| `renderer` | `renderCapabilityAbi = 11` | `modules/renderer/include/engine/renderer/capabilities.hpp` |
-| `renderer.vulkan` (secondary) | `renderCapabilityAbi = 11` (same constant) | same header |
-| `renderer.headless` (secondary) | `renderCapabilityAbi = 11` (same constant) | same header |
+| `renderer` | `renderCapabilityAbi = 12` | `modules/renderer/include/engine/renderer/capabilities.hpp` |
+| `renderer.vulkan` (secondary) | `renderCapabilityAbi = 12` (same constant) | same header |
+| `renderer.headless` (secondary) | `renderCapabilityAbi = 12` (same constant) | same header |
 
 The shared data types the capability references live in `shared_types/include/engine/renderer/` (`mesh.hpp`, `material.hpp`, `device_profile.hpp`) and in `modules/renderer/include/engine/renderer/` (`draw_sort.hpp`, `draw_batch.hpp`, `dynamic_resolution.hpp`).
 
@@ -22,9 +22,22 @@ From `module.toml` (and identical in `makeManifest()` and in the module entry ta
 | --- | --- |
 | Provided | `renderer`, `renderer.vulkan`, `renderer.headless` |
 | Required | `window` |
-| Optional | `window.vulkan`, `pbr`, `direct_lighting` |
+| Optional | `window.vulkan`, `pbr`, `direct_lighting`, `lumen_gi` |
 
-`window` supplies the surface a renderer draws into; `window.vulkan` (`VulkanSurfaceCapability`) supplies the native handles and instance extensions the Vulkan backend needs; `pbr` supplies the sun/ambient/tone- mapping environment (with a version counter so updates are pushed once) and `direct_lighting` supplies point/spot/directional lights; when absent, a built-in default environment is used and no direct lights are set. The entry table declares no permissions (`declaredPermissions = nullptr`).
+`window` supplies the surface a renderer draws into; `window.vulkan` (`VulkanSurfaceCapability`) supplies the native handles and instance extensions the Vulkan backend needs; `pbr` supplies the sun/ambient/tone- mapping environment (with a version counter so updates are pushed once) and `direct_lighting` supplies point/spot/directional lights; when absent, a built-in default environment is used and no direct lights are set. `lumen_gi` supplies the world-space radiance probe grid for the indirect-lighting hook (see below); when absent, the legacy hemispheric ambient is used unchanged. The entry table declares no permissions (`declaredPermissions = nullptr`).
+
+Because the renderer now acquires five capabilities in total, the kernel's trust gate classifies it as "broad"; the engine's own application configs trust it by name under `[trust]` (`trustModules = ["renderer"]`).
+
+## lumen_gi probe-grid indirect lighting (ABI 12 hook)
+
+When the optional `lumen_gi` capability is present and `[renderer] gi_indirect_lighting` is true (the default), `beginFrame` polls `copyProbes` for the module's probe-grid version and, on change, copies the snapshot and pushes it to the backend via `RenderBackend::setProbeGrid` - the same version-gated pattern the pbr environment and direct lights use. Both backends turn the snapshot into an indirect term that replaces the legacy hemispheric ambient:
+
+- **Headless (CPU):** `pbrShade` samples the grid per shaded pixel - trilinear over the camera-centered probe lattice (level 0 inside its half-cell-extended bounds, level 1 elsewhere with boundary clamping), cosine-lobed SH2 convolution per corner probe, irradiance-weighted by each probe's `validity`, and the result blended back onto the hemispheric ambient by the footprint's validity coverage. Unregistered or partially populated scenes therefore degrade gracefully to the legacy look instead of going black.
+- **Vulkan (GPU):** `mesh.frag` implements the identical lattice walk and SH2 convolution. The 64-byte grid header rides the frame uniform (`FrameData` grew from 2224 to 2288 bytes; the vertex-stage block is unchanged - it reads only the leading members), and the packed probe records (8 vec4 per probe: position.xyz + validity, then the 27 SH2 floats) live in a read-only storage buffer on set 0 / binding 1, refreshed per frame slot when the snapshot version changes. A zero-filled dummy buffer is bound while the hook is inactive, and the shader branches off the header's active flag, so a machine without the module renders the pre-hook image.
+
+The snapshot can lag the latest `lumen_gi::evaluate()` by one frame: module update order does not guarantee lumen_gi runs before the renderer, and the cache is temporal by design (Lumen's updates are amortized the same way).
+
+The demo `demo_lumen_gi/` is a standalone harness for this hook: it registers deterministic interior/outdoor scenes into both the renderer and lumen_gi and exports screenshots plus the module's own debug views for A/B validation (`[renderer] gi_indirect_lighting = false` shows the pre-hook image).
 
 Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
 

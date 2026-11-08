@@ -1,0 +1,8 @@
+# Sunlit profile for the outdoor view: overlays the app engine.toml and
+# turns the sun on (later profiles/config values win over earlier ones).
+
+[pbr]
+sun_color     = [1.0, 0.96, 0.88]
+sun_direction = [0.45, 0.62, 0.35]
+sun_enabled   = true
+sun_intensity = 3.0

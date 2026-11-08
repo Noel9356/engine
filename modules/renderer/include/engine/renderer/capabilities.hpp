@@ -24,8 +24,13 @@ namespace renderer
 // ABI version shared by all three capability structs below. Bump whenever any
 // struct here changes layout. History: 10 -> 11 added the device-local memory
 // budget/pressure fields to FrameStatistics (the GPU-memory-budget feedback
-// surface consumed by the CPU-side asset policy).
-inline constexpr std::uint32_t renderCapabilityAbi = 11u;
+// surface consumed by the CPU-side asset policy). 11 -> 12 marks the optional
+// lumen_gi integration: the renderer now consumes the "lumen_gi" capability
+// (probe-grid indirect lighting replacing the hemispheric ambient when the
+// module publishes a valid snapshot) and reads the new [renderer]
+// gi_indirect_lighting key; ABI-checked consumers recompile against this
+// header so both sides agree on the integration contract.
+inline constexpr std::uint32_t renderCapabilityAbi = 12u;
 
 // Renderer, mesh, and texture handles are module-assigned ids starting at 1;
 // handles are never reused and 0 always means "none".

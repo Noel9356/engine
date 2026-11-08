@@ -1,0 +1,62 @@
+# Default values for the [lumen_gi] configuration section. Every key is
+# documented in docs/configuration.md; the budgets follow Lumen's published
+# defaults scaled for CPU evaluation.
+
+[lumen_gi]
+enabled = true
+# Quality preset (Auto 0, Low 1, Medium 2, High 3, Ultra 4) scales the
+# amortization budgets below; explicit budget keys still cap the result.
+quality = 3
+
+[lumen_gi.scene]
+max_surfaces                = 256
+max_triangles_per_surface   = 200000
+
+[lumen_gi.cards]
+# Lumen's default is 12 cards per mesh (Max Lumen Mesh Cards).
+per_surface_max             = 12
+texels_per_meter            = 24.0
+max_texels_per_card_axis    = 128
+
+[lumen_gi.capture]
+# Lumen captures a fixed 512x512 texel budget per frame.
+texels_per_frame            = 262144
+
+[lumen_gi.lighting]
+direct_texels_per_frame     = 65536
+indirect_texels_per_frame   = 65536
+sun_shadows                 = true
+point_light_shadows         = false
+# Lumen's "Lumen Scene Lighting Update Speed"; scales how fast the cached
+# lighting is re-evaluated relative to the budgets above.
+update_speed                = 1.0
+indirect_temporal_blend     = 0.8
+
+[lumen_gi.trace]
+max_distance_m              = 50.0
+
+[lumen_gi.probes]
+spacing_m                   = 2.0
+direction_resolution        = 32
+updates_per_frame           = 64
+hysteresis                  = 0.2
+level1_spacing_factor       = 4.0
+
+[lumen_gi.gather]
+# Screen-space final gather (Lumen's opaque Final Gather): probes at
+# 1/screen_scale of the internal resolution, a few rays each, 2 m short rays
+# falling back to the world radiance cache.
+screen_scale                = 8
+rays_per_probe              = 16
+importance_sampling         = true
+screen_ray_distance_m       = 2.0
+temporal_blend              = 0.85
+spatial_filter              = 3
+plane_depth_tolerance       = 0.35
+
+[lumen_gi.debug]
+internal_width              = 320
+internal_height             = 180
+reference_samples           = 64
+reference_bounces           = 4
+include_ambient             = false

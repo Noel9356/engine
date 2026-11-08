@@ -89,6 +89,7 @@ public:
     void setCamera(const CameraMatrices &newCamera) override;
     void setEnvironment(const pbr::PbrEnvironment &environment) override;
     void setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count) override;
+    void setProbeGrid(const GiProbeGrid &grid) override;
 
     void beginFrame(const FrameParameters &frame) override;
     void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) override;
@@ -218,6 +219,14 @@ private:
     // Lights packed into the std140 layout the fragment shader expects.
     std::array<DirectLightUniformData, direct_lighting::maxDirectLights> packedDirectLights_{};
     std::uint32_t                                                        directLightCount_ = 0;
+
+    // lumen_gi probe-grid hook: the std140 header rides the frame uniform,
+    // the SH2 records are packed std430 (8 vec4 per probe) into a scratch
+    // buffer and streamed to the per-slot probe storage by setProbeGrid.
+    ProbeGridUniformData packedProbeGrid_{};
+    std::uint64_t        probeGridRevision_    = 0;
+    bool                 probeGridDirty_       = false;
+    std::vector<float>   packedProbeRecords_{}; // giProbeRecordVec4s floats per probe
 
     FrameUniformData cachedFrameUniform_{}; // rebuilt only when inputs change (frameUniformDirty_)
     std::uint64_t    frameUniformRevision_ = 0;

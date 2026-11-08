@@ -24,6 +24,10 @@ namespace engine
 namespace renderer
 {
 
+// Defined in render_shared.hpp (the borrowed lumen_gi probe-grid snapshot
+// passed to RenderBackend::setProbeGrid).
+struct GiProbeGrid;
+
 // Lifecycle contract: createMesh/createTexture are safe any time after
 // construction; beginFrame/draw*/endFrame must nest exactly one frame at a
 // time, and draw* calls between beginFrame/endFrame. Destruction must happen
@@ -45,10 +49,17 @@ public:
 
     virtual void setCamera(const CameraMatrices &camera) = 0;
 
-    // Environment/lights are pushed by renderer.cpp when the pbr and
-    // direct_lighting capabilities report new versions.
+    // Environment/lights/probe grid are pushed by renderer.cpp when the pbr,
+    // direct_lighting and lumen_gi capabilities report new versions.
     virtual void setEnvironment(const pbr::PbrEnvironment &environment)                           = 0;
     virtual void setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count) = 0;
+
+    // The lumen_gi probe-grid snapshot for the indirect-lighting hook. The
+    // view is borrowed only for this call; backends copy what they need
+    // (headless: the CPU sampling path in render_shared.hpp; Vulkan: the
+    // packed std430 probe storage buffer). An invalid/empty grid disables the
+    // hook and keeps the legacy hemispheric ambient.
+    virtual void setProbeGrid(const GiProbeGrid &grid) = 0;
 
     virtual void beginFrame(const FrameParameters &frame)                                          = 0;
     virtual void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) = 0;

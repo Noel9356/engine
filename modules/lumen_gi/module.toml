@@ -1,0 +1,39 @@
+config_keys           = [
+    "lumen_gi.capture.texels_per_frame",
+    "lumen_gi.cards.max_texels_per_card_axis",
+    "lumen_gi.cards.per_surface_max",
+    "lumen_gi.cards.texels_per_meter",
+    "lumen_gi.debug.include_ambient",
+    "lumen_gi.debug.internal_height",
+    "lumen_gi.debug.internal_width",
+    "lumen_gi.debug.reference_bounces",
+    "lumen_gi.debug.reference_samples",
+    "lumen_gi.enabled",
+    "lumen_gi.gather.importance_sampling",
+    "lumen_gi.gather.plane_depth_tolerance",
+    "lumen_gi.gather.rays_per_probe",
+    "lumen_gi.gather.screen_ray_distance_m",
+    "lumen_gi.gather.screen_scale",
+    "lumen_gi.gather.spatial_filter",
+    "lumen_gi.gather.temporal_blend",
+    "lumen_gi.lighting.direct_texels_per_frame",
+    "lumen_gi.lighting.indirect_temporal_blend",
+    "lumen_gi.lighting.indirect_texels_per_frame",
+    "lumen_gi.lighting.point_light_shadows",
+    "lumen_gi.lighting.sun_shadows",
+    "lumen_gi.lighting.update_speed",
+    "lumen_gi.probes.direction_resolution",
+    "lumen_gi.probes.hysteresis",
+    "lumen_gi.probes.level1_spacing_factor",
+    "lumen_gi.probes.spacing_m",
+    "lumen_gi.probes.updates_per_frame",
+    "lumen_gi.quality",
+    "lumen_gi.scene.max_surfaces",
+    "lumen_gi.scene.max_triangles_per_surface",
+    "lumen_gi.trace.max_distance_m",
+]
+name                  = "lumen_gi"
+optional_capabilities = ["pbr", "direct_lighting"]
+provides              = ["lumen_gi"]
+requires              = []
+version               = "0.1.0"

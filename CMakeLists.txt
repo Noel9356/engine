@@ -877,3 +877,9 @@ include(engine_add_application)
 if(ENGINE_BUILD_DEMO)
     add_subdirectory(demo)
 endif()
+
+# Second demo: standalone global-illumination test harness for the lumen_gi
+# module and the renderer's probe-grid indirect-lighting hook.
+if(ENGINE_BUILD_DEMO)
+    add_subdirectory(demo_lumen_gi)
+endif()

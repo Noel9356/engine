@@ -275,19 +275,26 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
     }
 
     {
-        const VkDescriptorSetLayoutBinding frameBinding{
-            .binding            = 0,
-            .descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount    = 1,
-            .stageFlags         = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            .pImmutableSamplers = nullptr,
-        };
+        const VkDescriptorSetLayoutBinding frameBindings[2]
+            = {{.binding            = 0,
+                   .descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                   .descriptorCount    = 1,
+                   .stageFlags         = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                   .pImmutableSamplers = nullptr},
+                // binding 1: the lumen_gi probe-grid storage buffer (read-only
+                // from the fragment stage; zero-filled while the hook is
+                // inactive). The overlay pipeline does not use this layout.
+                {.binding            = 1,
+                    .descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount    = 1,
+                    .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .pImmutableSamplers = nullptr}};
         const VkDescriptorSetLayoutCreateInfo frameLayoutInfo{
             .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext        = nullptr,
             .flags        = 0,
-            .bindingCount = 1,
-            .pBindings    = &frameBinding,
+            .bindingCount = 2,
+            .pBindings    = frameBindings,
         };
         const VkResult frameLayoutResult
             = vkCreateDescriptorSetLayout(vulkanDevice, &frameLayoutInfo, nullptr, &frameSetLayout_);

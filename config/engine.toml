@@ -25,6 +25,7 @@ lod_enabled = false
 
 [trust]
 trustMods = ["main_menu", "character_lab"]
+trustModules = ["renderer"]
 
 [window]
 # The character studio demo defaults to an 800x450 window: the CPU

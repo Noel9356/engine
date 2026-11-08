@@ -81,10 +81,10 @@ bool sameEnvironment(const pbr::PbrEnvironment &left, const pbr::PbrEnvironment 
 }
 
 // Builds the std140 frame uniform: view-projection (with the Vulkan fixup),
-// camera position, sun/ambient/exposure/tone-mapper, and the packed light
-// array with its active count.
+// camera position, sun/ambient/exposure/tone-mapper, the packed light
+// array with its active count, and the lumen_gi probe-grid header.
 FrameUniformData makeFrameUniform(const CameraMatrices &camera, const pbr::PbrEnvironment &environment,
-    const DirectLightUniformData *packedLights, std::uint32_t lightCount)
+    const DirectLightUniformData *packedLights, std::uint32_t lightCount, const ProbeGridUniformData &probeGrid)
 {
     FrameUniformData data;
     const glm::mat4  viewProj = vulkanClipFixup * glm::make_mat4(camera.projection) * glm::make_mat4(camera.view);
@@ -126,6 +126,7 @@ FrameUniformData makeFrameUniform(const CameraMatrices &camera, const pbr::PbrEn
     {
         std::copy_n(packedLights, packedLightCount, data.directLights);
     }
+    data.probeGrid = probeGrid;
     return data;
 }
 
@@ -643,6 +644,52 @@ void VulkanBackend::setDirectLights(const direct_lighting::DirectLight *lights, 
     frameUniformDirty_ = true;
 }
 
+// Packs the borrowed lumen_gi snapshot into the std140 frame-uniform header
+// and the std430 probe-record scratch (8 vec4 per probe: position.xyz +
+// validity, then the 27 SH2 floats plus one pad - the exact layout the
+// ProbeData block in shaders/mesh.frag walks). The per-slot probe storage
+// buffers are refreshed lazily at their next beginFrame.
+void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
+{
+    packedProbeGrid_       = ProbeGridUniformData{};
+    packedProbeRecords_.clear();
+    if (grid.valid())
+    {
+        const lumen_gi::GiProbeHeader &header = grid.header;
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            packedProbeGrid_.centerSpacing[axis] = header.gridCenter[axis];
+            packedProbeGrid_.level0Meta[axis]    = static_cast<float>(header.level0Dimensions[axis]);
+            packedProbeGrid_.level1Meta[axis]    = static_cast<float>(header.level1Dimensions[axis]);
+        }
+        packedProbeGrid_.centerSpacing[3] = header.level0Spacing;
+        packedProbeGrid_.level0Meta[3]    = header.level1Spacing;
+        packedProbeGrid_.level1Meta[3]    = 1.0f; // grid active: probes are bound below
+        packedProbeGrid_.countMeta[0]     = static_cast<float>(grid.probeCount);
+        packedProbeGrid_.countMeta[1]     = static_cast<float>(header.directionResolution);
+        packedProbeGrid_.countMeta[2]     = static_cast<float>(header.level0ProbeOffset);
+        packedProbeGrid_.countMeta[3]     = static_cast<float>(header.level1ProbeOffset);
+
+        packedProbeRecords_.reserve(static_cast<std::size_t>(grid.probeCount) * giProbeRecordVec4s);
+        for (std::uint32_t index = 0; index < grid.probeCount; ++index)
+        {
+            const lumen_gi::GiProbe &probe = grid.probes[index];
+            packedProbeRecords_.push_back(probe.position[0]);
+            packedProbeRecords_.push_back(probe.position[1]);
+            packedProbeRecords_.push_back(probe.position[2]);
+            packedProbeRecords_.push_back(probe.validity);
+            for (std::uint32_t coefficient = 0; coefficient < 27; ++coefficient)
+            {
+                packedProbeRecords_.push_back(probe.sh2[coefficient / 3][coefficient % 3]);
+            }
+            packedProbeRecords_.push_back(0.0f); // pad to 8 vec4
+        }
+    }
+    ++probeGridRevision_;
+    probeGridDirty_    = true;
+    frameUniformDirty_ = true; // the header rides the frame uniform
+}
+
 // Rebuilds the swapchain when it is dirty or the requested viewport no
 // longer matches. A failed recreate leaves frameActive_ false, so the
 // draw/endFrame calls become no-ops for this frame.
@@ -691,7 +738,8 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
 
     if (frameUniformDirty_)
     {
-        cachedFrameUniform_ = makeFrameUniform(camera_, environment_, packedDirectLights_.data(), directLightCount_);
+        cachedFrameUniform_ = makeFrameUniform(
+            camera_, environment_, packedDirectLights_.data(), directLightCount_, packedProbeGrid_);
         frameUniformDirty_  = false;
         ++frameUniformRevision_;
     }
@@ -700,6 +748,20 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
         frameUniformDirty_ = true;
         std::fprintf(stderr, "renderer module: could not flush frame uniform memory\n");
         return;
+    }
+    if (probeGridDirty_)
+    {
+        // The recording slot is refreshed eagerly; the other slots catch up
+        // on their next beginFrame (their stored revision is older).
+        const VkDeviceSize recordBytes
+            = static_cast<VkDeviceSize>(packedProbeRecords_.size()) * sizeof(float);
+        if (!resources_->updateProbeStorage(
+                frames_->currentFrame(), packedProbeRecords_.data(), recordBytes, probeGridRevision_))
+        {
+            std::fprintf(stderr, "renderer module: could not flush the probe storage buffer\n");
+            return;
+        }
+        probeGridDirty_ = false;
     }
 
     // Acquire FIRST, before any command-buffer recording: every skipped-frame

@@ -1568,7 +1568,8 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 roughness,
                                 occlusion,
                                 directLights_.data(),
-                                static_cast<std::uint32_t>(directLights_.size()));
+                                static_cast<std::uint32_t>(directLights_.size()),
+                                probeGrid_.valid() ? &probeGrid_ : nullptr);
                         }
 
                         if (hasEmissive)
@@ -1991,7 +1992,8 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             roughness,
             occlusion,
             lights,
-            lightCount);
+            lightCount,
+            probeGrid_.valid() ? &probeGrid_ : nullptr);
     }
 
     if (hasEmissive)

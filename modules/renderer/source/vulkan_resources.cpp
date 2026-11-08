@@ -88,9 +88,36 @@ bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t fr
         }
     }
 
+    // Probe storage (set 0 binding 1): sized for the full lumen_gi probe
+    // bound and zero-filled so the inactive hook reads nothing.
+    probeStorageBuffers_.resize(framesInFlight, VK_NULL_HANDLE);
+    probeStorageAllocations_.resize(framesInFlight, nullptr);
+    probeStorageMappings_.resize(framesInFlight, nullptr);
+    probeStorageVersions_.resize(framesInFlight, 0);
+    for (std::uint32_t index = 0; index < framesInFlight; ++index)
     {
-        const VkDescriptorPoolSize poolSizes[2]
+        if (!device.createBuffer(probeStorageBytes_,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                BufferMemoryIntent::HostSequentialWrite,
+                &probeStorageBuffers_[index],
+                &probeStorageAllocations_[index]))
+        {
+            std::fprintf(stderr, "renderer module: could not allocate the probe storage buffer\n");
+            return false;
+        }
+        if (!device.mapAllocation(probeStorageAllocations_[index], &probeStorageMappings_[index]))
+        {
+            std::fprintf(stderr, "renderer module: could not persistently map the probe storage buffer\n");
+            return false;
+        }
+        std::memset(probeStorageMappings_[index], 0, static_cast<std::size_t>(probeStorageBytes_));
+    }
+
+    {
+        const VkDescriptorPoolSize poolSizes[3]
             = {{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = framesInFlight},
+                {.type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = framesInFlight},
                 {.type               = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                     .descriptorCount = 5 * (maximumMaterialSets_ + 1)}};
         const VkDescriptorPoolCreateInfo poolInfo{
@@ -137,7 +164,21 @@ bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t fr
                 .pBufferInfo      = &bufferInfo,
                 .pTexelBufferView = nullptr,
             };
-            vkUpdateDescriptorSets(vulkanDevice, 1, &write, 0, nullptr);
+            const VkDescriptorBufferInfo probeBufferInfo{probeStorageBuffers_[index], 0, probeStorageBytes_};
+            const VkWriteDescriptorSet   probeWrite{
+                .sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext            = nullptr,
+                .dstSet           = frameUniformSets_[index],
+                .dstBinding       = 1,
+                .dstArrayElement  = 0,
+                .descriptorCount  = 1,
+                .descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo       = nullptr,
+                .pBufferInfo      = &probeBufferInfo,
+                .pTexelBufferView = nullptr,
+            };
+            const VkWriteDescriptorSet writes[2] = {write, probeWrite};
+            vkUpdateDescriptorSets(vulkanDevice, 2, writes, 0, nullptr);
         }
     }
 
@@ -220,6 +261,24 @@ void VulkanResources::destroy()
     frameUniformMappings_.clear();
     frameUniformVersions_.clear();
     frameUniformSets_.clear();
+
+    for (std::size_t index = 0; index < probeStorageBuffers_.size(); ++index)
+    {
+        if (probeStorageMappings_[index] != nullptr && probeStorageAllocations_[index] != nullptr)
+        {
+            device_->unmapAllocation(probeStorageAllocations_[index]);
+            probeStorageMappings_[index] = nullptr;
+        }
+        if (probeStorageBuffers_[index] != VK_NULL_HANDLE)
+        {
+            device_->destroyBuffer(probeStorageBuffers_[index], probeStorageAllocations_[index]);
+        }
+    }
+    probeStorageBuffers_.clear();
+    probeStorageAllocations_.clear();
+    probeStorageMappings_.clear();
+    probeStorageVersions_.clear();
+
     if (descriptorPool_ != VK_NULL_HANDLE)
     {
         vkDestroyDescriptorPool(vulkanDevice, descriptorPool_, nullptr);
@@ -240,6 +299,29 @@ bool VulkanResources::updateFrameUniform(std::uint32_t frameIndex, const FrameUn
     if (!device_->flushAllocation(frameUniformAllocations_[frameIndex]))
         return false;
     frameUniformVersions_[frameIndex] = revision;
+    return true;
+}
+
+bool VulkanResources::updateProbeStorage(
+    std::uint32_t frameIndex, const void *packedRecords, VkDeviceSize recordBytes, std::uint64_t revision)
+{
+    if (frameIndex >= probeStorageMappings_.size() || probeStorageMappings_[frameIndex] == nullptr
+        || recordBytes > probeStorageBytes_)
+    {
+        return false;
+    }
+    if (probeStorageVersions_[frameIndex] == revision)
+    {
+        return true; // this slot already holds this snapshot
+    }
+    std::memset(probeStorageMappings_[frameIndex], 0, static_cast<std::size_t>(probeStorageBytes_));
+    if (recordBytes != 0 && packedRecords != nullptr)
+    {
+        std::memcpy(probeStorageMappings_[frameIndex], packedRecords, static_cast<std::size_t>(recordBytes));
+    }
+    if (!device_->flushAllocation(probeStorageAllocations_[frameIndex]))
+        return false;
+    probeStorageVersions_[frameIndex] = revision;
     return true;
 }
 

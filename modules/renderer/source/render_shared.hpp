@@ -6,6 +6,7 @@
 #define ENGINE_RENDERER_SHARED_HPP
 
 #include <engine/direct_lighting/capabilities.hpp>
+#include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 
@@ -39,6 +40,13 @@ enum class DevicePreference : std::uint32_t
 // BRDF constants shared with shaders/mesh.frag so both backends shade alike.
 inline float     minimumRoughness = 0.045f;
 inline glm::vec3 dielectricF0     = glm::vec3(0.04f);
+
+// Probes a GiProbeGrid holds at most (two 9^3 clip levels); the Vulkan probe
+// storage buffer is sized for this bound.
+inline constexpr std::uint32_t maxGiProbes = 2u * 9u * 9u * 9u;
+// Floats per probe in the packed storage-buffer/std430 record: 1x vec4
+// (position.xyz + validity) + 7x vec4 (the 27 SH2 floats plus one pad).
+inline constexpr std::uint32_t giProbeRecordVec4s = 8u;
 
 // Sun + hemisphere ambient + ACES tone mapping, used whenever the pbr
 // capability is absent.
@@ -101,16 +109,194 @@ inline glm::vec3 pbrFresnelSchlick(float cosTheta, const glm::vec3 &f0)
     return f0 + (1.0f - f0) * fifthPower;
 }
 
-// Full CPU shading pass: hemispheric ambient, one directional sun, then the
-// prepared direct lights (range-faded point/spot attenuation with smoothstep
-// cones). Roughness/metallic are clamped here exactly like the shader.
+// ---- lumen_gi probe-grid hook -----------------------------------------------
+// Snapshot of the lumen_gi world-space radiance cache borrowed by the
+// renderer: a GiProbeHeader plus the probe array behind it. Backends copy the
+// data synchronously inside setProbeGrid(), so the borrowed view only needs
+// to stay valid for that call. A null/empty snapshot means "no GI": the
+// shading model keeps its legacy hemispheric ambient (bit-identical to the
+// pre-hook behavior).
+struct GiProbeGrid
+{
+    lumen_gi::GiProbeHeader  header{};
+    const lumen_gi::GiProbe *probes     = nullptr; // borrowed; header.probeCount entries
+    std::uint32_t            probeCount = 0;
+
+    bool valid() const
+    {
+        return probes != nullptr && probeCount != 0;
+    }
+};
+
+// One level of the exported probe cache: a regular dims^3 lattice anchored at
+// anchor with uniform spacing, index = x + dims.x * (y + dims.y * z), the
+// ordering copyProbes documents (z-major, level 0 first then level 1).
+struct GiProbeLevel
+{
+    glm::vec3      anchor{0.0f};
+    glm::ivec3     dims{0};
+    float          spacing = 1.0f;
+    std::uint32_t  offset  = 0; // first probe index inside GiProbeGrid::probes
+};
+
+// Picks the lattice level for a world position: level 0 inside its
+// half-cell-extended bounds, level 1 everywhere else (its trilinear lookup
+// clamps to the boundary probes, so distant geometry still receives the
+// coarse ambient). Returns false only when the snapshot cannot serve a
+// lookup at all.
+inline bool giProbeLevelFor(const GiProbeGrid &grid, const glm::vec3 &position, GiProbeLevel &outLevel)
+{
+    const lumen_gi::GiProbeHeader &header = grid.header;
+    if (header.level0Dimensions[0] < 2u || header.level1Dimensions[0] < 2u)
+    {
+        return false;
+    }
+    const std::uint32_t level0Count = header.level1ProbeOffset - header.level0ProbeOffset;
+    if (header.level0ProbeOffset >= grid.probeCount || level0Count == 0
+        || header.level1ProbeOffset >= grid.probeCount)
+    {
+        return false;
+    }
+
+    GiProbeLevel level0;
+    level0.anchor  = glm::make_vec3(grid.probes[header.level0ProbeOffset].position);
+    level0.dims    = glm::ivec3(static_cast<int>(header.level0Dimensions[0]),
+        static_cast<int>(header.level0Dimensions[1]), static_cast<int>(header.level0Dimensions[2]));
+    level0.spacing = header.level0Spacing;
+    level0.offset  = header.level0ProbeOffset;
+
+    GiProbeLevel level1;
+    level1.anchor  = glm::make_vec3(grid.probes[header.level1ProbeOffset].position);
+    level1.dims    = glm::ivec3(static_cast<int>(header.level1Dimensions[0]),
+        static_cast<int>(header.level1Dimensions[1]), static_cast<int>(header.level1Dimensions[2]));
+    level1.spacing = header.level1Spacing;
+    level1.offset  = header.level1ProbeOffset;
+
+    const glm::vec3 local        = position - level0.anchor;
+    const glm::vec3 extent0      = glm::vec3(level0.dims - 1) * level0.spacing;
+    const float     halfCell0    = level0.spacing * 0.5f;
+    const bool      insideLevel0 = glm::all(glm::bvec4(local.x >= -halfCell0, local.y >= -halfCell0,
+        local.z >= -halfCell0, true))
+                                && glm::all(glm::bvec4(local.x <= extent0.x + halfCell0, local.y <= extent0.y + halfCell0,
+                                    local.z <= extent0.z + halfCell0, true));
+    outLevel = insideLevel0 ? level0 : level1;
+    return true;
+}
+
+// Cosine-lobed SH2 irradiance at one probe (the same convolution as
+// lumen_gi::evaluateProbeIrradiance; kept textually in sync because the GLSL
+// mirror in shaders/mesh.frag must match this CPU path like the rest of the
+// shading model). sh2 is 27 floats in the GiProbe [basis][channel] order.
+inline glm::vec3 giEvaluateSh2Irradiance(const float sh2[27], const glm::vec3 &normal)
+{
+    constexpr float k0 = 3.141592654f;  // pi      (band 0)
+    constexpr float k1 = 2.094395102f;  // 2pi/3   (band 1)
+    constexpr float k2 = 0.785398163f;  // pi/4    (band 2)
+
+    const float x  = normal.x;
+    const float y  = normal.y;
+    const float z  = normal.z;
+    const float xx = x * x;
+    const float yy = y * y;
+    const float zz = z * z;
+
+    glm::vec3 irradiance(0.0f);
+    for (std::uint32_t channel = 0; channel < 3; ++channel)
+    {
+        irradiance[channel] = k0 * sh2[channel]
+                            + k1 * (sh2[3 + channel] * y + sh2[6 + channel] * z + sh2[9 + channel] * x)
+                            + k2 * (sh2[12 + channel] * x * y + sh2[15 + channel] * y * z
+                                    + sh2[18 + channel] * (3.0f * zz - 1.0f) + sh2[21 + channel] * x * z
+                                    + sh2[24 + channel] * (xx - yy));
+    }
+    return irradiance;
+}
+
+// Trilinear probe-grid irradiance for one shaded point, validity-weighted.
+// Returns false when the grid holds no valid probes along this footprint (the
+// caller keeps its legacy ambient); outWeight is the validity coverage of the
+// footprint in 0..1, used to blend GI against the hemispheric ambient.
+inline bool giProbeGridIrradiance(const GiProbeGrid &grid, const glm::vec3 &position, const glm::vec3 &normal,
+    glm::vec3 &outIrradiance, float &outWeight)
+{
+    outIrradiance = glm::vec3(0.0f);
+    outWeight     = 0.0f;
+    GiProbeLevel  level;
+    if (!giProbeLevelFor(grid, position, level))
+    {
+        return false;
+    }
+
+    const glm::vec3 cell     = (position - level.anchor) / level.spacing;
+    const glm::ivec3 base    = glm::clamp(glm::ivec3(glm::floor(cell)), glm::ivec3(0), level.dims - glm::ivec3(2));
+    const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
+
+    float    weightSum     = 0.0f;
+    glm::vec3 irradianceSum(0.0f);
+    for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
+    {
+        for (int cornerY = 0; cornerY < 2; ++cornerY)
+        {
+            for (int cornerX = 0; cornerX < 2; ++cornerX)
+            {
+                const glm::ivec3 corner = base + glm::ivec3(cornerX, cornerY, cornerZ);
+                const std::size_t probeIndex = static_cast<std::size_t>(level.offset)
+                    + static_cast<std::size_t>(corner.x + level.dims.x * (corner.y + level.dims.y * corner.z));
+                if (probeIndex >= grid.probeCount)
+                {
+                    continue;
+                }
+                const lumen_gi::GiProbe &probe = grid.probes[probeIndex];
+                const float latticeWeight = (cornerX != 0 ? fraction.x : 1.0f - fraction.x)
+                                          * (cornerY != 0 ? fraction.y : 1.0f - fraction.y)
+                                          * (cornerZ != 0 ? fraction.z : 1.0f - fraction.z);
+                const float weight = latticeWeight * probe.validity;
+                if (weight <= 0.0f)
+                {
+                    continue;
+                }
+                irradianceSum += weight * giEvaluateSh2Irradiance(&probe.sh2[0][0], normal);
+                weightSum += weight;
+            }
+        }
+    }
+    if (weightSum <= 0.0f)
+    {
+        return false;
+    }
+    outIrradiance = irradianceSum / weightSum;
+    outWeight     = glm::clamp(weightSum, 0.0f, 1.0f);
+    return true;
+}
+
+// Full CPU shading pass: hemispheric ambient (or the lumen_gi probe-grid
+// indirect term blended over it by probe validity), one directional sun, then
+// the prepared direct lights (range-faded point/spot attenuation with
+// smoothstep cones). Roughness/metallic are clamped here exactly like the
+// shader. giGrid is the borrowed probe-grid snapshot; nullptr keeps the
+// legacy ambient path bit-identical.
 inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPosition, const glm::vec3 &cameraPosition,
     const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance, const glm::vec3 &ambientSky,
     const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic, float roughness, float ambientOcclusion,
-    const PreparedDirectLight *directLights, std::uint32_t directLightCount)
+    const PreparedDirectLight *directLights, std::uint32_t directLightCount, const GiProbeGrid *giGrid = nullptr)
 {
-    const glm::vec3 ambient = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * albedo * ambientOcclusion;
-    glm::vec3       result  = ambient;
+    const glm::vec3 hemispheric = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * albedo * ambientOcclusion;
+    glm::vec3       ambient     = hemispheric;
+    if (giGrid != nullptr && giGrid->valid())
+    {
+        glm::vec3 giIrradiance(0.0f);
+        float     giWeight         = 0.0f;
+        if (giProbeGridIrradiance(*giGrid, worldPosition, normal, giIrradiance, giWeight))
+        {
+            // The SH2 convolution returns incident irradiance; a Lambertian
+            // BRDF turns it into outgoing radiance as albedo / pi * E. The
+            // occlusion map darkens the indirect term like the ambient it
+            // replaces. Partial probe coverage blends back to hemispheric.
+            const glm::vec3 giAmbient = albedo * (giIrradiance * (1.0f / glm::pi<float>())) * ambientOcclusion;
+            ambient                   = glm::mix(hemispheric, giAmbient, giWeight);
+        }
+    }
+    glm::vec3 result = ambient;
 
     metallic  = std::clamp(metallic, 0.0f, 1.0f);
     roughness = std::clamp(roughness, minimumRoughness, 1.0f);

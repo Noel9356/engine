@@ -8,6 +8,7 @@
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
 
+#include "render_shared.hpp"
 #include "engine/renderer/capabilities.hpp"
 #include "engine/renderer/material.hpp"
 #include "engine/renderer/mesh.hpp"
@@ -40,8 +41,22 @@ struct DirectLightUniformData
 };
 static_assert(sizeof(DirectLightUniformData) == 64, "a direct light occupies four std140 vec4 values");
 
+// std140 header of the lumen_gi probe grid, consumed by the fragment stage's
+// indirect-lighting hook (the probe SH2 records themselves live in the set-0
+// binding-1 storage buffer, not here). Keep in sync with the uProbeGrid
+// comment block in shaders/mesh.frag.
+struct ProbeGridUniformData
+{
+    float centerSpacing[4]    = {}; // xyz = grid center, w = level0 spacing
+    float level0Meta[4]       = {}; // xyz = level0 dimensions, w = level1 spacing
+    float level1Meta[4]       = {}; // xyz = level1 dimensions, w = grid active (1 = probes bound)
+    float countMeta[4]        = {}; // x = probe count, y = direction resolution, z = level0 offset, w = level1 offset
+};
+static_assert(sizeof(ProbeGridUniformData) == 64, "the probe grid header occupies four std140 vec4 values");
+
 // Per-frame uniform block (std140), one buffer per frame in flight. Mirrors
-// the FrameData block in shaders/mesh.vert and shaders/mesh.frag.
+// the FrameData block in shaders/mesh.frag (mesh.vert reads only the leading
+// members, so its block stays untouched by the probe-grid tail).
 struct FrameUniformData
 {
     float                  viewProj[16]       = {};
@@ -53,8 +68,9 @@ struct FrameUniformData
     float                  toneMapping[4]     = {};
     float                  directLightMeta[4] = {};
     DirectLightUniformData directLights[32]   = {};
+    ProbeGridUniformData   probeGrid          = {};
 };
-static_assert(sizeof(FrameUniformData) == 2224, "FrameData must match the shader's std140 layout");
+static_assert(sizeof(FrameUniformData) == 2288, "FrameData must match the shader's std140 layout");
 
 class VulkanResources
 {
@@ -73,6 +89,12 @@ public:
     // Skips the memcpy when the frame already holds this revision; returns
     // true in that case too (idempotent per frame slot).
     bool updateFrameUniform(std::uint32_t frameIndex, const FrameUniformData &data, std::uint64_t revision);
+
+    // Replaces the packed probe records of the set-0 binding-1 storage buffer
+    // (host-visible, written directly). The revision guard mirrors
+    // updateFrameUniform; recordBytes may be 0 (dummy bound, hook off).
+    bool updateProbeStorage(
+        std::uint32_t frameIndex, const void *packedRecords, VkDeviceSize recordBytes, std::uint64_t revision);
 
     VkDescriptorSet frameUniformSet(std::uint32_t frameIndex) const
     {
@@ -164,6 +186,16 @@ private:
     std::vector<void *>          frameUniformMappings_;
     std::vector<std::uint64_t>   frameUniformVersions_;
     std::vector<VkDescriptorSet> frameUniformSets_;
+
+    // Probe storage for the lumen_gi indirect-lighting hook: one host-visible
+    // std430 buffer per frame in flight, always bound on set 0 binding 1
+    // (a zeroed dummy when no grid is active keeps the pipeline valid).
+    static constexpr VkDeviceSize probeStorageBytes_ = maxGiProbes * giProbeRecordVec4s * sizeof(float) * 4;
+    std::vector<VkBuffer>        probeStorageBuffers_;
+    std::vector<VmaAllocation>   probeStorageAllocations_;
+    std::vector<void *>          probeStorageMappings_;
+    std::vector<std::uint64_t>   probeStorageVersions_;
+
     VkDescriptorPool             descriptorPool_ = VK_NULL_HANDLE;
 
     std::unordered_map<MeshHandle, VulkanMesh> meshes_;

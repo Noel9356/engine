@@ -11,6 +11,7 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
@@ -80,12 +81,18 @@ struct RendererRecord
     window::WindowHandle surface = 0;
 
     // Environment and light copies are pushed into the backend only when the
-    // provider's version counter changes (see beginFrameImpl).
+    // provider's version counter changes (see beginFrameImpl). The lumen_gi
+    // probe grid follows the same version pattern; probeScratch owns the
+    // snapshot the backend borrows while setProbeGrid copies it.
     std::uint64_t                         environmentVersion      = 0;
     bool                                  environmentInitialized  = false;
     std::uint64_t                         directLightVersion      = 0;
     std::uint32_t                         directLightLimit        = direct_lighting::maxDirectLights;
     bool                                  directLightsInitialized = false;
+    std::uint64_t                         probeGridVersion        = 0;
+    bool                                  probeGridInitialized    = false;
+    std::vector<lumen_gi::GiProbe>        probeScratch{};
+    lumen_gi::GiProbeHeader               probeHeader{};
     std::chrono::steady_clock::time_point frameStart{};
     bool                                  frameTimingActive = false;
 
@@ -133,6 +140,7 @@ public:
 
         pbr_            = context.tryAcquireCapability<pbr::PbrCapability>();
         directLighting_ = context.tryAcquireCapability<direct_lighting::DirectLightingCapability>();
+        lumenGi_        = context.tryAcquireCapability<lumen_gi::LumenGiCapability>();
         context_        = &context;
         profiler_       = &context.profiler();
         readConfiguration();
@@ -157,6 +165,7 @@ public:
         window_         = nullptr;
         pbr_            = nullptr;
         directLighting_ = nullptr;
+        lumenGi_        = nullptr;
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
         vulkanSurface_ = nullptr;
 #endif
@@ -216,6 +225,7 @@ private:
         maximumMaterialSetsPerRenderer_   = 256;
         pipelineCacheMaximumBytes_        = 64u * 1024u * 1024u;
         memoryBudgetUpdateIntervalFrames_ = 120;
+        giIndirectLighting_               = true;
         configuredClearColor_                    = {0.0f, 0.0f, 0.0f, 1.0f};
         headlessTransformCacheBudgetBytes_       = 32u * 1024u * 1024u;
         frustumCulling_                          = true;
@@ -376,6 +386,8 @@ private:
         frustumCulling_  = context.configurationBooleanInSection("renderer", "frustum_culling").value_or(true);
         backFaceCulling_ = context.configurationBooleanInSection("renderer", "back_face_culling").value_or(true);
         lodEnabled_      = context.configurationBooleanInSection("renderer", "lod_enabled").value_or(true);
+        giIndirectLighting_
+            = context.configurationBooleanInSection("renderer", "gi_indirect_lighting").value_or(true);
         gpuTimestampsEnabled_
             = context.configurationBooleanInSection("renderer", "gpu_timestamps_enabled").value_or(false);
         instanceBatchingEnabled_ = context.configurationBooleanInSection("renderer", "instance_batching").value_or(true);
@@ -646,7 +658,7 @@ private:
             .version              = "0.1.0",
             .providedCapabilities = {"renderer", "renderer.vulkan", "renderer.headless"},
             .requiredCapabilities = {"window"},
-            .optionalCapabilities = {"window.vulkan", "pbr", "direct_lighting"}};
+            .optionalCapabilities = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi"}};
     }
 
     RendererRecord *recordFor(RendererHandle renderer)
@@ -906,6 +918,44 @@ private:
         {
             record->backendInstance->setDirectLights(nullptr, 0);
             record->directLightsInitialized = true;
+        }
+        // The lumen_gi probe grid follows the same version pattern as the
+        // environment/lights above: a null/zero-capacity copyProbes call
+        // reports the current version, and only a changed version pays for
+        // the snapshot copy. When the module is absent or the hook is
+        // disabled by configuration, the backend keeps whatever it had (an
+        // empty grid at creation) and shading falls back to the legacy
+        // hemispheric ambient. The snapshot may lag the latest evaluate() by
+        // one frame: module update order does not guarantee lumen_gi runs
+        // before the renderer, and GI is temporal by nature (Lumen's cache
+        // updates are amortized the same way).
+        if (giIndirectLighting_ && lumenGi_ != nullptr && lumenGi_->copyProbes != nullptr)
+        {
+            std::uint64_t version = 0;
+            lumenGi_->copyProbes(lumenGi_->self, nullptr, 0, &record->probeHeader, &version);
+            if (!record->probeGridInitialized || record->probeGridVersion != version)
+            {
+                record->probeScratch.resize(record->probeHeader.probeCount);
+                const std::uint32_t copied = record->probeHeader.probeCount != 0
+                    ? lumenGi_->copyProbes(lumenGi_->self,
+                          record->probeScratch.data(),
+                          static_cast<std::uint32_t>(record->probeScratch.size()),
+                          &record->probeHeader,
+                          &version)
+                    : 0;
+                GiProbeGrid grid;
+                grid.header     = record->probeHeader;
+                grid.probes     = record->probeScratch.data();
+                grid.probeCount = std::min(copied, record->probeHeader.probeCount);
+                record->backendInstance->setProbeGrid(grid);
+                record->probeGridVersion     = version;
+                record->probeGridInitialized = true;
+            }
+        }
+        else if (!record->probeGridInitialized)
+        {
+            record->backendInstance->setProbeGrid(GiProbeGrid{});
+            record->probeGridInitialized = true;
         }
         record->frameStart        = std::chrono::steady_clock::now();
         record->frameTimingActive = true;
@@ -1485,6 +1535,7 @@ private:
 
     pbr::PbrCapability                        *pbr_            = nullptr;
     direct_lighting::DirectLightingCapability *directLighting_ = nullptr;
+    lumen_gi::LumenGiCapability               *lumenGi_        = nullptr;
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
     window::VulkanSurfaceCapability *vulkanSurface_ = nullptr;
@@ -1510,6 +1561,7 @@ private:
     std::size_t          headlessTransformCacheBudgetBytes_ = 32u * 1024u * 1024u;
     bool                 frustumCulling_                    = true;
     bool                 backFaceCulling_                   = true;
+    bool                 giIndirectLighting_                = true; // [renderer] gi_indirect_lighting
     bool                 lodEnabled_                        = true;
     bool                 gpuTimestampsEnabled_              = true;
     bool                 drawSortEnabled_                   = false;
@@ -1555,7 +1607,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
 {
     static const char *const providedCapabilities[] = {"renderer", "renderer.vulkan", "renderer.headless"};
     static const char *const requiredCapabilities[] = {"window"};
-    static const char *const optionalCapabilities[] = {"window.vulkan", "pbr", "direct_lighting"};
+    static const char *const optionalCapabilities[] = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi"};
 
     static const engine::EngineModuleEntryTable entry = {
         .abiVersion              = engine::engineModuleAbiVersion,
@@ -1567,7 +1619,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
         .requiredCapabilities    = requiredCapabilities,
         .requiredCapabilityCount = 1,
         .optionalCapabilities    = optionalCapabilities,
-        .optionalCapabilityCount = 3,
+        .optionalCapabilityCount = 4,
         .declaredPermissions     = nullptr,
         .declaredPermissionCount = 0,
     };

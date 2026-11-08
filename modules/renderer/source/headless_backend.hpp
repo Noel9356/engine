@@ -208,6 +208,18 @@ public:
 
     void setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count) override;
 
+    // Copies the borrowed lumen_gi probe-grid snapshot; the rasterizer's
+    // pbrShade calls then sample it per pixel (validity-weighted trilinear
+    // SH2 irradiance). An empty snapshot keeps the legacy hemispheric
+    // ambient.
+    void setProbeGrid(const GiProbeGrid &grid) override
+    {
+        probeGridProbes_.assign(grid.probes, grid.probes + grid.probeCount);
+        probeGrid_.header     = grid.header;
+        probeGrid_.probeCount = grid.probeCount;
+        probeGrid_.probes     = probeGridProbes_.empty() ? nullptr : probeGridProbes_.data();
+    }
+
     void setEnvironment(const pbr::PbrEnvironment &environment) override
     {
         environment_    = environment;
@@ -433,6 +445,11 @@ private:
     glm::vec3                        ambientSky_{0.0f};
     glm::vec3                        ambientGround_{0.0f};
     std::vector<PreparedDirectLight> directLights_;
+
+    // lumen_gi probe-grid hook: owned probe copy plus the view passed to
+    // pbrShade. Kept valid between frames; setProbeGrid replaces it wholesale.
+    GiProbeGrid                     probeGrid_{};
+    std::vector<lumen_gi::GiProbe> probeGridProbes_;
 
     std::uint32_t viewportWidth  = 0;
     std::uint32_t viewportHeight = 0;

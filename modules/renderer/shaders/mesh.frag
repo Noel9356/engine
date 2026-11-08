@@ -61,7 +61,21 @@ layout(std140, set = 0, binding = 0) uniform FrameData
     vec4 uToneMapping;    // x = exposure, y = tone mapper id
     vec4 uDirectLightMeta; // x = active direct-light count
     LightData uDirectLights[MAX_LIGHTS];
+    // lumen_gi probe-grid header (the indirect-lighting hook; the SH2 probe
+    // records ride the set-0 binding-1 storage buffer below):
+    vec4 uProbeGridA; // xyz = grid center, w = level0 spacing
+    vec4 uProbeGridB; // xyz = level0 dimensions, w = level1 spacing
+    vec4 uProbeGridC; // xyz = level1 dimensions, w = grid active (1.0 = probes bound)
+    vec4 uProbeGridD; // x = probe count, y = direction resolution, z = level0 offset, w = level1 offset
 } frameData;
+
+// lumen_gi probe records, 8 vec4 per probe: (position.xyz, validity) then
+// the 27 SH2 radiance floats (GiProbe [basis][channel] order) plus one pad.
+// Written by the renderer module from the lumen_gi copyProbes snapshot.
+layout(std430, set = 0, binding = 1) readonly buffer ProbeData
+{
+    vec4 probeRecords[];
+};
 
 // One material descriptor set (the layout's set 1): five combined image
 // samplers, one binding per map. The renderer fills every slot - a material
@@ -153,6 +167,112 @@ vec3 toneMap(vec3 color, float mapperId)
     return clamp((acesInput * (2.51 * acesInput + 0.03)) / (acesInput * (2.43 * acesInput + 0.59) + 0.14), 0.0, 1.0);
 }
 
+// ---- lumen_gi probe-grid indirect lighting ----------------------------------
+// Mirrors the CPU path in source/render_shared.hpp exactly (same lattice
+// walk, same SH2 convolution, same validity weighting), like every other
+// formula this shader shares with the software rasterizer.
+
+// Cosine-lobed SH2 irradiance at the probe whose record starts at vec4 index
+// `base` (= 8 * probe index): Ramamoorthi & Hanrahan convolution, band
+// constants A0 = pi, A1 = 2pi/3, A2 = pi/4.
+vec3 giProbeIrradiance(uint base, vec3 n)
+{
+    float sh2[27];
+    for (int i = 0; i < 27; ++i)
+    {
+        sh2[i] = probeRecords[base + 1u + uint(i / 4)][i % 4];
+    }
+    const float k0 = 3.141592654;  // pi    (band 0)
+    const float k1 = 2.094395102;  // 2pi/3 (band 1)
+    const float k2 = 0.785398163;  // pi/4  (band 2)
+    const float xx = n.x * n.x;
+    const float yy = n.y * n.y;
+    const float zz = n.z * n.z;
+    vec3 irradiance;
+    irradiance[0] = k0 * sh2[0]  + k1 * (sh2[3]  * n.y + sh2[6]  * n.z + sh2[9]  * n.x)
+                  + k2 * (sh2[12] * n.x * n.y + sh2[15] * n.y * n.z + sh2[18] * (3.0 * zz - 1.0)
+                        + sh2[21] * n.x * n.z + sh2[24] * (xx - yy));
+    irradiance[1] = k0 * sh2[1]  + k1 * (sh2[4]  * n.y + sh2[7]  * n.z + sh2[10] * n.x)
+                  + k2 * (sh2[13] * n.x * n.y + sh2[16] * n.y * n.z + sh2[19] * (3.0 * zz - 1.0)
+                        + sh2[22] * n.x * n.z + sh2[25] * (xx - yy));
+    irradiance[2] = k0 * sh2[2]  + k1 * (sh2[5]  * n.y + sh2[8]  * n.z + sh2[11] * n.x)
+                  + k2 * (sh2[14] * n.x * n.y + sh2[17] * n.y * n.z + sh2[20] * (3.0 * zz - 1.0)
+                        + sh2[23] * n.x * n.z + sh2[26] * (xx - yy));
+    return irradiance;
+}
+
+// Trilinear SH2 irradiance over one level of the probe lattice (regular
+// dims^3 grid, index = x + dimX * (y + dimY * z), clamped to the boundary
+// probes), validity-weighted. Returns the irradiance and the validity
+// coverage of the footprint in giWeight.
+vec3 giLevelIrradiance(uint levelOffset, vec3 levelAnchor, vec3 levelDims, float levelSpacing, vec3 position,
+    vec3 normal, out float giWeight)
+{
+    const vec3 cell       = (position - levelAnchor) / levelSpacing;
+    const ivec3 base      = clamp(ivec3(floor(cell)), ivec3(0.0), ivec3(levelDims) - ivec3(2.0));
+    const vec3 fraction   = clamp(cell - vec3(base), vec3(0.0), vec3(1.0));
+    vec3 irradianceSum    = vec3(0.0);
+    float weightSum       = 0.0;
+    for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
+    {
+        for (int cornerY = 0; cornerY < 2; ++cornerY)
+        {
+            for (int cornerX = 0; cornerX < 2; ++cornerX)
+            {
+                const ivec3 corner = base + ivec3(cornerX, cornerY, cornerZ);
+                const uint probeIndex = levelOffset + uint(corner.x + uint(levelDims.x) * (corner.y + uint(levelDims.y) * corner.z));
+                if (probeIndex >= uint(frameData.uProbeGridD.x))
+                {
+                    continue;
+                }
+                const uint recordBase = probeIndex * 8u;
+                const float latticeWeight = (cornerX != 0 ? fraction.x : 1.0 - fraction.x)
+                                          * (cornerY != 0 ? fraction.y : 1.0 - fraction.y)
+                                          * (cornerZ != 0 ? fraction.z : 1.0 - fraction.z);
+                const float weight = latticeWeight * probeRecords[recordBase].w;
+                if (weight <= 0.0)
+                {
+                    continue;
+                }
+                irradianceSum += weight * giProbeIrradiance(recordBase, normal);
+                weightSum += weight;
+            }
+        }
+    }
+    giWeight = clamp(weightSum, 0.0, 1.0);
+    return weightSum > 0.0 ? irradianceSum / weightSum : vec3(0.0);
+}
+
+// Validity-weighted probe-grid irradiance at a world point: level 0 inside
+// its half-cell-extended bounds, level 1 elsewhere (boundary clamped).
+bool giGridIrradiance(vec3 position, vec3 normal, out vec3 giIrradiance, out float giWeight)
+{
+    giIrradiance = vec3(0.0);
+    giWeight     = 0.0;
+    if (frameData.uProbeGridC.w < 0.5 || frameData.uProbeGridD.x < 1.0)
+    {
+        return false;
+    }
+    const vec3  anchor0      = probeRecords[uint(frameData.uProbeGridD.z) * 8u].xyz;
+    const vec3  local0       = position - anchor0;
+    const vec3  extent0      = (vec3(frameData.uProbeGridB.xyz) - vec3(1.0)) * frameData.uProbeGridA.w;
+    const float halfCell0    = frameData.uProbeGridA.w * 0.5;
+    const bool  insideLevel0 = all(greaterThanEqual(local0, vec3(-halfCell0)))
+                            && all(lessThanEqual(local0, extent0 + vec3(halfCell0)));
+    if (insideLevel0)
+    {
+        giIrradiance = giLevelIrradiance(uint(frameData.uProbeGridD.z), anchor0, frameData.uProbeGridB.xyz,
+            frameData.uProbeGridA.w, position, normal, giWeight);
+    }
+    else
+    {
+        const vec3 anchor1 = probeRecords[uint(frameData.uProbeGridD.w) * 8u].xyz;
+        giIrradiance = giLevelIrradiance(uint(frameData.uProbeGridD.w), anchor1, frameData.uProbeGridC.xyz,
+            frameData.uProbeGridB.w, position, normal, giWeight);
+    }
+    return giWeight > 0.0;
+}
+
 void main()
 {
     const vec3 geometryNormal = normalize(vNormal);
@@ -200,10 +320,21 @@ void main()
 
     // Hemispheric ambient: sky color for up-facing normals, ground bounce
     // for down-facing ones, blended by the world-space normal's y, scaled
-    // by the occlusion map.
+    // by the occlusion map. When the lumen_gi probe grid holds valid data
+    // at this point, its validity-weighted SH2 irradiance replaces the
+    // hemispheric term (blended back by coverage so partially populated
+    // grids degrade gracefully instead of going black).
     const vec3 upColor   = frameData.uAmbientSky.rgb * frameData.uAmbientSky.a;
     const vec3 downColor = frameData.uAmbientGround.rgb * frameData.uAmbientSky.a;
-    const vec3 ambient   = mix(downColor, upColor, normal.y * 0.5 + 0.5) * baseColor * occlusion;
+    const vec3 hemispheric = mix(downColor, upColor, normal.y * 0.5 + 0.5) * baseColor * occlusion;
+    vec3 ambient = hemispheric;
+    vec3 giIrradiance;
+    float giWeight;
+    if (giGridIrradiance(vWorldPosition, normal, giIrradiance, giWeight))
+    {
+        const vec3 giAmbient = baseColor * (giIrradiance * (1.0 / PI)) * occlusion;
+        ambient = mix(hemispheric, giAmbient, giWeight);
+    }
 
     vec3 color = (diffuse + specular) * sunRadiance * nDotL + ambient;
 
