@@ -6,45 +6,7 @@ from it, and how the demo content implements that contract. Read
 `overview.md` first for the module's data model; this document explains the
 deformation and junction decisions on top of it.
 
-## 0. Fourth revision: what the asset audit changed
-
-A fresh screenshot audit of the third revision (front/side/back captures of
-every drive preset, junction zooms, and standalone renders of each OBJ)
-found that two checked-in assets were never the geometry their docs
-described, and drove these fixes:
-
-- **The demon head's skull was missing.** `head_demon.obj` held only two
-  horn cones, a collar bowl, and a fused ball - the skull itself was absent
-  (the earlier pipeline cut caught the wrong region), so the head rendered
-  as horns hovering over an empty neck. The head is re-cut from the
-  *Ultimate Monsters* Demon's `Head`-joint partition surface (skull, jaw,
-  horns, eyes, fangs; the floating halo accessory is dropped), re-rooted at
-  the measured neck boundary, sized to the other heads' size class, and its
-  colors come from the pack's monster atlas (the previous "authored red"
-  palette is gone with the broken cut). A three-step collar under the wide
-  chibi neck opening seals the tube junction; the `head_size`,
-  `muzzle_length`, and `neck_fit` morphs are re-baked on the final welded
-  mesh.
-- **The "tail" was a wing fragment.** The checked-in tail cut held a fin of
-  membrane and claw geometry from the demon's wing chain, not a T-Rex tail
-  (the measured T-Rex cut never shipped), which is why the tail read as a
-  thin disconnected whip with a stray ball at the root. The *Dinosaur
-  Animated Pack* is no longer retrievable upstream, so the tail is now
-  authored by the pipeline itself: a lofted, tapered reptile tail in two
-  pieces that follow the `tail_chain` rig curve (root -> mid -> end), with
-  the tip piece's ring nesting inside the base's end stub. Rings sit at
-  part origins, so the existing thickness/length scale bindings keep every
-  junction closed.
-- **Two new drive presets** (`bighead`, `longmuzzle`) capture the head
-  morph range ends for visual regression, since the head morphs only move
-  away from the slider defaults.
-
-The third revision's findings below remain the contract; the fourth
-revision is an asset-level repair on top of it, plus the recreated
-`scripts/build_character_parts.py` (the original was lost with the revision
-that shipped it).
-
-## 1. Third revision: what the visual audit changed
+## 0. Third revision: what the visual audit changed
 
 A screenshot-driven audit of the second revision (capturing every drive
 preset, zooming into every junction, and re-checking each extracted OBJ in
@@ -78,7 +40,7 @@ fixes:
   authored palette, and tiny color atlases are gutter-inpainted and voted
   per face.
 
-## 2. What shipped games actually do
+## 1. What shipped games actually do
 
 Findings from public postmortems, engine documentation, and tooling
 discussions (all visited while designing this revision):
@@ -114,7 +76,7 @@ The consistent lesson: **a junction is safe only when both sides derive
 their interface geometry from the same parameter formula, and geometry is
 only ever re-derived when parameters change.**
 
-## 3. The junction contract (authoring rules for this engine)
+## 2. The junction contract (authoring rules for this engine)
 
 1. **Every junction interface is a function of shared parameters.** The
    torso neck stub radius, the neck piece, and the head collar radius are
@@ -138,7 +100,7 @@ only ever re-derived when parameters change.**
    free of deep self-intersection; the compatibility rules' relative-scale
    gate catches asset-level mismatches on top.
 
-## 4. Deformation architecture in this build
+## 3. Deformation architecture in this build
 
 The renderer in this engine has no skinning or GPU morph path, so the
 industry morph-target pattern is implemented consumer-side, at change time:
@@ -154,7 +116,7 @@ industry morph-target pattern is implemented consumer-side, at change time:
   `JointTranslation` bindings; the module already scales joint-anchored
   socket positions by part scale and keeps rotations rigid.
 
-## 5. Performance model (software rasterizer)
+## 4. Performance model (software rasterizer)
 
 The character screen must hold up on a 2-core CPU with the headless
 rasterizer backend, which makes shaded pixels the budget:
@@ -166,10 +128,11 @@ rasterizer backend, which makes shaded pixels the budget:
   or parameters change, not every animation-driven re-transform.
 - Character meshes stay in the low thousands of triangles per part.
 
-## 6. Sources for the shipped assets
+## 5. Sources for the shipped assets
 
-All downloaded meshes in `demo/assets/character_parts/` come from CC0 packs
-by Quaternius (see the pack directories and `LICENSE.md` next to the OBJs):
+All meshes in `demo_character_customisation/assets/character_parts/` are cut by
+`scripts/build_character_parts.py` from CC0 packs downloaded into
+`assets_dl/` (see the pack directories and `LICENSE.md` next to the OBJs):
 
 - Humanoid torso, arms, legs: Quaternius *Universal Base Characters*
   (Superhero male), cut along the rig's joint partition (UE-style skeleton:
@@ -177,21 +140,19 @@ by Quaternius (see the pack directories and `LICENSE.md` next to the OBJs):
   arm, `thigh_*`/`ball_*` per leg). Arms end in a fused deltoid ball; legs
   keep the buried interface skirt.
 - Demon head: Quaternius *Ultimate Monsters* Demon, `Head`-joint surface of
-  the head mesh only, minus the floating halo accessory, anchored at the
-  skull's measured neck boundary (the rig's Head joint sits mid-skull) and
-  sized to the dragon head's size class; atlas-sampled palette. One Loop
-  subdivision level and a generated three-step collar under the neck
-  opening.
+  the head mesh only, anchored at the skull's measured neck boundary (the
+  rig's Head joint sits mid-skull); authored red palette because the source
+  UV set maps the head to an unpainted atlas strip. One Loop subdivision
+  level.
 - Dragon head: Quaternius *Ultimate Monsters* Dragon Evolved `Head`-joint
   surface; one Loop subdivision level.
 - Serpent head: Quaternius *Ultimate Monsters* Dino `Head`-joint surface.
 - Wings: Quaternius *Ultimate Monsters* Dragon wing chains (one source side
   per engine side), rooted with a ball joint; open-boundary membrane
   triangles are emitted double-sided.
-- Tail: authored by the pipeline (`scripts/build_character_parts.py`) as a
-  procedural reptile tail in two pieces along the `tail_chain` rig curve.
-  The earlier T-Rex cut from the *Dinosaur Animated Pack* never shipped
-  correctly and the pack is no longer retrievable upstream.
+- Tail: two measured spatial cuts along the *Dinosaur Animated Pack*
+  T-Rex's tail (the monster dragons are tailless), Loop-subdivided, rooted
+  with a ball joint; the dark source palette is brightened.
 
 Joint partition cuts follow the animation boundary, so the extracted pieces
 are exactly the regions the source skeleton deforms - the same seam the

@@ -1,5 +1,5 @@
 engine_add_application(
-    demo
+    demo_character_customisation
     SOURCES
     source/main.cpp
     source/demo/character_content.cpp

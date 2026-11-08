@@ -30,8 +30,8 @@ const char *optionsUsage() noexcept
            "  --view character|benchmark|sun\n"
            "                           Select the screen (default: character).\n"
            "  --character-test         Run the character assembly test operations, then exit.\n"
-           "  --character-drive <name> Apply a named configuration (dragon, serpent, tall, broad, longtail,\n"
-           "                           compact, bighead, longmuzzle, noappend) to the character screen.\n";
+           "  --character-drive <name> Apply a named configuration (dragon, serpent, tall, broad,\n"
+           "                           longtail, compact, noappend) to the character screen.\n";
 }
 
 // Strict flag parser: every recognized flag consumes the next token as its
@@ -86,11 +86,10 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         else if (argument == "--character-drive")
         {
             if (value != "dragon" && value != "serpent" && value != "tall" && value != "broad" && value != "longtail"
-                && value != "compact" && value != "bighead" && value != "longmuzzle" && value != "noappend")
+                && value != "compact" && value != "noappend")
             {
                 outError = "invalid character drive preset '" + value
-                         + "'; expected dragon, serpent, tall, broad, longtail, compact, bighead, longmuzzle, "
-                           "or noappend";
+                         + "'; expected dragon, serpent, tall, broad, longtail, compact, or noappend";
                 return false;
             }
             parsedOptions.characterDrive = value;

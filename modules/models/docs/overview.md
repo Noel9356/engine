@@ -85,7 +85,7 @@ Every `[models]` key, its validated range, default, and effect is documented in 
 
 **Permissions.** The module declares no permissions itself. A consumer acquires the capability with `context.acquireCapability<engine::models::ModelsCapability>()`, which the permission system gates behind the `capability.models` permission; declaring `models` in the consumer's `requires` (module.toml) or required capabilities grants it (the kernel derives `capability.<name>` permissions from declared requirements). `tryAcquireCapability` returns null instead of throwing when the capability is missing.
 
-**Consumer usage** (signatures from `capabilities.hpp`, as used by `demo/source/main.cpp`):
+**Consumer usage** (signatures from `capabilities.hpp`, as used by `demo_character_customisation/source/main.cpp`):
 
 ```cpp
 auto &models = context.acquireCapability<engine::models::ModelsCapability>();

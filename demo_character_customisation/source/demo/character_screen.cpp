@@ -1368,18 +1368,6 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
                && setParameter("tail.length", 0.6f) && setParameter("wings.span", 0.5f);
         applyParameterHeights();
     }
-    else if (name == "bighead")
-    {
-        // Head size range end: the skull morphs above the fixed collar ring,
-        // so the head grows while the neck junction stays sealed.
-        applied = setParameter("head.size", 1.35f);
-    }
-    else if (name == "longmuzzle")
-    {
-        // Muzzle range end on the biggest head: exercises both head morphs
-        // (size ramp + forward muzzle push) at once.
-        applied = setParameter("head.size", 1.2f) && setParameter("head.muzzle_length", 1.4f);
-    }
     else if (name == "noappend")
     {
         // Appendage removal on both slots.

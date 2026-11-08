@@ -247,4 +247,13 @@ over the hemispheric ambient. The CPU reference of that sampling lives in
 `modules/renderer/shaders/mesh.frag`; `[renderer] gi_indirect_lighting`
 switches the hook off. The standalone `demo_lumen_gi/` application
 demonstrates the full loop (scene registration into both modules, per-frame
-`evaluate`, hook-composed output, debug-view exports for A/B validation).
+`evaluate`, hook-composed output, debug-view exports for A/B validation). It
+pumps window events every frame and, windowed, runs until the window is
+closed or Escape is pressed; `--frames N` pins an exact deterministic frame
+count for CI and screenshot exports (headless runs default to 30 frames).
+Its camera comes from the engine's `camera` module (WASD + mouse look, with
+Left Alt releasing the cursor) so the GI response to motion can be exercised
+interactively, window resizes re-render at the new viewport, and
+`--orbit` sweeps the camera on a path for hands-free dynamic-GI tests. The
+module's static-frame skip (`skip_unchanged_frames`, on by default) makes a
+stationary camera and scene converge and then stop consuming CPU entirely.

@@ -49,7 +49,7 @@ Configurable — see [configuration.md](configuration.md) for the `[camera]` key
 
 Events: the module subscribes to `ConfigurationReloadedEvent` (kernel event bus) in `construct()` and unsubscribes in `stop()`. The handler re-reads the `[camera]` section when any changed key starts with `"camera."`. It publishes no events of its own. Permissions: none declared (`declaredPermissions = nullptr` in the entry table).
 
-Consumer usage with the real API signatures (as the demo app does in `demo/source/main.cpp`):
+Consumer usage with the real API signatures (as the demo app does in `demo_character_customisation/source/main.cpp`):
 
 ```cpp
 camera::CameraCapability &camera = context.acquireCapability<camera::CameraCapability>();

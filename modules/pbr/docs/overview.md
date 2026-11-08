@@ -1,6 +1,6 @@
 # pbr module
 
-pbr is the engine's shared physically-based-rendering state holder: it owns the global PBR environment (directional sun, hemisphere ambient, exposure, tone mapping) that the renderer samples every frame, and it converts legacy Phong-style `models::ModelMaterial` data into the PBR `renderer::MeshMaterial` the renderer consumes. The module holds no GPU resources of its own - it is plain state plus pure conversion math, published as the `pbr` capability. The application binds it with `tryAcquireCapability<pbr::PbrCapability>()` (see `demo/source/main.cpp`), tunes it through `[pbr]` configuration with live reload, and can drive it at runtime through the capability entries.
+pbr is the engine's shared physically-based-rendering state holder: it owns the global PBR environment (directional sun, hemisphere ambient, exposure, tone mapping) that the renderer samples every frame, and it converts legacy Phong-style `models::ModelMaterial` data into the PBR `renderer::MeshMaterial` the renderer consumes. The module holds no GPU resources of its own - it is plain state plus pure conversion math, published as the `pbr` capability. The application binds it with `tryAcquireCapability<pbr::PbrCapability>()` (see `demo_character_customisation/source/main.cpp`), tunes it through `[pbr]` configuration with live reload, and can drive it at runtime through the capability entries.
 
 ## Capability
 
@@ -72,7 +72,7 @@ Configurable through the `[pbr]` section; every key is documented in [configurat
 - **Events subscribed:** `ConfigurationReloadedEvent` (reacts only to keys starting with `pbr.`).
 - **Permissions declared:** none in the entry table; acquisition of the capability is gated by the implicit `capability.pbr` permission.
 
-Consumer example (real signatures; mirrors `demo/source/main.cpp`):
+Consumer example (real signatures; mirrors `demo_character_customisation/source/main.cpp`):
 
 ```cpp
 #include <engine/pbr/capabilities.hpp>

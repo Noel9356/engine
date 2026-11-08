@@ -5,6 +5,7 @@ engine_add_application(
     CAPABILITIES
     window
     renderer
+    camera
     pbr
     lumen_gi
     LIBRARIES

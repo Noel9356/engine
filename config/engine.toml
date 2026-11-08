@@ -25,6 +25,10 @@ lod_enabled = false
 
 [trust]
 trustMods = ["main_menu", "character_lab"]
+# The renderer acquires five capabilities now that it consumes the optional
+# lumen_gi probe grid (window + window.vulkan + pbr + direct_lighting +
+# lumen_gi), which the trust gate flags as "broad"; first-party modules are
+# trusted by name.
 trustModules = ["renderer"]
 
 [window]

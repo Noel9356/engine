@@ -52,6 +52,10 @@ inline constexpr float invalidCardDepth = std::numeric_limits<float>::max();
 struct GiSettings
 {
     bool          enabled                    = true;
+    // Static-frame skip: when camera, scene, and environment are all
+    // unchanged and the caches have converged, evaluate() returns early
+    // instead of re-blending the same radiance. See docs/configuration.md.
+    bool          skipUnchangedFrames        = true;
     std::uint32_t quality                    = 3;  // QualityPreset::High
     std::uint32_t maxSurfaces                = 256;
     std::uint64_t maxTrianglesPerSurface     = 200000;
@@ -249,6 +253,13 @@ struct GiPipelineState
     glm::mat4 previousViewProjection{1.0f};
     glm::vec3 previousCameraPosition{0.0f};
     bool      hasPreviousView = false;
+    // Static-frame skip change detection: setView marks viewDirty when the
+    // passed matrices differ from the previous call, surface mutators mark
+    // sceneDirty, and evaluate() consumes both. framesSinceDirty counts
+    // consecutive non-dirty evaluates (the convergence gate for the skip).
+    bool          viewDirty  = true;
+    bool          sceneDirty = true;
+    std::uint32_t framesSinceDirty = 0;
     GiEnvironmentSnapshot environment;
     bool        environmentValid = false;
     std::uint64_t environmentVersion = 0;
@@ -317,6 +328,7 @@ struct GiPipelineState
     std::atomic<std::uint32_t> screenProbesThisFrame{0};
     std::atomic<std::uint32_t> gatherRaysThisFrame{0};
     std::atomic<std::uint64_t> totalRaysTraced{0};
+    std::atomic<std::uint32_t> framesSkippedStatic{0};
 };
 
 // ---- scene.cpp ------------------------------------------------------------

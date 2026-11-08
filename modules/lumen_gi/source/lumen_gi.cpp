@@ -219,6 +219,7 @@ private:
             return value.has_value() ? *value : fallback;
         };
         settings.enabled                  = boolean("enabled", true);
+        settings.skipUnchangedFrames      = boolean("skip_unchanged_frames", true);
         settings.quality                  = static_cast<std::uint32_t>(integer("quality", 3, 0, 4));
         settings.maxSurfaces              = static_cast<std::uint32_t>(integer("scene.max_surfaces", 256, 1, 65536));
         settings.maxTrianglesPerSurface   = static_cast<std::uint64_t>(
@@ -396,6 +397,7 @@ private:
         }
         state_.surfaces.push_back(std::move(surface));
         rebuildCardsForSurfaceLocked(0);
+        state_.sceneDirty = true;
         setError(error, GiError::None);
         return handle;
     }
@@ -452,6 +454,7 @@ private:
             return false;
         }
         rebuildCardsForSurfaceLocked(index);
+        state_.sceneDirty = true;
         setError(error, GiError::None);
         return true;
     }
@@ -480,6 +483,7 @@ private:
         surface.inverseTransform = glm::inverse(surface.transform);
         surface.normalMatrix     = glm::inverseTranspose(glm::mat3(surface.transform));
         updateSurfaceWorldBounds(surface);
+        state_.sceneDirty = true;
         return true;
     }
 
@@ -493,6 +497,7 @@ private:
         }
         state_.surfaces.erase(state_.surfaces.begin() + index);
         rebuildCardsForSurfaceLocked(0);
+        state_.sceneDirty = true;
         return true;
     }
 
@@ -510,6 +515,37 @@ private:
                 return false;
             }
         }
+        // Static-frame skip change detection: an identical repeated setView
+        // (same matrices, same eye) leaves the frame clean. Column-major
+        // float compare; -0.0 vs 0.0 counts as changed (harmless: one extra
+        // evaluate).
+        bool viewChanged = true;
+        if (state_.hasView)
+        {
+            viewChanged = false;
+            for (std::uint32_t column = 0; column < 4; ++column)
+            {
+                for (std::uint32_t row = 0; row < 4; ++row)
+                {
+                    if (state_.viewProjection[column][row]
+                        != viewProjectionColumnMajor16[column * 4 + row])
+                    {
+                        viewChanged = true;
+                    }
+                }
+            }
+            for (std::uint32_t axis = 0; axis < 3; ++axis)
+            {
+                if (state_.cameraPosition[axis] != cameraPosition3[axis])
+                {
+                    viewChanged = true;
+                }
+            }
+        }
+        if (viewChanged)
+        {
+            state_.viewDirty = true;
+        }
         state_.viewProjection  = glm::make_mat4(viewProjectionColumnMajor16);
         state_.cameraPosition  = glm::make_vec3(cameraPosition3);
         state_.hasView         = true;
@@ -518,9 +554,15 @@ private:
 
     // ---- environment snapshot ---------------------------------------------------
 
-    void snapshotEnvironmentLocked()
+    // Snapshots the pbr environment and direct lights into the frame state.
+    // Returns true when the snapshot differs from the previous one (version
+    // compare against the stored environmentVersion/directLightsVersion),
+    // which is the environment-change signal for the static-frame skip.
+    bool snapshotEnvironmentLocked()
     {
         GiEnvironmentSnapshot snapshot;
+        std::uint64_t         pbrVersion    = 0;
+        std::uint64_t         lightsVersion = 0;
         const glm::vec3       defaultSunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
         snapshot.sunDirection = defaultSunDirection;
         snapshot.sunColor     = glm::vec3(1.0f, 0.96f, 0.88f);
@@ -537,6 +579,7 @@ private:
             std::uint64_t       version = 0;
             if (pbrCapability_->copyEnvironment(pbrCapability_->self, &environment, &version))
             {
+                pbrVersion = version;
                 snapshot.hasSun           = true;
                 snapshot.sunEnabled       = environment.sun.enabled;
                 snapshot.sunDirection     = glm::normalize(glm::vec3(
@@ -555,20 +598,24 @@ private:
         }
         if (directLightingCapability_ != nullptr && directLightingCapability_->copyLights != nullptr)
         {
-            std::uint64_t version = 0;
-            directLightingCapability_->copyLights(directLightingCapability_->self, nullptr, 0, &version);
+            directLightingCapability_->copyLights(directLightingCapability_->self, nullptr, 0, &lightsVersion);
             std::vector<direct_lighting::DirectLight> lights(
-                std::min<std::uint64_t>(version == 0 ? 0 : 64, direct_lighting::maxDirectLights));
+                std::min<std::uint64_t>(lightsVersion == 0 ? 0 : 64, direct_lighting::maxDirectLights));
             // maxDirectLights caps the snapshot; the registry may hold more.
             lights.assign(direct_lighting::maxDirectLights, direct_lighting::DirectLight{});
             const std::uint32_t count = directLightingCapability_->copyLights(directLightingCapability_->self,
-                lights.data(), static_cast<std::uint32_t>(lights.size()), &version);
+                lights.data(), static_cast<std::uint32_t>(lights.size()), &lightsVersion);
             lights.resize(count);
             snapshot.hasDirectLights = count > 0;
             snapshot.directLights    = std::move(lights);
         }
+        const bool environmentChanged = !state_.environmentValid
+            || pbrVersion != state_.environmentVersion || lightsVersion != state_.directLightsVersion;
+        state_.environmentVersion    = pbrVersion;
+        state_.directLightsVersion   = lightsVersion;
         state_.environment = std::move(snapshot);
         state_.environmentValid = true;
+        return environmentChanged;
     }
 
     // ---- evaluate: the Lumen-style frame -----------------------------------------
@@ -588,7 +635,7 @@ private:
             return true;
         }
         const auto startTime = std::chrono::steady_clock::now();
-        snapshotEnvironmentLocked();
+        const bool environmentChanged = snapshotEnvironmentLocked();
         ++state_.frameIndex;
         state_.captureTexelsThisFrame.store(0, std::memory_order_relaxed);
         state_.directTexelsThisFrame.store(0, std::memory_order_relaxed);
@@ -596,6 +643,34 @@ private:
         state_.probeTracesThisFrame.store(0, std::memory_order_relaxed);
         state_.screenProbesThisFrame.store(0, std::memory_order_relaxed);
         state_.gatherRaysThisFrame.store(0, std::memory_order_relaxed);
+
+        // Static-frame skip: when the camera, the scene, and the environment
+        // are all unchanged and the caches have had a full probe-update cycle
+        // to converge, re-running the pipeline would only re-blend the same
+        // radiance with fresh random rays. Return early instead - and do not
+        // bump the probe version, so a renderer polling copyProbes also skips
+        // its per-frame snapshot upload.
+        const bool viewChanged  = state_.viewDirty;
+        const bool sceneChanged = state_.sceneDirty;
+        state_.viewDirty  = false;
+        state_.sceneDirty = false;
+        if (viewChanged || sceneChanged || environmentChanged)
+        {
+            state_.framesSinceDirty = 0;
+        }
+        const std::uint32_t probeBudget = std::max(1u, state_.settings.probeUpdatesPerFrame);
+        const std::size_t   largestLevel = std::max(state_.level0.probes.size(), state_.level1.probes.size());
+        const std::uint32_t staticSkipAfterFrames = static_cast<std::uint32_t>(
+            (largestLevel + probeBudget - 1) / probeBudget) + 2u;
+        if (settings_.skipUnchangedFrames && state_.hasPreviousView && !viewChanged && !sceneChanged
+            && !environmentChanged && state_.framesSinceDirty >= staticSkipAfterFrames)
+        {
+            state_.framesSkippedStatic.fetch_add(1, std::memory_order_relaxed);
+            lastEvaluateMilliseconds_ = 0.0;
+            setError(error, GiError::None);
+            return true;
+        }
+        ++state_.framesSinceDirty;
 
         // Update camera-distance priorities for capture amortization.
         for (GiSurface &surface : state_.surfaces)
@@ -720,6 +795,14 @@ private:
             setError(error, GiError::None);
             return false;
         }
+
+        // Lifetime ray counter (GiStatistics::totalRaysTraced): this frame's
+        // probe traces plus screen-space gather rays. The per-frame counters
+        // reset at the start of the next evaluate.
+        state_.totalRaysTraced.fetch_add(
+            static_cast<std::uint64_t>(state_.probeTracesThisFrame.load(std::memory_order_relaxed))
+                + static_cast<std::uint64_t>(state_.gatherRaysThisFrame.load(std::memory_order_relaxed)),
+            std::memory_order_relaxed);
 
         // Roll the temporal state: previous indirect becomes current, the
         // screen gather buffers become the reprojection source.
@@ -955,6 +1038,7 @@ private:
         outStatistics->screenProbesThisFrame    = state_.screenProbesThisFrame.load(std::memory_order_relaxed);
         outStatistics->gatherRaysThisFrame      = state_.gatherRaysThisFrame.load(std::memory_order_relaxed);
         outStatistics->totalRaysTraced          = state_.totalRaysTraced.load(std::memory_order_relaxed);
+        outStatistics->framesSkippedStatic      = state_.framesSkippedStatic.load(std::memory_order_relaxed);
         outStatistics->lastEvaluateMilliseconds = lastEvaluateMilliseconds_;
         return true;
     }

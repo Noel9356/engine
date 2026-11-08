@@ -4,6 +4,12 @@
 
 [lumen_gi]
 enabled = true
+# Static-frame skip: when the camera, the scene, and the environment are all
+# unchanged and the caches have converged (a full probe-update cycle plus a
+# small margin), evaluate() returns early instead of re-blending the same
+# radiance, and the exported probe version stops changing (renderers polling
+# it skip their per-frame upload too). Set false to always run the pipeline.
+skip_unchanged_frames = true
 # Quality preset (Auto 0, Low 1, Medium 2, High 3, Ultra 4) scales the
 # amortization budgets below; explicit budget keys still cap the result.
 quality = 3

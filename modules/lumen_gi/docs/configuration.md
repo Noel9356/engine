@@ -13,6 +13,7 @@ evaluation.
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | When `false`, `evaluate()` is a no-op and the probe grid stops updating. |
+| `skip_unchanged_frames` | bool | `true` | Static-frame skip: when the camera (`setView`), the scene (surface mutators), and the environment (pbr / direct-lighting versions) are all unchanged and a full probe-update cycle has elapsed since the last change, `evaluate()` returns early without touching the caches, and the exported probe version stops changing (renderers polling `copyProbes` skip their per-frame snapshot upload too). Any change re-enables evaluation immediately. |
 | `quality` | 0-4 | `3` (High) | Preset scaling of the four amortization budgets below (Low 0.25x, Medium 0.5x, High 1x, Ultra 2x), mirroring the render graph's quality resolution. Explicit budget keys are scaled by the same factor. |
 
 ## Scene

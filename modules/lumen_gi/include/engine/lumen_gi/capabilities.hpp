@@ -1,8 +1,8 @@
 // Public capability surface of the lumen_gi module.
 //
-// Declares the POD types and function-pointer table consumers receive through
-// ParticipantContext::acquireCapability for the "lumen_gi" capability (ABI 1):
-// a registry of GI scene surfaces, a camera-driven frame evaluation that runs
+// Declares the POD types and function-pointer tables consumers receive
+// through ParticipantContext::acquireCapability for the "lumen_gi" capability
+// (ABI 2): a registry of GI scene surfaces, a camera-driven frame evaluation that runs
 // a Lumen-style dynamic global illumination pipeline (card-based surface
 // cache, amortized direct/indirect lighting, world-space radiance probes,
 // screen-space final gather), a probe-grid snapshot copy API for renderers,
@@ -20,8 +20,11 @@ namespace engine
 namespace lumen_gi
 {
 
-// ABI version of this capability struct; consumers must match it.
-inline constexpr std::uint32_t lumenGiCapabilityAbi = 1u;
+// ABI version of this capability struct; consumers must match it. History:
+// 1 -> 2 added GiStatistics::framesSkippedStatic (the static-frame skip
+// reports how many evaluate() calls returned early because the camera, the
+// scene, and the environment were all unchanged and the caches converged).
+inline constexpr std::uint32_t lumenGiCapabilityAbi = 2u;
 using GiSurfaceHandle                               = std::uint32_t;
 inline constexpr GiSurfaceHandle invalidGiSurface   = 0;
 
@@ -103,7 +106,10 @@ struct GiProbeHeader
 };
 
 // Frame counters and cumulative totals. The per-frame fields are reset by
-// evaluate(); totalRaysTraced and frameIndex accumulate.
+// evaluate(); totalRaysTraced and frameIndex accumulate, and
+// framesSkippedStatic counts the evaluate() calls that returned early under
+// the static-frame skip (camera, scene, and environment unchanged, caches
+// converged).
 struct GiStatistics
 {
     std::uint64_t frameIndex               = 0;
@@ -118,6 +124,7 @@ struct GiStatistics
     std::uint32_t screenProbesThisFrame    = 0;
     std::uint32_t gatherRaysThisFrame      = 0;
     std::uint64_t totalRaysTraced          = 0;
+    std::uint32_t framesSkippedStatic      = 0;
     double        lastEvaluateMilliseconds = 0.0;
 };
 

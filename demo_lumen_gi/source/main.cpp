@@ -14,6 +14,11 @@
 //                    and sun disc (excluded from GI tracing; probes fall
 //                    back to the hemispheric skylight on miss).
 //
+// The frame loop pumps window events every frame, so the OS window stays
+// responsive even while a GI evaluate takes tens of milliseconds on the CPU.
+// Without --frames the demo runs interactively until the window is closed or
+// Escape is pressed; headless runs (and --frames N) stop after a fixed count.
+//
 // Useful flags: --frames N renders exactly N frames (deterministic, unlike
 // the wall-clock --quit-after), --screenshot/--screenshot-frame export the
 // rendered frame, --export-debug additionally writes the lumen_gi module's
@@ -21,6 +26,7 @@
 // path trace) next to the screenshot for A/B validation.
 
 #include <engine/application/application.hpp>
+#include <engine/camera/capabilities.hpp>
 #include <engine/kernel/executable_directory.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
@@ -42,6 +48,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -62,11 +69,14 @@ namespace window = engine::window;
 struct GiDemoOptions
 {
     std::string   viewName         = "interior"; // --view interior|outdoor
-    std::uint64_t frames           = 0;          // --frames: exact frame count (0 = default 30)
+    std::uint64_t frames           = 0;          // --frames: exact frame count (0 = run until closed;
+                                                  // headless backends default to 30)
     std::string   screenshotPath;                // --screenshot: PPM export at screenshotFrame
-    std::uint64_t screenshotFrame  = 30;         // --screenshot-frame
+    std::uint64_t screenshotFrame  = 29;         // --screenshot-frame (default = last of a
+                                                  // default 30-frame run)
     std::string   exportDebugPrefix;             // --export-debug: lumen_gi debug views at screenshotFrame
     std::uint32_t statsEveryFrames = 30;         // --stats-every: print lumen_gi statistics cadence
+    bool          orbit            = false;      // --orbit: sweep the camera on a circular path
 };
 
 const char *giOptionsUsage() noexcept
@@ -74,12 +84,19 @@ const char *giOptionsUsage() noexcept
     return "GI demo options:\n"
            "  --view interior|outdoor  Scene to render (default interior).\n"
            "  --frames <n>             Render exactly n frames, then exit (deterministic).\n"
+           "                           Without it a windowed run keeps going until the\n"
+           "                           window is closed or Escape is pressed; headless\n"
+           "                           runs default to 30 frames.\n"
            "  --screenshot <file.ppm>  Export the rendered frame (hook output) as PPM.\n"
-           "  --screenshot-frame <n>   Frame index for --screenshot (default 30).\n"
+           "  --screenshot-frame <n>   Frame index for --screenshot (default 29, the\n"
+           "                           last frame of a default 30-frame run).\n"
            "  --export-debug <prefix>  Also write lumen_gi debug views <prefix>_<view>.ppm\n"
            "                           (final, gionly, lumenscene, surfacecache, probes,\n"
            "                           reference) at the screenshot frame.\n"
-           "  --stats-every <n>        Print lumen_gi statistics every n frames (default 30).\n";
+           "  --stats-every <n>        Print lumen_gi statistics every n frames (default 30).\n"
+           "  --orbit                  Sweep the camera on a circular path around the view\n"
+           "                           target (hands-free dynamic-GI testing; deterministic\n"
+           "                           under --frames).\n";
 }
 
 bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &options, std::string &outError)
@@ -118,6 +135,10 @@ bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &op
         {
             options.statsEveryFrames
                 = static_cast<std::uint32_t>(std::strtoull(arguments[++index].c_str(), nullptr, 10));
+        }
+        else if (argument == "--orbit")
+        {
+            options.orbit = true;
         }
         else
         {
@@ -382,10 +403,11 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    // Modules this harness needs: window + renderer draw the scene, pbr
-    // supplies the sun/ambient environment, lumen_gi runs the GI pipeline.
+    // Modules this harness needs: window + renderer draw the scene, camera
+    // drives the view, pbr supplies the sun/ambient environment, lumen_gi
+    // runs the GI pipeline.
     engine::ApplicationHostOptions hostOptions
-        = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "pbr", "lumen_gi"});
+        = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "camera", "pbr", "lumen_gi"});
     engine::ApplicationHost host;
     std::string             startupReport;
     if (commandLine.validateOnly)
@@ -409,6 +431,7 @@ int main(int argc, char **argv)
 
     window::WindowCapability   &windowCapability = context.acquireCapability<window::WindowCapability>();
     renderer::RenderCapability &renderCapability = context.acquireCapability<renderer::RenderCapability>();
+    camera::CameraCapability   &cameraCapability = context.acquireCapability<camera::CameraCapability>();
     auto *giCapability = context.tryAcquireCapability<lumen_gi::LumenGiCapability>();
     if (giCapability == nullptr || giCapability->abi != lumen_gi::lumenGiCapabilityAbi)
     {
@@ -427,23 +450,46 @@ int main(int argc, char **argv)
                   << " (intensity " << environment.sun.intensity << ")\n";
     }
 
-    // Fixed deterministic camera per view.
+    // Camera pose per view; the engine camera module owns the matrices and
+    // the interactive WASD/mouse-look controls (Fly mode).
     const glm::vec3 viewEye
         = options.viewName == "outdoor" ? glm::vec3(7.0f, 3.4f, 9.0f) : glm::vec3(0.0f, 1.5f, 1.7f);
     const glm::vec3 viewTarget
         = options.viewName == "outdoor" ? glm::vec3(-0.5f, 0.9f, -2.5f) : glm::vec3(0.0f, 1.1f, -1.2f);
-    const float     fovRadians = 60.0f * 3.141592654f / 180.0f;
-    const float     aspect     = 640.0f / 360.0f;
-    const glm::mat4 view       = glm::lookAt(viewEye, viewTarget, glm::vec3(0.0f, 1.0f, 0.0f));
-    const glm::mat4 projection = glm::perspective(fovRadians, aspect, 0.1f, 300.0f);
-    const glm::mat4 viewProj   = projection * view;
 
-    renderer::CameraMatrices cameraMatrices{};
-    std::memcpy(cameraMatrices.view, glm::value_ptr(view), sizeof(cameraMatrices.view));
-    std::memcpy(cameraMatrices.projection, glm::value_ptr(projection), sizeof(cameraMatrices.projection));
-    cameraMatrices.position[0] = viewEye.x;
-    cameraMatrices.position[1] = viewEye.y;
-    cameraMatrices.position[2] = viewEye.z;
+    camera::CameraParameters cameraParameters{};
+    cameraParameters.position[0]  = viewEye.x;
+    cameraParameters.position[1]  = viewEye.y;
+    cameraParameters.position[2]  = viewEye.z;
+    cameraParameters.hasPosition   = true;
+    cameraParameters.target[0]     = viewTarget.x;
+    cameraParameters.target[1]     = viewTarget.y;
+    cameraParameters.target[2]     = viewTarget.z;
+    cameraParameters.hasTarget     = true;
+    cameraParameters.fovYDegrees   = 60.0f;
+    cameraParameters.nearZ         = 0.1f;
+    cameraParameters.farZ          = 300.0f;
+    camera::CameraError cameraError = camera::CameraError::None;
+    const camera::CameraHandle cameraHandle
+        = cameraCapability.createCamera(cameraCapability.self, &cameraParameters, &cameraError);
+    if (cameraHandle == camera::invalidCamera)
+    {
+        std::cerr << "demo_lumen_gi: the camera module could not create a camera\n";
+        host.stop();
+        return 1;
+    }
+    cameraCapability.setControlMode(cameraCapability.self, cameraHandle, camera::CameraControlMode::Fly);
+
+    // --orbit sweeps the camera on a circular path. The interior circle is
+    // centered in the room so the sweep stays inside the walls; the outdoor
+    // view circles the default target in the open field. Both start from the
+    // view's default pose.
+    const glm::vec3 orbitCenter
+        = options.viewName == "outdoor" ? viewTarget : glm::vec3(0.0f, 1.1f, 0.0f);
+    const float orbitRadius       = std::max(0.5f,
+        glm::length(glm::vec2(viewEye.x, viewEye.z) - glm::vec2(orbitCenter.x, orbitCenter.z)));
+    const float orbitHeightOffset = viewEye.y - orbitCenter.y;
+    double      orbitAngle        = std::atan2(viewEye.z - orbitCenter.z, viewEye.x - orbitCenter.x);
 
     window::WindowDescription  windowDescription{};
     window::WindowError        windowError = window::WindowError::None;
@@ -466,12 +512,42 @@ int main(int argc, char **argv)
         host.stop();
         return 1;
     }
-    std::cout << "demo_lumen_gi: window backend '" << windowCapability.activeBackendName(windowCapability.self)
-              << "', renderer backend '" << renderCapability.activeBackendName(renderCapability.self, rendererHandle)
-              << "'\n";
+    const std::string windowBackendName = windowCapability.activeBackendName(windowCapability.self);
+    std::cout << "demo_lumen_gi: window backend '" << windowBackendName << "', renderer backend '"
+              << renderCapability.activeBackendName(renderCapability.self, rendererHandle) << "'\n";
 
-    renderCapability.setViewport(renderCapability.self, rendererHandle, 640, 360);
-    renderCapability.setCamera(renderCapability.self, rendererHandle, &cameraMatrices);
+    // First event slice now that the window is mapped: scene setup below runs
+    // before the frame loop takes over the pumping.
+    windowCapability.pollEvents(windowCapability.self);
+
+    // Fly-camera mouse look wants a captured cursor; Left Alt releases it and
+    // Escape quits (windowed backends only - the headless backend has no
+    // cursor or keyboard).
+    const bool windowedBackend = windowBackendName != std::string("headless");
+    bool       cursorCaptured  = false;
+    if (windowedBackend)
+    {
+        cursorCaptured = true;
+        windowCapability.setCursorMode(windowCapability.self, windowHandle, window::CursorMode::Captured);
+        std::cout << "demo_lumen_gi: controls - mouse looks, WASD moves, Space/Ctrl up/down, Shift sprints,\n"
+                     "      arrows look, Left Alt toggles the cursor, Escape quits\n";
+    }
+    else
+    {
+        std::cout << "demo_lumen_gi: headless window - no keyboard/cursor input; use --orbit for a moving camera\n";
+    }
+
+    // Track the actual framebuffer (resizes keep this current through the
+    // event drain below); the camera aspect and the GI view follow it.
+    std::uint32_t framebufferWidth  = 0;
+    std::uint32_t framebufferHeight = 0;
+    windowCapability.getFramebufferSize(windowCapability.self, windowHandle, &framebufferWidth, &framebufferHeight);
+    if (framebufferWidth == 0 || framebufferHeight == 0)
+    {
+        framebufferWidth  = 640;
+        framebufferHeight = 360;
+    }
+    renderCapability.setViewport(renderCapability.self, rendererHandle, framebufferWidth, framebufferHeight);
 
     // Build the scene and register every mesh into BOTH consumers: the
     // renderer draws it, lumen_gi bounces light off it. Vertex attributes are
@@ -544,23 +620,175 @@ int main(int argc, char **argv)
         }
     }
 
-    // The GI camera tracks the render camera; evaluate() runs one full
-    // Lumen-style GI frame per rendered frame. Column-major view-projection
-    // straight out of glm (OpenGL convention, same as CameraMatrices).
-    const float viewProjection[16] = {
-        viewProj[0][0], viewProj[0][1], viewProj[0][2], viewProj[0][3],
-        viewProj[1][0], viewProj[1][1], viewProj[1][2], viewProj[1][3],
-        viewProj[2][0], viewProj[2][1], viewProj[2][2], viewProj[2][3],
-        viewProj[3][0], viewProj[3][1], viewProj[3][2], viewProj[3][3],
-    };
-    const float cameraPosition[3] = {viewEye.x, viewEye.y, viewEye.z};
-
-    const std::uint64_t totalFrames     = options.frames != 0 ? options.frames : 30;
+    // Run mode: --frames N pins an exact frame count (deterministic CI runs
+    // and screenshot exports). Without it, a windowed backend runs
+    // interactively until the OS window is closed or Escape is pressed;
+    // headless backends (no close events) stop after 30 frames.
+    const bool          runUntilClosed    = options.frames == 0 && windowedBackend;
+    const std::uint64_t totalFrames       = options.frames != 0 ? options.frames : 30;
     const double        frameDeltaSeconds = 1.0 / 30.0;
 
-    bool screenshotTaken = false;
-    for (std::uint64_t frameIndex = 0; frameIndex < totalFrames; ++frameIndex)
+    if (runUntilClosed)
     {
+        std::cout << "demo_lumen_gi: running interactively - close the window or press Escape to stop\n";
+    }
+    if (!options.screenshotPath.empty() && !runUntilClosed && options.screenshotFrame >= totalFrames)
+    {
+        std::cout << "demo_lumen_gi: warning - --screenshot-frame " << options.screenshotFrame
+                  << " is beyond this run of " << totalFrames << " frames; no screenshot will be taken\n";
+    }
+
+    bool          screenshotTaken = false;
+    std::uint64_t framesRendered  = 0;
+    std::array<window::WindowEvent, 64> eventBuffer;
+    bool   haveLastCursor = false;
+    double lastCursorX    = 0.0;
+    double lastCursorY    = 0.0;
+    auto   lastWallClock  = std::chrono::steady_clock::now();
+    for (std::uint64_t frameIndex = 0; runUntilClosed || frameIndex < totalFrames; ++frameIndex)
+    {
+        // GLFW requires its event queue to be pumped from the main thread
+        // every frame; skipping this is what makes a busy window show up as
+        // "not responding" to the window manager.
+        windowCapability.pollEvents(windowCapability.self);
+
+        // Drain and dispatch the queued events: close requests, resizes
+        // (viewport + camera aspect + GI view all follow the framebuffer),
+        // and the Left Alt cursor toggle.
+        std::uint32_t eventCount = 0;
+        do
+        {
+            eventCount = windowCapability.popEvents(windowCapability.self,
+                windowHandle, eventBuffer.data(), static_cast<std::uint32_t>(eventBuffer.size()));
+            for (std::uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex)
+            {
+                const window::WindowEvent &event = eventBuffer[eventIndex];
+                if (event.kind == window::WindowEventKind::CloseRequested)
+                {
+                    windowCapability.requestClose(windowCapability.self, windowHandle);
+                }
+                else if (event.kind == window::WindowEventKind::FramebufferResized)
+                {
+                    if (event.framebufferWidth != 0 && event.framebufferHeight != 0)
+                    {
+                        framebufferWidth  = event.framebufferWidth;
+                        framebufferHeight = event.framebufferHeight;
+                        renderCapability.setViewport(
+                            renderCapability.self, rendererHandle, framebufferWidth, framebufferHeight);
+                    }
+                }
+                else if (event.kind == window::WindowEventKind::KeyPressed
+                    && event.key == window::Key::LeftAlt && windowedBackend)
+                {
+                    cursorCaptured = !cursorCaptured;
+                    windowCapability.setCursorMode(windowCapability.self, windowHandle,
+                        cursorCaptured ? window::CursorMode::Captured : window::CursorMode::Normal);
+                    haveLastCursor = false;
+                }
+            }
+        }
+        while (eventCount == static_cast<std::uint32_t>(eventBuffer.size()));
+
+        if (windowCapability.shouldClose(windowCapability.self, windowHandle))
+        {
+            std::cout << "demo_lumen_gi: window close requested\n";
+            break;
+        }
+        if (windowCapability.isKeyDown != nullptr
+            && windowCapability.isKeyDown(windowCapability.self, windowHandle, window::Key::Escape))
+        {
+            std::cout << "demo_lumen_gi: escape pressed\n";
+            break;
+        }
+
+        // Interactive runs advance the camera by wall-clock time; --frames
+        // runs use the fixed 30 Hz step so the camera path is deterministic.
+        const auto   now               = std::chrono::steady_clock::now();
+        const double wallDeltaSeconds
+            = std::min(0.25, std::chrono::duration<double>(now - lastWallClock).count());
+        lastWallClock                = now;
+        const double cameraDeltaSeconds = options.frames != 0 ? frameDeltaSeconds : wallDeltaSeconds;
+
+        // Camera input: WASD + Space/Ctrl + arrows + Shift sprint, mouse deltas
+        // while the cursor is captured.
+        camera::CameraInputState cameraInput{};
+        const auto keyDown = [&](window::Key key)
+        { return windowCapability.isKeyDown(windowCapability.self, windowHandle, key); };
+        cameraInput.moveForward    = static_cast<float>(keyDown(window::Key::W))
+                                   - static_cast<float>(keyDown(window::Key::S));
+        cameraInput.moveRight      = static_cast<float>(keyDown(window::Key::D))
+                                   - static_cast<float>(keyDown(window::Key::A));
+        cameraInput.moveUp         = static_cast<float>(keyDown(window::Key::Space))
+                                   - static_cast<float>(keyDown(window::Key::LeftControl));
+        cameraInput.lookHorizontal = static_cast<float>(keyDown(window::Key::Right))
+                                   - static_cast<float>(keyDown(window::Key::Left));
+        cameraInput.lookVertical   = static_cast<float>(keyDown(window::Key::Up))
+                                   - static_cast<float>(keyDown(window::Key::Down));
+        cameraInput.sprint         = keyDown(window::Key::LeftShift);
+        if (cursorCaptured)
+        {
+            double cursorX = 0.0;
+            double cursorY = 0.0;
+            if (windowCapability.cursorPosition(windowCapability.self, windowHandle, &cursorX, &cursorY)
+                && std::isfinite(cursorX) && std::isfinite(cursorY))
+            {
+                if (haveLastCursor)
+                {
+                    // Clamp the delta to survive platform cursor jumps.
+                    cameraInput.mouseDeltaX = static_cast<float>(std::clamp(cursorX - lastCursorX, -200.0, 200.0));
+                    cameraInput.mouseDeltaY = static_cast<float>(std::clamp(cursorY - lastCursorY, -200.0, 200.0));
+                }
+                lastCursorX    = cursorX;
+                lastCursorY    = cursorY;
+                haveLastCursor = true;
+            }
+            else
+            {
+                haveLastCursor = false;
+            }
+        }
+        else
+        {
+            haveLastCursor = false;
+        }
+
+        // --orbit overrides the pose each frame: a circular sweep around the
+        // orbit center (deterministic per-frame step under --frames).
+        if (options.orbit)
+        {
+            orbitAngle += options.frames != 0 ? 0.05 : 0.5 * cameraDeltaSeconds;
+            const glm::vec3 orbitEye = orbitCenter
+                + glm::vec3(orbitRadius * static_cast<float>(std::cos(orbitAngle)), orbitHeightOffset,
+                    orbitRadius * static_cast<float>(std::sin(orbitAngle)));
+            const float eye[3]    = {orbitEye.x, orbitEye.y, orbitEye.z};
+            const float target[3] = {orbitCenter.x, orbitCenter.y, orbitCenter.z};
+            const float up[3]     = {0.0f, 1.0f, 0.0f};
+            cameraCapability.setLookAt(cameraCapability.self, cameraHandle, eye, target, up);
+        }
+
+        cameraCapability.update(cameraCapability.self, cameraHandle, &cameraInput, cameraDeltaSeconds);
+        camera::ViewState viewState{};
+        cameraCapability.viewState(
+            cameraCapability.self, cameraHandle, framebufferWidth, framebufferHeight, &viewState);
+
+        renderer::CameraMatrices cameraMatrices{};
+        std::memcpy(cameraMatrices.view, viewState.view, sizeof(cameraMatrices.view));
+        std::memcpy(cameraMatrices.projection, viewState.projection, sizeof(cameraMatrices.projection));
+        std::memcpy(cameraMatrices.position, viewState.position, sizeof(cameraMatrices.position));
+        renderCapability.setCamera(renderCapability.self, rendererHandle, &cameraMatrices);
+
+        // The GI camera tracks the render camera; evaluate() runs one full
+        // Lumen-style GI frame per rendered frame. Column-major view-projection
+        // straight out of glm (OpenGL convention, same as CameraMatrices).
+        const glm::mat4 viewProjectionMatrix
+            = glm::make_mat4(viewState.projection) * glm::make_mat4(viewState.view);
+        const float viewProjection[16] = {
+            viewProjectionMatrix[0][0], viewProjectionMatrix[0][1], viewProjectionMatrix[0][2], viewProjectionMatrix[0][3],
+            viewProjectionMatrix[1][0], viewProjectionMatrix[1][1], viewProjectionMatrix[1][2], viewProjectionMatrix[1][3],
+            viewProjectionMatrix[2][0], viewProjectionMatrix[2][1], viewProjectionMatrix[2][2], viewProjectionMatrix[2][3],
+            viewProjectionMatrix[3][0], viewProjectionMatrix[3][1], viewProjectionMatrix[3][2], viewProjectionMatrix[3][3],
+        };
+        const float cameraPosition[3] = {viewState.position[0], viewState.position[1], viewState.position[2]};
         if (giCapability->setView != nullptr)
         {
             giCapability->setView(giCapability->self, viewProjection, cameraPosition);
@@ -578,6 +806,7 @@ int main(int argc, char **argv)
         renderCapability.drawMeshes(
             renderCapability.self, rendererHandle, drawCommands.data(), static_cast<std::uint32_t>(drawCommands.size()));
         renderCapability.endFrame(renderCapability.self, rendererHandle);
+        ++framesRendered;
 
         if (options.statsEveryFrames != 0 && frameIndex % options.statsEveryFrames == 0
             && giCapability->statistics != nullptr)
@@ -662,7 +891,8 @@ int main(int argc, char **argv)
         lumen_gi::GiStatistics finalStatistics{};
         if (giCapability->statistics(giCapability->self, &finalStatistics))
         {
-            std::cout << "demo_lumen_gi: lumen_gi totals - frames " << finalStatistics.frameIndex << ", surfaces "
+            std::cout << "demo_lumen_gi: lumen_gi totals - frames " << finalStatistics.frameIndex << " ("
+                      << finalStatistics.framesSkippedStatic << " static-skipped), surfaces "
                       << finalStatistics.surfaces << ", cards " << finalStatistics.cards << ", card texels "
                       << finalStatistics.cardTexels << ", total rays " << finalStatistics.totalRaysTraced << "\n";
         }
@@ -681,7 +911,8 @@ int main(int argc, char **argv)
     }
     renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
     windowCapability.destroyWindow(windowCapability.self, windowHandle);
+    cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
     host.stop();
-    std::cout << "demo_lumen_gi: stopped cleanly after " << totalFrames << " frames\n";
+    std::cout << "demo_lumen_gi: stopped cleanly after " << framesRendered << " frames\n";
     return 0;
 }

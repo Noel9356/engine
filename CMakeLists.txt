@@ -301,7 +301,7 @@ list(
 
 option(
     ENGINE_BUILD_DEMO
-    "Build the demo app"
+    "Build the demo apps (character customisation + GI test harness)"
     ON
 )
 set(ENGINE_MODULES
@@ -874,8 +874,10 @@ endif()
 
 include(engine_add_application)
 
+# Character-customisation demo: the engine's showcase application (orbit
+# character viewport, benchmark views, mod/script integration).
 if(ENGINE_BUILD_DEMO)
-    add_subdirectory(demo)
+    add_subdirectory(demo_character_customisation)
 endif()
 
 # Second demo: standalone global-illumination test harness for the lumen_gi
