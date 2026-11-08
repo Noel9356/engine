@@ -190,6 +190,33 @@ inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
     return result;
 }
 
+// Fast sRGB encode for the CPU rasterizer. glm::pow(c, 1/2.2) costs three
+// powf calls per pixel - by far the most expensive op in the shading loop -
+// while the output lands in an 8-bit target anyway. A 256-entry nearest
+// lookup keeps the error below half an output quantization step.
+inline float fastSrgbEncode(float channel)
+{
+    struct SrgbTable
+    {
+        float values[256];
+        SrgbTable()
+        {
+            for (std::uint32_t index = 0; index < 256; ++index)
+            {
+                values[index] = std::pow(static_cast<float>(index) / 255.0f, 1.0f / 2.2f);
+            }
+        }
+    };
+    static const SrgbTable table;
+    const float            clamped = channel < 0.0f ? 0.0f : (channel > 1.0f ? 1.0f : channel);
+    return table.values[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
+}
+
+inline glm::vec3 fastSrgbEncode(const glm::vec3 &color)
+{
+    return glm::vec3(fastSrgbEncode(color.r), fastSrgbEncode(color.g), fastSrgbEncode(color.b));
+}
+
 // Tone mappers mirroring mesh.frag's toneMap(): none / Reinhard / ACES filmic.
 inline glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
 {

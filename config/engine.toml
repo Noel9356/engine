@@ -16,6 +16,20 @@ sun_direction = [-0.55, 0.34, -0.76]
 
 [renderer]
 clear_color = [0.18, 0.3, 0.5, 1.0]
+# The character studio inspects its hero meshes up close (orbit radius
+# ~2.4 m against ~0.3 m part radii). The headless LOD path decimates by
+# striding the index list, which shreds an organic mesh into scattered
+# fragments at any level above 0; these meshes are always on screen, so
+# LOD switching has nothing to save here.
+lod_enabled = false
 
 [trust]
-trustMods = ["main_menu"]
+trustMods = ["main_menu", "character_lab"]
+
+[window]
+# The character studio demo defaults to an 800x450 window: the CPU
+# (headless) rasterizer's cost is strictly per shaded pixel, and this keeps
+# the customisation screen above 30 fps on a two-core machine. Raise the
+# size when running on the Vulkan backend.
+height = 450
+width  = 800

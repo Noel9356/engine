@@ -1,25 +1,29 @@
 // main.cpp - the engine demo application.
 //
-// Starts the engine with the modules the demo needs, acquires their
-// capabilities, assembles a benchmark 3D scene (textured room, sky dome, sun
-// disc, static draw batches, moving instances, dragon models), runs the frame
-// loop with camera input, and drives the main_menu Lua mod through the C++
-// bridge in demo/menu_bridge.
+// Starts the engine with the modules the demo needs and acquires their
+// capabilities. --view character (the default) shows the character
+// customisation screen built on the character module; --view benchmark|sun
+// assembles the benchmark 3D scene (textured room, sky dome, sun disc,
+// static draw batches, moving instances, dragon models). The frame loop runs
+// camera input for the active view and drives the main_menu Lua mod through
+// the C++ bridge in demo/menu_bridge on the benchmark views.
 
 #include <engine/application/application.hpp>
 #include <engine/application/frame_pacer.hpp>
 #include <engine/camera/capabilities.hpp>
+#include <engine/character/capabilities.hpp>
 #include <engine/file_asset_store/capabilities.hpp>
 #include <engine/kernel/executable_directory.hpp>
 #include <engine/models/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
+#include <engine/render_graph/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/renderer/draw_sort.hpp>
-#include <engine/render_graph/capabilities.hpp>
 #include <engine/script_runtime/capabilities.hpp>
 #include <engine/ui/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
 
+#include "demo/character_screen.hpp"
 #include "demo/diagnostics.hpp"
 #include "demo/frame_stats.hpp"
 #include "demo/geometry.hpp"
@@ -225,9 +229,9 @@ DemoCameraKeyBindings loadCameraKeyBindings(engine::ParticipantContext &context)
 namespace pbr    = engine::pbr;
 namespace camera = engine::camera;
 
-// Frame index at which --screenshot writes its PPM export (after the scene and
-// menu have warmed up but before the loop can quit early).
-constexpr std::uint64_t screenshotFrame = 90;
+// --screenshot writes its PPM export after the scene and menu have warmed up
+// but before the loop can quit early; --screenshot-frame moves the export to
+// another frame (the Options default in options.hpp mirrors this choice).
 
 // Ground plane: a thin box extending roomHalfExtent on X/Z.
 constexpr float roomHalfExtent = 36.0f;
@@ -310,10 +314,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    // Modules loaded by the kernel for this demo; pbr and render_graph are
-    // probed optionally below.
+    // Modules loaded by the kernel for this demo; pbr, character and
+    // render_graph are probed optionally below.
     engine::ApplicationHostOptions hostOptions = engine::makeApplicationHostOptions(
-        commandLine, {"window", "renderer", "render_graph", "camera", "models", "ui", "script_runtime"});
+        commandLine, {"window", "renderer", "render_graph", "camera", "models", "ui", "character", "script_runtime"});
     engine::ApplicationHost host;
     std::string             startupReport;
     if (commandLine.validateOnly)
@@ -352,11 +356,27 @@ int main(int argc, char **argv)
     const auto assetPath = [&assetRoot](const char *relativeName) { return (assetRoot / relativeName).string(); };
 
     window::WindowCapability         &windowCapability = appContext->acquireCapability<window::WindowCapability>();
-    renderer::RenderCapability         &renderCapability = appContext->acquireCapability<renderer::RenderCapability>();
+    renderer::RenderCapability       &renderCapability = appContext->acquireCapability<renderer::RenderCapability>();
     camera::CameraCapability         &cameraCapability = appContext->acquireCapability<camera::CameraCapability>();
     engine::models::ModelsCapability &modelsCapability
         = appContext->acquireCapability<engine::models::ModelsCapability>();
     ui::UiCapability &uiCapability = appContext->acquireCapability<ui::UiCapability>();
+    // The character module hosts the character customisation screen; it is
+    // optional at the engine level (a build without it falls back to the
+    // benchmark views) but required by --view character.
+    auto *characterCapability = appContext->tryAcquireCapability<engine::character::CharacterCapability>();
+    if (characterCapability != nullptr
+        && !capabilityAbiMatches("character", characterCapability->abi, engine::character::characterCapabilityAbi))
+    {
+        characterCapability = nullptr;
+    }
+    const bool characterView = demoOptions.viewName == "character";
+    if (characterView && characterCapability == nullptr)
+    {
+        std::cerr << "demo: --view character needs the character module, which is not loaded\n";
+        host.stop();
+        return 1;
+    }
     // pbr is optional: without it the demo falls back to its built-in sun and
     // skips the environment block below.
     const pbr::PbrCapability *pbrCapability = appContext->tryAcquireCapability<pbr::PbrCapability>();
@@ -400,8 +420,8 @@ int main(int argc, char **argv)
             && !capabilityAbiMatches("renderer.vulkan", vulkanCapability->abi, renderer::renderCapabilityAbi))
         || (fileAssetStoreCapability != nullptr
             && !capabilityAbiMatches("file_asset_store",
-                   fileAssetStoreCapability->abi,
-                   engine::file_asset_store::fileAssetStoreCapabilityAbi)))
+                fileAssetStoreCapability->abi,
+                engine::file_asset_store::fileAssetStoreCapabilityAbi)))
     {
         host.stop();
         return 1;
@@ -442,22 +462,24 @@ int main(int argc, char **argv)
     // it: this thread only waits and pumps; the render thread does the rest.
     // (Vulkan has no main-thread restriction, and no GLFW call happens inside
     // renderer creation - the surface was already created above.)
-    std::atomic<bool>                 rendererCreationDone{false};
-    bool                              rendererCreationThrew = false;
-    renderer::RendererHandle          createdRenderer       = renderer::invalidRenderer;
+    std::atomic<bool>        rendererCreationDone{false};
+    bool                     rendererCreationThrew = false;
+    renderer::RendererHandle createdRenderer       = renderer::invalidRenderer;
     {
-        std::thread creator([&]()
-        {
-            try
+        std::thread creator(
+            [&]()
             {
-                createdRenderer = renderCapability.createRenderer(renderCapability.self, windowHandle, &renderError);
-            }
-            catch (...)
-            {
-                rendererCreationThrew = true;
-            }
-            rendererCreationDone.store(true, std::memory_order_release);
-        });
+                try
+                {
+                    createdRenderer
+                        = renderCapability.createRenderer(renderCapability.self, windowHandle, &renderError);
+                }
+                catch (...)
+                {
+                    rendererCreationThrew = true;
+                }
+                rendererCreationDone.store(true, std::memory_order_release);
+            });
         if (windowCapability.activeBackendName(windowCapability.self) != std::string("headless"))
         {
             std::cout << "demo: initializing the renderer (first launch compiles shaders; this can take a while on\n"
@@ -535,9 +557,18 @@ int main(int argc, char **argv)
         }
     }
 
-    std::cout << "demo: controls - mouse looks, WASD moves, Space up, Ctrl down, "
-                 "Shift sprints,\n"
-                 "      Esc toggles menu, Left Alt toggles cursor\n";
+    if (characterView)
+    {
+        std::cout << "demo: controls - left-drag orbits the character, Space/Ctrl zoom, "
+                     "arrow keys orbit\n"
+                     "      the Character Studio panel edits parts, parameters, and recipes\n";
+    }
+    else
+    {
+        std::cout << "demo: controls - mouse looks, WASD moves, Space up, Ctrl down, "
+                     "Shift sprints,\n"
+                     "      Esc toggles menu, Left Alt toggles cursor\n";
+    }
 
     std::uint32_t framebufferWidth  = 0;
     std::uint32_t framebufferHeight = 0;
@@ -552,27 +583,35 @@ int main(int argc, char **argv)
     // loop as usual.
     const auto pumpWindowEvents = [&]() { windowCapability.pollEvents(windowCapability.self); };
     // Load every floor texture up front; failures log and yield invalidTexture,
-    // which the renderer treats as "no texture".
-    std::cout << "demo: loading floor textures (albedo, normal, metal-roughness, occlusion)...\n";
-    auto loadTexture = [&](const char *path)
+    // which the renderer treats as "no texture". The character screen builds
+    // its own untextured stage, so this is benchmark-only.
+    renderer::TextureHandle floorAlbedo     = renderer::invalidTexture;
+    renderer::TextureHandle floorNormal     = renderer::invalidTexture;
+    renderer::TextureHandle floorMetalRough = renderer::invalidTexture;
+    renderer::TextureHandle floorOcclusion  = renderer::invalidTexture;
+    if (!characterView)
     {
-        const renderer::TextureHandle handle
-            = renderCapability.createTextureFromFile(renderCapability.self, rendererHandle, path, &renderError);
-        if (handle == renderer::invalidTexture)
+        std::cout << "demo: loading floor textures (albedo, normal, metal-roughness, occlusion)...\n";
+        auto loadTexture = [&](const char *path)
         {
-            std::cerr << "demo: texture '" << path << "' failed (" << renderErrorName(renderError) << ")\n";
-        }
-        return handle;
-    };
-    const renderer::TextureHandle floorAlbedo     = loadTexture(assetPath("textures/floor_tiles.png").c_str());
-    pumpWindowEvents();
-    const renderer::TextureHandle floorNormal     = loadTexture(assetPath("textures/floor_tiles_normal.png").c_str());
-    pumpWindowEvents();
-    const renderer::TextureHandle floorMetalRough = loadTexture(assetPath("textures/floor_tiles_mr.png").c_str());
-    pumpWindowEvents();
-    const renderer::TextureHandle floorOcclusion  = loadTexture(assetPath("textures/floor_tiles_ao.png").c_str());
-    pumpWindowEvents();
-    std::cout << "demo: floor textures loaded\n";
+            const renderer::TextureHandle handle
+                = renderCapability.createTextureFromFile(renderCapability.self, rendererHandle, path, &renderError);
+            if (handle == renderer::invalidTexture)
+            {
+                std::cerr << "demo: texture '" << path << "' failed (" << renderErrorName(renderError) << ")\n";
+            }
+            return handle;
+        };
+        floorAlbedo = loadTexture(assetPath("textures/floor_tiles.png").c_str());
+        pumpWindowEvents();
+        floorNormal = loadTexture(assetPath("textures/floor_tiles_normal.png").c_str());
+        pumpWindowEvents();
+        floorMetalRough = loadTexture(assetPath("textures/floor_tiles_mr.png").c_str());
+        pumpWindowEvents();
+        floorOcclusion = loadTexture(assetPath("textures/floor_tiles_ao.png").c_str());
+        pumpWindowEvents();
+        std::cout << "demo: floor textures loaded\n";
+    }
 
     glm::vec3 sunDiscColor(1.0f, 0.9f, 0.7f);
     glm::vec3 sunDirection(0.45f, 0.62f, 0.35f);
@@ -599,58 +638,60 @@ int main(int argc, char **argv)
         }
     };
 
-    // Inigo model: vertex colors on, materials off, welded vertices with
-    // generated smooth normals for consistent shading.
-    engine::models::ModelLoadOptions dragonLoadOptions{
-        .normalMode         = engine::models::ModelNormalMode::GenerateSmooth,
-        .importVertexColors = true,
-        .weldVertices       = true,
-        .importMaterials    = false};
-    engine::models::ModelLoadError    dragonLoadError = engine::models::ModelLoadError::None;
-    const std::string                 dragonPath      = assetPath("models/inigo_the_dragon/dragon_meshed.obj");
-    std::cout << "demo: importing the Inigo model (weld + smooth normals)...\n";
-    const engine::models::ModelHandle dragonModel     = modelsCapability.loadModelWithOptions(
-        modelsCapability.self, dragonPath.c_str(), &dragonLoadOptions, &dragonLoadError);
+    // Inigo model + benchmark environment: only the benchmark views load
+    // them; the character screen builds its own stage and body parts.
     std::vector<renderer::MeshHandle> dragonMeshes;
-    engine::models::ModelStatistics dragonStatistics;
-    // One GPU mesh per imported part; parts that fail to upload are skipped.
-    if (dragonModel == engine::models::invalidModel)
+    engine::models::ModelStatistics   dragonStatistics{};
+    renderer::MeshHandle              floorMesh   = renderer::invalidMesh;
+    renderer::MeshHandle              skyDomeMesh = renderer::invalidMesh;
+    renderer::MeshHandle              sunDiscMesh = renderer::invalidMesh;
+    if (!characterView)
     {
-        std::cerr << "demo: Inigo model import failed (" << static_cast<std::uint32_t>(dragonLoadError) << ")\n";
-    }
-    else
-    {
-        (void)modelsCapability.statistics(modelsCapability.self, dragonModel, &dragonStatistics);
-        const std::uint32_t dragonPartCount = modelsCapability.partCount(modelsCapability.self, dragonModel);
-        dragonMeshes.reserve(dragonPartCount);
-        for (std::uint32_t partIndex = 0; partIndex < dragonPartCount; ++partIndex)
+        engine::models::ModelLoadOptions dragonLoadOptions{
+            .normalMode         = engine::models::ModelNormalMode::GenerateSmooth,
+            .importVertexColors = true,
+            .weldVertices       = true,
+            .importMaterials    = false};
+        engine::models::ModelLoadError dragonLoadError = engine::models::ModelLoadError::None;
+        const std::string              dragonPath      = assetPath("models/inigo_the_dragon/dragon_meshed.obj");
+        std::cout << "demo: importing the Inigo model (weld + smooth normals)...\n";
+        const engine::models::ModelHandle dragonModel = modelsCapability.loadModelWithOptions(
+            modelsCapability.self, dragonPath.c_str(), &dragonLoadOptions, &dragonLoadError);
+        // One GPU mesh per imported part; parts that fail to upload are skipped.
+        if (dragonModel == engine::models::invalidModel)
         {
-            renderer::MeshDescription description;
-            if (!modelsCapability.part(modelsCapability.self, dragonModel, partIndex, &description))
-            {
-                continue;
-            }
-            const renderer::MeshHandle handle
-                = renderCapability.createMesh(renderCapability.self, rendererHandle, &description, &renderError);
-            pumpWindowEvents();
-            if (handle == renderer::invalidMesh)
-            {
-                std::cerr << "demo: Inigo mesh upload failed (" << renderErrorName(renderError) << ")\n";
-                continue;
-            }
-            dragonMeshes.push_back(handle);
+            std::cerr << "demo: Inigo model import failed (" << static_cast<std::uint32_t>(dragonLoadError) << ")\n";
         }
-        modelsCapability.destroyModel(modelsCapability.self, dragonModel);
-        std::cout << "demo: loaded Inigo model " << dragonStatistics.vertexCount << " vertices, "
-                  << dragonStatistics.indexCount / 3 << " triangles, " << dragonMeshes.size() << " GPU mesh parts\n";
-    }
+        else
+        {
+            (void)modelsCapability.statistics(modelsCapability.self, dragonModel, &dragonStatistics);
+            const std::uint32_t dragonPartCount = modelsCapability.partCount(modelsCapability.self, dragonModel);
+            dragonMeshes.reserve(dragonPartCount);
+            for (std::uint32_t partIndex = 0; partIndex < dragonPartCount; ++partIndex)
+            {
+                renderer::MeshDescription description;
+                if (!modelsCapability.part(modelsCapability.self, dragonModel, partIndex, &description))
+                {
+                    continue;
+                }
+                const renderer::MeshHandle handle
+                    = renderCapability.createMesh(renderCapability.self, rendererHandle, &description, &renderError);
+                pumpWindowEvents();
+                if (handle == renderer::invalidMesh)
+                {
+                    std::cerr << "demo: Inigo mesh upload failed (" << renderErrorName(renderError) << ")\n";
+                    continue;
+                }
+                dragonMeshes.push_back(handle);
+            }
+            modelsCapability.destroyModel(modelsCapability.self, dragonModel);
+            std::cout << "demo: loaded Inigo model " << dragonStatistics.vertexCount << " vertices, "
+                      << dragonStatistics.indexCount / 3 << " triangles, " << dragonMeshes.size()
+                      << " GPU mesh parts\n";
+        }
 
-    // Static environment geometry: floor box, sky dome, sun disc.
-    std::cout << "demo: uploading environment meshes (floor, sky dome, sun disc)...\n";
-    renderer::MeshHandle floorMesh   = renderer::invalidMesh;
-    renderer::MeshHandle skyDomeMesh = renderer::invalidMesh;
-    renderer::MeshHandle sunDiscMesh = renderer::invalidMesh;
-    {
+        // Static environment geometry: floor box, sky dome, sun disc.
+        std::cout << "demo: uploading environment meshes (floor, sky dome, sun disc)...\n";
         const MeshData floorGeometry
             = makeBoxMesh({0.0f, -0.05f, 0.0f}, {roomHalfExtent, 0.05f, roomHalfExtent}, {1, 1, 1}, roomHalfExtent);
         uploadMesh(floorGeometry, floorMesh);
@@ -665,28 +706,17 @@ int main(int argc, char **argv)
     // Benchmark grid: gridWidth^2 objects, spatially grouped into chunkWidth x
     // chunkWidth chunks. Each chunk gets one merged batch per model type (rock/
     // torus), so the static scene costs batchCount draw calls instead of one
-    // per object.
-    constexpr std::uint32_t gridWidth            = 10;
-    constexpr std::uint32_t chunkWidth           = 3;
-    constexpr std::uint32_t chunksPerAxis        = (gridWidth + chunkWidth - 1) / chunkWidth;
-    constexpr std::uint32_t batchCount           = chunksPerAxis * chunksPerAxis * 2;
-    constexpr std::uint32_t benchmarkObjectCount = gridWidth * gridWidth;
-    constexpr float         objectSpacing        = 6.2f;
-
-    std::cout << "demo: building benchmark meshes (rock 160x80, torus 128x48)...\n";
-    MeshData           rockGeometry  = demo::makeRockMesh(1.0f, 160, 80, {0.48f, 0.56f, 0.62f});
-    MeshData           torusGeometry = demo::makeTorusMesh(1.0f, 0.32f, 128, 48, {0.82f, 0.43f, 0.16f});
-    renderer::MeshHandle rockMesh      = renderer::invalidMesh;
-    renderer::MeshHandle torusMesh     = renderer::invalidMesh;
-    uploadMesh(rockGeometry, rockMesh);
-    pumpWindowEvents();
-    uploadMesh(torusGeometry, torusMesh);
-    pumpWindowEvents();
-
+    // per object. Benchmark-only: the character screen does not need it, but
+    // the handles/containers stay live at function scope for the frame loop
+    // and teardown.
+    MeshData             rockGeometry{};
+    MeshData             torusGeometry{};
+    renderer::MeshHandle rockMesh  = renderer::invalidMesh;
+    renderer::MeshHandle torusMesh = renderer::invalidMesh;
     struct StaticBatch
     {
         renderer::MeshHandle mesh      = renderer::invalidMesh;
-        std::uint32_t      modelType = 0; // 0 = rock, 1 = torus; selects the material.
+        std::uint32_t        modelType = 0; // 0 = rock, 1 = torus; selects the material.
     };
     struct DynamicObject
     {
@@ -697,84 +727,102 @@ int main(int argc, char **argv)
         float         angularSpeed = 1.0f; // Radians/second of the wander/rotation phase.
         glm::mat4     transform{1.0f};
     };
-
-    // Deterministic layout: checkerboard model assignment, hashed scale/yaw,
-    // grid-centered positions. Every 5th object becomes a moving instance; the
-    // rest are baked into its chunk's batch geometry.
-    std::cout << "demo: merging " << benchmarkObjectCount << " static objects into " << batchCount
-              << " spatial batches...\n";
-    std::vector<MeshData>      staticBatchGeometry(batchCount);
+    std::vector<StaticBatch>   staticBatches;
     std::vector<DynamicObject> dynamicObjects;
-    dynamicObjects.reserve(benchmarkObjectCount / 5);
-    std::uint32_t staticObjectCount = 0;
-    for (std::uint32_t row = 0; row < gridWidth; ++row)
+    if (!characterView)
     {
-        for (std::uint32_t column = 0; column < gridWidth; ++column)
-        {
-            const std::uint32_t modelType = (row + column) & 1u;
-            const float         scale     = 0.82f + static_cast<float>((row * 3 + column * 5) % 4) * 0.11f;
-            const float         yaw       = static_cast<float>((row * 7 + column * 11) % 31) * 0.17f;
-            const glm::vec3     position((static_cast<float>(column) - 4.5f) * objectSpacing,
-                (modelType == 0 ? 0.94f : 0.70f) * scale,
-                (static_cast<float>(row) - 4.5f) * objectSpacing);
-            const glm::mat4     transform = glm::translate(glm::mat4(1.0f), position)
-                                          * glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0, 1, 0))
-                                          * glm::scale(glm::mat4(1.0f), glm::vec3(scale));
+        constexpr std::uint32_t gridWidth            = 10;
+        constexpr std::uint32_t chunkWidth           = 3;
+        constexpr std::uint32_t chunksPerAxis        = (gridWidth + chunkWidth - 1) / chunkWidth;
+        constexpr std::uint32_t batchCount           = chunksPerAxis * chunksPerAxis * 2;
+        constexpr std::uint32_t benchmarkObjectCount = gridWidth * gridWidth;
+        constexpr float         objectSpacing        = 6.2f;
 
-            if (((row * gridWidth + column) % 5u) == 0u)
+        std::cout << "demo: building benchmark meshes (rock 160x80, torus 128x48)...\n";
+        rockGeometry  = demo::makeRockMesh(1.0f, 160, 80, {0.48f, 0.56f, 0.62f});
+        torusGeometry = demo::makeTorusMesh(1.0f, 0.32f, 128, 48, {0.82f, 0.43f, 0.16f});
+        uploadMesh(rockGeometry, rockMesh);
+        pumpWindowEvents();
+        uploadMesh(torusGeometry, torusMesh);
+        pumpWindowEvents();
+
+        // Deterministic layout: checkerboard model assignment, hashed scale/yaw,
+        // grid-centered positions. Every 5th object becomes a moving instance; the
+        // rest are baked into its chunk's batch geometry.
+        std::cout << "demo: merging " << benchmarkObjectCount << " static objects into " << batchCount
+                  << " spatial batches...\n";
+        std::vector<MeshData> staticBatchGeometry(batchCount);
+        dynamicObjects.reserve(benchmarkObjectCount / 5);
+        std::uint32_t staticObjectCount = 0;
+        for (std::uint32_t row = 0; row < gridWidth; ++row)
+        {
+            for (std::uint32_t column = 0; column < gridWidth; ++column)
             {
-                dynamicObjects.push_back(DynamicObject{
-                    .modelType    = modelType,
-                    .basePosition = position,
-                    .scale        = scale,
-                    .phase        = static_cast<float>(row * gridWidth + column) * 0.37f,
-                    .angularSpeed = 0.25f + static_cast<float>((row + column) % 4) * 0.13f,
-                    .transform    = transform});
+                const std::uint32_t modelType = (row + column) & 1u;
+                const float         scale     = 0.82f + static_cast<float>((row * 3 + column * 5) % 4) * 0.11f;
+                const float         yaw       = static_cast<float>((row * 7 + column * 11) % 31) * 0.17f;
+                const glm::vec3     position((static_cast<float>(column) - 4.5f) * objectSpacing,
+                    (modelType == 0 ? 0.94f : 0.70f) * scale,
+                    (static_cast<float>(row) - 4.5f) * objectSpacing);
+                const glm::mat4     transform = glm::translate(glm::mat4(1.0f), position)
+                                              * glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0, 1, 0))
+                                              * glm::scale(glm::mat4(1.0f), glm::vec3(scale));
+
+                if (((row * gridWidth + column) % 5u) == 0u)
+                {
+                    dynamicObjects.push_back(DynamicObject{
+                        .modelType    = modelType,
+                        .basePosition = position,
+                        .scale        = scale,
+                        .phase        = static_cast<float>(row * gridWidth + column) * 0.37f,
+                        .angularSpeed = 0.25f + static_cast<float>((row + column) % 4) * 0.13f,
+                        .transform    = transform});
+                    continue;
+                }
+
+                const std::uint32_t chunkX     = column / chunkWidth;
+                const std::uint32_t chunkZ     = row / chunkWidth;
+                const std::uint32_t chunkIndex = chunkZ * chunksPerAxis + chunkX;
+                const std::uint32_t batchIndex = chunkIndex * 2 + modelType;
+                appendTransformedMesh(
+                    staticBatchGeometry[batchIndex], modelType == 0 ? rockGeometry : torusGeometry, transform);
+                ++staticObjectCount;
+            }
+        }
+
+        // Upload the merged batches, then release all CPU-side geometry: batches
+        // own their vertices now, and the per-object data is no longer needed.
+        std::cout << "demo: uploading benchmark batches to the GPU...\n";
+        staticBatches.reserve(batchCount);
+        for (std::uint32_t batchIndex = 0; batchIndex < batchCount; ++batchIndex)
+        {
+            MeshData &geometry = staticBatchGeometry[batchIndex];
+            if (geometry.vertices.empty())
+            {
                 continue;
             }
-
-            const std::uint32_t chunkX     = column / chunkWidth;
-            const std::uint32_t chunkZ     = row / chunkWidth;
-            const std::uint32_t chunkIndex = chunkZ * chunksPerAxis + chunkX;
-            const std::uint32_t batchIndex = chunkIndex * 2 + modelType;
-            appendTransformedMesh(
-                staticBatchGeometry[batchIndex], modelType == 0 ? rockGeometry : torusGeometry, transform);
-            ++staticObjectCount;
+            StaticBatch batch{.modelType = batchIndex & 1u};
+            uploadMesh(geometry, batch.mesh);
+            pumpWindowEvents();
+            if (batch.mesh != renderer::invalidMesh)
+            {
+                staticBatches.push_back(batch);
+            }
+            geometry = MeshData{};
         }
+        staticBatchGeometry.clear();
+        staticBatchGeometry.shrink_to_fit();
+        const std::uint64_t rockTriangleCount  = rockGeometry.indices.size() / 3;
+        const std::uint64_t torusTriangleCount = torusGeometry.indices.size() / 3;
+        const std::uint64_t benchmarkTriangleCount
+            = (benchmarkObjectCount / 2) * (rockTriangleCount + torusTriangleCount);
+        std::cout << "demo: benchmark scene " << benchmarkObjectCount << " high-detail objects (" << staticObjectCount
+                  << " static in " << staticBatches.size() << " spatial batches, " << dynamicObjects.size()
+                  << " moving), " << benchmarkTriangleCount << " model triangles (rock=" << rockTriangleCount
+                  << ", torus=" << torusTriangleCount << ")\n";
+        rockGeometry  = MeshData{};
+        torusGeometry = MeshData{};
     }
-
-    // Upload the merged batches, then release all CPU-side geometry: batches
-    // own their vertices now, and the per-object data is no longer needed.
-    std::cout << "demo: uploading benchmark batches to the GPU...\n";
-    std::vector<StaticBatch> staticBatches;
-    staticBatches.reserve(batchCount);
-    for (std::uint32_t batchIndex = 0; batchIndex < batchCount; ++batchIndex)
-    {
-        MeshData &geometry = staticBatchGeometry[batchIndex];
-        if (geometry.vertices.empty())
-        {
-            continue;
-        }
-        StaticBatch batch{.modelType = batchIndex & 1u};
-        uploadMesh(geometry, batch.mesh);
-        pumpWindowEvents();
-        if (batch.mesh != renderer::invalidMesh)
-        {
-            staticBatches.push_back(batch);
-        }
-        geometry = MeshData{};
-    }
-    staticBatchGeometry.clear();
-    staticBatchGeometry.shrink_to_fit();
-    const std::uint64_t rockTriangleCount      = rockGeometry.indices.size() / 3;
-    const std::uint64_t torusTriangleCount     = torusGeometry.indices.size() / 3;
-    const std::uint64_t benchmarkTriangleCount = (benchmarkObjectCount / 2) * (rockTriangleCount + torusTriangleCount);
-    std::cout << "demo: benchmark scene " << benchmarkObjectCount << " high-detail objects (" << staticObjectCount
-              << " static in " << staticBatches.size() << " spatial batches, " << dynamicObjects.size() << " moving), "
-              << benchmarkTriangleCount << " model triangles (rock=" << rockTriangleCount
-              << ", torus=" << torusTriangleCount << ")\n";
-    rockGeometry  = MeshData{};
-    torusGeometry = MeshData{};
 
     glm::vec3 sunDirectionForView(0.45f, 0.62f, 0.35f);
     if (hasPbrEnvironment)
@@ -783,10 +831,16 @@ int main(int argc, char **argv)
     }
 
     // --view selects the starting viewpoint: default overview of the grid or a
-    // close-up angled toward the sun disc.
+    // close-up angled toward the sun disc. The character screen re-aims the
+    // camera itself (orbit around the assembled character).
     glm::vec3 viewEye(0.0f, 13.0f, 39.0f);
     glm::vec3 viewTarget(0.0f, 0.0f, 0.0f);
-    if (demoOptions.viewName == "sun")
+    if (characterView)
+    {
+        viewEye    = glm::vec3(1.15f, 1.65f, 2.6f);
+        viewTarget = glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    else if (demoOptions.viewName == "sun")
     {
         viewEye    = glm::vec3(7.5f, 8.0f, 10.5f);
         viewTarget = sunDirectionForView * 55.0f;
@@ -818,9 +872,11 @@ int main(int argc, char **argv)
     }
 
     // Capture the cursor (fly mode) unless orbit/fixed was requested; the
-    // window config is consulted when the command line left it empty.
+    // window config is consulted when the command line left it empty. The
+    // character screen keeps the cursor visible for its UI panel.
     const auto configuredCameraMode = appContext->configurationStringInSection("camera", "mode");
-    bool       cursorCaptured       = demoOptions.cameraMode.empty()
+    bool       cursorCaptured       = characterView ? false
+                                    : demoOptions.cameraMode.empty()
                                         ? (!configuredCameraMode.has_value()
                                               || (*configuredCameraMode != "orbit" && *configuredCameraMode != "fixed"))
                                         : demoOptions.cameraMode == "fly";
@@ -842,8 +898,8 @@ int main(int argc, char **argv)
 
     // quit_after: the command line (--quit-after) wins over the
     // [engine] quit_after_seconds configuration; <= 0 disables the timeout.
-    constexpr double headlessDefaultQuitAfterSeconds = 10.0;
-    const std::int64_t maxFps = appContext->configurationIntegerInSection("engine", "max_fps").value_or(0);
+    constexpr double            headlessDefaultQuitAfterSeconds = 10.0;
+    const std::int64_t          maxFps = appContext->configurationIntegerInSection("engine", "max_fps").value_or(0);
     const std::optional<double> configuredQuitAfterSeconds
         = appContext->configurationFloatingInSection("engine", "quit_after_seconds");
     const bool quitAfterExplicit = demoOptions.quitAfterSeconds >= 0.0 || configuredQuitAfterSeconds.has_value();
@@ -950,30 +1006,36 @@ int main(int argc, char **argv)
     // Sky and sun are drawn first and unsorted; the floor/batch draws from
     // sortableStart on are sorted (default: material, then mesh) so the
     // renderer can batch runs of equal materials into instanced draws.
-    const glm::mat4                        identityTransform(1.0f);
-    glm::mat4                              skyTransform(1.0f);
-    glm::mat4                              sunTransform(1.0f);
+    // Benchmark-only: the character screen submits its own draw list.
+    glm::mat4                                skyTransform(1.0f);
+    glm::mat4                                sunTransform(1.0f);
     std::vector<renderer::RenderDrawCommand> drawCommands;
-    drawCommands.reserve(3 + staticBatches.size());
-    const auto addDraw
-        = [&drawCommands](renderer::MeshHandle mesh, const glm::mat4 &transform, const renderer::MeshMaterial &material)
+    if (!characterView)
     {
-        if (mesh != renderer::invalidMesh)
+        const glm::mat4 identityTransform(1.0f);
+        drawCommands.reserve(3 + staticBatches.size());
+        const auto addDraw
+            = [&drawCommands](
+                  renderer::MeshHandle mesh, const glm::mat4 &transform, const renderer::MeshMaterial &material)
         {
-            drawCommands.push_back({.mesh = mesh, .modelMatrix = glm::value_ptr(transform), .material = &material});
+            if (mesh != renderer::invalidMesh)
+            {
+                drawCommands.push_back({.mesh = mesh, .modelMatrix = glm::value_ptr(transform), .material = &material});
+            }
+        };
+        addDraw(skyDomeMesh, skyTransform, skyMaterial);
+        addDraw(sunDiscMesh, sunTransform, sunMaterial);
+        const std::size_t sortableStart = drawCommands.size();
+        addDraw(floorMesh, identityTransform, floorMaterial);
+        for (const StaticBatch &batch : staticBatches)
+        {
+            addDraw(batch.mesh, identityTransform, batch.modelType == 0 ? rockMaterial : torusMaterial);
         }
-    };
-    addDraw(skyDomeMesh, skyTransform, skyMaterial);
-    addDraw(sunDiscMesh, sunTransform, sunMaterial);
-    const std::size_t sortableStart = drawCommands.size();
-    addDraw(floorMesh, identityTransform, floorMaterial);
-    for (const StaticBatch &batch : staticBatches)
-    {
-        addDraw(batch.mesh, identityTransform, batch.modelType == 0 ? rockMaterial : torusMaterial);
-    }
-    if (drawCommands.size() > sortableStart)
-    {
-        renderer::sortRenderDrawCommands(std::span<renderer::RenderDrawCommand>(drawCommands).subspan(sortableStart));
+        if (drawCommands.size() > sortableStart)
+        {
+            renderer::sortRenderDrawCommands(
+                std::span<renderer::RenderDrawCommand>(drawCommands).subspan(sortableStart));
+        }
     }
 
     // Fixed-update pacing comes from the [engine] section; the clock clamps
@@ -1027,6 +1089,67 @@ int main(int argc, char **argv)
         {
             menuReady = true;
         }
+    }
+
+    // The character customisation screen (its own UI context, content, and
+    // assembly on top of the character module).
+    demo::CharacterScreen characterScreen;
+    bool                  characterScreenReady = false;
+    bool                  characterTestPassed  = true;
+    if (characterView)
+    {
+        characterScreenReady = characterScreen.create(windowCapability,
+            windowHandle,
+            renderCapability,
+            rendererHandle,
+            cameraCapability,
+            cameraHandle,
+            uiCapability,
+            *characterCapability,
+            assetRoot.string());
+        if (!characterScreenReady)
+        {
+            std::cerr << "demo: the character screen failed to initialise\n";
+            menuBridge.destroy();
+            cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
+            renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
+            windowCapability.destroyWindow(windowCapability.self, windowHandle);
+            host.stop();
+            return 1;
+        }
+        if (demoOptions.characterTest)
+        {
+            characterTestPassed = characterScreen.runSelfTest();
+            if (demoOptions.screenshotPath.empty())
+            {
+                // Pure test run: leave the loop almost immediately.
+                effectiveQuitAfterSeconds
+                    = effectiveQuitAfterSeconds > 0.0 ? std::min(effectiveQuitAfterSeconds, 0.25) : 0.25;
+            }
+        }
+        if (!demoOptions.characterDrive.empty())
+        {
+            if (!characterScreen.applyDrivePreset(demoOptions.characterDrive))
+            {
+                std::cerr << "demo: character drive preset failed\n";
+                menuBridge.destroy();
+                cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
+                renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
+                windowCapability.destroyWindow(windowCapability.self, windowHandle);
+                host.stop();
+                return 1;
+            }
+        }
+        if (demoOptions.cameraFramingSet)
+        {
+            characterScreen.configureCamera(
+                demoOptions.cameraYawDegrees, demoOptions.cameraPitchDegrees, demoOptions.orbitDistance);
+        }
+        if (demoOptions.hidePanel)
+        {
+            characterScreen.setPanelVisible(false);
+        }
+        std::cout << "demo: character screen ready (drag to orbit, panel on the right)\n";
     }
 
     engine::FrameClock frameClock(engine::FrameClockOptions{
@@ -1194,14 +1317,14 @@ int main(int argc, char **argv)
     bool          frameGraphReady = false;
     std::uint32_t frameGraphOrder[3]{};
     std::uint32_t frameGraphSlots[3]{};
-    if (frameGraphCapability != nullptr)
+    if (frameGraphCapability != nullptr && !characterView)
     {
         // Device-tuned limits: resolveProfile scales the configured settings
         // for the active renderer and setSettings applies them (clearing the
         // plan cache) before the one-time compile below.
         const render_graph::RenderGraphSettings *currentSettings
             = frameGraphCapability->settings(frameGraphCapability->self);
-        renderer::DeviceProfile            deviceProfile{};
+        renderer::DeviceProfile          deviceProfile{};
         render_graph::RenderGraphProfile scaledProfile{};
         if (currentSettings != nullptr
             && renderCapability.deviceProfile(renderCapability.self, rendererHandle, &deviceProfile)
@@ -1247,7 +1370,7 @@ int main(int argc, char **argv)
                       << "); frame updates run inline\n";
         }
     }
-    else
+    else if (!characterView)
     {
         std::cout << "demo: render_graph capability unavailable; frame updates run "
                      "inline\n";
@@ -1260,8 +1383,9 @@ int main(int argc, char **argv)
     // otherwise lands directly in the frame-time P99. Uncapped runs skip
     // pacing entirely, so the spin window costs nothing there.
     const std::uint32_t pacerSpinWindowMicroseconds = maxFps > 0 ? 1200u : 0u;
-    engine::FramePacer framePacer({.targetFrameRateHz = static_cast<double>(std::max<std::int64_t>(maxFps, 0)),
-        .spinWindowMicroseconds = pacerSpinWindowMicroseconds});
+    engine::FramePacer  framePacer(
+        {.targetFrameRateHz         = static_cast<double>(std::max<std::int64_t>(maxFps, 0)),
+            .spinWindowMicroseconds = pacerSpinWindowMicroseconds});
     framePacer.reset();
     demo::FrameTimeRecorder frameTimeRecorder;
 
@@ -1301,6 +1425,10 @@ int main(int argc, char **argv)
             for (std::uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex)
             {
                 const window::WindowEvent &event = eventBuffer[eventIndex];
+                if (characterScreenReady)
+                {
+                    characterScreen.handleWindowEvent(event);
+                }
                 if (event.kind == window::WindowEventKind::CloseRequested)
                 {
                     windowCapability.requestClose(windowCapability.self, windowHandle);
@@ -1364,8 +1492,9 @@ int main(int argc, char **argv)
         frameClock.publishFixedUpdates(kernel, frameTiming);
 
         windowCapability.getFramebufferSize(windowCapability.self, windowHandle, &framebufferWidth, &framebufferHeight);
-        // Assemble camera input from the configured keys (signed -1/+1 axes)
-        // plus mouse deltas captured since the previous frame.
+        // Benchmark views assemble camera input from the configured keys
+        // (signed -1/+1 axes) plus mouse deltas captured since the previous
+        // frame. The character screen drives the camera itself.
         camera::CameraInputState cameraInput{};
         const std::uint64_t      cameraKeysDown
             = cameraKeyMask != 0 ? windowCapability.keyStateMask(windowCapability.self, windowHandle, cameraKeyMask)
@@ -1413,21 +1542,24 @@ int main(int argc, char **argv)
         {
             haveLastCameraCursor = false;
         }
-        cameraCapability.update(cameraCapability.self, cameraHandle, &cameraInput, deltaSeconds);
-        camera::ViewState viewState;
-        cameraCapability.viewState(
-            cameraCapability.self, cameraHandle, framebufferWidth, framebufferHeight, &viewState);
-        renderer::CameraMatrices cameraMatrices;
-        std::memcpy(cameraMatrices.view, viewState.view, sizeof(cameraMatrices.view));
-        std::memcpy(cameraMatrices.projection, viewState.projection, sizeof(cameraMatrices.projection));
-        std::memcpy(cameraMatrices.position, viewState.position, sizeof(cameraMatrices.position));
-        renderCapability.setCamera(renderCapability.self, rendererHandle, &cameraMatrices);
+        if (!characterScreenReady)
+        {
+            cameraCapability.update(cameraCapability.self, cameraHandle, &cameraInput, deltaSeconds);
+            camera::ViewState viewState;
+            cameraCapability.viewState(
+                cameraCapability.self, cameraHandle, framebufferWidth, framebufferHeight, &viewState);
+            renderer::CameraMatrices cameraMatrices;
+            std::memcpy(cameraMatrices.view, viewState.view, sizeof(cameraMatrices.view));
+            std::memcpy(cameraMatrices.projection, viewState.projection, sizeof(cameraMatrices.projection));
+            std::memcpy(cameraMatrices.position, viewState.position, sizeof(cameraMatrices.position));
+            renderCapability.setCamera(renderCapability.self, rendererHandle, &cameraMatrices);
 
-        // The sky dome and sun disc are infinitely far: re-center them on the
-        // camera each frame so they can never be reached.
-        const glm::vec3 cameraPosition = glm::make_vec3(viewState.position);
-        skyTransform                   = glm::translate(glm::mat4(1.0f), cameraPosition);
-        sunTransform                   = skyTransform;
+            // The sky dome and sun disc are infinitely far: re-center them on the
+            // camera each frame so they can never be reached.
+            const glm::vec3 cameraPosition = glm::make_vec3(viewState.position);
+            skyTransform                   = glm::translate(glm::mat4(1.0f), cameraPosition);
+            sunTransform                   = skyTransform;
+        }
 
         // Per-frame CPU work: through the render_graph capability when it is
         // ready (the callbacks run on the task scheduler and block here), or
@@ -1435,7 +1567,11 @@ int main(int argc, char **argv)
         // paths; a failed execute falls back to a full inline pass, which is
         // safe because every update recomputes its outputs from scratch.
         animationTime = static_cast<float>(elapsedSeconds);
-        if (frameGraphReady)
+        if (characterScreenReady)
+        {
+            // (benchmark-only CPU passes skipped on the character screen)
+        }
+        else if (frameGraphReady)
         {
             render_graph::RenderGraphError graphError = render_graph::RenderGraphError::None;
             if (!frameGraphCapability->execute(frameGraphCapability->self,
@@ -1452,51 +1588,60 @@ int main(int argc, char **argv)
                 frameGraphReady = false;
             }
         }
-        if (!frameGraphReady)
+        if (!frameGraphReady && !characterScreenReady)
         {
             frameGraphTasks.updateRocks();
             frameGraphTasks.updateTori();
             frameGraphTasks.updateDragons();
         }
 
-        // Static batches in one drawMeshes call; moving objects as instanced
-        // draws (one per mesh, transform list packed contiguously).
         renderCapability.beginFrame(renderCapability.self, rendererHandle, nullptr);
-        renderCapability.drawMeshes(renderCapability.self,
-            rendererHandle,
-            drawCommands.data(),
-            static_cast<std::uint32_t>(drawCommands.size()));
-        if (rockMesh != renderer::invalidMesh && !dynamicRockTransforms.empty())
+        if (characterScreenReady)
         {
-            renderCapability.drawMeshInstances(renderCapability.self,
-                rendererHandle,
-                rockMesh,
-                glm::value_ptr(dynamicRockTransforms.front()),
-                static_cast<std::uint32_t>(dynamicRockTransforms.size()),
-                &rockMaterial);
+            // The screen draws stage, character, and its UI panel, and
+            // submits the overlay before endFrame.
+            characterScreen.frame(deltaSeconds, elapsedSeconds);
         }
-        if (torusMesh != renderer::invalidMesh && !dynamicTorusTransforms.empty())
+        else
         {
-            renderCapability.drawMeshInstances(renderCapability.self,
+            // Static batches in one drawMeshes call; moving objects as instanced
+            // draws (one per mesh, transform list packed contiguously).
+            renderCapability.drawMeshes(renderCapability.self,
                 rendererHandle,
-                torusMesh,
-                glm::value_ptr(dynamicTorusTransforms.front()),
-                static_cast<std::uint32_t>(dynamicTorusTransforms.size()),
-                &torusMaterial);
-        }
-        if (!dragonMeshes.empty())
-        {
-            for (const renderer::MeshHandle dragonMesh : dragonMeshes)
+                drawCommands.data(),
+                static_cast<std::uint32_t>(drawCommands.size()));
+            if (rockMesh != renderer::invalidMesh && !dynamicRockTransforms.empty())
             {
                 renderCapability.drawMeshInstances(renderCapability.self,
                     rendererHandle,
-                    dragonMesh,
-                    glm::value_ptr(dragonTransforms.front()),
-                    static_cast<std::uint32_t>(dragonTransforms.size()),
-                    &dragonMaterial);
+                    rockMesh,
+                    glm::value_ptr(dynamicRockTransforms.front()),
+                    static_cast<std::uint32_t>(dynamicRockTransforms.size()),
+                    &rockMaterial);
             }
-        }
-        if (menuReady)
+            if (torusMesh != renderer::invalidMesh && !dynamicTorusTransforms.empty())
+            {
+                renderCapability.drawMeshInstances(renderCapability.self,
+                    rendererHandle,
+                    torusMesh,
+                    glm::value_ptr(dynamicTorusTransforms.front()),
+                    static_cast<std::uint32_t>(dynamicTorusTransforms.size()),
+                    &torusMaterial);
+            }
+            if (!dragonMeshes.empty())
+            {
+                for (const renderer::MeshHandle dragonMesh : dragonMeshes)
+                {
+                    renderCapability.drawMeshInstances(renderCapability.self,
+                        rendererHandle,
+                        dragonMesh,
+                        glm::value_ptr(dragonTransforms.front()),
+                        static_cast<std::uint32_t>(dragonTransforms.size()),
+                        &dragonMaterial);
+                }
+            }
+        } // benchmark draw branch
+        if (menuReady && !characterScreenReady)
         {
             std::uint32_t displayWidth  = 0;
             std::uint32_t displayHeight = 0;
@@ -1568,8 +1713,8 @@ int main(int argc, char **argv)
             assetPressurePurgeActive = deviceMemoryPressure;
             if (deviceMemoryPressure && fileAssetStoreCapability != nullptr)
             {
-                const std::uint64_t freedBytes = fileAssetStoreCapability->purgeUnusedAssets(
-                    fileAssetStoreCapability->self, 0);
+                const std::uint64_t freedBytes
+                    = fileAssetStoreCapability->purgeUnusedAssets(fileAssetStoreCapability->self, 0);
                 std::cout << "demo: device-local memory pressure (" << frameStatistics.deviceLocalUsageBytes << "/"
                           << frameStatistics.deviceLocalBudgetBytes << " bytes): purged " << freedBytes
                           << " evictable asset cache bytes\n";
@@ -1585,10 +1730,10 @@ int main(int argc, char **argv)
             }
         }
 
-        // One-shot screenshot at frame screenshotFrame: the Vulkan backend can
+        // One-shot screenshot at the configured frame: the Vulkan backend can
         // export the frame directly; otherwise only the headless window backend
         // can export its surface. Other backends cannot export.
-        if (!screenshotTaken && !demoOptions.screenshotPath.empty() && frameIndex == screenshotFrame)
+        if (!screenshotTaken && !demoOptions.screenshotPath.empty() && frameIndex == demoOptions.screenshotFrame)
         {
             if (vulkanCapability != nullptr
                 && renderCapability.activeBackendName(renderCapability.self, rendererHandle) == std::string("vulkan"))
@@ -1625,6 +1770,12 @@ int main(int argc, char **argv)
         }
         // No-op when max_fps is 0 (uncapped).
         (void)framePacer.pace(&kernel.profiler());
+    }
+
+    // The --character-test run reports failure through the exit code.
+    if (demoOptions.characterTest && characterView && !characterTestPassed)
+    {
+        std::cerr << "demo: character test FAILED\n";
     }
 
     // Headless runs that exited before the screenshot frame get one last
@@ -1665,6 +1816,7 @@ int main(int argc, char **argv)
     renderCapability.destroyTexture(renderCapability.self, rendererHandle, floorNormal);
     renderCapability.destroyTexture(renderCapability.self, rendererHandle, floorMetalRough);
     renderCapability.destroyTexture(renderCapability.self, rendererHandle, floorOcclusion);
+    characterScreen.destroy();
     menuBridge.destroy();
     cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
     renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
@@ -1672,5 +1824,5 @@ int main(int argc, char **argv)
 
     host.stop();
     std::cout << "demo: stopped cleanly after " << frameIndex << " frames\n";
-    return 0;
+    return (demoOptions.characterTest && characterView && !characterTestPassed) ? 1 : 0;
 }

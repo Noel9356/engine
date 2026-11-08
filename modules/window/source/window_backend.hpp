@@ -46,6 +46,9 @@ struct WindowRecord
     // Bit (1 << Key value) set for each pressed key.
     std::uint64_t keyStateMask = 0;
 
+    // Bit (1 << MouseButton value) set for each held mouse button.
+    std::uint8_t mouseButtonStateMask = 0;
+
     std::deque<WindowEvent> events;
     std::size_t             eventQueueCapacity = 4096;
 

@@ -6,6 +6,7 @@
 #ifndef ENGINE_DEMO_OPTIONS_HPP
 #define ENGINE_DEMO_OPTIONS_HPP
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -15,10 +16,18 @@ namespace demo
 // Demo options after parsing; empty strings mean "use the configured default".
 struct Options
 {
-    std::string screenshotPath;          // --screenshot: PPM file to write at frame 90; empty = off.
-    double      quitAfterSeconds = -1.0; // --quit-after: < 0 = unset (falls back to quit_after_seconds).
-    std::string cameraMode;              // --camera fly|orbit|fixed; empty = use [camera] mode config.
-    std::string viewName = "benchmark";  // --view benchmark|sun; picks the initial viewpoint.
+    std::string   screenshotPath;              // --screenshot: PPM file to write at screenshotFrame; empty = off.
+    std::uint64_t screenshotFrame  = 90;       // --screenshot-frame: frame index for the --screenshot export.
+    double        quitAfterSeconds = -1.0;     // --quit-after: < 0 = unset (falls back to quit_after_seconds).
+    std::string   cameraMode;                  // --camera fly|orbit|fixed; empty = use [camera] mode config.
+    float         cameraYawDegrees = 0.0f;     // --camera-yaw: character-screen orbit azimuth around the target.
+    float         cameraPitchDegrees = 18.0f;  // --camera-pitch: character-screen orbit elevation.
+    float         orbitDistance = 2.6f;        // --orbit-distance: character-screen orbit radius in meters.
+    bool          cameraFramingSet = false;    // true once any framing flag was given.
+    bool          hidePanel = false;           // --hide-panel: capture the viewport without the studio UI.
+    std::string   viewName      = "character"; // --view character|benchmark|sun; picks the screen.
+    bool          characterTest = false;       // --character-test: run the assembly test operations and exit.
+    std::string   characterDrive;              // --character-drive: named configuration for the character screen.
 };
 
 // One-line description of the application flags, appended to --help output.

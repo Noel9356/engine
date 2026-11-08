@@ -648,6 +648,14 @@ private:
         return record != nullptr ? record->keyStateMask & requestedMask : 0;
     }
 
+    bool isMouseButtonDownImpl(WindowHandle window, MouseButton button) const
+    {
+        const WindowRecord  *record = recordFor(window);
+        const std::uint32_t  value  = static_cast<std::uint32_t>(button);
+        return record != nullptr && value < 8
+            && (record->mouseButtonStateMask & (std::uint8_t{1} << value)) != 0;
+    }
+
     void setCursorModeImpl(WindowHandle window, CursorMode mode)
     {
         WindowRecord *record = recordFor(window);
@@ -827,6 +835,8 @@ private:
         { return static_cast<WindowModule *>(self)->isKeyDownImpl(window, key); };
         windowCapability_.keyStateMask = [](void *self, WindowHandle window, std::uint64_t requestedMask)
         { return static_cast<WindowModule *>(self)->keyStateMaskImpl(window, requestedMask); };
+        windowCapability_.isMouseButtonDown = [](void *self, WindowHandle window, MouseButton button)
+        { return static_cast<const WindowModule *>(self)->isMouseButtonDownImpl(window, button); };
         windowCapability_.setCursorMode = [](void *self, WindowHandle window, CursorMode mode)
         { static_cast<WindowModule *>(self)->setCursorModeImpl(window, mode); };
         windowCapability_.cursorPosition = [](void *self, WindowHandle window, double *outX, double *outY)

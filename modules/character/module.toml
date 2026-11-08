@@ -1,0 +1,21 @@
+config_keys           = [
+    "character.maximum_bindings_per_part",
+    "character.maximum_characters",
+    "character.maximum_connectors_per_part",
+    "character.maximum_connections_per_character",
+    "character.maximum_joints_per_rig",
+    "character.maximum_material_slots_per_part",
+    "character.maximum_parameters",
+    "character.maximum_parts",
+    "character.maximum_parts_per_character",
+    "character.maximum_profiles",
+    "character.maximum_rigs",
+    "character.maximum_rules",
+    "character.maximum_tags_per_part",
+    "character.validate_on_evaluate",
+]
+name                  = "character"
+optional_capabilities = ["script_runtime"]
+provides              = ["character"]
+requires              = []
+version               = "0.2.0"

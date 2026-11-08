@@ -2,6 +2,8 @@ engine_add_application(
     demo
     SOURCES
     source/main.cpp
+    source/demo/character_content.cpp
+    source/demo/character_screen.cpp
     source/demo/diagnostics.cpp
     source/demo/geometry.cpp
     source/demo/menu_bridge.cpp
@@ -14,6 +16,7 @@ engine_add_application(
     camera
     models
     ui
+    character
     script_runtime
     file_asset_store
     LIBRARIES

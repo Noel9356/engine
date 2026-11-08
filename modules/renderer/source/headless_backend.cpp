@@ -960,9 +960,12 @@ const HeadlessTexture *HeadlessBackend::mapFor(TextureHandle handle, const Headl
 
 // Gathers everything rasterizeTriangles needs. Order matters: frustum cull,
 // transform the vertices (through the generation-stamped cache when it fits
-// the budget), resolve textures to stand-ins, then probe one triangle's
-// winding against its vertex normals to decide if back-face culling is safe
-// (only attempted when the whole mesh is in front of the camera).
+// the budget), resolve textures to stand-ins, then probe a spread of the
+// mesh's triangles against their vertex normals to decide if back-face
+// culling is safe (only attempted when the whole mesh is in front of the
+// camera). A majority over up to 64 samples replaces the old single-triangle
+// probe: one sample on a sharp crease (where a smooth vertex normal leans
+// across the edge) used to flip the sign and cull nearly every front face.
 bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float *modelMatrix,
     const MeshMaterial &material, const std::uint32_t *activeIndices, std::size_t activeIndexCount,
     RasterSetup &outSetup)
@@ -1071,6 +1074,26 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
             {
                 transformRange(0, vertexCount);
             }
+            // DEBUG: verify cache contents against a fresh transform.
+            {
+                static std::uint64_t verifiedDraws = 0;
+                ++verifiedDraws;
+                const float *dbgPos = mesh.positions.data();
+                for (std::size_t v = 0; v < vertexCount; v += std::max<std::size_t>(1, vertexCount / 3))
+                {
+                    const glm::vec4 localPos(dbgPos[v * 3], dbgPos[v * 3 + 1], dbgPos[v * 3 + 2], 1.0f);
+                    const glm::vec4 expected = viewProjection * localPos;
+                    const glm::vec4 actual = transformedVertices_[v].clip;
+                    if (std::fabs(expected.x - actual.x) > 1.0e-3f || std::fabs(expected.y - actual.y) > 1.0e-3f
+                        || std::fabs(expected.z - actual.z) > 1.0e-3f || std::fabs(expected.w - actual.w) > 1.0e-3f)
+                    {
+                        std::fprintf(stderr,
+                            "CACHE MISMATCH draw #%llu v=%zu/%zu expected=(%.2f, %.2f, %.2f, %.2f) actual=(%.2f, %.2f, %.2f, %.2f)\n",
+                            static_cast<unsigned long long>(verifiedDraws), v, vertexCount, expected.x, expected.y,
+                            expected.z, expected.w, actual.x, actual.y, actual.z, actual.w);
+                    }
+                }
+            }
         }
         catch (const std::bad_alloc &)
         {
@@ -1123,36 +1146,45 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
         const float cameraDist  = glm::distance(cameraPosition_, worldCenter);
         if (cameraDist > worldRadius)
         {
-            const auto *indices = activeIndices;
-            for (std::size_t t = 0; t < triangleCount; ++t)
+            // Majority vote over a spread of triangles: face winding against
+            // vertex normals identifies the outward orientation
+            // camera-independently (screen-space signs cannot - front and
+            // back faces balance on a closed mesh). A crease triangle whose
+            // smooth corner normals lean across the edge loses the vote
+            // instead of flipping the whole mesh.
+            const std::size_t sampleStride = std::max<std::size_t>(1, triangleCount / 64);
+            std::uint32_t     positive = 0, negative = 0;
+            for (std::size_t t = 0; t < triangleCount; t += sampleStride)
             {
-                const std::uint32_t i0 = indices[t * 3 + 0];
-                const std::uint32_t i1 = indices[t * 3 + 1];
-                const std::uint32_t i2 = indices[t * 3 + 2];
+                const std::uint32_t i0 = activeIndices[t * 3 + 0];
+                const std::uint32_t i1 = activeIndices[t * 3 + 1];
+                const std::uint32_t i2 = activeIndices[t * 3 + 2];
                 if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
                     continue;
-                const glm::vec3 &wp0        = transformedVertices_[i0].worldPosition;
-                const glm::vec3 &wp1        = transformedVertices_[i1].worldPosition;
-                const glm::vec3 &wp2        = transformedVertices_[i2].worldPosition;
+                const glm::vec3 &wp0 = transformedVertices_[i0].worldPosition;
+                const glm::vec3 &wp1 = transformedVertices_[i1].worldPosition;
+                const glm::vec3 &wp2 = transformedVertices_[i2].worldPosition;
                 const glm::vec3  faceNormal = glm::cross(wp1 - wp0, wp2 - wp0);
                 const float      fnLen2     = glm::dot(faceNormal, faceNormal);
                 if (fnLen2 < 1e-12f)
                     continue;
-                const glm::vec3 &wn0       = transformedVertices_[i0].worldNormal;
-                const glm::vec3 &wn1       = transformedVertices_[i1].worldNormal;
-                const glm::vec3 &wn2       = transformedVertices_[i2].worldNormal;
+                const glm::vec3 &wn0 = transformedVertices_[i0].worldNormal;
+                const glm::vec3 &wn1 = transformedVertices_[i1].worldNormal;
+                const glm::vec3 &wn2 = transformedVertices_[i2].worldNormal;
                 const glm::vec3  avgNormal = wn0 + wn1 + wn2;
                 const float      anLen2    = glm::dot(avgNormal, avgNormal);
                 if (anLen2 < 1e-12f)
                     continue;
                 const float dotFN = glm::dot(faceNormal, avgNormal);
                 if (dotFN > 1e-6f)
-                    outSetup.frontSign = 1.0f;
+                    ++positive;
                 else if (dotFN < -1e-6f)
-                    outSetup.frontSign = -1.0f;
-                if (outSetup.frontSign != 0.0f)
-                    break;
+                    ++negative;
             }
+            if (positive > negative && positive > 0)
+                outSetup.frontSign = 1.0f;
+            else if (negative > positive && negative > 0)
+                outSetup.frontSign = -1.0f;
             if (outSetup.frontSign != 0.0f)
             {
                 outSetup.enableBackFaceCull = true; // winding convention confirmed; culling is safe
@@ -1204,7 +1236,6 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
     const float       frontSign          = setup.frontSign;
     const bool        useTransformCache  = setup.useTransformCache;
     const std::size_t vertexCount        = setup.vertexCount;
-
     const float *const posData   = mesh.positions.data();
     const float *const nrmData   = mesh.normals.data();
     const float *const colorData = mesh.colors.data();
@@ -1227,8 +1258,6 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
     const bool                   hasEmissiveMap          = setup.hasEmissiveMap;
     const bool                   hasEmissive             = setup.hasEmissive;
     const bool                   hasOcclusion            = setup.hasOcclusion;
-    const glm::vec3              fallbackTangentNormal   = setup.fallbackTangentNormal;
-
     float *const ENGINE_RESTRICT        depthBuffer       = this->depth.data();
     std::uint8_t *const ENGINE_RESTRICT colorBuffer       = this->color.data();
     const std::uint32_t                 framebufferWidth  = this->framebufferWidth;
@@ -1492,18 +1521,23 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                                                  + correctedC * clipped[cornerC].worldNormal;
                             const glm::vec3 geometryNormal       = glm::normalize(interpolatedNormal);
 
-                            glm::vec3 tangentNormal = fallbackTangentNormal;
+                            // Without a normal map the surface normal IS the
+                            // interpolated geometry normal: skip the TBN
+                            // construction and its per-pixel normalize (the
+                            // common case for colored/vertex-lit parts).
+                            glm::vec3 normal = geometryNormal;
                             if (hasNormalMap)
                             {
                                 const glm::vec3 normalMapSample
                                     = normalMap->sample(interpolatedUv.x, interpolatedUv.y) * 2.0f - 1.0f;
-                                tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
+                                const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
                                     normalMapSample.y * normalScale,
                                     normalMapSample.z));
+                                const glm::mat3 tbn(
+                                    tangentVector * tangentInverseMax, bitangentVector * tangentInverseMax,
+                                    geometryNormal);
+                                normal = glm::normalize(tbn * tangentNormal);
                             }
-                            const glm::mat3 tbn(
-                                tangentVector * tangentInverseMax, bitangentVector * tangentInverseMax, geometryNormal);
-                            const glm::vec3 normal = glm::normalize(tbn * tangentNormal);
 
                             float metallic  = metallicFactor;
                             float roughness = roughnessFactor;
@@ -1548,11 +1582,12 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 shaded += emissiveColor;
                             }
                         }
-                        // Output transform: tone map, then manual gamma (the CPU
-                        // raster always writes UNORM targets; see SRGB_OUTPUT in
-                        // mesh.frag for the GPU-side switch).
+                        // Output transform: tone map, then the fast sRGB
+                        // lookup (see fastSrgbEncode; the CPU raster always
+                        // writes UNORM targets; see SRGB_OUTPUT in mesh.frag
+                        // for the GPU-side switch).
                         shaded = toneMapColor(shaded, environment_.exposure, environment_.toneMapping);
-                        shaded = glm::pow(glm::max(shaded, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
+                        shaded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
 
                         if (useAtomicDepth)
                         {
@@ -1869,7 +1904,6 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     const bool        hasNormalMap            = setup.hasNormalMap;
     const HeadlessTexture *normalMap          = setup.normalMap;
     const float       normalScale             = setup.normalScale;
-    const glm::vec3   fallbackTangentNormal   = setup.fallbackTangentNormal;
     const bool        hasMetallicRoughnessMap = setup.hasMetallicRoughnessMap;
     const HeadlessTexture *metallicRoughnessMap = setup.metallicRoughnessMap;
     const float       metallicFactor          = setup.metallicFactor;
@@ -1916,16 +1950,19 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
                                              + correctedC * cornerC.worldNormal;
         const glm::vec3 geometryNormal       = glm::normalize(interpolatedNormal);
 
-        glm::vec3 tangentNormal = fallbackTangentNormal;
+        // Without a normal map the surface normal IS the interpolated
+        // geometry normal: skip the TBN construction and its per-pixel
+        // normalize (the common case for colored/vertex-lit parts).
+        glm::vec3 normal = geometryNormal;
         if (hasNormalMap)
         {
             const glm::vec3 normalMapSample = normalMap->sample(interpolatedUv.x, interpolatedUv.y) * 2.0f - 1.0f;
-            tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
+            const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
                 normalMapSample.y * normalScale,
                 normalMapSample.z));
+            const glm::mat3 tbn(tangentScaled, bitangentScaled, geometryNormal);
+            normal = glm::normalize(tbn * tangentNormal);
         }
-        const glm::mat3 tbn(tangentScaled, bitangentScaled, geometryNormal);
-        const glm::vec3 normal = glm::normalize(tbn * tangentNormal);
 
         float metallic  = metallicFactor;
         float roughness = roughnessFactor;
@@ -1969,7 +2006,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         }
     }
     shaded = toneMapColor(shaded, environment_.exposure, environment_.toneMapping);
-    shaded = glm::pow(glm::max(shaded, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
+    shaded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
     return shaded;
 }
 

@@ -266,6 +266,29 @@ std::uint64_t keyMaskBit(Key key)
     return value > 0 && value < 64 ? (std::uint64_t{1} << value) : 0;
 }
 
+// Bit for a MouseButton in the mouse button state mask; 0 when out of range.
+std::uint8_t mouseButtonMaskBit(MouseButton button)
+{
+    const std::uint32_t value = static_cast<std::uint32_t>(button);
+    return value < 8 ? static_cast<std::uint8_t>(std::uint8_t{1} << value) : std::uint8_t{0};
+}
+
+// Rebuilds the held-mouse-button mask from GLFW's live button state. Used at
+// creation and on focus gain: while unfocused, button events are missed.
+void synchronizeMouseButtonState(GLFWwindow *window, WindowRecord &record)
+{
+    std::uint8_t        mask       = 0;
+    constexpr std::uint32_t maximumButton = static_cast<std::uint32_t>(MouseButton::Forward);
+    for (std::uint32_t value = 0; value <= maximumButton; ++value)
+    {
+        if (glfwGetMouseButton(window, static_cast<int>(value)) == GLFW_PRESS)
+        {
+            mask |= mouseButtonMaskBit(static_cast<MouseButton>(value));
+        }
+    }
+    record.mouseButtonStateMask = mask;
+}
+
 // Rebuilds the pressed-key mask from GLFW's live key state. Used at creation
 // and on focus gain: while unfocused, key events are missed entirely.
 void synchronizeKeyState(GLFWwindow *window, WindowRecord &record)
@@ -336,7 +359,8 @@ void glfwFramebufferSizeCallback(GLFWwindow *glfwWindow, int width, int height)
 }
 
 // Focus gain re-syncs the key mask (missed events are compensated), focus
-// loss clears it so no key sticks.
+// loss clears it so no key sticks. Mouse buttons are re-synced/cleared the
+// same way.
 void glfwFocusCallback(GLFWwindow *glfwWindow, int focused)
 {
     auto *record = static_cast<WindowRecord *>(glfwGetWindowUserPointer(glfwWindow));
@@ -345,10 +369,12 @@ void glfwFocusCallback(GLFWwindow *glfwWindow, int focused)
         if (focused == GLFW_TRUE)
         {
             synchronizeKeyState(glfwWindow, *record);
+            synchronizeMouseButtonState(glfwWindow, *record);
         }
         else
         {
-            record->keyStateMask = 0;
+            record->keyStateMask         = 0;
+            record->mouseButtonStateMask = 0;
         }
         queueWindowEvent(
             *record, WindowEvent{.kind = focused ? WindowEventKind::FocusGained : WindowEventKind::FocusLost});
@@ -394,6 +420,40 @@ void glfwKeyCallback(GLFWwindow *glfwWindow, int key, int, int action, int)
         WindowEvent{
             .kind = action == GLFW_PRESS ? WindowEventKind::KeyPressed : WindowEventKind::KeyReleased,
             .key  = mappedKey});
+}
+
+// Press/release updates the mouse button mask and queues a button event.
+void glfwMouseButtonCallback(GLFWwindow *glfwWindow, int button, int action, int)
+{
+    auto *record = static_cast<WindowRecord *>(glfwGetWindowUserPointer(glfwWindow));
+    if (record == nullptr)
+    {
+        return;
+    }
+    if (action != GLFW_PRESS && action != GLFW_RELEASE)
+    {
+        return;
+    }
+    if (button < 0 || button > 7)
+    {
+        return;
+    }
+
+    const MouseButton mappedButton  = static_cast<MouseButton>(static_cast<std::uint32_t>(button));
+    const std::uint8_t bit          = mouseButtonMaskBit(mappedButton);
+    if (action == GLFW_PRESS)
+    {
+        record->mouseButtonStateMask |= bit;
+    }
+    else
+    {
+        record->mouseButtonStateMask &= static_cast<std::uint8_t>(~bit);
+    }
+    queueWindowEvent(*record,
+        WindowEvent{
+            .kind        = action == GLFW_PRESS ? WindowEventKind::MouseButtonPressed
+                                 : WindowEventKind::MouseButtonReleased,
+            .mouseButton = mappedButton});
 }
 
 // Tracks whether glfwInit succeeded (GLFW state is process-global).
@@ -483,9 +543,11 @@ bool GlfwWindowBackend::createWindow(WindowRecord &record, const WindowDescripti
     glfwSetWindowFocusCallback(glfwWindow, glfwFocusCallback);
     glfwSetWindowIconifyCallback(glfwWindow, glfwIconifyCallback);
     glfwSetKeyCallback(glfwWindow, glfwKeyCallback);
+    glfwSetMouseButtonCallback(glfwWindow, glfwMouseButtonCallback);
     if (glfwGetWindowAttrib(glfwWindow, GLFW_FOCUSED) == GLFW_TRUE)
     {
         synchronizeKeyState(glfwWindow, record);
+        synchronizeMouseButtonState(glfwWindow, record);
     }
 
     int framebufferWidth  = 0;

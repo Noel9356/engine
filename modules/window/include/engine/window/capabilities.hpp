@@ -17,8 +17,11 @@ namespace window
 {
 
 // Capability ABI shared by all four capability structs. Bump on layout
-// changes so consumers can reject mismatched providers.
-inline constexpr std::uint32_t windowCapabilityAbi = 9u;
+// changes so consumers can reject mismatched providers. History:
+// 9 -> 10 added mouse button state (MouseButton, isMouseButtonDown, and the
+// MouseButtonPressed/Released event kinds) so applications can drive
+// interactive user interfaces.
+inline constexpr std::uint32_t windowCapabilityAbi = 10u;
 
 // Opaque window identifier; 0 (invalidWindow) means "none".
 using WindowHandle = std::uint32_t;
@@ -120,6 +123,17 @@ enum class CursorMode : std::uint32_t
     Captured
 };
 
+// Mouse buttons reported by isMouseButtonDown and the mouse button events.
+// Values match the GLFW button ordering.
+enum class MouseButton : std::uint32_t
+{
+    Left = 0,
+    Right,
+    Middle,
+    Back,
+    Forward
+};
+
 // Event kinds queued per window and drained with popEvent(s).
 // Resized/FramebufferResized events are coalesced (see queueWindowEvent);
 // size fields are in pixels.
@@ -136,12 +150,15 @@ enum class WindowEventKind : std::uint32_t
     Minimized,
     Restored,
     KeyPressed,
-    KeyReleased
+    KeyReleased,
+    MouseButtonPressed,
+    MouseButtonReleased
 };
 
 // One queued window event. Only the fields relevant to kind are filled:
 // width/height for Resized, framebufferWidth/Height for
-// FramebufferResized, key for key events.
+// FramebufferResized, key for key events, mouseButton for mouse button
+// events.
 struct WindowEvent
 {
     WindowEventKind kind = WindowEventKind::CloseRequested;
@@ -153,6 +170,8 @@ struct WindowEvent
     std::uint32_t framebufferHeight = 0;
 
     Key key = Key::Unknown;
+
+    MouseButton mouseButton = MouseButton::Left;
 };
 
 // Creation parameters. The has* flags distinguish "caller set this" from the
@@ -255,6 +274,11 @@ struct WindowCapability
     // 64-bit mask with bit (1 << Key) set for pressed keys; the result is
     // the stored mask ANDed with requestedMask (0 selects nothing).
     std::uint64_t (*keyStateMask)(void *self, WindowHandle window, std::uint64_t requestedMask);
+
+    // Live mouse button state, mirrored from button events the same way
+    // isKeyDown mirrors key events. Always false on backends without a
+    // pointing device (headless).
+    bool (*isMouseButtonDown)(void *self, WindowHandle window, MouseButton button);
 
     // Headless backend only: maps the software RGBA buffer (fails otherwise).
     bool (*lockSurfacePixels)(void *self, WindowHandle window, SurfacePixels *outPixels);
