@@ -134,7 +134,8 @@ public:
     // to its one-off staging path).
     BlockToken beginBlock(std::uint64_t actualCapacity)
     {
-        if (actualCapacity == 0 || nextToken_ == std::numeric_limits<BlockToken>::max())
+        if (actualCapacity == 0 || nextToken_ == std::numeric_limits<BlockToken>::max()
+            || actualCapacity > maxPoolBytes_ - std::min(pooledBytes_, maxPoolBytes_))
             return invalidBlock;
         const BlockToken token = nextToken_++;
         blocks_.push_back(Block{token, actualCapacity, 0, 0, true});
@@ -258,10 +259,10 @@ private:
     // fresh block always fits even when the offset rounds up.
     [[nodiscard]] std::uint64_t blockCapacityFor(std::uint64_t size) const noexcept
     {
-        std::uint64_t rounded = ((size + blockStep_ - 1) / blockStep_) * blockStep_;
-        if (rounded == 0)
-            rounded = blockStep_;
-        return rounded + alignment_;
+        const std::uint64_t blockCount = size / blockStep_ + (size % blockStep_ != 0 ? 1u : 0u);
+        if (blockCount > (std::numeric_limits<std::uint64_t>::max() - alignment_) / blockStep_)
+            return std::numeric_limits<std::uint64_t>::max();
+        return blockCount * blockStep_ + alignment_;
     }
 
     [[nodiscard]] bool canGrow(std::uint64_t size) const noexcept
@@ -282,10 +283,13 @@ private:
         {
             if (block.pending != 0 || block.open)
                 continue;
+            if (block.used > std::numeric_limits<std::uint64_t>::max() - (alignment_ - 1u))
+                continue;
             const std::uint64_t offset = roundUp(block.used, alignment_);
-            if (offset > std::numeric_limits<std::uint64_t>::max() - size
-                || offset + size > block.capacity)
-                continue; // cannot fit this request even when bump-allocated
+            const std::uint64_t flushSize = roundUp(size, alignment_);
+            if (offset > std::numeric_limits<std::uint64_t>::max() - flushSize
+                || offset + flushSize > block.capacity)
+                continue; // cannot fit the write and its aligned flush range
             if (best == nullptr || block.capacity < best->capacity)
                 best = &block;
         }
@@ -310,9 +314,7 @@ private:
             open_ = 0; // unreachable; guards the open_ invariant
             return false;
         }
-        const std::uint64_t offset = roundUp(block->used, alignment_);
-        const std::uint64_t end    = offset + size; // overflow-checked below
-        if (offset > std::numeric_limits<std::uint64_t>::max() - size || end > block->capacity)
+        if (block->used > std::numeric_limits<std::uint64_t>::max() - (alignment_ - 1u))
         {
             block->open = false;
             open_       = 0;
@@ -320,6 +322,26 @@ private:
                 block->used = 0;
             return false;
         }
+        const std::uint64_t offset = roundUp(block->used, alignment_);
+        if (offset > std::numeric_limits<std::uint64_t>::max() - size)
+        {
+            block->open = false;
+            open_       = 0;
+            if (block->pending == 0)
+                block->used = 0;
+            return false;
+        }
+        const std::uint64_t flushSize = roundUp(size, alignment_);
+        if (offset > std::numeric_limits<std::uint64_t>::max() - flushSize
+            || offset + flushSize > block->capacity)
+        {
+            block->open = false;
+            open_       = 0;
+            if (block->pending == 0)
+                block->used = 0;
+            return false;
+        }
+        const std::uint64_t end = offset + size;
         block->used = end;
         ++block->pending;
         ++outstandingSpans_;
@@ -328,7 +350,7 @@ private:
         if (pendingBytes_ > peakPendingBytes_)
             peakPendingBytes_ = pendingBytes_;
         if (outSpan != nullptr)
-            *outSpan = Span{open_, offset, size, offset, roundUp(size, alignment_)};
+            *outSpan = Span{open_, offset, size, offset, flushSize};
         return true;
     }
 
@@ -363,7 +385,12 @@ private:
         if (alignment <= 1)
             return value;
         const std::uint64_t remainder = value % alignment;
-        return remainder == 0 ? value : value + (alignment - remainder);
+        if (remainder == 0)
+            return value;
+        const std::uint64_t padding = alignment - remainder;
+        return value > std::numeric_limits<std::uint64_t>::max() - padding
+            ? std::numeric_limits<std::uint64_t>::max()
+            : value + padding;
     }
 
     std::uint64_t      alignment_;

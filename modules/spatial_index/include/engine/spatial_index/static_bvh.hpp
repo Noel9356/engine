@@ -307,6 +307,141 @@ public:
         return stats;
     }
 
+    // Sphere query: appends original item indices whose AABBs intersect the
+    // sphere. Internal bounds prune traversal; item bounds are tested exactly.
+    QueryStatistics querySphere(const std::array<float, 3> &center, float radius,
+        std::vector<std::uint32_t> &out,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        QueryStatistics stats{};
+        if (nodes_.empty() || categoryMask == 0 || !std::isfinite(center[0])
+            || !std::isfinite(center[1]) || !std::isfinite(center[2])
+            || !std::isfinite(radius) || radius < 0.0f)
+            return stats;
+        std::array<std::uint32_t, 128> stack{};
+        std::size_t stackSize = 0;
+        stack[stackSize++] = 0u;
+        while (stackSize != 0)
+        {
+            const std::uint32_t index = stack[--stackSize];
+            const Node &node = nodes_[index];
+            ++stats.nodesVisited;
+            if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsSphereValid(node.bounds, center, radius))
+                continue;
+            if (node.count != 0u)
+            {
+                for (std::uint32_t offset = 0; offset < node.count; ++offset)
+                {
+                    const std::uint32_t itemIndex = order_[node.first + offset];
+                    ++stats.leavesVisited;
+                    const SpatialItem &item = items_[itemIndex];
+                    if ((item.categoryMask & categoryMask) != 0
+                        && query_detail::intersectsSphereValid(item.bounds, center, radius))
+                    {
+                        out.push_back(itemIndex);
+                        ++stats.hits;
+                    }
+                }
+            }
+            else
+            {
+                if (stackSize + 2u > stack.size())
+                    return stats;
+                stack[stackSize++] = node.right;
+                stack[stackSize++] = node.left;
+            }
+        }
+        return stats;
+    }
+
+    // Frustum query: appends original item indices whose AABBs intersect all
+    // inward-facing planes. Category masks are used at both node and item level.
+    QueryStatistics queryFrustum(const Frustum3 &frustum, std::vector<std::uint32_t> &out,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        QueryStatistics stats{};
+        if (!frustum.valid() || nodes_.empty() || categoryMask == 0)
+            return stats;
+        std::array<std::uint32_t, 128> stack{};
+        std::size_t stackSize = 0;
+        stack[stackSize++] = 0u;
+        while (stackSize != 0)
+        {
+            const std::uint32_t index = stack[--stackSize];
+            const Node &node = nodes_[index];
+            ++stats.nodesVisited;
+            if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsFrustumValid(node.bounds, frustum))
+                continue;
+            if (node.count != 0u)
+            {
+                for (std::uint32_t offset = 0; offset < node.count; ++offset)
+                {
+                    const std::uint32_t itemIndex = order_[node.first + offset];
+                    ++stats.leavesVisited;
+                    const SpatialItem &item = items_[itemIndex];
+                    if ((item.categoryMask & categoryMask) != 0 && query_detail::intersectsFrustumValid(item.bounds, frustum))
+                    {
+                        out.push_back(itemIndex);
+                        ++stats.hits;
+                    }
+                }
+            }
+            else
+            {
+                if (stackSize + 2u > stack.size())
+                    return stats;
+                stack[stackSize++] = node.right;
+                stack[stackSize++] = node.left;
+            }
+        }
+        return stats;
+    }
+
+    // Ray query: appends exact item-bound hits in BVH traversal order.
+    // Distance is in world units; out is not cleared. Traversal uses a fixed
+    // stack and returns partial results if it would overflow.
+    QueryStatistics raycast(const Ray3 &ray, std::vector<StaticRayHit> &out,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        QueryStatistics stats{};
+        if (nodes_.empty() || categoryMask == 0)
+            return stats;
+        std::array<std::uint32_t, 128> stack{};
+        std::size_t stackSize = 0;
+        stack[stackSize++] = 0u;
+        while (stackSize != 0)
+        {
+            const std::uint32_t index = stack[--stackSize];
+            const Node &node = nodes_[index];
+            ++stats.nodesVisited;
+            if ((node.categoryMask & categoryMask) == 0 || !intersectRay(node.bounds, ray))
+                continue;
+            if (node.count != 0u)
+            {
+                for (std::uint32_t offset = 0; offset < node.count; ++offset)
+                {
+                    const std::uint32_t itemIndex = order_[node.first + offset];
+                    ++stats.leavesVisited;
+                    const SpatialItem &item = items_[itemIndex];
+                    float distance = 0.0f;
+                    if ((item.categoryMask & categoryMask) != 0 && intersectRay(item.bounds, ray, &distance))
+                    {
+                        out.push_back({itemIndex, item.userData, item.categoryMask, distance});
+                        ++stats.hits;
+                    }
+                }
+            }
+            else
+            {
+                if (stackSize + 2u > stack.size())
+                    return stats;
+                stack[stackSize++] = node.right;
+                stack[stackSize++] = node.left;
+            }
+        }
+        return stats;
+    }
+
     // Item accessor by original index; nullptr when out of range.
     [[nodiscard]] const SpatialItem *item(std::uint32_t index) const noexcept
     {

@@ -202,7 +202,7 @@ target_include_directories(
 
 target_compile_definitions(
     engine_module_audio
-    PRIVATE ENGINE_AUDIO_MODULE_VERSION="0.3.0"
+    PRIVATE ENGINE_AUDIO_MODULE_VERSION="0.1.0"
 )
 
 target_link_libraries(

@@ -38,6 +38,18 @@ struct SceneSpatialHit
     std::uint64_t categoryMask  = std::numeric_limits<std::uint64_t>::max();
 };
 
+// Scene-level ray hit. staticIndex is meaningful for Static; dynamicHandle
+// is meaningful for Dynamic. Distance is measured in world units.
+struct SceneSpatialRayHit
+{
+    SceneMobility mobility = SceneMobility::Static;
+    std::uint32_t staticIndex = invalidNode;
+    ProxyHandle dynamicHandle = invalidProxy;
+    std::uint64_t userData = 0;
+    std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max();
+    float distance = 0.0f;
+};
+
 // Caller-owned temporary storage reused across queries to avoid per-query
 // allocations; it holds no data between calls and is reset by every query.
 struct SceneSpatialQueryScratch
@@ -48,6 +60,20 @@ struct SceneSpatialQueryScratch
     void reserve(std::size_t staticCount, std::size_t dynamicCount)
     {
         staticIndices.reserve(staticCount);
+        dynamicHits.reserve(dynamicCount);
+    }
+};
+
+// Caller-owned ray-query buffers; reserve to the expected number of hits to
+// keep steady-state queries allocation-free.
+struct SceneSpatialRayScratch
+{
+    std::vector<StaticRayHit> staticHits;
+    std::vector<DynamicRayHit> dynamicHits;
+
+    void reserve(std::size_t staticCount, std::size_t dynamicCount)
+    {
+        staticHits.reserve(staticCount);
         dynamicHits.reserve(dynamicCount);
     }
 };
@@ -145,6 +171,75 @@ public:
         result.hits += dynamicStats.hits;
         for (const SpatialHit &hit : scratch.dynamicHits)
             out.push_back({SceneMobility::Dynamic, invalidNode, hit.handle, hit.userData, hit.categoryMask});
+        return result;
+    }
+
+    // Sphere query across static and dynamic geometry. Results are appended
+    // static-first, then dynamic; scratch buffers are cleared and reused.
+    QueryStatistics querySphere(const std::array<float, 3> &center, float radius,
+        std::vector<SceneSpatialHit> &out, SceneSpatialQueryScratch &scratch,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        scratch.staticIndices.clear();
+        scratch.dynamicHits.clear();
+        QueryStatistics result = static_.querySphere(center, radius, scratch.staticIndices, categoryMask);
+        for (const std::uint32_t index : scratch.staticIndices)
+        {
+            const SpatialItem *item = static_.item(index);
+            if (item != nullptr)
+                out.push_back({SceneMobility::Static, index, invalidProxy, item->userData, item->categoryMask});
+        }
+        const QueryStatistics dynamicStats = dynamic_.querySphere(center, radius, scratch.dynamicHits, categoryMask);
+        result.nodesVisited += dynamicStats.nodesVisited;
+        result.leavesVisited += dynamicStats.leavesVisited;
+        result.hits += dynamicStats.hits;
+        for (const SpatialHit &hit : scratch.dynamicHits)
+            out.push_back({SceneMobility::Dynamic, invalidNode, hit.handle, hit.userData, hit.categoryMask});
+        return result;
+    }
+
+    // Frustum query across static and dynamic geometry. Frustum planes point
+    // inward; invalid plane data yields an empty result.
+    QueryStatistics queryFrustum(const Frustum3 &frustum, std::vector<SceneSpatialHit> &out,
+        SceneSpatialQueryScratch &scratch,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        scratch.staticIndices.clear();
+        scratch.dynamicHits.clear();
+        QueryStatistics result = static_.queryFrustum(frustum, scratch.staticIndices, categoryMask);
+        for (const std::uint32_t index : scratch.staticIndices)
+        {
+            const SpatialItem *item = static_.item(index);
+            if (item != nullptr)
+                out.push_back({SceneMobility::Static, index, invalidProxy, item->userData, item->categoryMask});
+        }
+        const QueryStatistics dynamicStats = dynamic_.queryFrustum(frustum, scratch.dynamicHits, categoryMask);
+        result.nodesVisited += dynamicStats.nodesVisited;
+        result.leavesVisited += dynamicStats.leavesVisited;
+        result.hits += dynamicStats.hits;
+        for (const SpatialHit &hit : scratch.dynamicHits)
+            out.push_back({SceneMobility::Dynamic, invalidNode, hit.handle, hit.userData, hit.categoryMask});
+        return result;
+    }
+
+    // Ray query across static and dynamic geometry. Results are appended in
+    // static-then-dynamic grouping, not distance-sorted; sort by distance when
+    // nearest-first processing is required. Scratch buffers are cleared/reused.
+    QueryStatistics raycast(const Ray3 &ray, std::vector<SceneSpatialRayHit> &out,
+        SceneSpatialRayScratch &scratch,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        scratch.staticHits.clear();
+        scratch.dynamicHits.clear();
+        QueryStatistics result = static_.raycast(ray, scratch.staticHits, categoryMask);
+        for (const StaticRayHit &hit : scratch.staticHits)
+            out.push_back({SceneMobility::Static, hit.itemIndex, invalidProxy, hit.userData, hit.categoryMask, hit.distance});
+        const QueryStatistics dynamicStats = dynamic_.raycast(ray, scratch.dynamicHits, categoryMask);
+        result.nodesVisited += dynamicStats.nodesVisited;
+        result.leavesVisited += dynamicStats.leavesVisited;
+        result.hits += dynamicStats.hits;
+        for (const DynamicRayHit &hit : scratch.dynamicHits)
+            out.push_back({SceneMobility::Dynamic, invalidNode, hit.handle, hit.userData, hit.categoryMask, hit.distance});
         return result;
     }
 

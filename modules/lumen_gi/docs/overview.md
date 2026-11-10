@@ -107,11 +107,11 @@ radiance as `albedo / pi * irradiance`.
 | `module.toml` / `config.toml` | Module descriptor (capability + declared config keys) and the default `[lumen_gi]` section. |
 | `include/engine/lumen_gi/capabilities.hpp` | Public POD types, function-pointer table, SH2 evaluation helpers. |
 | `source/lumen_gi.cpp` | Module class: manifest, capability binding, configuration + live reload, environment snapshot, the `evaluate` task graph, budgeted work list construction, entry table. |
-| `source/lumen_gi_internal.hpp` | Shared pipeline state: settings, surfaces, cards, probe levels, screen gather buffers, statistics. |
+| `source/lumen_gi_internal.hpp` | Shared pipeline state, deterministic sampling helpers, orthonormal-basis construction, settings, surfaces, cards, probe levels, screen gather buffers, statistics. |
 | `source/lumen_gi_scene.cpp` | Geometry ingestion/validation, per-surface BVHs, closest/any-hit tracing, card placement, probe direction table and clip levels, card capture. |
 | `source/lumen_gi_lighting.cpp` | Surface cache sampling (the card lookup), direct lighting chunks, indirect propagation chunks, world probe updates, SH2 projection. |
 | `source/lumen_gi_debug.cpp` | GBuffer rasterizer for the debug view, screen-space final gather (probes, plane-aware interpolation, temporal + bilateral). |
-| `source/lumen_gi_debug_views.cpp` | Debug view composition, reference path tracer (ground truth), PPM export. |
+| `source/lumen_gi_debug_views.cpp` | Debug view composition, reference path tracer (ground truth), and RGB PPM export through `engine/util/ppm.hpp`. |
 
 ## How it works
 

@@ -33,7 +33,7 @@ add_library(
 )
 target_compile_definitions(
     engine_module_file_asset_store
-    PRIVATE ENGINE_FILE_ASSET_STORE_MODULE_VERSION="0.3.0"
+    PRIVATE ENGINE_FILE_ASSET_STORE_MODULE_VERSION="0.1.0"
 )
 target_link_libraries(
     engine_module_file_asset_store

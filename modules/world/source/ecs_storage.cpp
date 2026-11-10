@@ -14,6 +14,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -55,9 +56,14 @@ bool isPowerOfTwo(std::uint32_t value) noexcept
     return value != 0 && (value & (value - 1u)) == 0;
 }
 
-std::size_t alignUp(std::size_t value, std::size_t alignment) noexcept
+std::size_t boundedStringLength(const char *value, std::size_t maximum) noexcept
 {
-    return (value + alignment - 1u) & ~(alignment - 1u);
+    if (value == nullptr)
+        return 0;
+    std::size_t length = 0;
+    while (length < maximum && value[length] != '\0')
+        ++length;
+    return length;
 }
 
 // Overflow-checked alignUp.
@@ -312,6 +318,8 @@ struct Storage::Impl
         if (existing != archetypeMap.end())
             return existing->second;
 
+        if (archetypes.size() >= invalidIndex)
+            throw std::length_error("archetype handle space exhausted");
         auto archetype            = std::make_unique<Archetype>();
         archetype->signature      = signature;
         const std::uint32_t index = static_cast<std::uint32_t>(archetypes.size());
@@ -540,7 +548,8 @@ Storage &Storage::operator=(Storage &&) noexcept = default;
 ComponentId Storage::registerComponent(const ComponentDescription &description, StorageError *error)
 {
     setError(error, StorageError::None);
-    if (!impl_ || description.name == nullptr || description.name[0] == '\0' || description.size == 0
+    const std::size_t nameLength = boundedStringLength(description.name, 4097u);
+    if (!impl_ || nameLength == 0 || nameLength > 4096u || description.size == 0
         || !isPowerOfTwo(description.alignment) || description.alignment > 4096)
     {
         setError(error, StorageError::InvalidInput);
@@ -564,10 +573,14 @@ ComponentId Storage::registerComponent(const ComponentDescription &description, 
     try
     {
         Impl::ComponentType type;
-        type.name             = description.name;
-        type.size             = description.size;
-        type.alignment        = description.alignment;
-        type.stride           = alignUp(description.size, description.alignment);
+        type.name      = description.name;
+        type.size      = description.size;
+        type.alignment = description.alignment;
+        if (!tryAlignUp(description.size, description.alignment, type.stride))
+        {
+            setError(error, StorageError::InvalidInput);
+            return invalidComponent;
+        }
         type.defaultConstruct = description.defaultConstruct;
         type.copyConstruct    = description.copyConstruct;
         type.destroy          = description.destroy;
@@ -586,6 +599,11 @@ ComponentId Storage::registerComponent(const ComponentDescription &description, 
         return id;
     }
     catch (const std::bad_alloc &)
+    {
+        setError(error, StorageError::ResourceFailure);
+        return invalidComponent;
+    }
+    catch (const std::length_error &)
     {
         setError(error, StorageError::ResourceFailure);
         return invalidComponent;
@@ -654,10 +672,20 @@ Entity Storage::createEntity(StorageError *error)
         setError(error, StorageError::ResourceFailure);
         return invalidEntity;
     }
+    catch (const std::length_error &)
+    {
+        if (slot != invalidIndex)
+        {
+            impl_->entities[slot].nextFree = impl_->freeSlotHead;
+            impl_->freeSlotHead            = slot;
+        }
+        setError(error, StorageError::ResourceFailure);
+        return invalidEntity;
+    }
 }
 
-// Frees the entity: swap-removes its row, bumps the generation (stale
-// handles now fail), and links the slot into the free list.
+// Frees the entity: swap-removes its row, advances the generation, and
+// links the slot into the free list. Exhausted generations retire the slot.
 bool Storage::destroyEntity(Entity entity, StorageError *error)
 {
     setError(error, StorageError::None);
@@ -677,10 +705,17 @@ bool Storage::destroyEntity(Entity entity, StorageError *error)
     ++impl_->structuralVersion;
     location.alive     = false;
     location.archetype = location.chunk = location.row = invalidIndex;
-    if (++location.generation == 0)
+    if (location.generation == std::numeric_limits<std::uint32_t>::max())
+    {
+        location.generation = 0;
+        location.nextFree   = invalidIndex;
+    }
+    else
+    {
         ++location.generation;
-    location.nextFree   = impl_->freeSlotHead;
-    impl_->freeSlotHead = slot;
+        location.nextFree   = impl_->freeSlotHead;
+        impl_->freeSlotHead = slot;
+    }
     --impl_->aliveCount;
     return true;
 }
@@ -761,6 +796,11 @@ bool Storage::addComponent(Entity entity, ComponentId component, const void *ini
         setError(error, StorageError::ResourceFailure);
         return false;
     }
+    catch (const std::length_error &)
+    {
+        setError(error, StorageError::ResourceFailure);
+        return false;
+    }
 }
 
 // Moves the entity to the archetype with one fewer component;
@@ -818,6 +858,11 @@ bool Storage::removeComponent(Entity entity, ComponentId component, StorageError
         setError(error, StorageError::ResourceFailure);
         return false;
     }
+    catch (const std::length_error &)
+    {
+        setError(error, StorageError::ResourceFailure);
+        return false;
+    }
 }
 
 bool Storage::hasComponent(Entity entity, ComponentId component) const noexcept
@@ -862,7 +907,9 @@ QueryId Storage::createQuery(const QueryDescription &description, StorageError *
         return invalidQuery;
     }
     if (!impl_ || (description.requiredCount != 0 && description.required == nullptr)
-        || (description.excludedCount != 0 && description.excluded == nullptr))
+        || (description.excludedCount != 0 && description.excluded == nullptr)
+        || description.requiredCount > impl_->componentTypes.size()
+        || description.excludedCount > impl_->componentTypes.size())
     {
         setError(error, StorageError::InvalidInput);
         return invalidQuery;
@@ -909,13 +956,35 @@ QueryId Storage::createQuery(const QueryDescription &description, StorageError *
                 query.matches.push_back(std::move(match));
             }
         }
-        QueryId id = impl_->nextQuery++;
+        QueryId id = invalidQuery;
+        for (std::size_t attempt = 0; attempt <= impl_->queries.size(); ++attempt)
+        {
+            const QueryId candidate = impl_->nextQuery++;
+            if (candidate != invalidQuery && !impl_->queries.contains(candidate))
+            {
+                id = candidate;
+                break;
+            }
+        }
         if (id == invalidQuery)
-            id = impl_->nextQuery++;
-        impl_->queries.emplace(id, std::move(query));
+        {
+            setError(error, StorageError::CapacityExceeded);
+            return invalidQuery;
+        }
+        const auto inserted = impl_->queries.emplace(id, std::move(query));
+        if (!inserted.second)
+        {
+            setError(error, StorageError::CapacityExceeded);
+            return invalidQuery;
+        }
         return id;
     }
     catch (const std::bad_alloc &)
+    {
+        setError(error, StorageError::ResourceFailure);
+        return invalidQuery;
+    }
+    catch (const std::length_error &)
     {
         setError(error, StorageError::ResourceFailure);
         return invalidQuery;
@@ -976,6 +1045,11 @@ bool Storage::queryChunks(QueryId query, ChunkCallback callback, void *userData,
             setError(error, StorageError::ResourceFailure);
             return false;
         }
+        catch (const std::length_error &)
+        {
+            setError(error, StorageError::ResourceFailure);
+            return false;
+        }
     }
     for (const Impl::QueryMatch &match : found->second.matches)
     {
@@ -1001,7 +1075,8 @@ bool Storage::queryChunks(QueryId query, ChunkCallback callback, void *userData,
 
 const StorageOptions &Storage::options() const noexcept
 {
-    return impl_->settings;
+    static constexpr StorageOptions defaults{};
+    return impl_ ? impl_->settings : defaults;
 }
 
 } // namespace engine::ecs
@@ -1024,6 +1099,11 @@ bool CommandBuffer::append(Command command, StorageError *error)
         return true;
     }
     catch (const std::bad_alloc &)
+    {
+        setError(error, StorageError::ResourceFailure);
+        return false;
+    }
+    catch (const std::length_error &)
     {
         setError(error, StorageError::ResourceFailure);
         return false;

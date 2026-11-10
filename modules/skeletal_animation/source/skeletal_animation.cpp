@@ -7,6 +7,7 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/math/quaternion.hpp>
 #include <engine/skeletal_animation/capabilities.hpp>
 #include "lua_bridge.hpp"
 
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <new>
 #include <string>
@@ -25,6 +27,10 @@ namespace engine::skeletal_animation
 {
 namespace
 {
+
+using engine::math::multiplyQuaternion;
+using engine::math::normalizeQuaternion;
+using engine::math::quaternionDot;
 
 using Pose = JointDescription;
 
@@ -55,39 +61,12 @@ bool finitePose(const Pose &pose) noexcept
     return lengthSquared > 1.0e-16 && std::isfinite(lengthSquared);
 }
 
-void normalizeQuaternion(float value[4]) noexcept
-{
-    const double lengthSquared = static_cast<double>(value[0]) * value[0]
-        + static_cast<double>(value[1]) * value[1] + static_cast<double>(value[2]) * value[2]
-        + static_cast<double>(value[3]) * value[3];
-    const float inverseLength = static_cast<float>(1.0 / std::sqrt(lengthSquared));
-    for (std::uint32_t index = 0; index < 4; ++index)
-        value[index] *= inverseLength;
-}
-
-float quaternionDot(const float a[4], const float b[4]) noexcept
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-}
-
 void nlerp(const float a[4], const float bInput[4], float t, float output[4]) noexcept
 {
     const float sign = quaternionDot(a, bInput) < 0.0f ? -1.0f : 1.0f;
     for (std::uint32_t index = 0; index < 4; ++index)
         output[index] = a[index] + (bInput[index] * sign - a[index]) * t;
     normalizeQuaternion(output);
-}
-
-void quaternionMultiply(const float left[4], const float right[4], float output[4]) noexcept
-{
-    const float x = left[3] * right[0] + left[0] * right[3] + left[1] * right[2] - left[2] * right[1];
-    const float y = left[3] * right[1] - left[0] * right[2] + left[1] * right[3] + left[2] * right[0];
-    const float z = left[3] * right[2] + left[0] * right[1] - left[1] * right[0] + left[2] * right[3];
-    const float w = left[3] * right[3] - left[0] * right[0] - left[1] * right[1] - left[2] * right[2];
-    output[0] = x;
-    output[1] = y;
-    output[2] = z;
-    output[3] = w;
 }
 
 void weightedQuaternionDelta(const float deltaInput[4], float weight, float output[4]) noexcept
@@ -262,6 +241,7 @@ struct ClipRecord
     // Slerp-only intervals are packed independently; angle and reciprocal sine
     // are precomputed at clip creation to remove acos/sin(angle) from sampling.
     std::vector<QuaternionInterval> rotationIntervals;
+    std::vector<AnimationEventMarker> eventMarkers;
 };
 
 struct PlayerRecord
@@ -273,6 +253,8 @@ struct PlayerRecord
     bool                    playing  = true;
     bool                    finished = false;
     std::vector<std::uint32_t> trackKeyCursors;
+    std::deque<AnimationPlayerEvent> events;
+    bool eventQueueOverflowed = false;
 };
 
 class SkeletalAnimationModule final : public ModuleInterface
@@ -305,6 +287,10 @@ public:
         readPositiveLimit(context, "maximum_blend_poses", 256, maximumBlendPoses_);
         readPositiveLimit(context, "maximum_total_sampling_cache_entries", 100'000'000,
             maximumTotalSamplingCacheEntries_);
+        readPositiveLimit(context, "maximum_event_markers_per_clip", 65536, maximumEventMarkersPerClip_);
+        readPositiveLimit(context, "maximum_events_per_player", 65536, maximumEventsPerPlayer_);
+        readPositiveLimit(context, "maximum_total_pending_events", 100'000'000, maximumTotalPendingEvents_);
+        readPositiveLimit(context, "maximum_total_event_markers", 100'000'000, maximumTotalEventMarkers_);
         if (const auto value = context.configurationIntegerInSection("skeletal_animation", "maximum_cursor_walk");
             value && *value >= 0 && *value <= 1'000'000)
             maximumCursorWalk_ = static_cast<std::uint32_t>(*value);
@@ -322,8 +308,7 @@ public:
         }
 
         scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
-        if (scriptRuntime_ != nullptr && scriptRuntime_->abi == script_runtime::scriptRuntimeCapabilityAbi
-            && scriptRuntime_->registerRuntimeInitializer != nullptr)
+        if (script_runtime::canRegisterRuntimeInitializer(scriptRuntime_))
         {
             luaBridgeContext_.scriptRuntime = scriptRuntime_;
             luaBridgeContext_.animation = &capability_;
@@ -332,10 +317,12 @@ public:
             luaBridgeContext_.maximumClipBuilders = maximumClips_;
             luaBridgeContext_.maximumTracksPerClip = maximumTracksPerClip_;
             luaBridgeContext_.maximumKeyframesPerTrack = maximumKeyframesPerTrack_;
+            luaBridgeContext_.maximumEventMarkersPerClip = maximumEventMarkersPerClip_;
+            luaBridgeContext_.maximumPendingEventMarkers = maximumTotalEventMarkers_;
             luaBridgeContext_.maximumPendingJoints = maximumTotalJoints_;
             luaBridgeContext_.maximumPendingKeyframes = maximumTotalKeyframes_;
-            runtimeInitializer_ = scriptRuntime_->registerRuntimeInitializer(
-                scriptRuntime_->self, initializeSkeletalAnimationLuaRuntime, &luaBridgeContext_);
+            runtimeInitializer_ = script_runtime::tryRegisterRuntimeInitializer(
+                scriptRuntime_, initializeSkeletalAnimationLuaRuntime, &luaBridgeContext_);
         }
 
         // Reserving the configured live-object budgets avoids rehash pauses
@@ -350,12 +337,7 @@ public:
 
     void stop() override
     {
-        if (scriptRuntime_ != nullptr && runtimeInitializer_ != script_runtime::invalidScriptRuntimeInitializer
-            && scriptRuntime_->unregisterRuntimeInitializer != nullptr)
-        {
-            scriptRuntime_->unregisterRuntimeInitializer(scriptRuntime_->self, runtimeInitializer_);
-            runtimeInitializer_ = script_runtime::invalidScriptRuntimeInitializer;
-        }
+        script_runtime::unregisterRuntimeInitializer(scriptRuntime_, runtimeInitializer_);
         shutdownSkeletalAnimationLuaBridge(luaBridgeContext_);
         players_.clear();
         clips_.clear();
@@ -363,6 +345,8 @@ public:
         totalKeyframes_             = 0;
         totalJoints_                = 0;
         totalSamplingCacheEntries_  = 0;
+        totalEventMarkers_          = 0;
+        totalPendingEvents_         = 0;
     }
 
     void *capabilityPointerFor(const std::string &name) override
@@ -376,7 +360,7 @@ private:
         return ParticipantManifest{
             .name                 = "skeletal_animation",
             .kind                 = ParticipantKind::EngineModule,
-            .version              = "0.4.0",
+            .version              = "0.1.0",
             .providedCapabilities = {"skeletal_animation"},
             .optionalCapabilities = {"script_runtime"}};
     }
@@ -403,6 +387,7 @@ private:
         ENGINE_SKELETAL_ANIMATION_BIND(destroyClip, destroyClipImpl);
         ENGINE_SKELETAL_ANIMATION_BIND(clipDuration, clipDurationImpl);
         ENGINE_SKELETAL_ANIMATION_BIND(sampleClip, sampleClipImpl);
+        ENGINE_SKELETAL_ANIMATION_BIND(extractRootMotion, extractRootMotionImpl);
         ENGINE_SKELETAL_ANIMATION_BIND(createPlayer, createPlayerImpl);
         ENGINE_SKELETAL_ANIMATION_BIND(destroyPlayer, destroyPlayerImpl);
         ENGINE_SKELETAL_ANIMATION_BIND(setPlayerClip, setPlayerClipImpl);
@@ -415,6 +400,9 @@ private:
         ENGINE_SKELETAL_ANIMATION_BIND(blendPosesMasked, blendPosesMaskedImpl);
         ENGINE_SKELETAL_ANIMATION_BIND(applyAdditivePose, applyAdditivePoseImpl);
         ENGINE_SKELETAL_ANIMATION_BIND(buildGlobalTransforms, buildGlobalTransformsImpl);
+        ENGINE_SKELETAL_ANIMATION_BIND(playerEventCount, playerEventCountImpl);
+        ENGINE_SKELETAL_ANIMATION_BIND(copyPlayerEvents, copyPlayerEventsImpl);
+        ENGINE_SKELETAL_ANIMATION_BIND(clearPlayerEvents, clearPlayerEventsImpl);
 #undef ENGINE_SKELETAL_ANIMATION_BIND
     }
 
@@ -547,12 +535,16 @@ private:
     {
         setError(error, AnimationError::None);
         if (description == nullptr || !std::isfinite(description->durationSeconds)
-            || description->durationSeconds <= 0.0f || (description->trackCount != 0 && description->tracks == nullptr))
+            || description->durationSeconds <= 0.0f || (description->trackCount != 0 && description->tracks == nullptr)
+            || (description->eventMarkerCount != 0 && description->eventMarkers == nullptr))
         {
             setError(error, AnimationError::InvalidDescription);
             return invalidAnimationClip;
         }
-        if (clips_.size() >= maximumClips_ || description->trackCount > maximumTracksPerClip_)
+        if (clips_.size() >= maximumClips_ || description->trackCount > maximumTracksPerClip_
+            || description->eventMarkerCount > maximumEventMarkersPerClip_
+            || totalEventMarkers_ > maximumTotalEventMarkers_
+            || description->eventMarkerCount > maximumTotalEventMarkers_ - totalEventMarkers_)
         {
             setError(error, AnimationError::CapacityExceeded);
             return invalidAnimationClip;
@@ -627,6 +619,21 @@ private:
         record.keyframes.reserve(static_cast<std::size_t>(requestedKeyframes));
         record.inverseIntervals.reserve(static_cast<std::size_t>(requestedKeyframes));
         record.rotationIntervals.reserve(static_cast<std::size_t>(slerpKeyframes));
+        record.eventMarkers.reserve(description->eventMarkerCount);
+        for (std::uint32_t index = 0; index < description->eventMarkerCount; ++index)
+        {
+            const AnimationEventMarker marker = description->eventMarkers[index];
+            if (!std::isfinite(marker.timeSeconds) || marker.timeSeconds < 0.0f
+                || marker.timeSeconds > record.duration)
+            {
+                setError(error, AnimationError::InvalidDescription);
+                return invalidAnimationClip;
+            }
+            record.eventMarkers.push_back(marker);
+        }
+        std::stable_sort(record.eventMarkers.begin(), record.eventMarkers.end(),
+            [](const AnimationEventMarker &left, const AnimationEventMarker &right)
+            { return left.timeSeconds < right.timeSeconds; });
 
         for (const AnimationTrackDescription *source : orderedTracks)
         {
@@ -726,6 +733,7 @@ private:
         }
         clips_.emplace(handle, std::move(record));
         totalKeyframes_ += requestedKeyframes;
+        totalEventMarkers_ += description->eventMarkerCount;
         return handle;
     }
 
@@ -735,6 +743,7 @@ private:
         if (clip == clips_.end())
             return;
         totalKeyframes_ -= clip->second.keyframeCount;
+        totalEventMarkers_ -= clip->second.eventMarkers.size();
         clips_.erase(clip);
 
         // Clip destruction is infrequent. Park only players currently using
@@ -894,6 +903,294 @@ private:
         return sampleClipInternal(clipHandle, skeletonHandle, time, looping, output, capacity, error, nullptr);
     }
 
+    bool extractRootMotionImpl(AnimationClipHandle clipHandle, SkeletonHandle skeletonHandle,
+        std::uint32_t rootJoint, float startTime, float endTime, bool looping,
+        float outTranslation[3], float outRotation[4], AnimationError *error)
+    {
+        setError(error, AnimationError::None);
+        if (outTranslation == nullptr || outRotation == nullptr || !std::isfinite(startTime)
+            || !std::isfinite(endTime))
+        {
+            setError(error, AnimationError::InvalidDescription);
+            return false;
+        }
+        const auto skeleton = skeletons_.find(skeletonHandle);
+        const auto clip = clips_.find(clipHandle);
+        if (skeleton == skeletons_.end() || clip == clips_.end())
+        {
+            setError(error, AnimationError::InvalidHandle);
+            return false;
+        }
+        const std::uint32_t jointCount = static_cast<std::uint32_t>(skeleton->second.bindPose.size());
+        if (rootJoint >= jointCount)
+        {
+            setError(error, AnimationError::InvalidDescription);
+            return false;
+        }
+        if (skeleton->second.bindPose[rootJoint].parentIndex != -1)
+        {
+            setError(error, AnimationError::InvalidDescription);
+            return false;
+        }
+
+        try
+        {
+            std::vector<Pose> startPose(jointCount);
+            std::vector<Pose> endPose(jointCount);
+            if (!sampleClipInternal(clipHandle, skeletonHandle, startTime, looping,
+                    startPose.data(), jointCount, error, nullptr)
+                || !sampleClipInternal(clipHandle, skeletonHandle, endTime, looping,
+                    endPose.data(), jointCount, error, nullptr))
+                return false;
+
+            const Pose &start = startPose[rootJoint];
+            const Pose &end = endPose[rootJoint];
+            if (!finitePose(start) || !finitePose(end))
+            {
+                setError(error, AnimationError::InvalidDescription);
+                return false;
+            }
+
+            float inverseStart[4] = {-start.rotation[0], -start.rotation[1],
+                -start.rotation[2], start.rotation[3]};
+            normalizeQuaternion(inverseStart);
+            const float delta[3] = {end.translation[0] - start.translation[0],
+                end.translation[1] - start.translation[1], end.translation[2] - start.translation[2]};
+            const float qx = inverseStart[0];
+            const float qy = inverseStart[1];
+            const float qz = inverseStart[2];
+            const float qw = inverseStart[3];
+            const float dot = qx * delta[0] + qy * delta[1] + qz * delta[2];
+            const float cross[3] = {qy * delta[2] - qz * delta[1],
+                qz * delta[0] - qx * delta[2], qx * delta[1] - qy * delta[0]};
+            const float rotated[3] = {
+                2.0f * dot * qx + (qw * qw - (qx * qx + qy * qy + qz * qz)) * delta[0] + 2.0f * qw * cross[0],
+                2.0f * dot * qy + (qw * qw - (qx * qx + qy * qy + qz * qz)) * delta[1] + 2.0f * qw * cross[1],
+                2.0f * dot * qz + (qw * qw - (qx * qx + qy * qy + qz * qz)) * delta[2] + 2.0f * qw * cross[2]};
+            float rotationDelta[4]{};
+            multiplyQuaternion(inverseStart, end.rotation, rotationDelta);
+            normalizeQuaternion(rotationDelta);
+            for (float value : rotated)
+                if (!std::isfinite(value))
+                {
+                    setError(error, AnimationError::InvalidDescription);
+                    return false;
+                }
+            for (float value : rotationDelta)
+                if (!std::isfinite(value))
+                {
+                    setError(error, AnimationError::InvalidDescription);
+                    return false;
+                }
+            std::copy(rotated, rotated + 3, outTranslation);
+            std::copy(rotationDelta, rotationDelta + 4, outRotation);
+            return true;
+        }
+        catch (const std::bad_alloc &)
+        {
+            setError(error, AnimationError::CapacityExceeded);
+            return false;
+        }
+    }
+
+    void clearPlayerEvents(PlayerRecord &player) noexcept
+    {
+        totalPendingEvents_ -= std::min<std::uint64_t>(totalPendingEvents_, player.events.size());
+        player.events.clear();
+        player.eventQueueOverflowed = false;
+    }
+
+    bool queuePlayerEvent(PlayerRecord &player, AnimationClipHandle clip,
+        const AnimationEventMarker &marker, std::int32_t direction) noexcept
+    {
+        if (player.events.size() >= maximumEventsPerPlayer_
+            || totalPendingEvents_ >= maximumTotalPendingEvents_)
+        {
+            player.eventQueueOverflowed = true;
+            return false;
+        }
+        try
+        {
+            player.events.push_back(AnimationPlayerEvent{
+                .clip = clip,
+                .eventId = marker.eventId,
+                .userData = marker.userData,
+                .clipTimeSeconds = marker.timeSeconds,
+                .direction = direction});
+            ++totalPendingEvents_;
+            return true;
+        }
+        catch (const std::bad_alloc &)
+        {
+            player.eventQueueOverflowed = true;
+            return false;
+        }
+    }
+
+    void collectPlayerEvents(PlayerRecord &player, AnimationClipHandle clipHandle,
+        const ClipRecord &clip, double advancedTime, double duration) noexcept
+    {
+        const double startTime = player.time;
+        if (!player.looping)
+        {
+            const double endTime = std::clamp(advancedTime, 0.0, duration);
+            if (advancedTime > startTime)
+            {
+                for (const AnimationEventMarker &marker : clip.eventMarkers)
+                {
+                    const double markerTime = marker.timeSeconds;
+                    if (markerTime > startTime && markerTime <= endTime
+                        && !queuePlayerEvent(player, clipHandle, marker, 1))
+                        return;
+                }
+            }
+            else
+            {
+                for (auto marker = clip.eventMarkers.rbegin(); marker != clip.eventMarkers.rend(); ++marker)
+                {
+                    const double markerTime = marker->timeSeconds;
+                    if (markerTime < startTime && markerTime >= endTime
+                        && !queuePlayerEvent(player, clipHandle, *marker, -1))
+                        return;
+                }
+            }
+            return;
+        }
+
+        if (advancedTime > startTime)
+        {
+            double remaining = advancedTime - startTime;
+            double localTime = startTime;
+            while (remaining > 0.0)
+            {
+                const double toBoundary = duration - localTime;
+                const double segmentLength = std::min(remaining, toBoundary);
+                const double segmentEnd = localTime + segmentLength;
+                for (const AnimationEventMarker &marker : clip.eventMarkers)
+                {
+                    const double markerTime = marker.timeSeconds;
+                    if (markerTime > localTime && markerTime <= segmentEnd
+                        && !queuePlayerEvent(player, clipHandle, marker, 1))
+                        return;
+                }
+                remaining -= segmentLength;
+                if (segmentLength < toBoundary)
+                    break;
+
+                localTime = 0.0;
+                for (const AnimationEventMarker &marker : clip.eventMarkers)
+                {
+                    if (marker.timeSeconds != 0.0f)
+                        break;
+                    if (!queuePlayerEvent(player, clipHandle, marker, 1))
+                        return;
+                }
+                if (remaining <= 0.0)
+                    break;
+            }
+            return;
+        }
+
+        if (advancedTime < startTime)
+        {
+            double remaining = startTime - advancedTime;
+            double localTime = startTime;
+            bool initialPosition = true;
+            while (remaining > 0.0)
+            {
+                if (localTime == 0.0)
+                {
+                    // The starting position is excluded by reverse-crossing
+                    // semantics. A marker at duration belongs to the previous
+                    // cycle and is therefore not fired at the initial instant.
+                    if (initialPosition)
+                    {
+                        localTime = duration;
+                        initialPosition = false;
+                        continue;
+                    }
+                }
+
+                const double toBoundary = localTime;
+                const double segmentLength = std::min(remaining, toBoundary);
+                const double segmentEnd = localTime - segmentLength;
+                std::size_t end = clip.eventMarkers.size();
+                while (end > 0)
+                {
+                    const float markerTime = clip.eventMarkers[end - 1].timeSeconds;
+                    std::size_t begin = end - 1;
+                    while (begin > 0 && clip.eventMarkers[begin - 1].timeSeconds == markerTime)
+                        --begin;
+                    if (static_cast<double>(markerTime) < localTime
+                        && static_cast<double>(markerTime) >= segmentEnd)
+                    {
+                        for (std::size_t index = begin; index < end; ++index)
+                        {
+                            if (!queuePlayerEvent(player, clipHandle, clip.eventMarkers[index], -1))
+                                return;
+                        }
+                    }
+                    end = begin;
+                }
+                remaining -= segmentLength;
+                if (segmentLength < toBoundary)
+                    break;
+
+                // At a crossed loop boundary, duration markers in the previous
+                // cycle share the boundary instant with time-zero markers.
+                for (auto marker = clip.eventMarkers.rbegin(); marker != clip.eventMarkers.rend(); ++marker)
+                {
+                    if (marker->timeSeconds != duration)
+                        break;
+                    if (!queuePlayerEvent(player, clipHandle, *marker, -1))
+                        return;
+                }
+                localTime = duration;
+                initialPosition = false;
+                if (remaining <= 0.0)
+                    break;
+            }
+        }
+    }
+
+    bool playerEventCountImpl(AnimationPlayerHandle handle, std::uint32_t *outCount, bool *outOverflowed)
+    {
+        const auto found = players_.find(handle);
+        if (found == players_.end() || outCount == nullptr)
+            return false;
+        *outCount = static_cast<std::uint32_t>(found->second.events.size());
+        if (outOverflowed != nullptr)
+            *outOverflowed = found->second.eventQueueOverflowed;
+        return true;
+    }
+
+    bool copyPlayerEventsImpl(AnimationPlayerHandle handle, std::uint32_t firstIndex,
+        AnimationPlayerEvent *output, std::uint32_t capacity, std::uint32_t *outCopied)
+    {
+        const auto found = players_.find(handle);
+        if (found == players_.end() || outCopied == nullptr || (capacity != 0 && output == nullptr))
+            return false;
+        *outCopied = 0;
+        if (firstIndex >= found->second.events.size() || capacity == 0)
+            return true;
+        const std::size_t available = found->second.events.size() - firstIndex;
+        const std::size_t count = std::min<std::size_t>(available, capacity);
+        auto event = found->second.events.begin() + static_cast<std::ptrdiff_t>(firstIndex);
+        for (std::size_t index = 0; index < count; ++index, ++event)
+            output[index] = *event;
+        *outCopied = static_cast<std::uint32_t>(count);
+        return true;
+    }
+
+    bool clearPlayerEventsImpl(AnimationPlayerHandle handle)
+    {
+        const auto found = players_.find(handle);
+        if (found == players_.end())
+            return false;
+        clearPlayerEvents(found->second);
+        return true;
+    }
+
     AnimationClipHandle findClip(AnimationClipHandle handle) const
     {
         return clips_.contains(handle) ? handle : invalidAnimationClip;
@@ -949,6 +1246,7 @@ private:
         if (found == players_.end())
             return;
         releaseSamplingCache(found->second);
+        totalPendingEvents_ -= found->second.events.size();
         players_.erase(found);
     }
 
@@ -962,6 +1260,7 @@ private:
         PlayerRecord &record = player->second;
         if (record.clip != clip)
         {
+            clearPlayerEvents(record);
             releaseSamplingCache(record);
             record.clip = clip;
             configureSamplingCache(record, target->second.tracks.size());
@@ -972,6 +1271,7 @@ private:
 
         if (restart)
         {
+            clearPlayerEvents(record);
             record.time     = 0.0;
             record.finished = false;
         }
@@ -1035,6 +1335,10 @@ private:
             return false;
 
         const double duration = static_cast<double>(clip->second.duration);
+        if (!clip->second.eventMarkers.empty() && advancedTime != record.time)
+        {
+            collectPlayerEvents(record, clip->first, clip->second, advancedTime, duration);
+        }
         if (record.looping)
         {
             double wrappedTime = std::fmod(advancedTime, duration);
@@ -1259,11 +1563,11 @@ private:
             const float inverseReference[4] = {
                 -referenceRotation[0], -referenceRotation[1], -referenceRotation[2], referenceRotation[3]};
             float rotationDelta[4];
-            quaternionMultiply(inverseReference, additiveRotation, rotationDelta);
+            multiplyQuaternion(inverseReference, additiveRotation, rotationDelta);
             normalizeQuaternion(rotationDelta);
             float weightedDelta[4];
             weightedQuaternionDelta(rotationDelta, jointWeight, weightedDelta);
-            quaternionMultiply(baseRotation, weightedDelta, output[joint].rotation);
+            multiplyQuaternion(baseRotation, weightedDelta, output[joint].rotation);
             normalizeQuaternion(output[joint].rotation);
         }
         return true;
@@ -1344,6 +1648,10 @@ private:
     std::uint64_t         maximumTotalKeyframes_    = 8'000'000;
     std::uint64_t         maximumTotalJoints_       = 1'000'000;
     std::uint32_t         maximumBlendPoses_        = 16;
+    std::uint32_t         maximumEventMarkersPerClip_ = 4096;
+    std::uint32_t         maximumEventsPerPlayer_ = 256;
+    std::uint64_t         maximumTotalEventMarkers_ = 1'000'000;
+    std::uint64_t         maximumTotalPendingEvents_ = 1'000'000;
     std::uint64_t         maximumTotalSamplingCacheEntries_ = 1'000'000;
     bool                  samplingCacheEnabled_ = true;
     std::uint32_t         maximumCursorWalk_ = 8;
@@ -1352,6 +1660,8 @@ private:
     std::uint64_t totalKeyframes_            = 0;
     std::uint64_t totalJoints_               = 0;
     std::uint64_t totalSamplingCacheEntries_  = 0;
+    std::uint64_t totalEventMarkers_          = 0;
+    std::uint64_t totalPendingEvents_         = 0;
 };
 
 } // namespace
@@ -1364,7 +1674,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
     static const engine::EngineModuleEntryTable entry
         = {.abiVersion     = engine::engineModuleAbiVersion,
             .moduleName    = "skeletal_animation",
-            .moduleVersion = "0.4.0",
+            .moduleVersion = "0.1.0",
             .createModule  = []() -> engine::ModuleInterface *
             { return new engine::skeletal_animation::SkeletalAnimationModule(); },
             .providedCapabilities    = provided,

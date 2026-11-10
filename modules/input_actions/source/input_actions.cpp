@@ -31,15 +31,29 @@ namespace engine::input_actions
 namespace
 {
 
-// Per-device control snapshot. Button/axis maps grow on demand and count
-// toward the per-device control cap; the accumulated values below reset at
+// Per-device control snapshot. Control maps and touch contacts grow on demand
+// and count toward the per-device control cap; accumulated values reset at
 // the end of every advanceFrame.
+struct TouchState
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float deltaX = 0.0f;
+    float deltaY = 0.0f;
+    float pressure = 1.0f;
+    std::uint64_t sequence = 0;
+    bool down = false;
+    bool pressedThisFrame = false;
+};
+
 struct DeviceState
 {
     std::unordered_map<std::uint32_t, bool>  keys;
     std::unordered_map<std::uint32_t, bool>  mouseButtons;
     std::unordered_map<std::uint32_t, bool>  gamepadButtons;
     std::unordered_map<std::uint32_t, float> gamepadAxes;
+    std::unordered_map<std::uint32_t, TouchState> touches;
+    std::uint64_t touchSequence = 0;
     // Accumulated [x, y] since the last frame, clamped to +/-1e6.
     float mouseDelta[2] = {0.0f, 0.0f};
     float mouseWheel[2] = {0.0f, 0.0f};
@@ -144,25 +158,19 @@ public:
             maximumFrameDeltaSeconds_ = static_cast<float>(*value);
 
         scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
-        if (scriptRuntime_ != nullptr && scriptRuntime_->abi == script_runtime::scriptRuntimeCapabilityAbi
-            && scriptRuntime_->registerRuntimeInitializer != nullptr)
+        if (script_runtime::canRegisterRuntimeInitializer(scriptRuntime_))
         {
             luaBridgeContext_.scriptRuntime = scriptRuntime_;
             luaBridgeContext_.inputActions = &capability_;
-            runtimeInitializer_ = scriptRuntime_->registerRuntimeInitializer(
-                scriptRuntime_->self, initializeInputActionsLuaRuntime, &luaBridgeContext_);
+            runtimeInitializer_ = script_runtime::tryRegisterRuntimeInitializer(
+                scriptRuntime_, initializeInputActionsLuaRuntime, &luaBridgeContext_);
         }
     }
     void start() override
     {}
     void stop() override
     {
-        if (scriptRuntime_ != nullptr && runtimeInitializer_ != script_runtime::invalidScriptRuntimeInitializer
-            && scriptRuntime_->unregisterRuntimeInitializer != nullptr)
-        {
-            scriptRuntime_->unregisterRuntimeInitializer(scriptRuntime_->self, runtimeInitializer_);
-            runtimeInitializer_ = script_runtime::invalidScriptRuntimeInitializer;
-        }
+        script_runtime::unregisterRuntimeInitializer(scriptRuntime_, runtimeInitializer_);
         {
             std::lock_guard bridgeLock(luaBridgeContext_.apiMutex);
             luaBridgeContext_.inputActions = nullptr;
@@ -206,7 +214,11 @@ private:
         ENGINE_INPUT_ACTIONS_BIND(removeAction, removeActionImpl);
         ENGINE_INPUT_ACTIONS_BIND(bindAction, bindActionImpl);
         ENGINE_INPUT_ACTIONS_BIND(clearBindings, clearBindingsImpl);
+        ENGINE_INPUT_ACTIONS_BIND(removeBinding, removeBindingImpl);
+        ENGINE_INPUT_ACTIONS_BIND(bindingCount, bindingCountImpl);
+        ENGINE_INPUT_ACTIONS_BIND(copyBindings, copyBindingsImpl);
         ENGINE_INPUT_ACTIONS_BIND(feedEvent, feedEventImpl);
+        ENGINE_INPUT_ACTIONS_BIND(feedWindowEvent, feedWindowEventImpl);
         ENGINE_INPUT_ACTIONS_BIND(advanceFrame, advanceFrameImpl);
         ENGINE_INPUT_ACTIONS_BIND(actionState, actionStateImpl);
         ENGINE_INPUT_ACTIONS_BIND(copyActionName, copyActionNameImpl);
@@ -315,12 +327,17 @@ private:
             || !std::isfinite(binding->deadzone) || binding->deadzone < -1.0f || binding->deadzone >= 1.0f
             || !std::isfinite(binding->responseExponent) || binding->responseExponent <= 0.0f
             || binding->responseExponent > 8.0f
-            || static_cast<std::uint32_t>(binding->control) > static_cast<std::uint32_t>(InputControlKind::MouseWheelY))
+            || static_cast<std::uint32_t>(binding->control) > static_cast<std::uint32_t>(InputControlKind::TouchPressure))
             return false;
         if (action->bindings.size() >= maximumBindingsPerAction_)
             return false;
-        if (action->type == InputActionType::Button
-            && (binding->control == InputControlKind::GamepadAxis || binding->component != 0))
+        const bool analogControl = binding->control == InputControlKind::GamepadAxis
+            || binding->control == InputControlKind::TouchPositionX
+            || binding->control == InputControlKind::TouchPositionY
+            || binding->control == InputControlKind::TouchDeltaX
+            || binding->control == InputControlKind::TouchDeltaY
+            || binding->control == InputControlKind::TouchPressure;
+        if (action->type == InputActionType::Button && (analogControl || binding->component != 0))
             return false;
         if (action->type == InputActionType::Axis1D && binding->component != 0)
             return false;
@@ -337,13 +354,47 @@ private:
         action->state = {};
         return true;
     }
+    bool removeBindingImpl(
+        InputContextHandle contextHandle, InputActionHandle actionHandle, std::uint32_t bindingIndex)
+    {
+        ContextRecord *context = findContext(contextHandle);
+        ActionRecord  *action  = context != nullptr ? findAction(*context, actionHandle) : nullptr;
+        if (action == nullptr || bindingIndex >= action->bindings.size())
+            return false;
+        action->bindings.erase(action->bindings.begin() + bindingIndex);
+        action->state = {};
+        return true;
+    }
+    std::uint32_t bindingCountImpl(InputContextHandle contextHandle, InputActionHandle actionHandle)
+    {
+        ContextRecord *context = findContext(contextHandle);
+        ActionRecord  *action  = context != nullptr ? findAction(*context, actionHandle) : nullptr;
+        return action != nullptr ? static_cast<std::uint32_t>(action->bindings.size()) : 0u;
+    }
+    bool copyBindingsImpl(InputContextHandle contextHandle, InputActionHandle actionHandle, InputBinding *output,
+        std::uint32_t capacity, std::uint32_t *outRequired)
+    {
+        ContextRecord *context = findContext(contextHandle);
+        ActionRecord  *action  = context != nullptr ? findAction(*context, actionHandle) : nullptr;
+        if (action == nullptr)
+            return false;
+        const std::uint32_t required = static_cast<std::uint32_t>(action->bindings.size());
+        if (outRequired != nullptr)
+            *outRequired = required;
+        if (capacity < required || (required != 0 && output == nullptr))
+            return false;
+        if (required != 0)
+            std::copy(action->bindings.begin(), action->bindings.end(), output);
+        return true;
+    }
     // Push a raw event into device state. FocusLost clears the device instead
     // of storing anything; unknown devices are created on demand until the
     // device cap is hit. Returns false for malformed events or cap refusals.
     bool feedEventImpl(const InputEvent *event)
     {
         if (event == nullptr || !std::isfinite(event->value) || !std::isfinite(event->secondaryValue)
-            || static_cast<std::uint32_t>(event->kind) > static_cast<std::uint32_t>(InputEventKind::FocusLost))
+            || !std::isfinite(event->tertiaryValue)
+            || static_cast<std::uint32_t>(event->kind) > static_cast<std::uint32_t>(InputEventKind::TouchCancelled))
             return false;
         if (event->kind == InputEventKind::FocusLost)
         {
@@ -355,6 +406,7 @@ private:
             device.mouseButtons.clear();
             device.gamepadButtons.clear();
             device.gamepadAxes.clear();
+            device.touches.clear();
             device.mouseDelta[0] = device.mouseDelta[1] = device.mouseWheel[0] = device.mouseWheel[1] = 0.0f;
             return true;
         }
@@ -363,22 +415,41 @@ private:
         {
             if (devices_.size() >= maximumDevices_)
                 return false;
-            found = devices_.try_emplace(event->device).first;
+            try
+            {
+                found = devices_.try_emplace(event->device).first;
+            }
+            catch (...)
+            {
+                return false;
+            }
         }
         DeviceState &device = found->second;
-        // One stored slot per code; the cap spans every button/axis map of
+        // One stored slot per code/contact; the cap spans every control map of
         // the device combined. Existing controls always update in place.
         auto insertControl = [this, &device](auto &controls, std::uint32_t code, auto value)
         {
             const auto        item          = controls.find(code);
             const std::size_t totalControls = device.keys.size() + device.mouseButtons.size()
-                                            + device.gamepadButtons.size() + device.gamepadAxes.size();
+                                            + device.gamepadButtons.size() + device.gamepadAxes.size()
+                                            + device.touches.size();
             if (item == controls.end() && totalControls >= maximumControlsPerDevice_)
                 return false;
             if (item == controls.end())
-                controls.emplace(code, value);
+            {
+                try
+                {
+                    controls.emplace(code, value);
+                }
+                catch (...)
+                {
+                    return false;
+                }
+            }
             else
+            {
                 item->second = value;
+            }
             return true;
         };
         switch (event->kind)
@@ -401,11 +472,187 @@ private:
             device.mouseWheel[0] = std::clamp(device.mouseWheel[0] + event->value, -1.0e6f, 1.0e6f);
             device.mouseWheel[1] = std::clamp(device.mouseWheel[1] + event->secondaryValue, -1.0e6f, 1.0e6f);
             return true;
+        case InputEventKind::TouchBegan:
+        case InputEventKind::TouchMoved:
+        case InputEventKind::TouchEnded:
+        case InputEventKind::TouchCancelled: {
+            if (event->code == anyTouchContact || event->value < 0.0f || event->value > 1.0f || event->secondaryValue < 0.0f
+                || event->secondaryValue > 1.0f || event->tertiaryValue < 0.0f || event->tertiaryValue > 1.0f)
+                return false;
+            auto touch = device.touches.find(event->code);
+            if (event->kind == InputEventKind::TouchBegan)
+            {
+                if (touch != device.touches.end() && touch->second.down)
+                    return false;
+                const std::size_t totalControls = device.keys.size() + device.mouseButtons.size()
+                    + device.gamepadButtons.size() + device.gamepadAxes.size() + device.touches.size();
+                if (touch == device.touches.end() && totalControls >= maximumControlsPerDevice_)
+                    return false;
+                TouchState state{};
+                state.x = event->value;
+                state.y = event->secondaryValue;
+                state.pressure = event->tertiaryValue;
+                state.down = true;
+                state.pressedThisFrame = true;
+                state.sequence = ++device.touchSequence;
+                if (state.sequence == 0)
+                    state.sequence = ++device.touchSequence;
+                if (touch == device.touches.end())
+                {
+                    try
+                    {
+                        device.touches.emplace(event->code, state);
+                    }
+                    catch (...)
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    touch->second = state;
+                }
+                return true;
+            }
+            if (touch == device.touches.end() || !touch->second.down)
+                return false;
+            TouchState &state = touch->second;
+            state.deltaX += event->kind == InputEventKind::TouchMoved ? event->value - state.x : 0.0f;
+            state.deltaY += event->kind == InputEventKind::TouchMoved ? event->secondaryValue - state.y : 0.0f;
+            state.x = event->value;
+            state.y = event->secondaryValue;
+            state.pressure = event->tertiaryValue;
+            state.sequence = ++device.touchSequence;
+            if (state.sequence == 0)
+                state.sequence = ++device.touchSequence;
+            if (event->kind == InputEventKind::TouchEnded || event->kind == InputEventKind::TouchCancelled)
+                state.down = false;
+            return true;
+        }
         case InputEventKind::FocusLost:
             break;
         }
         return false;
     }
+    const TouchState *findTouch(
+        const DeviceState &device, std::uint32_t contactId, std::uint32_t *outContactId = nullptr) const
+    {
+        if (contactId != anyTouchContact)
+        {
+            const auto found = device.touches.find(contactId);
+            if (outContactId != nullptr)
+                *outContactId = found != device.touches.end() ? found->first : anyTouchContact;
+            return found != device.touches.end() ? &found->second : nullptr;
+        }
+        const TouchState *selected = nullptr;
+        std::uint32_t selectedId = anyTouchContact;
+        for (const auto &[id, touch] : device.touches)
+        {
+            if (selected == nullptr || (touch.down && !selected->down)
+                || (touch.down == selected->down && touch.sequence > selected->sequence))
+            {
+                selected = &touch;
+                selectedId = id;
+            }
+        }
+        if (outContactId != nullptr)
+            *outContactId = selectedId;
+        return selected;
+    }
+    bool feedWindowEventImpl(window::WindowHandle windowHandle, const window::WindowEvent *event)
+    {
+        if (event == nullptr || windowHandle == window::invalidWindow)
+            return false;
+
+        InputEvent input{};
+        input.device = keyboardMouseDevice;
+        switch (event->kind)
+        {
+        case window::WindowEventKind::KeyPressed:
+        case window::WindowEventKind::KeyReleased:
+            input.kind = InputEventKind::Key;
+            input.code = static_cast<std::uint32_t>(event->key);
+            input.down = event->kind == window::WindowEventKind::KeyPressed;
+            return input.code != static_cast<std::uint32_t>(window::Key::Unknown) && feedEventImpl(&input);
+        case window::WindowEventKind::MouseButtonPressed:
+        case window::WindowEventKind::MouseButtonReleased:
+            input.kind = InputEventKind::MouseButton;
+            input.code = static_cast<std::uint32_t>(event->mouseButton);
+            input.down = event->kind == window::WindowEventKind::MouseButtonPressed;
+            return input.code < 8u && feedEventImpl(&input);
+        case window::WindowEventKind::CursorMoved:
+            input.kind = InputEventKind::MouseDelta;
+            input.value = static_cast<float>(std::clamp(event->cursorDeltaX,
+                -static_cast<double>(std::numeric_limits<float>::max()),
+                static_cast<double>(std::numeric_limits<float>::max())));
+            input.secondaryValue = static_cast<float>(std::clamp(event->cursorDeltaY,
+                -static_cast<double>(std::numeric_limits<float>::max()),
+                static_cast<double>(std::numeric_limits<float>::max())));
+            return feedEventImpl(&input);
+        case window::WindowEventKind::MouseScrolled:
+            input.kind = InputEventKind::MouseWheel;
+            input.value = static_cast<float>(std::clamp(event->scrollX,
+                -static_cast<double>(std::numeric_limits<float>::max()),
+                static_cast<double>(std::numeric_limits<float>::max())));
+            input.secondaryValue = static_cast<float>(std::clamp(event->scrollY,
+                -static_cast<double>(std::numeric_limits<float>::max()),
+                static_cast<double>(std::numeric_limits<float>::max())));
+            return feedEventImpl(&input);
+        case window::WindowEventKind::FocusLost:
+            input.kind = InputEventKind::FocusLost;
+            if (!feedEventImpl(&input))
+                return false;
+            // A lost window focus can prevent a native host from receiving
+            // touch-end callbacks. Drop all forwarded contacts to avoid stuck touches.
+            for (auto &[deviceId, device] : devices_)
+            {
+                if ((deviceId & touchDeviceIdBase) != 0)
+                    device.touches.clear();
+            }
+            return true;
+        case window::WindowEventKind::GamepadConnected:
+            return true;
+        case window::WindowEventKind::GamepadDisconnected:
+            resetDeviceStateImpl(gamepadDeviceIdBase | (event->gamepadId & 0x3fffffffu));
+            return true;
+        case window::WindowEventKind::GamepadButtonPressed:
+        case window::WindowEventKind::GamepadButtonReleased:
+            input.device = gamepadDeviceIdBase | (event->gamepadId & 0x3fffffffu);
+            input.kind = InputEventKind::GamepadButton;
+            input.code = event->gamepadControl;
+            input.down = event->kind == window::WindowEventKind::GamepadButtonPressed;
+            return input.code < 15u && feedEventImpl(&input);
+        case window::WindowEventKind::GamepadAxisMoved:
+            input.device = gamepadDeviceIdBase | (event->gamepadId & 0x3fffffffu);
+            input.kind = InputEventKind::GamepadAxis;
+            input.code = event->gamepadControl;
+            input.value = event->gamepadValue;
+            return input.code < 6u && feedEventImpl(&input);
+        case window::WindowEventKind::TouchBegan:
+        case window::WindowEventKind::TouchMoved:
+        case window::WindowEventKind::TouchEnded:
+        case window::WindowEventKind::TouchCancelled:
+            if (event->touchDevice > 0x7fffffffu)
+                return false;
+            input.device = touchDeviceIdBase | event->touchDevice;
+            input.code = event->touchId;
+            input.value = event->touchX;
+            input.secondaryValue = event->touchY;
+            input.tertiaryValue = event->touchPressure;
+            switch (event->kind)
+            {
+            case window::WindowEventKind::TouchBegan: input.kind = InputEventKind::TouchBegan; break;
+            case window::WindowEventKind::TouchMoved: input.kind = InputEventKind::TouchMoved; break;
+            case window::WindowEventKind::TouchEnded: input.kind = InputEventKind::TouchEnded; break;
+            case window::WindowEventKind::TouchCancelled: input.kind = InputEventKind::TouchCancelled; break;
+            default: return false;
+            }
+            return feedEventImpl(&input);
+        default:
+            return true;
+        }
+    }
+
     // Evaluate one binding against current device state: look up the control
     // (unknown devices read as 0), apply the axis deadzone rescaled so
     // [dz, 1] maps to [0, 1] sign-preserving, then invert, scale, and apply
@@ -451,6 +698,36 @@ private:
         case InputControlKind::MouseWheelY:
             value = device.mouseWheel[1];
             break;
+        case InputControlKind::TouchContact: {
+            const TouchState *touch = findTouch(device, binding.code);
+            value = touch != nullptr && (touch->down || touch->pressedThisFrame) ? 1.0f : 0.0f;
+            break;
+        }
+        case InputControlKind::TouchPositionX: {
+            const TouchState *touch = findTouch(device, binding.code);
+            value = touch != nullptr ? touch->x : 0.0f;
+            break;
+        }
+        case InputControlKind::TouchPositionY: {
+            const TouchState *touch = findTouch(device, binding.code);
+            value = touch != nullptr ? touch->y : 0.0f;
+            break;
+        }
+        case InputControlKind::TouchDeltaX: {
+            const TouchState *touch = findTouch(device, binding.code);
+            value = touch != nullptr ? touch->deltaX : 0.0f;
+            break;
+        }
+        case InputControlKind::TouchDeltaY: {
+            const TouchState *touch = findTouch(device, binding.code);
+            value = touch != nullptr ? touch->deltaY : 0.0f;
+            break;
+        }
+        case InputControlKind::TouchPressure: {
+            const TouchState *touch = findTouch(device, binding.code);
+            value = touch != nullptr ? touch->pressure : 0.0f;
+            break;
+        }
         }
         if (binding.control == InputControlKind::GamepadAxis)
         {
@@ -517,8 +794,17 @@ private:
                 {
                     for (const InputBinding &binding : action.bindings)
                     {
-                        const ControlKey key{binding.control, binding.device, binding.code};
-                        // Skipped when an earlier context consumed this control.
+                        ControlKey key{binding.control, binding.device, binding.code};
+                        if (binding.code == anyTouchContact
+                            && binding.control >= InputControlKind::TouchContact
+                            && binding.control <= InputControlKind::TouchPressure)
+                        {
+                            const auto device = devices_.find(binding.device);
+                            if (device != devices_.end())
+                                (void)findTouch(device->second, anyTouchContact, &key.code);
+                        }
+                        // Wildcard touch bindings consume the resolved contact,
+                        // so they also block lower-priority concrete bindings.
                         if (consumedControls_.contains(key))
                             continue;
                         const float value          = readBinding(binding);
@@ -579,6 +865,16 @@ private:
             // Relative deltas are per-frame; start the next frame at zero.
             device.mouseDelta[0] = device.mouseDelta[1] = 0.0f;
             device.mouseWheel[0] = device.mouseWheel[1] = 0.0f;
+            for (auto touch = device.touches.begin(); touch != device.touches.end();)
+            {
+                touch->second.deltaX = 0.0f;
+                touch->second.deltaY = 0.0f;
+                touch->second.pressedThisFrame = false;
+                if (!touch->second.down)
+                    touch = device.touches.erase(touch);
+                else
+                    ++touch;
+            }
         }
     }
 

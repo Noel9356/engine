@@ -79,9 +79,10 @@ template <typename EventType>
 class EventChannel final
 {
 public:
-    // C-style handler; userData is the listener pointer (or a free-function
-    // address for the free-function overloads).
+    // C-style handler plus a separately typed free-function form. Keeping
+    // function pointers typed avoids object-pointer conversions.
     using HandlerFunction = void (*)(void *userData, const EventType &event);
+    using FreeFunction    = void (*)(const EventType &event);
 
     EventChannel() = default;
 
@@ -90,38 +91,40 @@ public:
 
     SubscriptionToken subscribe(HandlerFunction handler, void *userData)
     {
-        return subscribeHandler(handler, userData, defaultEventPriority);
+        return subscribeHandler(handler, userData, nullptr, defaultEventPriority);
     }
 
     SubscriptionToken subscribe(HandlerFunction handler, void *userData, int priority)
     {
-        return subscribeHandler(handler, userData, priority);
+        return subscribeHandler(handler, userData, nullptr, priority);
     }
 
     template <typename ListenerClass, void (ListenerClass::*HandlerMethod)(const EventType &)>
     SubscriptionToken subscribe(ListenerClass *listener)
     {
+        if (listener == nullptr)
+            return invalidSubscriptionToken;
         return subscribeHandler(&EventChannel::dispatchToMember<ListenerClass, HandlerMethod>,
-            static_cast<void *>(listener),
-            defaultEventPriority);
+            static_cast<void *>(listener), nullptr, defaultEventPriority);
     }
 
     template <typename ListenerClass, void (ListenerClass::*HandlerMethod)(const EventType &)>
     SubscriptionToken subscribe(ListenerClass *listener, int priority)
     {
+        if (listener == nullptr)
+            return invalidSubscriptionToken;
         return subscribeHandler(
-            &EventChannel::dispatchToMember<ListenerClass, HandlerMethod>, static_cast<void *>(listener), priority);
+            &EventChannel::dispatchToMember<ListenerClass, HandlerMethod>, static_cast<void *>(listener), nullptr, priority);
     }
 
-    SubscriptionToken subscribe(void (*freeFunction)(const EventType &))
+    SubscriptionToken subscribe(FreeFunction freeFunction)
     {
-        return subscribeHandler(
-            &EventChannel::dispatchToFree, reinterpret_cast<void *>(freeFunction), defaultEventPriority);
+        return subscribeHandler(nullptr, nullptr, freeFunction, defaultEventPriority);
     }
 
-    SubscriptionToken subscribe(void (*freeFunction)(const EventType &), int priority)
+    SubscriptionToken subscribe(FreeFunction freeFunction, int priority)
     {
-        return subscribeHandler(&EventChannel::dispatchToFree, reinterpret_cast<void *>(freeFunction), priority);
+        return subscribeHandler(nullptr, nullptr, freeFunction, priority);
     }
 
     // Safe during dispatch: the entry is flagged and removed once the current
@@ -134,8 +137,8 @@ public:
             {
                 if (entry.token == token && !entry.pendingRemoval)
                 {
-                    entry.pendingRemoval = true;
                     deferredRemovals.push_back(token);
+                    entry.pendingRemoval = true;
                     return true;
                 }
             }
@@ -177,7 +180,10 @@ public:
 
                 if (!entry.pendingRemoval) [[likely]]
                 {
-                    entry.invoke(entry.userData, event);
+                    if (entry.freeFunction != nullptr)
+                        entry.freeFunction(event);
+                    else
+                        entry.invoke(entry.userData, event);
                 }
             }
         }
@@ -319,6 +325,7 @@ private:
     {
         void             *userData       = nullptr;
         HandlerFunction   invoke         = nullptr;
+        FreeFunction      freeFunction   = nullptr;
         SubscriptionToken token          = invalidSubscriptionToken;
         bool              pendingRemoval = false;
         int               priority       = defaultEventPriority;
@@ -374,13 +381,22 @@ private:
 
     // Tokens start at 1 so 0 can flag "no subscription"; entries made while
     // dispatching wait in pendingSubscriptions.
-    SubscriptionToken subscribeHandler(HandlerFunction handler, void *userData, int priority)
+    SubscriptionToken subscribeHandler(
+        HandlerFunction handler, void *userData, FreeFunction freeFunction, int priority)
     {
+        if ((handler == nullptr) == (freeFunction == nullptr) || nextToken == invalidSubscriptionToken)
+            return invalidSubscriptionToken;
+
         const SubscriptionToken token = nextToken++;
-        HandlerEntry            entry{
-            .userData = userData, .invoke = handler, .token = token, .pendingRemoval = false, .priority = priority};
+        HandlerEntry            entry{.userData       = userData,
+            .invoke                              = handler,
+            .freeFunction                        = freeFunction,
+            .token                                = token,
+            .pendingRemoval                       = false,
+            .priority                             = priority};
         if (dispatching)
         {
+            handlers.reserve(handlers.size() + pendingSubscriptions.size() + 1u);
             pendingSubscriptions.push_back(std::move(entry));
             return token;
         }
@@ -409,12 +425,6 @@ private:
     static void dispatchToMember(void *userData, const EventType &event)
     {
         (static_cast<ListenerClass *>(userData)->*HandlerMethod)(event);
-    }
-
-    static void dispatchToFree(void *userData, const EventType &event)
-    {
-        void (*freeFunction)(const EventType &) = reinterpret_cast<void (*)(const EventType &)>(userData);
-        freeFunction(event);
     }
 
     // Live handler list; pendingSubscriptions/deferredRemovals hold changes

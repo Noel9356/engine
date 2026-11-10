@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -181,40 +182,129 @@ inline void reverseTriangleWinding(std::vector<std::uint32_t> &indices)
     }
 }
 
-// Accumulates area-weighted smooth normals over an interleaved vertex/index pair
-// (face normals summed per vertex, then normalized). Used by the stl/off/gltf
-// paths that keep a shared vertex pool.
-inline void accumulateSmoothNormalsInterleaved(
-    const std::vector<float> &vertices, const std::vector<std::uint32_t> &indices, std::vector<float> &outNormals)
+// Computes an unnormalized triangle cross product from three position vectors.
+template <typename Real>
+inline void crossProduct3(const Real *a, const Real *b, const Real *c, float *destination) noexcept
 {
-    const std::size_t vertexCount = vertices.size() / renderer::meshVertexFloatCount;
-    outNormals.assign(vertexCount * 3, 0.0f);
-    for (std::size_t corner = 0; corner + 2 < indices.size(); corner += 3)
+    const double ab[3] = {static_cast<double>(b[0]) - static_cast<double>(a[0]),
+        static_cast<double>(b[1]) - static_cast<double>(a[1]),
+        static_cast<double>(b[2]) - static_cast<double>(a[2])};
+    const double ac[3] = {static_cast<double>(c[0]) - static_cast<double>(a[0]),
+        static_cast<double>(c[1]) - static_cast<double>(a[1]),
+        static_cast<double>(c[2]) - static_cast<double>(a[2])};
+    destination[0] = static_cast<float>(ab[1] * ac[2] - ab[2] * ac[1]);
+    destination[1] = static_cast<float>(ab[2] * ac[0] - ab[0] * ac[2]);
+    destination[2] = static_cast<float>(ab[0] * ac[1] - ab[1] * ac[0]);
+}
+
+// Computes a unit face normal. Degenerate triangles use the same +Y fallback as
+// other generated normals in the import pipeline.
+inline void computeFaceNormal(const float *a, const float *b, const float *c, float *destination) noexcept
+{
+    crossProduct3(a, b, c, destination);
+    normalizeVector(destination);
+}
+
+// Accumulates area-weighted smooth normals for indexed position data. vertexStride
+// and positionOffset describe either a packed position array or an interleaved
+// vertex array. Returns false when the source layout or an index is invalid.
+inline bool accumulateIndexedSmoothNormals(const std::vector<float> &vertices,
+    const std::vector<std::uint32_t> &indices, std::vector<float> &outNormals,
+    std::size_t vertexStride = renderer::meshVertexFloatCount, std::size_t positionOffset = 0)
+{
+    outNormals.clear();
+    if (positionOffset > vertexStride || vertexStride - positionOffset < 3 || vertices.size() % vertexStride != 0
+        || indices.size() % 3 != 0)
     {
-        const std::uint32_t indexA = indices[corner + 0];
-        const std::uint32_t indexB = indices[corner + 1];
-        const std::uint32_t indexC = indices[corner + 2];
-        const float        *a      = vertices.data() + static_cast<std::size_t>(indexA) * renderer::meshVertexFloatCount;
-        const float        *b      = vertices.data() + static_cast<std::size_t>(indexB) * renderer::meshVertexFloatCount;
-        const float        *c      = vertices.data() + static_cast<std::size_t>(indexC) * renderer::meshVertexFloatCount;
-        const float         ab[3]  = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
-        const float         ac[3]  = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-        const float         normal[3]
-            = {ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]};
-        for (const std::uint32_t index : {indexA, indexB, indexC})
+        return false;
+    }
+
+    const std::size_t vertexCount = vertices.size() / vertexStride;
+    if (vertexCount > std::vector<float>().max_size() / 3)
+    {
+        return false;
+    }
+    for (const std::uint32_t index : indices)
+    {
+        if (index >= vertexCount)
         {
-            const std::size_t offset = static_cast<std::size_t>(index) * 3;
-            outNormals[offset + 0] += normal[0];
-            outNormals[offset + 1] += normal[1];
-            outNormals[offset + 2] += normal[2];
+            return false;
         }
     }
-    for (std::size_t offset = 0; offset + 2 < outNormals.size(); offset += 3)
+
+    outNormals.assign(vertexCount * 3, 0.0f);
+    for (std::size_t triangle = 0; triangle < indices.size(); triangle += 3)
     {
-        float normal[3] = {outNormals[offset + 0], outNormals[offset + 1], outNormals[offset + 2]};
-        normalizeVector(normal);
-        std::copy(normal, normal + 3, outNormals.begin() + offset);
+        const std::uint32_t indexA = indices[triangle + 0];
+        const std::uint32_t indexB = indices[triangle + 1];
+        const std::uint32_t indexC = indices[triangle + 2];
+        const float *a = vertices.data() + static_cast<std::size_t>(indexA) * vertexStride + positionOffset;
+        const float *b = vertices.data() + static_cast<std::size_t>(indexB) * vertexStride + positionOffset;
+        const float *c = vertices.data() + static_cast<std::size_t>(indexC) * vertexStride + positionOffset;
+        float normal[3]{};
+        crossProduct3(a, b, c, normal);
+        for (const std::uint32_t index : {indexA, indexB, indexC})
+        {
+            float *sum = outNormals.data() + static_cast<std::size_t>(index) * 3;
+            sum[0] += normal[0];
+            sum[1] += normal[1];
+            sum[2] += normal[2];
+        }
     }
+    for (std::size_t vertex = 0; vertex < vertexCount; ++vertex)
+    {
+        normalizeVector(outNormals.data() + vertex * 3);
+    }
+    return true;
+}
+
+// Expands an indexed part to one vertex per triangle corner and writes a flat
+// face normal to each expanded vertex. Triangle-material order is unchanged.
+inline bool expandFlatShading(ModelPart &part)
+{
+    constexpr std::size_t vertexStride = renderer::meshVertexFloatCount;
+    const std::size_t sourceVertexCount = part.vertices.size() / vertexStride;
+    if (part.vertices.size() % vertexStride != 0 || part.indices.size() % 3 != 0
+        || static_cast<std::uint64_t>(part.indices.size()) > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1ull
+        || part.indices.size() > std::vector<float>().max_size() / vertexStride)
+    {
+        return false;
+    }
+    for (const std::uint32_t index : part.indices)
+    {
+        if (index >= sourceVertexCount)
+        {
+            return false;
+        }
+    }
+
+    std::vector<float> flatVertices(part.indices.size() * vertexStride);
+    for (std::size_t triangle = 0; triangle < part.indices.size(); triangle += 3)
+    {
+        const std::uint32_t indexA = part.indices[triangle + 0];
+        const std::uint32_t indexB = part.indices[triangle + 1];
+        const std::uint32_t indexC = part.indices[triangle + 2];
+        const float *a = part.vertices.data() + static_cast<std::size_t>(indexA) * vertexStride;
+        const float *b = part.vertices.data() + static_cast<std::size_t>(indexB) * vertexStride;
+        const float *c = part.vertices.data() + static_cast<std::size_t>(indexC) * vertexStride;
+        float normal[3]{};
+        computeFaceNormal(a, b, c, normal);
+        for (std::size_t corner = 0; corner < 3; ++corner)
+        {
+            const std::uint32_t sourceIndex = part.indices[triangle + corner];
+            const float *source = part.vertices.data() + static_cast<std::size_t>(sourceIndex) * vertexStride;
+            float *destination = flatVertices.data() + (triangle + corner) * vertexStride;
+            std::copy_n(source, vertexStride, destination);
+            std::copy_n(normal, 3, destination + 3);
+        }
+    }
+
+    part.vertices = std::move(flatVertices);
+    for (std::size_t index = 0; index < part.indices.size(); ++index)
+    {
+        part.indices[index] = static_cast<std::uint32_t>(index);
+    }
+    return true;
 }
 
 // Writes an error code through an optional out-parameter.

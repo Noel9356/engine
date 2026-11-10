@@ -1,7 +1,8 @@
 #include "lua_bridge.hpp"
 
+#include <engine/script_runtime/native_values.hpp>
+
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string_view>
@@ -15,77 +16,16 @@ using script_runtime::ScriptNativeFunction;
 using script_runtime::ScriptRuntimeHandle;
 using script_runtime::ScriptValue;
 using script_runtime::ScriptValueType;
+using script_runtime::native::boolean;
+using script_runtime::native::floatValue;
+using script_runtime::native::int32Value;
+using script_runtime::native::resultBoolean;
+using script_runtime::native::resultNil;
+using script_runtime::native::resultNumber;
+using script_runtime::native::stringValue;
+using script_runtime::native::uint32Value;
 using Bridge = SkeletalAnimationLuaBridgeContext;
 
-bool number(const ScriptValue *args, std::uint32_t count, std::uint32_t index, double &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::Number || !std::isfinite(args[index].numberValue))
-        return false;
-    out = args[index].numberValue;
-    return true;
-}
-
-bool uint32Value(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::uint32_t &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < 0.0
-        || value > static_cast<double>(std::numeric_limits<std::uint32_t>::max()) || std::floor(value) != value)
-        return false;
-    out = static_cast<std::uint32_t>(value);
-    return true;
-}
-
-bool int32Value(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::int32_t &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < static_cast<double>(std::numeric_limits<std::int32_t>::min())
-        || value > static_cast<double>(std::numeric_limits<std::int32_t>::max()) || std::floor(value) != value)
-        return false;
-    out = static_cast<std::int32_t>(value);
-    return true;
-}
-
-bool floatValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, float &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < -std::numeric_limits<float>::max()
-        || value > std::numeric_limits<float>::max())
-        return false;
-    out = static_cast<float>(value);
-    return true;
-}
-
-bool boolean(const ScriptValue *args, std::uint32_t count, std::uint32_t index, bool &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::Boolean)
-        return false;
-    out = args[index].booleanValue;
-    return true;
-}
-
-bool stringValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, const char *&out)
-{
-    if (index >= count || args[index].type != ScriptValueType::String || args[index].stringData == nullptr)
-        return false;
-    out = args[index].stringData;
-    return true;
-}
-
-void resultNumber(ScriptValue *out, std::uint32_t index, double value)
-{
-    out[index].type = ScriptValueType::Number;
-    out[index].numberValue = value;
-}
-void resultBoolean(ScriptValue *out, std::uint32_t index, bool value)
-{
-    out[index].type = ScriptValueType::Boolean;
-    out[index].booleanValue = value;
-}
-void resultNil(ScriptValue *out, std::uint32_t index)
-{
-    out[index] = {};
-    out[index].type = ScriptValueType::Nil;
-}
 void resultError(ScriptValue *out, std::uint32_t index, AnimationError error)
 {
     resultNumber(out, index, static_cast<std::uint32_t>(error));
@@ -179,6 +119,54 @@ bool addKeyframe(void *userData,const ScriptValue*a,std::uint32_t n,ScriptValue*
     }}resultBoolean(r,0,ok);*outCount=1;return true;
 }
 
+bool addEventMarker(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t builderHandle = 0;
+    float timeSeconds = 0.0f;
+    std::uint32_t eventId = 0;
+    std::uint32_t userDataValue = 0;
+    if (count != 4 || capacity < 1 || !uint32Value(args, count, 0, builderHandle)
+        || !floatValue(args, count, 1, timeSeconds)
+        || !uint32Value(args, count, 2, eventId)
+        || !uint32Value(args, count, 3, userDataValue))
+        return false;
+
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.mutex);
+    auto found = bridge.clipBuilders.find(builderHandle);
+    if (found == bridge.clipBuilders.end())
+    {
+        resultBoolean(results, 0, false);
+        *outCount = 1;
+        return true;
+    }
+    if (found->second.eventMarkers.size() >= bridge.maximumEventMarkersPerClip
+        || bridge.pendingEventMarkers >= bridge.maximumPendingEventMarkers)
+    {
+        resultBoolean(results, 0, false);
+        *outCount = 1;
+        return true;
+    }
+    try
+    {
+        found->second.eventMarkers.push_back(AnimationEventMarker{
+            .timeSeconds = timeSeconds,
+            .eventId = eventId,
+            .userData = userDataValue});
+        ++bridge.pendingEventMarkers;
+        resultBoolean(results, 0, true);
+        *outCount = 1;
+        return true;
+    }
+    catch (...)
+    {
+        resultBoolean(results, 0, false);
+        *outCount = 1;
+        return true;
+    }
+}
+
 bool finishClip(void *userData,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::uint32_t cap,std::uint32_t*outCount)
 {
     auto &b=*static_cast<Bridge*>(userData);std::uint32_t handle=0;if(n!=1||cap<2||!uint32Value(a,n,0,handle))return false;Bridge::ClipBuilder builder;
@@ -186,9 +174,11 @@ bool finishClip(void *userData,const ScriptValue*a,std::uint32_t n,ScriptValue*r
      if(found->second.tracks.empty()||std::any_of(found->second.tracks.begin(),found->second.tracks.end(),[](const auto&t){return t.keyframes.empty();})){resultNil(r,0);resultError(r,1,AnimationError::InvalidDescription);*outCount=2;return true;}
      std::uint64_t keyCount=0;for(const auto&track:found->second.tracks)keyCount+=track.keyframes.size();
      b.pendingKeyframes-=std::min(b.pendingKeyframes,keyCount);
+     b.pendingEventMarkers-=std::min<std::uint64_t>(b.pendingEventMarkers,found->second.eventMarkers.size());
      builder=std::move(found->second);b.clipBuilders.erase(found);}
     std::vector<AnimationTrackDescription> tracks;tracks.reserve(builder.tracks.size());for(const auto&track:builder.tracks){tracks.push_back(AnimationTrackDescription{.jointIndex=track.jointIndex,.keyframes=track.keyframes.data(),.keyframeCount=static_cast<std::uint32_t>(track.keyframes.size()),.interpolation=track.interpolation});}
-    AnimationClipDescription d{builder.name.c_str(),builder.durationSeconds,tracks.data(),static_cast<std::uint32_t>(tracks.size())};AnimationError error=AnimationError::None;
+    AnimationClipDescription d{builder.name.c_str(),builder.durationSeconds,tracks.data(),static_cast<std::uint32_t>(tracks.size()),
+        builder.eventMarkers.data(),static_cast<std::uint32_t>(builder.eventMarkers.size())};AnimationError error=AnimationError::None;
     std::lock_guard apiLock(b.apiMutex);auto created=b.animation->createClip(b.animation->self,&d,&error);resultHandle(r,0,created);resultError(r,1,error);*outCount=2;return true;
 }
 
@@ -198,7 +188,10 @@ bool cancelBuilder(void *userData,const ScriptValue*a,std::uint32_t n,ScriptValu
     bool ok=false;auto skeleton=b.skeletonBuilders.find(handle);if(skeleton!=b.skeletonBuilders.end()){
         b.pendingJoints-=std::min<std::uint64_t>(b.pendingJoints,skeleton->second.joints.size());b.skeletonBuilders.erase(skeleton);ok=true;
     }else{auto clip=b.clipBuilders.find(handle);if(clip!=b.clipBuilders.end()){
-        std::uint64_t count=0;for(const auto&track:clip->second.tracks)count+=track.keyframes.size();b.pendingKeyframes-=std::min(b.pendingKeyframes,count);b.clipBuilders.erase(clip);ok=true;
+        std::uint64_t count=0;for(const auto&track:clip->second.tracks)count+=track.keyframes.size();
+        b.pendingKeyframes-=std::min(b.pendingKeyframes,count);
+        b.pendingEventMarkers-=std::min<std::uint64_t>(b.pendingEventMarkers,clip->second.eventMarkers.size());
+        b.clipBuilders.erase(clip);ok=true;
     }}resultBoolean(r,0,ok);*outCount=1;return true;
 }
 
@@ -264,6 +257,86 @@ bool buildGlobalTransforms(void*u,const ScriptValue*a,std::uint32_t n,ScriptValu
     const float *matrix=matrices.data()+static_cast<std::size_t>(joint)*16;for(std::uint32_t i=0;i<16;++i)resultNumber(r,i,matrix[i]);*o=16;return true;
 }
 
+bool extractRootMotion(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::uint32_t c,std::uint32_t*o)
+{
+    std::uint32_t clip=0,skeleton=0,root=0;float start=0.0f,end=0.0f;bool looping=false;
+    if(n!=6||c<8||!uint32Value(a,n,0,clip)||!uint32Value(a,n,1,skeleton)
+        ||!uint32Value(a,n,2,root)||!floatValue(a,n,3,start)||!floatValue(a,n,4,end)
+        ||!boolean(a,n,5,looping))return false;
+    float translation[3]{},rotation[4]{};AnimationError error=AnimationError::None;
+    auto&b=*static_cast<Bridge*>(u);std::lock_guard lock(b.apiMutex);
+    const bool ok=b.animation->extractRootMotion(b.animation->self,clip,skeleton,root,start,end,looping,
+        translation,rotation,&error);
+    if(ok){std::uint32_t k=0;for(float v:translation)resultNumber(r,k++,v);for(float v:rotation)resultNumber(r,k++,v);}
+    else for(std::uint32_t k=0;k<7;++k)resultNil(r,k);
+    resultError(r,7,error);*o=8;return true;
+}
+
+bool playerEventCount(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t player = 0;
+    if (count != 1 || capacity < 2 || !uint32Value(args, count, 0, player))
+        return false;
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::uint32_t eventCount = 0;
+    bool overflowed = false;
+    std::lock_guard lock(bridge.apiMutex);
+    if (!bridge.animation->playerEventCount(bridge.animation->self, player, &eventCount, &overflowed))
+    {
+        resultNil(results, 0);
+        resultBoolean(results, 1, false);
+    }
+    else
+    {
+        resultNumber(results, 0, eventCount);
+        resultBoolean(results, 1, overflowed);
+    }
+    *outCount = 2;
+    return true;
+}
+
+bool playerEventAt(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t player = 0;
+    std::uint32_t index = 0;
+    if (count != 2 || capacity < 5 || !uint32Value(args, count, 0, player)
+        || !uint32Value(args, count, 1, index))
+        return false;
+    auto &bridge = *static_cast<Bridge *>(userData);
+    AnimationPlayerEvent event{};
+    std::uint32_t copied = 0;
+    std::lock_guard lock(bridge.apiMutex);
+    if (!bridge.animation->copyPlayerEvents(bridge.animation->self, player, index, &event, 1, &copied)
+        || copied == 0)
+    {
+        resultNil(results, 0);
+        *outCount = 1;
+        return true;
+    }
+    resultNumber(results, 0, event.clip);
+    resultNumber(results, 1, event.eventId);
+    resultNumber(results, 2, event.userData);
+    resultNumber(results, 3, event.clipTimeSeconds);
+    resultNumber(results, 4, event.direction);
+    *outCount = 5;
+    return true;
+}
+
+bool clearPlayerEvents(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t player = 0;
+    if (count != 1 || capacity < 1 || !uint32Value(args, count, 0, player))
+        return false;
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.apiMutex);
+    resultBoolean(results, 0, bridge.animation->clearPlayerEvents(bridge.animation->self, player));
+    *outCount = 1;
+    return true;
+}
+
 struct Binding{const char*name;ScriptNativeFunction function;};
 constexpr Binding bindings[]={
     {"skeletal_animation.begin_skeleton",beginSkeleton},{"skeletal_animation.set_joint",setJoint},
@@ -276,6 +349,11 @@ constexpr Binding bindings[]={
     {"skeletal_animation.set_player_clip",setPlayerClip},{"skeletal_animation.set_player_speed",setPlayerSpeed},
     {"skeletal_animation.set_player_playing",setPlayerPlaying},{"skeletal_animation.advance_player",advancePlayer},
     {"skeletal_animation.player_state",playerState},{"skeletal_animation.sample_joint",sampleJoint},
+    {"skeletal_animation.extract_root_motion",extractRootMotion},
+    {"skeletal_animation.add_event_marker",addEventMarker},
+    {"skeletal_animation.player_event_count",playerEventCount},
+    {"skeletal_animation.player_event_at",playerEventAt},
+    {"skeletal_animation.clear_player_events",clearPlayerEvents},
     {"skeletal_animation.evaluate_joint",evaluateJoint},{"skeletal_animation.global_transform",buildGlobalTransforms},
 };
 }
@@ -307,6 +385,7 @@ void shutdownSkeletalAnimationLuaBridge(SkeletalAnimationLuaBridgeContext &conte
     context.clipBuilders.clear();
     context.pendingJoints = 0;
     context.pendingKeyframes = 0;
+    context.pendingEventMarkers = 0;
 }
 
 } // namespace engine::skeletal_animation

@@ -22,4 +22,8 @@ A value outside its documented range (or a wrong TOML type) is silently ignored 
 - `maximum_hierarchy_depth` bounds transform recomputation recursion; keep it at the depth the scene graph actually uses plus headroom, not an unbounded value.
 - The two world-count keys are independent because the ecs and entity-world layers keep separate registries.
 
+## World persistence
+
+`saveWorld` writes format version 5. `loadWorld` accepts versions 2 through 5 and applies fixed input bounds in addition to `entity_world.maximum_entities`: 512 MiB maximum save-file size, 256 MiB maximum slot storage, 128 MiB aggregate entity/world-name data, and 1 MiB per individual name. A save must contain exactly the declared records and no trailing bytes. The live world is replaced only after the complete file has been validated and its replacement storage has been prepared.
+
 See [overview.md](overview.md) for the capability surface and world lifecycle.

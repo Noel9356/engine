@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -34,7 +35,7 @@
 
 #if defined(__linux__)
 #include <fcntl.h>
-#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -270,7 +271,7 @@ private:
         return ParticipantManifest{
             .name                 = "file_asset_store",
             .kind                 = ParticipantKind::EngineModule,
-            .version              = "0.3.0",
+            .version              = "0.1.0",
             .providedCapabilities = {"file_asset_store"}};
     }
 
@@ -318,11 +319,12 @@ private:
     // root; relative paths are interpreted against the root directory.
     std::string canonicalPath(const char *path) const
     {
-        if (path == nullptr || path[0] == '\0' || (rootConfigured_ && !rootRestricted_))
+        if (path == nullptr || (rootConfigured_ && !rootRestricted_))
             return {};
-        const std::string input(path);
-        if (input.size() > maximumPathBytes_)
+        const auto *terminator = static_cast<const char *>(std::memchr(path, '\0', maximumPathBytes_ + 1u));
+        if (terminator == nullptr || terminator == path)
             return {};
+        const std::string input(path, static_cast<std::size_t>(terminator - path));
         std::error_code       error;
         std::filesystem::path requested(input);
         if (rootRestricted_ && !requested.is_absolute())
@@ -455,9 +457,9 @@ private:
 
     // Reads the record's file into memory and publishes the bytes. Budgets
     // are accounted under recordsMutex_ (reserve before reading, commit or
-    // release after); on Linux the copy goes through a short-lived read-only
-    // mmap, elsewhere through std::ifstream. Leaves the record Ready or
-    // Failed and reports the reason via *error when given.
+    // release after); Linux reads through an opened descriptor and other
+    // platforms use std::ifstream. Leaves the record Ready or Failed and
+    // reports the reason via *error when given.
     bool readAsset(const std::shared_ptr<AssetRecord> &record, AssetError *error)
     {
         std::error_code      filesystemError;
@@ -545,10 +547,11 @@ private:
         }
 #if defined(__linux__)
 
-        // Fast path: map the file read-only, hint the kernel that the pages
-        // will be needed, copy, and unmap. Falls back to std::ifstream below.
+        // Read from an opened descriptor instead of mapping the file. This
+        // handles empty files and reports concurrent truncation as an ordinary
+        // read failure rather than risking a fault while touching mapped pages.
         {
-            int fd = ::open(record->path.c_str(), O_RDONLY | O_CLOEXEC);
+            const int fd = ::open(record->path.c_str(), O_RDONLY | O_CLOEXEC);
             if (fd < 0)
             {
                 releaseReservation(newSize);
@@ -556,18 +559,53 @@ private:
                 setError(error, AssetError::FileNotFound);
                 return false;
             }
-            void *mapped = ::mmap(nullptr, static_cast<std::size_t>(fileSize), PROT_READ, MAP_PRIVATE, fd, 0);
+
+            struct stat fileStatus{};
+            if (::fstat(fd, &fileStatus) != 0 || fileStatus.st_size < 0
+                || static_cast<std::uintmax_t>(fileStatus.st_size) != fileSize)
+            {
+                ::close(fd);
+                releaseReservation(newSize);
+                setState(record, AssetState::Failed, AssetError::ReadFailed);
+                setError(error, AssetError::ReadFailed);
+                return false;
+            }
+
+            std::size_t offset = 0;
+            bool        readFailed = false;
+            while (offset < loaded.size())
+            {
+                const std::size_t remaining = loaded.size() - offset;
+                const std::size_t chunkSize = std::min<std::size_t>(
+                    remaining, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+                const ssize_t count = ::read(fd, loaded.data() + offset, chunkSize);
+                if (count < 0 && errno == EINTR)
+                    continue;
+                if (count <= 0)
+                {
+                    readFailed = true;
+                    break;
+                }
+                offset += static_cast<std::size_t>(count);
+            }
+            if (!readFailed)
+            {
+                std::uint8_t extraByte = 0;
+                ssize_t     count = 0;
+                do
+                {
+                    count = ::read(fd, &extraByte, 1u);
+                } while (count < 0 && errno == EINTR);
+                readFailed = count != 0;
+            }
             ::close(fd);
-            if (mapped == MAP_FAILED)
+            if (readFailed)
             {
                 releaseReservation(newSize);
                 setState(record, AssetState::Failed, AssetError::ReadFailed);
                 setError(error, AssetError::ReadFailed);
                 return false;
             }
-            ::madvise(mapped, static_cast<std::size_t>(fileSize), MADV_WILLNEED);
-            std::memcpy(loaded.data(), mapped, static_cast<std::size_t>(fileSize));
-            ::munmap(mapped, static_cast<std::size_t>(fileSize));
         }
 #else
         std::ifstream stream(record->path, std::ios::binary);
@@ -662,8 +700,16 @@ private:
             setError(error, AssetError::CatalogUnavailable);
             return invalidAsset;
         }
-        std::string key;
-        if (!normalizeAssetKey(request->filePath, key))
+        const auto *pathTerminator
+            = static_cast<const char *>(std::memchr(request->filePath, '\0', maximumPathBytes_ + 1u));
+        if (pathTerminator == nullptr || pathTerminator == request->filePath)
+        {
+            setError(error, AssetError::InvalidPath);
+            return invalidAsset;
+        }
+        const std::string input(request->filePath, static_cast<std::size_t>(pathTerminator - request->filePath));
+        std::string       key;
+        if (!normalizeAssetKey(input, key) || key.size() > maximumPathBytes_)
         {
             setError(error, AssetError::InvalidPath);
             return invalidAsset;
@@ -697,6 +743,28 @@ private:
         return defaultAsyncPriority_;
     }
 
+    bool reservePendingJob()
+    {
+        std::lock_guard lock(jobsMutex_);
+        const std::size_t pending = pendingJobs_.load(std::memory_order_relaxed);
+        if (stopping_.load(std::memory_order_acquire) || scheduler_ == nullptr
+            || pending >= maximumPendingRequests_)
+            return false;
+        pendingJobs_.store(pending + 1u, std::memory_order_release);
+        return true;
+    }
+
+    void completePendingJob()
+    {
+        {
+            std::lock_guard lock(jobsMutex_);
+            const std::size_t pending = pendingJobs_.load(std::memory_order_relaxed);
+            if (pending != 0)
+                pendingJobs_.store(pending - 1u, std::memory_order_release);
+        }
+        jobsCondition_.notify_all();
+    }
+
     // Shared request path: dedupe by identity string (canonical path or
     // "cooked://key"), make room at the record cap, then either schedule an
     // asynchronous read or run it inline. A handle is returned even when the
@@ -715,7 +783,14 @@ private:
                 const auto found = records_.find(existing->second);
                 if (found != records_.end())
                 {
-                    found->second->references.fetch_add(1, std::memory_order_relaxed);
+                    const std::uint32_t references
+                        = found->second->references.load(std::memory_order_relaxed);
+                    if (references == std::numeric_limits<std::uint32_t>::max())
+                    {
+                        setError(error, AssetError::CapacityExceeded);
+                        return invalidAsset;
+                    }
+                    found->second->references.store(references + 1u, std::memory_order_relaxed);
                     touchAsset(found->second);
                     return found->first;
                 }
@@ -730,10 +805,27 @@ private:
             try
             {
                 record = std::make_shared<AssetRecord>();
-                // Handle counter wrap skips the 0 (invalidAsset) sentinel.
-                record->handle = nextHandle_++;
-                if (record->handle == invalidAsset)
-                    record->handle = nextHandle_++;
+                // Probe live handles after counter wrap; 0 remains reserved.
+                AssetHandle candidate = nextHandle_;
+                bool        handleAvailable = false;
+                for (std::size_t attempt = 0; attempt <= records_.size(); ++attempt)
+                {
+                    if (candidate == invalidAsset)
+                        candidate = 1;
+                    if (!records_.contains(candidate))
+                    {
+                        handleAvailable = true;
+                        break;
+                    }
+                    candidate = candidate == std::numeric_limits<AssetHandle>::max() ? 1 : candidate + 1;
+                }
+                if (!handleAvailable)
+                {
+                    setError(error, AssetError::CapacityExceeded);
+                    return invalidAsset;
+                }
+                record->handle = candidate;
+                nextHandle_ = candidate == std::numeric_limits<AssetHandle>::max() ? 1 : candidate + 1;
                 record->path          = resolvedPath;
                 record->canonicalPath = identity;
                 touchAsset(record);
@@ -762,50 +854,49 @@ private:
         if (request->asynchronous)
         {
             const TaskPriority taskPriority = resolveTaskPriority(request->priority);
-            std::size_t        pending      = pendingJobs_.load(std::memory_order_relaxed);
-            // Atomically claim a pending-job slot so the cap cannot be raced.
-            while (pending < maximumPendingRequests_
-                   && !pendingJobs_.compare_exchange_weak(
-                       pending, pending + 1u, std::memory_order_acq_rel, std::memory_order_relaxed))
+            if (!reservePendingJob())
             {
-            }
-            if (stopping_.load(std::memory_order_acquire) || scheduler_ == nullptr
-                || pending >= maximumPendingRequests_)
-            {
-                // Submission refused (shutting down, no scheduler, or queue
-                // full): mark the record Failed/Busy but still return its
-                // handle so callers can poll it or ignore it.
-                if (pending < maximumPendingRequests_)
-                    pendingJobs_.fetch_sub(1, std::memory_order_acq_rel);
                 setState(record, AssetState::Failed, AssetError::Busy);
                 setError(error, AssetError::Busy);
                 return record->handle;
             }
-            const bool accepted = scheduler_->schedule(
-                // Read on a scheduler thread, then drop the pending count so
-                // stop() can drain and wake.
-                [this, record]
-                {
-                    setState(record, AssetState::Loading, AssetError::None);
-                    try
+
+            bool accepted = false;
+            try
+            {
+                accepted = scheduler_->schedule(
+                    [this, record]
                     {
-                        ScopedProfileTimer timer(*profiler_, PerformanceMetric::AssetRead);
-                        readAsset(record, nullptr);
-                    }
-                    catch (...)
-                    {
-                        setState(record, AssetState::Failed, AssetError::ReadFailed);
-                    }
-                    pendingJobs_.fetch_sub(1, std::memory_order_acq_rel);
-                    jobsCondition_.notify_all();
-                },
-                taskPriority);
+                        setState(record, AssetState::Loading, AssetError::None);
+                        try
+                        {
+                            if (profiler_ != nullptr)
+                            {
+                                ScopedProfileTimer timer(*profiler_, PerformanceMetric::AssetRead);
+                                readAsset(record, nullptr);
+                            }
+                            else
+                            {
+                                readAsset(record, nullptr);
+                            }
+                        }
+                        catch (...)
+                        {
+                            setState(record, AssetState::Failed, AssetError::ReadFailed);
+                        }
+                        completePendingJob();
+                    },
+                    taskPriority);
+            }
+            catch (...)
+            {
+                accepted = false;
+            }
             if (!accepted)
             {
-                pendingJobs_.fetch_sub(1, std::memory_order_acq_rel);
+                completePendingJob();
                 setState(record, AssetState::Failed, AssetError::Busy);
                 setError(error, AssetError::Busy);
-                jobsCondition_.notify_all();
             }
         }
         else
@@ -825,7 +916,10 @@ private:
         const auto      iterator = records_.find(handle);
         if (iterator == records_.end())
             return false;
-        iterator->second->references.fetch_add(1, std::memory_order_relaxed);
+        const std::uint32_t references = iterator->second->references.load(std::memory_order_relaxed);
+        if (references == std::numeric_limits<std::uint32_t>::max())
+            return false;
+        iterator->second->references.store(references + 1u, std::memory_order_relaxed);
         touchAsset(iterator->second);
         return true;
     }
@@ -1035,7 +1129,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
     static const engine::EngineModuleEntryTable entry
         = {.abiVersion     = engine::engineModuleAbiVersion,
             .moduleName    = "file_asset_store",
-            .moduleVersion = "0.3.0",
+            .moduleVersion = "0.1.0",
             .createModule  = []() -> engine::ModuleInterface *
             { return new engine::file_asset_store::FileAssetStoreModule(); },
             .providedCapabilities    = provided,

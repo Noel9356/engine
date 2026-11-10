@@ -15,7 +15,7 @@ add_library(
 )
 target_compile_definitions(
     engine_module_skeletal_animation
-    PRIVATE ENGINE_SKELETAL_ANIMATION_MODULE_VERSION="0.4.0"
+    PRIVATE ENGINE_SKELETAL_ANIMATION_MODULE_VERSION="0.1.0"
 )
 target_include_directories(
     engine_module_skeletal_animation
@@ -26,6 +26,7 @@ target_link_libraries(
     engine_module_skeletal_animation
     PRIVATE engine_kernel
             engine_skeletal_animation_capabilities
+            engine_util_types
 )
 
 set_target_properties(

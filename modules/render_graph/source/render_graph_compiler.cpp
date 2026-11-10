@@ -18,8 +18,11 @@ namespace engine::render_graph
 {
 namespace
 {
-// Hard cap on total resource uses across all passes.
+// Caps mirror the module settings and bound analysis work for direct compiler users.
+inline constexpr std::uint32_t maxGraphPasses = 4096;
+inline constexpr std::uint32_t maxGraphResources = 8192;
 inline constexpr std::uint64_t maxGraphUses = 1'000'000;
+inline constexpr std::uint64_t maxGraphDependencies = 1'000'000;
 } // namespace
 
 bool buildRenderGraphPlan(const RenderGraphPassDescription *passes, std::uint32_t passCount,
@@ -33,8 +36,11 @@ bool buildRenderGraphPlan(const RenderGraphPassDescription *passes, std::uint32_
     };
     if ((passCount != 0 && passes == nullptr) || (resourceCount != 0 && resources == nullptr))
         return fail(RenderGraphError::InvalidInput);
+    if (passCount > maxGraphPasses || resourceCount > maxGraphResources)
+        return fail(RenderGraphError::CapacityExceeded);
 
     std::uint64_t totalUseCount = 0;
+    std::uint64_t totalDependencyCount = 0;
     // Resources need a non-zero size and a power-of-two alignment; transient
     // and initiallyDefined are mutually exclusive.
     for (std::uint32_t resource = 0; resource < resourceCount; ++resource)
@@ -55,16 +61,19 @@ bool buildRenderGraphPlan(const RenderGraphPassDescription *passes, std::uint32_
             || (passes[pass].dependencyCount != 0 && passes[pass].dependencies == nullptr))
             return fail(RenderGraphError::InvalidInput);
         totalUseCount += passes[pass].useCount;
-        if (totalUseCount > maxGraphUses)
+        totalDependencyCount += passes[pass].dependencyCount;
+        if (totalUseCount > maxGraphUses || totalDependencyCount > maxGraphDependencies)
             return fail(RenderGraphError::CapacityExceeded);
     }
 
     std::vector<std::vector<std::uint32_t>> successors(passCount);
     std::vector<std::uint32_t>              indegree(passCount, 0);
     std::unordered_set<std::uint64_t>       edgeSet;
-    edgeSet.reserve(static_cast<std::size_t>(passCount) * 2u + static_cast<std::size_t>(totalUseCount));
+    edgeSet.reserve(static_cast<std::size_t>(passCount) * 2u + static_cast<std::size_t>(totalUseCount)
+        + static_cast<std::size_t>(totalDependencyCount));
     outPlan.edges.clear();
-    outPlan.edges.reserve(static_cast<std::size_t>(passCount) + static_cast<std::size_t>(totalUseCount));
+    outPlan.edges.reserve(static_cast<std::size_t>(passCount) + static_cast<std::size_t>(totalUseCount)
+        + static_cast<std::size_t>(totalDependencyCount));
 
     // Deduplicating edge insert (64-bit packed key); returns false only for
     // out-of-range indices or a self-dependency.

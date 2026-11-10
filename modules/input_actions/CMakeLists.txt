@@ -6,6 +6,10 @@ target_include_directories(
     engine_input_actions_capabilities
     INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
+target_link_libraries(
+    engine_input_actions_capabilities
+    INTERFACE engine_window_capabilities
+)
 
 add_library(
     engine_module_input_actions
@@ -26,6 +30,7 @@ target_link_libraries(
     engine_module_input_actions
     PRIVATE engine_kernel
             engine_input_actions_capabilities
+            engine_window_capabilities
 )
 
 set_target_properties(

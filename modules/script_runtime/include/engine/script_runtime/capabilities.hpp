@@ -126,6 +126,41 @@ struct ScriptRuntimeCapability
     bool (*unregisterRuntimeInitializer)(void *, ScriptRuntimeInitializerHandle initializer);
 };
 
+// Optional-module helper for installing a bridge initializer when a compatible
+// script runtime provider is present.
+inline bool canRegisterRuntimeInitializer(const ScriptRuntimeCapability *capability) noexcept
+{
+    return capability != nullptr && capability->abi == scriptRuntimeCapabilityAbi
+        && capability->registerRuntimeInitializer != nullptr;
+}
+
+inline ScriptRuntimeInitializerHandle tryRegisterRuntimeInitializer(
+    ScriptRuntimeCapability *capability, ScriptRuntimeInitializer initializer, void *userData)
+{
+    if (!canRegisterRuntimeInitializer(capability) || initializer == nullptr)
+    {
+        return invalidScriptRuntimeInitializer;
+    }
+    return capability->registerRuntimeInitializer(capability->self, initializer, userData);
+}
+
+// Clears the local handle even when the provider has already shut down or the
+// initializer was removed by the runtime.
+inline void unregisterRuntimeInitializer(
+    ScriptRuntimeCapability *capability, ScriptRuntimeInitializerHandle &initializer)
+{
+    if (initializer == invalidScriptRuntimeInitializer)
+    {
+        return;
+    }
+    if (capability != nullptr && capability->abi == scriptRuntimeCapabilityAbi
+        && capability->unregisterRuntimeInitializer != nullptr)
+    {
+        capability->unregisterRuntimeInitializer(capability->self, initializer);
+    }
+    initializer = invalidScriptRuntimeInitializer;
+}
+
 } // namespace engine::script_runtime
 
 #endif

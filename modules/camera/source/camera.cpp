@@ -177,13 +177,12 @@ public:
             // Capacity remains enforced even when the initial reservation fails.
         }
         scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
-        if (scriptRuntime_ != nullptr && scriptRuntime_->abi == script_runtime::scriptRuntimeCapabilityAbi
-            && scriptRuntime_->registerRuntimeInitializer != nullptr)
+        if (script_runtime::canRegisterRuntimeInitializer(scriptRuntime_))
         {
             luaBridgeContext_.scriptRuntime = scriptRuntime_;
             luaBridgeContext_.camera = &capability_;
-            runtimeInitializer_ = scriptRuntime_->registerRuntimeInitializer(
-                scriptRuntime_->self, initializeCameraLuaRuntime, &luaBridgeContext_);
+            runtimeInitializer_ = script_runtime::tryRegisterRuntimeInitializer(
+                scriptRuntime_, initializeCameraLuaRuntime, &luaBridgeContext_);
         }
         reloadSubscription_ = context.eventBus()
                                   .channel<ConfigurationReloadedEvent>()
@@ -195,12 +194,7 @@ public:
 
     void stop() override
     {
-        if (scriptRuntime_ != nullptr && runtimeInitializer_ != script_runtime::invalidScriptRuntimeInitializer
-            && scriptRuntime_->unregisterRuntimeInitializer != nullptr)
-        {
-            scriptRuntime_->unregisterRuntimeInitializer(scriptRuntime_->self, runtimeInitializer_);
-            runtimeInitializer_ = script_runtime::invalidScriptRuntimeInitializer;
-        }
+        script_runtime::unregisterRuntimeInitializer(scriptRuntime_, runtimeInitializer_);
         {
             std::lock_guard bridgeLock(luaBridgeContext_.apiMutex);
             luaBridgeContext_.camera = nullptr;
@@ -928,6 +922,75 @@ private:
         *outState = record.cachedViewState;
     }
 
+    bool worldToViewportImpl(CameraHandle camera, std::uint32_t viewportWidth, std::uint32_t viewportHeight,
+        const float worldPosition[3], float *outX, float *outY, float *outDepth) const
+    {
+        if (viewportWidth == 0 || viewportHeight == 0 || worldPosition == nullptr
+            || outX == nullptr || outY == nullptr || outDepth == nullptr
+            || !std::isfinite(worldPosition[0]) || !std::isfinite(worldPosition[1])
+            || !std::isfinite(worldPosition[2]))
+            return false;
+        const auto found = cameras_.find(camera);
+        if (found == cameras_.end())
+            return false;
+        ViewState state{};
+        viewStateImpl(camera, viewportWidth, viewportHeight, &state);
+        const glm::vec4 clip = found->second.cachedProjection * found->second.cachedView
+            * glm::vec4(worldPosition[0], worldPosition[1], worldPosition[2], 1.0f);
+        if (!std::isfinite(clip.x) || !std::isfinite(clip.y) || !std::isfinite(clip.z)
+            || !std::isfinite(clip.w) || clip.w <= 1.0e-7f)
+            return false;
+        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        const float x = (ndc.x + 1.0f) * 0.5f * static_cast<float>(viewportWidth);
+        const float y = (1.0f - ndc.y) * 0.5f * static_cast<float>(viewportHeight);
+        const float depth = ndc.z * 0.5f + 0.5f;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(depth))
+            return false;
+        *outX = x;
+        *outY = y;
+        *outDepth = depth;
+        return true;
+    }
+
+    bool viewportToWorldRayImpl(CameraHandle camera, std::uint32_t viewportWidth, std::uint32_t viewportHeight,
+        float viewportX, float viewportY, float outOrigin[3], float outDirection[3]) const
+    {
+        if (viewportWidth == 0 || viewportHeight == 0 || !std::isfinite(viewportX) || !std::isfinite(viewportY)
+            || outOrigin == nullptr || outDirection == nullptr)
+            return false;
+        const auto found = cameras_.find(camera);
+        if (found == cameras_.end())
+            return false;
+        ViewState state{};
+        viewStateImpl(camera, viewportWidth, viewportHeight, &state);
+        const float ndcX = 2.0f * viewportX / static_cast<float>(viewportWidth) - 1.0f;
+        const float ndcY = 1.0f - 2.0f * viewportY / static_cast<float>(viewportHeight);
+        const glm::mat4 inverseViewProjection = glm::inverse(found->second.cachedProjection * found->second.cachedView);
+        const glm::vec4 nearHomogeneous = inverseViewProjection * glm::vec4(ndcX, ndcY, -1.0f, 1.0f);
+        const glm::vec4 farHomogeneous = inverseViewProjection * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+        if (!std::isfinite(nearHomogeneous.w) || !std::isfinite(farHomogeneous.w)
+            || std::abs(nearHomogeneous.w) <= 1.0e-7f || std::abs(farHomogeneous.w) <= 1.0e-7f)
+            return false;
+        const glm::vec3 nearPoint = glm::vec3(nearHomogeneous) / nearHomogeneous.w;
+        const glm::vec3 farPoint = glm::vec3(farHomogeneous) / farHomogeneous.w;
+        const glm::vec3 origin = found->second.projectionType == ProjectionType::Perspective
+            ? found->second.position : nearPoint;
+        const glm::vec3 delta = found->second.projectionType == ProjectionType::Perspective
+            ? farPoint - origin : farPoint - nearPoint;
+        const float lengthSquared = glm::dot(delta, delta);
+        if (!finiteVector(origin) || !finiteVector(delta) || !std::isfinite(lengthSquared)
+            || lengthSquared <= 1.0e-12f)
+            return false;
+        const glm::vec3 direction = delta * glm::inversesqrt(lengthSquared);
+        outOrigin[0] = origin.x;
+        outOrigin[1] = origin.y;
+        outOrigin[2] = origin.z;
+        outDirection[0] = direction.x;
+        outDirection[1] = direction.y;
+        outDirection[2] = direction.z;
+        return true;
+    }
+
     static void reportError(CameraError *error, CameraError value)
     {
         if (error != nullptr)
@@ -968,6 +1031,12 @@ private:
         capability_.viewState
             = [](void *self, CameraHandle camera, std::uint32_t width, std::uint32_t height, ViewState *outState)
         { static_cast<CameraModule *>(self)->viewStateImpl(camera, width, height, outState); };
+        capability_.worldToViewport = [](void *self, CameraHandle camera, std::uint32_t width, std::uint32_t height,
+            const float position[3], float *x, float *y, float *depth)
+        { return static_cast<CameraModule *>(self)->worldToViewportImpl(camera, width, height, position, x, y, depth); };
+        capability_.viewportToWorldRay = [](void *self, CameraHandle camera, std::uint32_t width, std::uint32_t height,
+            float x, float y, float origin[3], float direction[3])
+        { return static_cast<CameraModule *>(self)->viewportToWorldRayImpl(camera, width, height, x, y, origin, direction); };
     }
 
     ParticipantContext *context_            = nullptr;

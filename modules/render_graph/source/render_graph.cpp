@@ -429,11 +429,12 @@ private:
             break;
         }
         const float scale = settings_.quality == renderer::QualityPreset::Auto ? memoryScale : qualityScale;
-        out->maxPasses
-            = std::min(settings_.maxPasses, std::max(1u, static_cast<std::uint32_t>(settings_.maxPasses * scale)));
-        out->maxResources = std::min(
-            settings_.maxResources, std::max(1u, static_cast<std::uint32_t>(settings_.maxResources * scale)));
-        const std::uint64_t budget      = static_cast<std::uint64_t>(settings_.transientMemoryBudgetBytes * scale);
+        out->maxPasses = std::min(settings_.maxPasses,
+            std::max(1u, static_cast<std::uint32_t>(static_cast<double>(settings_.maxPasses) * scale)));
+        out->maxResources = std::min(settings_.maxResources,
+            std::max(1u, static_cast<std::uint32_t>(static_cast<double>(settings_.maxResources) * scale)));
+        const std::uint64_t budget = static_cast<std::uint64_t>(
+            static_cast<double>(settings_.transientMemoryBudgetBytes) * scale);
         out->transientMemoryBudgetBytes = std::min(budget, settings_.transientMemoryBudgetBytes);
         out->transientAliasing          = settings_.transientAliasing;
         out->asyncCompute               = false;

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -53,12 +54,12 @@ bool parseDecimal(const std::string &text, std::uintmax_t &out)
             return false;
         }
         const std::uintmax_t digitValue = static_cast<std::uintmax_t>(digit - '0');
-        const std::uintmax_t next       = parsed * 10 + digitValue;
-        if (next < parsed)
+        const std::uintmax_t maximum    = std::numeric_limits<std::uintmax_t>::max();
+        if (parsed > (maximum - digitValue) / 10u)
         {
             return false;
         }
-        parsed = next;
+        parsed = parsed * 10u + digitValue;
     }
     out = parsed;
     return true;
@@ -75,6 +76,13 @@ void ModuleDescriptorCache::load()
     {
         return;
     }
+    constexpr std::uintmax_t maximumCacheBytes = 64ull * 1024ull * 1024ull;
+    std::error_code          sizeError;
+    const std::uintmax_t     cacheSize = std::filesystem::file_size(cacheFile, sizeError);
+    if (sizeError || cacheSize > maximumCacheBytes)
+    {
+        return;
+    }
     std::ifstream cacheStream(cacheFile, std::ios::in | std::ios::binary);
     if (!cacheStream.is_open())
     {
@@ -87,11 +95,19 @@ void ModuleDescriptorCache::load()
         return;
     }
 
+    constexpr std::size_t maximumCacheEntries = 65'536u;
+    constexpr std::size_t maximumCacheLineBytes = 4096u;
+    constexpr std::size_t maximumDescriptorValues = 256u;
     ModuleDescriptorCacheEntry pending;
     std::string                pendingPath;
     bool                       recordOpen = false;
     while (std::getline(cacheStream, line))
     {
+        if (line.size() > maximumCacheLineBytes)
+        {
+            entries.clear();
+            return;
+        }
         std::string key;
         std::string value;
         if (!splitCacheLine(line, key, value))
@@ -102,6 +118,11 @@ void ModuleDescriptorCache::load()
         {
             if (recordOpen && !pendingPath.empty() && !pending.descriptor.name.empty())
             {
+                if (entries.size() >= maximumCacheEntries)
+                {
+                    entries.clear();
+                    return;
+                }
                 entries.emplace(pendingPath, pending);
             }
             pending     = ModuleDescriptorCacheEntry{};
@@ -123,7 +144,10 @@ void ModuleDescriptorCache::load()
         }
         else if (key == "path")
         {
-            pendingPath = value;
+            if (value.size() <= maximumCacheLineBytes)
+            {
+                pendingPath = value;
+            }
         }
         else if (key == "name")
         {
@@ -135,12 +159,20 @@ void ModuleDescriptorCache::load()
         }
         else if (key == "sha256")
         {
-            pending.contentSha256 = value;
+            if (value.size() == 64u)
+            {
+                pending.contentSha256 = value;
+            }
         }
         else if (key == "provided")
         {
             if (!value.empty())
             {
+                if (pending.descriptor.providedCapabilities.size() >= maximumDescriptorValues)
+                {
+                    entries.clear();
+                    return;
+                }
                 pending.descriptor.providedCapabilities.push_back(value);
             }
         }
@@ -148,6 +180,11 @@ void ModuleDescriptorCache::load()
         {
             if (!value.empty())
             {
+                if (pending.descriptor.requiredCapabilities.size() >= maximumDescriptorValues)
+                {
+                    entries.clear();
+                    return;
+                }
                 pending.descriptor.requiredCapabilities.push_back(value);
             }
         }
@@ -155,6 +192,11 @@ void ModuleDescriptorCache::load()
         {
             if (!value.empty())
             {
+                if (pending.descriptor.optionalCapabilities.size() >= maximumDescriptorValues)
+                {
+                    entries.clear();
+                    return;
+                }
                 pending.descriptor.optionalCapabilities.push_back(value);
             }
         }
@@ -162,20 +204,30 @@ void ModuleDescriptorCache::load()
         {
             if (!value.empty())
             {
+                if (pending.descriptor.declaredPermissions.size() >= maximumDescriptorValues)
+                {
+                    entries.clear();
+                    return;
+                }
                 pending.descriptor.declaredPermissions.push_back(value);
             }
         }
     }
     if (recordOpen && !pendingPath.empty() && !pending.descriptor.name.empty())
     {
+        if (entries.size() >= maximumCacheEntries)
+        {
+            entries.clear();
+            return;
+        }
         entries.emplace(pendingPath, pending);
     }
 }
 
 // A hit requires size and mtime to match; the stored sha256 is for advisories, not
 // compared here.
-const ModuleDescriptorCacheEntry *ModuleDescriptorCache::find(
-    const std::filesystem::path &libraryPath, std::uintmax_t sizeBytes, std::uintmax_t modificationStamp) const
+const ModuleDescriptorCacheEntry *ModuleDescriptorCache::find(const std::filesystem::path &libraryPath,
+    std::uintmax_t sizeBytes, std::uintmax_t modificationStamp, const std::string &contentSha256) const
 {
     const auto found = entries.find(libraryPath.string());
     if (found == entries.end())
@@ -184,7 +236,8 @@ const ModuleDescriptorCacheEntry *ModuleDescriptorCache::find(
     }
     const ModuleDescriptorCacheEntry &entry = found->second;
 
-    if (entry.sizeBytes != sizeBytes || entry.modificationStamp != modificationStamp)
+    if (entry.sizeBytes != sizeBytes || entry.modificationStamp != modificationStamp
+        || entry.contentSha256 != contentSha256)
     {
         return nullptr;
     }

@@ -453,7 +453,11 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
     if (smooth)
     {
         std::vector<float> smoothNormals;
-        accumulateSmoothNormalsInterleaved(part.vertices, part.indices, smoothNormals);
+        if (!accumulateIndexedSmoothNormals(part.vertices, part.indices, smoothNormals))
+        {
+            reportError(error, ModelLoadError::ParseFailed);
+            return false;
+        }
         for (std::size_t vertex = 0; vertex < part.vertices.size() / renderer::meshVertexFloatCount; ++vertex)
         {
             std::copy_n(

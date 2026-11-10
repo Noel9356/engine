@@ -1,10 +1,9 @@
 #include "lua_bridge.hpp"
 
-#include <array>
-#include <cmath>
+#include <engine/script_runtime/native_values.hpp>
+
 #include <cstdint>
 #include <limits>
-#include <string>
 
 namespace engine::audio
 {
@@ -14,106 +13,18 @@ using script_runtime::ScriptNativeFunction;
 using script_runtime::ScriptRuntimeHandle;
 using script_runtime::ScriptValue;
 using script_runtime::ScriptValueType;
-
+using script_runtime::native::floatValue;
+using script_runtime::native::number;
+using script_runtime::native::optionalBoolean;
+using script_runtime::native::resultBoolean;
+using script_runtime::native::resultNil;
+using script_runtime::native::resultNumber;
+using script_runtime::native::resultString;
+using script_runtime::native::stringValue;
+using script_runtime::native::uint32Value;
 AudioCapability &audio(void *userData)
 {
     return *static_cast<AudioLuaBridgeContext *>(userData)->audio;
-}
-
-bool number(const ScriptValue *args, std::uint32_t count, std::uint32_t index, double &out, bool required = true)
-{
-    if (index >= count || args[index].type == ScriptValueType::Nil)
-        return !required;
-    if (args[index].type != ScriptValueType::Number || !std::isfinite(args[index].numberValue))
-        return false;
-    out = args[index].numberValue;
-    return true;
-}
-
-bool uint32Value(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::uint32_t &out,
-    std::uint32_t fallback = 0, bool required = true)
-{
-    double value = fallback;
-    if (!number(args, count, index, value, required))
-        return false;
-    if (index >= count || args[index].type == ScriptValueType::Nil)
-    {
-        out = fallback;
-        return true;
-    }
-    if (value < 0.0 || value > std::numeric_limits<std::uint32_t>::max() || std::floor(value) != value)
-        return false;
-    out = static_cast<std::uint32_t>(value);
-    return true;
-}
-
-bool floatValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, float &out,
-    float fallback = 0.0f, bool required = true)
-{
-    double value = fallback;
-    if (!number(args, count, index, value, required))
-        return false;
-    if (index >= count || args[index].type == ScriptValueType::Nil)
-    {
-        out = fallback;
-        return true;
-    }
-    if (value < -std::numeric_limits<float>::max() || value > std::numeric_limits<float>::max())
-        return false;
-    out = static_cast<float>(value);
-    return true;
-}
-
-bool boolean(const ScriptValue *args, std::uint32_t count, std::uint32_t index, bool &out, bool fallback = false,
-    bool required = false)
-{
-    if (index >= count || args[index].type == ScriptValueType::Nil)
-    {
-        if (required)
-            return false;
-        out = fallback;
-        return true;
-    }
-    if (args[index].type != ScriptValueType::Boolean)
-        return false;
-    out = args[index].booleanValue;
-    return true;
-}
-
-bool stringValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, const char *&out,
-    bool required = true)
-{
-    if (index >= count || args[index].type == ScriptValueType::Nil)
-        return !required;
-    if (args[index].type != ScriptValueType::String)
-        return false;
-    out = args[index].stringData;
-    return out != nullptr;
-}
-
-void resultNumber(ScriptValue *results, std::uint32_t index, double value)
-{
-    results[index].type = ScriptValueType::Number;
-    results[index].numberValue = value;
-}
-
-void resultBoolean(ScriptValue *results, std::uint32_t index, bool value)
-{
-    results[index].type = ScriptValueType::Boolean;
-    results[index].booleanValue = value;
-}
-
-void resultString(ScriptValue *results, std::uint32_t index, const char *value)
-{
-    results[index].type = ScriptValueType::String;
-    results[index].stringData = value != nullptr ? value : "";
-    results[index].stringSize = static_cast<std::uint32_t>(value != nullptr ? std::char_traits<char>::length(value) : 0);
-}
-
-void resultNil(ScriptValue *results, std::uint32_t index)
-{
-    results[index] = {};
-    results[index].type = ScriptValueType::Nil;
 }
 
 void resultError(ScriptValue *results, std::uint32_t index, AudioError error)
@@ -143,8 +54,8 @@ bool createEngine(void *userData, const ScriptValue *args, std::uint32_t count, 
         || !uint32Value(args, count, 1, d.channels, 0, false)
         || !uint32Value(args, count, 2, d.listenerCount, 0, false)
         || !floatValue(args, count, 3, master, -1.0f, false)
-        || !boolean(args, count, 4, d.noDevice)
-        || !boolean(args, count, 5, d.noAutoStart)) return false;
+        || !optionalBoolean(args, count, 4, d.noDevice)
+        || !optionalBoolean(args, count, 5, d.noAutoStart)) return false;
     d.masterVolume = master;
     AudioError error = AudioError::None;
     const auto handle = api.createEngine(api.self, &d, &error);
@@ -194,7 +105,7 @@ bool createBus(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::uin
     std::uint32_t e = 0;
     AudioBusDescription d{};
     std::uint32_t parent = 0;
-    if(!uint32Value(a,n,0,e)||!uint32Value(a,n,1,parent,0,false)||!floatValue(a,n,2,d.volume,1.0f,false)||!boolean(a,n,3,d.muted))return false;
+    if(!uint32Value(a,n,0,e)||!uint32Value(a,n,1,parent,0,false)||!floatValue(a,n,2,d.volume,1.0f,false)||!optionalBoolean(a,n,3,d.muted))return false;
     d.parent=parent; AudioError err=AudioError::None; auto&api=audio(u);
     auto h=api.createBus(api.self,e,&d,&err); if(h==invalidAudioBus)resultNil(r,0);else resultNumber(r,0,h);resultError(r,1,err);*o=2;return true;
 }
@@ -211,7 +122,7 @@ bool setBusVolume(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::
 }
 bool setBusMuted(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::uint32_t c,std::uint32_t*o)
 {
-    std::uint32_t e=0,b=0;bool v=false;if(n!=3||c<1||!uint32Value(a,n,0,e)||!uint32Value(a,n,1,b)||!boolean(a,n,2,v,false,true))return false;
+    std::uint32_t e=0,b=0;bool v=false;if(n!=3||c<1||!uint32Value(a,n,0,e)||!uint32Value(a,n,1,b)||!optionalBoolean(a,n,2,v,false,true))return false;
     auto&api=audio(u);resultBoolean(r,0,api.setBusMuted(api.self,e,b,v));*o=1;return true;
 }
 
@@ -225,8 +136,8 @@ bool createSound(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::u
     AudioSoundDescription d{};
     if(!uint32Value(a,n,0,e)||!stringValue(a,n,1,path)||!uint32Value(a,n,2,b,0,false)
        ||!floatValue(a,n,3,d.volume,1.0f,false)||!floatValue(a,n,4,d.pitch,1.0f,false)||!floatValue(a,n,5,d.pan,0.0f,false)
-       ||!boolean(a,n,6,d.looping)||!boolean(a,n,7,d.spatialized)||!boolean(a,n,8,d.streaming)
-       ||!boolean(a,n,9,d.decode)||!boolean(a,n,10,d.asynchronous)||!boolean(a,n,11,d.disablePitch))return false;
+       ||!optionalBoolean(a,n,6,d.looping)||!optionalBoolean(a,n,7,d.spatialized)||!optionalBoolean(a,n,8,d.streaming)
+       ||!optionalBoolean(a,n,9,d.decode)||!optionalBoolean(a,n,10,d.asynchronous)||!optionalBoolean(a,n,11,d.disablePitch))return false;
     d.filePath=path;d.bus=b;AudioError err=AudioError::None;auto&api=audio(u);
     auto h=api.createSound(api.self,e,&d,&err);if(h==invalidAudioSound)resultNil(r,0);else resultNumber(r,0,h);resultError(r,1,err);*o=2;return true;
 }
@@ -278,7 +189,7 @@ bool setSoundDoppler(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,st
 
 bool setSoundLooping(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::uint32_t c,std::uint32_t*o)
 {
-    AudioEngineHandle e=0;AudioSoundHandle s=0;bool b=false;if(n!=3||c<1||!parseEngineSound(a,n,e,s)||!boolean(a,n,2,b,false,true))return false;
+    AudioEngineHandle e=0;AudioSoundHandle s=0;bool b=false;if(n!=3||c<1||!parseEngineSound(a,n,e,s)||!optionalBoolean(a,n,2,b,false,true))return false;
     resultBoolean(r,0,audio(u).setSoundLooping(audio(u).self,e,s,b));*o=1;return true;
 }
 enum class VectorSetter{Position,Velocity,Direction};
@@ -304,7 +215,7 @@ bool setSoundListener(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,s
 }
 bool setSoundSpatialization(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::uint32_t c,std::uint32_t*o)
 {
-    AudioEngineHandle e=0;AudioSoundHandle s=0;bool enabled=false;if(n!=3||c<1||!parseEngineSound(a,n,e,s)||!boolean(a,n,2,enabled,false,true))return false;
+    AudioEngineHandle e=0;AudioSoundHandle s=0;bool enabled=false;if(n!=3||c<1||!parseEngineSound(a,n,e,s)||!optionalBoolean(a,n,2,enabled,false,true))return false;
     AudioError err=AudioError::None;auto&api=audio(u);bool ok=api.setSoundSpatializationEnabled(api.self,e,s,enabled,&err);resultBoolean(r,0,ok);*o=1;return true;
 }
 bool setSoundGainRange(void*u,const ScriptValue*a,std::uint32_t n,ScriptValue*r,std::uint32_t c,std::uint32_t*o)

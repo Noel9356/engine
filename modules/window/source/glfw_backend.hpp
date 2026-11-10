@@ -6,6 +6,9 @@
 
 #include "window_backend.hpp"
 
+#include <array>
+#include <vector>
+
 #if defined(ENGINE_WINDOW_BACKEND_GLFW)
 
 namespace engine
@@ -48,10 +51,26 @@ public:
     void setCursorMode(const WindowRecord &record, CursorMode mode) override;
 
     bool cursorPosition(const WindowRecord &record, double *outX, double *outY) const override;
+    bool setClipboardText(const WindowRecord &record, const char *text) override;
+    bool copyClipboardText(const WindowRecord &record, std::string &output) const override;
 
     const char *const *requiredInstanceExtensions(std::uint32_t *outCount) const override;
 
     bool nativeSurfaceHandles(const WindowRecord &record, NativeWindowHandles *outHandles) const override;
+
+private:
+    struct GamepadSnapshot
+    {
+        bool connected = false;
+        std::array<unsigned char, 15> buttons{};
+        std::array<float, 6> axes{};
+    };
+
+    void pollGamepads();
+    void queueGamepadEvent(const WindowEvent &event);
+
+    std::array<GamepadSnapshot, 16> gamepads_{};
+    std::vector<WindowRecord *> windows_;
 };
 
 } // namespace window

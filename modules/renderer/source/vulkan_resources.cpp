@@ -44,10 +44,21 @@ bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t fr
     VkDescriptorSetLayout frameSetLayout, VkDescriptorSetLayout materialSetLayout, bool mipmapsEnabled,
     float anisotropyLevel, std::uint32_t maximumTextures, std::uint32_t maximumMaterialSets)
 {
+    constexpr std::uint32_t maximumDescriptorMaterialSets
+        = std::numeric_limits<std::uint32_t>::max() / 5u - 1u;
+    const std::uint32_t effectiveMaterialSets = std::max(1u, maximumMaterialSets);
+    if (framesInFlight == 0 || effectiveMaterialSets > maximumDescriptorMaterialSets
+        || framesInFlight > std::numeric_limits<std::uint32_t>::max() - effectiveMaterialSets - 1u
+        || device.device() == VK_NULL_HANDLE || frameSetLayout == VK_NULL_HANDLE
+        || materialSetLayout == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
     device_                = &device;
     materialSetLayout_     = materialSetLayout;
     mipmapsEnabled_        = mipmapsEnabled;
-    anisotropyLevel_       = anisotropyLevel;
+    anisotropyLevel_       = std::isfinite(anisotropyLevel) ? std::max(1.0f, anisotropyLevel) : 1.0f;
     maximumTextures_       = std::max(1u, maximumTextures);
     maximumMaterialSets_   = std::max(1u, maximumMaterialSets);
     VkFormatProperties rgba8Properties{};
@@ -125,7 +136,7 @@ bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t fr
             .pNext         = nullptr,
             .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
             .maxSets       = framesInFlight + maximumMaterialSets_ + 1,
-            .poolSizeCount = 2,
+            .poolSizeCount = 3,
             .pPoolSizes    = poolSizes,
         };
         if (vkCreateDescriptorPool(vulkanDevice, &poolInfo, nullptr, &descriptorPool_) != VK_SUCCESS)
@@ -306,7 +317,7 @@ bool VulkanResources::updateProbeStorage(
     std::uint32_t frameIndex, const void *packedRecords, VkDeviceSize recordBytes, std::uint64_t revision)
 {
     if (frameIndex >= probeStorageMappings_.size() || probeStorageMappings_[frameIndex] == nullptr
-        || recordBytes > probeStorageBytes_)
+        || recordBytes > probeStorageBytes_ || (recordBytes != 0 && packedRecords == nullptr))
     {
         return false;
     }

@@ -244,6 +244,86 @@ public:
         return stats;
     }
 
+    // Sphere query over dynamic proxies. The fat bounds prune traversal and
+    // tight bounds confirm each leaf hit before its generation-safe handle is emitted.
+    QueryStatistics querySphere(const std::array<float, 3> &center, float radius,
+        std::vector<SpatialHit> &out,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        QueryStatistics stats{};
+        if (root_ == invalidNode || categoryMask == 0 || !std::isfinite(center[0])
+            || !std::isfinite(center[1]) || !std::isfinite(center[2])
+            || !std::isfinite(radius) || radius < 0.0f)
+            return stats;
+        std::array<std::uint32_t, 128> stack{};
+        std::size_t stackSize = 0;
+        stack[stackSize++] = root_;
+        while (stackSize != 0)
+        {
+            const std::uint32_t index = stack[--stackSize];
+            const Node &node = nodes_[index];
+            ++stats.nodesVisited;
+            if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsSphereValid(node.bounds, center, radius))
+                continue;
+            if (node.left == invalidNode)
+            {
+                ++stats.leavesVisited;
+                if ((node.categoryMask & categoryMask) != 0
+                    && query_detail::intersectsSphereValid(node.tightBounds, center, radius))
+                {
+                    out.push_back({makeHandle(index, node.generation), node.userData, node.categoryMask});
+                    ++stats.hits;
+                }
+            }
+            else
+            {
+                if (stackSize + 2u > stack.size())
+                    return stats;
+                stack[stackSize++] = node.right;
+                stack[stackSize++] = node.left;
+            }
+        }
+        return stats;
+    }
+
+    // Frustum query over dynamic proxies. Fat bounds are used for pruning and
+    // tight bounds are used for the final leaf test.
+    QueryStatistics queryFrustum(const Frustum3 &frustum, std::vector<SpatialHit> &out,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        QueryStatistics stats{};
+        if (!frustum.valid() || root_ == invalidNode || categoryMask == 0)
+            return stats;
+        std::array<std::uint32_t, 128> stack{};
+        std::size_t stackSize = 0;
+        stack[stackSize++] = root_;
+        while (stackSize != 0)
+        {
+            const std::uint32_t index = stack[--stackSize];
+            const Node &node = nodes_[index];
+            ++stats.nodesVisited;
+            if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsFrustumValid(node.bounds, frustum))
+                continue;
+            if (node.left == invalidNode)
+            {
+                ++stats.leavesVisited;
+                if ((node.categoryMask & categoryMask) != 0 && query_detail::intersectsFrustumValid(node.tightBounds, frustum))
+                {
+                    out.push_back({makeHandle(index, node.generation), node.userData, node.categoryMask});
+                    ++stats.hits;
+                }
+            }
+            else
+            {
+                if (stackSize + 2u > stack.size())
+                    return stats;
+                stack[stackSize++] = node.right;
+                stack[stackSize++] = node.left;
+            }
+        }
+        return stats;
+    }
+
     // Full top-down rebuild with median splits, recycling the existing leaf
     // nodes in place and reusing the old internal-node slots as the new internal
     // nodes. Returns false (tree unchanged) on allocation failure or if the
@@ -377,6 +457,46 @@ public:
         {
             return false;
         }
+    }
+
+    // Ray query: appends exact tight-bound hits in tree traversal order.
+    // categoryMask filters whole subtrees; out is not cleared. Traversal uses
+    // a fixed stack and returns partial results if it would overflow.
+    QueryStatistics raycast(const Ray3 &ray, std::vector<DynamicRayHit> &out,
+        std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
+    {
+        QueryStatistics stats{};
+        if (root_ == invalidNode || categoryMask == 0)
+            return stats;
+        std::array<std::uint32_t, 128> stack{};
+        std::size_t stackSize = 0;
+        stack[stackSize++] = root_;
+        while (stackSize != 0)
+        {
+            const std::uint32_t index = stack[--stackSize];
+            const Node &node = nodes_[index];
+            ++stats.nodesVisited;
+            if ((node.categoryMask & categoryMask) == 0 || !intersectRay(node.bounds, ray))
+                continue;
+            if (node.left == invalidNode)
+            {
+                ++stats.leavesVisited;
+                float distance = 0.0f;
+                if (intersectRay(node.tightBounds, ray, &distance))
+                {
+                    out.push_back({makeHandle(index, node.generation), node.userData, node.categoryMask, distance});
+                    ++stats.hits;
+                }
+            }
+            else
+            {
+                if (stackSize + 2u > stack.size())
+                    return stats;
+                stack[stackSize++] = node.right;
+                stack[stackSize++] = node.left;
+            }
+        }
+        return stats;
     }
 
     // Tree quality snapshot: node count, height, worst sibling-height

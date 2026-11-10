@@ -10,13 +10,14 @@
 
 #include "lumen_gi_internal.hpp"
 
+#include <engine/util/ppm.hpp>
+
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -28,40 +29,6 @@ namespace lumen_gi
 namespace
 {
 
-constexpr float kPi = 3.141592654f;
-
-std::uint64_t hashSeed(std::uint64_t seed)
-{
-    std::uint64_t hash = seed * 0x9E3779B97F4A7C15ull;
-    hash ^= hash >> 30;
-    hash *= 0xBF58476D1CE4E5B9ull;
-    hash ^= hash >> 27;
-    hash *= 0x94D049BB133111EBull;
-    hash ^= hash >> 31;
-    return hash;
-}
-
-float randomFloat(std::uint64_t &seed)
-{
-    seed = hashSeed(seed);
-    return static_cast<float>(seed & 0xFFFFFFull) / 16777216.0f;
-}
-
-glm::vec3 cosineDirectionSeeded(std::uint64_t &seed)
-{
-    const float u      = randomFloat(seed);
-    const float v      = randomFloat(seed);
-    const float radius = std::sqrt(std::max(0.0f, u));
-    const float phi    = v * 2.0f * kPi;
-    return glm::vec3(radius * std::cos(phi), radius * std::sin(phi), std::sqrt(std::max(0.0f, 1.0f - u)));
-}
-
-glm::mat3 onb(const glm::vec3 &normal)
-{
-    const glm::vec3 axis      = std::fabs(normal.z) < 0.9f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
-    const glm::vec3 tangent   = glm::normalize(glm::cross(axis, normal));
-    const glm::vec3 bitangent = glm::cross(normal, tangent);
-    return glm::mat3(tangent, bitangent, normal);
 }
 
 glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
@@ -90,24 +57,6 @@ std::uint8_t toByte(float value)
 glm::vec3 gammaEncode(glm::vec3 color)
 {
     return glm::pow(glm::max(color, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
-}
-
-bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgb)
-{
-    std::FILE *file = std::fopen(filePath, "wb");
-    if (file == nullptr)
-    {
-        return false;
-    }
-    std::fprintf(file, "P6\n%u %u\n255\n", width, height);
-    const std::size_t byteCount = static_cast<std::size_t>(width) * height * 3;
-    if (std::fwrite(rgb, 1, byteCount, file) != byteCount)
-    {
-        std::fclose(file);
-        return false;
-    }
-    std::fclose(file);
-    return true;
 }
 
 // Direct lighting for visible surfaces, mirroring the renderer's shading
@@ -284,13 +233,13 @@ void composeDebugView(GiPipelineState &state, GiDebugView view, std::vector<std:
                     weightSum = 0.0f;
                     accumulated = glm::vec3(0.0f);
                 }
-                color = weightSum > 1.0e-6f ? albedo / kPi * (accumulated / weightSum) + emissive
+                color = weightSum > 1.0e-6f ? albedo / detail::kPi * (accumulated / weightSum) + emissive
                                             : emissive;
                 break;
             }
             case GiDebugView::GiOnly:
             {
-                color = albedo / kPi * state.gatherIrradiance[pixelIndex] + emissive;
+                color = albedo / detail::kPi * state.gatherIrradiance[pixelIndex] + emissive;
                 break;
             }
             case GiDebugView::FinalImage:
@@ -318,7 +267,7 @@ void composeDebugView(GiPipelineState &state, GiDebugView view, std::vector<std:
                             normal.y * 0.5f + 0.5f) * snapshot.ambientIntensity;
                         color += albedo * hemisphere;
                     }
-                    color += albedo / kPi * state.gatherIrradiance[pixelIndex];
+                    color += albedo / detail::kPi * state.gatherIrradiance[pixelIndex];
                 }
                 break;
             }
@@ -351,12 +300,12 @@ void referencePathTrace(GiPipelineState &state, std::vector<std::uint8_t> &outRg
     {
         for (std::uint32_t x = 0; x < width; ++x)
         {
-            std::uint64_t seed = hashSeed(0x5DEECE66Dull * (static_cast<std::uint64_t>(y) * width + x + 1)
+            std::uint64_t seed = detail::hashSeed(0x5DEECE66Dull * (static_cast<std::uint64_t>(y) * width + x + 1)
                 + state.frameIndex);
             glm::vec3     sum(0.0f);
             for (std::uint32_t sample = 0; sample < samples; ++sample)
             {
-                const glm::vec2 jitter(randomFloat(seed), randomFloat(seed));
+                const glm::vec2 jitter(detail::randomFloat(seed), detail::randomFloat(seed));
                 const glm::vec2 ndc(((static_cast<float>(x) + jitter.x) / static_cast<float>(width)) * 2.0f - 1.0f,
                     1.0f - ((static_cast<float>(y) + jitter.y) / static_cast<float>(height)) * 2.0f);
                 const glm::vec4 target  = inverseViewProjection * glm::vec4(ndc, 1.0f, 1.0f);
@@ -404,13 +353,13 @@ void referencePathTrace(GiPipelineState &state, std::vector<std::uint8_t> &outRg
                     {
                         if (!sunShadowed(state, hit.position, hit.normal, hit.surfaceIndex))
                         {
-                            pathRadiance += throughput * hitAlbedo / kPi * snapshot.sunRadiance() * nDotL;
+                            pathRadiance += throughput * hitAlbedo / detail::kPi * snapshot.sunRadiance() * nDotL;
                         }
                     }
                     // Indirect: cosine-sampled bounce.
                     throughput *= hitAlbedo;
-                    const glm::mat3 basis    = onb(hit.normal);
-                    direction               = glm::normalize(basis * cosineDirectionSeeded(seed));
+                    const glm::mat3 basis    = detail::onb(hit.normal);
+                    direction               = glm::normalize(basis * detail::cosineDirectionSeeded(seed));
                     origin                  = hit.position + hit.normal * 0.02f;
                 }
                 sum += pathRadiance;
@@ -438,7 +387,8 @@ bool exportDebugView(GiPipelineState &state, GiDebugView view, const char *fileP
     {
         composeDebugView(state, view, rgb);
     }
-    if (!writePpm(filePath, state.viewWidth, state.viewHeight, rgb.data()))
+    if (!util::writePpmRgb(filePath, state.viewWidth, state.viewHeight, rgb.data(),
+            static_cast<std::size_t>(state.viewWidth) * 3))
     {
         if (error != nullptr)
         {

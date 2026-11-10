@@ -7,6 +7,7 @@
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/window/capabilities.hpp>
+#include <engine/util/ppm.hpp>
 
 #if defined(ENGINE_WINDOW_BACKEND_GLFW)
 #include "glfw_backend.hpp"
@@ -17,7 +18,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <memory>
@@ -676,6 +677,123 @@ private:
         return activeBackend_->cursorPosition(*record, outX, outY);
     }
 
+    bool setClipboardTextImpl(WindowHandle window, const char *text)
+    {
+        const WindowRecord *record = recordFor(window);
+        if (record == nullptr || activeBackend_ == nullptr || text == nullptr)
+            return false;
+        return activeBackend_->setClipboardText(*record, text);
+    }
+
+    bool copyClipboardTextImpl(WindowHandle window, char *output, std::uint32_t capacity,
+        std::uint32_t *outRequired) const
+    {
+        const WindowRecord *record = recordFor(window);
+        if (record == nullptr || activeBackend_ == nullptr)
+            return false;
+        std::string text;
+        if (!activeBackend_->copyClipboardText(*record, text)
+            || text.size() > maximumClipboardTextBytes
+            || text.size() + 1 > std::numeric_limits<std::uint32_t>::max())
+            return false;
+        const auto required = static_cast<std::uint32_t>(text.size() + 1);
+        if (outRequired != nullptr)
+            *outRequired = required;
+        if (output == nullptr || capacity < required)
+            return false;
+        std::copy(text.begin(), text.end(), output);
+        output[text.size()] = '\0';
+        return true;
+    }
+
+    bool copyDroppedFilesImpl(WindowHandle window, std::uint64_t batchId,
+        char *output, std::uint32_t capacity, std::uint32_t *outRequired) const
+    {
+        const WindowRecord *record = recordFor(window);
+        return record != nullptr && copyDroppedFileBatch(*record, batchId, output, capacity, outRequired);
+    }
+
+    bool releaseDroppedFilesImpl(WindowHandle window, std::uint64_t batchId)
+    {
+        WindowRecord *record = recordFor(window);
+        return record != nullptr && releaseDroppedFileBatch(*record, batchId);
+    }
+
+    bool submitFileDropEventImpl(WindowHandle window, const char *const *paths, std::uint32_t count)
+    {
+        WindowRecord *record = recordFor(window);
+        return record != nullptr && queueDroppedFileBatch(*record, paths, count);
+    }
+
+    bool submitTouchEventImpl(WindowHandle window, const TouchEventDescription *description)
+    {
+        WindowRecord *record = recordFor(window);
+        if (record == nullptr || description == nullptr
+            || static_cast<std::uint32_t>(description->phase) > static_cast<std::uint32_t>(TouchPhase::Cancelled)
+            || !std::isfinite(description->x) || !std::isfinite(description->y)
+            || description->touchId == invalidTouchId || !std::isfinite(description->pressure) || description->x < 0.0f || description->x > 1.0f
+            || description->y < 0.0f || description->y > 1.0f || description->pressure < 0.0f
+            || description->pressure > 1.0f)
+            return false;
+
+        const std::uint64_t key = (static_cast<std::uint64_t>(description->device) << 32u) | description->touchId;
+        auto contact = record->activeTouches.find(key);
+        if (description->phase == TouchPhase::Began)
+        {
+            if (contact != record->activeTouches.end()
+                || record->activeTouches.size() >= maximumTouchContactsPerWindow)
+                return false;
+            try
+            {
+                contact = record->activeTouches.emplace(
+                    key, WindowRecord::TouchContact{description->x, description->y, description->pressure}).first;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+        else if (contact == record->activeTouches.end())
+        {
+            return false;
+        }
+
+        const WindowRecord::TouchContact previousContact = contact->second;
+        const float deltaX = description->phase == TouchPhase::Began ? 0.0f : description->x - contact->second.x;
+        const float deltaY = description->phase == TouchPhase::Began ? 0.0f : description->y - contact->second.y;
+        contact->second = {description->x, description->y, description->pressure};
+
+        WindowEventKind kind = WindowEventKind::TouchBegan;
+        switch (description->phase)
+        {
+        case TouchPhase::Began: kind = WindowEventKind::TouchBegan; break;
+        case TouchPhase::Moved: kind = WindowEventKind::TouchMoved; break;
+        case TouchPhase::Ended: kind = WindowEventKind::TouchEnded; break;
+        case TouchPhase::Cancelled: kind = WindowEventKind::TouchCancelled; break;
+        }
+        const bool queued = queueWindowEvent(*record, WindowEvent{.kind = kind,
+            .touchDevice = description->device,
+            .touchId = description->touchId,
+            .touchX = description->x,
+            .touchY = description->y,
+            .touchPressure = description->pressure,
+            .touchDeltaX = deltaX,
+            .touchDeltaY = deltaY});
+
+        if (description->phase == TouchPhase::Ended || description->phase == TouchPhase::Cancelled)
+        {
+            record->activeTouches.erase(key);
+        }
+        else if (!queued)
+        {
+            if (description->phase == TouchPhase::Began)
+                record->activeTouches.erase(key);
+            else
+                contact->second = previousContact;
+        }
+        return queued;
+    }
+
     // Headless windows only: maps the software RGBA buffer; GLFW windows
     // have no CPU surface to lock.
     bool lockSurfacePixelsImpl(WindowHandle window, SurfacePixels *outPixels)
@@ -772,26 +890,17 @@ private:
         }
         const std::uint32_t width  = record->framebufferWidth;
         const std::uint32_t height = record->framebufferHeight;
-        std::FILE          *file   = std::fopen(filePath, "wb");
-        if (file == nullptr)
+        if (static_cast<std::size_t>(width) > std::numeric_limits<std::size_t>::max() / 4)
         {
             reportError(error, WindowError::CreationFailed);
             return false;
         }
-        std::fprintf(file, "P6\n%u %u\n255\n", width, height);
-        std::vector<std::uint8_t> row(static_cast<std::size_t>(width) * 3);
-        for (std::uint32_t y = 0; y < height; ++y)
+        const std::size_t stride = static_cast<std::size_t>(width) * 4;
+        if (!util::writePpmRgba(filePath, width, height, record->headlessRgba.data(), stride, false, false))
         {
-            const std::uint8_t *source = record->headlessRgba.data() + static_cast<std::size_t>(y) * width * 4;
-            for (std::uint32_t x = 0; x < width; ++x)
-            {
-                row[x * 3 + 0] = source[x * 4 + 0];
-                row[x * 3 + 1] = source[x * 4 + 1];
-                row[x * 3 + 2] = source[x * 4 + 2];
-            }
-            std::fwrite(row.data(), 1, row.size(), file);
+            reportError(error, WindowError::CreationFailed);
+            return false;
         }
-        std::fclose(file);
         reportError(error, WindowError::None);
         return true;
     }
@@ -841,6 +950,21 @@ private:
         { static_cast<WindowModule *>(self)->setCursorModeImpl(window, mode); };
         windowCapability_.cursorPosition = [](void *self, WindowHandle window, double *outX, double *outY)
         { return static_cast<const WindowModule *>(self)->cursorPositionImpl(window, outX, outY); };
+        windowCapability_.setClipboardText = [](void *self, WindowHandle window, const char *text)
+        { return static_cast<WindowModule *>(self)->setClipboardTextImpl(window, text); };
+        windowCapability_.copyClipboardText = [](void *self, WindowHandle window, char *output,
+            std::uint32_t capacity, std::uint32_t *outRequired)
+        { return static_cast<const WindowModule *>(self)->copyClipboardTextImpl(window, output, capacity, outRequired); };
+        windowCapability_.submitTouchEvent = [](void *self, WindowHandle window, const TouchEventDescription *event)
+        { return static_cast<WindowModule *>(self)->submitTouchEventImpl(window, event); };
+        windowCapability_.copyDroppedFiles = [](void *self, WindowHandle window, std::uint64_t batchId,
+            char *output, std::uint32_t capacity, std::uint32_t *outRequired)
+        { return static_cast<const WindowModule *>(self)->copyDroppedFilesImpl(window, batchId, output, capacity, outRequired); };
+        windowCapability_.releaseDroppedFiles = [](void *self, WindowHandle window, std::uint64_t batchId)
+        { return static_cast<WindowModule *>(self)->releaseDroppedFilesImpl(window, batchId); };
+        windowCapability_.submitFileDropEvent = [](void *self, WindowHandle window,
+            const char *const *paths, std::uint32_t count)
+        { return static_cast<WindowModule *>(self)->submitFileDropEventImpl(window, paths, count); };
         windowCapability_.lockSurfacePixels = [](void *self, WindowHandle window, SurfacePixels *outPixels)
         { return static_cast<WindowModule *>(self)->lockSurfacePixelsImpl(window, outPixels); };
         windowCapability_.unlockSurfacePixels = [](void *self, WindowHandle window)

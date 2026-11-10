@@ -44,6 +44,49 @@ namespace engine
 namespace lumen_gi
 {
 
+namespace detail
+{
+
+inline constexpr float kPi = 3.141592654f;
+
+inline std::uint64_t hashSeed(std::uint64_t seed) noexcept
+{
+    std::uint64_t hash = seed * 0x9E3779B97F4A7C15ull;
+    hash ^= hash >> 30;
+    hash *= 0xBF58476D1CE4E5B9ull;
+    hash ^= hash >> 27;
+    hash *= 0x94D049BB133111EBull;
+    hash ^= hash >> 31;
+    return hash;
+}
+
+inline float randomFloat(std::uint64_t &seed) noexcept
+{
+    seed = hashSeed(seed);
+    return static_cast<float>(seed & 0xFFFFFFull) / 16777216.0f;
+}
+
+inline glm::vec3 cosineDirectionSeeded(std::uint64_t &seed)
+{
+    const float u = randomFloat(seed);
+    const float v = randomFloat(seed);
+    const float radius = std::sqrt(std::max(0.0f, u));
+    const float phi = v * 2.0f * kPi;
+    return glm::vec3(radius * std::cos(phi), radius * std::sin(phi), std::sqrt(std::max(0.0f, 1.0f - u)));
+}
+
+inline glm::mat3 onb(const glm::vec3 &normal)
+{
+    const glm::vec3 axis = std::fabs(normal.z) < 0.9f
+        ? glm::vec3(0.0f, 0.0f, 1.0f)
+        : glm::vec3(1.0f, 0.0f, 0.0f);
+    const glm::vec3 tangent = glm::normalize(glm::cross(axis, normal));
+    const glm::vec3 bitangent = glm::cross(normal, tangent);
+    return glm::mat3(tangent, bitangent, normal);
+}
+
+} // namespace detail
+
 inline constexpr float invalidCardDepth = std::numeric_limits<float>::max();
 
 

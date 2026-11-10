@@ -1,10 +1,11 @@
 #include "lua_bridge.hpp"
 
-#include <cmath>
+#include <engine/script_runtime/native_values.hpp>
+
 #include <cstdint>
-#include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace engine::input_actions
 {
@@ -14,79 +15,15 @@ using script_runtime::ScriptNativeFunction;
 using script_runtime::ScriptRuntimeHandle;
 using script_runtime::ScriptValue;
 using script_runtime::ScriptValueType;
+using script_runtime::native::boolean;
+using script_runtime::native::floatValue;
+using script_runtime::native::int32Value;
+using script_runtime::native::resultBoolean;
+using script_runtime::native::resultNil;
+using script_runtime::native::resultNumber;
+using script_runtime::native::stringValue;
+using script_runtime::native::uint32Value;
 using Bridge = InputActionsLuaBridgeContext;
-
-bool number(const ScriptValue *args, std::uint32_t count, std::uint32_t index, double &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::Number || !std::isfinite(args[index].numberValue))
-        return false;
-    out = args[index].numberValue;
-    return true;
-}
-
-bool uint32Value(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::uint32_t &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < 0.0
-        || value > static_cast<double>(std::numeric_limits<std::uint32_t>::max()) || std::floor(value) != value)
-        return false;
-    out = static_cast<std::uint32_t>(value);
-    return true;
-}
-
-bool int32Value(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::int32_t &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < std::numeric_limits<std::int32_t>::min()
-        || value > std::numeric_limits<std::int32_t>::max() || std::floor(value) != value)
-        return false;
-    out = static_cast<std::int32_t>(value);
-    return true;
-}
-
-bool floatValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, float &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < -std::numeric_limits<float>::max()
-        || value > std::numeric_limits<float>::max())
-        return false;
-    out = static_cast<float>(value);
-    return true;
-}
-
-bool boolean(const ScriptValue *args, std::uint32_t count, std::uint32_t index, bool &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::Boolean)
-        return false;
-    out = args[index].booleanValue;
-    return true;
-}
-
-bool stringValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::string_view &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::String || args[index].stringData == nullptr)
-        return false;
-    out = std::string_view(args[index].stringData, args[index].stringSize);
-    return true;
-}
-
-void resultNumber(ScriptValue *out, std::uint32_t index, double value)
-{
-    out[index].type = ScriptValueType::Number;
-    out[index].numberValue = value;
-}
-
-void resultBoolean(ScriptValue *out, std::uint32_t index, bool value)
-{
-    out[index].type = ScriptValueType::Boolean;
-    out[index].booleanValue = value;
-}
-
-void resultNil(ScriptValue *out, std::uint32_t index)
-{
-    out[index] = {};
-    out[index].type = ScriptValueType::Nil;
-}
 
 bool parseActionType(std::string_view value, InputActionType &out)
 {
@@ -116,6 +53,12 @@ bool parseControl(std::string_view value, InputControlKind &out)
     else if (value == "mouse_delta_y") out = InputControlKind::MouseDeltaY;
     else if (value == "mouse_wheel_x") out = InputControlKind::MouseWheelX;
     else if (value == "mouse_wheel_y") out = InputControlKind::MouseWheelY;
+    else if (value == "touch_contact") out = InputControlKind::TouchContact;
+    else if (value == "touch_position_x") out = InputControlKind::TouchPositionX;
+    else if (value == "touch_position_y") out = InputControlKind::TouchPositionY;
+    else if (value == "touch_delta_x") out = InputControlKind::TouchDeltaX;
+    else if (value == "touch_delta_y") out = InputControlKind::TouchDeltaY;
+    else if (value == "touch_pressure") out = InputControlKind::TouchPressure;
     else return false;
     return true;
 }
@@ -129,6 +72,10 @@ bool parseEventKind(std::string_view value, InputEventKind &out)
     else if (value == "mouse_delta") out = InputEventKind::MouseDelta;
     else if (value == "mouse_wheel") out = InputEventKind::MouseWheel;
     else if (value == "focus_lost") out = InputEventKind::FocusLost;
+    else if (value == "touch_began") out = InputEventKind::TouchBegan;
+    else if (value == "touch_moved") out = InputEventKind::TouchMoved;
+    else if (value == "touch_ended") out = InputEventKind::TouchEnded;
+    else if (value == "touch_cancelled") out = InputEventKind::TouchCancelled;
     else return false;
     return true;
 }
@@ -284,6 +231,93 @@ bool clearBindings(void *userData, const ScriptValue *args, std::uint32_t count,
     return true;
 }
 
+bool removeBinding(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
+    std::uint32_t capacity, std::uint32_t *outCount)
+{
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.apiMutex);
+    if (bridge.inputActions == nullptr)
+        return false;
+    std::uint32_t context = 0;
+    std::uint32_t action = 0;
+    std::uint32_t index = 0;
+    if (count != 3 || capacity < 1 || !uint32Value(args, count, 0, context)
+        || !uint32Value(args, count, 1, action) || !uint32Value(args, count, 2, index))
+        return false;
+    resultBoolean(results, 0,
+        bridge.inputActions->removeBinding(bridge.inputActions->self, context, action, index));
+    *outCount = 1;
+    return true;
+}
+
+bool bindingCount(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
+    std::uint32_t capacity, std::uint32_t *outCount)
+{
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.apiMutex);
+    if (bridge.inputActions == nullptr)
+        return false;
+    std::uint32_t context = 0;
+    std::uint32_t action = 0;
+    if (count != 2 || capacity < 1 || !uint32Value(args, count, 0, context)
+        || !uint32Value(args, count, 1, action))
+        return false;
+    resultNumber(results, 0,
+        bridge.inputActions->bindingCount(bridge.inputActions->self, context, action));
+    *outCount = 1;
+    return true;
+}
+
+bool bindingAt(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
+    std::uint32_t capacity, std::uint32_t *outCount)
+{
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.apiMutex);
+    if (bridge.inputActions == nullptr)
+        return false;
+    std::uint32_t context = 0;
+    std::uint32_t action = 0;
+    std::uint32_t index = 0;
+    if (count != 3 || capacity < 8 || !uint32Value(args, count, 0, context)
+        || !uint32Value(args, count, 1, action) || !uint32Value(args, count, 2, index))
+        return false;
+    const std::uint32_t bindingCount
+        = bridge.inputActions->bindingCount(bridge.inputActions->self, context, action);
+    if (index >= bindingCount)
+    {
+        resultNil(results, 0);
+        *outCount = 1;
+        return true;
+    }
+    std::vector<InputBinding> bindings(bindingCount);
+    std::uint32_t required = 0;
+    if (!bridge.inputActions->copyBindings(
+            bridge.inputActions->self, context, action, bindings.data(), bindingCount, &required)
+        || index >= required)
+        return false;
+    static constexpr const char *controlNames[] = {
+        "key", "mouse_button", "gamepad_button", "gamepad_axis", "mouse_delta_x", "mouse_delta_y",
+        "mouse_wheel_x", "mouse_wheel_y", "touch_contact", "touch_position_x", "touch_position_y",
+        "touch_delta_x", "touch_delta_y", "touch_pressure"};
+    const InputBinding &binding = bindings[index];
+    const std::uint32_t control = static_cast<std::uint32_t>(binding.control);
+    if (control >= sizeof(controlNames) / sizeof(controlNames[0]))
+        return false;
+    const char *controlName = controlNames[control];
+    results[0].type = ScriptValueType::String;
+    results[0].stringData = controlName;
+    results[0].stringSize = static_cast<std::uint32_t>(std::char_traits<char>::length(controlName));
+    resultNumber(results, 1, binding.device);
+    resultNumber(results, 2, binding.code);
+    resultNumber(results, 3, binding.component);
+    resultNumber(results, 4, binding.scale);
+    resultNumber(results, 5, binding.deadzone);
+    resultNumber(results, 6, binding.responseExponent);
+    resultBoolean(results, 7, binding.invert);
+    *outCount = 8;
+    return true;
+}
+
 bool feedEvent(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
     std::uint32_t capacity, std::uint32_t *outCount)
 {
@@ -293,10 +327,11 @@ bool feedEvent(void *userData, const ScriptValue *args, std::uint32_t count, Scr
         return false;
     std::string_view kindName;
     InputEvent event{};
-    if (count != 6 || capacity < 1 || !stringValue(args, count, 0, kindName)
+    if ((count != 6 && count != 7) || capacity < 1 || !stringValue(args, count, 0, kindName)
         || !uint32Value(args, count, 1, event.device) || !uint32Value(args, count, 2, event.code)
         || !floatValue(args, count, 3, event.value) || !floatValue(args, count, 4, event.secondaryValue)
-        || !boolean(args, count, 5, event.down) || !parseEventKind(kindName, event.kind))
+        || !boolean(args, count, 5, event.down) || (count == 7 && !floatValue(args, count, 6, event.tertiaryValue))
+        || !parseEventKind(kindName, event.kind))
         return false;
     resultBoolean(results, 0, bridge.inputActions->feedEvent(bridge.inputActions->self, &event));
     *outCount = 1;
@@ -375,6 +410,9 @@ constexpr Binding bindings[] = {
     {"input_actions.remove_action", removeAction},
     {"input_actions.bind_action", bindAction},
     {"input_actions.clear_bindings", clearBindings},
+    {"input_actions.remove_binding", removeBinding},
+    {"input_actions.binding_count", bindingCount},
+    {"input_actions.binding_at", bindingAt},
     {"input_actions.feed_event", feedEvent},
     {"input_actions.advance_frame", advanceFrame},
     {"input_actions.action_state", actionState},

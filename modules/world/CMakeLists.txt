@@ -48,6 +48,7 @@ target_link_libraries(
             engine_world_capabilities
             engine_ecs_capabilities
             engine_entity_world_capabilities
+            engine_util_types
 )
 set_target_properties(
     engine_module_world

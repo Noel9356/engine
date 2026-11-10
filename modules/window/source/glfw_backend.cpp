@@ -17,8 +17,12 @@
 #include <GLFW/glfw3native.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
+#include <utility>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -370,11 +374,14 @@ void glfwFocusCallback(GLFWwindow *glfwWindow, int focused)
         {
             synchronizeKeyState(glfwWindow, *record);
             synchronizeMouseButtonState(glfwWindow, *record);
+            record->cursorPositionValid = false;
         }
         else
         {
             record->keyStateMask         = 0;
             record->mouseButtonStateMask = 0;
+            record->cursorPositionValid = false;
+            cancelActiveTouches(*record);
         }
         queueWindowEvent(
             *record, WindowEvent{.kind = focused ? WindowEventKind::FocusGained : WindowEventKind::FocusLost});
@@ -456,6 +463,55 @@ void glfwMouseButtonCallback(GLFWwindow *glfwWindow, int button, int action, int
             .mouseButton = mappedButton});
 }
 
+// Cursor coordinates use GLFW's logical window coordinate system.
+void glfwCursorPositionCallback(GLFWwindow *glfwWindow, double x, double y)
+{
+    auto *record = static_cast<WindowRecord *>(glfwGetWindowUserPointer(glfwWindow));
+    if (record == nullptr)
+        return;
+
+    const double deltaX = record->cursorPositionValid ? x - record->lastCursorX : 0.0;
+    const double deltaY = record->cursorPositionValid ? y - record->lastCursorY : 0.0;
+    record->lastCursorX = x;
+    record->lastCursorY = y;
+    record->cursorPositionValid = true;
+    queueWindowEvent(*record,
+        WindowEvent{.kind = WindowEventKind::CursorMoved,
+            .cursorX = x,
+            .cursorY = y,
+            .cursorDeltaX = deltaX,
+            .cursorDeltaY = deltaY});
+}
+
+// Scroll offsets are accumulated when consecutive scroll callbacks arrive
+// before the application drains the event queue.
+void glfwScrollCallback(GLFWwindow *glfwWindow, double xOffset, double yOffset)
+{
+    auto *record = static_cast<WindowRecord *>(glfwGetWindowUserPointer(glfwWindow));
+    if (record != nullptr)
+        queueWindowEvent(*record, WindowEvent{.kind = WindowEventKind::MouseScrolled, .scrollX = xOffset, .scrollY = yOffset});
+}
+
+// GLFW delivers all dropped paths for one user action in a single callback.
+// The window record owns a bounded copy so the application's event lifetime
+// does not depend on GLFW's callback buffer lifetime.
+void glfwDropCallback(GLFWwindow *glfwWindow, int pathCount, const char **paths)
+{
+    auto *record = static_cast<WindowRecord *>(glfwGetWindowUserPointer(glfwWindow));
+    if (record == nullptr || pathCount <= 0)
+        return;
+    queueDroppedFileBatch(*record, paths, static_cast<std::uint32_t>(pathCount));
+}
+
+// GLFW supplies Unicode code points, not key codes; preserve the scalar value
+// so text entry and international input do not depend on keyboard layout.
+void glfwCharacterCallback(GLFWwindow *glfwWindow, unsigned int codepoint)
+{
+    auto *record = static_cast<WindowRecord *>(glfwGetWindowUserPointer(glfwWindow));
+    if (record != nullptr && codepoint <= 0x10ffffu && !(codepoint >= 0xd800u && codepoint <= 0xdfffu))
+        queueWindowEvent(*record, WindowEvent{.kind = WindowEventKind::TextInput, .codepoint = codepoint});
+}
+
 // Tracks whether glfwInit succeeded (GLFW state is process-global).
 bool initialized = false;
 
@@ -488,6 +544,8 @@ bool GlfwWindowBackend::initialize()
 
 void GlfwWindowBackend::shutdown()
 {
+    windows_.clear();
+    gamepads_ = {};
     if (initialized)
     {
         glfwTerminate();
@@ -514,6 +572,16 @@ bool GlfwWindowBackend::createWindow(WindowRecord &record, const WindowDescripti
     }
 
     record.platformWindow = glfwWindow;
+    try
+    {
+        windows_.push_back(&record);
+    }
+    catch (...)
+    {
+        glfwDestroyWindow(glfwWindow);
+        record.platformWindow = nullptr;
+        return false;
+    }
     if (description.hasPosition)
     {
         glfwSetWindowPos(glfwWindow, description.x, description.y);
@@ -544,6 +612,10 @@ bool GlfwWindowBackend::createWindow(WindowRecord &record, const WindowDescripti
     glfwSetWindowIconifyCallback(glfwWindow, glfwIconifyCallback);
     glfwSetKeyCallback(glfwWindow, glfwKeyCallback);
     glfwSetMouseButtonCallback(glfwWindow, glfwMouseButtonCallback);
+    glfwSetCursorPosCallback(glfwWindow, glfwCursorPositionCallback);
+    glfwSetScrollCallback(glfwWindow, glfwScrollCallback);
+    glfwSetCharCallback(glfwWindow, glfwCharacterCallback);
+    glfwSetDropCallback(glfwWindow, glfwDropCallback);
     if (glfwGetWindowAttrib(glfwWindow, GLFW_FOCUSED) == GLFW_TRUE)
     {
         synchronizeKeyState(glfwWindow, record);
@@ -560,6 +632,7 @@ bool GlfwWindowBackend::createWindow(WindowRecord &record, const WindowDescripti
 
 void GlfwWindowBackend::destroyWindow(WindowRecord &record)
 {
+    windows_.erase(std::remove(windows_.begin(), windows_.end(), &record), windows_.end());
     if (record.platformWindow != nullptr)
     {
         glfwDestroyWindow(static_cast<GLFWwindow *>(record.platformWindow));
@@ -622,9 +695,128 @@ bool GlfwWindowBackend::setPosition(WindowRecord &record, std::int32_t x, std::i
     return true;
 }
 
+bool GlfwWindowBackend::setClipboardText(const WindowRecord &record, const char *text)
+{
+    if (record.platformWindow == nullptr || text == nullptr)
+        return false;
+    std::size_t length = 0;
+    while (length <= maximumClipboardTextBytes && text[length] != '\0')
+        ++length;
+    if (length > maximumClipboardTextBytes || !isValidUtf8(text, length))
+        return false;
+    glfwSetClipboardString(static_cast<GLFWwindow *>(record.platformWindow), text);
+    return true;
+}
+
+bool GlfwWindowBackend::copyClipboardText(const WindowRecord &record, std::string &output) const
+{
+    if (record.platformWindow == nullptr)
+        return false;
+    const char *text = glfwGetClipboardString(static_cast<GLFWwindow *>(record.platformWindow));
+    if (text == nullptr)
+        return false;
+    std::size_t length = 0;
+    while (length <= maximumClipboardTextBytes && text[length] != '\0')
+        ++length;
+    if (length > maximumClipboardTextBytes || !isValidUtf8(text, length))
+        return false;
+    try
+    {
+        output.assign(text, length);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 void GlfwWindowBackend::pollEvents()
 {
     glfwPollEvents();
+    pollGamepads();
+}
+
+void GlfwWindowBackend::queueGamepadEvent(const WindowEvent &event)
+{
+    for (WindowRecord *record : windows_)
+    {
+        if (record != nullptr)
+            queueWindowEvent(*record, event);
+    }
+}
+
+// GLFW exposes standardized gamepad states through joystick polling rather
+// than per-control callbacks. Poll once per engine event pump, compare against
+// the previous snapshot, and publish only changed controls. Axis changes are
+// coalesced per device/control by queueWindowEvent to bound queue growth.
+void GlfwWindowBackend::pollGamepads()
+{
+    constexpr int buttonCount = GLFW_GAMEPAD_BUTTON_LAST + 1;
+    constexpr int axisCount = GLFW_GAMEPAD_AXIS_LAST + 1;
+    static_assert(buttonCount == 15);
+    static_assert(axisCount == 6);
+
+    for (int joystick = GLFW_JOYSTICK_1; joystick <= GLFW_JOYSTICK_LAST; ++joystick)
+    {
+        const std::size_t index = static_cast<std::size_t>(joystick - GLFW_JOYSTICK_1);
+        GamepadSnapshot &previous = gamepads_[index];
+        GLFWgamepadstate state{};
+        const bool connected = glfwJoystickPresent(joystick) == GLFW_TRUE
+            && glfwJoystickIsGamepad(joystick) == GLFW_TRUE
+            && glfwGetGamepadState(joystick, &state) == GLFW_TRUE;
+
+        if (!connected)
+        {
+            if (previous.connected)
+            {
+                queueGamepadEvent(WindowEvent{.kind = WindowEventKind::GamepadDisconnected,
+                    .gamepadId = static_cast<std::uint32_t>(joystick)});
+                previous = {};
+            }
+            continue;
+        }
+
+        if (!previous.connected)
+        {
+            previous = {};
+            previous.connected = true;
+            queueGamepadEvent(WindowEvent{.kind = WindowEventKind::GamepadConnected,
+                .gamepadId = static_cast<std::uint32_t>(joystick)});
+        }
+
+        for (int button = 0; button < buttonCount; ++button)
+        {
+            const unsigned char down = state.buttons[button] == GLFW_PRESS ? 1u : 0u;
+            if (down == previous.buttons[static_cast<std::size_t>(button)])
+                continue;
+            previous.buttons[static_cast<std::size_t>(button)] = down;
+            queueGamepadEvent(WindowEvent{
+                .kind = down != 0 ? WindowEventKind::GamepadButtonPressed : WindowEventKind::GamepadButtonReleased,
+                .gamepadId = static_cast<std::uint32_t>(joystick),
+                .gamepadControl = static_cast<std::uint32_t>(button),
+                .gamepadDown = down != 0});
+        }
+
+        for (int axis = 0; axis < axisCount; ++axis)
+        {
+            const float rawValue = std::clamp(state.axes[axis], -1.0f, 1.0f);
+            // GLFW exposes trigger axes in [-1, 1] with the released state at
+            // -1. Convert them to the engine's conventional [0, 1] trigger
+            // range; stick axes remain signed.
+            const float value = axis >= static_cast<int>(GamepadAxis::LeftTrigger)
+                ? (rawValue + 1.0f) * 0.5f
+                : rawValue;
+            float &oldValue = previous.axes[static_cast<std::size_t>(axis)];
+            if (std::abs(value - oldValue) <= 0.0005f)
+                continue;
+            oldValue = value;
+            queueGamepadEvent(WindowEvent{.kind = WindowEventKind::GamepadAxisMoved,
+                .gamepadId = static_cast<std::uint32_t>(joystick),
+                .gamepadControl = static_cast<std::uint32_t>(axis),
+                .gamepadValue = value});
+        }
+    }
 }
 
 // Normal/Captured map to GLFW_CURSOR normal/disabled; captured also enables

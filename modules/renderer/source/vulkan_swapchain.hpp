@@ -200,6 +200,7 @@ private:
     VkFormat                   colorFormat_  = VK_FORMAT_UNDEFINED;
     VkColorSpaceKHR            colorSpace_   = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     bool                       formatIsBgra_ = false; // readback must swap R/B
+    bool                       transferSourceSupported_ = false;
     VkFormat                   depthFormat_  = VK_FORMAT_UNDEFINED;
     VkExtent2D                extent_       = {0, 0};
     VkSwapchainKHR            swapchain_    = VK_NULL_HANDLE;

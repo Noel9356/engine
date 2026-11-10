@@ -108,6 +108,7 @@ target_link_libraries(
     engine_module_window
     PRIVATE engine_kernel
             engine_window_capabilities
+            engine_util_types
 )
 
 if(ENGINE_WINDOW_ENABLE_GLFW

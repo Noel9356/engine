@@ -10,13 +10,83 @@
 #include <algorithm>
 #include <cstddef>
 #include <deque>
+#include <limits>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace engine
 {
 namespace window
 {
+
+inline constexpr std::size_t maximumClipboardTextBytes = 1024u * 1024u;
+inline constexpr std::size_t maximumDroppedFilePathBytes = 32768u;
+inline constexpr std::size_t maximumDroppedFileBatchBytes = 8u * 1024u * 1024u;
+inline constexpr std::size_t maximumDroppedFilesPerBatch = 256u;
+inline constexpr std::size_t maximumPendingDroppedFileBatches = 64u;
+
+// Validates a bounded UTF-8 byte sequence without allocating. Rejects overlong
+// encodings, surrogate code points, truncated sequences, and values above U+10FFFF.
+inline bool isValidUtf8(const char *text, std::size_t length) noexcept
+{
+    if (text == nullptr && length != 0)
+        return false;
+
+    std::size_t offset = 0;
+    while (offset < length)
+    {
+        const auto lead = static_cast<unsigned char>(text[offset]);
+        if (lead <= 0x7fu)
+        {
+            ++offset;
+            continue;
+        }
+
+        std::uint32_t codePoint = 0;
+        std::size_t continuationCount = 0;
+        if (lead >= 0xc2u && lead <= 0xdfu)
+        {
+            codePoint = lead & 0x1fu;
+            continuationCount = 1;
+        }
+        else if (lead >= 0xe0u && lead <= 0xefu)
+        {
+            codePoint = lead & 0x0fu;
+            continuationCount = 2;
+        }
+        else if (lead >= 0xf0u && lead <= 0xf4u)
+        {
+            codePoint = lead & 0x07u;
+            continuationCount = 3;
+        }
+        else
+        {
+            return false;
+        }
+
+        if (continuationCount > length - offset - 1)
+            return false;
+        for (std::size_t index = 1; index <= continuationCount; ++index)
+        {
+            const auto continuation = static_cast<unsigned char>(text[offset + index]);
+            if ((continuation & 0xc0u) != 0x80u)
+                return false;
+            codePoint = (codePoint << 6u) | (continuation & 0x3fu);
+        }
+
+        if ((continuationCount == 1 && codePoint < 0x80u)
+            || (continuationCount == 2 && codePoint < 0x800u)
+            || (continuationCount == 3 && codePoint < 0x10000u)
+            || (codePoint >= 0xd800u && codePoint <= 0xdfffu) || codePoint > 0x10ffffu)
+        {
+            return false;
+        }
+        offset += continuationCount + 1;
+    }
+    return true;
+}
 
 // Module-side state for one window, shared with the backend that created it.
 // width/height track the current client-area size and framebuffer* the
@@ -49,6 +119,27 @@ struct WindowRecord
     // Bit (1 << MouseButton value) set for each held mouse button.
     std::uint8_t mouseButtonStateMask = 0;
 
+    bool cursorPositionValid = false;
+    double lastCursorX = 0.0;
+    double lastCursorY = 0.0;
+
+    struct TouchContact
+    {
+        float x = 0.0f;
+        float y = 0.0f;
+        float pressure = 1.0f;
+    };
+    std::unordered_map<std::uint64_t, TouchContact> activeTouches;
+
+    struct DroppedFileBatch
+    {
+        std::uint64_t id = 0;
+        std::uint32_t totalBytes = 0;
+        std::vector<std::string> paths;
+    };
+    std::deque<DroppedFileBatch> droppedFileBatches;
+    std::uint64_t nextDroppedFileBatchId = 1;
+
     std::deque<WindowEvent> events;
     std::size_t             eventQueueCapacity = 4096;
 
@@ -57,40 +148,201 @@ struct WindowRecord
     std::vector<std::uint8_t> headlessRgba;
 };
 
-// Appends to the window's queue: a trailing same-kind resize event is
-// replaced in place (resize storms collapse to the latest size); when the
-// queue is full the first queued resize is evicted, else the oldest event.
-// Allocation failure silently drops the new event.
-inline void queueWindowEvent(WindowRecord &record, const WindowEvent &event)
+// Removes retained path storage associated with a queued FilesDropped event.
+inline void eraseDroppedFileBatch(WindowRecord &record, std::uint64_t batchId) noexcept
 {
-    const bool coalescible
-        = event.kind == WindowEventKind::Resized || event.kind == WindowEventKind::FramebufferResized;
+    const auto found = std::find_if(record.droppedFileBatches.begin(), record.droppedFileBatches.end(),
+        [batchId](const WindowRecord::DroppedFileBatch &batch) { return batch.id == batchId; });
+    if (found != record.droppedFileBatches.end())
+        record.droppedFileBatches.erase(found);
+}
+
+// Appends to the window's queue: trailing resize events are replaced, cursor
+// and same-contact touch moves keep the latest position and accumulate deltas,
+// and consecutive scroll events are accumulated. When full, high-frequency
+// state events are evicted before transitions; if none exist, the oldest event
+// is evicted. Allocation failure drops the new event and reports false to
+// callers that own payloads.
+inline bool queueWindowEvent(WindowRecord &record, const WindowEvent &event)
+{
+    const bool coalescible = event.kind == WindowEventKind::Resized
+        || event.kind == WindowEventKind::FramebufferResized || event.kind == WindowEventKind::CursorMoved;
     if (coalescible && !record.events.empty() && record.events.back().kind == event.kind)
     {
+        if (event.kind == WindowEventKind::CursorMoved)
+        {
+            WindowEvent &previous = record.events.back();
+            previous.cursorDeltaX += event.cursorDeltaX;
+            previous.cursorDeltaY += event.cursorDeltaY;
+            previous.cursorX = event.cursorX;
+            previous.cursorY = event.cursorY;
+        }
+        else
+        {
+            record.events.back() = event;
+        }
+        return true;
+    }
+    if (event.kind == WindowEventKind::GamepadAxisMoved && !record.events.empty()
+        && record.events.back().kind == WindowEventKind::GamepadAxisMoved
+        && record.events.back().gamepadId == event.gamepadId
+        && record.events.back().gamepadControl == event.gamepadControl)
+    {
         record.events.back() = event;
-        return;
+        return true;
+    }
+    if (event.kind == WindowEventKind::TouchMoved && !record.events.empty()
+        && record.events.back().kind == WindowEventKind::TouchMoved
+        && record.events.back().touchDevice == event.touchDevice
+        && record.events.back().touchId == event.touchId)
+    {
+        WindowEvent &previous = record.events.back();
+        previous.touchDeltaX += event.touchDeltaX;
+        previous.touchDeltaY += event.touchDeltaY;
+        previous.touchX = event.touchX;
+        previous.touchY = event.touchY;
+        previous.touchPressure = event.touchPressure;
+        return true;
+    }
+    if (event.kind == WindowEventKind::MouseScrolled && !record.events.empty()
+        && record.events.back().kind == WindowEventKind::MouseScrolled)
+    {
+        record.events.back().scrollX += event.scrollX;
+        record.events.back().scrollY += event.scrollY;
+        return true;
     }
     if (record.eventQueueCapacity != 0 && record.events.size() >= record.eventQueueCapacity)
     {
         const auto disposable = std::find_if(record.events.begin(),
             record.events.end(),
             [](const WindowEvent &queued)
-            { return queued.kind == WindowEventKind::Resized || queued.kind == WindowEventKind::FramebufferResized; });
-        if (disposable != record.events.end())
-        {
-            record.events.erase(disposable);
-        }
-        else
-        {
-            record.events.pop_front();
-        }
+            {
+                switch (queued.kind)
+                {
+                case WindowEventKind::Resized:
+                case WindowEventKind::FramebufferResized:
+                case WindowEventKind::CursorMoved:
+                case WindowEventKind::MouseScrolled:
+                case WindowEventKind::GamepadAxisMoved:
+                case WindowEventKind::TouchMoved: return true;
+                default: return false;
+                }
+            });
+        auto discarded = disposable != record.events.end() ? disposable : record.events.begin();
+        if (discarded->kind == WindowEventKind::FilesDropped)
+            eraseDroppedFileBatch(record, discarded->fileDropBatchId);
+        record.events.erase(discarded);
     }
     try
     {
         record.events.push_back(event);
+        return true;
     }
     catch (...)
-    {}
+    {
+        return false;
+    }
+}
+
+// Terminates every active contact after focus loss. A host may not receive
+// native end callbacks once the window is unfocused, so cancellation is
+// emitted before the contact table is cleared.
+inline void cancelActiveTouches(WindowRecord &record) noexcept
+{
+    for (const auto &[key, contact] : record.activeTouches)
+    {
+        (void)queueWindowEvent(record, WindowEvent{
+            .kind = WindowEventKind::TouchCancelled,
+            .touchDevice = static_cast<std::uint32_t>(key >> 32u),
+            .touchId = static_cast<std::uint32_t>(key),
+            .touchX = contact.x,
+            .touchY = contact.y,
+            .touchPressure = contact.pressure});
+    }
+    record.activeTouches.clear();
+}
+
+// Stores a complete drop batch before publishing its event. The count, each
+// path length, total bytes, UTF-8 encoding and outstanding-batch count are
+// bounded so native callbacks cannot retain arbitrary memory.
+inline bool queueDroppedFileBatch(WindowRecord &record, const char *const *paths, std::uint32_t count)
+{
+    if (paths == nullptr || count == 0 || count > maximumDroppedFilesPerBatch
+        || record.droppedFileBatches.size() >= maximumPendingDroppedFileBatches
+        || record.nextDroppedFileBatchId == 0)
+        return false;
+
+    WindowRecord::DroppedFileBatch batch;
+    batch.id = record.nextDroppedFileBatchId;
+    try
+    {
+        batch.paths.reserve(count);
+        std::size_t totalBytes = 0;
+        for (std::uint32_t index = 0; index < count; ++index)
+        {
+            if (paths[index] == nullptr)
+                return false;
+            std::size_t length = 0;
+            while (length <= maximumDroppedFilePathBytes && paths[index][length] != '\0')
+                ++length;
+            if (length == 0 || length > maximumDroppedFilePathBytes
+                || length + 1 > maximumDroppedFileBatchBytes - totalBytes
+                || !isValidUtf8(paths[index], length))
+                return false;
+            totalBytes += length + 1;
+            batch.paths.emplace_back(paths[index], length);
+        }
+        batch.totalBytes = static_cast<std::uint32_t>(totalBytes);
+        record.droppedFileBatches.push_back(std::move(batch));
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    const std::uint64_t batchId = record.nextDroppedFileBatchId;
+    record.nextDroppedFileBatchId = batchId == std::numeric_limits<std::uint64_t>::max() ? 0 : batchId + 1;
+    if (!queueWindowEvent(record, WindowEvent{
+            .kind = WindowEventKind::FilesDropped,
+            .fileDropBatchId = batchId,
+            .fileDropCount = count}))
+    {
+        eraseDroppedFileBatch(record, batchId);
+        return false;
+    }
+    return true;
+}
+
+inline bool copyDroppedFileBatch(const WindowRecord &record, std::uint64_t batchId,
+    char *output, std::uint32_t capacity, std::uint32_t *outRequired)
+{
+    if (outRequired == nullptr || batchId == 0)
+        return false;
+    const auto found = std::find_if(record.droppedFileBatches.begin(), record.droppedFileBatches.end(),
+        [batchId](const WindowRecord::DroppedFileBatch &batch) { return batch.id == batchId; });
+    if (found == record.droppedFileBatches.end())
+        return false;
+    *outRequired = found->totalBytes;
+    if (output == nullptr || capacity < found->totalBytes)
+        return false;
+
+    std::size_t offset = 0;
+    for (const std::string &path : found->paths)
+    {
+        std::copy(path.begin(), path.end(), output + offset);
+        offset += path.size();
+        output[offset++] = '\0';
+    }
+    return true;
+}
+
+inline bool releaseDroppedFileBatch(WindowRecord &record, std::uint64_t batchId) noexcept
+{
+    if (batchId == 0)
+        return false;
+    const std::size_t originalSize = record.droppedFileBatches.size();
+    eraseDroppedFileBatch(record, batchId);
+    return record.droppedFileBatches.size() != originalSize;
 }
 
 // Interface every window backend implements (GLFW, headless). Calls come
@@ -122,6 +374,15 @@ public:
 
     virtual void setCursorMode(const WindowRecord &record, CursorMode mode)                   = 0;
     virtual bool cursorPosition(const WindowRecord &record, double *outX, double *outY) const = 0;
+
+    virtual bool setClipboardText(const WindowRecord &, const char *)
+    {
+        return false;
+    }
+    virtual bool copyClipboardText(const WindowRecord &, std::string &) const
+    {
+        return false;
+    }
 
     virtual const char *const *requiredInstanceExtensions(std::uint32_t *outCount) const = 0;
 

@@ -16,7 +16,9 @@ namespace camera
 {
 
 // ABI version of this capability struct; consumers must match it.
-inline constexpr std::uint32_t cameraCapabilityAbi = 9u;
+// ABI history: 9 added per-camera pitch/control limits; 10 added viewport
+// projection and viewport-to-world ray queries.
+inline constexpr std::uint32_t cameraCapabilityAbi = 10u;
 
 // Opaque camera handle; 0 (invalidCamera) means "none". Handles start at 1.
 using CameraHandle                          = std::uint32_t;
@@ -175,6 +177,20 @@ struct CameraCapability
     // to call every frame with the current viewport size.
     void (*viewState)(void *self, CameraHandle camera, std::uint32_t viewportWidth, std::uint32_t viewportHeight,
         ViewState *outState);
+
+    // Projects a world-space point to top-left-origin viewport pixel
+    // coordinates. outDepth is mapped from OpenGL NDC [-1, 1] to [0, 1].
+    // Returns false for an invalid camera, zero viewport, null pointers, or a
+    // point on/behind the perspective eye plane. Coordinates may lie outside
+    // the viewport when the point is outside the view frustum.
+    bool (*worldToViewport)(void *self, CameraHandle camera, std::uint32_t viewportWidth,
+        std::uint32_t viewportHeight, const float worldPosition[3], float *outX, float *outY, float *outDepth);
+
+    // Builds a normalized world-space ray from a top-left-origin viewport
+    // pixel coordinate. Perspective rays originate at the camera eye;
+    // orthographic rays originate on the near plane.
+    bool (*viewportToWorldRay)(void *self, CameraHandle camera, std::uint32_t viewportWidth,
+        std::uint32_t viewportHeight, float viewportX, float viewportY, float outOrigin[3], float outDirection[3]);
 };
 
 } // namespace camera

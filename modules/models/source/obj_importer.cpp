@@ -82,12 +82,8 @@ void accumulateSmoothNormals(const std::vector<tinyobj::real_t> &positions,
         const tinyobj::real_t *a = positions.data() + static_cast<std::size_t>(indexA) * 3;
         const tinyobj::real_t *b = positions.data() + static_cast<std::size_t>(indexB) * 3;
         const tinyobj::real_t *c = positions.data() + static_cast<std::size_t>(indexC) * 3;
-        const float            ab[3]
-            = {static_cast<float>(b[0] - a[0]), static_cast<float>(b[1] - a[1]), static_cast<float>(b[2] - a[2])};
-        const float ac[3]
-            = {static_cast<float>(c[0] - a[0]), static_cast<float>(c[1] - a[1]), static_cast<float>(c[2] - a[2])};
-        const float normal[3]
-            = {ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]};
+        float normal[3]{};
+        crossProduct3(a, b, c, normal);
         for (const std::uint32_t index : {indexA, indexB, indexC})
         {
             if (touchedFlags[index] == 0)
@@ -448,14 +444,8 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
                 const tinyobj::real_t  *a = attrib.vertices.data() + static_cast<std::size_t>(indexA.vertex_index) * 3;
                 const tinyobj::real_t  *b = attrib.vertices.data() + static_cast<std::size_t>(indexB.vertex_index) * 3;
                 const tinyobj::real_t  *c = attrib.vertices.data() + static_cast<std::size_t>(indexC.vertex_index) * 3;
-                const float             edgeAB[3] = {
-                    static_cast<float>(b[0] - a[0]), static_cast<float>(b[1] - a[1]), static_cast<float>(b[2] - a[2])};
-                const float edgeAC[3] = {
-                    static_cast<float>(c[0] - a[0]), static_cast<float>(c[1] - a[1]), static_cast<float>(c[2] - a[2])};
-                float faceNormal[3]
-                    = {edgeAB[1] * edgeAC[2] - edgeAB[2] * edgeAC[1],
-                        edgeAB[2] * edgeAC[0] - edgeAB[0] * edgeAC[2],
-                        edgeAB[0] * edgeAC[1] - edgeAB[1] * edgeAC[0]};
+                float faceNormal[3]{};
+                crossProduct3(a, b, c, faceNormal);
                 normalizeVector(faceNormal);
                 std::copy(faceNormal, faceNormal + 3, flatNormals.begin() + (corner / 3) * 3);
             }

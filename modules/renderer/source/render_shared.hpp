@@ -9,6 +9,7 @@
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
+#include <engine/util/ppm.hpp>
 
 #include <glm/common.hpp>
 #include <glm/ext/scalar_constants.hpp>
@@ -21,7 +22,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <vector>
 
 namespace engine
@@ -436,37 +436,15 @@ inline void reportError(RenderError *error, RenderError value)
 }
 
 // Writes a binary P6 PPM from an RGBA8 raster. flipVertically and
-// swapRedBlue adapt to the source's row order and channel order (BGRA
-// swapchain readbacks). Always writes *error; CreationFailed on failure.
+// swapRedBlue adapt the source row and channel order.
 inline bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgba,
     std::size_t sourceStrideBytes, bool flipVertically, bool swapRedBlue, RenderError *error)
 {
-    if (filePath == nullptr)
+    if (!util::writePpmRgba(filePath, width, height, rgba, sourceStrideBytes, flipVertically, swapRedBlue))
     {
         reportError(error, RenderError::CreationFailed);
         return false;
     }
-    std::FILE *file = std::fopen(filePath, "wb");
-    if (file == nullptr)
-    {
-        reportError(error, RenderError::CreationFailed);
-        return false;
-    }
-    std::fprintf(file, "P6\n%u %u\n255\n", width, height);
-    std::vector<std::uint8_t> row(static_cast<std::size_t>(width) * 3);
-    for (std::uint32_t line = 0; line < height; ++line)
-    {
-        const std::uint32_t sourceLine = flipVertically ? height - 1 - line : line;
-        const std::uint8_t *source     = rgba + static_cast<std::size_t>(sourceLine) * sourceStrideBytes;
-        for (std::uint32_t x = 0; x < width; ++x)
-        {
-            row[x * 3 + 0] = swapRedBlue ? source[x * 4 + 2] : source[x * 4 + 0];
-            row[x * 3 + 1] = source[x * 4 + 1];
-            row[x * 3 + 2] = swapRedBlue ? source[x * 4 + 0] : source[x * 4 + 2];
-        }
-        std::fwrite(row.data(), 1, row.size(), file);
-    }
-    std::fclose(file);
     reportError(error, RenderError::None);
     return true;
 }

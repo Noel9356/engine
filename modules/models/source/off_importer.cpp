@@ -246,45 +246,27 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
     // normal_mode; PreserveOnly keeps the +Y placeholder from the vertex defaults.
     if (options.normalMode != ModelNormalMode::PreserveOnly)
     {
-        std::vector<float> normals;
         if (options.normalMode == ModelNormalMode::GenerateFlat)
         {
-            std::vector<float> flatVertices;
-            flatVertices.reserve(indices.size() * renderer::meshVertexFloatCount);
-            for (std::size_t corner = 0; corner + 2 < indices.size(); corner += 3)
+            ModelPart flatPart;
+            flatPart.vertices = std::move(interleaved);
+            flatPart.indices = std::move(indices);
+            if (!expandFlatShading(flatPart))
             {
-                const std::uint32_t ia = indices[corner + 0];
-                const std::uint32_t ib = indices[corner + 1];
-                const std::uint32_t ic = indices[corner + 2];
-                const float *a     = interleaved.data() + static_cast<std::size_t>(ia) * renderer::meshVertexFloatCount;
-                const float *b     = interleaved.data() + static_cast<std::size_t>(ib) * renderer::meshVertexFloatCount;
-                const float *c     = interleaved.data() + static_cast<std::size_t>(ic) * renderer::meshVertexFloatCount;
-                const float  ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
-                const float  ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-                float        normal[3]
-                    = {ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]};
-                normalizeVector(normal);
-                for (std::size_t triangleCorner = 0; triangleCorner < 3; ++triangleCorner)
-                {
-                    const std::uint32_t sourceIndex = indices[corner + triangleCorner];
-                    const float        *source
-                        = interleaved.data() + static_cast<std::size_t>(sourceIndex) * renderer::meshVertexFloatCount;
-                    const std::size_t base = flatVertices.size();
-                    flatVertices.insert(flatVertices.end(), source, source + renderer::meshVertexFloatCount);
-                    std::copy(normal, normal + 3, flatVertices.begin() + base + 3);
-                }
+                reportError(error, ModelLoadError::ParseFailed);
+                return false;
             }
-            // Expanded vertices are addressed by sequential identity indices.
-            interleaved = std::move(flatVertices);
-            indices.resize(interleaved.size() / renderer::meshVertexFloatCount);
-            for (std::size_t index = 0; index < indices.size(); ++index)
-            {
-                indices[index] = static_cast<std::uint32_t>(index);
-            }
+            interleaved = std::move(flatPart.vertices);
+            indices = std::move(flatPart.indices);
         }
         else
         {
-            accumulateSmoothNormalsInterleaved(interleaved, indices, normals);
+            std::vector<float> normals;
+            if (!accumulateIndexedSmoothNormals(interleaved, indices, normals))
+            {
+                reportError(error, ModelLoadError::ParseFailed);
+                return false;
+            }
             for (std::size_t vertex = 0; vertex < normals.size() / 3; ++vertex)
             {
                 std::copy_n(

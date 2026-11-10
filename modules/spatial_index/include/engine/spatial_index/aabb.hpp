@@ -66,6 +66,107 @@ struct Aabb
     }
 };
 
+// Intersects a ray with an AABB using a double-precision slab test. The
+// returned distance is in world units, independent of direction magnitude.
+// A ray starting inside the box reports distance 0.
+[[nodiscard]] inline bool intersectRay(const Aabb &bounds, const Ray3 &ray, float *outDistance = nullptr) noexcept
+{
+    if (!bounds.valid() || !std::isfinite(ray.origin[0]) || !std::isfinite(ray.origin[1])
+        || !std::isfinite(ray.origin[2]) || !std::isfinite(ray.direction[0])
+        || !std::isfinite(ray.direction[1]) || !std::isfinite(ray.direction[2])
+        || std::isnan(ray.maxDistance) || ray.maxDistance < 0.0f)
+        return false;
+
+    const double dx = ray.direction[0];
+    const double dy = ray.direction[1];
+    const double dz = ray.direction[2];
+    const double directionLength = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!std::isfinite(directionLength) || directionLength <= 1.0e-20)
+        return false;
+
+    const double inverseLength = 1.0 / directionLength;
+    const double direction[3] = {dx * inverseLength, dy * inverseLength, dz * inverseLength};
+    double entry = 0.0;
+    double exit = static_cast<double>(ray.maxDistance);
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        const double origin = ray.origin[axis];
+        if (std::abs(direction[axis]) <= 1.0e-15)
+        {
+            if (origin < bounds.minimum[axis] || origin > bounds.maximum[axis])
+                return false;
+            continue;
+        }
+        double first = (static_cast<double>(bounds.minimum[axis]) - origin) / direction[axis];
+        double last = (static_cast<double>(bounds.maximum[axis]) - origin) / direction[axis];
+        if (first > last)
+            std::swap(first, last);
+        entry = std::max(entry, first);
+        exit = std::min(exit, last);
+        if (entry > exit)
+            return false;
+    }
+    if (exit < 0.0 || entry > static_cast<double>(ray.maxDistance)
+        || entry > static_cast<double>(std::numeric_limits<float>::max()))
+        return false;
+    if (outDistance != nullptr)
+        *outDistance = static_cast<float>(entry);
+    return true;
+}
+
+namespace query_detail
+{
+
+[[nodiscard]] inline bool intersectsSphereValid(const Aabb &bounds, const std::array<float, 3> &center,
+    float radius) noexcept
+{
+    double distanceSquared = 0.0;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        const double coordinate = center[axis];
+        const double closest = std::clamp(coordinate, static_cast<double>(bounds.minimum[axis]),
+            static_cast<double>(bounds.maximum[axis]));
+        const double delta = coordinate - closest;
+        distanceSquared += delta * delta;
+    }
+    return distanceSquared <= static_cast<double>(radius) * radius;
+}
+
+[[nodiscard]] inline bool intersectsFrustumValid(const Aabb &bounds, const Frustum3 &frustum) noexcept
+{
+    for (const Plane3 &plane : frustum.planes)
+    {
+        const double x = plane.normal[0] >= 0.0f ? bounds.maximum[0] : bounds.minimum[0];
+        const double y = plane.normal[1] >= 0.0f ? bounds.maximum[1] : bounds.minimum[1];
+        const double z = plane.normal[2] >= 0.0f ? bounds.maximum[2] : bounds.minimum[2];
+        const double signedDistance = static_cast<double>(plane.normal[0]) * x
+            + static_cast<double>(plane.normal[1]) * y + static_cast<double>(plane.normal[2]) * z
+            + plane.distance;
+        if (signedDistance < 0.0)
+            return false;
+    }
+    return true;
+}
+
+} // namespace query_detail
+
+// Exact sphere/AABB overlap test. A sphere radius must be finite and
+// non-negative; the squared-distance calculation uses double precision.
+[[nodiscard]] inline bool intersectsSphere(const Aabb &bounds, const std::array<float, 3> &center,
+    float radius) noexcept
+{
+    return bounds.valid() && std::isfinite(center[0]) && std::isfinite(center[1])
+        && std::isfinite(center[2]) && std::isfinite(radius) && radius >= 0.0f
+        && query_detail::intersectsSphereValid(bounds, center, radius);
+}
+
+// Conservative AABB/view-frustum test. Plane normals point inward and the
+// positive support vertex is tested against each plane. Invalid frusta reject.
+[[nodiscard]] inline bool intersectsFrustum(const Aabb &bounds, const Frustum3 &frustum) noexcept
+{
+    return bounds.valid() && frustum.valid() && query_detail::intersectsFrustumValid(bounds, frustum);
+}
+
 // Component-wise union of two boxes.
 [[nodiscard]] inline Aabb merge(const Aabb &lhs, const Aabb &rhs) noexcept
 {

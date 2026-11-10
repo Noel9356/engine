@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -26,10 +27,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -74,7 +75,7 @@ void setError(ScriptError *output, ScriptError value)
 // of the errorText outputs across the capability: on a failed execute/call the
 // boolean return only reports usage problems, the ScriptError out-parameter
 // reports the runtime failure itself.
-bool copyText(const std::string &text, char *output, std::uint32_t capacity, std::uint32_t *outRequired)
+bool copyText(std::string_view text, char *output, std::uint32_t capacity, std::uint32_t *outRequired)
 {
     if (text.size() >= UINT32_MAX)
         return false;
@@ -83,7 +84,9 @@ bool copyText(const std::string &text, char *output, std::uint32_t capacity, std
         *outRequired = required;
     if (output == nullptr || capacity < required)
         return false;
-    std::memcpy(output, text.c_str(), required);
+    if (!text.empty())
+        std::memcpy(output, text.data(), text.size());
+    output[text.size()] = '\0';
     return true;
 }
 
@@ -92,12 +95,19 @@ bool copyText(const std::string &text, char *output, std::uint32_t capacity, std
 // restore the original stack top and return false.
 bool pushGlobalPath(lua_State *state, const char *name)
 {
-    if (state == nullptr || name == nullptr || name[0] == '\0')
+    constexpr std::size_t maximumGlobalPathBytes = 4096;
+    if (state == nullptr || name == nullptr)
         return false;
-    const std::string_view path(name);
+    const auto *terminator = static_cast<const char *>(std::memchr(name, '\0', maximumGlobalPathBytes + 1u));
+    if (terminator == nullptr || terminator == name)
+        return false;
+    const std::string_view path(name, static_cast<std::size_t>(terminator - name));
     if (path.find('.') == std::string_view::npos)
     {
-        lua_getglobal(state, name);
+        lua_pushglobaltable(state);
+        lua_pushstring(state, name);
+        lua_rawget(state, -2);
+        lua_remove(state, -2);
         return true;
     }
 
@@ -138,14 +148,21 @@ bool pushGlobalPath(lua_State *state, const char *name)
 // existing non-table namespace is treated as a collision, not overwritten.
 bool setGlobalPath(lua_State *state, const char *name, int valueIndex)
 {
-    if (state == nullptr || name == nullptr || name[0] == '\0')
+    constexpr std::size_t maximumGlobalPathBytes = 4096;
+    if (state == nullptr || name == nullptr)
         return false;
-    const std::string_view path(name);
+    const auto *terminator = static_cast<const char *>(std::memchr(name, '\0', maximumGlobalPathBytes + 1u));
+    if (terminator == nullptr || terminator == name)
+        return false;
+    const std::string_view path(name, static_cast<std::size_t>(terminator - name));
     valueIndex = lua_absindex(state, valueIndex);
     if (path.find('.') == std::string_view::npos)
     {
+        lua_pushglobaltable(state);
+        lua_pushstring(state, name);
         lua_pushvalue(state, valueIndex);
-        lua_setglobal(state, name);
+        lua_rawset(state, -3);
+        lua_pop(state, 1);
         return true;
     }
 
@@ -319,7 +336,7 @@ void instructionHook(lua_State *state, lua_Debug *)
     if (runtime == nullptr)
         return;
     constexpr std::uint64_t hookGranularity = 1000;
-    if (runtime->instructionsRemaining <= hookGranularity)
+    if (runtime->instructionsRemaining < hookGranularity)
     {
         runtime->instructionsRemaining = 0;
         luaL_error(state, "instruction limit exceeded");
@@ -432,10 +449,12 @@ void setExecutionBudget(RuntimeRecord &runtime)
     lua_sethook(runtime.state, instructionHook, LUA_MASKCOUNT, 1000);
 }
 
-std::string stackError(lua_State *state)
+std::string_view stackError(lua_State *state)
 {
-    const char *message = lua_tostring(state, -1);
-    return message != nullptr ? message : "Lua execution failed without an error message";
+    std::size_t length = 0;
+    const char *message = lua_tolstring(state, -1, &length);
+    return message != nullptr ? std::string_view(message, length)
+                              : std::string_view("Lua execution failed without an error message");
 }
 
 void removeGlobal(lua_State *state, const char *name)
@@ -621,11 +640,16 @@ private:
 
     ScriptRuntimeHandle hostedRuntimeImpl(const char *modId)
     {
+        constexpr std::size_t maximumModIdBytes = 128;
         if (modId == nullptr)
             return invalidScriptRuntime;
+        const auto *terminator = static_cast<const char *>(std::memchr(modId, '\0', maximumModIdBytes + 1u));
+        if (terminator == nullptr || terminator == modId)
+            return invalidScriptRuntime;
+        const std::string_view requestedId(modId, static_cast<std::size_t>(terminator - modId));
         std::lock_guard lock(hostedMutex_);
         for (const HostedMod &mod : hostedMods_)
-            if (mod.modId == modId)
+            if (mod.modId == requestedId)
                 return mod.runtime;
         return invalidScriptRuntime;
     }
@@ -642,9 +666,8 @@ private:
         if (!runtime)
             return;
         std::lock_guard lock(runtime->mutex);
-        lua_State      *state = runtime->state;
-        lua_getglobal(state, name);
-        if (!lua_isfunction(state, -1))
+        lua_State *state = runtime->state;
+        if (!pushGlobalPath(state, name) || !lua_isfunction(state, -1))
         {
             lua_pop(state, 1);
             return;
@@ -659,13 +682,20 @@ private:
         lua_sethook(state, nullptr, 0, 0);
         if (result != LUA_OK)
         {
-            const std::string message = stackError(state);
-            lua_pop(state, 1);
+            const std::string_view message = stackError(state);
             if (runtime->lastCallbackError != message)
             {
-                runtime->lastCallbackError = message;
-                std::fprintf(stderr, "script_runtime: callback '%s' failed: %s\n", name, message.c_str());
+                try
+                {
+                    runtime->lastCallbackError.assign(message);
+                }
+                catch (...)
+                {}
+                std::fprintf(stderr, "script_runtime: callback '%s' failed: %.*s\n", name,
+                    static_cast<int>(std::min<std::size_t>(message.size(), static_cast<std::size_t>(INT_MAX))),
+                    message.data());
             }
+            lua_pop(state, 1);
         }
     }
 #else
@@ -677,9 +707,20 @@ private:
     void dispatchToHostedMods(
         const char *callback, std::initializer_list<double> numbers = {}, const char *text = nullptr)
     {
-        std::lock_guard lock(hostedMutex_);
-        for (const HostedMod &mod : hostedMods_)
-            callOptionalGlobal(mod.runtime, callback, numbers, text);
+        std::vector<ScriptRuntimeHandle> runtimes;
+        try
+        {
+            std::lock_guard lock(hostedMutex_);
+            runtimes.reserve(hostedMods_.size());
+            for (const HostedMod &mod : hostedMods_)
+                runtimes.push_back(mod.runtime);
+        }
+        catch (...)
+        {
+            return;
+        }
+        for (const ScriptRuntimeHandle runtime : runtimes)
+            callOptionalGlobal(runtime, callback, numbers, text);
     }
 
     void onEngineStartupCompleted(const EngineStartupCompletedEvent &)
@@ -734,8 +775,16 @@ private:
                                      + description.scriptPath.string() + "': " + std::string(errorBuffer.data()));
         }
         callOptionalGlobal(runtime, "on_construct");
-        std::lock_guard lock(hostedMutex_);
-        hostedMods_.push_back(HostedMod{.modId = description.modId, .runtime = runtime});
+        try
+        {
+            std::lock_guard lock(hostedMutex_);
+            hostedMods_.push_back(HostedMod{.modId = description.modId, .runtime = runtime});
+        }
+        catch (...)
+        {
+            destroyRuntimeImpl(runtime);
+            throw std::runtime_error("script mod '" + description.modId + "' could not be registered");
+        }
 #else
         (void)description;
         throw std::runtime_error("script_runtime: the Lua backend is disabled; script mods cannot be hosted");
@@ -860,13 +909,24 @@ private:
         if (settings.memoryLimitBytes < 1024u * 1024u || settings.memoryLimitBytes > (1ull << 40u)
             || settings.instructionLimit < 1000u || settings.maximumScriptBytes == 0
             || settings.maximumScriptBytes > settings.memoryLimitBytes
+            || settings.maximumScriptBytes >= static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())
+            || settings.maximumScriptBytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max())
             || (settings.enabledLibraries & ~allowedLibraries) != 0)
         {
             setError(error, ScriptError::InvalidArgument);
             return invalidScriptRuntime;
         }
         std::lock_guard initializerLock(initializersMutex_);
-        auto runtime = std::make_shared<RuntimeRecord>(settings);
+        std::shared_ptr<RuntimeRecord> runtime;
+        try
+        {
+            runtime = std::make_shared<RuntimeRecord>(settings);
+        }
+        catch (...)
+        {
+            setError(error, ScriptError::MemoryLimitExceeded);
+            return invalidScriptRuntime;
+        }
         runtime->globalMemoryUsed = &totalMemoryUsed_;
         runtime->globalMemoryLimitBytes = maximumTotalMemoryBytes_;
         runtime->state = lua_newstate(luaAllocator, runtime.get(), luaHashSeed());
@@ -955,38 +1015,49 @@ private:
             setError(error, ScriptError::InvalidHandle);
             return copyText("invalid script runtime", errorText, errorCapacity, errorRequired);
         }
-        std::lock_guard   lock(runtime->mutex);
-        const std::size_t length = std::strlen(source);
-        if (length > runtime->description.maximumScriptBytes)
+        std::lock_guard lock(runtime->mutex);
+        const std::size_t maximumBytes = static_cast<std::size_t>(runtime->description.maximumScriptBytes);
+        const auto *terminator = static_cast<const char *>(std::memchr(source, '\0', maximumBytes + 1u));
+        if (terminator == nullptr)
         {
             setError(error, ScriptError::CapacityExceeded);
             return copyText("script exceeds configured size limit", errorText, errorCapacity, errorRequired);
+        }
+        const std::size_t length = static_cast<std::size_t>(terminator - source);
+        constexpr std::size_t maximumChunkNameBytes = 16384;
+        if (chunkName != nullptr
+            && std::memchr(chunkName, '\0', maximumChunkNameBytes + 1u) == nullptr)
+        {
+            setError(error, ScriptError::InvalidArgument);
+            return copyText("chunk name exceeds configured size limit", errorText, errorCapacity, errorRequired);
         }
         lua_State *state = runtime->state;
         setExecutionBudget(*runtime);
         const int loaded = luaL_loadbufferx(state, source, length, chunkName != nullptr ? chunkName : "=(engine)", "t");
         if (loaded != LUA_OK)
         {
-            const std::string message = stackError(state);
-            lua_pop(state, 1);
-            const ScriptError code = message.find("memory") != std::string::npos ? ScriptError::MemoryLimitExceeded
-                                                                                 : ScriptError::CompilationFailed;
+            const std::string_view message = stackError(state);
+            const ScriptError code = message.find("memory") != std::string_view::npos ? ScriptError::MemoryLimitExceeded
+                                                                                        : ScriptError::CompilationFailed;
             setError(error, code);
             lua_sethook(state, nullptr, 0, 0);
-            return copyText(message, errorText, errorCapacity, errorRequired);
+            const bool copied = copyText(message, errorText, errorCapacity, errorRequired);
+            lua_pop(state, 1);
+            return copied;
         }
         const int executed = lua_pcall(state, 0, 0, 0);
         lua_sethook(state, nullptr, 0, 0);
         if (executed != LUA_OK)
         {
-            const std::string message = stackError(state);
-            lua_pop(state, 1);
-            const ScriptError code = message.find("instruction limit exceeded") != std::string::npos
+            const std::string_view message = stackError(state);
+            const ScriptError code = message.find("instruction limit exceeded") != std::string_view::npos
                                        ? ScriptError::InstructionLimitExceeded
-                                       : (message.find("memory") != std::string::npos ? ScriptError::MemoryLimitExceeded
-                                                                                      : ScriptError::RuntimeFailed);
+                                       : (message.find("memory") != std::string_view::npos ? ScriptError::MemoryLimitExceeded
+                                                                                            : ScriptError::RuntimeFailed);
             setError(error, code);
-            return copyText(message, errorText, errorCapacity, errorRequired);
+            const bool copied = copyText(message, errorText, errorCapacity, errorRequired);
+            lua_pop(state, 1);
+            return copied;
         }
         if (errorRequired != nullptr)
             *errorRequired = 1;
@@ -999,10 +1070,17 @@ private:
         std::uint32_t errorCapacity, std::uint32_t *errorRequired)
     {
         setError(error, ScriptError::None);
-        if (filePath == nullptr || filePath[0] == '\0')
+        constexpr std::size_t maximumPathBytes = 16384;
+        if (filePath == nullptr)
         {
             setError(error, ScriptError::InvalidArgument);
             return copyText("file path is empty", errorText, errorCapacity, errorRequired);
+        }
+        const auto *pathTerminator = static_cast<const char *>(std::memchr(filePath, '\0', maximumPathBytes + 1u));
+        if (pathTerminator == nullptr || pathTerminator == filePath)
+        {
+            setError(error, ScriptError::InvalidArgument);
+            return copyText("file path is empty or too long", errorText, errorCapacity, errorRequired);
         }
         auto runtime = findRuntime(handle);
         if (!runtime)
@@ -1017,12 +1095,14 @@ private:
             setError(error, ScriptError::IoFailed);
             return copyText("unable to read script file size", errorText, errorCapacity, errorRequired);
         }
-        if (fileSize > runtime->description.maximumScriptBytes)
+        if (fileSize > runtime->description.maximumScriptBytes
+            || fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())
+            || fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max()))
         {
             setError(error, ScriptError::CapacityExceeded);
             return copyText("script exceeds configured size limit", errorText, errorCapacity, errorRequired);
         }
-        std::ifstream stream(filePath, std::ios::binary);
+        std::ifstream stream(std::filesystem::path(filePath), std::ios::binary);
         if (!stream)
         {
             setError(error, ScriptError::IoFailed);
@@ -1030,11 +1110,29 @@ private:
         }
         std::string source(static_cast<std::size_t>(fileSize), '\0');
         if (!source.empty())
+        {
             stream.read(source.data(), static_cast<std::streamsize>(source.size()));
-        if (!stream && !source.empty())
+            if (stream.gcount() != static_cast<std::streamsize>(source.size()))
+            {
+                setError(error, ScriptError::IoFailed);
+                return copyText("unable to read complete script file", errorText, errorCapacity, errorRequired);
+            }
+        }
+        char trailingByte = 0;
+        if (stream.get(trailingByte))
         {
             setError(error, ScriptError::IoFailed);
-            return copyText("unable to read script file", errorText, errorCapacity, errorRequired);
+            return copyText("script file changed while being read", errorText, errorCapacity, errorRequired);
+        }
+        if (!stream.eof())
+        {
+            setError(error, ScriptError::IoFailed);
+            return copyText("unable to finish reading script file", errorText, errorCapacity, errorRequired);
+        }
+        if (source.find('\0') != std::string::npos)
+        {
+            setError(error, ScriptError::CompilationFailed);
+            return copyText("script file contains a null byte", errorText, errorCapacity, errorRequired);
         }
         return executeStringImpl(handle, source.c_str(), filePath, error, errorText, errorCapacity, errorRequired);
     }
@@ -1072,12 +1170,13 @@ private:
         lua_sethook(state, nullptr, 0, 0);
         if (result != LUA_OK)
         {
-            const std::string message = stackError(state);
-            lua_pop(state, 1);
+            const std::string_view message = stackError(state);
             setError(error,
-                message.find("instruction limit exceeded") != std::string::npos ? ScriptError::InstructionLimitExceeded
-                                                                                : ScriptError::RuntimeFailed);
-            return copyText(message, errorText, errorCapacity, errorRequired);
+                message.find("instruction limit exceeded") != std::string_view::npos ? ScriptError::InstructionLimitExceeded
+                                                                                       : ScriptError::RuntimeFailed);
+            const bool copied = copyText(message, errorText, errorCapacity, errorRequired);
+            lua_pop(state, 1);
+            return copied;
         }
         if (errorRequired != nullptr)
             *errorRequired = 1;
@@ -1095,22 +1194,38 @@ private:
         std::lock_guard lock(runtime->mutex);
         if (runtime->nativeFunctions.size() >= maximumNativeFunctions_)
             return false;
-        auto function                         = std::make_unique<NativeFunctionRecord>();
+        std::unique_ptr<NativeFunctionRecord> function;
+        try
+        {
+            function = std::make_unique<NativeFunctionRecord>();
+        }
+        catch (...)
+        {
+            return false;
+        }
         function->callback                    = callback;
         function->userData                    = userData;
         function->maximumArguments            = maximumNativeArguments_;
         function->maximumResults              = maximumNativeResults_;
         NativeFunctionRecord *functionPointer = function.get();
+        try
+        {
+            runtime->nativeFunctions.push_back(std::move(function));
+        }
+        catch (...)
+        {
+            return false;
+        }
         lua_pushlightuserdata(runtime->state, functionPointer);
         lua_pushcclosure(runtime->state, invokeNativeFunction, 1);
         const int functionIndex = lua_absindex(runtime->state, -1);
         if (!setGlobalPath(runtime->state, name, functionIndex))
         {
             lua_pop(runtime->state, 1);
+            runtime->nativeFunctions.pop_back();
             return false;
         }
         lua_pop(runtime->state, 1);
-        runtime->nativeFunctions.push_back(std::move(function));
         return true;
     }
 
@@ -1151,7 +1266,11 @@ private:
         if (!runtime || name == nullptr || name[0] == '\0' || value == nullptr)
             return false;
         std::lock_guard lock(runtime->mutex);
-        lua_pushstring(runtime->state, value);
+        const std::size_t maximumBytes = static_cast<std::size_t>(runtime->description.maximumScriptBytes);
+        const auto *terminator = static_cast<const char *>(std::memchr(value, '\0', maximumBytes + 1u));
+        if (terminator == nullptr)
+            return false;
+        lua_pushlstring(runtime->state, value, static_cast<std::size_t>(terminator - value));
         const int valueIndex = lua_absindex(runtime->state, -1);
         const bool assigned = setGlobalPath(runtime->state, name, valueIndex);
         lua_pop(runtime->state, 1);
@@ -1174,7 +1293,7 @@ private:
             lua_pop(runtime->state, 1);
             return false;
         }
-        const bool copied = copyText(std::string(value, length), output, capacity, outRequired);
+        const bool copied = copyText(std::string_view(value, length), output, capacity, outRequired);
         lua_pop(runtime->state, 1);
         return copied;
     }

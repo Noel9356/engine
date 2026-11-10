@@ -8,6 +8,7 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/math/quaternion.hpp>
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,10 @@ namespace engine::entity_world
 {
 namespace
 {
+
+using engine::math::multiplyQuaternion;
+using engine::math::normalizeQuaternion;
+using engine::math::rotateVector;
 
 void setError(EntityWorldError *output, EntityWorldError value)
 {
@@ -52,39 +57,6 @@ bool finiteTransform(const Transform &value)
                                     + static_cast<double>(value.rotation[2]) * value.rotation[2]
                                     + static_cast<double>(value.rotation[3]) * value.rotation[3]);
     return std::isfinite(length) && length > 1.0e-8;
-}
-
-// Minimal quaternion helpers (x, y, z, w component order).
-void normalizeQuaternion(float value[4])
-{
-    const float lengthSq = value[0] * value[0] + value[1] * value[1] + value[2] * value[2] + value[3] * value[3];
-    if (lengthSq > 0.0f)
-    {
-        const float invLen = 1.0f / std::sqrt(lengthSq);
-        value[0] *= invLen;
-        value[1] *= invLen;
-        value[2] *= invLen;
-        value[3] *= invLen;
-    }
-}
-
-void multiplyQuaternion(const float a[4], const float b[4], float out[4])
-{
-    out[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
-    out[1] = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
-    out[2] = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
-    out[3] = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
-}
-
-// Rotates a vector by a quaternion.
-void rotateVector(const float q[4], const float value[3], float out[3])
-{
-    const float tx = 2.0f * (q[1] * value[2] - q[2] * value[1]);
-    const float ty = 2.0f * (q[2] * value[0] - q[0] * value[2]);
-    const float tz = 2.0f * (q[0] * value[1] - q[1] * value[0]);
-    out[0]         = value[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
-    out[1]         = value[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
-    out[2]         = value[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
 }
 
 // parent * local: the scaled local offset is rotated into parent space;
@@ -346,6 +318,17 @@ private:
 
         if (world.entities[root].worldTransformDirty)
             return;
+        try
+        {
+            world.transformDirtyStack.reserve(world.entities.size());
+        }
+        catch (...)
+        {
+            for (EntitySlot &record : world.entities)
+                if (record.alive)
+                    record.worldTransformDirty = true;
+            return;
+        }
         world.transformDirtyStack.clear();
         world.transformDirtyStack.push_back(root);
         while (!world.transformDirtyStack.empty())
@@ -407,28 +390,52 @@ private:
             setError(error, EntityWorldError::CapacityExceeded);
             return invalidEntityWorld;
         }
-        auto record             = std::make_unique<WorldRecord>();
-        record->name            = description != nullptr && description->name != nullptr ? description->name : "world";
-        record->maximumEntities = description != nullptr && description->maximumEntities != 0
-                                    ? std::min(description->maximumEntities, maximumEntities_)
-                                    : maximumEntities_;
-        record->maximumHierarchyDepth = description != nullptr && description->maximumHierarchyDepth != 0
-                                          ? std::min(description->maximumHierarchyDepth, maximumDepth_)
-                                          : maximumDepth_;
-        const std::uint32_t capacity  = description != nullptr && description->initialEntityCapacity != 0
-                                          ? std::min(description->initialEntityCapacity, record->maximumEntities)
-                                          : initialCapacity_;
-        record->entities.reserve(capacity);
-        record->freeSlots.reserve(capacity);
-        record->transformDirtyStack.reserve(capacity);
-        const EntityWorldHandle handle = nextWorld_++;
-        if (handle == invalidEntityWorld)
+        try
         {
-            setError(error, EntityWorldError::CapacityExceeded);
+            auto record              = std::make_unique<WorldRecord>();
+            record->name             = description != nullptr && description->name != nullptr ? description->name : "world";
+            record->maximumEntities  = description != nullptr && description->maximumEntities != 0
+                                          ? std::min(description->maximumEntities, maximumEntities_)
+                                          : maximumEntities_;
+            record->maximumHierarchyDepth = description != nullptr && description->maximumHierarchyDepth != 0
+                                                ? std::min(description->maximumHierarchyDepth, maximumDepth_)
+                                                : maximumDepth_;
+            const std::uint32_t capacity = description != nullptr && description->initialEntityCapacity != 0
+                                               ? std::min(description->initialEntityCapacity, record->maximumEntities)
+                                               : std::min(initialCapacity_, record->maximumEntities);
+            record->entities.reserve(capacity);
+            record->freeSlots.reserve(capacity);
+            record->transformDirtyStack.reserve(capacity);
+
+            EntityWorldHandle handle = invalidEntityWorld;
+            for (std::size_t attempt = 0; attempt < worlds_.size() + 2u; ++attempt)
+            {
+                const EntityWorldHandle candidate = nextWorld_++;
+                if (candidate != invalidEntityWorld && !worlds_.contains(candidate))
+                {
+                    handle = candidate;
+                    break;
+                }
+            }
+            if (handle == invalidEntityWorld)
+            {
+                setError(error, EntityWorldError::CapacityExceeded);
+                return invalidEntityWorld;
+            }
+            const auto [iterator, inserted] = worlds_.emplace(handle, std::move(record));
+            (void)iterator;
+            if (!inserted)
+            {
+                setError(error, EntityWorldError::CapacityExceeded);
+                return invalidEntityWorld;
+            }
+            return handle;
+        }
+        catch (...)
+        {
+            setError(error, EntityWorldError::ResourceFailure);
             return invalidEntityWorld;
         }
-        worlds_.emplace(handle, std::move(record));
-        return handle;
     }
 
     void destroyWorldImpl(EntityWorldHandle handle)
@@ -488,39 +495,56 @@ private:
             setError(error, EntityWorldError::CapacityExceeded);
             return invalidEntity;
         }
-        std::uint32_t slot = 0;
-        if (!world->freeSlots.empty())
+
+        try
         {
-            slot = world->freeSlots.back();
-            world->freeSlots.pop_back();
-        }
-        else
-        {
-            if (world->entities.size() >= world->maximumEntities)
+            std::string entityName = description->name != nullptr ? description->name : "entity";
+            if (parentSlot != std::numeric_limits<std::uint32_t>::max())
             {
-                setError(error, EntityWorldError::CapacityExceeded);
-                return invalidEntity;
+                auto &children = world->entities[parentSlot].children;
+                children.reserve(children.size() + 1u);
             }
-            slot = static_cast<std::uint32_t>(world->entities.size());
-            world->entities.emplace_back();
+
+            std::uint32_t slot = 0;
+            if (!world->freeSlots.empty())
+            {
+                slot = world->freeSlots.back();
+                world->freeSlots.pop_back();
+            }
+            else
+            {
+                if (world->entities.size() >= world->maximumEntities)
+                {
+                    setError(error, EntityWorldError::CapacityExceeded);
+                    return invalidEntity;
+                }
+                slot = static_cast<std::uint32_t>(world->entities.size());
+                world->entities.emplace_back();
+            }
+
+            EntitySlot &record       = world->entities[slot];
+            record.alive             = true;
+            record.enabled           = description->enabled;
+            record.parentSlot        = parentSlot;
+            record.name              = std::move(entityName);
+            record.local             = description->localTransform;
+            normalizeQuaternion(record.local.rotation);
+            record.worldTransformDirty = true;
+            record.children.clear();
+            if (parentSlot != std::numeric_limits<std::uint32_t>::max())
+                world->entities[parentSlot].children.push_back(slot);
+            ++world->aliveCount;
+            return makeEntityHandle(slot, record.generation);
         }
-        EntitySlot &record = world->entities[slot];
-        record.alive       = true;
-        record.enabled     = description->enabled;
-        record.parentSlot  = parentSlot;
-        record.name        = description->name != nullptr ? description->name : "entity";
-        record.local       = description->localTransform;
-        normalizeQuaternion(record.local.rotation);
-        record.worldTransformDirty = true;
-        record.children.clear();
-        if (parentSlot != std::numeric_limits<std::uint32_t>::max())
-            world->entities[parentSlot].children.push_back(slot);
-        ++world->aliveCount;
-        return makeEntityHandle(slot, record.generation);
+        catch (...)
+        {
+            setError(error, EntityWorldError::ResourceFailure);
+            return invalidEntity;
+        }
     }
 
-    // Detaches from the parent, clears state, bumps the generation (wraps to
-    // 1 at UINT32_MAX), and returns the slot to the free list.
+    // Detaches from the parent, clears state, and advances the generation.
+    // A slot at generation exhaustion is retired instead of reusing a handle.
     void eraseSlot(WorldRecord &world, std::uint32_t slot)
     {
         EntitySlot &record = world.entities[slot];
@@ -534,9 +558,10 @@ private:
         record.parentSlot = std::numeric_limits<std::uint32_t>::max();
         record.name.clear();
         record.children.clear();
-        record.generation
-            = record.generation == std::numeric_limits<std::uint32_t>::max() ? 1u : record.generation + 1u;
-        world.freeSlots.push_back(slot);
+        const bool retireSlot = record.generation == std::numeric_limits<std::uint32_t>::max();
+        record.generation = retireSlot ? 0u : record.generation + 1u;
+        if (!retireSlot)
+            world.freeSlots.push_back(slot);
         --world.aliveCount;
     }
 
@@ -554,6 +579,8 @@ private:
             setError(error, EntityWorldError::InvalidHandle);
             return false;
         }
+        try
+        {
         if (!recursive)
         {
             const std::uint32_t newParent = world->entities[root].parentSlot;
@@ -587,6 +614,7 @@ private:
             if (newParent != std::numeric_limits<std::uint32_t>::max())
                 world->entities[newParent].children.reserve(
                     world->entities[newParent].children.size() + children.size());
+            world->freeSlots.reserve(world->freeSlots.size() + 1u);
             for (const auto &[child, local] : replacements)
             {
                 world->entities[child].parentSlot = newParent;
@@ -610,9 +638,16 @@ private:
             pending.insert(
                 pending.end(), world->entities[current].children.begin(), world->entities[current].children.end());
         }
+        world->freeSlots.reserve(world->freeSlots.size() + removal.size());
         for (auto iterator = removal.rbegin(); iterator != removal.rend(); ++iterator)
             eraseSlot(*world, *iterator);
         return true;
+        }
+        catch (...)
+        {
+            setError(error, EntityWorldError::ResourceFailure);
+            return false;
+        }
     }
 
     bool entityExistsImpl(EntityWorldHandle handle, EntityHandle entity)
@@ -701,6 +736,8 @@ private:
         EntityWorldHandle handle, EntityHandle entity, EntityHandle parent, bool preserveWorld, EntityWorldError *error)
     {
         setError(error, EntityWorldError::None);
+        try
+        {
         WorldRecord  *world      = findWorld(handle);
         std::uint32_t entitySlot = 0;
         EntitySlot   *record     = world != nullptr ? findEntity(*world, entity, &entitySlot) : nullptr;
@@ -773,6 +810,12 @@ private:
         record->local = newLocal;
         invalidateWorldTransforms(*world, entitySlot);
         return true;
+        }
+        catch (...)
+        {
+            setError(error, EntityWorldError::ResourceFailure);
+            return false;
+        }
     }
 
     EntityHandle getParentImpl(EntityWorldHandle handle, EntityHandle entity)
@@ -828,7 +871,7 @@ private:
         return true;
     }
 
-    // Binary format: magic "WRLD" (0x444C5257), version 4, world name, then
+    // Binary format: magic "WRLD" (0x444C5257), version 5, world name, then
     // per-slot generations and one record per alive entity (slot, parent,
     // enabled byte, name, local transform). Truncates any existing file.
     bool saveWorldImpl(EntityWorldHandle handle, const char *filePath, EntityWorldError *error)
@@ -840,6 +883,20 @@ private:
             setError(error, EntityWorldError::InvalidHandle);
             return false;
         }
+        constexpr std::size_t maximumStoredNameBytes = 1'048'576u;
+        if (world->name.size() > maximumStoredNameBytes)
+        {
+            setError(error, EntityWorldError::ResourceFailure);
+            return false;
+        }
+        for (const EntitySlot &record : world->entities)
+        {
+            if (record.alive && record.name.size() > maximumStoredNameBytes)
+            {
+                setError(error, EntityWorldError::ResourceFailure);
+                return false;
+            }
+        }
         std::ofstream stream(filePath, std::ios::binary | std::ios::trunc);
         if (!stream)
         {
@@ -847,7 +904,7 @@ private:
             return false;
         }
         constexpr std::uint32_t magic   = 0x444C5257u;
-        constexpr std::uint32_t version = 4u;
+        constexpr std::uint32_t version = 5u;
         stream.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
         stream.write(reinterpret_cast<const char *>(&version), sizeof(version));
         const std::uint32_t nameSize = static_cast<std::uint32_t>(world->name.size());
@@ -883,7 +940,8 @@ private:
         return true;
     }
 
-    // Reads versions 2-4 (3 adds per-slot generations, 4 the stored depth).
+    // Reads versions 2-5 (3 adds per-slot generations, 4 the stored depth,
+    // 5 reserves generation zero for slots retired after generation exhaustion).
     // Everything is validated before the world is replaced: slot bounds,
     // duplicate slots, transforms, parent occupancy, depth, and cycles.
     bool loadWorldImpl(EntityWorldHandle handle, const char *filePath, EntityWorldError *error)
@@ -895,17 +953,30 @@ private:
             setError(error, EntityWorldError::InvalidHandle);
             return false;
         }
+        constexpr std::uintmax_t maximumWorldFileBytes = 512ull * 1024ull * 1024ull;
+        constexpr std::uint64_t  maximumSlotStorageBytes = 256ull * 1024ull * 1024ull;
+        constexpr std::uint64_t  maximumTotalNameBytes = 128ull * 1024ull * 1024ull;
+        std::error_code          fileSizeError;
+        const std::uintmax_t     fileSize = std::filesystem::file_size(filePath, fileSizeError);
+        if (fileSizeError || fileSize > maximumWorldFileBytes)
+        {
+            setError(error, EntityWorldError::ResourceFailure);
+            return false;
+        }
         std::ifstream stream(filePath, std::ios::binary);
         if (!stream)
         {
             setError(error, EntityWorldError::ResourceFailure);
             return false;
         }
+        try
+        {
         std::uint32_t magic = 0, version = 0, nameSize = 0, slotCount = 0, aliveCount = 0;
         stream.read(reinterpret_cast<char *>(&magic), sizeof(magic));
         stream.read(reinterpret_cast<char *>(&version), sizeof(version));
         stream.read(reinterpret_cast<char *>(&nameSize), sizeof(nameSize));
-        if (!stream || magic != 0x444C5257u || (version != 2u && version != 3u && version != 4u)
+        if (!stream || magic != 0x444C5257u
+            || (version != 2u && version != 3u && version != 4u && version != 5u)
             || nameSize > 1'048'576u)
         {
             setError(error, EntityWorldError::ResourceFailure);
@@ -918,7 +989,9 @@ private:
         std::uint32_t loadedMaximumDepth = world->maximumHierarchyDepth;
         if (version >= 4u)
             stream.read(reinterpret_cast<char *>(&loadedMaximumDepth), sizeof(loadedMaximumDepth));
-        if (!stream || slotCount > world->maximumEntities || aliveCount > slotCount || loadedMaximumDepth == 0
+        if (!stream || slotCount > world->maximumEntities
+            || static_cast<std::uint64_t>(slotCount) * sizeof(EntitySlot) > maximumSlotStorageBytes
+            || aliveCount > slotCount || loadedMaximumDepth == 0
             || loadedMaximumDepth > world->maximumHierarchyDepth)
         {
             setError(error, EntityWorldError::CapacityExceeded);
@@ -931,13 +1004,14 @@ private:
             for (EntitySlot &record : replacement)
             {
                 stream.read(reinterpret_cast<char *>(&record.generation), sizeof(record.generation));
-                if (!stream || record.generation == 0)
+                if (!stream)
                 {
                     setError(error, EntityWorldError::ResourceFailure);
                     return false;
                 }
             }
         }
+        std::uint64_t totalNameBytes = nameSize;
         for (std::uint32_t index = 0; index < aliveCount; ++index)
         {
             std::uint32_t slot = 0, parent = std::numeric_limits<std::uint32_t>::max(), length = 0;
@@ -949,13 +1023,20 @@ private:
             stream.read(reinterpret_cast<char *>(&parent), sizeof(parent));
             stream.read(reinterpret_cast<char *>(&enabled), sizeof(enabled));
             stream.read(reinterpret_cast<char *>(&length), sizeof(length));
-            if (!stream || slot >= slotCount || occupied[slot] || length > 1'048'576u)
+            if (!stream || slot >= slotCount || occupied[slot] || length > 1'048'576u
+                || length > maximumTotalNameBytes - std::min(maximumTotalNameBytes, totalNameBytes)
+                || enabled > 1u)
             {
                 setError(error, EntityWorldError::ResourceFailure);
                 return false;
             }
             occupied[slot]     = true;
             EntitySlot &record = replacement[slot];
+            if (record.generation == 0)
+            {
+                setError(error, EntityWorldError::ResourceFailure);
+                return false;
+            }
             if (version == 2u)
             {
                 if (generation == 0)
@@ -968,6 +1049,7 @@ private:
             record.alive      = true;
             record.enabled    = enabled != 0;
             record.parentSlot = parent;
+            totalNameBytes += length;
             record.name.resize(length);
             stream.read(record.name.data(), static_cast<std::streamsize>(length));
             stream.read(reinterpret_cast<char *>(&record.local), sizeof(record.local));
@@ -1009,9 +1091,14 @@ private:
                 ancestor = replacement[ancestor].parentSlot;
             }
         }
+        if (stream.peek() != std::char_traits<char>::eof())
+        {
+            setError(error, EntityWorldError::ResourceFailure);
+            return false;
+        }
         std::vector<std::uint32_t> freeSlots;
         for (std::uint32_t slot = 0; slot < slotCount; ++slot)
-            if (!occupied[slot])
+            if (!occupied[slot] && replacement[slot].generation != 0)
                 freeSlots.push_back(slot);
         world->entities              = std::move(replacement);
         world->freeSlots             = std::move(freeSlots);
@@ -1019,6 +1106,12 @@ private:
         world->maximumHierarchyDepth = loadedMaximumDepth;
         world->name                  = std::move(worldName);
         return true;
+        }
+        catch (...)
+        {
+            setError(error, EntityWorldError::ResourceFailure);
+            return false;
+        }
     }
 
     ParticipantManifest                                                 manifest_;

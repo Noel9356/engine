@@ -202,6 +202,15 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
     }
     if (framebufferWidth != width || framebufferHeight != height)
     {
+        if (width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())
+            || height > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
+        {
+            framebufferWidth = framebufferHeight = 0;
+            color.clear();
+            depth.clear();
+            pixelLocks.clear();
+            return;
+        }
         const std::size_t maximum = std::numeric_limits<std::size_t>::max();
         if (static_cast<std::size_t>(width) > maximum / height
             || static_cast<std::size_t>(width) * height > maximum / 4)
@@ -209,6 +218,7 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
             framebufferWidth = framebufferHeight = 0;
             color.clear();
             depth.clear();
+            pixelLocks.clear();
             return;
         }
         const std::size_t pixelCount = static_cast<std::size_t>(width) * height;
@@ -217,6 +227,7 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
             framebufferWidth = framebufferHeight = 0;
             color.clear();
             depth.clear();
+            pixelLocks.clear();
             return;
         }
         try
@@ -236,6 +247,7 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
             framebufferWidth = framebufferHeight = 0;
             color.clear();
             depth.clear();
+            pixelLocks.clear();
             return;
         }
     }
@@ -244,23 +256,13 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
     const std::uint8_t blue  = toByte(frame.clearColor[2]);
     const std::uint8_t alpha = toByte(frame.clearColor[3]);
 
-    const std::uint32_t packed = static_cast<std::uint32_t>(red) | (static_cast<std::uint32_t>(green) << 8)
-                               | (static_cast<std::uint32_t>(blue) << 16) | (static_cast<std::uint32_t>(alpha) << 24);
-    if ((color.size() % sizeof(std::uint32_t)) == 0)
+    for (std::size_t pixel = 0; pixel < color.size() / 4; ++pixel)
     {
-        std::fill(reinterpret_cast<std::uint32_t *>(color.data()),
-            reinterpret_cast<std::uint32_t *>(color.data() + color.size()),
-            packed);
-    }
-    else
-    {
-        for (std::size_t pixel = 0; pixel < color.size() / 4; ++pixel)
-        {
-            color[pixel * 4 + 0] = red;
-            color[pixel * 4 + 1] = green;
-            color[pixel * 4 + 2] = blue;
-            color[pixel * 4 + 3] = alpha;
-        }
+        const std::size_t offset = pixel * 4;
+        color[offset + 0] = red;
+        color[offset + 1] = green;
+        color[offset + 2] = blue;
+        color[offset + 3] = alpha;
     }
     std::fill(depth.begin(), depth.end(), 1.0f);
 
@@ -2190,7 +2192,7 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
         return false;
     }
 
-    tilebins::binRecordTileRanges(tileRecords_.size(),
+    const bool binned = tilebins::binRecordTileRanges(tileRecords_.size(),
         [this, &grid](std::size_t record, std::uint32_t &tileXBegin, std::uint32_t &tileXEnd,
             std::uint32_t &tileYBegin, std::uint32_t &tileYEnd)
         {
@@ -2203,6 +2205,12 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
                 grid, firstX, lastX, firstY, lastY, tileXBegin, tileXEnd, tileYBegin, tileYEnd);
         },
         grid, tileOffsets_, tileItems_);
+    if (!binned)
+    {
+        tileOffsets_.clear();
+        tileItems_.clear();
+        return false;
+    }
     return true;
 }
 
@@ -2237,11 +2245,11 @@ void HeadlessBackend::rasterizeTileRecords(
         const std::uint32_t tileX      = tile % grid.tilesX;
         const std::uint32_t tileY      = tile / grid.tilesX;
         const std::int32_t  xBandBegin = static_cast<std::int32_t>(tileX * tileWidth_);
-        const std::int32_t  xBandEnd
-            = std::min(framebufferWidthInt, xBandBegin + static_cast<std::int32_t>(tileWidth_)) - 1;
+        const std::int32_t  xBandEnd = static_cast<std::int32_t>(
+            std::min<std::int64_t>(framebufferWidthInt, static_cast<std::int64_t>(xBandBegin) + tileWidth_) - 1);
         const std::int32_t yBandBegin = static_cast<std::int32_t>(tileY * tileHeight_);
-        const std::int32_t yBandEnd
-            = std::min(framebufferHeightInt, yBandBegin + static_cast<std::int32_t>(tileHeight_)) - 1;
+        const std::int32_t yBandEnd = static_cast<std::int32_t>(
+            std::min<std::int64_t>(framebufferHeightInt, static_cast<std::int64_t>(yBandBegin) + tileHeight_) - 1);
         for (std::uint32_t entry = begin; entry < end; ++entry)
         {
             const TileBinRecord &record = tileRecords_[tileItems_[entry]];

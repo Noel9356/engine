@@ -15,8 +15,9 @@ namespace ui
 {
 
 // Capability ABI. Bump when the UiCapability layout changes so consumers can
-// reject mismatched providers.
-inline constexpr std::uint32_t uiCapabilityAbi = 1u;
+// reject mismatched providers. History: 1 -> 2 added single-primary-pointer
+// touch input; 2 -> 3 added numeric and selection widgets.
+inline constexpr std::uint32_t uiCapabilityAbi = 3u;
 
 // Opaque handles. 0 (invalidUiContext) means "none"; font handle 0 is the
 // built-in default font created with every context.
@@ -335,6 +336,17 @@ struct UiCaptureState
     bool textInput = false;
 };
 
+// Touch is mapped to ImGui's primary mouse pointer. The first contact owns
+// the pointer until it ends or is cancelled; concurrent contacts are ignored
+// by the UI sink (they remain available to input_actions for gesture logic).
+enum class UiTouchPhase : std::uint32_t
+{
+    Began = 0,
+    Moved,
+    Ended,
+    Cancelled
+};
+
 // The "ui" capability: a C struct of function pointers; self is the first
 // argument of every call. Contexts are bound to their creating thread, widget
 // calls only act inside an active frame, and a false beginWindow still needs
@@ -355,6 +367,8 @@ struct UiCapability
 
     void (*addMousePosition)(void *self, UiContextHandle context, float x, float y);
     void (*addMouseButton)(void *self, UiContextHandle context, std::uint32_t button, bool down);
+    void (*addTouch)(void *self, UiContextHandle context, std::uint32_t touchId, UiTouchPhase phase,
+        float x, float y);
     void (*addMouseWheel)(void *self, UiContextHandle context, float horizontal, float vertical);
     void (*addKey)(void *self, UiContextHandle context, UiKey key, bool down);
     void (*addGamepadButton)(void *self, UiContextHandle context, UiGamepadButton button, bool down);
@@ -375,6 +389,20 @@ struct UiCapability
     bool (*sliderFloat)(void *self, UiContextHandle context, const char *label, float *value, float minimum,
         float maximum, const char *format);
     bool (*inputText)(void *self, UiContextHandle context, const char *label, char *buffer, std::uint32_t bufferSize);
+    bool (*inputInt)(void *self, UiContextHandle context, const char *label, std::int32_t *value,
+        std::int32_t step, std::int32_t fastStep);
+    bool (*inputFloat)(void *self, UiContextHandle context, const char *label, float *value,
+        const char *format);
+    bool (*sliderInt)(void *self, UiContextHandle context, const char *label, std::int32_t *value,
+        std::int32_t minimum, std::int32_t maximum, const char *format);
+    bool (*dragFloat)(void *self, UiContextHandle context, const char *label, float *value,
+        float speed, float minimum, float maximum, const char *format);
+    bool (*combo)(void *self, UiContextHandle context, const char *label, std::int32_t *currentItem,
+        const char *const *items, std::uint32_t itemCount);
+    bool (*selectable)(void *self, UiContextHandle context, const char *label, bool *selected,
+        float width, float height);
+    bool (*radioButton)(void *self, UiContextHandle context, const char *label, std::int32_t *value,
+        std::int32_t buttonValue);
     void (*progressBar)(
         void *self, UiContextHandle context, float fraction, float width, float height, const char *overlay);
     void (*image)(void *self, UiContextHandle context, UiTextureHandle texture, float width, float height, float uv0x,

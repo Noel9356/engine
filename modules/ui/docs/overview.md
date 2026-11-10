@@ -4,7 +4,7 @@ ui gives the engine an immediate-mode user interface layer. It wraps Dear ImGui 
 
 ## Capability
 
-The module provides the `ui` capability (ABI 1, constant `uiCapabilityAbi`, see `include/engine/ui/capabilities.hpp`). All calls take the capability's `self` pointer as their first argument. Handles: `UiContextHandle` (0 = `invalidUiContext`) and `UiFontHandle` (0 = the built-in default font).
+The module provides the `ui` capability (ABI 3, constant `uiCapabilityAbi`, see `include/engine/ui/capabilities.hpp`). All calls take the capability's `self` pointer as their first argument. Handles: `UiContextHandle` (0 = `invalidUiContext`) and `UiFontHandle` (0 = the built-in default font).
 
 Main function groups:
 
@@ -12,8 +12,8 @@ Main function groups:
 | --- | --- |
 | Context lifetime | `createContext`, `destroyContext` |
 | Frame lifecycle | `beginFrame`, `endFrame`, `drawData`, `captureState` |
-| Input sink | `addMousePosition`, `addMouseButton`, `addMouseWheel`, `addKey`, `addGamepadButton`, `addGamepadAxis`, `addText`, `addFocus` |
-| Windows and widgets | `beginWindow` / `endWindow`, `text`, `textColored`, `separator`, `sameLine`, `spacing`, `button`, `checkbox`, `sliderFloat`, `inputText`, `progressBar`, `image` |
+| Input sink | `addMousePosition`, `addMouseButton`, `addTouch`, `addMouseWheel`, `addKey`, `addGamepadButton`, `addGamepadAxis`, `addText`, `addFocus` |
+| Windows and widgets | `beginWindow` / `endWindow`, `text`, `textColored`, `separator`, `sameLine`, `spacing`, `button`, `checkbox`, `sliderFloat`, `inputText`, `inputInt`, `inputFloat`, `sliderInt`, `dragFloat`, `combo`, `selectable`, `radioButton`, `progressBar`, `image` |
 | Fonts | `addFontFromFile`, `pushFont` / `popFont`, `fontAtlas`, `setFontTexture` |
 | Style | `pushStyleColor` / `popStyleColor`, `pushStyleVariable` / `popStyleVariable`, `setNextWindowPosition`, `setNextWindowSize` |
 
@@ -46,7 +46,8 @@ The module is conditionally functional: without the `ENGINE_UI_BACKEND_IMGUI` bu
 - **Contexts.** `createContext` validates the description (finite positive scale; zero-valued reserve/maximum fields fall back to the built-in defaults; reserve above maximum is rejected), creates an `ImGuiContext`, applies `StyleColorsDark` scaled by `globalScale`, enables keyboard/gamepad navigation flags as requested, and installs the default font. Handles are handed out monotonically starting at 1. The first context fixes the owning thread for all contexts.
 - **Frame lifecycle.** `beginFrame` validates the `UiFrameDescription`, clamps `deltaSeconds` into [1 ms, 0.25 s] for ImGui's internal timers, clears the previous frame's draw data, and calls `ImGui::NewFrame()`. Consumers then issue widget calls (immediate mode: each call appends to the ImGui frame) and call `endFrame`, which runs `ImGui::Render()`.
 - **Draw data extraction.** `endFrame` flattens ImGui's draw lists into `UiDrawData`: vertices and indices from all lists are concatenated, each `UiDrawCommand`'s offsets are rebased into the combined buffers, clip rectangles and texture ids are copied through, and commands carrying custom callbacks are dropped (only the reset-render-state marker survives as `resetRenderState = true`). If any total exceeds the description's `maximumVertices` / `maximumIndices` / `maximumCommands`, the buffers are cleared and the frame fails with `CapacityExceeded`.
-- **Input.** The `add*` functions forward events into ImGui's IO queue (`AddMousePosEvent`, `AddKeyEvent`, and friends); they take effect on the next `beginFrame`. `addGamepadAxis` splits a stick axis into ImGui's positive/negative analog keys and clamps to [-1, 1]; triggers drive only the positive key. `addText` accepts single Unicode codepoints and rejects surrogates. `captureState` exposes ImGui's `WantCaptureMouse` / `WantCaptureKeyboard` / `WantTextInput` flags so the host can suppress game input while the UI is being used.
+- **Input.** The `add*` functions forward events into ImGui's IO queue (`AddMousePosEvent`, `AddKeyEvent`, and friends); they take effect on the next `beginFrame`. `addGamepadAxis` splits a stick axis into ImGui's positive/negative analog keys and clamps to [-1, 1]; triggers drive only the positive key. `addTouch` maps the first active contact to ImGui's left mouse button and pointer; concurrent contacts are ignored by the UI sink, while `input_actions` retains full multitouch state for gestures. Touch coordinates are UI display pixels, not normalized window coordinates. A cancelled contact or focus loss releases the pointer button. `addText` accepts single Unicode codepoints and rejects surrogates. `captureState` exposes ImGui's `WantCaptureMouse` / `WantCaptureKeyboard` / `WantTextInput` flags so the host can suppress game input while the UI is being used.
+- **Widgets.** Numeric controls include unconstrained integer/float inputs, bounded integer/float sliders, and a bounded float drag control. `dragFloat` requires finite, strictly increasing bounds; a zero-width range is rejected because Dear ImGui interprets `minimum >= maximum` as an unbounded drag. `combo` accepts a caller-owned array of non-null item strings and a selected index in `[-1, itemCount)`; `-1` represents no current selection. `selectable` toggles the pointed-to boolean when activated; `radioButton` updates a caller-owned integer selection. All widget buffers and values remain caller-owned and must stay valid for the duration of the call.
 - **Fonts.** `fontAtlas` returns the built atlas as RGBA pixels (uploaded by the renderer), and `setFontTexture` stores the renderer's texture handle so draw commands can reference it. `addFontFromFile` loads a TTF and rebuilds the atlas, so it must be called outside an active frame.
 
 ## Threading and lifetime
@@ -83,8 +84,23 @@ if (ui.beginFrame(ui.self, context, &frame, &error))
     if (ui.beginWindow(ui.self, context, "Debug", nullptr,
         engine::ui::UiWindowFlags_None))
     {
-        float value = 0.5f;
-        ui.sliderFloat(ui.self, context, "speed", &value, 0.0f, 1.0f, "%.2f");
+        float speed = 0.5f;
+        ui.sliderFloat(ui.self, context, "speed", &speed, 0.0f, 1.0f, "%.2f");
+        float exposure = 1.0f;
+        ui.inputFloat(ui.self, context, "exposure", &exposure, "%.2f");
+        float roughness = 0.5f;
+        ui.dragFloat(ui.self, context, "roughness", &roughness, 0.01f, 0.0f, 1.0f, "%.2f");
+
+        std::int32_t quality = 1;
+        const char *qualityItems[] = {"Low", "Medium", "High"};
+        ui.combo(ui.self, context, "quality", &quality, qualityItems, 3);
+        ui.radioButton(ui.self, context, "Low preset", &quality, 0);
+        ui.radioButton(ui.self, context, "High preset", &quality, 2);
+        std::int32_t samples = 16;
+        ui.sliderInt(ui.self, context, "samples", &samples, 1, 64, "%d");
+        ui.inputInt(ui.self, context, "samples override", &samples, 1, 10);
+        bool fullscreen = false;
+        ui.selectable(ui.self, context, "Fullscreen", &fullscreen, 0.0f, 0.0f);
         ui.endWindow(ui.self, context);                  // always pair
     }
     ui.endFrame(ui.self, context, &error);

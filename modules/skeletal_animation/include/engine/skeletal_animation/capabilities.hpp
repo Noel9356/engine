@@ -14,7 +14,10 @@ namespace engine::skeletal_animation
 {
 
 // Increment when any public capability structure or function-table layout changes.
-inline constexpr std::uint32_t skeletalAnimationCapabilityAbi = 3u;
+// ABI history: 3 added masked/additive blending and global transforms; 4 adds
+// root-motion extraction from a clip interval; 5 adds clip event markers and
+// bounded per-player event retrieval.
+inline constexpr std::uint32_t skeletalAnimationCapabilityAbi = 5u;
 using SkeletonHandle                                          = std::uint32_t;
 using AnimationClipHandle                                     = std::uint32_t;
 using AnimationPlayerHandle                                   = std::uint32_t;
@@ -71,14 +74,38 @@ struct AnimationTrackDescription
     AnimationInterpolation   interpolation = AnimationInterpolation::Default;
 };
 
-// Clip creation input: a name, total duration, and one track per animated
-// joint (at most one track per joint).
+// A named event marker embedded in a clip timeline. Multiple markers may share
+// a timestamp; their declaration order is preserved. userData is opaque to the
+// animation module and is copied into emitted player events.
+struct AnimationEventMarker
+{
+    float         timeSeconds = 0.0f;
+    std::uint32_t eventId = 0;
+    std::uint32_t userData = 0;
+};
+
+// Clip creation input: a name, total duration, one track per animated joint
+// (at most one track per joint), and optional timeline event markers.
 struct AnimationClipDescription
 {
     const char                      *name            = nullptr;
     float                            durationSeconds = 0.0f;
     const AnimationTrackDescription *tracks          = nullptr;
     std::uint32_t                    trackCount      = 0;
+    const AnimationEventMarker      *eventMarkers    = nullptr;
+    std::uint32_t                    eventMarkerCount = 0;
+};
+
+// Event delivered when a player crosses a clip marker. direction is +1 for
+// forward playback and -1 for reverse playback. clipTimeSeconds is the marker
+// timestamp in the source clip, not the player's unwrapped loop time.
+struct AnimationPlayerEvent
+{
+    AnimationClipHandle clip = invalidAnimationClip;
+    std::uint32_t eventId = 0;
+    std::uint32_t userData = 0;
+    float clipTimeSeconds = 0.0f;
+    std::int32_t direction = 1;
 };
 
 // Player creation input: which clip to run and how.
@@ -129,6 +156,17 @@ struct SkeletalAnimationCapability
     bool (*clipDuration)(void *, AnimationClipHandle, float *outDurationSeconds);
     bool (*sampleClip)(void *, AnimationClipHandle, SkeletonHandle, float timeSeconds, bool looping,
         JointDescription *outputPose, std::uint32_t capacity, AnimationError *);
+
+    // Extracts the root joint's local-space translation and rotation delta
+    // between two clip times. rootJoint must be a top-level joint. The output
+    // translation is expressed in the start pose's root frame; the output
+    // quaternion is inverse(startRotation) * endRotation (x, y, z, w). Scale
+    // is intentionally excluded. When looping is true, each endpoint is
+    // wrapped independently; split intervals at loop boundaries to accumulate
+    // continuous cycle motion.
+    bool (*extractRootMotion)(void *, AnimationClipHandle, SkeletonHandle, std::uint32_t rootJoint,
+        float startTimeSeconds, float endTimeSeconds, bool looping, float outTranslation[3],
+        float outRotation[4], AnimationError *);
     AnimationPlayerHandle (*createPlayer)(void *, const AnimationPlaybackDescription *, AnimationError *);
     void (*destroyPlayer)(void *, AnimationPlayerHandle);
     bool (*setPlayerClip)(void *, AnimationPlayerHandle, AnimationClipHandle, bool restart);
@@ -160,6 +198,17 @@ struct SkeletalAnimationCapability
     // not scalar floats; output storage must contain matrixCapacity * 16 floats.
     bool (*buildGlobalTransforms)(void *, SkeletonHandle, const JointDescription *localPose,
         float *outputMatrices, std::uint32_t matrixCapacity, AnimationError *);
+
+    // Player events are queued by advancePlayer when playback crosses clip
+    // markers. copyPlayerEvents is non-destructive and copies up to capacity
+    // events beginning at firstIndex; outCopied reports the number copied.
+    // playerEventCount reports pending events and whether any were dropped due
+    // to configured queue budgets. clearPlayerEvents removes pending events
+    // and resets the overflow indicator.
+    bool (*playerEventCount)(void *, AnimationPlayerHandle, std::uint32_t *outCount, bool *outOverflowed);
+    bool (*copyPlayerEvents)(void *, AnimationPlayerHandle, std::uint32_t firstIndex,
+        AnimationPlayerEvent *output, std::uint32_t capacity, std::uint32_t *outCopied);
+    bool (*clearPlayerEvents)(void *, AnimationPlayerHandle);
 };
 
 } // namespace engine::skeletal_animation

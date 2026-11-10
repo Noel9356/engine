@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <mutex>
 #include <vector>
 #include <vulkan/vulkan_core.h>
@@ -152,6 +153,11 @@ bool VulkanSwapchain::createObjects(VkRenderPass renderPass, std::uint32_t viewp
         return false;
     }
 
+    if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0u)
+    {
+        return false;
+    }
+    transferSourceSupported_ = (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u;
     extent_ = resolvedExtent;
 
     std::uint32_t imageCount = capabilities.minImageCount + 1; // one extra image for low-latency presentation
@@ -160,8 +166,13 @@ bool VulkanSwapchain::createObjects(VkRenderPass renderPass, std::uint32_t viewp
         imageCount = capabilities.maxImageCount;
     }
 
-    // TRANSFER_SRC usage is reserved here so PPM exports can copy from the
-    // swapchain image without recreating the swapchain.
+    // PPM exports use TRANSFER_SRC when the surface supports it; normal
+    // rendering only requires COLOR_ATTACHMENT.
+    VkImageUsageFlags imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (transferSourceSupported_)
+    {
+        imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     const VkSwapchainCreateInfoKHR swapchainInfo{
         .sType                 = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .pNext                 = nullptr,
@@ -172,7 +183,7 @@ bool VulkanSwapchain::createObjects(VkRenderPass renderPass, std::uint32_t viewp
         .imageColorSpace       = colorSpace_,
         .imageExtent           = resolvedExtent,
         .imageArrayLayers      = 1,
-        .imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .imageUsage            = imageUsage,
         .imageSharingMode      = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices   = nullptr,
@@ -606,7 +617,16 @@ VkResult VulkanSwapchain::present(VkSemaphore renderFinished, std::uint32_t imag
 
 bool VulkanSwapchain::ensureReadbackBuffer()
 {
-    const VkDeviceSize needed = static_cast<VkDeviceSize>(extent_.width) * extent_.height * 4;
+    if (!transferSourceSupported_ || extent_.width == 0 || extent_.height == 0)
+    {
+        return false;
+    }
+    constexpr VkDeviceSize maximumSize = std::numeric_limits<VkDeviceSize>::max();
+    if (static_cast<VkDeviceSize>(extent_.width) > maximumSize / 4u / extent_.height)
+    {
+        return false;
+    }
+    const VkDeviceSize needed = static_cast<VkDeviceSize>(extent_.width) * extent_.height * 4u;
     if (readbackBuffer_ != VK_NULL_HANDLE && readbackSize_ == needed)
     {
         return true;
@@ -637,7 +657,14 @@ bool VulkanSwapchain::ensureReadbackBuffer()
 void VulkanSwapchain::finishReadback(
     const char *filePath, std::uint32_t width, std::uint32_t height, bool bgra, RenderError *error)
 {
-    if (readbackBuffer_ == VK_NULL_HANDLE || readbackSize_ == 0 || filePath == nullptr || width == 0 || height == 0)
+    if (readbackBuffer_ == VK_NULL_HANDLE || readbackSize_ == 0 || filePath == nullptr || width == 0 || height == 0
+        || static_cast<VkDeviceSize>(width) > std::numeric_limits<VkDeviceSize>::max() / 4u / height)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return;
+    }
+    const VkDeviceSize requiredBytes = static_cast<VkDeviceSize>(width) * height * 4u;
+    if (requiredBytes > readbackSize_ || requiredBytes > std::numeric_limits<std::size_t>::max())
     {
         reportError(error, RenderError::CreationFailed);
         return;

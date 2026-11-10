@@ -44,7 +44,7 @@ Consumers still need the `capability.render_graph` permission granted by the ker
 
 **Analysis (`buildRenderGraphPlan`).** Pure computation over the caller's arrays, in stages:
 
-1. Validation: resources need a non-zero size and power-of-two alignment; `transient` and `initiallyDefined` are mutually exclusive; pass use/arrays must be consistent; total uses are capped at 1,000,000 (`CapacityExceeded`).
+1. Validation: at most 4,096 passes and 8,192 resources; resources need a non-zero size and power-of-two alignment; `transient` and `initiallyDefined` are mutually exclusive; pass use/dependency arrays must be consistent; total uses and explicit dependencies are each capped at 1,000,000 (`CapacityExceeded`).
 2. Explicit dependencies are inserted as deduplicated edges, then a first topological sort (Kahn's algorithm with a min-heap, so ties resolve to the lowest pass index) detects cycles among them (`DependencyCycle`).
 3. Hazard analysis in that order: every read depends on the resource's previous write; every write depends on the previous write and all pending reads (RAW, WAW, and WAR edges). Reading a transient (or not `initiallyDefined`) resource before any write, or using one resource twice in a single pass, is `InvalidInput`.
 4. A second topological sort over the combined edge set produces the final execution order; a cycle here means hazard edges contradicted the explicit dependencies.

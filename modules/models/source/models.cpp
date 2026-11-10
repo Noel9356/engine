@@ -22,6 +22,8 @@
 #include <filesystem>
 #include <limits>
 #include <optional>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -42,6 +44,22 @@ using detail::ModelPart;
 using detail::ModelRecord;
 using detail::ModelTransform;
 using detail::reportError;
+
+constexpr std::size_t maximumModelPathLength = 16384;
+
+std::size_t boundedStringLength(const char *value, std::size_t maximum) noexcept
+{
+    if (value == nullptr)
+    {
+        return 0;
+    }
+    std::size_t length = 0;
+    while (length < maximum && value[length] != '\0')
+    {
+        ++length;
+    }
+    return length;
+}
 
 // Module implementation. Owns every loaded model (handle -> record), the
 // configured default options, and the capability struct handed to consumers.
@@ -365,19 +383,24 @@ private:
     std::optional<std::filesystem::path> resolvePath(const std::string &path) const
     {
         const std::filesystem::path given(path);
+        std::error_code             filesystemError;
         if (given.is_absolute())
         {
-            return std::filesystem::exists(given) ? std::optional<std::filesystem::path>(given) : std::nullopt;
+            return std::filesystem::exists(given, filesystemError) && !filesystemError
+                     ? std::optional<std::filesystem::path>(given)
+                     : std::nullopt;
         }
         for (const std::string &searchPath : searchPaths_)
         {
+            filesystemError.clear();
             const std::filesystem::path candidate = std::filesystem::path(searchPath) / given;
-            if (std::filesystem::exists(candidate))
+            if (std::filesystem::exists(candidate, filesystemError) && !filesystemError)
             {
                 return candidate;
             }
         }
-        if (std::filesystem::exists(given))
+        filesystemError.clear();
+        if (std::filesystem::exists(given, filesystemError) && !filesystemError)
         {
             return given;
         }
@@ -394,11 +417,14 @@ private:
     // finished record under a fresh handle.
     ModelHandle loadModelWithOptionsImpl(const char *path, const ModelLoadOptions *options, ModelLoadError *error)
     {
-        if (path == nullptr || path[0] == '\0')
+        const std::size_t pathLength = boundedStringLength(path, maximumModelPathLength + 1u);
+        if (pathLength == 0 || pathLength > maximumModelPathLength)
         {
-            reportError(error, ModelLoadError::ParseFailed);
+            reportError(error, ModelLoadError::InvalidOptions);
             return invalidModel;
         }
+        try
+        {
         // models.max_loaded_models (0 disables the cap).
         if (maximumLoadedModels_ != 0 && models_.size() >= maximumLoadedModels_)
         {
@@ -527,6 +553,22 @@ private:
         }
         reportError(error, ModelLoadError::None);
         return id;
+        }
+        catch (const std::bad_alloc &)
+        {
+            reportError(error, ModelLoadError::FileTooLarge);
+            return invalidModel;
+        }
+        catch (const std::length_error &)
+        {
+            reportError(error, ModelLoadError::FileTooLarge);
+            return invalidModel;
+        }
+        catch (...)
+        {
+            reportError(error, ModelLoadError::ParseFailed);
+            return invalidModel;
+        }
     }
 
     // Checks a caller-supplied option set in place: enum ranges, material search
@@ -536,7 +578,8 @@ private:
     {
         if (options.normalMode > ModelNormalMode::GenerateFlat || options.format > ModelFormat::Gltf
             || options.windingMode > ModelWindingMode::Reverse
-            || (options.materialSearchPath != nullptr && std::strlen(options.materialSearchPath) > 4096))
+            || (options.materialSearchPath != nullptr
+                && boundedStringLength(options.materialSearchPath, 4097u) > 4096u))
         {
             return false;
         }

@@ -18,15 +18,17 @@ namespace window
 
 // Capability ABI shared by all four capability structs. Bump on layout
 // changes so consumers can reject mismatched providers. History:
-// 9 -> 10 added mouse button state (MouseButton, isMouseButtonDown, and the
-// MouseButtonPressed/Released event kinds) so applications can drive
-// interactive user interfaces.
-inline constexpr std::uint32_t windowCapabilityAbi = 10u;
+// 9 -> 10 added mouse button state and button events.
+// 10 -> 11 added cursor movement, scroll, and Unicode text-input events.
+// 11 -> 12 adds standardized gamepad events and a platform-neutral touch ingress; 12 -> 13 adds clipboard text access; 13 -> 14 adds dropped-file batches.
+inline constexpr std::uint32_t windowCapabilityAbi = 14u;
 
 // Opaque window identifier; 0 (invalidWindow) means "none".
 using WindowHandle = std::uint32_t;
 
 inline constexpr WindowHandle invalidWindow = 0;
+inline constexpr std::uint32_t invalidTouchId = 0xffffffffu;
+inline constexpr std::uint32_t maximumTouchContactsPerWindow = 256u;
 
 // Error codes for fallible calls. Unsupported marks operations the active
 // backend cannot provide (for example pixel locks outside the headless
@@ -131,12 +133,47 @@ enum class MouseButton : std::uint32_t
     Right,
     Middle,
     Back,
-    Forward
+    Forward,
+    Button6,
+    Button7,
+    Button8
+};
+
+// Standard gamepad layout follows GLFW's standardized Xbox-style mapping.
+enum class GamepadButton : std::uint32_t
+{
+    A = 0,
+    B,
+    X,
+    Y,
+    LeftBumper,
+    RightBumper,
+    Back,
+    Start,
+    Guide,
+    LeftThumb,
+    RightThumb,
+    DpadUp,
+    DpadRight,
+    DpadDown,
+    DpadLeft
+};
+
+// Stick axes are signed [-1, 1]; trigger axes are unipolar [0, 1] with 0
+// meaning released. The GLFW backend normalizes its raw trigger values.
+enum class GamepadAxis : std::uint32_t
+{
+    LeftX = 0,
+    LeftY,
+    RightX,
+    RightY,
+    LeftTrigger,
+    RightTrigger
 };
 
 // Event kinds queued per window and drained with popEvent(s).
-// Resized/FramebufferResized events are coalesced (see queueWindowEvent);
-// size fields are in pixels.
+// Resize and cursor events may be coalesced and scroll events accumulated
+// (see queueWindowEvent); size fields are in pixels.
 enum class WindowEventKind : std::uint32_t
 {
     CloseRequested = 0,
@@ -152,7 +189,20 @@ enum class WindowEventKind : std::uint32_t
     KeyPressed,
     KeyReleased,
     MouseButtonPressed,
-    MouseButtonReleased
+    MouseButtonReleased,
+    CursorMoved,
+    MouseScrolled,
+    TextInput,
+    GamepadConnected,
+    GamepadDisconnected,
+    GamepadButtonPressed,
+    GamepadButtonReleased,
+    GamepadAxisMoved,
+    TouchBegan,
+    TouchMoved,
+    TouchEnded,
+    TouchCancelled,
+    FilesDropped
 };
 
 // One queued window event. Only the fields relevant to kind are filled:
@@ -172,6 +222,63 @@ struct WindowEvent
     Key key = Key::Unknown;
 
     MouseButton mouseButton = MouseButton::Left;
+
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    double scrollX = 0.0;
+    double scrollY = 0.0;
+    std::uint32_t codepoint = 0;
+
+    // Relative cursor motion accumulated when adjacent CursorMoved events
+    // coalesce. The first event after creation/focus gain has zero delta.
+    double cursorDeltaX = 0.0;
+    double cursorDeltaY = 0.0;
+
+    // Standardized gamepad controls. `gamepadId` is the GLFW joystick id
+    // (0..GLFW_JOYSTICK_LAST); stick axes are [-1, 1], trigger axes [0, 1],
+    // and down is meaningful for buttons.
+    std::uint32_t gamepadId = 0;
+    std::uint32_t gamepadControl = 0;
+    float gamepadValue = 0.0f;
+    bool gamepadDown = false;
+
+    // Touch coordinates are normalized to the drawable window area [0, 1].
+    // touchId identifies one contact on the source touch device.
+    std::uint32_t touchDevice = 0;
+    std::uint32_t touchId = 0;
+    float touchX = 0.0f;
+    float touchY = 0.0f;
+    float touchPressure = 1.0f;
+    float touchDeltaX = 0.0f;
+    float touchDeltaY = 0.0f;
+
+    // FilesDropped identifies a retained batch. Paths are copied separately
+    // through copyDroppedFiles and remain valid until releaseDroppedFiles.
+    std::uint64_t fileDropBatchId = 0;
+    std::uint32_t fileDropCount = 0;
+};
+
+// A platform adapter (Android, iOS, SDL, etc.) submits touch contacts through
+// WindowCapability::submitTouchEvent. Coordinates and pressure are normalized
+// to [0, 1], with the origin at the top-left. Each window tracks at most `maximumTouchContactsPerWindow`
+// simultaneous contacts. A contact id is stable from Began to Ended or
+// Cancelled and may be reused only after it ends. `invalidTouchId` is reserved.
+enum class TouchPhase : std::uint32_t
+{
+    Began = 0,
+    Moved,
+    Ended,
+    Cancelled
+};
+
+struct TouchEventDescription
+{
+    std::uint32_t device = 0;
+    std::uint32_t touchId = 0;
+    TouchPhase phase = TouchPhase::Began;
+    float x = 0.0f;
+    float y = 0.0f;
+    float pressure = 1.0f;
 };
 
 // Creation parameters. The has* flags distinguish "caller set this" from the
@@ -287,6 +394,29 @@ struct WindowCapability
     void (*setCursorMode)(void *self, WindowHandle window, CursorMode mode);
 
     bool (*cursorPosition)(void *self, WindowHandle window, double *outX, double *outY);
+
+    // Copies UTF-8 clipboard text. Text is capped at 1 MiB; copyClipboardText
+    // writes the required buffer size including NUL to outRequired and performs
+    // no partial copy when the supplied buffer is too small.
+    bool (*setClipboardText)(void *self, WindowHandle window, const char *text);
+    bool (*copyClipboardText)(void *self, WindowHandle window, char *output, std::uint32_t capacity,
+        std::uint32_t *outRequired);
+
+    // Platform input adapters use this to forward native multitouch contacts
+    // into the same per-window event queue used by GLFW. It is intentionally
+    // backend-independent so mobile hosts do not need to emulate mouse input.
+    bool (*submitTouchEvent)(void *self, WindowHandle window, const TouchEventDescription *event);
+
+    // A FilesDropped event exposes a batch id and count. copyDroppedFiles
+    // writes NUL-separated UTF-8 paths (including each trailing NUL) and
+    // reports the required byte count; it never performs a partial copy.
+    // The batch must be released after use. Platform adapters may use
+    // submitFileDropEvent to forward their native drop callback.
+    bool (*copyDroppedFiles)(void *self, WindowHandle window, std::uint64_t batchId,
+        char *output, std::uint32_t capacity, std::uint32_t *outRequired);
+    bool (*releaseDroppedFiles)(void *self, WindowHandle window, std::uint64_t batchId);
+    bool (*submitFileDropEvent)(void *self, WindowHandle window,
+        const char *const *paths, std::uint32_t count);
 };
 
 // Secondary "window.vulkan" capability for render modules: the instance

@@ -54,6 +54,8 @@ struct UiContextRecord
     std::thread::id                            ownerThread = std::this_thread::get_id();
     UiContextDescription                       description{};
     bool                                       frameActive = false;
+    bool                                       touchPointerActive = false;
+    std::uint32_t                              touchPointerId = 0;
     UiFontHandle                               nextFont    = 1;
     std::unordered_map<UiFontHandle, ImFont *> fonts;
     std::vector<UiVertex>                      vertices;
@@ -517,6 +519,7 @@ private:
         ENGINE_UI_BIND(captureState, captureStateImpl);
         ENGINE_UI_BIND(addMousePosition, addMousePositionImpl);
         ENGINE_UI_BIND(addMouseButton, addMouseButtonImpl);
+        ENGINE_UI_BIND(addTouch, addTouchImpl);
         ENGINE_UI_BIND(addMouseWheel, addMouseWheelImpl);
         ENGINE_UI_BIND(addKey, addKeyImpl);
         ENGINE_UI_BIND(addGamepadButton, addGamepadButtonImpl);
@@ -534,6 +537,13 @@ private:
         ENGINE_UI_BIND(checkbox, checkboxImpl);
         ENGINE_UI_BIND(sliderFloat, sliderFloatImpl);
         ENGINE_UI_BIND(inputText, inputTextImpl);
+        ENGINE_UI_BIND(inputInt, inputIntImpl);
+        ENGINE_UI_BIND(inputFloat, inputFloatImpl);
+        ENGINE_UI_BIND(sliderInt, sliderIntImpl);
+        ENGINE_UI_BIND(dragFloat, dragFloatImpl);
+        ENGINE_UI_BIND(combo, comboImpl);
+        ENGINE_UI_BIND(selectable, selectableImpl);
+        ENGINE_UI_BIND(radioButton, radioButtonImpl);
         ENGINE_UI_BIND(progressBar, progressBarImpl);
         ENGINE_UI_BIND(image, imageImpl);
         ENGINE_UI_BIND(addFontFromFile, addFontFromFileImpl);
@@ -951,6 +961,48 @@ private:
 #endif
     }
 
+    void addTouchImpl(UiContextHandle handle, std::uint32_t touchId, UiTouchPhase phase, float x, float y)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (record == nullptr || static_cast<std::uint32_t>(phase) > static_cast<std::uint32_t>(UiTouchPhase::Cancelled)
+            || !std::isfinite(x) || !std::isfinite(y))
+            return;
+        makeCurrent(*record);
+        ImGuiIO &io = ImGui::GetIO();
+        switch (phase)
+        {
+        case UiTouchPhase::Began:
+            if (record->touchPointerActive)
+                return;
+            record->touchPointerActive = true;
+            record->touchPointerId = touchId;
+            io.AddMousePosEvent(x, y);
+            io.AddMouseButtonEvent(0, true);
+            break;
+        case UiTouchPhase::Moved:
+            if (record->touchPointerActive && record->touchPointerId == touchId)
+                io.AddMousePosEvent(x, y);
+            break;
+        case UiTouchPhase::Ended:
+        case UiTouchPhase::Cancelled:
+            if (record->touchPointerActive && record->touchPointerId == touchId)
+            {
+                io.AddMousePosEvent(x, y);
+                io.AddMouseButtonEvent(0, false);
+                record->touchPointerActive = false;
+            }
+            break;
+        }
+#else
+        (void)handle;
+        (void)touchId;
+        (void)phase;
+        (void)x;
+        (void)y;
+#endif
+    }
+
     void addMouseWheelImpl(UiContextHandle handle, float horizontal, float vertical)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
@@ -1067,7 +1119,13 @@ private:
         if (record == nullptr)
             return;
         makeCurrent(*record);
-        ImGui::GetIO().AddFocusEvent(focused);
+        ImGuiIO &io = ImGui::GetIO();
+        if (!focused && record->touchPointerActive)
+        {
+            io.AddMouseButtonEvent(0, false);
+            record->touchPointerActive = false;
+        }
+        io.AddFocusEvent(focused);
 #else
         (void)handle;
         (void)focused;
@@ -1245,6 +1303,161 @@ private:
         (void)label;
         (void)buffer;
         (void)bufferSize;
+        return false;
+#endif
+    }
+
+    bool inputIntImpl(UiContextHandle handle, const char *label, std::int32_t *value,
+        std::int32_t step, std::int32_t fastStep)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (!inFrame(record) || label == nullptr || value == nullptr || step < 0 || fastStep < 0)
+            return false;
+        makeCurrent(*record);
+        int nativeValue = static_cast<int>(*value);
+        const bool changed = ImGui::InputInt(label, &nativeValue, static_cast<int>(step), static_cast<int>(fastStep));
+        *value = static_cast<std::int32_t>(nativeValue);
+        return changed;
+#else
+        (void)handle;
+        (void)label;
+        (void)value;
+        (void)step;
+        (void)fastStep;
+        return false;
+#endif
+    }
+
+    bool inputFloatImpl(UiContextHandle handle, const char *label, float *value, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (!inFrame(record) || label == nullptr || value == nullptr || !std::isfinite(*value))
+            return false;
+        makeCurrent(*record);
+        return ImGui::InputFloat(label, value, 0.0f, 0.0f, format != nullptr ? format : "%.3f");
+#else
+        (void)handle;
+        (void)label;
+        (void)value;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool sliderIntImpl(UiContextHandle handle, const char *label, std::int32_t *value,
+        std::int32_t minimum, std::int32_t maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (!inFrame(record) || label == nullptr || value == nullptr || minimum > maximum)
+            return false;
+        makeCurrent(*record);
+        int nativeValue = static_cast<int>(*value);
+        const bool changed = ImGui::SliderInt(label, &nativeValue, static_cast<int>(minimum),
+            static_cast<int>(maximum), format != nullptr ? format : "%d");
+        *value = static_cast<std::int32_t>(nativeValue);
+        return changed;
+#else
+        (void)handle;
+        (void)label;
+        (void)value;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool dragFloatImpl(UiContextHandle handle, const char *label, float *value, float speed,
+        float minimum, float maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (!inFrame(record) || label == nullptr || value == nullptr || !std::isfinite(*value)
+            || !std::isfinite(speed) || speed < 0.0f || !std::isfinite(minimum)
+            || !std::isfinite(maximum) || minimum >= maximum)
+            return false;
+        makeCurrent(*record);
+        return ImGui::DragFloat(label, value, speed, minimum, maximum, format != nullptr ? format : "%.3f");
+#else
+        (void)handle;
+        (void)label;
+        (void)value;
+        (void)speed;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool comboImpl(UiContextHandle handle, const char *label, std::int32_t *currentItem,
+        const char *const *items, std::uint32_t itemCount)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (!inFrame(record) || label == nullptr || currentItem == nullptr || items == nullptr
+            || itemCount == 0 || itemCount > static_cast<std::uint32_t>(INT_MAX)
+            || *currentItem < -1 || (*currentItem >= 0 && static_cast<std::uint32_t>(*currentItem) >= itemCount))
+            return false;
+        for (std::uint32_t index = 0; index < itemCount; ++index)
+            if (items[index] == nullptr)
+                return false;
+        makeCurrent(*record);
+        int nativeCurrentItem = static_cast<int>(*currentItem);
+        const bool changed = ImGui::Combo(label, &nativeCurrentItem, items, static_cast<int>(itemCount));
+        *currentItem = static_cast<std::int32_t>(nativeCurrentItem);
+        return changed;
+#else
+        (void)handle;
+        (void)label;
+        (void)currentItem;
+        (void)items;
+        (void)itemCount;
+        return false;
+#endif
+    }
+
+    bool selectableImpl(UiContextHandle handle, const char *label, bool *selected, float width, float height)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (!inFrame(record) || label == nullptr || selected == nullptr
+            || !std::isfinite(width) || !std::isfinite(height))
+            return false;
+        makeCurrent(*record);
+        const bool activated = ImGui::Selectable(label, *selected, ImGuiSelectableFlags_None, ImVec2(width, height));
+        if (activated)
+            *selected = !*selected;
+        return activated;
+#else
+        (void)handle;
+        (void)label;
+        (void)selected;
+        (void)width;
+        (void)height;
+        return false;
+#endif
+    }
+
+    bool radioButtonImpl(UiContextHandle handle, const char *label, std::int32_t *value, std::int32_t buttonValue)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        UiContextRecord *record = findContext(handle);
+        if (!inFrame(record) || label == nullptr || value == nullptr)
+            return false;
+        makeCurrent(*record);
+        int nativeValue = static_cast<int>(*value);
+        const bool changed = ImGui::RadioButton(label, &nativeValue, static_cast<int>(buttonValue));
+        *value = static_cast<std::int32_t>(nativeValue);
+        return changed;
+#else
+        (void)handle;
+        (void)label;
+        (void)value;
+        (void)buttonValue;
         return false;
 #endif
     }

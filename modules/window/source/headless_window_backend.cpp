@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <limits>
 #include <new>
+#include <string>
 #include <vector>
 
 namespace engine
@@ -116,6 +117,39 @@ bool HeadlessWindowBackend::setSize(WindowRecord &record, std::uint32_t width, s
 bool HeadlessWindowBackend::setPosition(WindowRecord &, std::int32_t, std::int32_t)
 {
     return true;
+}
+
+bool HeadlessWindowBackend::setClipboardText(const WindowRecord &, const char *text)
+{
+    if (text == nullptr)
+        return false;
+    std::size_t length = 0;
+    while (length <= maximumClipboardTextBytes && text[length] != '\0')
+        ++length;
+    if (length > maximumClipboardTextBytes || !isValidUtf8(text, length))
+        return false;
+    try
+    {
+        clipboardText_.assign(text, length);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool HeadlessWindowBackend::copyClipboardText(const WindowRecord &, std::string &output) const
+{
+    try
+    {
+        output = clipboardText_;
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
 }
 
 // VK_KHR_surface + VK_EXT_headless_surface when the build has headless

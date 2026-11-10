@@ -52,5 +52,5 @@ Timing notes:
 ## Performance and safety
 
 - Scripts share the module-wide memory budget; keep per-frame allocations low and prefer reusing tables.
-- The instruction limit applies per execute/call: one `on_frame` invocation that loops forever is stopped, but the budget restarts next frame.
+- The instruction limit applies per execute/call and is checked in batches of 1000 Lua instructions to limit hook overhead: one `on_frame` invocation that loops forever is stopped, but the budget restarts next frame.
 - Native calls are the expensive boundary; batch data (tables of numbers are not supported — use multiple numbers or strings) rather than calling in a tight loop.

@@ -52,14 +52,6 @@ glm::vec3 cosineDirection(std::uint64_t seed)
         std::sqrt(std::max(0.0f, static_cast<float>(1.0 - u))));
 }
 
-glm::mat3 onb(const glm::vec3 &normal)
-{
-    const glm::vec3 axis = std::fabs(normal.z) < 0.9f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
-    const glm::vec3 tangent = glm::normalize(glm::cross(axis, normal));
-    const glm::vec3 bitangent = glm::cross(normal, tangent);
-    return glm::mat3(tangent, bitangent, normal);
-}
-
 // Point/spot/directional radiance arriving at position from the module's
 // light snapshot; formulas mirror the renderer's shading (range fade
 // (1 - (d/r)^2)^2 / d^2, smoothstep cone), so cached radiance matches what
@@ -422,7 +414,7 @@ void gatherIndirectLightingChunk(GiPipelineState &state, const GiTexelWork *work
                            - 0.5f)
                               * card.height);
             const glm::vec3 normal = card.normal[texel];
-            const glm::mat3 basis = onb(normal);
+            const glm::mat3 basis = detail::onb(normal);
             // Surface bias: start slightly off the surface; Lumen traces from
             // texels with a normal-dependent bias for the same reason.
             const glm::vec3 origin = position + normal * 0.02f;

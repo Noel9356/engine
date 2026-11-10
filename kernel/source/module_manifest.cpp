@@ -14,6 +14,8 @@
 #include <engine/kernel/module_api.hpp>
 #include <exception>
 #include <filesystem>
+#include <limits>
+#include <system_error>
 #include <string>
 
 namespace engine
@@ -55,6 +57,16 @@ bool ModuleManifestLoader::loadFromFile(
 
     errorMessage.clear();
     outManifest = ModuleManifest{};
+
+    constexpr std::uintmax_t maximumManifestBytes = 1024ull * 1024ull;
+    std::error_code filesystemError;
+    const std::uintmax_t manifestSize = std::filesystem::file_size(manifestPath, filesystemError);
+    if (filesystemError || manifestSize > maximumManifestBytes)
+    {
+        errorMessage = describeLocation(manifestLabel, manifestPath)
+                     + " could not be read or exceeds the 1 MiB manifest limit";
+        return false;
+    }
 
     toml::table table;
     try
@@ -117,7 +129,14 @@ bool ModuleManifestLoader::loadFromFile(
             errorMessage = describeLocation(manifestLabel, manifestPath) + " key 'abi' must be an integer";
             return false;
         }
-        outManifest.abi = static_cast<std::uint32_t>(abiInteger->get());
+        const std::int64_t abi = abiInteger->get();
+        if (abi < 0 || static_cast<std::uint64_t>(abi) > std::numeric_limits<std::uint32_t>::max())
+        {
+            errorMessage = describeLocation(manifestLabel, manifestPath)
+                         + " key 'abi' must be an unsigned 32-bit integer";
+            return false;
+        }
+        outManifest.abi = static_cast<std::uint32_t>(abi);
     }
     if (outManifest.abi != engineModuleAbiVersion)
     {

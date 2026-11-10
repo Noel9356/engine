@@ -41,6 +41,8 @@ The demo `demo_lumen_gi/` is a standalone harness for this hook: it registers de
 
 Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
 
+Vulkan swapchains require surface support for color-attachment usage. PPM screenshot readback is enabled when the surface also supports transfer-source usage; otherwise rendering remains available and screenshot requests report a creation failure.
+
 ## Architecture
 
 | File | Role |
@@ -52,7 +54,7 @@ Note: the `renderer.vulkan` entries only work when the module was built with `EN
 | `include/engine/renderer/dynamic_resolution.hpp` | `DynamicResolutionController` (render-scale stepping) and `AdaptiveQualityController` (quality-preset stepping) fed from frame timings. |
 | `source/renderer.cpp` | Module entry: `RenderModule` (ModuleInterface), capability binding, configuration, backend selection, draw sorting/batching, entry table. |
 | `source/render_backend.hpp` | `RenderBackend` - the abstract interface both backends implement. |
-| `source/render_shared.hpp` | Shared PBR math (must match the Vulkan shader), default environment, tone mapping, PPM writer, device preference enum. |
+| `source/render_shared.hpp` | Shared PBR math (must match the Vulkan shader), default environment, tone mapping, renderer error mapping, device preference enum; PPM output uses `engine/util/ppm.hpp`. |
 | `source/render_data.hpp/.cpp` | Mesh/texture normalization: attribute repacking, index validation, normal generation, pixel format conversion. |
 | `source/headless_backend.hpp/.cpp` | Headless backend: CPU rasterizer with culling, LOD, transform cache, and task-scheduler parallelism. |
 | `source/vulkan_backend.hpp/.cpp` | Vulkan backend: frame lifecycle, command recording, instance streaming, deferred destruction. |
@@ -128,7 +130,7 @@ The headless backend's frame is the same shape minus the GPU: `beginFrame` (re)a
 Headless parallel rasterization has two execution structures, selected per draw:
 
 - **Default - band/triangle-range split.** Big draws split their triangle range across workers; few-triangle wide-coverage draws (floor, sky) split their projected row extent into bands. Workers share the framebuffer, so depth/colour writes take a per-pixel-group spin lock. A submission rejected by the scheduler (stopping, or the outstanding bound hit) runs inline on the calling thread instead of silently dropping that band/range's geometry.
-- **Opt-in - tile-based split** (`[renderer] headless_tile_parallel`, default `false`). Triangles are binned into 64x64 screen tiles and each worker owns disjoint tiles exclusively, so no per-pixel locks exist. The binning pass (transform/clip/project of every triangle on the calling thread) makes this slower than the default split on low-core machines (measured ~+55% frame time on a 2-core host); it targets many-core hosts where per-pixel lock contention dominates. Triggers mirror the default paths exactly.
+- **Opt-in - tile-based split** (`[renderer] headless_tile_parallel`, default `false`). Triangles are binned into 64x64 screen tiles and each worker owns disjoint tiles exclusively, so no per-pixel locks exist. The binning pass (transform/clip/project of every triangle on the calling thread) makes this slower than the default split on low-core machines (measured ~+55% frame time on a 2-core host); it targets many-core hosts where per-pixel lock contention dominates. Tile grids and flattened record lists use 32-bit indices, with allocation counts also bounded by the host's representable vector size; dimensions beyond the signed raster-coordinate range or bins beyond either limit use the sequential path. Triggers mirror the default paths exactly.
 
 ### Mesh and texture resource model
 
@@ -156,6 +158,10 @@ The `renderer.device` key additionally biases Vulkan physical-device selection (
 - **Frame discipline.** Draw calls must sit between a matching `beginFrame`/`endFrame` pair; the Vulkan backend drops draws issued outside a frame (`frameActive_`). Resource creation/destruction may happen any time.
 - **GPU sync model (Vulkan).** N frame slots (`[renderer] max_frames_in_flight`, clamped 1..8) each own a command pool/buffer, an image-available semaphore, and a fence; `waitForFrameSlot` waits the slot's previous submission before re-recording. Swapchain images additionally track an "images in flight" fence so an image acquired early is not rendered into while still presenting (fence path). The timeline semaphore interface exists but is currently left uncreated, so all sync uses fences. Uploads run on one-shot command buffers, each fenced, capped at `[renderer] max_pending_uploads` pending copies; their staging memory comes from a persistently mapped, fence-recycled pool (blocks up to 16 MiB, 64 MiB total; oversized or pool-pressured uploads keep a one-off buffer). Mesh/texture destruction during a frame is deferred to the resource's frame slot and drained by the next `beginFrame` on that slot. PPM screenshots are likewise deferred: the copy rides the frame's command buffer, and the file write waits only for the recording slot's retirement (immediately at the next `beginFrame` of that slot; explicit flushes on a second request, swapchain recreation, and shutdown).
 - **Handle lifetime.** Renderer destruction destroys the backend (Vulkan: device idle, then scratch, swapchain, resources, frames, pipeline, device - in that order). The strings returned by `RendererInfoStrings` are owned by the module and die with the renderer; the Vulkan handles from `VulkanDeviceHandles` are borrowed and must not be destroyed by the caller.
+
+## VR support
+
+The renderer currently supports one window surface and one camera view per renderer frame. It does not create OpenXR instances/sessions, acquire or release OpenXR swapchain images, submit stereo projection views, or consume headset/controller tracking poses. The project therefore does not currently support VR rendering. Adding an OpenXR runtime module alone is insufficient: the Vulkan renderer needs an OpenXR graphics binding, per-eye swapchain image targets, stereo view/projection handling, and frame timing/submit integration.
 
 ## Configuration
 

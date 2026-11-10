@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <new>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 

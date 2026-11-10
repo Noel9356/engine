@@ -527,7 +527,10 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
     if (generateSmooth)
     {
         std::vector<float> generatedNormals;
-        accumulateSmoothNormalsInterleaved(part.vertices, part.indices, generatedNormals);
+        if (!accumulateIndexedSmoothNormals(part.vertices, part.indices, generatedNormals))
+        {
+            return false;
+        }
         for (std::size_t index = 0; index < vertexCount; ++index)
         {
             std::copy_n(generatedNormals.data() + index * 3,
@@ -536,42 +539,9 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
         }
     }
     // Flat mode: expand to one vertex per corner carrying the face normal.
-    if (options.normalMode == ModelNormalMode::GenerateFlat)
+    if (options.normalMode == ModelNormalMode::GenerateFlat && !expandFlatShading(part))
     {
-        std::vector<float> flatVertices;
-        flatVertices.resize(part.indices.size() * renderer::meshVertexFloatCount);
-        for (std::size_t triangle = 0; triangle < part.indices.size(); triangle += 3)
-        {
-            const std::uint32_t indexA = part.indices[triangle + 0];
-            const std::uint32_t indexB = part.indices[triangle + 1];
-            const std::uint32_t indexC = part.indices[triangle + 2];
-            const float *a     = part.vertices.data() + static_cast<std::size_t>(indexA) * renderer::meshVertexFloatCount;
-            const float *b     = part.vertices.data() + static_cast<std::size_t>(indexB) * renderer::meshVertexFloatCount;
-            const float *c     = part.vertices.data() + static_cast<std::size_t>(indexC) * renderer::meshVertexFloatCount;
-            const float  ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
-            const float  ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-            float        normal[3] = {
-                ab[1] * ac[2] - ab[2] * ac[1],
-                ab[2] * ac[0] - ab[0] * ac[2],
-                ab[0] * ac[1] - ab[1] * ac[0],
-            };
-            normalizeVector(normal);
-            for (std::size_t corner = 0; corner < 3; ++corner)
-            {
-                const float *source
-                    = part.vertices.data()
-                    + static_cast<std::size_t>(part.indices[triangle + corner]) * renderer::meshVertexFloatCount;
-                float *destination = flatVertices.data() + (triangle + corner) * renderer::meshVertexFloatCount;
-                std::copy_n(source, renderer::meshVertexFloatCount, destination);
-                std::copy_n(normal, 3, destination + 3);
-            }
-        }
-        part.vertices = std::move(flatVertices);
-        part.indices.resize(part.vertices.size() / renderer::meshVertexFloatCount);
-        for (std::size_t index = 0; index < part.indices.size(); ++index)
-        {
-            part.indices[index] = static_cast<std::uint32_t>(index);
-        }
+        return false;
     }
 
     // Triangles record the primitive's material by its index in the file's list.

@@ -23,7 +23,20 @@ The module provides the `script_runtime` capability (ABI 3, see `include/engine/
 
 **Error convention (important):** for `executeString`, `executeFile`, and `callFunction` the boolean return only reports usage problems (bad handle, bad argument, non-function global) or a truncated error text. Compilation and runtime failures are reported by setting the `ScriptError` out-parameter and filling `errorText`; with a large enough buffer the boolean return is `true` even for a failed script. Callers that need to detect script failures must check the `ScriptError` out-parameter.
 
+## Native bridge value helpers
+
+`include/engine/script_runtime/native_values.hpp` provides shared C++ helpers for module-owned native functions. `number`, `uint32Value`, `int32Value`, and `floatValue` validate numeric types, finiteness, integral ranges, and float representability. `boolean` and `stringValue` validate primitive arguments; `optionalBoolean` and the fallback/required parameters on numeric conversions, implement explicit optional-argument defaults. String views and pointers remain borrowed for the duration of the native call and must not be retained. `resultNumber`, `resultBoolean`, `resultString`, and `resultNil` initialize result slots before writing their value.
+
+These helpers do not alter the `ScriptRuntimeCapability` ABI or the native-function calling convention. Domain-specific enum parsing, argument-count checks, capability calls, and error mapping remain in the owning module's bridge.
+
 ## Optional module bridges
+
+Modules that install Lua APIs can use `canRegisterRuntimeInitializer()` and
+`tryRegisterRuntimeInitializer()` from the capability header to check provider
+compatibility and register their runtime callback. Call
+`unregisterRuntimeInitializer()` during module shutdown; it clears the local
+initializer handle after attempting removal. The callback context must remain
+alive until the module has unregistered it and completed its bridge shutdown.
 
 Modules may declare `script_runtime` as an optional capability and register a runtime initializer during `construct()`. The initializer receives each runtime handle and can register that module's native functions with `registerNativeFunction`. Registration also visits runtimes that already exist; future runtimes receive the initializer before `createRuntime()` returns. The configured `maximum_runtime_initializers` limits registered module hooks. Unregister the hook during module shutdown. It does not remove native functions already installed into existing Lua states, so bridge callbacks must remain safe for the lifetime of those states.
 
@@ -67,5 +80,6 @@ A scripting error while hosting (runtime creation failed, script did not compile
 | --- | --- |
 | `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys`. Read by the kernel's module discovery so the descriptor does not depend on loading the library. |
 | `config.toml` | Default values for the `[script_runtime]` configuration section (see `configuration.md`). |
-| `include/engine/script_runtime/capabilities.hpp` | The public capability types (ABI, errors, values, native function signature). |
+| `include/engine/script_runtime/capabilities.hpp` | The public capability types (ABI, errors, values, native function signature) and optional-module initializer helpers. |
+| `include/engine/script_runtime/native_values.hpp` | Allocation-free argument validation and result-slot helpers for native Lua bridge implementations. |
 | `source/script_runtime.cpp` | The whole implementation: sandbox primitives, capability binding, mod hosting, module entry table. |

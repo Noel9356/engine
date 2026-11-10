@@ -7,13 +7,16 @@
 #ifndef ENGINE_INPUT_ACTIONS_CAPABILITIES_HPP
 #define ENGINE_INPUT_ACTIONS_CAPABILITIES_HPP
 
+#include <engine/window/capabilities.hpp>
+
 #include <cstdint>
 
 namespace engine::input_actions
 {
 
 // ABI version consumers must match before calling any entry point.
-inline constexpr std::uint32_t inputActionsCapabilityAbi = 2u;
+// 2 -> 3 adds multitouch contact events and touch controls; 3 -> 4 adds binding inspection and removal.
+inline constexpr std::uint32_t inputActionsCapabilityAbi = 4u;
 // Handles are module-wide ids starting at 1; 0 (invalid*) means "none".
 using InputContextHandle                                = std::uint32_t;
 using InputActionHandle                                 = std::uint32_t;
@@ -32,12 +35,16 @@ enum class InputEventKind : std::uint32_t
     GamepadAxis,
     MouseDelta,
     MouseWheel,
-    FocusLost
+    FocusLost,
+    TouchBegan,
+    TouchMoved,
+    TouchEnded,
+    TouchCancelled
 };
 
-// What a binding reads from device state. The first four map to stored
-// button/axis state; MouseDeltaX/Y and MouseWheelX/Y select one component of
-// the accumulated per-frame values.
+// What a binding reads from device state. MouseDeltaX/Y and MouseWheelX/Y
+// select one component of accumulated per-frame motion; Touch* controls read
+// a selected contact or the most recently updated contact.
 enum class InputControlKind : std::uint32_t
 {
     Key = 0,
@@ -47,7 +54,13 @@ enum class InputControlKind : std::uint32_t
     MouseDeltaX,
     MouseDeltaY,
     MouseWheelX,
-    MouseWheelY
+    MouseWheelY,
+    TouchContact,
+    TouchPositionX,
+    TouchPositionY,
+    TouchDeltaX,
+    TouchDeltaY,
+    TouchPressure
 };
 
 // Action output shape: Button is digital (down flag only), Axis1D uses
@@ -80,7 +93,20 @@ struct InputEvent
     float          value          = 0.0f;
     float          secondaryValue = 0.0f;
     bool           down           = false;
+    // Touch pressure for Touch* events; ignored by other event kinds.
+    float          tertiaryValue = 1.0f;
 };
+
+// InputBinding::code value that selects the most recently updated active
+// contact (or the most recent contact for position/pressure reads). A concrete
+// contact id selects one finger. Device identifies the touch surface.
+inline constexpr std::uint32_t anyTouchContact = window::invalidTouchId;
+
+// Reserved producer ids used by feedWindowEvent so keyboard/mouse, gamepads,
+// and touch surfaces cannot accidentally share one DeviceState.
+inline constexpr std::uint32_t keyboardMouseDevice = 0u;
+inline constexpr std::uint32_t gamepadDeviceIdBase = 0x40000000u;
+inline constexpr std::uint32_t touchDeviceIdBase = 0x80000000u;
 
 // Context creation parameters. Higher-`priority` contexts evaluate (and may
 // consume controls) first; consumeWhenActive hides this context's active
@@ -107,8 +133,9 @@ struct InputActionDescription
 
 // One control-to-action mapping. component selects the Axis2D target (0 or
 // 1); scale and invert reshape the raw value; deadzone applies only to
-// GamepadAxis (-1 means the module default); responseExponent applies a
-// power curve |v|^e and must lie in (0, 8].
+// GamepadAxis (-1 means the module default); touch controls address a touch
+// contact through `code` (anyTouchContact selects the newest contact).
+// responseExponent applies a power curve |v|^e and must lie in (0, 8].
 struct InputBinding
 {
     InputControlKind control          = InputControlKind::Key;
@@ -133,8 +160,8 @@ struct InputActionState
 
 // Capability vtable handed to consumers; every function takes `self` first.
 // Frame flow: feedEvent as events arrive, advanceFrame once per frame, then
-// actionState per action. The module has no internal locks, so drive the
-// whole capability from a single thread.
+// actionState per action. Calls are serialized internally; feed events before
+// advanceFrame to preserve deterministic frame ordering.
 struct InputActionsCapability
 {
     static constexpr const char *capabilityName = "input_actions";
@@ -153,9 +180,21 @@ struct InputActionsCapability
     // analog axes. Appends the binding (up to the configured cap).
     bool (*bindAction)(void *, InputContextHandle, InputActionHandle, const InputBinding *);
     bool (*clearBindings)(void *, InputContextHandle, InputActionHandle);
+    // Removes one binding by its current zero-based index. Remaining bindings
+    // retain their relative order; the action state is reset until next frame.
+    bool (*removeBinding)(void *, InputContextHandle, InputActionHandle, std::uint32_t bindingIndex);
+    // Returns 0 for an invalid action. copyBindings reports the required count
+    // through outRequired and copies nothing unless capacity is sufficient.
+    std::uint32_t (*bindingCount)(void *, InputContextHandle, InputActionHandle);
+    bool (*copyBindings)(void *, InputContextHandle, InputActionHandle, InputBinding *output,
+        std::uint32_t capacity, std::uint32_t *outRequired);
     // Updates stored device state; false for malformed events or when the
-    // device/control caps refuse a new device or control.
+    // device/control caps refuse a new device or control. Touch positions and
+    // pressure use [0, 1]; Touch* event code is the contact id.
     bool (*feedEvent)(void *, const InputEvent *);
+    // Converts one WindowEvent into the corresponding raw input event. Call
+    // after popEvent(s); unrelated window events are accepted and ignored.
+    bool (*feedWindowEvent)(void *, window::WindowHandle, const window::WindowEvent *);
     // Re-evaluates every action for the frame; deltaSeconds is clamped to the
     // configured maximum (and non-positive deltas skip time-based effects).
     void (*advanceFrame)(void *, float deltaSeconds);

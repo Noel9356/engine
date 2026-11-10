@@ -383,12 +383,11 @@ public:
 #endif
 
         scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
-        if (scriptRuntime_ != nullptr && scriptRuntime_->abi == script_runtime::scriptRuntimeCapabilityAbi
-            && scriptRuntime_->registerRuntimeInitializer != nullptr)
+        if (script_runtime::canRegisterRuntimeInitializer(scriptRuntime_))
         {
             luaBridgeContext_ = AudioLuaBridgeContext{scriptRuntime_, &capability_};
-            runtimeInitializer_ = scriptRuntime_->registerRuntimeInitializer(
-                scriptRuntime_->self, initializeAudioLuaRuntime, &luaBridgeContext_);
+            runtimeInitializer_ = script_runtime::tryRegisterRuntimeInitializer(
+                scriptRuntime_, initializeAudioLuaRuntime, &luaBridgeContext_);
         }
     }
 
@@ -397,12 +396,7 @@ public:
 
     void stop() override
     {
-        if (scriptRuntime_ != nullptr && runtimeInitializer_ != script_runtime::invalidScriptRuntimeInitializer
-            && scriptRuntime_->unregisterRuntimeInitializer != nullptr)
-        {
-            scriptRuntime_->unregisterRuntimeInitializer(scriptRuntime_->self, runtimeInitializer_);
-            runtimeInitializer_ = script_runtime::invalidScriptRuntimeInitializer;
-        }
+        script_runtime::unregisterRuntimeInitializer(scriptRuntime_, runtimeInitializer_);
 #if defined(ENGINE_AUDIO_BACKEND_MINIAUDIO)
         std::lock_guard lifecycleLock(lifecycleMutex_);
         std::unordered_map<AudioEngineHandle, std::shared_ptr<EngineRecord>> records;
@@ -439,7 +433,7 @@ private:
         return ParticipantManifest{
             .name                 = "audio",
             .kind                 = ParticipantKind::EngineModule,
-            .version              = "0.3.0",
+            .version              = "0.1.0",
             .providedCapabilities = {"audio"},
             .optionalCapabilities = {"script_runtime"}};
     }
@@ -2036,7 +2030,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
     static const engine::EngineModuleEntryTable entry = {
         .abiVersion              = engine::engineModuleAbiVersion,
         .moduleName              = "audio",
-        .moduleVersion           = "0.3.0",
+        .moduleVersion           = "0.1.0",
         .createModule            = []() -> engine::ModuleInterface                             *{ return new engine::audio::AudioModule(); },
         .providedCapabilities    = providedCapabilities,
         .providedCapabilityCount = 1,

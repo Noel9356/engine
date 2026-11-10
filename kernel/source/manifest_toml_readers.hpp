@@ -8,6 +8,7 @@
 
 #include <toml.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -40,6 +41,11 @@ inline bool readRequiredString(const toml::table &table, const std::string &key,
         return false;
     }
     out = stringValue->get();
+    if (out.size() > 4096u)
+    {
+        errorMessage = describeLocation(manifestLabel, manifestPath) + " key '" + key + "' exceeds 4096 bytes";
+        return false;
+    }
     return true;
 }
 
@@ -59,6 +65,11 @@ inline bool readOptionalString(const toml::table &table, const std::string &key,
         return false;
     }
     out = stringValue->get();
+    if (out.size() > 4096u)
+    {
+        errorMessage = describeLocation(manifestLabel, manifestPath) + " key '" + key + "' exceeds 4096 bytes";
+        return false;
+    }
     return true;
 }
 
@@ -77,6 +88,11 @@ inline bool readStringArray(const toml::table &table, const std::string &key, st
         errorMessage = describeLocation(manifestLabel, manifestPath) + " key '" + key + "' must be an array of strings";
         return false;
     }
+    if (arrayValue->size() > 256u)
+    {
+        errorMessage = describeLocation(manifestLabel, manifestPath) + " key '" + key + "' exceeds 256 entries";
+        return false;
+    }
     for (const toml::node &element : *arrayValue)
     {
         const auto *elementString = element.as_string();
@@ -86,7 +102,14 @@ inline bool readStringArray(const toml::table &table, const std::string &key, st
                 = describeLocation(manifestLabel, manifestPath) + " key '" + key + "' must contain only strings";
             return false;
         }
-        out.push_back(elementString->get());
+        const std::string item = elementString->get();
+        if (item.empty() || item.size() > 4096u)
+        {
+            errorMessage = describeLocation(manifestLabel, manifestPath)
+                         + " key '" + key + "' contains an empty or oversized string";
+            return false;
+        }
+        out.push_back(item);
     }
     return true;
 }

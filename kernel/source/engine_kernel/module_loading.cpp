@@ -215,7 +215,7 @@ void EngineKernel::loadModuleLibraries(std::string &report)
         }
 
         ModuleLibraryRecord               record;
-        const ModuleDescriptorCacheEntry *remembered = descriptorCache.find(libraryPath, sizeBytes, modificationStamp);
+        const ModuleDescriptorCacheEntry *remembered = descriptorCache.find(libraryPath, sizeBytes, modificationStamp, contentSha256);
         if (remembered != nullptr)
         {
             record.descriptor    = remembered->descriptor;

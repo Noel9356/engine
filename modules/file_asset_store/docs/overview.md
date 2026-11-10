@@ -27,7 +27,7 @@ From the entry table at the bottom of `source/file_asset_store.cpp` (`engineQuer
 
 | Field | Value |
 | --- | --- |
-| moduleName / version | `file_asset_store` / `0.3.0` |
+| moduleName / version | `file_asset_store` / `0.1.0` |
 | providedCapabilities | `file_asset_store` (1) |
 | requiredCapabilities | none (0) |
 | optionalCapabilities | none (0) |
@@ -59,15 +59,16 @@ From the entry table at the bottom of `source/file_asset_store.cpp` (`engineQuer
 1. Stat the file; reject missing files (`FileNotFound`) and files above `maximum_file_bytes` (`FileTooLarge`).
 2. Cooked records additionally must match the catalog's expected size, else `CookedAssetIntegrityFailed`.
 3. Under `recordsMutex_`, the size is reserved against the in-flight budget and then the resident budget. If resident space is short, LRU eviction runs with a target of the shortfall plus `cache_eviction_batch_mb`; if the size still does not fit, the load fails with `CapacityExceeded`. Reserved bytes move to `residentBytes_` on success.
-4. The bytes are read: on Linux via a short-lived read-only `mmap` with `MADV_WILLNEED` and `memcpy`, elsewhere via `std::ifstream` (with a trailing `peek` to detect files that grew after the stat).
+4. The bytes are read from the opened file: on Linux through a descriptor-based read loop, elsewhere via `std::ifstream`. Both paths verify that the number of bytes read matches the initial file size; empty files are valid.
 5. If `verify_cooked_asset_hashes` is set and the record carries a catalog digest, the SHA-256 of the loaded bytes is checked.
 6. The buffer is swapped in under `dataMutex` and the record's `contentVersion` is bumped, so consumers can detect reloads.
 
-Asynchronous requests claim a slot in an atomic `pendingJobs_` counter (capped by `maximum_pending_requests`) and are submitted to the `ParticipantContext::taskScheduler()` at the request's priority (`AssetRequestPriority::Default` resolves to the configured `default_async_priority`). The job sets `Loading`, runs `readAsset`, then decrements the counter and wakes `stop()`.
+Asynchronous requests reserve a slot under the submission/shutdown mutex (capped by `maximum_pending_requests`) and are submitted to the `ParticipantContext::taskScheduler()` at the request's priority (`AssetRequestPriority::Default` resolves to the configured `default_async_priority`). The job sets `Loading`, runs `readAsset`, then releases the slot and wakes `stop()`.
 
 ### Eviction and lifetime
 
 - Eviction candidates are records with zero references that are `Ready` or `Failed`; they are ordered by `lastAccessTick` (a module-wide logical clock bumped on every use), then re-validated under the lock before removal.
+- References are counted with a 32-bit unsigned value; retain operations stop at the maximum value. Releasing a record with no outstanding references has no effect.
 - Releasing the last reference deletes the record immediately, unless `cache_unreferenced_assets` keeps it as an eviction candidate.
 - `stop()` sets the stopping flag (new submissions fail with `Busy`), drains `pendingJobs_` to zero, then clears the cache.
 

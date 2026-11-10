@@ -32,8 +32,8 @@ struct ModuleDescriptorCacheEntry
     ModuleDescriptor descriptor;
 };
 
-// Plain-text "format 3" records; entries whose size/mtime no longer
-// match are ignored by find().
+// Plain-text "format 3" records; entries whose size, mtime or content hash
+// no longer match are ignored by find().
 class ModuleDescriptorCache final
 {
 public:
@@ -50,9 +50,9 @@ public:
     // Silently ignores a missing, empty or unparseable cache file.
     void load();
 
-    // Returns the cached descriptor only when size and mtime match exactly.
-    const ModuleDescriptorCacheEntry *find(
-        const std::filesystem::path &libraryPath, std::uintmax_t sizeBytes, std::uintmax_t modificationStamp) const;
+    // Returns the cached descriptor only when size, mtime and content hash match.
+    const ModuleDescriptorCacheEntry *find(const std::filesystem::path &libraryPath, std::uintmax_t sizeBytes,
+        std::uintmax_t modificationStamp, const std::string &contentSha256) const;
 
     // Adds or overwrites the in-memory entry for libraryPath; persisted by
     // save().

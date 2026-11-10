@@ -4,23 +4,27 @@ skeletal_animation provides joint hierarchies, immutable keyframed clips, playba
 
 ## Capability
 
-The module provides the `skeletal_animation` capability (ABI 3, see `include/engine/skeletal_animation/capabilities.hpp`). All calls take the capability pointer's `self` first; handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidSkeleton` / `invalidAnimationClip` / `invalidAnimationPlayer`) means "none".
+The module provides the `skeletal_animation` capability (ABI 5, see `include/engine/skeletal_animation/capabilities.hpp`). All calls take the capability pointer's `self` first; handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidSkeleton` / `invalidAnimationClip` / `invalidAnimationPlayer`) means "none".
 
-Capability ABI 3 adds masked pose blending, additive pose application, and global transform generation. Consumers must rebuild against the updated header; binaries built against earlier capability layouts must not use this capability.
+Capability ABI 5 adds clip event markers and bounded player-event retrieval. ABI 4 added root-motion extraction; ABI 3 introduced masked pose blending, additive pose application, and global transform generation. Consumers must rebuild against the updated header; binaries built against earlier capability layouts must not use this capability.
 
 | Function | Purpose |
 | --- | --- |
 | `createSkeleton(description, outError)` | Stores a bind pose (validating the joint hierarchy) and returns a handle. |
 | `destroySkeleton(handle)` | Releases the skeleton and its joints budget. |
 | `skeletonInfo(handle, outJointCount)` | Joint count of a skeleton. |
-| `createClip(description, outError)` | Copies and validates keyframe tracks; returns a clip handle. |
+| `createClip(description, outError)` | Copies and validates keyframe tracks and optional timeline event markers; returns a clip handle. |
 | `destroyClip(handle)` | Releases the clip; players using it are parked. |
 | `clipDuration(handle, outDurationSeconds)` | Duration of a clip. |
 | `sampleClip(clip, skeleton, time, looping, output, capacity, outError)` | Samples a clip onto a full pose buffer (bind pose + tracked joints). |
+| `extractRootMotion(clip, skeleton, rootJoint, startTime, endTime, looping, outTranslation, outRotation, outError)` | Returns translation and rotation deltas for a top-level root joint between two clip times. |
 | `createPlayer(description, outError)` / `destroyPlayer(handle)` | Playback state machines over one clip. |
 | `setPlayerClip(handle, clip, restart)` / `setPlayerSpeed(handle, speed)` / `setPlayerPlaying(handle, playing)` | Player controls. |
-| `advancePlayer(handle, deltaSeconds)` | Advances the player clock (`deltaSeconds * speed`). |
+| `advancePlayer(handle, deltaSeconds)` | Advances the player clock (`deltaSeconds * speed`) and queues crossed clip events. |
 | `playerState(handle, outState)` | Time, normalized time, playing, finished. |
+| `playerEventCount(handle, outCount, outOverflowed)` | Pending event count and whether queue limits dropped notifications. |
+| `copyPlayerEvents(handle, firstIndex, output, capacity, outCopied)` | Non-destructively copies queued events by index. |
+| `clearPlayerEvents(handle)` | Clears pending events and resets the overflow indicator. |
 | `evaluatePlayer(player, skeleton, output, capacity, outError)` | Samples the player's clip at the player's clock. |
 | `blendPoses(poses, weights, poseCount, jointCount, output, capacity, outError)` | Weighted blend of several poses (translation/scale weighted average, hemisphere-corrected quaternion NLERP). |
 
@@ -35,7 +39,7 @@ From `module.toml` and the entry table at the bottom of `source/skeletal_animati
 - **Optional:** `script_runtime` (automatic Lua bridge registration).
 - **Declared permissions:** none.
 
-The entry table exports `engineQueryModuleEntryTable()` with `abiVersion = engineModuleAbiVersion` (kernel module ABI 8), module name `skeletal_animation`, version `0.4.0`, and a `createModule` factory for `SkeletalAnimationModule`. The capability ABI is independently versioned as 3 for the masked-blend, additive-pose, and global-transform operations.
+The entry table exports `engineQueryModuleEntryTable()` with `abiVersion = engineModuleAbiVersion` (kernel module ABI 8), module name `skeletal_animation`, version `0.1.0`, and a `createModule` factory for `SkeletalAnimationModule`. The capability ABI is independently versioned as 5; it includes masked-blend, additive-pose, global-transform, root-motion extraction, and clip-event operations.
 
 ## Architecture
 
@@ -46,11 +50,12 @@ The entry table exports `engineQueryModuleEntryTable()` with `abiVersion = engin
 | `CMakeLists.txt` | Builds `engine_module_skeletal_animation` (a `.so` under `runtime/modules/skeletal_animation/`) and copies `module.toml` next to it. |
 | `include/engine/skeletal_animation/capabilities.hpp` | Public capability types: ABI constant, handles, descriptions, player state, error codes, capability struct. |
 | `source/skeletal_animation.cpp` | Pose math, packed clip storage, bounded player sampling cursors, module class, capability binding, and entry table. |
+| `shared_types/include/engine/math/quaternion.hpp` | Shared x/y/z/w quaternion normalization, dot product, and composition routines used by pose processing. |
 | `source/lua_bridge.cpp` / `source/lua_bridge.hpp` | Automatic Lua namespace registration and bounded skeleton/clip builders. |
 
 ## How it works
 
-**Skeletons.** `createSkeleton` copies the joint list as the bind pose. Each joint must have a parent index in `[-1, jointCount)` other than itself, finite transform values, and a non-zero rotation quaternion (which is normalized on entry). The hierarchy is verified acyclic per joint with a two-phase walk (mark the path, then confirm); any cycle rejects the whole description. Global and per-skeleton joint budgets are enforced up front.
+**Skeletons.** `createSkeleton` copies the joint list as the bind pose. Each joint must have a parent index in `[-1, jointCount)` other than itself, finite transform values, and a non-zero rotation quaternion (which is normalized on entry). Quaternion components use x/y/z/w order; pose normalization and composition use the shared routines in `engine/math/quaternion.hpp`. The hierarchy is verified acyclic per joint with a two-phase walk (mark the path, then confirm); any cycle rejects the whole description. Global and per-skeleton joint budgets are enforced up front.
 
 **Clips.** A clip owns at most one track per joint. At creation every keyframe is validated: strictly increasing times within `[0, duration]`, finite translation/scale, scale magnitude ≥ 1e-8, finite non-zero rotation (normalized on entry). Tracks are sorted by joint index and their keyframes are packed into one contiguous keyframe array per clip; reciprocal time intervals are stored in a parallel array. Slerp tracks also store precomputed shortest-path quaternion interval coefficients, avoiding repeated `acos` and `sin(angle)` work during sampling. This avoids one keyframe allocation per track and makes sampling write joints in ascending order. Duplicate tracks are detected after sorting lightweight track references, without a bitmap proportional to the joint limit. Clip and keyframe budgets (per-track and global) are checked before runtime publication.
 
@@ -63,6 +68,37 @@ The entry table exports `engineQueryModuleEntryTable()` with `abiVersion = engin
 **Layered blending.** `blendPosesMasked` applies a separate [0, 1] joint mask to each input pose before normalizing that joint's effective weights. This supports upper/lower-body layers and arbitrary per-joint influence masks without imposing a fixed rig layout. `applyAdditivePose` applies translation/scale deltas and a local-space quaternion delta relative to a supplied reference pose; negative and greater-than-one layer weights are supported, and an optional per-joint mask controls influence.
 
 **Hierarchy evaluation.** `buildGlobalTransforms` converts a local pose into column-major 4x4 global matrices. Skeleton creation computes a topological order, so parent joints may appear after children in the caller's input array. The operation uses caller-owned output storage and no per-call allocation. Matrix layout and coordinate convention remain the consumer's responsibility.
+
+
+**Animation events.** A clip may contain time-stamped `AnimationEventMarker` entries with a caller-defined event ID and 32-bit user data. `advancePlayer` queues markers crossed in forward or reverse playback, including markers crossed at loop boundaries and during multi-loop advances. Marker timestamps are inclusive at the destination and exclusive at the starting time; markers at both `0` and `duration` are distinct and both fire at a loop boundary. Multiple markers at the same timestamp preserve declaration order in either playback direction. Players expose a bounded, non-destructive indexed event copy API plus queue-count/overflow inspection and an explicit clear operation. Changing a player's clip or restarting the same clip clears its pending events. Event queues are bounded per player and module-wide; when either budget is exhausted, later events are skipped and the overflow flag remains set until events are cleared. The Lua bridge supports adding clip markers and inspecting/clearing queued events.
+
+**Root motion.** `extractRootMotion` samples a selected top-level root joint at two clip times and returns translation delta in the start pose's root frame plus the quaternion delta `inverse(startRotation) * endRotation`. Scale is excluded. With looping enabled each endpoint is wrapped independently; to accumulate motion continuously across a loop boundary, split the interval at the boundary and compose the returned deltas in order. The selected joint must have `parentIndex == -1`.
+
+A consumer can attach event markers when creating a clip and drain them after advancing a player:
+
+```cpp
+const AnimationEventMarker markers[] = {
+    {.timeSeconds = 0.35f, .eventId = 1, .userData = 0}, // Footstep
+    {.timeSeconds = 0.8f, .eventId = 2, .userData = 7},   // Attack window
+};
+clipDescription.eventMarkers = markers;
+clipDescription.eventMarkerCount = 2;
+
+animation.advancePlayer(animation.self, player, deltaSeconds);
+std::uint32_t eventCount = 0;
+bool eventsOverflowed = false;
+if (animation.playerEventCount(animation.self, player, &eventCount, &eventsOverflowed))
+{
+    std::vector<AnimationPlayerEvent> events(eventCount);
+    std::uint32_t copied = 0;
+    if (animation.copyPlayerEvents(animation.self, player, 0, events.data(), eventCount, &copied))
+    {
+        for (std::uint32_t index = 0; index < copied; ++index)
+            dispatchAnimationEvent(events[index]);
+    }
+    animation.clearPlayerEvents(animation.self, player);
+}
+```
 
 ## Threading and lifetime
 

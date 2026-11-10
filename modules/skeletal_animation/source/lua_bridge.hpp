@@ -33,6 +33,7 @@ struct SkeletalAnimationLuaBridgeContext
         std::string name;
         float durationSeconds = 0.0f;
         std::vector<TrackBuilder> tracks;
+        std::vector<AnimationEventMarker> eventMarkers;
     };
 
     script_runtime::ScriptRuntimeCapability *scriptRuntime = nullptr;
@@ -47,10 +48,13 @@ struct SkeletalAnimationLuaBridgeContext
     std::uint32_t maximumClipBuilders = 0;
     std::uint32_t maximumTracksPerClip = 0;
     std::uint32_t maximumKeyframesPerTrack = 0;
+    std::uint32_t maximumEventMarkersPerClip = 0;
+    std::uint64_t maximumPendingEventMarkers = 0;
     std::uint64_t maximumPendingJoints = 0;
     std::uint64_t maximumPendingKeyframes = 0;
     std::uint64_t pendingJoints = 0;
     std::uint64_t pendingKeyframes = 0;
+    std::uint64_t pendingEventMarkers = 0;
 };
 
 bool initializeSkeletalAnimationLuaRuntime(

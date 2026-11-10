@@ -3,12 +3,16 @@ config_keys           = [
     "skeletal_animation.maximum_blend_poses",
     "skeletal_animation.maximum_clips",
     "skeletal_animation.maximum_cursor_walk",
+    "skeletal_animation.maximum_event_markers_per_clip",
+    "skeletal_animation.maximum_events_per_player",
     "skeletal_animation.maximum_joints",
     "skeletal_animation.maximum_keyframes_per_track",
     "skeletal_animation.maximum_players",
     "skeletal_animation.maximum_skeletons",
+    "skeletal_animation.maximum_total_event_markers",
     "skeletal_animation.maximum_total_joints",
     "skeletal_animation.maximum_total_keyframes",
+    "skeletal_animation.maximum_total_pending_events",
     "skeletal_animation.maximum_total_sampling_cache_entries",
     "skeletal_animation.maximum_tracks_per_clip",
     "skeletal_animation.sampling_cache_enabled",
@@ -17,4 +21,4 @@ name                  = "skeletal_animation"
 optional_capabilities = ["script_runtime"]
 provides              = ["skeletal_animation"]
 requires              = []
-version               = "0.4.0"
+version               = "0.1.0"

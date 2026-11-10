@@ -73,6 +73,9 @@ public:
         return false;
     }
 
+    bool setClipboardText(const WindowRecord &, const char *text) override;
+    bool copyClipboardText(const WindowRecord &, std::string &output) const override;
+
     const char *const *requiredInstanceExtensions(std::uint32_t *outCount) const override;
 
 #if defined(ENGINE_WINDOW_HEADLESS_VULKAN)
@@ -91,6 +94,9 @@ public:
         return false;
     }
 #endif
+
+private:
+    std::string clipboardText_;
 };
 
 } // namespace window

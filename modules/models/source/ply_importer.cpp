@@ -580,128 +580,59 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
 
     ModelPart part;
     part.name = path.stem().string();
-    // Flat mode: one expanded vertex per corner with sequential (identity) indices.
+    const std::size_t outputCount = static_cast<std::size_t>(vertexCount);
+    if (outputCount > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
+    {
+        reportError(error, ModelLoadError::FileTooLarge);
+        return false;
+    }
+    part.vertices.resize(outputCount * renderer::meshVertexFloatCount);
+    for (std::size_t index = 0; index < outputCount; ++index)
+    {
+        const auto &source = sourceVertices[index];
+        float *destination = part.vertices.data() + index * renderer::meshVertexFloatCount;
+        std::copy_n(positions.data() + index * 3, 3, destination);
+        if (preserveNormals)
+        {
+            transformNormal(transform, source.data() + 3, destination + 3);
+        }
+        else
+        {
+            destination[3] = 0.0f;
+            destination[4] = 1.0f;
+            destination[5] = 0.0f;
+        }
+        std::copy_n(source.data() + 6, 3, destination + 6);
+        const float v = options.flipTextureV ? 1.0f - source[10] : source[10];
+        destination[9] = source[9] * options.uvScale[0] + options.uvOffset[0];
+        destination[10] = v * options.uvScale[1] + options.uvOffset[1];
+    }
+    part.indices = std::move(sourceIndices);
+    if (transform.reverseWinding)
+    {
+        reverseTriangleWinding(part.indices);
+    }
     if (flat)
     {
-        const std::size_t vertexCountOut = sourceIndices.size();
-        if (vertexCountOut > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
+        if (!expandFlatShading(part))
         {
-            reportError(error, ModelLoadError::FileTooLarge);
+            reportError(error, ModelLoadError::ParseFailed);
             return false;
-        }
-        part.vertices.reserve(vertexCountOut * renderer::meshVertexFloatCount);
-        part.indices.reserve(vertexCountOut);
-        for (std::size_t triangle = 0; triangle < sourceIndices.size(); triangle += 3)
-        {
-            const std::uint32_t ia    = sourceIndices[triangle];
-            const std::uint32_t ib    = sourceIndices[triangle + 1];
-            const std::uint32_t ic    = sourceIndices[triangle + 2];
-            const float        *a     = positions.data() + static_cast<std::size_t>(ia) * 3;
-            const float        *b     = positions.data() + static_cast<std::size_t>(ib) * 3;
-            const float        *c     = positions.data() + static_cast<std::size_t>(ic) * 3;
-            const float         ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
-            const float         ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-            float               normal[3]
-                = {ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]};
-            normalizeVector(normal);
-            if (transform.reverseWinding)
-            {
-                normal[0] = -normal[0];
-                normal[1] = -normal[1];
-                normal[2] = -normal[2];
-            }
-            for (std::size_t corner = 0; corner < 3; ++corner)
-            {
-                const std::uint32_t sourceIndex = sourceIndices[triangle + corner];
-                const auto         &source      = sourceVertices[sourceIndex];
-                const float        *position    = positions.data() + static_cast<std::size_t>(sourceIndex) * 3;
-                const std::size_t   offset      = part.vertices.size();
-                part.vertices.resize(offset + renderer::meshVertexFloatCount);
-                std::copy_n(position, 3, part.vertices.data() + offset);
-                std::copy_n(normal, 3, part.vertices.data() + offset + 3);
-                std::copy_n(source.data() + 6, 3, part.vertices.data() + offset + 6);
-                const float v              = options.flipTextureV ? 1.0f - source[10] : source[10];
-                part.vertices[offset + 9]  = source[9] * options.uvScale[0] + options.uvOffset[0];
-                part.vertices[offset + 10] = v * options.uvScale[1] + options.uvOffset[1];
-                part.indices.push_back(static_cast<std::uint32_t>(part.indices.size()));
-            }
         }
     }
-    else
+    else if (generateSmooth)
     {
-        // Area-weighted smooth normals from the transformed positions.
         std::vector<float> smoothNormals;
-        if (generateSmooth)
+        if (!accumulateIndexedSmoothNormals(positions, part.indices, smoothNormals, 3, 0))
         {
-            smoothNormals.assign(static_cast<std::size_t>(vertexCount) * 3, 0.0f);
-            for (std::size_t triangle = 0; triangle < sourceIndices.size(); triangle += 3)
-            {
-                const std::uint32_t ia    = sourceIndices[triangle];
-                const std::uint32_t ib    = sourceIndices[triangle + 1];
-                const std::uint32_t ic    = sourceIndices[triangle + 2];
-                const float        *a     = positions.data() + static_cast<std::size_t>(ia) * 3;
-                const float        *b     = positions.data() + static_cast<std::size_t>(ib) * 3;
-                const float        *c     = positions.data() + static_cast<std::size_t>(ic) * 3;
-                const float         ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
-                const float         ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-                const float         normal[3]
-                    = {ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]};
-                for (const std::uint32_t index : {ia, ib, ic})
-                {
-                    float *sum = smoothNormals.data() + static_cast<std::size_t>(index) * 3;
-                    sum[0] += normal[0];
-                    sum[1] += normal[1];
-                    sum[2] += normal[2];
-                }
-            }
-            for (std::size_t index = 0; index < vertexCount; ++index)
-            {
-                normalizeVector(smoothNormals.data() + index * 3);
-            }
-            // Mirrored import flips handedness, so generated normals flip with it.
-            if (transform.reverseWinding)
-            {
-                for (float &component : smoothNormals)
-                {
-                    component = -component;
-                }
-            }
-        }
-        const std::size_t outputCount = static_cast<std::size_t>(vertexCount);
-        if (outputCount > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
-        {
-            reportError(error, ModelLoadError::FileTooLarge);
+            reportError(error, ModelLoadError::ParseFailed);
             return false;
         }
-        part.vertices.resize(outputCount * renderer::meshVertexFloatCount);
         for (std::size_t index = 0; index < outputCount; ++index)
         {
-            const auto &source      = sourceVertices[index];
-            float      *destination = part.vertices.data() + index * renderer::meshVertexFloatCount;
-            std::copy_n(positions.data() + index * 3, 3, destination);
-            if (generateSmooth)
-            {
-                std::copy_n(smoothNormals.data() + index * 3, 3, destination + 3);
-            }
-            else if (preserveNormals)
-            {
-                transformNormal(transform, source.data() + 3, destination + 3);
-            }
-            else
-            {
-                destination[3] = 0.0f;
-                destination[4] = 1.0f;
-                destination[5] = 0.0f;
-            }
-            std::copy_n(source.data() + 6, 3, destination + 6);
-            const float v   = options.flipTextureV ? 1.0f - source[10] : source[10];
-            destination[9]  = source[9] * options.uvScale[0] + options.uvOffset[0];
-            destination[10] = v * options.uvScale[1] + options.uvOffset[1];
-        }
-        part.indices = std::move(sourceIndices);
-        if (transform.reverseWinding)
-        {
-            reverseTriangleWinding(part.indices);
+            std::copy_n(smoothNormals.data() + index * 3,
+                3,
+                part.vertices.data() + index * renderer::meshVertexFloatCount + 3);
         }
     }
     // PLY has no materials; every triangle records invalidMaterial when enabled.

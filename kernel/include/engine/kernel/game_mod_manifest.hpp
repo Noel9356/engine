@@ -67,7 +67,7 @@ struct GameModManifest
     }
 };
 
-// Validates ids, types, script-host rules and path safety; fills
+// Validates ids (up to 128 ASCII characters), types, script-host rules and path safety; fills
 // directory.
 class GameModManifestLoader final
 {

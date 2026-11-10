@@ -21,10 +21,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <vector>
-#include <cstdio>
 
 namespace engine
 {
@@ -34,86 +32,6 @@ namespace lumen_gi
 namespace
 {
 
-constexpr float kPi = 3.141592654f;
-
-std::uint64_t hashSeed(std::uint64_t seed)
-{
-    std::uint64_t hash = seed * 0x9E3779B97F4A7C15ull;
-    hash ^= hash >> 30;
-    hash *= 0xBF58476D1CE4E5B9ull;
-    hash ^= hash >> 27;
-    hash *= 0x94D049BB133111EBull;
-    hash ^= hash >> 31;
-    return hash;
-}
-
-float randomFloat(std::uint64_t &seed)
-{
-    seed = hashSeed(seed);
-    return static_cast<float>(seed & 0xFFFFFFull) / 16777216.0f;
-}
-
-glm::vec3 cosineDirectionSeeded(std::uint64_t &seed)
-{
-    const float u      = randomFloat(seed);
-    const float v      = randomFloat(seed);
-    const float radius = std::sqrt(std::max(0.0f, u));
-    const float phi    = v * 2.0f * kPi;
-    return glm::vec3(radius * std::cos(phi), radius * std::sin(phi), std::sqrt(std::max(0.0f, 1.0f - u)));
-}
-
-glm::mat3 onb(const glm::vec3 &normal)
-{
-    const glm::vec3 axis      = std::fabs(normal.z) < 0.9f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
-    const glm::vec3 tangent   = glm::normalize(glm::cross(axis, normal));
-    const glm::vec3 bitangent = glm::cross(normal, tangent);
-    return glm::mat3(tangent, bitangent, normal);
-}
-
-[[maybe_unused]] glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
-{
-    color *= exposure;
-    switch (mapper)
-    {
-    case pbr::ToneMapping::None:
-        break;
-    case pbr::ToneMapping::Reinhard:
-        color = color / (1.0f + color);
-        break;
-    case pbr::ToneMapping::AcesFilmic:
-    default:
-        color = glm::clamp((color * (2.51f * color + 0.03f)) / (color * (2.43f * color + 0.59f) + 0.14f), 0.0f, 1.0f);
-        break;
-    }
-    return color;
-}
-
-[[maybe_unused]] std::uint8_t toByte(float value)
-{
-    return static_cast<std::uint8_t>(std::min(1.0f, std::max(0.0f, value)) * 255.0f + 0.5f);
-}
-
-[[maybe_unused]] glm::vec3 gammaEncode(glm::vec3 color)
-{
-    return glm::pow(glm::max(color, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
-}
-
-[[maybe_unused]] bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgb)
-{
-    std::FILE *file = std::fopen(filePath, "wb");
-    if (file == nullptr)
-    {
-        return false;
-    }
-    std::fprintf(file, "P6\n%u %u\n255\n", width, height);
-    const std::size_t byteCount = static_cast<std::size_t>(width) * height * 3;
-    if (std::fwrite(rgb, 1, byteCount, file) != byteCount)
-    {
-        std::fclose(file);
-        return false;
-    }
-    std::fclose(file);
-    return true;
 }
 
 // Interpolates the world-space radiance cache at a direction: trilinear
@@ -350,9 +268,9 @@ void traceScreenProbes(GiPipelineState &state)
             const std::size_t   probeIndex = static_cast<std::size_t>(probeY) * probeWidth + probeX;
             // Jittered probe placement inside the scale x scale cell (Lumen
             // jitters the placement grid and accumulates over frames).
-            std::uint64_t seed = hashSeed(state.frameIndex * 7919ull + probeIndex);
-            const float   jitterX = randomFloat(seed);
-            const float   jitterY = randomFloat(seed);
+            std::uint64_t seed = detail::hashSeed(state.frameIndex * 7919ull + probeIndex);
+            const float   jitterX = detail::randomFloat(seed);
+            const float   jitterY = detail::randomFloat(seed);
             const std::uint32_t pixelX =
                 std::min(probeX * scale + static_cast<std::uint32_t>(jitterX * scale), width - 1u);
             const std::uint32_t pixelY =
@@ -383,17 +301,17 @@ void traceScreenProbes(GiPipelineState &state)
                 }
             }
             const bool  useImportance = luminanceTotal > 1.0e-5f;
-            const glm::mat3 basis     = onb(normal);
+            const glm::mat3 basis     = detail::onb(normal);
             // Stratified over the octahedral map: ray r owns texel stratum r,
             // importance-selected by the previous radiance when enabled.
             for (std::uint32_t ray = 0; ray < rayCount; ++ray)
             {
                 const std::size_t stratum = (static_cast<std::size_t>(state.frameIndex) * rayCount + ray) % mapTexels;
                 std::size_t       selected = stratum;
-                if (useImportance && randomFloat(seed) < 0.5f)
+                if (useImportance && detail::randomFloat(seed) < 0.5f)
                 {
                     // Inverse-transform sampling over the previous radiance.
-                    const float pick       = randomFloat(seed) * luminanceTotal;
+                    const float pick       = detail::randomFloat(seed) * luminanceTotal;
                     float       accumulated = 0.0f;
                     for (std::size_t candidate = 0; candidate < directionCount; ++candidate)
                     {
@@ -411,15 +329,15 @@ void traceScreenProbes(GiPipelineState &state)
                 {
                     // Jitter within the stratum's cone (octahedral texel
                     // solid angle ~ 4pi / texelCount).
-                    const float cone = std::sqrt(4.0f * kPi / static_cast<float>(mapTexels)) * 0.5f;
+                    const float cone = std::sqrt(4.0f * detail::kPi / static_cast<float>(mapTexels)) * 0.5f;
                     direction = glm::normalize(stratumCenter
-                        + (cosineDirectionSeeded(seed) - glm::vec3(0.0f, 0.0f, 1.0f)) * cone);
+                        + (detail::cosineDirectionSeeded(seed) - glm::vec3(0.0f, 0.0f, 1.0f)) * cone);
                 }
                 else
                 {
                     // Off-hemisphere strata sample the BRDF lobe instead so
                     // the ray budget stays on visible directions.
-                    direction = glm::normalize(basis * cosineDirectionSeeded(seed));
+                    direction = glm::normalize(basis * detail::cosineDirectionSeeded(seed));
                 }
                 state.gatherRaysThisFrame.fetch_add(1, std::memory_order_relaxed);
                 const glm::vec3 origin = position + normal * 0.02f;

@@ -10,7 +10,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `input_actions.maximum_actions_per_context` | integer | 1 - 65536 | `1024` | Cap on actions per context; `createAction` rejects beyond it. Used to size the per-frame consumption scratch containers. |
 | `input_actions.maximum_bindings_per_action` | integer | 1 - 4096 | `64` | Cap on bindings per action; `bindAction` rejects beyond it. |
 | `input_actions.maximum_contexts` | integer | 1 - 4096 | `64` | Cap on live input contexts; `createContext` returns `invalidInputContext` beyond it. Also used to pre-reserve the frame context list. |
-| `input_actions.maximum_controls_per_device` | integer | 1 - 65536 | `4096` | Cap on stored controls (keys + mouse buttons + gamepad buttons + axes combined) per device; new controls beyond it are refused. |
+| `input_actions.maximum_controls_per_device` | integer | 1 - 65536 | `4096` | Cap on stored controls (keys + mouse buttons + gamepad buttons + axes + touch contacts combined) per device; new controls beyond it are refused. |
 | `input_actions.maximum_devices` | integer | 1 - 1024 | `32` | Cap on distinct device ids tracked; `feedEvent` for a new device beyond it returns false. |
 | `input_actions.maximum_frame_delta_seconds` | float | finite, 0.0 - 1.0 (exclusive lower) | `0.25` | Clamp applied to the `deltaSeconds` passed to `advanceFrame`; larger deltas are clamped, non-positive deltas skip time-based effects. |
 | `input_actions.maximum_smoothing_seconds` | float | finite, 0.0 - 10.0 | `2.0` | Upper bound accepted for an action's `smoothingSeconds` in `createAction`; larger values are rejected. |
@@ -22,5 +22,5 @@ Every value is read once in `construct()`; the module does not follow configurat
 ## How the caps shape behavior
 
 - The caps are enforced at object-creation time, not by eviction: existing contexts, actions, bindings, and device states survive a lowered cap; only new requests beyond it are refused. The Lua bridge (`create_context`, `create_action`, `bind_action`) is subject to the same limits and returns `nil`/`false` when a request is refused.
-- `maximum_controls_per_device` bounds the stored state a misbehaving producer can accumulate per device; `resetDevice` (or a `focus_lost` event) frees it.
+- `maximum_controls_per_device` bounds the stored state a misbehaving producer can accumulate per device (including simultaneous touch contacts); `resetDevice` (or a `focus_lost` event) frees it.
 - `maximum_frame_delta_seconds` exists so a pause or debugger break cannot turn one huge delta into teleporting smoothing; see [overview.md](overview.md) for the per-frame pipeline that consumes it.

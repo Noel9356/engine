@@ -17,4 +17,4 @@ config_keys = [
 name        = "file_asset_store"
 provides    = ["file_asset_store"]
 requires    = []
-version     = "0.3.0"
+version     = "0.1.0"

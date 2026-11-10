@@ -1,8 +1,8 @@
 #include "lua_bridge.hpp"
 
-#include <cmath>
+#include <engine/script_runtime/native_values.hpp>
+
 #include <cstdint>
-#include <limits>
 #include <string_view>
 
 namespace engine::camera
@@ -13,69 +13,14 @@ using script_runtime::ScriptNativeFunction;
 using script_runtime::ScriptRuntimeHandle;
 using script_runtime::ScriptValue;
 using script_runtime::ScriptValueType;
+using script_runtime::native::boolean;
+using script_runtime::native::floatValue;
+using script_runtime::native::resultBoolean;
+using script_runtime::native::resultNil;
+using script_runtime::native::resultNumber;
+using script_runtime::native::stringValue;
+using script_runtime::native::uint32Value;
 using Bridge = CameraLuaBridgeContext;
-
-bool number(const ScriptValue *args, std::uint32_t count, std::uint32_t index, double &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::Number || !std::isfinite(args[index].numberValue))
-        return false;
-    out = args[index].numberValue;
-    return true;
-}
-
-bool uint32Value(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::uint32_t &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < 0.0
-        || value > static_cast<double>(std::numeric_limits<std::uint32_t>::max()) || std::floor(value) != value)
-        return false;
-    out = static_cast<std::uint32_t>(value);
-    return true;
-}
-
-bool floatValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, float &out)
-{
-    double value = 0.0;
-    if (!number(args, count, index, value) || value < -std::numeric_limits<float>::max()
-        || value > std::numeric_limits<float>::max())
-        return false;
-    out = static_cast<float>(value);
-    return true;
-}
-
-bool boolean(const ScriptValue *args, std::uint32_t count, std::uint32_t index, bool &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::Boolean)
-        return false;
-    out = args[index].booleanValue;
-    return true;
-}
-
-bool stringValue(const ScriptValue *args, std::uint32_t count, std::uint32_t index, std::string_view &out)
-{
-    if (index >= count || args[index].type != ScriptValueType::String || args[index].stringData == nullptr)
-        return false;
-    out = std::string_view(args[index].stringData, args[index].stringSize);
-    return true;
-}
-
-void resultNumber(ScriptValue *out, std::uint32_t index, double value)
-{
-    out[index].type = ScriptValueType::Number;
-    out[index].numberValue = value;
-}
-
-void resultBoolean(ScriptValue *out, std::uint32_t index, bool value)
-{
-    out[index].type = ScriptValueType::Boolean;
-    out[index].booleanValue = value;
-}
-
-void resultNil(ScriptValue *out, std::uint32_t index)
-{
-    out[index] = {};
-    out[index].type = ScriptValueType::Nil;
-}
 
 CameraControlMode parseMode(std::string_view value, bool &valid)
 {
@@ -258,6 +203,65 @@ bool viewPosition(void *userData, const ScriptValue *args, std::uint32_t count, 
     return true;
 }
 
+bool worldToViewport(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
+    std::uint32_t capacity, std::uint32_t *outCount)
+{
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::uint32_t handle = 0, width = 0, height = 0;
+    float world[3]{};
+    if (count != 6 || capacity < 3 || !uint32Value(args, count, 0, handle)
+        || !uint32Value(args, count, 1, width) || !uint32Value(args, count, 2, height)
+        || !floatValue(args, count, 3, world[0]) || !floatValue(args, count, 4, world[1])
+        || !floatValue(args, count, 5, world[2]))
+        return false;
+    float x = 0.0f, y = 0.0f, depth = 0.0f;
+    std::lock_guard lock(bridge.apiMutex);
+    if (bridge.camera == nullptr)
+        return false;
+    const bool ok = bridge.camera->worldToViewport(bridge.camera->self, handle, width, height, world, &x, &y, &depth);
+    if (ok)
+    {
+        resultNumber(results, 0, x);
+        resultNumber(results, 1, y);
+        resultNumber(results, 2, depth);
+    }
+    else
+    {
+        resultNil(results, 0);
+        resultNil(results, 1);
+        resultNil(results, 2);
+    }
+    *outCount = 3;
+    return true;
+}
+
+bool viewportToWorldRay(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
+    std::uint32_t capacity, std::uint32_t *outCount)
+{
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::uint32_t handle = 0, width = 0, height = 0;
+    float x = 0.0f, y = 0.0f;
+    if (count != 5 || capacity < 6 || !uint32Value(args, count, 0, handle)
+        || !uint32Value(args, count, 1, width) || !uint32Value(args, count, 2, height)
+        || !floatValue(args, count, 3, x) || !floatValue(args, count, 4, y))
+        return false;
+    float origin[3]{}, direction[3]{};
+    std::lock_guard lock(bridge.apiMutex);
+    if (bridge.camera == nullptr)
+        return false;
+    const bool ok = bridge.camera->viewportToWorldRay(
+        bridge.camera->self, handle, width, height, x, y, origin, direction);
+    for (std::uint32_t index = 0; index < 6; ++index)
+    {
+        if (ok)
+            resultNumber(results, index, index < 3 ? origin[index] : direction[index - 3]);
+        else
+            resultNil(results, index);
+    }
+    *outCount = 6;
+    return true;
+}
+
 bool setControlSettings(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
     std::uint32_t capacity, std::uint32_t *outCount)
 {
@@ -295,6 +299,8 @@ constexpr Binding bindings[] = {
     {"camera.set_projection", setProjection},
     {"camera.update", updateCamera},
     {"camera.view_position", viewPosition},
+    {"camera.world_to_viewport", worldToViewport},
+    {"camera.viewport_to_world_ray", viewportToWorldRay},
     {"camera.set_control_settings", setControlSettings},
 };
 } // namespace
