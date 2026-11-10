@@ -56,11 +56,12 @@ constexpr float pi = glm::pi<float>();
 // Weights below this delta are treated as unchanged (no reupload).
 constexpr float kWeightEpsilon = 5.0e-4f;
 
-// Loads a colored OBJ produced by scripts/build_character_parts.py:
+// Loads a colored OBJ produced by scripts/refine_character_parts.py:
 // "v x y z r g b" vertices, "vn" normals, "f a//a b//b c//c" triangles
-// (1-based), then any number of morph blocks: "m <name>" followed by one
-// "d dx dy dz" per vertex in vertex order. Returns false when the file is
-// missing or holds no triangles.
+// (1-based), optional "vc r g b" corner colors referenced by the extended
+// "f a//a/c b//b/c c//c/c" corner form, then any number of morph blocks:
+// "m <name>" followed by one "d dx dy dz" per vertex in vertex order. Returns
+// false when the file is missing or holds no triangles.
 bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vector<std::string> &outMorphNames,
     std::vector<std::vector<glm::vec3>> &outMorphDeltas, std::vector<std::uint32_t> &outMorphVertexIds)
 {
@@ -72,6 +73,7 @@ bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vect
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> colors;
     std::vector<glm::vec3> normals;
+    std::vector<glm::vec3> cornerColors;
     char                   line[512];
     bool                   inMorph = false;
     while (std::fgets(line, sizeof(line), file) != nullptr)
@@ -88,6 +90,14 @@ bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vect
             colors.emplace_back(r, g, b);
             inMorph = false;
         }
+        else if (line[0] == 'v' && line[1] == 'c' && line[2] == ' ')
+        {
+            float r = 0.0f, g = 0.0f, b = 0.0f;
+            if (std::sscanf(line + 3, "%f %f %f", &r, &g, &b) == 3)
+            {
+                cornerColors.emplace_back(r, g, b);
+            }
+        }
         else if (line[0] == 'v' && line[1] == 'n')
         {
             float x = 0.0f, y = 0.0f, z = 0.0f;
@@ -98,11 +108,16 @@ bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vect
         }
         else if (line[0] == 'f' && line[1] == ' ')
         {
-            unsigned a = 0, an = 0, b = 0, bn = 0, c = 0, cn = 0;
-            // "f v//vn v//vn v//vn" is what the pipeline writes; plain
-            // "f v v v" is accepted for hand-made parts without normals.
-            if (std::sscanf(line + 2, "%u//%u %u//%u %u//%u", &a, &an, &b, &bn, &c, &cn) != 6
-                && std::sscanf(line + 2, "%u %u %u", &a, &b, &c) != 3)
+            unsigned a = 0, an = 0, ca = 0, b = 0, bn = 0, cb = 0, c = 0, cn = 0, cc = 0;
+            // The pipeline writes "f v//vn/c" when per-corner colors exist,
+            // "f v//vn" otherwise; plain "f v v v" is accepted for hand-made
+            // parts without normals.
+            const bool colored = std::sscanf(
+                line + 2, "%u//%u/%u %u//%u/%u %u//%u/%u", &a, &an, &ca, &b, &bn, &cb, &c, &cn, &cc) == 9;
+            const bool shaded = !colored
+                && std::sscanf(line + 2, "%u//%u %u//%u %u//%u", &a, &an, &b, &bn, &c, &cn) == 6;
+            const bool plain = !shaded && std::sscanf(line + 2, "%u %u %u", &a, &b, &c) == 3;
+            if (!colored && !shaded && !plain)
             {
                 std::fclose(file);
                 return false;
@@ -122,6 +137,14 @@ bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vect
                 // expanded corner keeps that id so the runtime applies the
                 // right delta to each corner of the same welded vertex.
                 outMorphVertexIds.push_back(index - 1);
+            }
+            if (colored && cornerColors.size() >= std::max({ca, cb, cc}))
+            {
+                const unsigned colorIndices[3] = {ca, cb, cc};
+                for (std::size_t corner = 0; corner < 3; ++corner)
+                {
+                    outMesh.vertices[base + corner].color = cornerColors[colorIndices[corner] - 1];
+                }
             }
             outMesh.indices.insert(outMesh.indices.end(), {base, base + 1, base + 2});
             inMorph = false;
@@ -397,6 +420,12 @@ float CharacterContent::weightForMorph(const std::string &name, const Deformatio
     {
         return std::clamp(neckRadius(input) / metrics.neckRing.radius - 1.0f, -0.5f, 0.5f);
     }
+    if (name == "tail_curl")
+    {
+        // tail.curl spans -1..+1 around its 0 default, so the raw value is
+        // already the normalized weight.
+        return input.tailCurl;
+    }
     return 0.0f;
 }
 
@@ -409,41 +438,50 @@ void CharacterContent::applyDeformation(const engine::character::CharacterCapabi
 
     // Customization geometry is rebuilt on parameter change (never per
     // frame): rest pose plus weighted morphs, uploaded only when a weight
-    // actually moved. The rest mesh stays pristine as the morph source.
+    // actually moved. The rest mesh stays pristine as the morph source. The
+    // revision-4 meshes carry more than the old three-morph cap (the torso
+    // alone bakes five), so the weights are a plain vector now.
     for (auto &[geometryId, entry] : geometries_)
     {
         if (entry.morphNames.empty())
         {
             continue;
         }
-        float resolved[3] = {0.0f, 0.0f, 0.0f};
-        bool  changed     = false;
-        for (std::size_t index = 0; index < entry.morphNames.size() && index < 3; ++index)
+        if (entry.morphWeights.size() != entry.morphNames.size())
         {
-            resolved[index] = weightForMorph(entry.morphNames[index], input);
-            changed = changed || std::fabs(resolved[index] - entry.morphWeights[index]) >= kWeightEpsilon;
+            entry.morphWeights.assign(entry.morphNames.size(), 0.0f);
+        }
+        bool changed = false;
+        for (std::size_t index = 0; index < entry.morphNames.size(); ++index)
+        {
+            const float resolved = weightForMorph(entry.morphNames[index], input);
+            changed = changed || std::fabs(resolved - entry.morphWeights[index]) >= kWeightEpsilon;
         }
         if (!changed)
         {
             continue;
+        }
+        for (std::size_t index = 0; index < entry.morphNames.size(); ++index)
+        {
+            entry.morphWeights[index] = weightForMorph(entry.morphNames[index], input);
         }
         entry.scratch = entry.rest;
         for (std::size_t vertex = 0; vertex < entry.scratch.vertices.size(); ++vertex)
         {
             // Deltas are per welded source vertex; expanded face corners
             // share their source vertex's delta through morphVertexIds.
-            const std::uint32_t sourceVertex = vertex < entry.morphVertexIds.size() ? entry.morphVertexIds[vertex]
-                                                                                    : static_cast<std::uint32_t>(vertex);
-            for (std::size_t morph = 0; morph < entry.morphNames.size() && morph < 3; ++morph)
+            const std::uint32_t sourceVertex = vertex < entry.morphVertexIds.size()
+                ? entry.morphVertexIds[vertex]
+                : static_cast<std::uint32_t>(vertex);
+            for (std::size_t morph = 0; morph < entry.morphNames.size(); ++morph)
             {
                 if (!entry.morphDeltas[morph].empty() && sourceVertex < entry.morphDeltas[morph].size())
                 {
                     entry.scratch.vertices[vertex].position
-                        += resolved[morph] * entry.morphDeltas[morph][sourceVertex];
+                        += entry.morphWeights[morph] * entry.morphDeltas[morph][sourceVertex];
                 }
             }
         }
-        entry.morphWeights = glm::vec3(resolved[0], resolved[1], resolved[2]);
         uploadGeometry(geometryId, renderer, rendererHandle);
     }
 
@@ -463,18 +501,23 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
 
     // ---- global parameters (the registry; assets map them locally) --------
     // Ranges are validated ranges: the extremes keep every junction inside
-    // its overlap and every morph inside its authored magnitude.
+    // its overlap and every morph inside its authored magnitude. Revision 4
+    // widened every axis (the junction contract keeps them safe) and added
+    // neck.length, tail.curl, and skin.tone.
     const ParameterDefinition parameters[] = {
-        {"body.height", "Body Height", 0.85f, 1.25f, 1.0f},
-        {"body.width", "Body Width", 0.80f, 1.30f, 1.0f},
-        {"body.muscle_mass", "Muscle Mass", 0.80f, 1.40f, 1.0f},
-        {"head.size", "Head Size", 0.80f, 1.35f, 1.0f},
-        {"head.muzzle_length", "Muzzle Length", 0.70f, 1.40f, 1.0f},
-        {"limbs.length", "Limb Length", 0.85f, 1.20f, 1.0f},
-        {"limbs.thickness", "Limb Thickness", 0.75f, 1.35f, 1.0f},
-        {"tail.length", "Tail Length", 0.60f, 1.50f, 1.0f},
-        {"tail.thickness", "Tail Thickness", 0.70f, 1.40f, 1.0f},
-        {"wings.span", "Wingspan", 0.50f, 1.40f, 1.0f},
+        {"body.height", "Body Height", 0.75f, 1.35f, 1.0f},
+        {"body.width", "Body Width", 0.70f, 1.45f, 1.0f},
+        {"body.muscle_mass", "Muscle Mass", 0.70f, 1.55f, 1.0f},
+        {"head.size", "Head Size", 0.70f, 1.50f, 1.0f},
+        {"head.muzzle_length", "Muzzle Length", 0.55f, 1.60f, 1.0f},
+        {"neck.length", "Neck Length", 0.80f, 1.30f, 1.0f},
+        {"limbs.length", "Limb Length", 0.75f, 1.35f, 1.0f},
+        {"limbs.thickness", "Limb Thickness", 0.65f, 1.55f, 1.0f},
+        {"tail.length", "Tail Length", 0.45f, 1.75f, 1.0f},
+        {"tail.thickness", "Tail Thickness", 0.55f, 1.65f, 1.0f},
+        {"tail.curl", "Tail Curl", -1.0f, 1.0f, 0.0f},
+        {"wings.span", "Wingspan", 0.40f, 1.60f, 1.0f},
+        {"skin.tone", "Skin Tone", 0.0f, 4.0f, 0.0f},
     };
     for (const ParameterDefinition &definition : parameters)
     {
@@ -491,19 +534,20 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     // ---- connector compatibility rules (data-defined, extensible) ---------
     // Relative-scale gates sit on top of the morph/junction contract: they
     // reject gross asset-level mismatches (a giant head on a small neck)
-    // at connect/replace time instead of rendering them.
+    // at connect/replace time instead of rendering them. The revision-4
+    // ranges below bracket every combination the widened parameter ranges
+    // can produce (worst cases: neck piece scaleY 1.61 at height+neck
+    // extremes, limb scale 1.35 at limb-length extremes, tail link ratio
+    // 1.12 at tail-length extremes).
     const CompatibilityRuleDefinition rules[] = {
-        // Neck extremes: body height 1.25 scales the neck piece to 1.24 while
-        // heads stay at 1.0, so the ratio reaches 0.81 - the gate sits just
-        // outside the validated range ends.
-        {"rule_neck", "neck.mount", "neck.root", true, 0.75f, 1.30f, nullptr, nullptr},
-        {"rule_head", "head.mount", "head.root", true, 0.70f, 1.45f, nullptr, nullptr},
-        {"rule_direct_head", "neck.mount", "head.root", true, 0.70f, 1.45f, nullptr, nullptr},
-        {"rule_arm", "arm.mount", "arm.root", true, 0.80f, 1.25f, nullptr, nullptr},
-        {"rule_leg", "leg.mount", "leg.root", true, 0.80f, 1.25f, nullptr, nullptr},
-        {"rule_wing", "wing.mount", "wing.root", true, 0.40f, 2.50f, nullptr, nullptr},
-        {"rule_appendage", "appendage.mount", "appendage.root", true, 0.40f, 2.50f, nullptr, nullptr},
-        {"rule_tail_link", "tail.link", "tail.end", true, 0.60f, 1.60f, nullptr, nullptr},
+        {"rule_neck", "neck.mount", "neck.root", true, 0.55f, 1.80f, nullptr, nullptr},
+        {"rule_head", "head.mount", "head.root", true, 0.55f, 1.80f, nullptr, nullptr},
+        {"rule_direct_head", "neck.mount", "head.root", true, 0.55f, 1.80f, nullptr, nullptr},
+        {"rule_arm", "arm.mount", "arm.root", true, 0.65f, 1.55f, nullptr, nullptr},
+        {"rule_leg", "leg.mount", "leg.root", true, 0.65f, 1.55f, nullptr, nullptr},
+        {"rule_wing", "wing.mount", "wing.root", true, 0.30f, 2.80f, nullptr, nullptr},
+        {"rule_appendage", "appendage.mount", "appendage.root", true, 0.30f, 2.80f, nullptr, nullptr},
+        {"rule_tail_link", "tail.link", "tail.end", true, 0.50f, 1.80f, nullptr, nullptr},
     };
     for (const CompatibilityRuleDefinition &rule : rules)
     {
@@ -542,11 +586,12 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     }
 
     // The tail chain rides the tail mesh's curve; tail_end is where the tip
-    // piece's skirt swallows the base's cut end.
+    // piece's ring swallows the base's end. The positions are the procedural
+    // tail base's link ring (TAIL_LINK in scripts/refine_character_parts.py).
     const RigJointDefinition tailJoints[] = {
         {"tail_root", -1, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f}},
-        {"tail_mid", 0, {0.0f, -0.020f, -0.160f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f}},
-        {"tail_end", 0, {0.0f, -0.100f, -0.290f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f}},
+        {"tail_mid", 0, {0.0f, -0.055f, -0.175f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f}},
+        {"tail_end", 0, {0.0f, -0.115f, -0.360f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f}},
     };
     const RigDefinition tailRig{"tail_chain", tailJoints, 3};
     if (!character.registerRig(character.self, &tailRig, &error))
@@ -593,7 +638,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         jointTranslationBinding("body.muscle_mass", "hip_right", hipMuscleUnit, 0.0f, 0.0f),
     };
     const MaterialSlotDefinition torsoSlots[] = {{"primary", {1.0f, 1.0f, 1.0f}, 0.75f, 0.0f}};
-    const char                  *torsoTags[]   = {"slot:torso", "plan:biped"};
+    const char                  *torsoTags[]   = {"slot:torso", "plan:biped", "skin"};
     const PartDefinition         torsoPart{
         .id                    = "torso_humanoid",
         .displayName           = "Humanoid Torso",
@@ -606,24 +651,26 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .materialSlots         = torsoSlots,
         .materialSlotCount     = 1,
         .tags                  = torsoTags,
-        .tagCount              = 2,
+        .tagCount              = 3,
         .boundsCenter          = {0.0f, 0.30f, 0.0f},
         .boundsRadius          = 0.52f,
         .triangleCount         = 0, // filled after the OBJ loads
     };
 
     // Neck transition: procedural (radius follows the shared junction
-    // function); its length rides body height with the torso's own gain so
-    // the head rises proportionally.
+    // function); its length rides body height and the neck.length parameter
+    // with the torso's own gain so the head rises proportionally. Its only
+    // ring is at its origin (neck.root), so scaling Y keeps it sealed.
     const ConnectorDefinition neckConnectors[] = {
         {"neck.root", "neck.root", partLocalAnchor(0.0f, 0.0f, 0.0f), nullptr, 1},
         {"head.mount", "head.mount", partLocalAnchor(0.0f, 0.205f, 0.0f), nullptr, 1},
     };
     const ParameterBinding neckBindings[] = {
         scaleBinding("body.height", ParameterBindingTarget::PartScaleY, metrics.torsoHeightGain / metrics.heightSpan),
+        scaleBinding("neck.length", ParameterBindingTarget::PartScaleY, 1.0f),
     };
     const MaterialSlotDefinition neckSlots[] = {{"primary", {0.74f, 0.55f, 0.43f}, 0.75f, 0.0f}};
-    const char                  *neckTags[]  = {"slot:neck"};
+    const char                  *neckTags[]  = {"slot:neck", "skin"};
     const PartDefinition         neckPart{
         .id                    = "neck_transition",
         .displayName           = "Neck Transition",
@@ -632,11 +679,11 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .connectors            = neckConnectors,
         .connectorCount        = 2,
         .parameterBindings     = neckBindings,
-        .parameterBindingCount = 1,
+        .parameterBindingCount = 2,
         .materialSlots         = neckSlots,
         .materialSlotCount     = 1,
         .tags                  = neckTags,
-        .tagCount              = 1,
+        .tagCount              = 2,
         .boundsCenter          = {0.0f, 0.07f, 0.0f},
         .boundsRadius          = 0.20f,
         .triangleCount         = 0,
@@ -701,6 +748,75 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .boundsRadius          = 0.26f,
         .triangleCount         = 0,
     };
+    const PartDefinition orcPart{
+        .id                    = "head_orc",
+        .displayName           = "Orc Head",
+        .geometryId            = "head_orc",
+        .rigId                 = nullptr,
+        .connectors            = headConnectors,
+        .connectorCount        = 1,
+        .parameterBindings     = nullptr,
+        .parameterBindingCount = 0,
+        .materialSlots         = whiteSlots,
+        .materialSlotCount     = 1,
+        .tags                  = headTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, 0.12f, 0.04f},
+        .boundsRadius          = 0.30f,
+        .triangleCount         = 0,
+    };
+    const PartDefinition yetiPart{
+        .id                    = "head_yeti",
+        .displayName           = "Yeti Head",
+        .geometryId            = "head_yeti",
+        .rigId                 = nullptr,
+        .connectors            = headConnectors,
+        .connectorCount        = 1,
+        .parameterBindings     = nullptr,
+        .parameterBindingCount = 0,
+        .materialSlots         = whiteSlots,
+        .materialSlotCount     = 1,
+        .tags                  = headTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, 0.10f, 0.04f},
+        .boundsRadius          = 0.28f,
+        .triangleCount         = 0,
+    };
+    const PartDefinition blueDemonPart{
+        .id                    = "head_bluedemon",
+        .displayName           = "Blue Demon Head",
+        .geometryId            = "head_bluedemon",
+        .rigId                 = nullptr,
+        .connectors            = headConnectors,
+        .connectorCount        = 1,
+        .parameterBindings     = nullptr,
+        .parameterBindingCount = 0,
+        .materialSlots         = whiteSlots,
+        .materialSlotCount     = 1,
+        .tags                  = headTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, 0.10f, 0.05f},
+        .boundsRadius          = 0.28f,
+        .triangleCount         = 0,
+    };
+
+    const PartDefinition alienPart{
+        .id                    = "head_alien",
+        .displayName           = "Alien Head",
+        .geometryId            = "head_alien",
+        .rigId                 = nullptr,
+        .connectors            = headConnectors,
+        .connectorCount        = 1,
+        .parameterBindings     = nullptr,
+        .parameterBindingCount = 0,
+        .materialSlots         = whiteSlots,
+        .materialSlotCount     = 1,
+        .tags                  = headTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, 0.12f, 0.02f},
+        .boundsRadius          = 0.30f,
+        .triangleCount         = 0,
+    };
 
     // Limbs: their only ring is at the origin, so part scale keeps the
     // junction on the anchor at any length/thickness. Each side is its own
@@ -715,7 +831,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         scaleBinding("limbs.thickness", ParameterBindingTarget::PartScaleZ, 0.45f),
     };
     const MaterialSlotDefinition limbSlots[] = {{"primary", {1.0f, 1.0f, 1.0f}, 0.8f, 0.0f}};
-    const char                  *legTags[]   = {"slot:legs"};
+    const char                  *legTags[]   = {"slot:legs", "skin"};
     const PartDefinition         legLeftPart{
         .id                    = "leg_humanoid_left",
         .displayName           = "Human Leg",
@@ -728,7 +844,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .materialSlots         = limbSlots,
         .materialSlotCount     = 1,
         .tags                  = legTags,
-        .tagCount              = 1,
+        .tagCount              = 2,
         .boundsCenter          = {0.0f, -0.45f, 0.0f},
         .boundsRadius          = 0.62f,
         .triangleCount         = 0,
@@ -745,7 +861,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .materialSlots         = limbSlots,
         .materialSlotCount     = 1,
         .tags                  = legTags,
-        .tagCount              = 1,
+        .tagCount              = 2,
         .boundsCenter          = {0.0f, -0.45f, 0.0f},
         .boundsRadius          = 0.62f,
         .triangleCount         = 0,
@@ -754,7 +870,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     const ConnectorDefinition armConnectors[] = {
         {"shoulder.root", "arm.root", partLocalAnchor(0.0f, 0.0f, 0.0f), nullptr, 1},
     };
-    const char          *armTags[] = {"slot:arms"};
+    const char          *armTags[] = {"slot:arms", "skin"};
     const PartDefinition armLeftPart{
         .id                    = "arm_humanoid_left",
         .displayName           = "Human Arm",
@@ -767,7 +883,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .materialSlots         = limbSlots,
         .materialSlotCount     = 1,
         .tags                  = armTags,
-        .tagCount              = 1,
+        .tagCount              = 2,
         .boundsCenter          = {0.0f, -0.28f, 0.0f},
         .boundsRadius          = 0.42f,
         .triangleCount         = 0,
@@ -784,7 +900,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .materialSlots         = limbSlots,
         .materialSlotCount     = 1,
         .tags                  = armTags,
-        .tagCount              = 1,
+        .tagCount              = 2,
         .boundsCenter          = {0.0f, -0.28f, 0.0f},
         .boundsRadius          = 0.42f,
         .triangleCount         = 0,
@@ -835,8 +951,13 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .triangleCount         = 0,
     };
 
-    // Reptilian tail (base + tip chain): rings at origins, so thickness and
-    // length scale about the anchors and the tip junction stays swallowed.
+    // Procedural tails (revision 4): three base+tip chains (reptile, spade,
+    // club) built by scripts/refine_character_parts.py with real thickness.
+    // Rings at origins, so thickness and length scale about the anchors and
+    // the tip junction stays swallowed. The baked tail_curl morph bends the
+    // base sideways; its interface ring delta (metrics.tailCurlRingDeltaX at
+    // weight 1) is re-issued here as the matching JointTranslation binding on
+    // tail_end, so anchors and geometry stay one formula.
     const ConnectorDefinition tailBaseConnectors[] = {
         {"tail.root", "appendage.root", partLocalAnchor(0.0f, 0.0f, 0.0f), nullptr, 1},
         {"tail.link", "tail.link", jointAnchor("tail_end", 0.0f, 0.0f, 0.0f), nullptr, 1},
@@ -845,6 +966,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         scaleBinding("tail.thickness", ParameterBindingTarget::PartScaleX, 0.50f),
         scaleBinding("tail.thickness", ParameterBindingTarget::PartScaleY, 0.50f),
         scaleBinding("tail.length", ParameterBindingTarget::PartScaleZ, 0.60f),
+        jointTranslationBinding("tail.curl", "tail_end", metrics.tailCurlRingDeltaX, 0.0f, 0.0f),
     };
     const MaterialSlotDefinition tailBaseSlots[] = {{"primary", {1.0f, 1.0f, 1.0f}, 0.65f, 0.0f}};
     const char                  *tailTags[]      = {"slot:tail"};
@@ -856,13 +978,47 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .connectors            = tailBaseConnectors,
         .connectorCount        = 2,
         .parameterBindings     = tailBaseBindings,
-        .parameterBindingCount = 3,
+        .parameterBindingCount = 4,
         .materialSlots         = tailBaseSlots,
         .materialSlotCount     = 1,
         .tags                  = tailTags,
         .tagCount              = 1,
-        .boundsCenter          = {0.0f, -0.03f, -0.13f},
-        .boundsRadius          = 0.30f,
+        .boundsCenter          = {0.0f, -0.05f, -0.15f},
+        .boundsRadius          = 0.40f,
+        .triangleCount         = 0,
+    };
+    const PartDefinition tailSpadeBasePart{
+        .id                    = "tail_spade",
+        .displayName           = "Spade Tail",
+        .geometryId            = "tail_spade",
+        .rigId                 = "tail_chain",
+        .connectors            = tailBaseConnectors,
+        .connectorCount        = 2,
+        .parameterBindings     = tailBaseBindings,
+        .parameterBindingCount = 4,
+        .materialSlots         = tailBaseSlots,
+        .materialSlotCount     = 1,
+        .tags                  = tailTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, -0.05f, -0.15f},
+        .boundsRadius          = 0.40f,
+        .triangleCount         = 0,
+    };
+    const PartDefinition tailClubBasePart{
+        .id                    = "tail_club",
+        .displayName           = "Club Tail",
+        .geometryId            = "tail_club",
+        .rigId                 = "tail_chain",
+        .connectors            = tailBaseConnectors,
+        .connectorCount        = 2,
+        .parameterBindings     = tailBaseBindings,
+        .parameterBindingCount = 4,
+        .materialSlots         = tailBaseSlots,
+        .materialSlotCount     = 1,
+        .tags                  = tailTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, -0.05f, -0.15f},
+        .boundsRadius          = 0.40f,
         .triangleCount         = 0,
     };
 
@@ -887,14 +1043,49 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         .materialSlotCount     = 1,
         .tags                  = tailTags,
         .tagCount              = 1,
-        .boundsCenter          = {0.0f, -0.03f, -0.18f},
-        .boundsRadius          = 0.28f,
+        .boundsCenter          = {0.0f, -0.02f, -0.10f},
+        .boundsRadius          = 0.30f,
+        .triangleCount         = 0,
+    };
+    const PartDefinition tailSpadeTipPart{
+        .id                    = "tail_spade_tip",
+        .displayName           = "Spade Tail Tip",
+        .geometryId            = "tail_spade_tip",
+        .rigId                 = nullptr,
+        .connectors            = tailTipConnectors,
+        .connectorCount        = 1,
+        .parameterBindings     = tailTipBindings,
+        .parameterBindingCount = 3,
+        .materialSlots         = tailBaseSlots,
+        .materialSlotCount     = 1,
+        .tags                  = tailTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, -0.02f, -0.10f},
+        .boundsRadius          = 0.30f,
+        .triangleCount         = 0,
+    };
+    const PartDefinition tailClubTipPart{
+        .id                    = "tail_club_tip",
+        .displayName           = "Club Tail Tip",
+        .geometryId            = "tail_club_tip",
+        .rigId                 = nullptr,
+        .connectors            = tailTipConnectors,
+        .connectorCount        = 1,
+        .parameterBindings     = tailTipBindings,
+        .parameterBindingCount = 3,
+        .materialSlots         = tailBaseSlots,
+        .materialSlotCount     = 1,
+        .tags                  = tailTags,
+        .tagCount              = 1,
+        .boundsCenter          = {0.0f, -0.02f, -0.10f},
+        .boundsRadius          = 0.30f,
         .triangleCount         = 0,
     };
 
     const PartDefinition parts[] = {
-        torsoPart, neckPart, demonPart, dragonPart, serpentPart, legLeftPart, legRightPart, armLeftPart,
-        armRightPart, wingLeftPart, wingRightPart, tailBasePart, tailTipPart,
+        torsoPart, neckPart, demonPart, dragonPart, serpentPart, orcPart, yetiPart, alienPart,
+        blueDemonPart, legLeftPart, legRightPart, armLeftPart, armRightPart, wingLeftPart, wingRightPart,
+        tailBasePart, tailSpadeBasePart, tailClubBasePart, tailTipPart, tailSpadeTipPart, tailClubTipPart,
     };
 
     // ---- geometry (OBJ downloads + procedural neck) ------------------------
@@ -904,12 +1095,20 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         {"head_demon", "head_demon.obj"},
         {"head_dragon", "head_dragon.obj"},
         {"head_serpent", "head_serpent.obj"},
+        {"head_orc", "head_orc.obj"},
+        {"head_yeti", "head_yeti.obj"},
+        {"head_alien", "head_alien.obj"},
+        {"head_bluedemon", "head_bluedemon.obj"},
         {"arm_left", "arm_left.obj"},
         {"leg_left", "leg_left.obj"},
         {"wing_avian_left", "wing_left.obj"},
         {"wing_avian_right", "wing_right.obj"},
         {"tail_reptile", "tail_reptile.obj"},
         {"tail_reptile_tip", "tail_reptile_tip.obj"},
+        {"tail_spade", "tail_spade.obj"},
+        {"tail_spade_tip", "tail_spade_tip.obj"},
+        {"tail_club", "tail_club.obj"},
+        {"tail_club_tip", "tail_club_tip.obj"},
     };
     for (const auto &[geometryId, fileName] : objParts)
     {
@@ -1005,10 +1204,17 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
 
     // ---- render info table (UI grouping + materials) -----------------------
     const std::pair<const char *, const char *> slotOfPart[] = {
-        {"torso_humanoid", "torso"},  {"neck_transition", "neck"}, {"head_demon", "head"},
-        {"head_dragon", "head"},      {"head_serpent", "head"},    {"leg_humanoid_left", "legs"}, {"leg_humanoid_right", "legs"},
-        {"arm_humanoid_left", "arms"}, {"arm_humanoid_right", "arms"},     {"wing_avian_left", "wings"}, {"wing_avian_right", "wings"},
+        {"torso_humanoid", "torso"},  {"neck_transition", "neck"},
+        {"head_demon", "head"},      {"head_dragon", "head"},
+        {"head_serpent", "head"},    {"head_orc", "head"},
+        {"head_yeti", "head"},       {"head_alien", "head"},
+        {"head_bluedemon", "head"},
+        {"leg_humanoid_left", "legs"}, {"leg_humanoid_right", "legs"},
+        {"arm_humanoid_left", "arms"}, {"arm_humanoid_right", "arms"},
+        {"wing_avian_left", "wings"}, {"wing_avian_right", "wings"},
         {"tail_reptile", "tail"},     {"tail_reptile_tip", "tail"},
+        {"tail_spade", "tail"},       {"tail_spade_tip", "tail"},
+        {"tail_club", "tail"},        {"tail_club_tip", "tail"},
     };
     for (const PartDefinition &part : parts)
     {

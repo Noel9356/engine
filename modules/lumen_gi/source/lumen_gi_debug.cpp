@@ -70,7 +70,7 @@ glm::mat3 onb(const glm::vec3 &normal)
     return glm::mat3(tangent, bitangent, normal);
 }
 
-glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
+[[maybe_unused]] glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
 {
     color *= exposure;
     switch (mapper)
@@ -88,17 +88,17 @@ glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
     return color;
 }
 
-std::uint8_t toByte(float value)
+[[maybe_unused]] std::uint8_t toByte(float value)
 {
     return static_cast<std::uint8_t>(std::min(1.0f, std::max(0.0f, value)) * 255.0f + 0.5f);
 }
 
-glm::vec3 gammaEncode(glm::vec3 color)
+[[maybe_unused]] glm::vec3 gammaEncode(glm::vec3 color)
 {
     return glm::pow(glm::max(color, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
 }
 
-bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgb)
+[[maybe_unused]] bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgb)
 {
     std::FILE *file = std::fopen(filePath, "wb");
     if (file == nullptr)

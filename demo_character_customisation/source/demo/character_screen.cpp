@@ -54,6 +54,28 @@ using engine::window::WindowHandle;
 constexpr const char *kRecipeFileName   = "character_recipe.toml";
 constexpr const char *kFontRelativePath = "fonts/Inter-Variable.ttf";
 
+// Parts tinted by the skin.tone palette (the humanoid skin surface; monster
+// heads, tails, and wings keep their authored palettes).
+bool isSkinPart(const char *partId)
+{
+    static const char *skinParts[] = {
+        "torso_humanoid", "arm_humanoid_left", "arm_humanoid_right", "leg_humanoid_left", "leg_humanoid_right",
+        "neck_transition",
+    };
+    if (partId == nullptr)
+    {
+        return false;
+    }
+    for (const char *candidate : skinParts)
+    {
+        if (std::strcmp(partId, candidate) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 UiKey mapWindowKey(Key key)
 {
     switch (key)
@@ -492,36 +514,105 @@ bool CharacterScreen::secondTailPresent() const
     return instanceByName("tail2") != engine::character::invalidInstance;
 }
 
+bool CharacterScreen::addTail(const char *basePartId)
+{
+    if (instanceByName("tail") != engine::character::invalidInstance)
+    {
+        return true;
+    }
+    const char *tipPartId = std::strcmp(basePartId, "tail_spade") == 0
+        ? "tail_spade_tip"
+        : std::strcmp(basePartId, "tail_club") == 0 ? "tail_club_tip" : "tail_reptile_tip";
+    CharacterError   error  = CharacterError::None;
+    const InstanceId torso  = instanceByName("torso");
+    const InstanceId tail   = character_->addPart(character_->self, characterHandle_, basePartId, "tail", &error);
+    const InstanceId tailTip = tail != engine::character::invalidInstance
+        ? character_->addPart(character_->self, characterHandle_, tipPartId, "tail_tip", &error)
+        : engine::character::invalidInstance;
+    if (torso == engine::character::invalidInstance || tail == engine::character::invalidInstance
+        || tailTip == engine::character::invalidInstance)
+    {
+        return false;
+    }
+    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool        connected   = character_->connect(
+        character_->self, characterHandle_, torso, "tail.base", tail, "tail.root", nullptr, identity, &error);
+    connected = character_->connect(
+            character_->self, characterHandle_, tail, "tail.link", tailTip, "tail.end", nullptr, identity, &error)
+        && connected;
+    return connected;
+}
+
+bool CharacterScreen::removeTail()
+{
+    const InstanceId tailTip = instanceByName("tail_tip");
+    const InstanceId tail    = instanceByName("tail");
+    if (tail == engine::character::invalidInstance)
+    {
+        return true;
+    }
+    if (tailTip != engine::character::invalidInstance)
+    {
+        character_->removePart(character_->self, characterHandle_, tailTip);
+    }
+    return character_->removePart(character_->self, characterHandle_, tail);
+}
+
 bool CharacterScreen::addSecondTail()
 {
     if (secondTailPresent())
     {
         return true;
     }
-    CharacterError   error = CharacterError::None;
-    const InstanceId torso = instanceByName("torso");
-    const InstanceId tail2 = character_->addPart(character_->self, characterHandle_, "tail_reptile", "tail2", &error);
-    const InstanceId tail2Tip
-        = tail2 != engine::character::invalidInstance
-            ? character_->addPart(character_->self, characterHandle_, "tail_reptile_tip", "tail2_tip", &error)
-            : engine::character::invalidInstance;
+    CharacterError   error  = CharacterError::None;
+    const InstanceId torso  = instanceByName("torso");
+    const InstanceId tail2
+        = character_->addPart(character_->self, characterHandle_, activeTailVariant_.c_str(), "tail2", &error);
+    const char *tail2TipId = std::strcmp(activeTailVariant_.c_str(), "tail_spade") == 0
+        ? "tail_spade_tip"
+        : std::strcmp(activeTailVariant_.c_str(), "tail_club") == 0 ? "tail_club_tip" : "tail_reptile_tip";
+    const InstanceId tail2Tip = tail2 != engine::character::invalidInstance
+        ? character_->addPart(character_->self, characterHandle_, tail2TipId, "tail2_tip", &error)
+        : engine::character::invalidInstance;
     if (torso == engine::character::invalidInstance || tail2 == engine::character::invalidInstance
         || tail2Tip == engine::character::invalidInstance)
     {
         return false;
     }
-    // The second tail hangs to the side: the authored connector correction
-    // offset from the data model (BodyPartConnection.offset).
+    // The pair spreads symmetrically around the spine (the animation driver
+    // holds the base yaws; see updateAnimationDrivers). The tiny drop keeps
+    // the second tail's root ball clear of the first inside the pelvis. The
+    // base yaws are also applied right here so headless self-test runs see
+    // the spread without waiting for the next animation frame.
     const float offset[3] = {0.0f, -0.02f, 0.0f};
     float       yaw[4];
-    setYawRotation(yaw, 0.9f);
+    setYawRotation(yaw, 0.0f);
     const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     bool        connected   = character_->connect(
         character_->self, characterHandle_, torso, "tail.base", tail2, "tail.root", offset, yaw, &error);
-    connected
-        = character_->connect(
-              character_->self, characterHandle_, tail2, "tail.link", tail2Tip, "tail.end", nullptr, identity, &error)
-       && connected;
+    connected = character_->connect(
+            character_->self, characterHandle_, tail2, "tail.link", tail2Tip, "tail.end", nullptr, identity, &error)
+        && connected;
+    if (connected)
+    {
+        const float halfSpread = 0.55f;
+        float       leftYaw[4];
+        float       rightYaw[4];
+        setYawRotation(leftYaw, -halfSpread);
+        setYawRotation(rightYaw, halfSpread);
+        const InstanceId tail    = instanceByName("tail");
+        const InstanceId tailTip = instanceByName("tail_tip");
+        if (tail != engine::character::invalidInstance)
+        {
+            character_->setConnectionOffset(character_->self, characterHandle_, tail, nullptr, leftYaw);
+        }
+        if (tailTip != engine::character::invalidInstance)
+        {
+            character_->setConnectionOffset(character_->self, characterHandle_, tailTip, nullptr, leftYaw);
+        }
+        character_->setConnectionOffset(character_->self, characterHandle_, tail2, nullptr, rightYaw);
+        character_->setConnectionOffset(character_->self, characterHandle_, tail2Tip, nullptr, rightYaw);
+    }
     return connected;
 }
 
@@ -565,7 +656,8 @@ void CharacterScreen::resetToDefault()
         std::fprintf(stderr, "demo: could not recreate the default assembly (%u)\n", static_cast<unsigned>(error));
         return;
     }
-    activeHeadPart_ = "head_demon";
+    activeHeadPart_    = "head_demon";
+    activeTailVariant_ = "tail_reptile";
     applyParameterHeights();
     evaluateCharacter(true);
     setStatusMessage("Character reset to the Hybrid Biped profile");
@@ -599,6 +691,7 @@ void CharacterScreen::syncDeformation()
     character_->getParameter(character_->self, characterHandle_, "body.muscle_mass", &input.bodyMuscle);
     character_->getParameter(character_->self, characterHandle_, "head.size", &input.headSize);
     character_->getParameter(character_->self, characterHandle_, "head.muzzle_length", &input.headMuzzle);
+    character_->getParameter(character_->self, characterHandle_, "tail.curl", &input.tailCurl);
     if (deformationValid_ && std::memcmp(&input, &deformation_, sizeof(input)) == 0)
     {
         return;
@@ -767,18 +860,22 @@ void CharacterScreen::updateAnimationDrivers(double deltaSeconds, double elapsed
     (void)deltaSeconds;
     // Tail sway: connection offset rotations per segment. The module
     // re-derives the attached parts' transforms from the connectors, so
-    // geometry and attachment points stay synchronized.
-    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // geometry and attachment points stay synchronized. With two tails the
+    // pair spreads symmetrically around the spine (the fix for the old
+    // overlap: both tails used to hang on the same yaw and intersect), so
+    // each segment's offset rotation rides on its base yaw, not zero.
+    const float spread = secondTailPresent() ? 0.55f : 0.0f;
     const struct
     {
         const char *name;
         float       phase;
         float       amplitude;
+        float       baseYaw;
     } tailSegments[] = {
-        {"tail", 0.0f, 0.20f},
-        {"tail_tip", 0.9f, 0.30f},
-        {"tail2", 1.4f, 0.18f},
-        {"tail2_tip", 2.2f, 0.26f},
+        {"tail", 0.0f, 0.20f, -spread},
+        {"tail_tip", 0.9f, 0.30f, -spread},
+        {"tail2", 1.4f, 0.18f, spread},
+        {"tail2_tip", 2.2f, 0.26f, spread},
     };
     for (const auto &segment : tailSegments)
     {
@@ -787,18 +884,15 @@ void CharacterScreen::updateAnimationDrivers(double deltaSeconds, double elapsed
         {
             continue;
         }
+        float sway = 0.0f;
         if (animateTail_ && tailSwaySpeed_ > 0.01f)
         {
-            const float sway = std::sin(static_cast<float>(elapsedSeconds) * 1.7f * tailSwaySpeed_ + segment.phase)
-                             * segment.amplitude * tailSwaySpeed_;
-            float       rotation[4];
-            setYawRotation(rotation, sway);
-            character_->setConnectionOffset(character_->self, characterHandle_, instance, nullptr, rotation);
+            sway = std::sin(static_cast<float>(elapsedSeconds) * 1.7f * tailSwaySpeed_ + segment.phase)
+                 * segment.amplitude * tailSwaySpeed_;
         }
-        else
-        {
-            character_->setConnectionOffset(character_->self, characterHandle_, instance, nullptr, identity);
-        }
+        float rotation[4];
+        setYawRotation(rotation, segment.baseYaw + sway);
+        character_->setConnectionOffset(character_->self, characterHandle_, instance, nullptr, rotation);
     }
 
     // Wing flap: rotate the connection offset around the forward axis; the
@@ -822,6 +916,19 @@ void CharacterScreen::updateAnimationDrivers(double deltaSeconds, double elapsed
 
 void CharacterScreen::drawCharacter()
 {
+    // skin.tone indexes a five-swatch palette (see the panel); the tint is a
+    // draw-time material multiplier on the skin-tagged parts, so vertex
+    // colors keep their shading detail underneath.
+    float       skinTone = 0.0f;
+    character_->getParameter(character_->self, characterHandle_, "skin.tone", &skinTone);
+    static const glm::vec3 toneTints[5] = {
+        {1.00f, 1.00f, 1.00f},
+        {0.92f, 0.80f, 0.68f},
+        {0.82f, 0.68f, 0.55f},
+        {0.66f, 0.52f, 0.42f},
+        {0.42f, 0.40f, 0.42f},
+    };
+    const int toneIndex = std::clamp(static_cast<int>(skinTone + 0.5f), 0, 4);
     const std::uint32_t count = character_->instanceCount(character_->self, characterHandle_);
     for (std::uint32_t index = 0; index < count; ++index)
     {
@@ -846,7 +953,15 @@ void CharacterScreen::drawCharacter()
         {
             continue;
         }
-        render_->drawMesh(render_->self, rendererHandle_, mesh, matrix, &renderInfo->material);
+        MeshMaterial material = renderInfo->material;
+        if (isSkinPart(partId))
+        {
+            const glm::vec3 &tint = toneTints[toneIndex];
+            material.baseColor[0] *= tint.r;
+            material.baseColor[1] *= tint.g;
+            material.baseColor[2] *= tint.b;
+        }
+        render_->drawMesh(render_->self, rendererHandle_, mesh, matrix, &material);
     }
 }
 
@@ -1009,6 +1124,7 @@ void CharacterScreen::drawPanel(double deltaSeconds)
 
     // ---- head variants ---------------------------------------------------------
     uiHeading("Head");
+    std::size_t headButtons = 0;
     for (const std::string &partId : content_.partsInSlot("head"))
     {
         const PartRenderInfo *info = content_.renderInfoForPart(partId);
@@ -1018,7 +1134,7 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         }
         char label[96];
         std::snprintf(label, sizeof(label), "%s%s", partId == activeHeadPart_ ? "* " : "", info->displayName.c_str());
-        if (uiButton(label, 100.0f))
+        if (uiButton(label, 96.0f))
         {
             const InstanceId head = instanceByName("head");
             if (head != engine::character::invalidInstance)
@@ -1036,13 +1152,24 @@ void CharacterScreen::drawPanel(double deltaSeconds)
                 }
             }
         }
-        ui_->sameLine(ui_->self, uiContext_);
+        // three variant buttons per row keeps every slot variant on-panel
+        ++headButtons;
+        if (headButtons % 3 == 0)
+        {
+            ui_->spacing(ui_->self, uiContext_);
+        }
+        else
+        {
+            ui_->sameLine(ui_->self, uiContext_);
+        }
     }
     ui_->spacing(ui_->self, uiContext_);
 
     // ---- body parameters (central registry, per-asset bindings) ---------------
     uiHeading("Body Parameters");
-    const char *bodySliders[] = {"body.height", "body.width", "body.muscle_mass", "head.size", "head.muzzle_length"};
+    const char *bodySliders[] = {
+        "body.height", "body.width", "body.muscle_mass", "head.size", "head.muzzle_length", "neck.length",
+    };
     for (const char *parameter : bodySliders)
     {
         float  value    = 1.0f;
@@ -1068,8 +1195,8 @@ void CharacterScreen::drawPanel(double deltaSeconds)
     {
         float limbLength = 1.0f;
         const ParameterDefinition *lengthDefinition = parameterDefinition("limbs.length");
-        const float limbMinimum = lengthDefinition != nullptr ? lengthDefinition->minimum : 0.85f;
-        const float limbMaximum = lengthDefinition != nullptr ? lengthDefinition->maximum : 1.20f;
+        const float limbMinimum = lengthDefinition != nullptr ? lengthDefinition->minimum : 0.75f;
+        const float limbMaximum = lengthDefinition != nullptr ? lengthDefinition->maximum : 1.35f;
         character_->getParameter(character_->self, characterHandle_, "limbs.length", &limbLength);
         const float before = limbLength;
         if (uiSlider("Limb Length", &limbLength, limbMinimum, limbMaximum) && std::fabs(limbLength - before) > 1.0e-6f)
@@ -1080,8 +1207,8 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         }
         float limbThickness = 1.0f;
         const ParameterDefinition *thicknessDefinition = parameterDefinition("limbs.thickness");
-        const float thicknessMinimum = thicknessDefinition != nullptr ? thicknessDefinition->minimum : 0.75f;
-        const float thicknessMaximum = thicknessDefinition != nullptr ? thicknessDefinition->maximum : 1.35f;
+        const float thicknessMinimum = thicknessDefinition != nullptr ? thicknessDefinition->minimum : 0.65f;
+        const float thicknessMaximum = thicknessDefinition != nullptr ? thicknessDefinition->maximum : 1.55f;
         character_->getParameter(character_->self, characterHandle_, "limbs.thickness", &limbThickness);
         const float thicknessBefore = limbThickness;
         if (uiSlider("Limb Thickness", &limbThickness, thicknessMinimum, thicknessMaximum)
@@ -1089,6 +1216,34 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         {
             CharacterError error = CharacterError::None;
             character_->setParameter(character_->self, characterHandle_, "limbs.thickness", limbThickness, &error);
+        }
+    }
+    // Skin tone palette (industry pattern: swatches, not a raw color picker).
+    // The value is the tone index; drawCharacter maps it to a material tint on
+    // the skin-tagged parts.
+    {
+        const char *toneNames[] = {"Fair", "Tan", "Bronze", "Umber", "Charcoal"};
+        float       tone        = 0.0f;
+        character_->getParameter(character_->self, characterHandle_, "skin.tone", &tone);
+        const int currentTone = static_cast<int>(tone + 0.5f);
+        for (int candidate = 0; candidate < 5; ++candidate)
+        {
+            char label[32];
+            std::snprintf(label, sizeof(label), "%s%s", candidate == currentTone ? "* " : "", toneNames[candidate]);
+            if (uiButton(label, 58.0f))
+            {
+                CharacterError error = CharacterError::None;
+                character_->setParameter(
+                    character_->self, characterHandle_, "skin.tone", static_cast<float>(candidate), &error);
+            }
+            if (candidate % 3 == 2 || candidate == 4)
+            {
+                ui_->spacing(ui_->self, uiContext_);
+            }
+            else
+            {
+                ui_->sameLine(ui_->self, uiContext_);
+            }
         }
     }
 
@@ -1102,31 +1257,119 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         applyParameterHeights();
         evaluateCharacter(true);
     }
+    bool tail = instanceByName("tail") != engine::character::invalidInstance;
+    if (uiCheckbox("Tail", &tail))
     {
+        if (tail)
+        {
+            setStatusMessage(addTail(activeTailVariant_.c_str()) ? "Tail attached" : "Tail attachment failed");
+        }
+        else
+        {
+            setStatusMessage(removeTail() ? "Tail removed" : "Tail removal failed");
+        }
+        applyParameterHeights();
+        evaluateCharacter(true);
+    }
+    // Tail variants swap the base and the tip instances together so the chain
+    // keeps one look.
+    uiHeading("Tail Style");
+    const struct
+    {
+        const char *label;
+        const char *baseId;
+        const char *tipId;
+    } tailVariants[] = {
+        {"Reptile", "tail_reptile", "tail_reptile_tip"},
+        {"Spade", "tail_spade", "tail_spade_tip"},
+        {"Club", "tail_club", "tail_club_tip"},
+    };
+    std::size_t variantIndex = 0;
+    for (const auto &variant : tailVariants)
+    {
+        ++variantIndex;
+        char label[48];
+        std::snprintf(label, sizeof(label), "%s%s", activeTailVariant_ == variant.baseId ? "* " : "", variant.label);
+        if (uiButton(label, 62.0f))
+        {
+            const InstanceId tail    = instanceByName("tail");
+            const InstanceId tailTip = instanceByName("tail_tip");
+            bool             swapped = tail != engine::character::invalidInstance;
+            CharacterError   error   = CharacterError::None;
+            if (swapped)
+            {
+                swapped = character_->replacePart(character_->self, characterHandle_, tail, variant.baseId, &error);
+            }
+            if (swapped && tailTip != engine::character::invalidInstance)
+            {
+                swapped = character_->replacePart(character_->self, characterHandle_, tailTip, variant.tipId, &error);
+            }
+            if (swapped)
+            {
+                activeTailVariant_ = variant.baseId;
+                setStatusMessage(std::string("Tail style set to ") + variant.label);
+            }
+            else
+            {
+                setStatusMessage("Tail variant replacement rejected");
+            }
+            evaluateCharacter(true);
+        }
+        if (variantIndex % 3 == 2)
+        {
+            ui_->spacing(ui_->self, uiContext_);
+        }
+        else
+        {
+            ui_->sameLine(ui_->self, uiContext_);
+        }
+    }
+    {
+        const ParameterDefinition *spanDefinition = parameterDefinition("wings.span");
+        const float spanMinimum = spanDefinition != nullptr ? spanDefinition->minimum : 0.40f;
+        const float spanMaximum = spanDefinition != nullptr ? spanDefinition->maximum : 1.60f;
         float wingSpan = 1.0f;
         character_->getParameter(character_->self, characterHandle_, "wings.span", &wingSpan);
         const float before = wingSpan;
-        if (uiSlider("Wingspan", &wingSpan, 0.5f, 1.4f) && std::fabs(wingSpan - before) > 1.0e-6f)
+        if (uiSlider("Wingspan", &wingSpan, spanMinimum, spanMaximum) && std::fabs(wingSpan - before) > 1.0e-6f)
         {
             CharacterError error = CharacterError::None;
             character_->setParameter(character_->self, characterHandle_, "wings.span", wingSpan, &error);
         }
+        const ParameterDefinition *tailLengthDefinition = parameterDefinition("tail.length");
+        const float tailLengthMinimum = tailLengthDefinition != nullptr ? tailLengthDefinition->minimum : 0.45f;
+        const float tailLengthMaximum = tailLengthDefinition != nullptr ? tailLengthDefinition->maximum : 1.75f;
         float tailLength = 1.0f;
         character_->getParameter(character_->self, characterHandle_, "tail.length", &tailLength);
         const float tailBefore = tailLength;
-        if (uiSlider("Tail Length", &tailLength, 0.6f, 1.5f) && std::fabs(tailLength - tailBefore) > 1.0e-6f)
+        if (uiSlider("Tail Length", &tailLength, tailLengthMinimum, tailLengthMaximum)
+            && std::fabs(tailLength - tailBefore) > 1.0e-6f)
         {
             CharacterError error = CharacterError::None;
             character_->setParameter(character_->self, characterHandle_, "tail.length", tailLength, &error);
         }
+        const ParameterDefinition *tailThicknessDefinition = parameterDefinition("tail.thickness");
+        const float thicknessMinimum = tailThicknessDefinition != nullptr ? tailThicknessDefinition->minimum : 0.55f;
+        const float thicknessMaximum = tailThicknessDefinition != nullptr ? tailThicknessDefinition->maximum : 1.65f;
         float tailThickness = 1.0f;
         character_->getParameter(character_->self, characterHandle_, "tail.thickness", &tailThickness);
         const float thicknessBefore = tailThickness;
-        if (uiSlider("Tail Thickness", &tailThickness, 0.7f, 1.5f)
+        if (uiSlider("Tail Thickness", &tailThickness, thicknessMinimum, thicknessMaximum)
             && std::fabs(tailThickness - thicknessBefore) > 1.0e-6f)
         {
             CharacterError error = CharacterError::None;
             character_->setParameter(character_->self, characterHandle_, "tail.thickness", tailThickness, &error);
+        }
+        const ParameterDefinition *curlDefinition = parameterDefinition("tail.curl");
+        const float curlMinimum = curlDefinition != nullptr ? curlDefinition->minimum : -1.0f;
+        const float curlMaximum = curlDefinition != nullptr ? curlDefinition->maximum : 1.0f;
+        float tailCurl = 0.0f;
+        character_->getParameter(character_->self, characterHandle_, "tail.curl", &tailCurl);
+        const float curlBefore = tailCurl;
+        if (uiSlider("Tail Curl", &tailCurl, curlMinimum, curlMaximum) && std::fabs(tailCurl - curlBefore) > 1.0e-6f)
+        {
+            CharacterError error = CharacterError::None;
+            character_->setParameter(character_->self, characterHandle_, "tail.curl", tailCurl, &error);
         }
     }
     bool tailAnimation = animateTail_;
@@ -1334,38 +1577,68 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     const InstanceId head    = instanceByName("head");
     bool             applied = true;
 
-    if (name == "dragon" || name == "serpent")
+    if (name == "dragon" || name == "serpent" || name == "orc" || name == "yeti" || name == "alien"
+        || name == "bluedemon")
     {
         // Head variant swap: the head slot's alternative assets.
-        const char *partId = name == "dragon" ? "head_dragon" : "head_serpent";
+        const char *partId = name == "dragon"     ? "head_dragon"
+                           : name == "serpent"    ? "head_serpent"
+                           : name == "orc"        ? "head_orc"
+                           : name == "yeti"       ? "head_yeti"
+                           : name == "bluedemon"  ? "head_bluedemon"
+                                                  : "head_alien";
         applied            = head != engine::character::invalidInstance
                           && character_->replacePart(character_->self, characterHandle_, head, partId, &error);
         activeHeadPart_    = partId;
     }
+    else if (name == "spadetail" || name == "clubtail")
+    {
+        // Tail variant swap: base and tip instances move together.
+        const char *baseId = name == "spadetail" ? "tail_spade" : "tail_club";
+        const char *tipId  = name == "spadetail" ? "tail_spade_tip" : "tail_club_tip";
+        const InstanceId tail = instanceByName("tail");
+        const InstanceId tailTip = instanceByName("tail_tip");
+        applied               = tail != engine::character::invalidInstance
+                   && character_->replacePart(character_->self, characterHandle_, tail, baseId, &error);
+        if (applied && tailTip != engine::character::invalidInstance)
+        {
+            applied = character_->replacePart(character_->self, characterHandle_, tailTip, tipId, &error);
+        }
+        activeTailVariant_ = baseId;
+    }
+    else if (name == "curltail")
+    {
+        // The tail.curl parameter bends the baked tail mesh; the tail_end
+        // anchor follows through the matching joint-translation binding.
+        applied = setParameter("tail.curl", 1.0f);
+    }
     else if (name == "tall")
     {
         // Height range ends: the neck/head attachment must track the scaled
-        // torso through the parameter bindings.
-        applied = setParameter("body.height", 1.25f) && setParameter("limbs.length", 1.2f);
+        // torso through the parameter bindings, with the longest neck.
+        applied = setParameter("body.height", 1.35f) && setParameter("limbs.length", 1.35f)
+               && setParameter("neck.length", 1.3f);
         applyParameterHeights();
     }
     else if (name == "broad")
     {
         // Width/mass range ends: shoulders, hips, and arms must stay grafted.
-        applied = setParameter("body.width", 1.3f) && setParameter("body.muscle_mass", 1.4f)
-               && setParameter("limbs.thickness", 1.35f);
+        applied = setParameter("body.width", 1.45f) && setParameter("body.muscle_mass", 1.55f)
+               && setParameter("limbs.thickness", 1.55f);
     }
     else if (name == "longtail")
     {
-        // Tail length range end plus a second tail on the same mount.
-        applied = setParameter("tail.length", 1.5f) && setParameter("tail.thickness", 1.3f) && addSecondTail();
+        // Tail length range end plus a second tail spread symmetrically.
+        applied = setParameter("tail.length", 1.75f) && setParameter("tail.thickness", 1.65f)
+               && setParameter("tail.curl", 0.8f) && addSecondTail();
     }
     else if (name == "compact")
     {
         // Everything small at once: the opposite range end of every parameter.
-        applied = setParameter("body.height", 0.85f) && setParameter("body.width", 0.8f)
-               && setParameter("limbs.length", 0.85f) && setParameter("head.size", 0.8f)
-               && setParameter("tail.length", 0.6f) && setParameter("wings.span", 0.5f);
+        applied = setParameter("body.height", 0.75f) && setParameter("body.width", 0.70f)
+               && setParameter("limbs.length", 0.75f) && setParameter("head.size", 0.70f)
+               && setParameter("tail.length", 0.45f) && setParameter("wings.span", 0.40f)
+               && setParameter("neck.length", 0.80f);
         applyParameterHeights();
     }
     else if (name == "noappend")
@@ -1436,28 +1709,111 @@ bool CharacterScreen::runSelfTest()
     {
         const InstanceId head  = instanceByName("head");
         CharacterError   error = CharacterError::None;
-        const bool replaced    = head != engine::character::invalidInstance
-                              && character_->replacePart(character_->self, characterHandle_, head, "head_dragon", &error);
+        const bool replaced = head != engine::character::invalidInstance
+            && character_->replacePart(character_->self, characterHandle_, head, "head_dragon", &error);
         check("replace demon head with dragon head", replaced && evaluateCharacter(true) && issues_.empty());
     }
 
     // 2. Change leg proportions.
     {
         CharacterError error = CharacterError::None;
-        const bool set = character_->setParameter(character_->self, characterHandle_, "limbs.length", 1.2f, &error);
+        const bool set = character_->setParameter(character_->self, characterHandle_, "limbs.length", 1.35f, &error);
         applyParameterHeights();
         float boundsCenter[3] = {0.0f, 0.0f, 0.0f};
         float boundsRadius    = 0.0f;
-        check("change leg proportions (limbs.length=1.2)",
+        check("change leg proportions (limbs.length=1.35)",
             set && evaluateCharacter(true)
                 && character_->bounds(character_->self, characterHandle_, boundsCenter, &boundsRadius)
                 && boundsRadius > 0.8f);
     }
 
-    // 3. Add a second tail (connector capacity 2 + offset correction).
+    // 2b. Swap through every head variant (the three revision-3 heads plus
+    // the three revision-4 cuts) and both tail variants.
+    {
+        const InstanceId head    = instanceByName("head");
+        const InstanceId tail    = instanceByName("tail");
+        const InstanceId tailTip = instanceByName("tail_tip");
+        CharacterError   error   = CharacterError::None;
+        bool             allOk   = head != engine::character::invalidInstance;
+        for (const char *partId : {"head_orc", "head_yeti", "head_alien", "head_bluedemon", "head_demon"})
+        {
+            allOk = allOk && character_->replacePart(character_->self, characterHandle_, head, partId, &error)
+                && evaluateCharacter(true) && issues_.empty();
+        }
+        allOk = allOk && tail != engine::character::invalidInstance
+            && character_->replacePart(character_->self, characterHandle_, tail, "tail_spade", &error)
+            && tailTip != engine::character::invalidInstance
+            && character_->replacePart(character_->self, characterHandle_, tailTip, "tail_spade_tip", &error)
+            && evaluateCharacter(true) && issues_.empty();
+        allOk = allOk && character_->replacePart(character_->self, characterHandle_, tail, "tail_club", &error)
+            && character_->replacePart(character_->self, characterHandle_, tailTip, "tail_club_tip", &error)
+            && evaluateCharacter(true) && issues_.empty();
+        allOk = allOk && character_->replacePart(character_->self, characterHandle_, tail, "tail_reptile", &error)
+            && character_->replacePart(character_->self, characterHandle_, tailTip, "tail_reptile_tip", &error)
+            && evaluateCharacter(true) && issues_.empty();
+        activeHeadPart_    = "head_demon";
+        activeTailVariant_ = "tail_reptile";
+        check("swap every head and tail variant", allOk);
+    }
+
+    // 2c. The full widened-range extreme sweep: every parameter at once must
+    // stay junction-safe (the revision-4 validated ranges).
+    {
+        const auto setParameterSafe = [&](const char *parameter, float value)
+        {
+            CharacterError parameterError = CharacterError::None;
+            return character_->setParameter(character_->self, characterHandle_, parameter, value, &parameterError);
+        };
+        CharacterError error = CharacterError::None;
+        const bool set = setParameterSafe("body.height", 1.35f)
+            && setParameterSafe("body.width", 1.45f)
+            && setParameterSafe("body.muscle_mass", 1.55f)
+            && setParameterSafe("head.size", 1.50f)
+            && setParameterSafe("head.muzzle_length", 1.60f)
+            && setParameterSafe("neck.length", 1.30f)
+            && setParameterSafe("limbs.length", 1.35f)
+            && setParameterSafe("limbs.thickness", 1.55f)
+            && setParameterSafe("tail.length", 1.75f)
+            && setParameterSafe("tail.thickness", 1.65f)
+            && setParameterSafe("tail.curl", 1.0f)
+            && setParameterSafe("wings.span", 1.60f)
+            && setParameterSafe("skin.tone", 4.0f);
+        applyParameterHeights();
+        check("every parameter at its range end validates", set && evaluateCharacter(true) && issues_.empty());
+        // restore defaults for the remaining checks
+        for (const char *parameter : {"body.height", "body.width", "body.muscle_mass", "head.size",
+                 "head.muzzle_length", "neck.length", "limbs.length", "limbs.thickness", "tail.length",
+                 "tail.thickness", "wings.span", "skin.tone"})
+        {
+            character_->setParameter(character_->self, characterHandle_, parameter, 1.0f, &error);
+        }
+        character_->setParameter(character_->self, characterHandle_, "tail.curl", 0.0f, &error);
+        applyParameterHeights();
+        evaluateCharacter(true);
+    }
+
+    // 3. Add a second tail (connector capacity 2 + offset correction); the
+    // pair must spread symmetrically instead of hanging on the same yaw.
     {
         const bool added = addSecondTail();
-        check("add a second tail (appendage.mount capacity 2)", added && evaluateCharacter(true) && issues_.empty());
+        evaluateCharacter(true);
+        float tailTipMatrix[16] = {};
+        float tail2TipMatrix[16] = {};
+        const InstanceId tailTip    = instanceByName("tail_tip");
+        const InstanceId tail2TipId = instanceByName("tail2_tip");
+        const bool transformed = added && tailTip != engine::character::invalidInstance
+            && tail2TipId != engine::character::invalidInstance
+            && character_->instanceTransform(character_->self, characterHandle_, tailTip, tailTipMatrix)
+            && character_->instanceTransform(character_->self, characterHandle_, tail2TipId, tail2TipMatrix);
+        const float separation = transformed
+            ? std::sqrt((tailTipMatrix[12] - tail2TipMatrix[12]) * (tailTipMatrix[12] - tail2TipMatrix[12])
+                + (tailTipMatrix[13] - tail2TipMatrix[13]) * (tailTipMatrix[13] - tail2TipMatrix[13])
+                + (tailTipMatrix[14] - tail2TipMatrix[14]) * (tailTipMatrix[14] - tail2TipMatrix[14]))
+            : 0.0f;
+        // The tips ride their base yaws (±0.55 rad) - the old bug hung both
+        // tails on the same transform and they intersected.
+        check("add a second tail (capacity 2) with symmetric spread",
+            added && evaluateCharacter(true) && issues_.empty() && separation > 0.15f);
     }
 
     // 4. Remove both wings.
@@ -1469,16 +1825,16 @@ bool CharacterScreen::runSelfTest()
     // 5. Change torso width.
     {
         CharacterError error = CharacterError::None;
-        const bool     set   = character_->setParameter(character_->self, characterHandle_, "body.width", 1.3f, &error);
-        check("change torso width (body.width=1.3)", set && evaluateCharacter(true) && issues_.empty());
+        const bool set = character_->setParameter(character_->self, characterHandle_, "body.width", 1.45f, &error);
+        check("change torso width (body.width=1.45)", set && evaluateCharacter(true) && issues_.empty());
     }
 
     // 6. Animate the tail independently: connection offset must move the tip.
     {
         const InstanceId tailTip    = instanceByName("tail_tip");
         float            before[16] = {};
-        const bool hadTransform     = tailTip != engine::character::invalidInstance
-                                   && character_->instanceTransform(character_->self, characterHandle_, tailTip, before);
+        const bool hadTransform = tailTip != engine::character::invalidInstance
+            && character_->instanceTransform(character_->self, characterHandle_, tailTip, before);
         float      yaw[4];
         setYawRotation(yaw, 0.6f);
         character_->setConnectionOffset(character_->self, characterHandle_, tailTip, nullptr, yaw);
@@ -1541,9 +1897,9 @@ bool CharacterScreen::runSelfTest()
     // the head-to-neck distance stays the authored neck length.
     {
         CharacterError error = CharacterError::None;
-        const bool     set   = character_->setParameter(character_->self, characterHandle_, "head.size", 1.35f, &error)
-                       && character_->setParameter(character_->self, characterHandle_, "body.width", 1.3f, &error)
-                       && character_->setParameter(character_->self, characterHandle_, "body.muscle_mass", 1.4f, &error);
+        const bool set = character_->setParameter(character_->self, characterHandle_, "head.size", 1.50f, &error)
+            && character_->setParameter(character_->self, characterHandle_, "body.width", 1.45f, &error)
+            && character_->setParameter(character_->self, characterHandle_, "body.muscle_mass", 1.55f, &error);
         const InstanceId head = instanceByName("head");
         const InstanceId neck = instanceByName("neck");
         float headMatrix[16] = {};

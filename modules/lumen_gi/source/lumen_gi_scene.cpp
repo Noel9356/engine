@@ -890,6 +890,10 @@ void snapProbeLevels(GiPipelineState &state, const glm::vec3 &cameraPosition)
 void captureCard(GiPipelineState &state, GiCard &card, const GiSurface &surface, std::uint32_t texelBegin,
     std::uint32_t texelEnd)
 {
+    // The state carries the capture settings shared by the card families;
+    // this family reads everything from the surface, so the parameter is
+    // deliberately unused here.
+    (void)state;
     if (surface.excluded)
     {
         return;

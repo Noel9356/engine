@@ -87,7 +87,9 @@ void applySettingsToState(const GiSettings &settings, GiPipelineState &state)
 }
 
 // One stage task executed on the scheduler; failures reject the graph.
-void runStageChunk(const std::function<void()> &work)
+// (Referenced by the scheduler-driven stage paths; kept [[maybe_unused]] so
+// configurations that inline the stage work do not warn.)
+[[maybe_unused]] void runStageChunk(const std::function<void()> &work)
 {
     work();
 }

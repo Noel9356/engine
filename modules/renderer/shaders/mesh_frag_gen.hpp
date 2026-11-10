@@ -7998,3 +7998,6 @@ inline constexpr std::uint32_t meshFragmentSpirv[] = {
     0x00000342,
     0x00010038,
 };
+
+} // namespace renderer
+} // namespace engine

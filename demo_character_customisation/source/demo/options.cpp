@@ -85,11 +85,15 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         }
         else if (argument == "--character-drive")
         {
-            if (value != "dragon" && value != "serpent" && value != "tall" && value != "broad" && value != "longtail"
-                && value != "compact" && value != "noappend")
+            const char *allowedPresets[] = {"dragon", "serpent", "orc", "yeti", "alien", "bluedemon", "spadetail",
+                "clubtail", "curltail", "tall", "broad", "longtail", "compact", "noappend"};
+            const bool allowed = std::find(std::begin(allowedPresets), std::end(allowedPresets), value)
+                              != std::end(allowedPresets);
+            if (!allowed)
             {
                 outError = "invalid character drive preset '" + value
-                         + "'; expected dragon, serpent, tall, broad, longtail, compact, or noappend";
+                         + "'; expected dragon, serpent, orc, yeti, alien, bluedemon, spadetail, clubtail,"
+                           " curltail, tall, broad, longtail, compact, or noappend";
                 return false;
             }
             parsedOptions.characterDrive = value;

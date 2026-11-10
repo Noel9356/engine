@@ -87,6 +87,8 @@ private:
     bool                          addWings();
     bool                          removeWings();
     bool                          wingsPresent() const;
+    bool                          addTail(const char *basePartId);
+    bool                          removeTail();
     bool                          addSecondTail();
     bool                          removeSecondTail();
     bool                          secondTailPresent() const;
@@ -161,6 +163,7 @@ private:
     float                                           statusSeconds_       = 0.0f;
     float                                           framesPerSecond_     = 0.0f;
     std::string                                     activeHeadPart_      = "head_demon";
+    std::string                                     activeTailVariant_   = "tail_reptile";
     bool                                            panelFirstPlacement_ = true;
     bool                                            panelVisible_        = true;
     std::vector<engine::character::ValidationIssue> issues_;

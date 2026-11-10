@@ -55,6 +55,7 @@ struct DeformationInput
     float bodyMuscle = 1.0f;
     float headSize   = 1.0f;
     float headMuzzle = 1.0f;
+    float tailCurl   = 0.0f;
 };
 
 // Body-part content for one character screen. Create before creating the
@@ -108,7 +109,7 @@ private:
         std::vector<std::string>     morphNames;
         std::vector<std::vector<glm::vec3>> morphDeltas;
         std::vector<std::uint32_t>   morphVertexIds; // expanded corner -> welded source vertex
-        glm::vec3                    morphWeights{0.0f, 0.0f, 0.0f};
+        std::vector<float>           morphWeights;   // one weight per baked morph
         bool                         uploaded = false;
     };
 

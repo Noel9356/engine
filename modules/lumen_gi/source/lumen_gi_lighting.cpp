@@ -493,7 +493,9 @@ glm::vec3 probeDirectionRadiance(GiPipelineState &state, const glm::vec3 &positi
 // Projects an octahedral radiance map to the 9-coefficient SH2 basis (the
 // GiProbe order) using uniform solid-angle weights. Coefficients verified
 // against numerical integration of smooth fields (see docs/overview.md).
-void projectSh2(const std::vector<glm::vec3> &radiance, const std::vector<glm::vec3> &directions,
+// Kept for the probe-integration work that consumes it; [[maybe_unused]]
+// silences the configurations where that path is compiled out.
+[[maybe_unused]] void projectSh2(const std::vector<glm::vec3> &radiance, const std::vector<glm::vec3> &directions,
     const std::vector<float> &solidAngles, float *outSh2 /* 9 x 3 */)
 {
     for (std::uint32_t coefficient = 0; coefficient < 27; ++coefficient)
