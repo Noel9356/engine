@@ -30,8 +30,9 @@ const char *optionsUsage() noexcept
            "  --view character|benchmark|sun\n"
            "                           Select the screen (default: character).\n"
            "  --character-test         Run the character assembly test operations, then exit.\n"
-           "  --character-drive <name> Apply a named configuration (dragon, serpent, tall, broad,\n"
-           "                           longtail, compact, noappend) to the character screen.\n";
+           "  --character-drive <name> Apply a named configuration (human, dragonhead, centaur, naga,\n"
+           "                           quadruped, wolf, deer, bull, twoheaded, threewings, fourarms,\n"
+           "                           wingedtail, tall, broad, longtail, compact, noappend).\n";
 }
 
 // Strict flag parser: every recognized flag consumes the next token as its
@@ -45,8 +46,8 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         const std::string &argument = arguments[index];
         if (argument != "--screenshot" && argument != "--screenshot-frame" && argument != "--quit-after"
             && argument != "--camera" && argument != "--camera-yaw" && argument != "--camera-pitch"
-            && argument != "--orbit-distance" && argument != "--hide-panel" && argument != "--view"
-            && argument != "--character-test" && argument != "--character-drive")
+            && argument != "--orbit-distance" && argument != "--camera-target-y" && argument != "--hide-panel"
+            && argument != "--view" && argument != "--character-test" && argument != "--character-drive")
         {
             outError = "unknown application argument '" + argument + "'";
             return false;
@@ -85,15 +86,16 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         }
         else if (argument == "--character-drive")
         {
-            const char *allowedPresets[] = {"dragon", "serpent", "orc", "yeti", "alien", "bluedemon", "spadetail",
-                "clubtail", "curltail", "tall", "broad", "longtail", "compact", "noappend"};
+            const char *allowedPresets[] = {"human", "dragonhead", "centaur", "naga", "quadruped", "wolf", "deer",
+                "bull", "twoheaded", "threewings", "fourarms", "wingedtail", "tall", "broad", "longtail",
+                "compact", "noappend"};
             const bool allowed = std::find(std::begin(allowedPresets), std::end(allowedPresets), value)
                               != std::end(allowedPresets);
             if (!allowed)
             {
                 outError = "invalid character drive preset '" + value
-                         + "'; expected dragon, serpent, orc, yeti, alien, bluedemon, spadetail, clubtail,"
-                           " curltail, tall, broad, longtail, compact, or noappend";
+                         + "'; expected human, dragonhead, centaur, naga, quadruped, wolf, deer, bull, twoheaded,"
+                           " threewings, fourarms, wingedtail, tall, broad, longtail, compact, or noappend";
                 return false;
             }
             parsedOptions.characterDrive = value;
@@ -118,7 +120,8 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
             }
             parsedOptions.cameraMode = value;
         }
-        else if (argument == "--camera-yaw" || argument == "--camera-pitch" || argument == "--orbit-distance")
+        else if (argument == "--camera-yaw" || argument == "--camera-pitch" || argument == "--orbit-distance"
+                 || argument == "--camera-target-y")
         {
             char        *numericEnd = nullptr;
             const double parsed     = std::strtod(value.c_str(), &numericEnd);
@@ -135,6 +138,10 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
             else if (argument == "--camera-pitch")
             {
                 parsedOptions.cameraPitchDegrees = static_cast<float>(std::clamp(parsed, -80.0, 80.0));
+            }
+            else if (argument == "--camera-target-y")
+            {
+                parsedOptions.cameraTargetY = static_cast<float>(std::clamp(parsed, -2.0, 6.0));
             }
             else
             {

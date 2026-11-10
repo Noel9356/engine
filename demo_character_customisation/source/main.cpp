@@ -1142,8 +1142,9 @@ int main(int argc, char **argv)
         }
         if (demoOptions.cameraFramingSet)
         {
-            characterScreen.configureCamera(
-                demoOptions.cameraYawDegrees, demoOptions.cameraPitchDegrees, demoOptions.orbitDistance);
+            characterScreen.configureCamera(demoOptions.cameraYawDegrees, demoOptions.cameraPitchDegrees,
+                demoOptions.orbitDistance, demoOptions.cameraTargetY);
+            characterScreen.setUserCameraFraming(true);
         }
         if (demoOptions.hidePanel)
         {

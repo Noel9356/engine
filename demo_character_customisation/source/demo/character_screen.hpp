@@ -56,11 +56,12 @@ public:
     // Camera framing override for automated captures (--camera-yaw /
     // --camera-pitch / --orbit-distance): yaw is measured around the
     // character with 0 looking from +Z (the character's front).
-    void configureCamera(float yawDegrees, float pitchDegrees, float orbitDistance);
+    void configureCamera(float yawDegrees, float pitchDegrees, float orbitDistance, float targetY);
 
     // Hides the studio panel (the --hide-panel capture mode); the viewport
     // keeps rendering so screenshots show the character alone.
     void setPanelVisible(bool visible);
+    void setUserCameraFraming(bool user); // CLI --orbit-distance/--camera-target-y survive updates
 
     // Applies a named configuration (the --character-drive presets used by
     // the automated capture runs): swaps head variants, drives parameters to
@@ -84,22 +85,21 @@ private:
 
     // Assembly helpers.
     engine::character::InstanceId instanceByName(const std::string &name) const;
-    bool                          addWings();
-    bool                          removeWings();
-    bool                          wingsPresent() const;
-    bool                          addTail(const char *basePartId);
-    bool                          removeTail();
-    bool                          addSecondTail();
-    bool                          removeSecondTail();
-    bool                          secondTailPresent() const;
-    void                          applyParameterHeights(); // keeps the feet near the ground plane
+    bool                          rebuildAssembly();  // (re)create the assembly for the active body plan
+    bool                          setPlan(int plan);  // 0 humanoid, 1 centaur, 2 naga, 3 quadruped
+    bool                          setQuadSpecies(int species); // 0 horse, 1 wolf, 2 deer, 3 bull
+    bool                          setHeadCount(int count);     // 1..3 heads on the neck connector
+    bool                          setWingPairs(int pairs);     // 0..3 stacked wing pairs
+    bool                          setArmPairs(int pairs);      // 1..3 arm pairs along the torso
+    bool                          setTail(bool present);       // reptile tail on humanoid/centaur
+    bool                          addWingPairToSlot(int slot);
+    void                          applyParameterHeights(); // keeps the feet/hooves near the ground plane
     void                          resetToDefault();
 
     // Evaluation + rendering.
     // evaluateCharacter re-derives transforms; full validation runs only when
     // requested (structure/parameter changes), never per animation frame.
     bool evaluateCharacter(bool validate = false);
-    void syncDeformation();
     void updateAnimationDrivers(double deltaSeconds, double elapsedSeconds);
     void drawCharacter();
     void drawFloor();
@@ -162,19 +162,21 @@ private:
     std::string                                     statusMessage_       = "Welcome - drag to orbit, edit the panel";
     float                                           statusSeconds_       = 0.0f;
     float                                           framesPerSecond_     = 0.0f;
-    std::string                                     activeHeadPart_      = "head_demon";
-    std::string                                     activeTailVariant_   = "tail_reptile";
+    std::string                                     activeHeadPart_      = "head_human";
+    int                                             activePlan_          = 0;   // body.plan index
+    int                                             quadSpecies_         = 0;   // quadruped variant index
+    int                                             headCount_           = 1;   // 1..3
+    int                                             wingPairs_           = 0;   // 0..3
+    int                                             armPairs_            = 1;   // 1..3
+    bool                                            tailPresent_         = false;
     bool                                            panelFirstPlacement_ = true;
     bool                                            panelVisible_        = true;
+    bool                                            userCameraFraming_   = false; // explicit CLI framing active
     std::vector<engine::character::ValidationIssue> issues_;
     bool                                            created_ = false;
 
-    // Cached parameter registry (slider ranges) and the last deformation
-    // state pushed into the content layer (morph reuploads happen only when
-    // a slider actually moved).
+    // Cached parameter registry (slider ranges for the panel).
     std::vector<engine::character::ParameterDefinition> parameterDefinitions_;
-    DeformationInput                                    deformation_{};
-    bool                                                deformationValid_ = false;
 };
 
 } // namespace demo

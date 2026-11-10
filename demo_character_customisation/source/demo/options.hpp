@@ -22,6 +22,7 @@ struct Options
     std::string   cameraMode;                  // --camera fly|orbit|fixed; empty = use [camera] mode config.
     float         cameraYawDegrees = 0.0f;     // --camera-yaw: character-screen orbit azimuth around the target.
     float         cameraPitchDegrees = 18.0f;  // --camera-pitch: character-screen orbit elevation.
+    float         cameraTargetY = 1.0f;        // --camera-target-y: orbit target height (junction close-ups).
     float         orbitDistance = 2.6f;        // --orbit-distance: character-screen orbit radius in meters.
     bool          cameraFramingSet = false;    // true once any framing flag was given.
     bool          hidePanel = false;           // --hide-panel: capture the viewport without the studio UI.
