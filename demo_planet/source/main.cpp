@@ -1140,7 +1140,6 @@ int main(int argc, char **argv)
     glm::dvec3 target   = planetCenter;
     double     nearZ    = planetRadius * 0.01;
     double     farZ     = planetRadius * 12.0;
-    double     eyeSpeed = planetRadius * 0.04; // orbit linear speed for --orbit
 
     if (options.viewName == "globe")
     {
@@ -1322,7 +1321,6 @@ int main(int argc, char **argv)
         // the 120 km far plane.
         nearZ    = 15.0;
         farZ     = planetRadius * 2.0;
-        eyeSpeed = 6.0;
         // Open-framing guarantee: whatever the ground ahead does, the view
         // pitch stays in a band that keeps the horizon in frame (deep enough
         // to keep landscape in the lower half, shallow enough to keep sky

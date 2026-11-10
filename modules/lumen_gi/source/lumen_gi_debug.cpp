@@ -32,8 +32,6 @@ namespace lumen_gi
 namespace
 {
 
-}
-
 // Interpolates the world-space radiance cache at a direction: trilinear
 // blend of the surrounding probes' octahedral texel values weighted by their
 // validity (Lumen shortens screen probe rays and interpolates the world cache

@@ -29,8 +29,6 @@ namespace lumen_gi
 namespace
 {
 
-}
-
 glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
 {
     color *= exposure;

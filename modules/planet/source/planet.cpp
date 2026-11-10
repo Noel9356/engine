@@ -199,7 +199,6 @@ void Planet::update(const Vec3 &eyeLocal)
         std::fprintf(stderr, "planet-diag: update %llu visible %zu readyVisible %u requests %u cache %zu started %u completed %u eye(%.1f,%.1f,%.1f) depths",
             static_cast<unsigned long long>(updateCount_), visible.size(), readyVisible, lastNewRequests, readyMeshes_.size(),
             workerStartedCount_.load(), workerCompletedCount_.load(),
-            static_cast<unsigned long long>(updateCount_), visible.size(), readyVisible, lastNewRequests, readyMeshes_.size(),
             eyeLocal.x, eyeLocal.y, eyeLocal.z);
         for (std::uint32_t depth = 0; depth < 16; ++depth)
         {
