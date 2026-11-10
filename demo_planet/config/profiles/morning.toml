@@ -1,0 +1,9 @@
+# Morning-light profile for demo_planet: overlays the app engine.toml with a
+# lower, cooler sun (long shadows along the cliffs). Usage:
+#   demo_planet --profile config/profiles/morning.toml
+# (the demo's CMake config dir is copied into the runtime layout)
+
+[pbr]
+sun_color     = [1.0, 0.90, 0.78]
+sun_direction = [0.72, 0.28, 0.36]
+sun_intensity = 3.6

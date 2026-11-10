@@ -1,0 +1,186 @@
+# planet module configuration defaults.
+#
+# Every generation knob of the module lives here; the struct defaults in
+# params.hpp mirror these values. All lengths are meters (planets scale to
+# arbitrary radii - raise radius_meters and the wavelengths/amplitudes that
+# should scale with it), angles/axes are unit vectors, colors are linear RGB
+# rows in Biome enum order (see types.hpp).
+
+[planet]
+seed                   = 1337
+# The showcase planet is 60 km across (radius 60000 m): with Earth-like relief
+# amplitudes the relief fraction lands near real planets (~1%), so globe views
+# read as a planet instead of a spiked marble. The large-scale relief layers
+# below have wavelengths scaled to this radius; the close-range layers (hills
+# and finer) stay metric and do not care about the radius.
+radius_meters          = 60000.0
+sea_level_offset_meters = 0.0
+axis                   = [0.0, 1.0, 0.0]
+
+# octree / LOD
+leaf_grid_n              = 16
+target_voxel_meters      = 2.5
+max_depth_limit          = 18
+# refine while the chunk's voxel subtends more than this many radians at the
+# eye (screen-space LOD): detail follows apparent size, independent of planet
+# radius, viewport and zoom. Smaller = finer views everywhere, but the visible
+# chunk count grows quadratically; 0.02 keeps the finest voxel within ~200 m
+# of a ground-level eye.
+lod_angular_voxel_radians = 0.02
+# per-depth low-pass: density content below voxel * factor fades out before
+# coarse chunks sample it. Without this, sub-voxel detail octaves alias into
+# random spikes on every coarse LOD surface (the "spiky globe"). Marching
+# cubes needs ~4 samples per wavelength for smooth surfaces: 2.0 fades content
+# out below 2 voxels and lets it render at full strength from 4 voxels up.
+# Raise it to trade close-range roughness for cheaper, smoother chunks.
+lod_band_limit_factor    = 2.0
+horizon_culling          = true
+bounding_factor          = 1.4
+# async chunk builds: several thousand chunks can be selected at once by the
+# screen-space LOD on ground views, so the pipeline runs wide open by default
+# (one build per worker). Lower these for interactive use on small machines.
+max_concurrent_builds    = 16
+max_new_builds_per_update = 48
+chunk_eviction_updates   = 240
+# The cache must hold the whole visible set plus working room: at ground views
+# on the 60 km planet the screen-space LOD selects ~9000 chunks (depth 4-12);
+# a cache smaller than the visible set evicts ready meshes and rebuilds them
+# in a churn loop.
+chunk_cache_capacity     = 16384
+
+# relief shaping
+# Large-scale layers (continents ... regional) carry wavelengths scaled to the
+# 60 km radius: the globe's coarse LOD chunks (voxels of roughly 1-3 km at
+# globe view) can then resolve them, which is what makes the planet read as
+# textured landmasses and mountain ranges instead of smooth blobs.
+continent_amplitude_meters   = 560.0
+continent_wavelength_meters  = 34000.0
+# Fewer octaves = fewer medium patches: landmass cores stay contiguous and
+# coastline complexity comes from the warp plus the hills near the shore.
+continent_octaves            = 4
+# domain_warp_amplitude is an ANGULAR displacement (fraction of a radian-ish
+# bend of the sample direction): at radius R it shears features by roughly
+# amplitude * R meters. 0.18 at 60 km bends coastlines by ~10 km without
+# shredding landmasses into filaments (0.5 sheared ~30 km - archipelagos).
+domain_warp_amplitude        = 0.18
+domain_warp_wavelength_meters = 14000.0
+mountain_amplitude_meters    = 1100.0
+mountain_wavelength_meters   = 9000.0
+mountain_mask_low            = 0.08
+mountain_mask_high           = 0.45
+mountain_sharpness           = 1.25
+mountain_octaves             = 5
+# mountain profile shaping: the ridged crest field rides on a broad smooth
+# mass field (mountain_mass_fraction splits the amplitude), and a broad
+# range-cluster field groups uplift into distinct ranges with foothill gaps
+# (range_cluster_strength). Without them, mountains read as uniform
+# needle/rib carpets.
+mountain_mass_fraction        = 0.50
+range_cluster_strength        = 0.55
+range_cluster_wavelength_meters = 20000.0
+# regional relief: broad plateaus/basins/valley systems between the continent
+# and hill bands - the layer that carries landform structure at globe scale.
+regional_amplitude_meters    = 80.0
+regional_wavelength_meters   = 6500.0
+regional_octaves             = 3
+# Close-range layers stay metric (independent of the planet radius): rolling
+# hills, surface roughness, overhangs and strata are features a walker sees.
+hill_amplitude_meters        = 110.0
+hill_wavelength_meters       = 1000.0
+hill_octaves                 = 5
+# fine detail layer: surface roughness between the hill wavelength and the
+# voxel size (rock ribs, soil ripples). detail_plains_fraction keeps flat
+# ground walkable (values above ~0.3 boil plains into noise lumps);
+# mountains/cliffs carry full strength.
+detail_amplitude_meters      = 14.0
+detail_wavelength_meters     = 120.0
+detail_plains_fraction       = 0.22
+detail_octaves               = 4
+terrace_strength             = 0.60
+terrace_steps                = 9.0
+cliff_wavelength_meters      = 1400.0
+
+# true-3D terms (overhangs, strata, caves)
+# overhang_plains_fraction: how much 3D displacement survives on flat ground;
+# large values boil plains into noise lumps.
+overhang_amplitude_meters   = 38.0
+overhang_wavelength_meters  = 300.0
+overhang_plains_fraction    = 0.06
+# strata: banded rock on cliff faces. strata_warp bends the bands; values
+# >= 2 fold the sinusoid into nested ripple rings (an artefact, not geology).
+strata_amplitude_meters     = 3.0
+strata_band_meters          = 34.0
+strata_warp                 = 1.1
+# strata is additionally gated to genuinely terraced country (cliff mask above
+# ~0.65) inside the field; open slopes keep no corduroy banding at all.
+caves_enabled               = false
+cave_threshold              = 0.16
+cave_worm_wavelength_meters = 240.0
+cave_carve_meters           = 60.0
+
+# coastal shaping: detail (hills, terraces, overhangs, strata) is damped
+# toward the waterline so shorelines slope into the sea instead of breaking
+# into a web of sub-sea ponds with beach rims.
+coastal_flatten_meters      = 80.0
+coastal_flatten_floor       = 0.10
+
+# oceans
+shallow_water_meters    = 18.0
+deep_water_meters       = 140.0
+water_depth_tint_meters = 70.0
+water_enabled           = true
+water_color_shallow     = [0.060, 0.205, 0.275]
+water_color_deep        = [0.012, 0.060, 0.130]
+# gloss of the ocean surface: low = mirror-sharp sun glints (the coarse
+# far-water facets then band at grazing angles), high = matte.
+water_roughness         = 0.42
+
+# climate
+equator_temperature        = 1.0
+pole_temperature           = 0.02
+temperature_perturbation   = 0.09
+temperature_wavelength_meters = 20000.0
+temperature_lapse_meters   = 1100.0
+moisture_wavelength_meters = 14000.0
+moisture_perturbation      = 0.24
+# moisture_warp_amplitude bends the humidity field into elongated, organic
+# shapes; unwrapped, biome patches read as round camouflage blobs.
+moisture_warp_amplitude    = 0.22
+# coastal_moisture_boost: onshore humidity - low land near the sea stays
+# green (without it the flat shoreline belt paints a beige desert fringe
+# around every landmass and the globe reads as speckled). Fades out over
+# coastal_moisture_band_meters of elevation.
+coastal_moisture_boost     = 0.18
+coastal_moisture_band_meters = 400.0
+moisture_latitude_bands    = true
+color_variation            = 0.14
+snow_line_meters           = 1600.0
+beach_width_meters         = 2.0
+rock_slope_threshold       = 0.62
+# luminance banding of rock faces at the strata band spacing (sediment
+# stripes); 0 disables.
+rock_strata_contrast       = 0.10
+
+# biome color BLENDING (see docs/configuration.md): biome colors interpolate
+# between palette rows over these widths instead of hard-switching per vertex
+# (hard switches smear into pale stains across triangles).
+biome_blend_width          = 0.06
+slope_blend_width          = 0.08
+elevation_blend_fraction   = 0.12
+
+# biome palette, linear RGB rows in Biome enum order:
+# deep ocean, ocean, shallow ocean, beach, desert, savanna,
+# grassland, shrubland, temperate forest, seasonal forest,
+# tropical rainforest, temperate rainforest, taiga, tundra,
+# snow, rock
+# The ocean-floor rows sit deliberately DARKER than the water surface colors
+# (water_color_*): the floor is only seen through the water tint, and when the
+# two matched, the sea read as a flat sheet of sea floor with no water at all.
+biome_palette = [
+    0.006, 0.024, 0.055,   0.013, 0.048, 0.100,   0.034, 0.115, 0.165,
+    0.540, 0.490, 0.350,   0.560, 0.500, 0.330,   0.520, 0.470, 0.245,
+    0.360, 0.500, 0.220,   0.310, 0.355, 0.165,   0.180, 0.330, 0.130,
+    0.130, 0.360, 0.120,   0.100, 0.310, 0.090,   0.090, 0.280, 0.110,
+    0.150, 0.260, 0.180,   0.480, 0.500, 0.450,   0.870, 0.900, 0.930,
+    0.280, 0.250, 0.210,
+]

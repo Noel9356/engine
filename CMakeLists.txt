@@ -885,3 +885,10 @@ endif()
 if(ENGINE_BUILD_DEMO)
     add_subdirectory(demo_lumen_gi)
 endif()
+
+# Third demo: procedural planet generation harness for the planet module
+# (globe / coast / cliffs / surface views, screenshot export, determinism
+# self-tests).
+if(ENGINE_BUILD_DEMO)
+    add_subdirectory(demo_planet)
+endif()
