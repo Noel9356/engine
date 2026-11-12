@@ -19,10 +19,15 @@ max_surfaces                = 256
 max_triangles_per_surface   = 200000
 
 [lumen_gi.cards]
-# Lumen's default is 12 cards per mesh (Max Lumen Mesh Cards).
+# Lumen's default is 12 cards per mesh (Max Lumen Mesh Cards). When a surface
+# would need more, the texel density is lowered so every face stays covered.
 per_surface_max             = 12
 texels_per_meter            = 24.0
 max_texels_per_card_axis    = 128
+# Depth layers per card texel: each (x, y) texel keeps up to this many
+# front-facing hits, so a concave mesh (a room modelled as one mesh) keeps the
+# faces that sit behind a nearer one. 1 = the old single-layer capture.
+depth_layers                = 2
 
 [lumen_gi.capture]
 # Lumen captures a fixed 512x512 texel budget per frame.
@@ -31,11 +36,17 @@ texels_per_frame            = 262144
 [lumen_gi.lighting]
 direct_texels_per_frame     = 65536
 indirect_texels_per_frame   = 65536
+# Stratified cosine rays per refreshed texel; the temporal history below
+# accumulates them across updates (4 x ~5 updates = ~20 effective rays).
+indirect_rays_per_texel     = 4
 sun_shadows                 = true
 point_light_shadows         = false
 # Lumen's "Lumen Scene Lighting Update Speed"; scales how fast the cached
 # lighting is re-evaluated relative to the budgets above.
 update_speed                = 1.0
+# Weight of the cached history when a texel is refreshed (0 = replace with the
+# fresh gather, 0.99 = almost never change). The first update of a texel always
+# takes the fresh sample whole.
 indirect_temporal_blend     = 0.8
 
 [lumen_gi.trace]
@@ -45,6 +56,11 @@ max_distance_m              = 50.0
 spacing_m                   = 2.0
 direction_resolution        = 32
 updates_per_frame           = 64
+# Rays traced per probe update; the direction map is refreshed in rotating
+# strata (direction_resolution^2 / rays_per_update updates per full refresh).
+# A probe without data traces every direction once.
+rays_per_update             = 256
+# Fraction of the previous radiance kept when a texel is re-traced.
 hysteresis                  = 0.2
 level1_spacing_factor       = 4.0
 
@@ -66,3 +82,9 @@ internal_height             = 180
 reference_samples           = 64
 reference_bounces           = 4
 include_ambient             = false
+# The module's screen-space final gather only feeds the debug views, so it runs
+# on demand when a view is exported (export_gather_frames accumulation passes
+# first so the temporal filter has converged). Set continuous_gather = true to
+# run one pass every evaluate() instead (costs CPU every frame).
+continuous_gather           = false
+export_gather_frames        = 16

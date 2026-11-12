@@ -1,6 +1,6 @@
 # renderer backends
 
-How the two `RenderBackend` implementations differ internally. Both implement the same interface (source/render_backend.hpp) and are chosen per renderer at `createRenderer` time (see overview.md, "Backend selection").
+How the two `RenderBackend` implementations differ internally. Both implement the same interface (source/backend/render_backend.hpp) and are chosen per renderer at `createRenderer` time (see overview.md, "Backend selection").
 
 ## Headless (software rasterizer)
 

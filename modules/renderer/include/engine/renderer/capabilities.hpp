@@ -279,6 +279,20 @@ struct RenderCapability
 
     void (*drawMeshInstances)(void *self, RendererHandle renderer, MeshHandle mesh, const float *modelMatrices,
         std::uint32_t instanceCount, const MeshMaterial *material);
+
+    // True when this renderer's endFrame already blocks until the display's
+    // vblank (a FIFO swapchain does), so the host loop is paced by
+    // presentation. An application that also throttles to a fixed frame rate
+    // should skip its own throttle when this returns true: two independent
+    // throttles - a wall-clock deadline chain and the presentation engine -
+    // are never in lock-step, and the frames that slip land a whole refresh
+    // period late, turning the frame-time P99 into two frames instead of one.
+    // Returns false for backends that present without waiting (headless,
+    // immediate, mailbox). Appended at the end of the struct: field offsets
+    // of the existing entries and the ABI version are unchanged. Older
+    // loaders ignore it; a loader must still null-check it before calling,
+    // since a module built before this field leaves it null.
+    bool (*waitsForPresentation)(void *self, RendererHandle renderer);
 };
 
 // The "renderer.vulkan" secondary capability: Vulkan-specific introspection and

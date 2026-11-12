@@ -44,7 +44,7 @@ Configurable — see [configuration.md](configuration.md) for the `[direct_light
 
 The module does not touch the kernel event bus: it publishes no events and subscribes to none (no `eventBus` usage in the source). It declares no permissions (`declaredPermissions = nullptr` in the entry table).
 
-Consumer usage with the real API signatures (as the renderer module does in `modules/renderer/source/renderer.cpp`):
+Consumer usage with the real API signatures (as the renderer module does in `modules/renderer/source/core/renderer.cpp`):
 
 ```cpp
 // tryAcquireCapability returns nullptr when the module is absent.

@@ -2,7 +2,7 @@
 //
 // Declares the POD types and function-pointer tables consumers receive
 // through ParticipantContext::acquireCapability for the "lumen_gi" capability
-// (ABI 2): a registry of GI scene surfaces, a camera-driven frame evaluation that runs
+// (ABI 3): a registry of GI scene surfaces, a camera-driven frame evaluation that runs
 // a Lumen-style dynamic global illumination pipeline (card-based surface
 // cache, amortized direct/indirect lighting, world-space radiance probes,
 // screen-space final gather), a probe-grid snapshot copy API for renderers,
@@ -24,7 +24,9 @@ namespace lumen_gi
 // 1 -> 2 added GiStatistics::framesSkippedStatic (the static-frame skip
 // reports how many evaluate() calls returned early because the camera, the
 // scene, and the environment were all unchanged and the caches converged).
-inline constexpr std::uint32_t lumenGiCapabilityAbi = 2u;
+// 2 -> 3 added GiError::EvaluationFailed and GiStatistics::indirectRaysThisFrame,
+// and defined GiProbe::sh2 as irradiance-ready coefficients (see GiProbe).
+inline constexpr std::uint32_t lumenGiCapabilityAbi = 3u;
 using GiSurfaceHandle                               = std::uint32_t;
 inline constexpr GiSurfaceHandle invalidGiSurface   = 0;
 
@@ -47,7 +49,8 @@ enum class GiError : std::uint32_t
     InvalidHandle,
     CapacityReached,
     ViewNotSet,
-    ExportFailed
+    ExportFailed,
+    EvaluationFailed   // a pipeline stage threw or the scheduler rejected work
 };
 
 // Scene surface registered into the GI world. Geometry is borrowed for the
@@ -80,7 +83,11 @@ struct GiSurfaceDescription
 // One radiance probe of the exported world-space cache. sh2 holds the
 // spherical-harmonic-2 projection of the probe's incoming RADIANCE as nine
 // (basis index, RGB) triplets ordered C00, C1-1, C10, C11, C2-2, C2-1, C20,
-// C21, C22. validity is 1 for freshly traced probes and decays with age.
+// C21, C22, each coefficient already multiplied by its basis normalization
+// constant, so evaluateSh2Irradiance is a plain polynomial and a constant
+// radiance L evaluates to exactly pi * L. validity is 0 for probes without
+// data or inside geometry and 1 for fully usable probes (it is reduced for
+// probes that partly look into a wall).
 struct GiProbe
 {
     float         position[3] = {0.0f, 0.0f, 0.0f};
@@ -90,8 +97,10 @@ struct GiProbe
 };
 
 // Layout of the exported probe grid: camera-centered, uniformly spaced probe
-// boxes per clip level (level 0 = coarse, level 1 = half spacing covering a
-// quarter of the extent). Probes are ordered level 0 first, then level 1.
+// boxes per clip level (level 0 = fine spacing, level 1 = level1_spacing_factor
+// times coarser, covering that many times the extent). Probes are exported in
+// logical lattice order (x fastest, then y, then z), level 0 first, then
+// level 1; probe 0 of a level sits at its lattice anchor.
 struct GiProbeHeader
 {
     float         gridCenter[3]       = {0.0f, 0.0f, 0.0f};
@@ -106,7 +115,8 @@ struct GiProbeHeader
 };
 
 // Frame counters and cumulative totals. The per-frame fields are reset by
-// evaluate(); totalRaysTraced and frameIndex accumulate, and
+// evaluate() (screenProbesThisFrame / gatherRaysThisFrame are non-zero only
+// when the debug gather ran that frame); totalRaysTraced and frameIndex accumulate, and
 // framesSkippedStatic counts the evaluate() calls that returned early under
 // the static-frame skip (camera, scene, and environment unchanged, caches
 // converged).
@@ -120,6 +130,7 @@ struct GiStatistics
     std::uint32_t captureTexelsThisFrame   = 0;
     std::uint32_t directTexelsThisFrame    = 0;
     std::uint32_t indirectTexelsThisFrame  = 0;
+    std::uint32_t indirectRaysThisFrame    = 0;
     std::uint32_t probeTracesThisFrame     = 0;
     std::uint32_t screenProbesThisFrame    = 0;
     std::uint32_t gatherRaysThisFrame      = 0;

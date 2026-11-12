@@ -12,7 +12,7 @@ include_guard(GLOBAL)
 #     [LINK_OPTIONS <option> [...]]
 #     [CONFIG_DIRECTORY <directory>]
 #     [ASSET_DIRECTORY <directory>]
-#     [MOD_DIRECTORY <directory>]
+#     [PLUGIN_DIRECTORY <directory>]
 #     [RUNTIME_DIRECTORY <directory>]
 #     [OUTPUT_NAME <name>]
 #     [WINDOWED]
@@ -26,7 +26,7 @@ function(engine_add_application target)
 		1
 		APP
 		"WINDOWED"
-		"CONFIG_DIRECTORY;ASSET_DIRECTORY;MOD_DIRECTORY;RUNTIME_DIRECTORY;OUTPUT_NAME"
+		"CONFIG_DIRECTORY;ASSET_DIRECTORY;PLUGIN_DIRECTORY;RUNTIME_DIRECTORY;OUTPUT_NAME"
 		"SOURCES;CAPABILITIES;LIBRARIES;INCLUDE_DIRECTORIES;COMPILE_OPTIONS;COMPILE_DEFINITIONS;LINK_OPTIONS"
 	)
 
@@ -102,7 +102,7 @@ function(engine_add_application target)
 
 	# Give each application an isolated runtime root. This allows several
 	# applications to share one engine build without sharing their config,
-	# assets, or mod packages.
+	# assets, or plugin packages.
 	if(NOT APP_RUNTIME_DIRECTORY)
 		set(APP_RUNTIME_DIRECTORY "${CMAKE_BINARY_DIR}/runtime/${target}")
 	endif()
@@ -132,8 +132,8 @@ function(engine_add_application target)
 		set(APP_ASSET_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets")
 	endif()
 
-	if(NOT APP_MOD_DIRECTORY AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mods")
-		set(APP_MOD_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/mods")
+	if(NOT APP_PLUGIN_DIRECTORY AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/plugins")
+		set(APP_PLUGIN_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/plugins")
 	endif()
 
 	if(APP_CONFIG_DIRECTORY)
@@ -154,9 +154,9 @@ function(engine_add_application target)
 		)
 	endif()
 
-	if(APP_MOD_DIRECTORY)
-		get_filename_component(APP_MOD_DIRECTORY
-			"${APP_MOD_DIRECTORY}"
+	if(APP_PLUGIN_DIRECTORY)
+		get_filename_component(APP_PLUGIN_DIRECTORY
+			"${APP_PLUGIN_DIRECTORY}"
 			ABSOLUTE
 			BASE_DIR
 			"${CMAKE_CURRENT_SOURCE_DIR}"
@@ -185,8 +185,8 @@ function(engine_add_application target)
 		${CMAKE_COMMAND}
 		-E
 		copy_directory
-		"${CMAKE_BINARY_DIR}/runtime/mods"
-		"${APP_RUNTIME_DIRECTORY}/mods"
+		"${CMAKE_BINARY_DIR}/runtime/plugins"
+		"${APP_RUNTIME_DIRECTORY}/plugins"
 		COMMAND
 		${CMAKE_COMMAND}
 		-E
@@ -237,10 +237,10 @@ function(engine_add_application target)
 		)
 	endif()
 
-	if(APP_MOD_DIRECTORY)
-		if(NOT IS_DIRECTORY "${APP_MOD_DIRECTORY}")
+	if(APP_PLUGIN_DIRECTORY)
+		if(NOT IS_DIRECTORY "${APP_PLUGIN_DIRECTORY}")
 			message(FATAL_ERROR
-				"engine_add_application(${target}): MOD_DIRECTORY does not exist: ${APP_MOD_DIRECTORY}"
+				"engine_add_application(${target}): PLUGIN_DIRECTORY does not exist: ${APP_PLUGIN_DIRECTORY}"
 			)
 		endif()
 		list(APPEND runtime_content_commands
@@ -248,13 +248,13 @@ function(engine_add_application target)
 			${CMAKE_COMMAND}
 			-E
 			make_directory
-			"${APP_RUNTIME_DIRECTORY}/mods"
+			"${APP_RUNTIME_DIRECTORY}/plugins"
 			COMMAND
 			${CMAKE_COMMAND}
 			-E
 			copy_directory
-			"${APP_MOD_DIRECTORY}"
-			"${APP_RUNTIME_DIRECTORY}/mods"
+			"${APP_PLUGIN_DIRECTORY}"
+			"${APP_RUNTIME_DIRECTORY}/plugins"
 		)
 	endif()
 

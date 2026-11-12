@@ -1,6 +1,6 @@
 # pbr module
 
-pbr is the engine's shared physically-based-rendering state holder: it owns the global PBR environment (directional sun, hemisphere ambient, exposure, tone mapping) that the renderer samples every frame, and it converts legacy Phong-style `models::ModelMaterial` data into the PBR `renderer::MeshMaterial` the renderer consumes. The module holds no GPU resources of its own - it is plain state plus pure conversion math, published as the `pbr` capability. The application binds it with `tryAcquireCapability<pbr::PbrCapability>()` (see `demo_character_customisation/source/main.cpp`), tunes it through `[pbr]` configuration with live reload, and can drive it at runtime through the capability entries.
+pbr is the engine's shared physically-based-rendering state holder: it owns the global PBR environment (directional sun, hemisphere ambient, exposure, tone mapping) that the renderer samples every frame, and it converts legacy Phong-style `models::ModelMaterial` data into the PBR `renderer::MeshMaterial` the renderer consumes. The module holds no GPU resources of its own - it is plain state plus pure conversion math, published as the `pbr` capability. The application binds it with `tryAcquireCapability<pbr::PbrCapability>()` (see `demos/character_customisation/source/main.cpp`), tunes it through `[pbr]` configuration with live reload, and can drive it at runtime through the capability entries.
 
 ## Capability
 
@@ -39,7 +39,7 @@ Consumers still need the `capability.pbr` permission granted by the kernel permi
 
 | File | Role |
 | --- | --- |
-| `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys` (documentation; the kernel validates only game-mod manifests' keys). |
+| `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys` (documentation; the kernel validates only plugin manifests' keys). |
 | `config.toml` | Default values for the `[pbr]` configuration section (see `configuration.md`). |
 | `include/engine/pbr/capabilities.hpp` | Public capability types: ABI constant, `ToneMapping`, `SunLight`, `AmbientLight`, `PbrEnvironment`, conversion options/results, and the `PbrCapability` function-pointer struct. |
 | `source/pbr.cpp` | The whole implementation: environment normalization/blending, material conversion, configuration reading and live reload, capability binding, module entry table. |
@@ -72,7 +72,7 @@ Configurable through the `[pbr]` section; every key is documented in [configurat
 - **Events subscribed:** `ConfigurationReloadedEvent` (reacts only to keys starting with `pbr.`).
 - **Permissions declared:** none in the entry table; acquisition of the capability is gated by the implicit `capability.pbr` permission.
 
-Consumer example (real signatures; mirrors `demo_character_customisation/source/main.cpp`):
+Consumer example (real signatures; mirrors `demos/character_customisation/source/main.cpp`):
 
 ```cpp
 #include <engine/pbr/capabilities.hpp>

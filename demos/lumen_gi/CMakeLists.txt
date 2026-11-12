@@ -1,0 +1,17 @@
+engine_add_application(
+    demo_lumen_gi
+    SOURCES
+    source/main.cpp
+    source/demo/gi_demo_options.cpp
+    source/demo/gi_demo_scene.cpp
+    CAPABILITIES
+    window
+    renderer
+    camera
+    pbr
+    lumen_gi
+    LIBRARIES
+    engine_dep_glm
+    CONFIG_DIRECTORY
+    "${CMAKE_CURRENT_SOURCE_DIR}/config"
+)

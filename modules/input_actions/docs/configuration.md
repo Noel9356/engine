@@ -1,6 +1,6 @@
 # input_actions configuration
 
-All keys live in the `[input_actions]` section. The module's `config.toml` supplies the defaults below; the application config or a runtime profile may override them. `module.toml` mirrors every key under `config_keys` for documentation; the kernel validates known keys for engine sections and game-mod manifests only, so unknown `[input_actions]` keys are silently accepted.
+All keys live in the `[input_actions]` section. The module's `config.toml` supplies the defaults below; the application config or a runtime profile may override them. `module.toml` mirrors every key under `config_keys` for documentation; the kernel validates known keys for engine sections and plugin manifests only, so unknown `[input_actions]` keys are silently accepted.
 
 Every value is read once in `construct()`; the module does not follow configuration reloads, so restarts are required for changes. Keys are listed alphabetically.
 

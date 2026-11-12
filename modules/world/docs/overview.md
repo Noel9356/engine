@@ -21,7 +21,7 @@ Error convention: fallible calls take an error out-parameter (`StorageError` / `
 
 ## Provided / required / optional capabilities
 
-From `module.toml` and the entry table at the bottom of `source/world.cpp` (they agree; `source/ecs.cpp` and `source/entity_world.cpp` declare the same capabilities individually when built standalone):
+From `module.toml` and the entry table at the bottom of `source/world/world.cpp` (they agree; `source/ecs/ecs.cpp` and `source/entity_world/entity_world.cpp` declare the same capabilities individually when built standalone):
 
 - Provided: `ecs`, `entity_world`
 - Required: none
@@ -41,10 +41,10 @@ Consumers need the kernel permissions `capability.ecs` / `capability.entity_worl
 | `include/engine/ecs/capabilities.hpp` | The `ecs` capability struct and its description/info types. |
 | `include/engine/entity_world/capabilities.hpp` | The `entity_world` capability struct, `Transform`, descriptions. |
 | `shared_types/include/engine/math/quaternion.hpp` | Dependency-free x/y/z/w quaternion normalization, composition, dot product, and vector rotation helpers used by transform hierarchy operations. |
-| `source/ecs_storage.cpp` | Archetype storage internals: chunk/column layout, entity slots, transitions, queries, command buffers. |
-| `source/ecs.cpp` | `ecs` capability binding: per-world records, function-pointer table, standalone entry table (or embedded hook). |
-| `source/entity_world.cpp` | `entity_world` implementation: slots, hierarchy, transforms, save/load, standalone entry table (or embedded hook). |
-| `source/world.cpp` | The facade: embeds both inner modules, bridges every capability call with handle translation and mirror consistency. |
+| `source/ecs/ecs_storage.cpp` | Archetype storage internals: chunk/column layout, entity slots, transitions, queries, command buffers. |
+| `source/ecs/ecs.cpp` | `ecs` capability binding: per-world records, function-pointer table, standalone entry table (or embedded hook). |
+| `source/entity_world/entity_world.cpp` | `entity_world` implementation: slots, hierarchy, transforms, save/load, standalone entry table (or embedded hook). |
+| `source/world/world.cpp` | The facade: embeds both inner modules, bridges every capability call with handle translation and mirror consistency. |
 
 ## How it works
 

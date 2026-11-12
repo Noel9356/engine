@@ -2,7 +2,7 @@
 profiling_enabled = true
 
 [engine]
-active_mods             = ["main_menu"]
+active_plugins             = ["main_menu"]
 max_fps                 = 60
 max_frame_delta_seconds = 0.25
 max_outstanding_tasks   = 65536
@@ -24,7 +24,7 @@ clear_color = [0.18, 0.3, 0.5, 1.0]
 lod_enabled = false
 
 [trust]
-trustMods = ["main_menu", "character_lab"]
+trustPlugins = ["main_menu", "character_lab"]
 # The renderer acquires five capabilities now that it consumes the optional
 # lumen_gi probe grid (window + window.vulkan + pbr + direct_lighting +
 # lumen_gi), which the trust gate flags as "broad"; first-party modules are

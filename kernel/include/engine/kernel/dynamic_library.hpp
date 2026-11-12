@@ -1,4 +1,4 @@
-// RAII wrapper over dlopen/LoadLibrary for module and mod libraries.
+// RAII wrapper over dlopen/LoadLibrary for module and plugin libraries.
 //
 // The kernel holds one instance per loaded participant library so its
 // entry table and code stay resident.

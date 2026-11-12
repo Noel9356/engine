@@ -98,7 +98,7 @@ list(
 option(
     ENGINE_ENABLE_LTO
     "Enable link-time / interprocedural optimization (opt-in)"
-    OFF
+    ON
 )
 
 option(
@@ -110,7 +110,7 @@ option(
 option(
     ENGINE_NATIVE_CPU_OPTIMIZATION
     "Optimize for the build machine CPU (-march=native; binaries may not run on older CPUs)"
-    OFF
+    ON
 )
 
 set(ENGINE_GCC_PGO_MODE
@@ -616,82 +616,82 @@ endforeach()
 
 file(
     GLOB
-    ENGINE_NATIVE_GAME_MOD_PROJECTS
+    ENGINE_NATIVE_PLUGIN_PROJECTS
     CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/mods/*/CMakeLists.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/*/CMakeLists.txt"
 )
 foreach(
-    nativeGameModProject
+    nativePluginProject
     IN
-    LISTS ENGINE_NATIVE_GAME_MOD_PROJECTS
+    LISTS ENGINE_NATIVE_PLUGIN_PROJECTS
 )
     get_filename_component(
-        nativeGameModDirectory
-        "${nativeGameModProject}"
+        nativePluginDirectory
+        "${nativePluginProject}"
         DIRECTORY
     )
-    add_subdirectory("${nativeGameModDirectory}")
+    add_subdirectory("${nativePluginDirectory}")
 endforeach()
 get_property(
-    ENGINE_NATIVE_GAME_MOD_BUILD_TARGETS
+    ENGINE_NATIVE_PLUGIN_BUILD_TARGETS
     GLOBAL
-    PROPERTY ENGINE_NATIVE_GAME_MOD_BUILD_TARGETS
+    PROPERTY ENGINE_NATIVE_PLUGIN_BUILD_TARGETS
 )
 
-set(ENGINE_GAME_MOD_PACKAGE_COMMANDS)
+set(ENGINE_PLUGIN_PACKAGE_COMMANDS)
 file(
     GLOB
-    ENGINE_GAME_MOD_PACKAGE_DIRS
+    ENGINE_PLUGIN_PACKAGE_DIRS
     CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/mods/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/*"
 )
 foreach(
-    gameModPackageDirectory
+    pluginPackageDirectory
     IN
-    LISTS ENGINE_GAME_MOD_PACKAGE_DIRS
+    LISTS ENGINE_PLUGIN_PACKAGE_DIRS
 )
     if(NOT
        EXISTS
-       "${gameModPackageDirectory}/mod.toml"
+       "${pluginPackageDirectory}/plugin.toml"
     )
         continue()
     endif()
     get_filename_component(
-        gameModPackageId
-        "${gameModPackageDirectory}"
+        pluginPackageId
+        "${pluginPackageDirectory}"
         NAME
     )
     if(EXISTS
-       "${gameModPackageDirectory}/CMakeLists.txt"
+       "${pluginPackageDirectory}/CMakeLists.txt"
     )
-        set(gameModBuildTarget
-            "engine_game_mod_${gameModPackageId}"
+        set(pluginBuildTarget
+            "engine_plugin_${pluginPackageId}"
         )
         if(NOT
            TARGET
-           "${gameModBuildTarget}"
+           "${pluginBuildTarget}"
         )
             message(
                 STATUS
-                    "engine: skipping native mod package '${gameModPackageId}' because its build target is unavailable"
+                    "engine: skipping native plugin package '${pluginPackageId}' because its build target is unavailable"
             )
             continue()
         endif()
     endif()
     list(
         APPEND
-        ENGINE_GAME_MOD_PACKAGE_COMMANDS
+        ENGINE_PLUGIN_PACKAGE_COMMANDS
         COMMAND
         ${CMAKE_COMMAND}
         -E
         make_directory
-        "${CMAKE_BINARY_DIR}/runtime/mods/${gameModPackageId}"
+        "${CMAKE_BINARY_DIR}/runtime/plugins/${pluginPackageId}"
         COMMAND
         ${CMAKE_COMMAND}
         -E
         copy_if_different
-        "${gameModPackageDirectory}/mod.toml"
-        "${CMAKE_BINARY_DIR}/runtime/mods/${gameModPackageId}/mod.toml"
+        "${pluginPackageDirectory}/plugin.toml"
+        "${CMAKE_BINARY_DIR}/runtime/plugins/${pluginPackageId}/plugin.toml"
     )
     foreach(
         packageFile
@@ -699,53 +699,53 @@ foreach(
         scene.toml
     )
         if(EXISTS
-           "${gameModPackageDirectory}/${packageFile}"
+           "${pluginPackageDirectory}/${packageFile}"
         )
             list(
                 APPEND
-                ENGINE_GAME_MOD_PACKAGE_COMMANDS
+                ENGINE_PLUGIN_PACKAGE_COMMANDS
                 COMMAND
                 ${CMAKE_COMMAND}
                 -E
                 copy_if_different
-                "${gameModPackageDirectory}/${packageFile}"
-                "${CMAKE_BINARY_DIR}/runtime/mods/${gameModPackageId}/${packageFile}"
+                "${pluginPackageDirectory}/${packageFile}"
+                "${CMAKE_BINARY_DIR}/runtime/plugins/${pluginPackageId}/${packageFile}"
             )
         endif()
     endforeach()
     file(
         GLOB
-        gameModPackageScripts
-        "${gameModPackageDirectory}/*.lua"
+        pluginPackageScripts
+        "${pluginPackageDirectory}/*.lua"
     )
     foreach(
-        gameModScript
+        pluginScript
         IN
-        LISTS gameModPackageScripts
+        LISTS pluginPackageScripts
     )
         list(
             APPEND
-            ENGINE_GAME_MOD_PACKAGE_COMMANDS
+            ENGINE_PLUGIN_PACKAGE_COMMANDS
             COMMAND
             ${CMAKE_COMMAND}
             -E
             copy_if_different
-            "${gameModScript}"
-            "${CMAKE_BINARY_DIR}/runtime/mods/${gameModPackageId}/"
+            "${pluginScript}"
+            "${CMAKE_BINARY_DIR}/runtime/plugins/${pluginPackageId}/"
         )
     endforeach()
     if(EXISTS
-       "${gameModPackageDirectory}/assets"
+       "${pluginPackageDirectory}/assets"
     )
         list(
             APPEND
-            ENGINE_GAME_MOD_PACKAGE_COMMANDS
+            ENGINE_PLUGIN_PACKAGE_COMMANDS
             COMMAND
             ${CMAKE_COMMAND}
             -E
             copy_directory
-            "${gameModPackageDirectory}/assets"
-            "${CMAKE_BINARY_DIR}/runtime/mods/${gameModPackageId}/assets"
+            "${pluginPackageDirectory}/assets"
+            "${CMAKE_BINARY_DIR}/runtime/plugins/${pluginPackageId}/assets"
         )
     endif()
 endforeach()
@@ -780,7 +780,7 @@ foreach(
     endif()
     list(
         APPEND
-        ENGINE_GAME_MOD_PACKAGE_COMMANDS
+        ENGINE_PLUGIN_PACKAGE_COMMANDS
         COMMAND
         ${CMAKE_COMMAND}
         -E
@@ -799,11 +799,11 @@ add_custom_target(
     engine_runtime_layout
     ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/runtime/config"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/runtime/mods"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/runtime/plugins"
     COMMAND
         ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/config" "${CMAKE_BINARY_DIR}/runtime/config"
-        ${ENGINE_GAME_MOD_PACKAGE_COMMANDS}
-    COMMENT "assembling the runtime layout (configuration, module defaults, and game-mod content)"
+        ${ENGINE_PLUGIN_PACKAGE_COMMANDS}
+    COMMENT "assembling the runtime layout (configuration, module defaults, and plugin content)"
 )
 if(ENGINE_MODULE_BUILD_TARGETS)
     add_dependencies(
@@ -838,19 +838,19 @@ if(ENGINE_MODULE_BUILD_TARGETS)
         endforeach()
     endif()
 endif()
-if(ENGINE_NATIVE_GAME_MOD_BUILD_TARGETS)
+if(ENGINE_NATIVE_PLUGIN_BUILD_TARGETS)
     add_dependencies(
         engine_runtime_layout
-        ${ENGINE_NATIVE_GAME_MOD_BUILD_TARGETS}
+        ${ENGINE_NATIVE_PLUGIN_BUILD_TARGETS}
     )
     if(APPLE)
         foreach(
-            gameModTarget
+            pluginTarget
             IN
-            LISTS ENGINE_NATIVE_GAME_MOD_BUILD_TARGETS
+            LISTS ENGINE_NATIVE_PLUGIN_BUILD_TARGETS
         )
             set_property(
-                TARGET "${gameModTarget}"
+                TARGET "${pluginTarget}"
                 APPEND
                 PROPERTY BUILD_RPATH
                          "@loader_path/../.."
@@ -858,12 +858,12 @@ if(ENGINE_NATIVE_GAME_MOD_BUILD_TARGETS)
         endforeach()
     elseif(UNIX)
         foreach(
-            gameModTarget
+            pluginTarget
             IN
-            LISTS ENGINE_NATIVE_GAME_MOD_BUILD_TARGETS
+            LISTS ENGINE_NATIVE_PLUGIN_BUILD_TARGETS
         )
             set_property(
-                TARGET "${gameModTarget}"
+                TARGET "${pluginTarget}"
                 APPEND
                 PROPERTY BUILD_RPATH
                          "$ORIGIN/../.."
@@ -874,21 +874,9 @@ endif()
 
 include(engine_add_application)
 
-# Character-customisation demo: the engine's showcase application (orbit
-# character viewport, benchmark views, mod/script integration).
+# Standalone samples. Each demo owns its assets, configuration, and executable.
 if(ENGINE_BUILD_DEMO)
-    add_subdirectory(demo_character_customisation)
-endif()
-
-# Second demo: standalone global-illumination test harness for the lumen_gi
-# module and the renderer's probe-grid indirect-lighting hook.
-if(ENGINE_BUILD_DEMO)
-    add_subdirectory(demo_lumen_gi)
-endif()
-
-# Third demo: procedural planet generation harness for the planet module
-# (globe / coast / cliffs / surface views, screenshot export, determinism
-# self-tests).
-if(ENGINE_BUILD_DEMO)
-    add_subdirectory(demo_planet)
+    add_subdirectory(demos/character_customisation)
+    add_subdirectory(demos/lumen_gi)
+    add_subdirectory(demos/planet)
 endif()

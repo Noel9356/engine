@@ -1,4 +1,4 @@
-// Directory containing the running executable (config/mods/modules paths
+// Directory containing the running executable (config/plugins/modules paths
 // resolve against it).
 
 #ifndef ENGINE_KERNEL_EXECUTABLE_DIRECTORY_HPP

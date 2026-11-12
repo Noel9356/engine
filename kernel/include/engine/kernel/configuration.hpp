@@ -1,7 +1,7 @@
 // ConfigurationStore: layered TOML configuration for the whole engine.
 //
 // Layers merge onto one document: engine.toml, runtime profiles, scene
-// file, module defaults, mod defaults and staged command-line overrides
+// file, module defaults, plugin defaults and staged command-line overrides
 // (last wins). The store tracks which layer supplied each key
 // (provenance), which keys are known (unknown-key warnings) and offers
 // typed readers for sections and dotted paths.
@@ -51,7 +51,7 @@ struct TrustBinding
 struct ConfigProvenance
 {
     // Effective precedence, highest first: CommandLine, Profile, SceneFile,
-    // EngineConfig, then the defaults layers (ModuleDefaults/ModDefaults only
+    // EngineConfig, then the defaults layers (ModuleDefaults/PluginDefaults only
     // fill keys no higher layer set).
     enum class Layer
     {
@@ -59,7 +59,7 @@ struct ConfigProvenance
         EngineConfig,
         SceneFile,
         ModuleDefaults,
-        ModDefaults,
+        PluginDefaults,
         Profile
     };
 
@@ -75,10 +75,10 @@ struct ConfigProvenance
 class ConfigurationStore final
 {
 public:
-    // Both ship as "config.toml": modules in config/modules/<name>/, mods in
+    // Both ship as "config.toml": modules in config/modules/<name>/, plugins in
     // their package directory.
     static constexpr const char *moduleDefaultsFileName = "config.toml";
-    static constexpr const char *modDefaultsFileName    = "config.toml";
+    static constexpr const char *pluginDefaultsFileName    = "config.toml";
 
     // Sections owned by the assembly ([scene] carries world content);
     // defaults files may never define these.
@@ -90,16 +90,16 @@ public:
     static constexpr const char *trustSectionName       = "trust";
 
     // [trust]: id/name lists (plain strings or {id,version,sha256} tables)
-    // plus the trustAllMods/trustAllModules blanket switches.
-    static constexpr const char *trustModsKey       = "trustMods";
-    static constexpr const char *trustAllModsKey    = "trustAllMods";
+    // plus the trustAllPlugins/trustAllModules blanket switches.
+    static constexpr const char *trustPluginsKey       = "trustPlugins";
+    static constexpr const char *trustAllPluginsKey    = "trustAllPlugins";
     static constexpr const char *trustModulesKey    = "trustModules";
     static constexpr const char *trustAllModulesKey = "trustAllModules";
 
-    // [engine]: active_mods restricts the run to these mod ids;
-    // disabled_mods excludes packages from discovery entirely.
-    static constexpr const char *engineActiveModsKey   = "active_mods";
-    static constexpr const char *engineDisabledModsKey = "disabled_mods";
+    // [engine]: active_plugins restricts the run to these plugin ids;
+    // disabled_plugins excludes packages from discovery entirely.
+    static constexpr const char *engineActivePluginsKey   = "active_plugins";
+    static constexpr const char *engineDisabledPluginsKey = "disabled_plugins";
 
     static constexpr const char *diagnosticsLatencyReportKey    = "latency_report";
     static constexpr const char *diagnosticsFrameHistoryKey     = "frame_history";
@@ -116,7 +116,7 @@ public:
     static constexpr const char *engineMaxFrameDeltaSecondsKey    = "max_frame_delta_seconds";
     static constexpr const char *engineQuitAfterSecondsKey        = "quit_after_seconds";
 
-    static constexpr const char *engineExtraModDirectoriesKey = "extra_mod_directories";
+    static constexpr const char *engineExtraPluginDirectoriesKey = "extra_plugin_directories";
 
     // Scanned for per-module defaults (config/modules/<module>/config.toml).
     static constexpr const char *moduleDefaultsDirectory = "config/modules";
@@ -138,8 +138,8 @@ public:
     // failure.
     bool loadFromFile(const std::filesystem::path &path, std::string &errorMessage);
 
-    // Merges a module/mod defaults file; only fills keys still unset. layer
-    // must be ModuleDefaults or ModDefaults. Rejects assembly-owned sections,
+    // Merges a module/plugin defaults file; only fills keys still unset. layer
+    // must be ModuleDefaults or PluginDefaults. Rejects assembly-owned sections,
     // [scene] and bare top-level values.
     bool mergeDefaultsFile(const std::filesystem::path &path, ConfigProvenance::Layer layer, const std::string &source,
         std::string &errorMessage);
@@ -171,17 +171,17 @@ public:
 
     bool hasSection(const std::string &sectionName) const;
 
-    // [engine] mod_directory / modules_directory; "mods"/"modules" defaults,
+    // [engine] plugin_directory / modules_directory; "plugins"/"modules" defaults,
     // resolved against the executable.
-    std::string modDirectory() const;
+    std::string pluginsDirectory() const;
 
-    std::vector<std::string> extraModDirectories() const;
+    std::vector<std::string> extraPluginsDirectories() const;
 
     std::string              modulesDirectory() const;
-    std::vector<std::string> disabledMods() const;
+    std::vector<std::string> disabledPlugins() const;
 
-    // nullopt when unset (all discovered mods run); otherwise the allow-list.
-    std::optional<std::vector<std::string>> activeMods() const;
+    // nullopt when unset (all discovered plugins run); otherwise the allow-list.
+    std::optional<std::vector<std::string>> activePlugins() const;
 
     // [providers] entries as capability -> participant-name choices.
     std::vector<DependencyResolver::ProviderSelection> providerSelections() const;
@@ -191,14 +191,14 @@ public:
 
     // [trust] readers; the *Bindings variants also parse {id/version/sha256}
     // table entries (sha256 binds trust to specific content).
-    std::vector<std::string> trustedMods() const;
+    std::vector<std::string> trustedPlugins() const;
     std::vector<std::string> trustedModules() const;
 
-    bool trustAllMods() const;
+    bool trustAllPlugins() const;
     bool trustAllModules() const;
 
-    // Binding form of the [trust] lists (see trustedMods).
-    std::vector<TrustBinding> trustedModBindings() const;
+    // Binding form of the [trust] lists (see trustedPlugins).
+    std::vector<TrustBinding> trustedPluginBindings() const;
 
     std::vector<TrustBinding> trustedModuleBindings() const;
 

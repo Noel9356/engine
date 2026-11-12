@@ -1,6 +1,6 @@
 # character configuration
 
-All keys live in the `[character]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it: known-key validation (unknown-key warnings) covers the engine's built-in sections and the `config_keys` of game-mod manifests only, so unknown `[character]` keys are silently accepted.
+All keys live in the `[character]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it: known-key validation (unknown-key warnings) covers the engine's built-in sections and the `config_keys` of plugin manifests only, so unknown `[character]` keys are silently accepted.
 
 Every value is read once per `readConfiguration()` (in `construct()`, and again whenever a `ConfigurationReloadedEvent` touches `character.*` keys). A value outside its documented range is ignored - the built-in default stays active; nothing is clamped. Keys are listed alphabetically.
 

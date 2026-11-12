@@ -31,10 +31,10 @@ target_link_libraries(
 add_library(
     engine_module_world
     MODULE
-    source/world.cpp
-    source/ecs.cpp
-    source/ecs_storage.cpp
-    source/entity_world.cpp
+    source/world/world.cpp
+    source/ecs/ecs.cpp
+    source/ecs/ecs_storage.cpp
+    source/entity_world/entity_world.cpp
 )
 target_compile_definitions(
     engine_module_world

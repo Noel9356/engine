@@ -37,7 +37,7 @@ When the optional `lumen_gi` capability is present and `[renderer] gi_indirect_l
 
 The snapshot can lag the latest `lumen_gi::evaluate()` by one frame: module update order does not guarantee lumen_gi runs before the renderer, and the cache is temporal by design (Lumen's updates are amortized the same way).
 
-The demo `demo_lumen_gi/` is a standalone harness for this hook: it registers deterministic interior/outdoor scenes into both the renderer and lumen_gi and exports screenshots plus the module's own debug views for A/B validation (`[renderer] gi_indirect_lighting = false` shows the pre-hook image).
+The demo `demos/lumen_gi/` is a standalone harness for this hook: it registers deterministic interior/outdoor scenes into both the renderer and lumen_gi and exports screenshots plus the module's own debug views for A/B validation (`[renderer] gi_indirect_lighting = false` shows the pre-hook image).
 
 Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
 
@@ -52,20 +52,20 @@ Vulkan swapchains require surface support for color-attachment usage. PPM screen
 | `include/engine/renderer/draw_sort.hpp` | Total-order material comparison and draw-command sorting (sort modes for batching). |
 | `include/engine/renderer/draw_batch.hpp` | `RenderInstanceBatchCache`: folds draw commands into instanced batches plus a packed instance-matrix stream. |
 | `include/engine/renderer/dynamic_resolution.hpp` | `DynamicResolutionController` (render-scale stepping) and `AdaptiveQualityController` (quality-preset stepping) fed from frame timings. |
-| `source/renderer.cpp` | Module entry: `RenderModule` (ModuleInterface), capability binding, configuration, backend selection, draw sorting/batching, entry table. |
-| `source/render_backend.hpp` | `RenderBackend` - the abstract interface both backends implement. |
-| `source/render_shared.hpp` | Shared PBR math (must match the Vulkan shader), default environment, tone mapping, renderer error mapping, device preference enum; PPM output uses `engine/util/ppm.hpp`. |
-| `source/render_data.hpp/.cpp` | Mesh/texture normalization: attribute repacking, index validation, normal generation, pixel format conversion. |
-| `source/headless_backend.hpp/.cpp` | Headless backend: CPU rasterizer with culling, LOD, transform cache, and task-scheduler parallelism. |
-| `source/vulkan_backend.hpp/.cpp` | Vulkan backend: frame lifecycle, command recording, instance streaming, deferred destruction. |
-| `source/vulkan_device.hpp/.cpp` | `VulkanDeviceContext`: instance/surface/device/VMA bring-up, device profile, async staging-upload queue. |
-| `source/vulkan_frames.hpp/.cpp` | `VulkanFrameScheduler`: frames-in-flight slots, fences/semaphores, GPU timestamp queries. |
-| `source/vulkan_pipeline.hpp/.cpp` | `VulkanPipeline`: render pass, descriptor layouts, PBR mesh pipeline, overlay pipeline, disk-backed pipeline cache. |
-| `source/vulkan_resources.hpp/.cpp` | `VulkanResources`: frame uniform ring, mesh buffers, texture images/samplers, material descriptor-set cache with per-renderer capacity limits. |
-| `source/vulkan_swapchain.hpp/.cpp` | `VulkanSwapchain`: format/present-mode selection, image views, framebuffers, recreation, PPM readback. |
-| `shaders/mesh.vert`, `shaders/mesh.frag` | GLSL sources of the PBR pipeline (the fragment shader is the reference twin of the CPU shading in `render_shared.hpp`). |
+| `source/core/renderer.cpp` | Module entry: `RenderModule` (ModuleInterface), capability binding, configuration, backend selection, draw sorting/batching, entry table. |
+| `source/backend/render_backend.hpp` | `RenderBackend` - the abstract interface both backends implement. |
+| `source/core/render_shared.hpp` | Shared PBR math (must match the Vulkan shader), default environment, tone mapping, renderer error mapping, and device preference enum. |
+| `source/core/render_data.hpp/.cpp` | Mesh/texture normalization: attribute repacking, index validation, normal generation, pixel format conversion. |
+| `source/backend/headless/headless_backend.hpp/.cpp` | Headless backend: CPU rasterizer with culling, LOD, transform cache, and task-scheduler parallelism. |
+| `source/backend/vulkan/vulkan_backend.hpp/.cpp` | Vulkan backend: frame lifecycle, command recording, instance streaming, deferred destruction. |
+| `source/backend/vulkan/vulkan_device.hpp/.cpp` | `VulkanDeviceContext`: instance/surface/device/VMA bring-up, device profile, async staging-upload queue. |
+| `source/backend/vulkan/vulkan_frames.hpp/.cpp` | `VulkanFrameScheduler`: frames-in-flight slots, fences/semaphores, GPU timestamp queries. |
+| `source/backend/vulkan/vulkan_pipeline.hpp/.cpp` | `VulkanPipeline`: render pass, descriptor layouts, PBR mesh pipeline, overlay pipeline, disk-backed pipeline cache. |
+| `source/backend/vulkan/vulkan_resources.hpp/.cpp` | `VulkanResources`: frame uniform ring, mesh buffers, texture images/samplers, material descriptor-set cache with per-renderer capacity limits. |
+| `source/backend/vulkan/vulkan_swapchain.hpp/.cpp` | `VulkanSwapchain`: format/present-mode selection, image views, framebuffers, recreation, PPM readback. |
+| `shaders/mesh.vert`, `shaders/mesh.frag` | GLSL sources of the PBR pipeline (the fragment shader is the reference twin of the CPU shading in `source/core/render_shared.hpp`). |
 | `shaders/ui.vert`, `shaders/ui.frag` | GLSL sources of the overlay pipeline. |
-| `shaders/*_gen.hpp` | SPIR-V arrays included by `vulkan_pipeline.cpp`; regenerated from the GLSL by `engine_module_compile_shaders` at build time. |
+| `shaders/*_gen.hpp` | SPIR-V arrays included by `source/backend/vulkan/vulkan_pipeline.cpp`; regenerated from the GLSL by `engine_module_compile_shaders` at build time. |
 
 ## How it works
 
@@ -130,7 +130,7 @@ The headless backend's frame is the same shape minus the GPU: `beginFrame` (re)a
 Headless parallel rasterization has two execution structures, selected per draw:
 
 - **Default - band/triangle-range split.** Big draws split their triangle range across workers; few-triangle wide-coverage draws (floor, sky) split their projected row extent into bands. Workers share the framebuffer, so depth/colour writes take a per-pixel-group spin lock. A submission rejected by the scheduler (stopping, or the outstanding bound hit) runs inline on the calling thread instead of silently dropping that band/range's geometry.
-- **Opt-in - tile-based split** (`[renderer] headless_tile_parallel`, default `false`). Triangles are binned into 64x64 screen tiles and each worker owns disjoint tiles exclusively, so no per-pixel locks exist. The binning pass (transform/clip/project of every triangle on the calling thread) makes this slower than the default split on low-core machines (measured ~+55% frame time on a 2-core host); it targets many-core hosts where per-pixel lock contention dominates. Tile grids and flattened record lists use 32-bit indices, with allocation counts also bounded by the host's representable vector size; dimensions beyond the signed raster-coordinate range or bins beyond either limit use the sequential path. Triggers mirror the default paths exactly.
+- **Default - tile-based split** (`[renderer] headless_tile_parallel`, default `true`). Triangles are binned into 64x64 screen tiles and each worker owns disjoint tiles exclusively, so no per-pixel locks exist. The binning pass (transform/clip/project of every triangle on the calling thread) makes this slower than the default split on low-core machines (measured ~+55% frame time on a 2-core host); disable on low-core hosts where per-pixel lock contention does not dominate. Tile grids and flattened record lists use 32-bit indices, with allocation counts also bounded by the host's representable vector size; dimensions beyond the signed raster-coordinate range or bins beyond either limit use the sequential path. Triggers mirror the default paths exactly.
 
 ### Mesh and texture resource model
 

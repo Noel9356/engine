@@ -1,13 +1,13 @@
-// EngineKernel module loading: library scan, descriptors and mod loading.
+// EngineKernel module loading: library scan, descriptors and plugin loading.
 //
 // loadModuleLibraries scans the modules directory and resolves each
 // library's descriptor from the cache or a module.toml sidecar; libraries
 // with neither need trust-gate approval to be scanned (that executes
-// code). Also loads native mod libraries and resolves script hosts.
+// code). Also loads native plugin libraries and resolves script hosts.
 
-#include "../engine_kernel_internal.hpp"
-#include "../kernel_internals.hpp"
-#include "../trust_gate.hpp"
+#include "engine_kernel_internal.hpp"
+#include "kernel_internals.hpp"
+#include "trust_gate.hpp"
 #include "engine/kernel/dependency_resolver.hpp"
 #include "engine/kernel/dynamic_library.hpp"
 #include "engine/kernel/module_descriptor.hpp"
@@ -16,9 +16,9 @@
 #include <engine/kernel/capability_name.hpp>
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/executable_directory.hpp>
-#include <engine/kernel/game_mod_api.hpp>
-#include <engine/kernel/game_mod_discovery.hpp>
-#include <engine/kernel/game_mod_manifest.hpp>
+#include <engine/kernel/plugin_api.hpp>
+#include <engine/kernel/plugin_discovery.hpp>
+#include <engine/kernel/plugin_manifest.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/module_descriptor_cache.hpp>
 #include <engine/kernel/module_manifest.hpp>
@@ -607,23 +607,23 @@ void EngineKernel::appendDeclaredModuleRecords()
     }
 }
 
-// Post-trust-gate loading of native mods: each pending package's library is loaded
-// and its compiled manifest is checked against mod.toml ('provides' lives only in
-// mod.toml); failures remove the participant record.
-void EngineKernel::loadNativeGameModLibraries(std::string &report)
+// Post-trust-gate loading of native plugins: each pending package's library is loaded
+// and its compiled manifest is checked against plugin.toml ('provides' lives only in
+// plugin.toml); failures remove the participant record.
+void EngineKernel::loadNativePluginLibraries(std::string &report)
 {
-    for (const DiscoveredGameModPackage &package : pendingNativeGameModPackages_)
+    for (const DiscoveredPluginPackage &package : pendingNativePluginPackages_)
     {
-        const GameModManifest &gameModManifest = package.manifest;
-        NativeGameModLoad      load;
-        if (!loadNativeModEntry(package, load, report))
+        const PluginManifest &pluginManifest = package.manifest;
+        NativePluginLoad      load;
+        if (!loadNativePluginEntry(package, load, report))
         {
             auto recordIt = std::find_if(records.begin(),
                 records.end(),
-                [&gameModManifest](const ParticipantRecord &candidate)
+                [&pluginManifest](const ParticipantRecord &candidate)
                 {
-                    return candidate.name == gameModManifest.id
-                        && candidate.manifest.kind == ParticipantKind::NativeGameMod;
+                    return candidate.name == pluginManifest.id
+                        && candidate.manifest.kind == ParticipantKind::NativePlugin;
                 });
             if (recordIt != records.end())
             {
@@ -633,53 +633,53 @@ void EngineKernel::loadNativeGameModLibraries(std::string &report)
         }
         auto recordIt = std::find_if(records.begin(),
             records.end(),
-            [&gameModManifest](const ParticipantRecord &candidate)
+            [&pluginManifest](const ParticipantRecord &candidate)
             {
-                return candidate.name == gameModManifest.id
-                    && candidate.manifest.kind == ParticipantKind::NativeGameMod;
+                return candidate.name == pluginManifest.id
+                    && candidate.manifest.kind == ParticipantKind::NativePlugin;
             });
         if (recordIt == records.end())
         {
             report
-                += "- native mod '" + gameModManifest.id + "' lost its participant record; the package is dropped.\n";
-            load.entryTable->destroyMod(load.gameModInstance);
+                += "- native plugin '" + pluginManifest.id + "' lost its participant record; the package is dropped.\n";
+            load.entryTable->destroyPlugin(load.pluginInstance);
             continue;
         }
         ParticipantRecord        &record           = *recordIt;
-        const ParticipantManifest compiledManifest = load.gameModInstance->manifest();
+        const ParticipantManifest compiledManifest = load.pluginInstance->manifest();
         if (!compiledManifest.providedCapabilities.empty()
-            && !detail::sameStringSet(compiledManifest.providedCapabilities, gameModManifest.providedCapabilities))
+            && !detail::sameStringSet(compiledManifest.providedCapabilities, pluginManifest.providedCapabilities))
         {
-            report += "- native mod '" + gameModManifest.id
-                    + "' provides different capabilities in its compiled manifest than mod.toml declares under "
-                      "'provides'; declare the provided capabilities in mod.toml (and only there) so the graph "
+            report += "- native plugin '" + pluginManifest.id
+                    + "' provides different capabilities in its compiled manifest than plugin.toml declares under "
+                      "'provides'; declare the provided capabilities in plugin.toml (and only there) so the graph "
                       "and the validate dry run see them.\n";
-            load.entryTable->destroyMod(load.gameModInstance);
+            load.entryTable->destroyPlugin(load.pluginInstance);
             records.erase(recordIt);
             continue;
         }
-        if (compiledManifest.providedCapabilities.empty() && !gameModManifest.providedCapabilities.empty())
+        if (compiledManifest.providedCapabilities.empty() && !pluginManifest.providedCapabilities.empty())
         {
-            report += "- native mod '" + gameModManifest.id + "' declares 'provides' in mod.toml but its compiled "
-                    + "manifest provides nothing; rebuild the mod against this engine.\n";
-            load.entryTable->destroyMod(load.gameModInstance);
+            report += "- native plugin '" + pluginManifest.id + "' declares 'provides' in plugin.toml but its compiled "
+                    + "manifest provides nothing; rebuild the plugin against this engine.\n";
+            load.entryTable->destroyPlugin(load.pluginInstance);
             records.erase(recordIt);
             continue;
         }
         record.library           = std::move(load.library);
-        record.gameModEntryTable = load.entryTable;
-        record.gameModInstance   = load.gameModInstance;
+        record.pluginEntryTable = load.entryTable;
+        record.pluginInstance   = load.pluginInstance;
     }
-    pendingNativeGameModPackages_.clear();
+    pendingNativePluginPackages_.clear();
 }
 
-// Finds the constructed module that provides a script mod's host capability
+// Finds the constructed module that provides a script plugin's host capability
 // (exact or family match); ambiguity needs a [providers] selection, otherwise
 // hosting fails.
 EngineKernel::ParticipantRecord *EngineKernel::resolveScriptHost(
     const ParticipantRecord &scriptRecord, std::string &report)
 {
-    const std::string capabilityName = scriptRecord.scriptMod.hostCapability;
+    const std::string capabilityName = scriptRecord.scriptPlugin.hostCapability;
     const auto        providesHost   = [&capabilityName](const ParticipantRecord &record)
     {
         return record.manifest.kind == ParticipantKind::EngineModule
@@ -702,7 +702,7 @@ EngineKernel::ParticipantRecord *EngineKernel::resolveScriptHost(
     }
     if (candidates.empty())
     {
-        report += "- script mod '" + scriptRecord.name + "' cannot be hosted: no active module provides the '"
+        report += "- script plugin '" + scriptRecord.name + "' cannot be hosted: no active module provides the '"
                 + capabilityName + "' capability it names as its host.\n";
         return nullptr;
     }
@@ -732,7 +732,7 @@ EngineKernel::ParticipantRecord *EngineKernel::resolveScriptHost(
             }
             names += "'" + candidate->name + "'";
         }
-        report += "- script mod '" + scriptRecord.name + "' cannot be hosted: " + std::to_string(candidates.size())
+        report += "- script plugin '" + scriptRecord.name + "' cannot be hosted: " + std::to_string(candidates.size())
                 + " active modules provide the '" + capabilityName + "' capability (" + names
                 + "); select one under [providers].\n";
         return nullptr;

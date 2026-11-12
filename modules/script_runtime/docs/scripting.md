@@ -1,6 +1,6 @@
-# Writing Lua script mods
+# Writing Lua script plugins
 
-A script mod is a package directory under a mods directory containing `mod.toml` and at least the entry script:
+A script plugin is a package directory under a plugins directory containing `plugin.toml` and at least the entry script:
 
 ```toml
 capabilities    = ["script_runtime"]
@@ -15,19 +15,19 @@ version         = "0.1.0"
 Rules enforced by the kernel:
 
 - `type` must be `"script"`; `entry` is a relative path inside the package.
-- `host_capability` must be set and must also appear in `capabilities` — this is what orders the hosting module before the mod.
-- Script mods cannot declare `provides` (only native mods publish capabilities).
+- `host_capability` must be set and must also appear in `capabilities` — this is what orders the hosting module before the plugin.
+- Script plugins cannot declare `provides` (only native plugins publish capabilities).
 - Every entry in `capabilities` must be provided by some active module or the graph fails to resolve.
-- `.lua` files in the package are part of the trust hash; a trusted mod that changes its scripts must be re-trusted.
+- `.lua` files in the package are part of the trust hash; a trusted plugin that changes its scripts must be re-trusted.
 
 ## Environment
 
 The entry file runs once in its own sandboxed runtime. Available:
 
-- Globals set by the host: `engine_mod_id`, `engine_mod_version`, `engine_mod_path`.
+- Globals set by the host: `engine_plugin_id`, `engine_plugin_version`, `engine_plugin_path`.
 - Libraries: `math`, `string`, `table`, `utf8`, and a trimmed `base` (`print` works; `dofile`/`loadfile`/`collectgarbage` do not exist; no `io`/`os`).
-- Functions registered by the hosting application (for example the demo's `menu_*` bridge) — check for existence if your mod must run in several games: `if menu_text ~= nil then ... end`.
-- Anything the application registered via `registerNativeFunction` on the runtime returned by `hostedRuntime(modId)`.
+- Functions registered by the hosting application (for example the demo's `menu_*` bridge) — check for existence if your plugin must run in several games: `if menu_text ~= nil then ... end`.
+- Anything the application registered via `registerNativeFunction` on the runtime returned by `hostedRuntime(pluginId)`.
 - Functions installed by the optional modules' Lua bridges when those modules are active: `audio.*`, `camera.*`, `input_actions.*`, and `skeletal_animation.*`. Each module's `docs/lua_bridge.md` documents its exact function set.
 
 ## Callbacks
@@ -46,8 +46,8 @@ function on_shutdown() end                    -- engine shutdown beginning
 Timing notes:
 
 - `on_frame` runs when the frame event is published, after the frame's render submission. `delta_seconds` is the engine's clamped frame delta.
-- Drawing must happen inside the render frame, so the application calls a dedicated function (like `on_draw`) itself between scene draw and frame submission — see the main_menu mod for the pattern.
-- A runtime error inside a callback is printed once per distinct message and the mod keeps running; an error that prevents hosting aborts startup.
+- Drawing must happen inside the render frame, so the application calls a dedicated function (like `on_draw`) itself between scene draw and frame submission — see the main_menu plugin for the pattern.
+- A runtime error inside a callback is printed once per distinct message and the plugin keeps running; an error that prevents hosting aborts startup.
 
 ## Performance and safety
 

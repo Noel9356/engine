@@ -39,8 +39,8 @@ public:
         // several providers and no [providers] choice; UnknownSelectedProvider:
         // a [providers] entry names a participant that does not provide the
         // capability (or no one provides it); CyclicDependency: requirement
-        // cycle; ModuleModCapability: a module requires a capability whose
-        // resolved provider is a mod.
+        // cycle; ModulePluginCapability: a module requires a capability whose
+        // resolved provider is a plugin.
         enum class Kind
         {
             UnknownCapability,
@@ -49,7 +49,7 @@ public:
             UnknownSelectedProvider,
             CyclicDependency,
 
-            ModuleModCapability
+            ModulePluginCapability
         };
 
         Kind                     kind             = Kind::UnknownCapability;

@@ -4,8 +4,8 @@
 // construct() re-runs it with trust enforced and builds participants in
 // the resolved topological order; start()/stop() walk that order.
 
-#include "../capability_provider_index.hpp"
-#include "../kernel_internals.hpp"
+#include "capability_provider_index.hpp"
+#include "kernel_internals.hpp"
 
 #include "engine/kernel/dependency_resolver.hpp"
 #include "engine/kernel/task_scheduler.hpp"
@@ -105,7 +105,7 @@ bool EngineKernel::validate(std::string &report)
     return true;
 }
 
-// Constructs participants in providers-first order: script mods go through their
+// Constructs participants in providers-first order: script plugins go through their
 // resolved host module; every declared capability must come back implemented.
 bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult &resolution,
     const std::vector<ParticipantManifest> &manifests, std::string &report)
@@ -119,7 +119,7 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
             continue;
         }
 
-        if (record->manifest.kind == ParticipantKind::ScriptGameMod)
+        if (record->manifest.kind == ParticipantKind::ScriptPlugin)
         {
             ParticipantRecord *hostRecord = resolveScriptHost(*record, report);
             if (hostRecord == nullptr)
@@ -128,25 +128,25 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
             }
             if (!hostRecord->constructed)
             {
-                report += "- script mod '" + record->name + "' cannot be hosted: module '" + hostRecord->name
+                report += "- script plugin '" + record->name + "' cannot be hosted: module '" + hostRecord->name
                         + "' did not construct.\n";
                 return false;
             }
-            ScriptGameModHost *scriptHost = hostRecord->moduleInstance->scriptModHost();
+            ScriptPluginHost *scriptHost = hostRecord->moduleInstance->scriptPluginHost();
             if (scriptHost == nullptr)
             {
-                report += "- script mod '" + record->name + "' cannot be hosted: module '" + hostRecord->name
-                        + "' provides the '" + record->scriptMod.hostCapability
-                        + "' capability but does not host script mods.\n";
+                report += "- script plugin '" + record->name + "' cannot be hosted: module '" + hostRecord->name
+                        + "' provides the '" + record->scriptPlugin.hostCapability
+                        + "' capability but does not host script plugins.\n";
                 return false;
             }
             try
             {
-                scriptHost->hostScriptGameMod(record->scriptMod);
+                scriptHost->hostScriptPlugin(record->scriptPlugin);
             }
             catch (const std::exception &error)
             {
-                report += "- construct failed for script mod '" + record->name + "': " + error.what() + "\n";
+                report += "- construct failed for script plugin '" + record->name + "': " + error.what() + "\n";
                 return false;
             }
             record->constructed = true;
@@ -171,9 +171,9 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
             {
                 record->moduleInstance->construct(context);
             }
-            else if (record->gameModInstance != nullptr)
+            else if (record->pluginInstance != nullptr)
             {
-                record->gameModInstance->construct(context);
+                record->pluginInstance->construct(context);
             }
         }
         catch (const std::exception &error)
@@ -190,9 +190,9 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
             {
                 capabilityPointer = record->moduleInstance->capabilityPointerFor(capabilityName);
             }
-            else if (record->gameModInstance != nullptr)
+            else if (record->pluginInstance != nullptr)
             {
-                capabilityPointer = record->gameModInstance->capabilityPointerFor(capabilityName);
+                capabilityPointer = record->pluginInstance->capabilityPointerFor(capabilityName);
             }
             if (capabilityPointer == nullptr)
             {
@@ -210,7 +210,7 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
             .kind                 = record->manifest.kind,
             .providedCapabilities = record->manifest.providedCapabilities,
             .moduleInstance       = record->moduleInstance,
-            .gameModInstance      = record->gameModInstance});
+            .pluginInstance      = record->pluginInstance});
     }
     return true;
 }
@@ -286,7 +286,7 @@ bool EngineKernel::construct(std::string &report)
     }
 
     // Records gathered by validate (no native code) must be rebuilt for a real construct.
-    if (participantsGathered && !nativeGameModLibrariesLoaded_)
+    if (participantsGathered && !nativePluginLibrariesLoaded_)
     {
         stop();
     }
@@ -351,9 +351,9 @@ void EngineKernel::start()
         {
             record.moduleInstance->start();
         }
-        else if (record.gameModInstance != nullptr)
+        else if (record.pluginInstance != nullptr)
         {
-            record.gameModInstance->start();
+            record.pluginInstance->start();
         }
         record.started = true;
     }
@@ -389,17 +389,17 @@ void EngineKernel::stop()
         {
             record.moduleInstance->stop();
         }
-        if (record.started && record.gameModInstance != nullptr)
+        if (record.started && record.pluginInstance != nullptr)
         {
-            record.gameModInstance->stop();
+            record.pluginInstance->stop();
         }
     }
     for (ParticipantRecord &record : records)
     {
-        if (record.gameModEntryTable != nullptr && record.gameModInstance != nullptr)
+        if (record.pluginEntryTable != nullptr && record.pluginInstance != nullptr)
         {
-            record.gameModEntryTable->destroyMod(record.gameModInstance);
-            record.gameModInstance = nullptr;
+            record.pluginEntryTable->destroyPlugin(record.pluginInstance);
+            record.pluginInstance = nullptr;
         }
         record.started     = false;
         record.constructed = false;
@@ -481,7 +481,7 @@ std::string EngineKernel::participantGraphReport() const
             appendList("optional", record.manifest.optionalCapabilities);
         }
         appendList("permissions", record.manifest.requiredPermissions);
-        if (!record.scriptMod.modId.empty())
+        if (!record.scriptPlugin.pluginId.empty())
         {
             report += "    script host: "
                     + (record.scriptHostName.empty() ? std::string("(unresolved)") : record.scriptHostName) + "\n";

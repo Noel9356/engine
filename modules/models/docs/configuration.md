@@ -37,4 +37,4 @@ A value outside its documented range is never clamped or coerced: it is ignored 
 - The optimizer keys form a fixed order - vertex cache, then overdraw, then vertex fetch - where each stage consumes the previous stage's result; `optimize_mesh` gates the whole chain and the other three are meaningless when it is false.
 - `search_paths` and `material_search_path` are only consulted for relative paths; absolute paths bypass both.
 
-`module.toml` enumerates exactly these 22 keys under `config_keys`; that list is the module's declared configuration surface on disk (the kernel validates known keys only for game-mod manifests, which declare `config_keys` in their own mod.toml, and for the engine's built-in sections).
+`module.toml` enumerates exactly these 22 keys under `config_keys`; that list is the module's declared configuration surface on disk (the kernel validates known keys only for plugin manifests, which declare `config_keys` in their own plugin.toml, and for the engine's built-in sections).

@@ -20,10 +20,10 @@ struct ApplicationCommandLineOptions
 {
     std::filesystem::path              configurationFile;
     std::filesystem::path              sceneFile;
-    std::vector<std::filesystem::path> gameModsDirectories;
+    std::vector<std::filesystem::path> pluginsDirectories;
     std::vector<std::string>           configurationOverrides;
-    // nullopt = no explicit set; an empty list (--no-mods) = run without mods.
-    std::optional<std::vector<std::string>> activeGameMods;
+    // nullopt = no explicit set; an empty list (--no-plugins) = run without plugins.
+    std::optional<std::vector<std::string>> activePlugins;
     std::vector<std::string>                applicationArguments;
     bool                                    validateOnly  = false;
     bool                                    helpRequested = false;

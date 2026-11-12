@@ -1,7 +1,7 @@
 // Command-line parsing for engine applications.
 //
-// Splits engine options (--config/--profile/--scene/--mod-dir/--set/
-// --active-mod/--no-mods/--validate) from application arguments (after
+// Splits engine options (--config/--profile/--scene/--plugin-dir/--set/
+// --active-plugin/--no-plugins/--validate) from application arguments (after
 // "--" or unrecognized tokens) and builds ApplicationHostOptions.
 
 #include "engine/application/application_host.hpp"
@@ -65,19 +65,19 @@ bool parseApplicationCommandLine(
         else if (argument == "--validate")
         {
             outOptions.validateOnly = true;
-            // --no-mods and --active-mod are two spellings of the active mod set; they conflict.
+            // --no-plugins and --active-plugin are two spellings of the active plugin set; they conflict.
         }
-        else if (argument == "--no-mods")
+        else if (argument == "--no-plugins")
         {
-            if (outOptions.activeGameMods.has_value() && !outOptions.activeGameMods->empty())
+            if (outOptions.activePlugins.has_value() && !outOptions.activePlugins->empty())
             {
-                error = "--no-mods cannot be combined with --active-mod";
+                error = "--no-plugins cannot be combined with --active-plugin";
                 return false;
             }
-            outOptions.activeGameMods = std::vector<std::string>{};
+            outOptions.activePlugins = std::vector<std::string>{};
         }
-        else if (argument == "--config" || argument == "--profile" || argument == "--scene" || argument == "--mod-dir"
-                 || argument == "--set" || argument == "--active-mod")
+        else if (argument == "--config" || argument == "--profile" || argument == "--scene" || argument == "--plugin-dir"
+                 || argument == "--set" || argument == "--active-plugin")
         {
             std::string value;
             if (!consumeValue(index, argument.c_str(), value))
@@ -98,22 +98,22 @@ bool parseApplicationCommandLine(
             {
                 outOptions.sceneFile = value;
             }
-            else if (argument == "--mod-dir")
+            else if (argument == "--plugin-dir")
             {
-                outOptions.gameModsDirectories.emplace_back(value);
+                outOptions.pluginsDirectories.emplace_back(value);
             }
-            else if (argument == "--active-mod")
+            else if (argument == "--active-plugin")
             {
-                if (outOptions.activeGameMods.has_value() && outOptions.activeGameMods->empty())
+                if (outOptions.activePlugins.has_value() && outOptions.activePlugins->empty())
                 {
-                    error = "--active-mod cannot be combined with --no-mods";
+                    error = "--active-plugin cannot be combined with --no-plugins";
                     return false;
                 }
-                if (!outOptions.activeGameMods.has_value())
+                if (!outOptions.activePlugins.has_value())
                 {
-                    outOptions.activeGameMods.emplace();
+                    outOptions.activePlugins.emplace();
                 }
-                outOptions.activeGameMods->push_back(std::move(value));
+                outOptions.activePlugins->push_back(std::move(value));
             }
             else
             {
@@ -144,9 +144,9 @@ ApplicationHostOptions makeApplicationHostOptions(
     options.configurationProfileFile      = commandLine.configurationProfileFile;
     options.configurationProfileFiles     = commandLine.configurationProfileFiles;
     options.sceneFile                     = commandLine.sceneFile;
-    options.additionalGameModsDirectories = commandLine.gameModsDirectories;
+    options.additionalPluginsDirectories = commandLine.pluginsDirectories;
     options.configurationOverrides        = commandLine.configurationOverrides;
-    options.activeGameMods                = commandLine.activeGameMods;
+    options.activePlugins                = commandLine.activePlugins;
     options.requiredCapabilities          = std::move(requiredCapabilities);
     return options;
 }
@@ -160,9 +160,9 @@ std::string applicationCommandLineUsage(const std::string &executableName)
            "  --profile <path>      Apply a tuning profile over the base configuration; may be repeated (later "
            "profiles win).\n"
            "  --scene <path>        Select a scene configuration.\n"
-           "  --mod-dir <path>      Add a game-mod search directory; may be repeated.\n"
-           "  --active-mod <id>     Activate only this game mod; may be repeated.\n"
-           "  --no-mods             Disable all game mods.\n"
+           "  --plugin-dir <path>      Add a plugin search directory; may be repeated.\n"
+           "  --active-plugin <id>     Activate only this plugin; may be repeated.\n"
+           "  --no-plugins             Disable all plugins.\n"
            "  --set <key=value>     Override a configuration value; may be repeated.\n"
            "  --validate            Validate configuration and the participant graph.\n"
            "  --help, -h            Show this help.\n"

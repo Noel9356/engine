@@ -69,14 +69,19 @@ engine_fetch_dependency(
 add_library(
     engine_module_models
     MODULE
-    source/models.cpp
-    source/obj_importer.cpp
-    source/stl_importer.cpp
-    source/ply_importer.cpp
-    source/off_importer.cpp
-    source/gltf_importer.cpp
-    source/cgltf_implementation.cpp
-    source/model_optimizer.cpp
+    source/core/models.cpp
+    source/importers/obj_importer.cpp
+    source/importers/stl_importer.cpp
+    source/importers/ply_importer.cpp
+    source/importers/off_importer.cpp
+    source/importers/gltf_importer.cpp
+    source/importers/cgltf_implementation.cpp
+    source/optimization/model_optimizer.cpp
+)
+
+target_include_directories(
+    engine_module_models
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/internal"
 )
 
 target_compile_definitions(

@@ -1,6 +1,6 @@
 # direct_lighting configuration
 
-All keys live in the `[direct_lighting]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it: known-key validation (unknown-key warnings) covers the engine's built-in sections and the `config_keys` of game-mod manifests only, so unknown `[direct_lighting]` keys are silently accepted.
+All keys live in the `[direct_lighting]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it: known-key validation (unknown-key warnings) covers the engine's built-in sections and the `config_keys` of plugin manifests only, so unknown `[direct_lighting]` keys are silently accepted.
 
 Every value is read once in `construct()`; the module does not follow configuration reloads. Keys are listed alphabetically.
 

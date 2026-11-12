@@ -10,7 +10,7 @@ The module provides the `models` capability, ABI version 7 (`modelsCapabilityAbi
 | --- | --- |
 | `loadModel(self, path, outError)` | Loads a model with the configured module defaults. |
 | `loadModelWithOptions(self, path, options, outError)` | Loads with caller-supplied `ModelLoadOptions`; a null `options` selects the module defaults. |
-| `destroyModel(self, model)` | Drops the model; every `MeshDescription` previously handed out for it becomes invalid. |
+| `destroyPluginel(self, model)` | Drops the model; every `MeshDescription` previously handed out for it becomes invalid. |
 | `partCount(self, model)` | Number of renderable parts (0 for unknown handles). |
 | `part(self, model, partIndex, outDescription)` | Fills a `renderer::MeshDescription` that aliases module-owned buffers. |
 | `partName(self, model, partIndex)` | Part name (OBJ shape, glTF node/mesh, or file stem); null when out of range. |
@@ -23,7 +23,7 @@ The module provides the `models` capability, ABI version 7 (`modelsCapabilityAbi
 
 ## Provided / required / optional capabilities
 
-From `module.toml` and from the exported entry table at the bottom of `source/models.cpp` (`engineQueryModuleEntryTable`), which is what the kernel actually loads the .so against (module ABI `engineModuleAbiVersion` = 8):
+From `module.toml` and from the exported entry table at the bottom of `source/core/models.cpp` (`engineQueryModuleEntryTable`), which is what the kernel actually loads the .so against (module ABI `engineModuleAbiVersion` = 8):
 
 | | |
 | --- | --- |
@@ -40,19 +40,19 @@ From `module.toml` and from the exported entry table at the bottom of `source/mo
 | `module.toml` | Module descriptor: name, version, provides/requires, and the declared `config_keys`. |
 | `config.toml` | Default values for the `[models]` configuration section (see `configuration.md`). |
 | `include/engine/models/capabilities.hpp` | Public capability types: ABI, handles, errors, load options, function-pointer table. Material and texture-slot types live in `shared_types/include/engine/models/material.hpp`. |
-| `source/models.cpp` | Module entry point: configuration, the model registry, capability binding, and the load pipeline. |
-| `source/model_import_internal.hpp` | Shared importer plumbing: `ModelRecord`/`ModelPart` types, option transforms, triangle-normal generation, flat-shading expansion, and index helpers. |
-| `source/obj_importer.cpp` | Wavefront OBJ/MTL importer (tinyobjloader v2.0.0rc13, header-only). One part per OBJ shape; MTL materials with PBR inference. |
-| `source/stl_importer.cpp` | STL importer (binary and ASCII). Bit-exact vertex welding on the transformed position. |
-| `source/ply_importer.cpp` | PLY importer (ascii, binary little/big endian) with a hand-rolled header parser. |
-| `source/off_importer.cpp` | OFF/COFF importer; polygon fan triangulation, optional COFF vertex colors. |
-| `source/gltf_importer.cpp` | glTF 2.0 importer (cgltf v1.15, header-only): scene walk, node transforms, material extensions. |
-| `source/cgltf_implementation.cpp` | The one translation unit that compiles the cgltf parser implementation. |
-| `source/model_optimizer.cpp` | meshoptimizer passes (v1.3): vertex cache, overdraw, vertex fetch. |
+| `source/core/models.cpp` | Module entry point: configuration, the model registry, capability binding, and the load pipeline. |
+| `source/internal/model_import_internal.hpp` | Shared importer plumbing: `ModelRecord`/`ModelPart` types, option transforms, triangle-normal generation, flat-shading expansion, and index helpers. |
+| `source/importers/obj_importer.cpp` | Wavefront OBJ/MTL importer (tinyobjloader v2.0.0rc13, header-only). One part per OBJ shape; MTL materials with PBR inference. |
+| `source/importers/stl_importer.cpp` | STL importer (binary and ASCII). Bit-exact vertex welding on the transformed position. |
+| `source/importers/ply_importer.cpp` | PLY importer (ascii, binary little/big endian) with a hand-rolled header parser. |
+| `source/importers/off_importer.cpp` | OFF/COFF importer; polygon fan triangulation, optional COFF vertex colors. |
+| `source/importers/gltf_importer.cpp` | glTF 2.0 importer (cgltf v1.15, header-only): scene walk, node transforms, material extensions. |
+| `source/importers/cgltf_implementation.cpp` | The one translation unit that compiles the cgltf parser implementation. |
+| `source/optimization/model_optimizer.cpp` | meshoptimizer passes (v1.3): vertex cache, overdraw, vertex fetch. |
 
 ## How it works
 
-`loadModelWithOptionsImpl` in `source/models.cpp` runs the pipeline; the per-format `import*File` functions fill a `ModelRecord`.
+`loadModelWithOptionsImpl` in `source/core/models.cpp` runs the pipeline; the per-format `import*File` functions fill a `ModelRecord`.
 
 1. **Options.** Caller options replace the configured defaults wholesale and are validated in place by `validOptions`: enum ranges, material search path length (4096 max), finite scale/translation/pivot/uv values bounded by 1e12, and a renormalized rotation quaternion. Invalid options fail with `InvalidOptions` before anything is read.
 2. **Transform.** `makeTransform` precomputes the option transform once: position matrix = rotation (from the quaternion) times per-axis scale, normal matrix = rotation divided by the scale, pivot and translation, plus a `reverseWinding` flag (Reverse mode, or Automatic with an odd number of negative scale axes; Preserve never reverses).
@@ -68,13 +68,13 @@ From `module.toml` and from the exported entry table at the bottom of `source/mo
 6. **Optimization.** When `optimize_mesh` is set, `optimizeModelRecord` runs the module-configured meshoptimizer passes over every part: vertex cache and overdraw reorder triangles (only for parts whose triangles share a single fully opaque material, so blending order survives), then vertex fetch reorders the vertex buffer along the index order.
 7. **Registration.** Statistics are filled from the post-optimization record, a fresh handle is allocated (monotonic counter that skips 0 and live ids), and the record moves into the module's map.
 
-**ModelHandle to GPU-facing data.** `part()` fills a `renderer::MeshDescription` whose `vertices`/`indices` pointers alias the part's own vectors (`vertexCount` = floats / 11, `indexCount` triangles x 3, `MeshIndexFormat::UInt32`); stride and attribute tables stay at the description defaults, the renderer knows the 11-float layout via `renderer::meshVertexFloatCount`. The pointers stay valid until `destroyModel`, module stop, or (for `partTriangleMaterials`/names) the same lifetime.
+**ModelHandle to GPU-facing data.** `part()` fills a `renderer::MeshDescription` whose `vertices`/`indices` pointers alias the part's own vectors (`vertexCount` = floats / 11, `indexCount` triangles x 3, `MeshIndexFormat::UInt32`); stride and attribute tables stay at the description defaults, the renderer knows the 11-float layout via `renderer::meshVertexFloatCount`. The pointers stay valid until `destroyPluginel`, module stop, or (for `partTriangleMaterials`/names) the same lifetime.
 
 ## Threading and lifetime
 
 All capability entries and the configuration-reload handler run synchronously on the caller's thread; the module keeps no mutexes. Treat the capability as single-threaded: load, query, and destroy models from the thread that owns the engine (the kernel drives construct/start/stop and event dispatch there) and do not share `MeshDescription` pointers across threads without external synchronization.
 
-The module owns everything: `ModelRecord` (vertex/index buffers, material strings, statistics) lives in the registry until `destroyModel` erases it or `stop()` clears the registry. `part()`, `partName()`, `materialName()`, `materialTexturePath()`, and `partTriangleMaterials()` return views into that storage, not copies. Importers allocate their own scratch (cgltf's document is freed via `unique_ptr` before `loadModelWithOptions` returns); nothing imported is retained beyond what the record holds.
+The module owns everything: `ModelRecord` (vertex/index buffers, material strings, statistics) lives in the registry until `destroyPluginel` erases it or `stop()` clears the registry. `part()`, `partName()`, `materialName()`, `materialTexturePath()`, and `partTriangleMaterials()` return views into that storage, not copies. Importers allocate their own scratch (cgltf's document is freed via `unique_ptr` before `loadModelWithOptions` returns); nothing imported is retained beyond what the record holds.
 
 ## Configuration
 
@@ -86,7 +86,7 @@ Every `[models]` key, its validated range, default, and effect is documented in 
 
 **Permissions.** The module declares no permissions itself. A consumer acquires the capability with `context.acquireCapability<engine::models::ModelsCapability>()`, which the permission system gates behind the `capability.models` permission; declaring `models` in the consumer's `requires` (module.toml) or required capabilities grants it (the kernel derives `capability.<name>` permissions from declared requirements). `tryAcquireCapability` returns null instead of throwing when the capability is missing.
 
-**Consumer usage** (signatures from `capabilities.hpp`, as used by `demo_character_customisation/source/main.cpp`):
+**Consumer usage** (signatures from `capabilities.hpp`, as used by `demos/character_customisation/source/main.cpp`):
 
 ```cpp
 auto &models = context.acquireCapability<engine::models::ModelsCapability>();
@@ -115,6 +115,6 @@ else
             // upload description.vertices / description.indices to the renderer
         }
     }
-    models.destroyModel(models.self, model); // invalidates the descriptions above
+    models.destroyPluginel(models.self, model); // invalidates the descriptions above
 }
 ```

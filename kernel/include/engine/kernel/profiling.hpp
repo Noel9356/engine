@@ -88,6 +88,36 @@ enum class PerformanceMetric : std::uint8_t
     Count
 };
 
+// Stable short name for a metric, for diagnostics dumps. Kept next to the
+// enum so a new metric cannot be added without a name.
+[[nodiscard]] inline const char *performanceMetricName(PerformanceMetric metric) noexcept
+{
+    switch (metric)
+    {
+    case PerformanceMetric::SchedulerTask: return "SchedulerTask";
+    case PerformanceMetric::SchedulerQueueWait: return "SchedulerQueueWait";
+    case PerformanceMetric::AssetRead: return "AssetRead";
+    case PerformanceMetric::AssetEviction: return "AssetEviction";
+    case PerformanceMetric::FrameEvents: return "FrameEvents";
+    case PerformanceMetric::RenderFrame: return "RenderFrame";
+    case PerformanceMetric::RenderGraphCompile: return "RenderGraphCompile";
+    case PerformanceMetric::RenderGraphExecute: return "RenderGraphExecute";
+    case PerformanceMetric::VulkanUpload: return "VulkanUpload";
+    case PerformanceMetric::FramePacing: return "FramePacing";
+    case PerformanceMetric::FrameSlotWait: return "FrameSlotWait";
+    case PerformanceMetric::SwapchainAcquire: return "SwapchainAcquire";
+    case PerformanceMetric::SwapchainPresent: return "SwapchainPresent";
+    case PerformanceMetric::QueueSubmit: return "QueueSubmit";
+    case PerformanceMetric::UploadFenceWait: return "UploadFenceWait";
+    case PerformanceMetric::UploadsWait: return "UploadsWait";
+    case PerformanceMetric::ImageFenceWait: return "ImageFenceWait";
+    case PerformanceMetric::ReadbackWait: return "ReadbackWait";
+    case PerformanceMetric::RenderDrawSort: return "RenderDrawSort";
+    case PerformanceMetric::Count: break;
+    }
+    return "Unknown";
+}
+
 // Nanosecond totals; averageMilliseconds() derives the mean. The percentile
 // fields are histogram estimates (bucket error <= ~6%, plus snapshot tearing
 // under concurrent record() calls - acceptable for diagnostics; publish the

@@ -29,7 +29,7 @@ Entries: `createPlanet`, `destroyPlanet`, `updatePlanet` (per-frame LOD advance 
 | `include/engine/planet/planet.hpp/.cpp` | `Planet` facade: owns a validated params copy, the density field and the octree; issues chunk builds to the kernel `TaskScheduler` (`TaskGroup`-tracked, bounded by `max_concurrent_builds` / `max_new_builds_per_update`), collects finished meshes into a stable cache, evicts stale entries (`chunk_eviction_updates`, `chunk_cache_capacity`) and hands out borrowed views. Each chunk build carries its `ConformMask`; the mask set is recomputed whenever the visible list changes (a mask is a pure function of the sorted visible list and the chunk coordinate) and chunks whose stored mesh was built under a different mask are rebuilt - the stale mesh keeps rendering until the conforming rebuild lands. |
 | `include/engine/planet/capabilities.hpp` | Public capability types and function-pointer table. |
 | `source/planet_module.cpp` | Module singleton: `[planet]` configuration mapping, per-planet creation with description overrides, capability binding, entry table. |
-| `demo_planet/` (top level) | The generation demo application: globe/coast/cliffs/surface views with deterministic camera placement, screenshot export, `--self-test`. |
+| `demos/planet/` (top level) | The generation demo application: globe/coast/cliffs/surface views with deterministic camera placement, screenshot export, `--self-test`. |
 
 ## How it works
 

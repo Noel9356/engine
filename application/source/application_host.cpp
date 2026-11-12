@@ -78,24 +78,24 @@ bool ApplicationHost::configureKernel(EngineKernel &kernel, const ApplicationHos
     {
         kernel.setSceneFile(resolveApplicationPath(options.sceneFile));
     }
-    if (!options.gameModsDirectory.empty())
+    if (!options.pluginsDirectory.empty())
     {
-        kernel.setGameModsDirectory(resolveApplicationPath(options.gameModsDirectory));
+        kernel.setPluginsDirectory(resolveApplicationPath(options.pluginsDirectory));
     }
-    for (const std::filesystem::path &directory : options.additionalGameModsDirectories)
+    for (const std::filesystem::path &directory : options.additionalPluginsDirectories)
     {
         if (directory.empty())
         {
-            report = "application host: an additional game-mod directory is empty\n";
+            report = "application host: an additional plugin directory is empty\n";
             return false;
         }
-        kernel.addGameModsDirectory(resolveApplicationPath(directory));
+        kernel.addPluginsDirectory(resolveApplicationPath(directory));
     }
 
     kernel.setApplicationRequirements(options.requiredCapabilities);
-    if (options.activeGameMods.has_value())
+    if (options.activePlugins.has_value())
     {
-        kernel.setActiveGameMods(*options.activeGameMods);
+        kernel.setActivePlugins(*options.activePlugins);
     }
     kernel.setTrustConsentHandler(options.trustConsentHandler);
 

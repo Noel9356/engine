@@ -1,6 +1,6 @@
 # file_asset_store configuration
 
-All keys live in the `[file_asset_store]` section. The module's `config.toml` supplies the defaults below; a runtime profile may override them (see `config/profiles/*.toml` in the engine tree). `module.toml` mirrors every key under `config_keys` for documentation; the kernel validates known keys for engine sections and game-mod manifests only. Keys are listed alphabetically within each table.
+All keys live in the `[file_asset_store]` section. The module's `config.toml` supplies the defaults below; a runtime profile may override them (see `config/profiles/*.toml` in the engine tree). `module.toml` mirrors every key under `config_keys` for documentation; the kernel validates known keys for engine sections and plugin manifests only. Keys are listed alphabetically within each table.
 
 ## Auto config
 

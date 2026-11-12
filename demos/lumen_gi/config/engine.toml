@@ -1,0 +1,43 @@
+# demo_lumen_gi: deterministic GI test harness configuration.
+#
+# The sun is disabled here so the interior view is lit ONLY by its emissive
+# panels through GI; the outdoor view enables it via
+#   --profile config/profiles/sunlit.toml
+# (profiles overlay this file, later values win).
+
+[diagnostics]
+profiling_enabled = true
+
+[engine]
+active_plugins             = []
+max_fps                 = 0
+max_frame_delta_seconds = 0.25
+max_worker_count        = 16
+priority_aging_ms       = 250
+queue_source_fairness   = true
+worker_count            = 0
+
+[pbr]
+# The interior view must be lit ONLY through GI (its lamps); the legacy
+# hemispheric fallback ambient stays near zero so the hook's indirect term
+# dominates when the probes are valid. The outdoor view's skylight comes from
+# the sunlit profile.
+ambient_intensity = 0.08
+sun_enabled = false
+sun_intensity = 0.0
+
+[renderer]
+backend = "headless"
+clear_color = [0.02, 0.02, 0.03, 1.0]
+
+[trust]
+# The renderer acquires five capabilities now that it consumes the optional
+# lumen_gi probe grid, which the trust gate flags as "broad"; first-party
+# modules are trusted by name.
+trustModules = ["renderer"]
+
+[window]
+# GI test renders at a modest resolution: the headless (CPU) rasterizer's
+# cost is strictly per shaded pixel.
+height = 360
+width  = 640

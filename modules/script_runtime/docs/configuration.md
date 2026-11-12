@@ -1,6 +1,6 @@
 # script_runtime configuration
 
-All keys live in the `[script_runtime]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it (only engine sections and game-mod manifests are validated), so unknown `[script_runtime]` keys are silently accepted.
+All keys live in the `[script_runtime]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it (only engine sections and plugin manifests are validated), so unknown `[script_runtime]` keys are silently accepted.
 
 Every value is read once in `construct()`; the module does not follow configuration reloads. Keys are listed alphabetically within each table.
 
@@ -28,7 +28,7 @@ A value outside its documented range is ignored and the built-in default stays a
 
 ## Notes
 
-- Hosted script mods always use the module defaults; per-mod limits are not configurable (the manifest has no per-mod resource fields).
+- Hosted script plugins always use the module defaults; per-plugin limits are not configurable (the manifest has no per-plugin resource fields).
 - The two memory budgets are independent: a runtime may be well under `script_runtime.memory_limit_mb` while the module-wide `script_runtime.maximum_total_memory_mb` stops it.
 - `script_runtime.maximum_script_size_mb` is also capped internally by the memory limit (a script can never be larger than the heap it runs in).
 - The native-function, argument, and result caps directly bound the Lua bridges the optional modules install: every bridge in this engine fits with room to spare (the widest bridge call takes 14 arguments and returns up to 16 results). See [overview.md](overview.md) for the capability surface, [scripting.md](scripting.md) for the script-authoring view, and the per-module [lua_bridge.md](../audio/docs/lua_bridge.md) documents for the bridged functions.

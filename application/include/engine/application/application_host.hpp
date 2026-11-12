@@ -23,13 +23,13 @@ struct ApplicationHostOptions
 {
     std::filesystem::path              configurationFile;
     std::filesystem::path              sceneFile;
-    std::filesystem::path              gameModsDirectory;
-    std::vector<std::filesystem::path> additionalGameModsDirectories;
+    std::filesystem::path              pluginsDirectory;
+    std::vector<std::filesystem::path> additionalPluginsDirectories;
 
     std::vector<std::string> requiredCapabilities;
-    // nullopt lets the configuration decide; an explicit list filters discovered mods
+    // nullopt lets the configuration decide; an explicit list filters discovered plugins
     // (an empty list means none).
-    std::optional<std::vector<std::string>> activeGameMods;
+    std::optional<std::vector<std::string>> activePlugins;
     // Staged "key=value" TOML overrides, applied after profiles.
     std::vector<std::string> configurationOverrides;
 

@@ -50,7 +50,7 @@ Functions are listed alphabetically.
 
 ```lua
 -- Build and inspect a two-part character (the demo content registry must be
--- registered first; the character_lab mod defers to the first frame).
+-- registered first; the character_lab plugin defers to the first frame).
 local assembly = character.create(nil)
 local torso = character.add_part(assembly, "torso_humanoid", "torso")
 local head  = character.add_part(assembly, "head_dragon", "head")

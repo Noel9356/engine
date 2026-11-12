@@ -1,0 +1,9 @@
+capabilities    = ["script_runtime", "character"]
+description     = "Exercises the character.* Lua bridge with a throwaway assembly."
+display_name    = "Character Lab"
+engine_api      = 2
+entry           = "character_lab.lua"
+host_capability = "script_runtime"
+id              = "character_lab"
+type            = "script"
+version         = "0.1.0"

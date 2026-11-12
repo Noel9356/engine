@@ -18,6 +18,7 @@ add_library(
     source/lumen_gi.cpp
     source/lumen_gi_scene.cpp
     source/lumen_gi_lighting.cpp
+    source/lumen_gi_pipeline.cpp
     source/lumen_gi_debug.cpp
     source/lumen_gi_debug_views.cpp
 )
@@ -25,7 +26,6 @@ target_link_libraries(
     engine_module_lumen_gi
     PRIVATE engine_kernel
             engine_lumen_gi_capabilities
-            engine_util_types
             engine_pbr_capabilities
             engine_direct_lighting_capabilities
             engine_dep_glm

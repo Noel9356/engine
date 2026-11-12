@@ -13,7 +13,7 @@ evaluation.
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | When `false`, `evaluate()` is a no-op and the probe grid stops updating. |
-| `skip_unchanged_frames` | bool | `true` | Static-frame skip: when the camera (`setView`), the scene (surface mutators), and the environment (pbr / direct-lighting versions) are all unchanged and a full probe-update cycle has elapsed since the last change, `evaluate()` returns early without touching the caches, and the exported probe version stops changing (renderers polling `copyProbes` skip their per-frame snapshot upload too). Any change re-enables evaluation immediately. |
+| `skip_unchanged_frames` | bool | `true` | Static-frame skip: when the camera (`setView`), the scene (surface mutators), and the environment (pbr / direct-lighting versions) are all unchanged and every cache has had enough updates to settle (derived from the budgets, the number of cached texels, and the probe refresh cycle), `evaluate()` returns early without touching the caches, and the exported probe version stops changing (renderers polling `copyProbes` skip their per-frame snapshot upload too). Any change re-enables evaluation immediately. |
 | `quality` | 0-4 | `3` (High) | Preset scaling of the four amortization budgets below (Low 0.25x, Medium 0.5x, High 1x, Ultra 2x), mirroring the render graph's quality resolution. Explicit budget keys are scaled by the same factor. |
 
 ## Scene
@@ -27,21 +27,23 @@ evaluation.
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
-| `cards.per_surface_max` | 1-64 | `12` | Maximum cards per surface (Lumen's "Max Lumen Mesh Cards" default). The six base face cards are placed first, then split pieces by texel count. |
+| `cards.per_surface_max` | 1-64 | `12` | Maximum cards per surface (Lumen's "Max Lumen Mesh Cards" default). Cards are local-space face projections of the surface bounds; when a surface would need more cards (large faces split at `max_texels_per_card_axis`), the texel density is lowered until everything fits so every face stays covered. |
 | `cards.texels_per_meter` | 1-256 | `24.0` | World-space capture density: a card of extent w x h meters captures ceil(w x density) x ceil(h x density) texels. |
 | `cards.max_texels_per_card_axis` | 4-512 | `128` | Faces longer than this along an axis are subdivided (Lumen's 128-texel physical page size). |
+| `cards.depth_layers` | 1-4 | `2` | Front-facing hits kept per card texel (nearest first). More than one layer lets a concave mesh, e.g. a room modelled as one mesh, keep faces hidden behind a nearer one; `1` is the old single-layer capture. Memory and lighting cost scale with it. |
 
 ## Capture / lighting budgets (texels per frame)
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
-| `capture.texels_per_frame` | 4096-16777216 | `262144` | Card capture budget (Lumen's fixed 512x512 per-frame capture budget). Priority: stalest first, then camera distance. |
-| `lighting.direct_texels_per_frame` | 1024-16777216 | `65536` | Direct-lighting evaluation budget (Lumen: 1024x1024). Untouched texels keep their cached radiance. |
-| `lighting.indirect_texels_per_frame` | 1024-16777216 | `65536` | Indirect gather budget (Lumen: 512x512). Each update propagates one more bounce through the feedback loop. |
+| `capture.texels_per_frame` | 4096-16777216 | `262144` | Card capture budget (Lumen's fixed 512x512 per-frame capture budget). Capture is incremental and runs only for cards that are not captured yet (new or changed surfaces), nearest to the camera first; a static scene captures once. |
+| `lighting.direct_texels_per_frame` | 1024-16777216 | `65536` | Direct-lighting evaluation budget (Lumen: 1024x1024), in layered card texels. Each card has a rotating cursor, so every texel is refreshed once per cycle even for cards larger than the budget; untouched texels keep their cached radiance. |
+| `lighting.indirect_texels_per_frame` | 1024-16777216 | `65536` | Indirect gather budget (Lumen: 512x512), same cursor scheme. Each update propagates one more bounce through the feedback loop. |
+| `lighting.indirect_rays_per_texel` | 1-64 | `4` | Stratified cosine rays per refreshed texel (previously tied to `gather.rays_per_probe`); accumulated across updates by the history below. |
 | `lighting.sun_shadows` | bool | `true` | Shadow rays for the sun's direct lighting; off makes card lighting cheaper but indirect shadows disappear. |
-| `lighting.point_light_shadows` | bool | `false` | Shadow rays for point/spot lights (reserved; the current implementation leaves them unshadowed like the renderer's light loop). |
-| `lighting.update_speed` | 0.05-16 | `1.0` | Scales how fast the cached lighting refreshes relative to the budgets (Lumen's "Lumen Scene Lighting Update Speed"); not yet wired to the budget path, reserved. |
-| `lighting.indirect_temporal_blend` | 0-1 | `0.8` | Blend of the fresh gather into the cached indirect radiance; 0 replaces immediately (noisy), 1 never updates. Light changes therefore propagate over frames. |
+| `lighting.point_light_shadows` | bool | `false` | Shadow rays for point/spot (and directional) direct lights in card lighting, the final-image view and the reference. Off by default like the renderer's light loop. |
+| `lighting.update_speed` | 0.05-16 | `1.0` | Scales how fast the cached lighting refreshes relative to the budgets (Lumen's "Lumen Scene Lighting Update Speed"); multiplies `lighting.direct_texels_per_frame` and `lighting.indirect_texels_per_frame` (on top of `quality`). |
+| `lighting.indirect_temporal_blend` | 0-1 | `0.8` | Weight of the cached history when a texel is refreshed: 0 replaces it with the fresh gather (noisy), values near 1 almost never change it. The first update of a texel takes the fresh sample whole (history ramp-up), then the weight settles at this value. |
 
 ## Tracing
 
@@ -55,11 +57,14 @@ evaluation.
 | --- | --- | --- | --- |
 | `probes.spacing_m` | 0.25-32 | `2.0` | Level-0 probe lattice spacing; level 1 uses `spacing x level1_spacing_factor`. Each level is a camera-centered 9x9x9 clip box. |
 | `probes.direction_resolution` | 4-64 | `32` | Octahedral radiance map resolution per world probe (Lumen uses 32x32 for world probes). Exported through `GiProbeHeader`. |
-| `probes.updates_per_frame` | 1-1458 | `64` | Probes re-traced per frame per level (round-robin; Lumen amortizes probe updates the same way). Full refresh of one level takes 729 / updates frames. |
-| `probes.hysteresis` | 0-0.99 | `0.2` | Fraction of the previous radiance kept when a probe is re-traced. Higher values are more stable but adapt slower to light changes. |
-| `probes.level1_spacing_factor` | 2-16 | `4.0` | Coarser level's spacing multiplier. |
+| `probes.updates_per_frame` | 1-1458 | `64` | Probes re-traced per frame per level (round-robin; Lumen amortizes probe updates the same way); probes that scrolled into the clip box are updated first. |
+| `probes.rays_per_update` | 1-4096 | `256` | Rays traced per probe update. The direction map is refreshed in rotating strata (`direction_resolution^2 / rays_per_update` updates per full refresh); a probe without data traces every direction once. |
+| `probes.hysteresis` | 0-0.99 | `0.2` | Fraction of the previous radiance kept when a probe texel is re-traced. Higher values are more stable but adapt slower to light changes. |
+| `probes.level1_spacing_factor` | 2-16 | `4.0` | Coarser level's spacing multiplier (level 1 covers that many times the extent). Both levels scroll with the camera: crossing a lattice cell recycles only the plane of probes that enters the box. |
 
 ## Screen-space final gather (debug view)
+
+The gather only feeds the debug views (the renderer consumes the world probe grid), so it runs on demand when a view is exported instead of on every `evaluate()`; see `debug.continuous_gather`.
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
@@ -78,6 +83,8 @@ evaluation.
 | `debug.internal_width` / `debug.internal_height` | 16-1920 / 16-1080 | `320` x `180` | Resolution of all debug exports and of the screen-space final gather. |
 | `debug.reference_samples` | 1-4096 | `64` | Path-traced samples per pixel for the `Reference` ground-truth view. |
 | `debug.reference_bounces` | 1-16 | `4` | Path length for the reference view. |
+| `debug.continuous_gather` | bool | `false` | Run one screen-gather pass inside every `evaluate()` instead of on demand. Costs CPU every frame. |
+| `debug.export_gather_frames` | 1-64 | `16` | Accumulation passes run before a `FinalImage` / `GiOnly` export (unless `continuous_gather`) so the temporal filter has converged. |
 | `debug.include_ambient` | bool | `false` | Adds the pbr hemispheric ambient on top of GI in the `FinalImage` view. Off by default so `FinalImage` and `Reference` (which has no ambient) stay comparable; enable it to preview the renderer-hook look where GI replaces the ambient. |
 
 ## Device resolution

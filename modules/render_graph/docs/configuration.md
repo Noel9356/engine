@@ -1,6 +1,6 @@
 # render_graph configuration
 
-All keys live in the `[render_graph]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it: known-key validation (unknown-key warnings) covers the engine's built-in sections and the `config_keys` of game-mod manifests only, so unknown `[render_graph]` keys are silently accepted.
+All keys live in the `[render_graph]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. The `config_keys` list in `module.toml` documents the section's keys, but the current kernel does not validate module sections against it: known-key validation (unknown-key warnings) covers the engine's built-in sections and the `config_keys` of plugin manifests only, so unknown `[render_graph]` keys are silently accepted.
 
 Values are read once in `construct()` (`source/render_graph.cpp`); the module does not follow configuration reloads, so a restart is needed for changes. Numeric keys are clamped to their upper bound rather than rejected, as shown in the range column. Keys are listed alphabetically.
 

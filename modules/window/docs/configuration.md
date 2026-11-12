@@ -1,6 +1,6 @@
 # window configuration
 
-All keys live in the `[window]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. Every value is read in `construct()` and again whenever a `ConfigurationReloadedEvent` touches a `window.*` key (see `source/window.cpp`, `readConfiguration()`). The keys are mirrored in `module.toml` `config_keys` for documentation; the kernel does not validate module sections against that list (only engine sections and game-mod manifests are validated). Keys are listed alphabetically.
+All keys live in the `[window]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. Every value is read in `construct()` and again whenever a `ConfigurationReloadedEvent` touches a `window.*` key (see `source/window.cpp`, `readConfiguration()`). The keys are mirrored in `module.toml` `config_keys` for documentation; the kernel does not validate module sections against that list (only engine sections and plugin manifests are validated). Keys are listed alphabetically.
 
 | Key | Type | Valid range (validated in `readConfiguration`) | Default (`config.toml`) | Effect |
 | --- | --- | --- | --- | --- |

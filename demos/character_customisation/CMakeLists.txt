@@ -1,0 +1,34 @@
+engine_add_application(
+    demo_character_customisation
+    SOURCES
+    source/main.cpp
+    source/demo/benchmark_scene.cpp
+    source/demo/character_stage.cpp
+    source/demo/camera_bindings.cpp
+    source/demo/character_content.cpp
+    source/demo/character_screen/assembly.cpp
+    source/demo/character_screen/frame.cpp
+    source/demo/character_screen/lifecycle.cpp
+    source/demo/character_screen/panel.cpp
+    source/demo/character_screen/rendering.cpp
+    source/demo/character_screen/testing.cpp
+    source/demo/diagnostics.cpp
+    source/demo/geometry.cpp
+    source/demo/menu_bridge.cpp
+    source/demo/options.cpp
+    CAPABILITIES
+    window
+    renderer
+    render_graph
+    pbr
+    camera
+    models
+    ui
+    character
+    script_runtime
+    file_asset_store
+    LIBRARIES
+    engine_dep_glm
+    ASSET_DIRECTORY
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+)

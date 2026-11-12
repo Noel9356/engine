@@ -2,15 +2,15 @@
 // and live reload.
 //
 // loadConfiguration merges engine.toml + module defaults + profiles;
-// finishConfiguration applies scene files (assembly or sole mod claim)
+// finishConfiguration applies scene files (assembly or sole plugin claim)
 // and staged overrides; reloadConfiguration re-runs the pipeline after a
 // pre-parse validation, keeping the old configuration on any failure.
 
 #include "engine/kernel/configuration.hpp"
 #include <engine/kernel/engine_kernel.hpp>
 
-#include "../engine_kernel_internal.hpp"
-#include "../kernel_internals.hpp"
+#include "engine_kernel_internal.hpp"
+#include "kernel_internals.hpp"
 #include "engine/kernel/participant_interface.hpp"
 
 #include <cstddef>
@@ -52,7 +52,7 @@ bool EngineKernel::loadConfiguration(std::string &report)
         return false;
     }
 
-    // True when engine.toml itself carries [scene] (mod scenes then lose).
+    // True when engine.toml itself carries [scene] (plugin scenes then lose).
     assemblyDefinesScene = configurationStore.hasSection(ConfigurationStore::sceneSectionName);
 
     if (!loadModuleDefaults(report))
@@ -102,8 +102,8 @@ bool EngineKernel::loadModuleDefaults(std::string &report)
     return true;
 }
 
-// Scene precedence: an explicit scene wins, then the single mod-claimed
-// scene; multiple claims are ambiguous (error); mod scenes under an
+// Scene precedence: an explicit scene wins, then the single plugin-claimed
+// scene; multiple claims are ambiguous (error); plugin scenes under an
 // assembly scene become deferred warnings. Overrides apply last and the
 // diagnostics switches take effect.
 bool EngineKernel::finishConfiguration(std::string &report)
@@ -123,14 +123,14 @@ bool EngineKernel::finishConfiguration(std::string &report)
             report += "- " + sceneError + "\n";
             return false;
         }
-        // Exactly one mod scene claim: adopt it as the world.
+        // Exactly one plugin scene claim: adopt it as the world.
     }
-    else if (!assemblyDefinesScene && gameModSceneClaims.size() == 1)
+    else if (!assemblyDefinesScene && pluginSceneClaims.size() == 1)
     {
-        const GameModSceneClaim &claim = gameModSceneClaims.front();
+        const PluginSceneClaim &claim = pluginSceneClaims.front();
         if (!std::filesystem::exists(claim.sceneFile))
         {
-            report += "- mod '" + claim.ownerId + "' declares scene file '" + claim.sceneFile.string()
+            report += "- plugin '" + claim.ownerId + "' declares scene file '" + claim.sceneFile.string()
                     + "' which does not exist.\n";
             return false;
         }
@@ -140,28 +140,28 @@ bool EngineKernel::finishConfiguration(std::string &report)
             report += "- " + sceneError + "\n";
             return false;
         }
-        // Several mods claim scenes and no assembly scene: refuse rather than
+        // Several plugins claim scenes and no assembly scene: refuse rather than
         // pick one.
     }
-    else if (!assemblyDefinesScene && gameModSceneClaims.size() > 1)
+    else if (!assemblyDefinesScene && pluginSceneClaims.size() > 1)
     {
-        report += "- the world is ambiguous: " + std::to_string(gameModSceneClaims.size())
-                + " active mods declare scene files";
-        for (const GameModSceneClaim &claim : gameModSceneClaims)
+        report += "- the world is ambiguous: " + std::to_string(pluginSceneClaims.size())
+                + " active plugins declare scene files";
+        for (const PluginSceneClaim &claim : pluginSceneClaims)
         {
             report += " '" + claim.sceneFile.string() + "' (" + claim.ownerId + ")";
         }
         report += "; give the run a world: a [scene] section in the configuration, "
-                  "or disable all but one of these mods.\n";
+                  "or disable all but one of these plugins.\n";
         return false;
     }
-    else if (assemblyDefinesScene && !gameModSceneClaims.empty())
+    else if (assemblyDefinesScene && !pluginSceneClaims.empty())
     {
-        for (const GameModSceneClaim &claim : gameModSceneClaims)
+        for (const PluginSceneClaim &claim : pluginSceneClaims)
         {
-            deferredConfigurationWarnings += "warning: mod '" + claim.ownerId + "' declares scene file '"
+            deferredConfigurationWarnings += "warning: plugin '" + claim.ownerId + "' declares scene file '"
                                            + claim.sceneFile.string()
-                                           + "' but the configuration defines its own [scene]; the mod scene is "
+                                           + "' but the configuration defines its own [scene]; the plugin scene is "
                                              "not applied\n";
         }
     }
@@ -187,7 +187,7 @@ bool EngineKernel::finishConfiguration(std::string &report)
     return true;
 }
 
-// Overrides apply before gather so [engine].active_mods etc. are current;
+// Overrides apply before gather so [engine].active_plugins etc. are current;
 // finishConfiguration re-applies them (staging is idempotent).
 bool EngineKernel::prepareParticipants(std::string &report, bool enforceTrust)
 {
@@ -268,7 +268,7 @@ bool EngineKernel::reloadConfiguration(std::string &report)
             return false;
         }
     }
-    for (const auto &[defaultsFile, source] : gameModDefaultsFiles)
+    for (const auto &[defaultsFile, source] : pluginDefaultsFiles)
     {
         (void)source;
         if (!ConfigurationStore::fileParses(defaultsFile, parseError))
@@ -283,9 +283,9 @@ bool EngineKernel::reloadConfiguration(std::string &report)
     {
         reloadScenePath = detail::resolveAgainstExecutableDirectory(sceneFilePath);
     }
-    else if (!assemblyDefinesScene && gameModSceneClaims.size() == 1)
+    else if (!assemblyDefinesScene && pluginSceneClaims.size() == 1)
     {
-        reloadScenePath = gameModSceneClaims.front().sceneFile;
+        reloadScenePath = pluginSceneClaims.front().sceneFile;
     }
     if (!reloadScenePath.empty() && !ConfigurationStore::fileParses(reloadScenePath, parseError))
     {
@@ -311,10 +311,10 @@ bool EngineKernel::reloadConfiguration(std::string &report)
         report = "engine reload failed after the pre-parse pass (unexpected):\n- " + reloadError + "\n";
         return false;
     }
-    for (const auto &[defaultsFile, source] : gameModDefaultsFiles)
+    for (const auto &[defaultsFile, source] : pluginDefaultsFiles)
     {
         if (!configurationStore.mergeDefaultsFile(
-                defaultsFile, ConfigProvenance::Layer::ModDefaults, source, reloadError))
+                defaultsFile, ConfigProvenance::Layer::PluginDefaults, source, reloadError))
         {
             report = "engine reload failed after the pre-parse pass (unexpected):\n- " + reloadError + "\n";
             return false;

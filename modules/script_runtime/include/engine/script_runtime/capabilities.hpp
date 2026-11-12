@@ -111,7 +111,7 @@ struct ScriptRuntimeCapability
         std::uint32_t errorCapacity, std::uint32_t *errorRequired);
     bool (*registerNativeFunction)(void *, ScriptRuntimeHandle, const char *name, ScriptNativeFunction, void *userData);
 
-    ScriptRuntimeHandle (*hostedRuntime)(void *, const char *modId);
+    ScriptRuntimeHandle (*hostedRuntime)(void *, const char *pluginId);
     bool (*setGlobalNumber)(void *, ScriptRuntimeHandle, const char *name, double value);
     bool (*getGlobalNumber)(void *, ScriptRuntimeHandle, const char *name, double *value);
     bool (*setGlobalString)(void *, ScriptRuntimeHandle, const char *name, const char *value);

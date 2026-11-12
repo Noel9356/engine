@@ -1,4 +1,4 @@
-// Participant identity and requirements shared by modules, mods and the
+// Participant identity and requirements shared by modules, plugins and the
 // application.
 
 #ifndef ENGINE_KERNEL_PARTICIPANT_MANIFEST_HPP
@@ -10,14 +10,14 @@
 namespace engine
 {
 
-// EngineModule: kernel-loaded .so module; NativeGameMod/ScriptGameMod:
-// discovered mod packages (type = "native"/"script"); Application: the
+// EngineModule: kernel-loaded .so module; NativePlugin/ScriptPlugin:
+// discovered plugin packages (type = "native"/"script"); Application: the
 // synthetic "<app>" participant.
 enum class ParticipantKind
 {
     EngineModule,
-    NativeGameMod,
-    ScriptGameMod,
+    NativePlugin,
+    ScriptPlugin,
     Application
 };
 

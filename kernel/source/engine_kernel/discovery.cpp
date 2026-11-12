@@ -1,12 +1,12 @@
 // EngineKernel discovery: permission pass and participant gathering.
 //
 // gatherParticipants assembles every participant record (the <app>
-// context, module libraries, game-mod packages), the demand closure picks
+// context, module libraries, plugin packages), the demand closure picks
 // active modules, and the trust gate runs before any native code loads.
 
-#include "../capability_provider_index.hpp"
-#include "../engine_kernel_internal.hpp"
-#include "../trust_gate.hpp"
+#include "capability_provider_index.hpp"
+#include "engine_kernel_internal.hpp"
+#include "trust_gate.hpp"
 
 #include "engine/kernel/configuration.hpp"
 #include "engine/kernel/dependency_resolver.hpp"
@@ -14,8 +14,8 @@
 #include "engine/kernel/participant_interface.hpp"
 #include <engine/kernel/capability_name.hpp>
 #include <engine/kernel/engine_kernel.hpp>
-#include <engine/kernel/game_mod_discovery.hpp>
-#include <engine/kernel/game_mod_manifest.hpp>
+#include <engine/kernel/plugin_discovery.hpp>
+#include <engine/kernel/plugin_manifest.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 
 #include <algorithm>
@@ -79,7 +79,7 @@ EngineKernel::ParticipantRecord *EngineKernel::findRecord(const std::string &nam
 
 // Assembles the participant list without constructing anything. With enforceTrust
 // false (the validate dry run) no native code runs: modules are declared from
-// descriptors only and native mod libraries stay unloaded.
+// descriptors only and native plugin libraries stay unloaded.
 bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
 {
     if (participantsGathered)
@@ -109,7 +109,7 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
 
     loadModuleLibraries(startupWarnings_);
 
-    gatherGameModPackages(startupWarnings_);
+    gatherPluginPackages(startupWarnings_);
 
     resolveUndescribedModuleLibraries(report, enforceTrust);
 
@@ -130,8 +130,8 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
 
     if (enforceTrust)
     {
-        loadNativeGameModLibraries(startupWarnings_);
-        nativeGameModLibrariesLoaded_ = true;
+        loadNativePluginLibraries(startupWarnings_);
+        nativePluginLibrariesLoaded_ = true;
         if (!instantiateActiveModules(report))
         {
             return false;
@@ -150,7 +150,7 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
             if (records[outer].name == records[inner].name)
             {
                 report += "- participant name '" + records[outer].name
-                        + "' is declared twice (a mod id and a module name, or two mods sharing an id); "
+                        + "' is declared twice (a plugin id and a module name, or two plugins sharing an id); "
                           "participant names must be unique across the whole assembly.\n";
                 return false;
             }
@@ -161,50 +161,50 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
     return true;
 }
 
-// Scans the mods directories for mod.toml packages, applies the active mod set and
+// Scans the plugins directories for plugin.toml packages, applies the active plugin set and
 // turns each package into a ParticipantRecord; native libraries wait in
-// pendingNativeGameModPackages_ until the trust gate passes.
-void EngineKernel::gatherGameModPackages(std::string &report)
+// pendingNativePluginPackages_ until the trust gate passes.
+void EngineKernel::gatherPluginPackages(std::string &report)
 {
-    gameModSceneClaims.clear();
-    gameModDefaultsFiles.clear();
-    pendingNativeGameModPackages_.clear();
-    nativeGameModLibrariesLoaded_ = false;
+    pluginSceneClaims.clear();
+    pluginDefaultsFiles.clear();
+    pendingNativePluginPackages_.clear();
+    nativePluginLibrariesLoaded_ = false;
 
     std::vector<std::filesystem::path> scanRoots;
-    if (!explicitGameModsDirectory.empty() || !explicitExtraGameModsDirectories.empty())
+    if (!explicitPluginsDirectory.empty() || !explicitExtraPluginsDirectories.empty())
     {
-        if (!explicitGameModsDirectory.empty())
+        if (!explicitPluginsDirectory.empty())
         {
-            scanRoots.push_back(detail::resolveAgainstExecutableDirectory(explicitGameModsDirectory));
+            scanRoots.push_back(detail::resolveAgainstExecutableDirectory(explicitPluginsDirectory));
         }
-        for (const std::filesystem::path &extraDirectory : explicitExtraGameModsDirectories)
+        for (const std::filesystem::path &extraDirectory : explicitExtraPluginsDirectories)
         {
             scanRoots.push_back(detail::resolveAgainstExecutableDirectory(extraDirectory));
         }
     }
     else
     {
-        scanRoots.push_back(detail::resolveAgainstExecutableDirectory(configurationStore.modDirectory()));
-        for (const std::string &extraDirectory : configurationStore.extraModDirectories())
+        scanRoots.push_back(detail::resolveAgainstExecutableDirectory(configurationStore.pluginsDirectory()));
+        for (const std::string &extraDirectory : configurationStore.extraPluginsDirectories())
         {
             scanRoots.push_back(detail::resolveAgainstExecutableDirectory(extraDirectory));
         }
     }
 
     std::map<std::string, std::filesystem::path> discoveredPackageRoots;
-    std::vector<DiscoveredGameModPackage>        packages;
+    std::vector<DiscoveredPluginPackage>        packages;
     for (const std::filesystem::path &scanRoot : scanRoots)
     {
-        for (DiscoveredGameModPackage &package :
-            discoverModPackages(scanRoot, configurationStore.disabledMods(), report))
+        for (DiscoveredPluginPackage &package :
+            discoverPluginPackages(scanRoot, configurationStore.disabledPlugins(), report))
         {
             const auto previouslySeen = discoveredPackageRoots.find(package.manifest.id);
             if (previouslySeen != discoveredPackageRoots.end())
             {
-                report += "- mod '" + package.manifest.id + "' appears in more than one mods directory ('"
+                report += "- plugin '" + package.manifest.id + "' appears in more than one plugins directory ('"
                         + previouslySeen->second.string() + "' and '" + scanRoot.string()
-                        + "'); mod ids are unique across every scanned directory and the later package is "
+                        + "'); plugin ids are unique across every scanned directory and the later package is "
                           "dropped.\n";
                 continue;
             }
@@ -213,22 +213,22 @@ void EngineKernel::gatherGameModPackages(std::string &report)
         }
     }
 
-    // An explicit app set wins over [engine].active_mods; no set at all means every
-    // discovered mod activates.
-    std::optional<std::vector<std::string>> activeSet = applicationActiveGameMods;
+    // An explicit app set wins over [engine].active_plugins; no set at all means every
+    // discovered plugin activates.
+    std::optional<std::vector<std::string>> activeSet = applicationActivePlugins;
     if (!activeSet)
     {
-        activeSet = configurationStore.activeMods();
+        activeSet = configurationStore.activePlugins();
     }
     if (activeSet)
     {
-        std::vector<DiscoveredGameModPackage> activated;
-        for (DiscoveredGameModPackage &package : packages)
+        std::vector<DiscoveredPluginPackage> activated;
+        for (DiscoveredPluginPackage &package : packages)
         {
             if (std::find(activeSet->begin(), activeSet->end(), package.manifest.id) == activeSet->end())
             {
-                report += "- mod '" + package.manifest.id
-                        + "' was not activated: it is not in the app's active mod set.\n";
+                report += "- plugin '" + package.manifest.id
+                        + "' was not activated: it is not in the app's active plugin set.\n";
                 continue;
             }
             activated.push_back(std::move(package));
@@ -236,54 +236,54 @@ void EngineKernel::gatherGameModPackages(std::string &report)
         packages = std::move(activated);
     }
 
-    for (const DiscoveredGameModPackage &package : packages)
+    for (const DiscoveredPluginPackage &package : packages)
     {
-        const GameModManifest &gameModManifest = package.manifest;
+        const PluginManifest &pluginManifest = package.manifest;
 
         if (!package.sceneFile.empty())
         {
-            gameModSceneClaims.push_back(
-                GameModSceneClaim{.sceneFile = package.sceneFile, .ownerId = gameModManifest.id});
+            pluginSceneClaims.push_back(
+                PluginSceneClaim{.sceneFile = package.sceneFile, .ownerId = pluginManifest.id});
         }
 
-        // Mod-shipped defaults merge right here (ModDefaults layer, fill-only).
+        // Plugin-shipped defaults merge right here (PluginDefaults layer, fill-only).
         if (!package.defaultsFile.empty())
         {
             std::string defaultsError;
             if (!configurationStore.mergeDefaultsFile(package.defaultsFile,
-                    ConfigProvenance::Layer::ModDefaults,
-                    gameModManifest.directory.filename().string(),
+                    ConfigProvenance::Layer::PluginDefaults,
+                    pluginManifest.directory.filename().string(),
                     defaultsError))
             {
                 report += "- " + defaultsError + "\n";
                 continue;
             }
 
-            gameModDefaultsFiles.emplace_back(package.defaultsFile, gameModManifest.directory.filename().string());
+            pluginDefaultsFiles.emplace_back(package.defaultsFile, pluginManifest.directory.filename().string());
         }
 
-        if (gameModManifest.isNative())
+        if (pluginManifest.isNative())
         {
             ParticipantRecord record{
-                .name     = gameModManifest.id,
-                .manifest = detail::manifestFromModManifest(gameModManifest, ParticipantKind::NativeGameMod)};
-            trustGate_->appendModRiskWarning(gameModManifest, true, startupWarnings_);
-            pendingNativeGameModPackages_.push_back(package);
+                .name     = pluginManifest.id,
+                .manifest = detail::manifestFromPluginManifest(pluginManifest, ParticipantKind::NativePlugin)};
+            trustGate_->appendPluginRiskWarning(pluginManifest, true, startupWarnings_);
+            pendingNativePluginPackages_.push_back(package);
             records.push_back(std::move(record));
         }
         else
         {
             ParticipantRecord record{
-                .name      = gameModManifest.id,
-                .manifest  = detail::manifestFromModManifest(gameModManifest, ParticipantKind::ScriptGameMod),
-                .scriptMod = ScriptGameModDescription{
-                    .modId                = gameModManifest.id,
-                    .scriptPath           = gameModManifest.directory / gameModManifest.entry,
-                    .hostCapability       = gameModManifest.hostCapability,
-                    .declaredCapabilities = gameModManifest.capabilities,
-                    .declaredPermissions  = gameModManifest.permissions,
-                    .version              = gameModManifest.version}};
-            trustGate_->appendModRiskWarning(gameModManifest, false, startupWarnings_);
+                .name      = pluginManifest.id,
+                .manifest  = detail::manifestFromPluginManifest(pluginManifest, ParticipantKind::ScriptPlugin),
+                .scriptPlugin = ScriptPluginDescription{
+                    .pluginId                = pluginManifest.id,
+                    .scriptPath           = pluginManifest.directory / pluginManifest.entry,
+                    .hostCapability       = pluginManifest.hostCapability,
+                    .declaredCapabilities = pluginManifest.capabilities,
+                    .declaredPermissions  = pluginManifest.permissions,
+                    .version              = pluginManifest.version}};
+            trustGate_->appendPluginRiskWarning(pluginManifest, false, startupWarnings_);
             records.push_back(std::move(record));
         }
     }

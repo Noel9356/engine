@@ -1,6 +1,6 @@
 # world configuration
 
-The world module reads two sections because it bundles two coordinators: `[ecs]` feeds the embedded ecs module (`source/ecs.cpp`, `construct()`) and `[entity_world]` feeds the entity-world layer (`source/entity_world.cpp`, `construct()`). Defaults ship in `config.toml`; the application config (or a profile) may override them. The keys are mirrored in `module.toml` `config_keys` for documentation; the kernel validates known keys for engine sections and game-mod manifests only, so unknown `[ecs]`/`[entity_world]` keys are silently accepted.
+The world module reads two sections because it bundles two coordinators: `[ecs]` feeds the embedded ecs module (`source/ecs/ecs.cpp`, `construct()`) and `[entity_world]` feeds the entity-world layer (`source/entity_world/entity_world.cpp`, `construct()`). Defaults ship in `config.toml`; the application config (or a profile) may override them. The keys are mirrored in `module.toml` `config_keys` for documentation; the kernel validates known keys for engine sections and plugin manifests only, so unknown `[ecs]`/`[entity_world]` keys are silently accepted.
 
 Every value is read once in `construct()`; the module does not subscribe to `ConfigurationReloadedEvent`, so restarts are required for changes. Keys are listed alphabetically.
 

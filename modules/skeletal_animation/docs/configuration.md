@@ -1,6 +1,6 @@
 # skeletal_animation configuration
 
-All keys live in the `[skeletal_animation]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. `module.toml` mirrors every key under `config_keys` for documentation; the kernel validates known keys for engine sections and game-mod manifests only, so unknown `[skeletal_animation]` keys are silently accepted.
+All keys live in the `[skeletal_animation]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. `module.toml` mirrors every key under `config_keys` for documentation; the kernel validates known keys for engine sections and plugin manifests only, so unknown `[skeletal_animation]` keys are silently accepted.
 
 Every value is read once in `construct()`; the module does not follow configuration reloads. Keys are listed alphabetically.
 

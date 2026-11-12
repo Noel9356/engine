@@ -124,16 +124,25 @@ endif()
 add_library(
     engine_module_renderer
     MODULE
-    source/headless_backend.cpp
-    source/render_data.cpp
-    source/renderer.cpp
-    source/vulkan_backend.cpp
-    source/vulkan_device.cpp
-    source/vulkan_frames.cpp
-    source/vulkan_gpu_probe.cpp
-    source/vulkan_pipeline.cpp
-    source/vulkan_resources.cpp
-    source/vulkan_swapchain.cpp
+    source/backend/headless/headless_backend.cpp
+    source/core/render_data.cpp
+    source/core/renderer.cpp
+    source/backend/vulkan/vulkan_backend.cpp
+    source/backend/vulkan/vulkan_device.cpp
+    source/backend/vulkan/vulkan_frames.cpp
+    source/backend/vulkan/vulkan_gpu_probe.cpp
+    source/backend/vulkan/vulkan_pipeline.cpp
+    source/backend/vulkan/vulkan_resources.cpp
+    source/backend/vulkan/vulkan_swapchain.cpp
+)
+
+target_include_directories(
+    engine_module_renderer
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/source/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/source/backend"
+        "${CMAKE_CURRENT_SOURCE_DIR}/source/backend/headless"
+        "${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan"
 )
 
 target_compile_definitions(
@@ -167,7 +176,7 @@ if(CMAKE_CXX_COMPILER_ID
    "GNU|Clang|AppleClang"
 )
     set_source_files_properties(
-        source/headless_backend.cpp
+        source/backend/headless/headless_backend.cpp
         PROPERTIES COMPILE_OPTIONS
                    "-ffast-math;-fno-math-errno;-funroll-loops"
     )

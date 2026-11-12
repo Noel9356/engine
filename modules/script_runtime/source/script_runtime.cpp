@@ -1,9 +1,9 @@
 // script_runtime module implementation.
 //
 // Provides the "script_runtime" capability: sandboxed Lua 5.5 runtimes with
-// memory and instruction budgets, plus hosting for type = "script" game mods
-// (see ScriptGameModHost). When ENGINE_SCRIPT_RUNTIME_BACKEND_LUA is not
-// defined every capability entry fails gracefully and script mods cannot be
+// memory and instruction budgets, plus hosting for type = "script" plugins
+// (see ScriptPluginHost). When ENGINE_SCRIPT_RUNTIME_BACKEND_LUA is not
+// defined every capability entry fails gracefully and script plugins cannot be
 // hosted.
 
 #include <engine/kernel/engine_kernel.hpp>
@@ -219,7 +219,7 @@ struct NativeFunctionRecord
 };
 
 // Everything that belongs to one created runtime. Shared pointers allow the
-// capability layer and the mod host to reference the same record; the mutex
+// capability layer and the plugin host to reference the same record; the mutex
 // serializes all use of the lua_State.
 struct RuntimeRecord
 {
@@ -497,7 +497,7 @@ void openLibraries(lua_State *state, std::uint32_t libraries)
 
 #endif
 
-class ScriptRuntimeModule final : public ModuleInterface, public ScriptGameModHost
+class ScriptRuntimeModule final : public ModuleInterface, public ScriptPluginHost
 {
 public:
     ScriptRuntimeModule()
@@ -587,7 +587,7 @@ public:
         }
         {
             std::lock_guard lock(hostedMutex_);
-            hostedMods_.clear();
+            hostedPlugins_.clear();
         }
         {
             std::lock_guard lock(initializersMutex_);
@@ -603,7 +603,7 @@ public:
         return name == ScriptRuntimeCapability::capabilityName ? &capability_ : nullptr;
     }
 
-    ScriptGameModHost *scriptModHost() override
+    ScriptPluginHost *scriptPluginHost() override
     {
         return this;
     }
@@ -618,10 +618,10 @@ private:
             .providedCapabilities = {"script_runtime"}};
     }
 
-    // --- script mod hosting -------------------------------------------------
+    // --- script plugin hosting -------------------------------------------------
     //
-    // The kernel hands every type = "script" mod to this module during the
-    // construct phase (see ScriptGameModHost). Hosting a mod means running its
+    // The kernel hands every type = "script" plugin to this module during the
+    // construct phase (see ScriptPluginHost). Hosting a plugin means running its
     // entry file in a fresh sandboxed Lua runtime and forwarding engine events
     // to the callback functions the script chose to define:
     //
@@ -632,31 +632,31 @@ private:
     //   on_key_pressed(name)                WindowKeyEvent
     //   on_shutdown()                       EngineShutdownStartedEvent
 
-    struct HostedMod
+    struct HostedPlugin
     {
-        std::string         modId;
+        std::string         pluginId;
         ScriptRuntimeHandle runtime = invalidScriptRuntime;
     };
 
-    ScriptRuntimeHandle hostedRuntimeImpl(const char *modId)
+    ScriptRuntimeHandle hostedRuntimeImpl(const char *pluginId)
     {
-        constexpr std::size_t maximumModIdBytes = 128;
-        if (modId == nullptr)
+        constexpr std::size_t maximumPluginIdBytes = 128;
+        if (pluginId == nullptr)
             return invalidScriptRuntime;
-        const auto *terminator = static_cast<const char *>(std::memchr(modId, '\0', maximumModIdBytes + 1u));
-        if (terminator == nullptr || terminator == modId)
+        const auto *terminator = static_cast<const char *>(std::memchr(pluginId, '\0', maximumPluginIdBytes + 1u));
+        if (terminator == nullptr || terminator == pluginId)
             return invalidScriptRuntime;
-        const std::string_view requestedId(modId, static_cast<std::size_t>(terminator - modId));
+        const std::string_view requestedId(pluginId, static_cast<std::size_t>(terminator - pluginId));
         std::lock_guard lock(hostedMutex_);
-        for (const HostedMod &mod : hostedMods_)
-            if (mod.modId == requestedId)
-                return mod.runtime;
+        for (const HostedPlugin &plugin : hostedPlugins_)
+            if (plugin.pluginId == requestedId)
+                return plugin.runtime;
         return invalidScriptRuntime;
     }
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
 
-    // Calls a global function if the mod defined one. Absent callbacks are the
+    // Calls a global function if the plugin defined one. Absent callbacks are the
     // normal opt-in case, not errors. Runtime failures are printed once per
     // distinct message so a broken on_frame cannot flood stderr.
     void callOptionalGlobal(ScriptRuntimeHandle handle, const char *name, std::initializer_list<double> numbers = {},
@@ -704,16 +704,16 @@ private:
     {}
 #endif
 
-    void dispatchToHostedMods(
+    void dispatchToHostedPlugins(
         const char *callback, std::initializer_list<double> numbers = {}, const char *text = nullptr)
     {
         std::vector<ScriptRuntimeHandle> runtimes;
         try
         {
             std::lock_guard lock(hostedMutex_);
-            runtimes.reserve(hostedMods_.size());
-            for (const HostedMod &mod : hostedMods_)
-                runtimes.push_back(mod.runtime);
+            runtimes.reserve(hostedPlugins_.size());
+            for (const HostedPlugin &plugin : hostedPlugins_)
+                runtimes.push_back(plugin.runtime);
         }
         catch (...)
         {
@@ -725,30 +725,30 @@ private:
 
     void onEngineStartupCompleted(const EngineStartupCompletedEvent &)
     {
-        dispatchToHostedMods("on_start");
+        dispatchToHostedPlugins("on_start");
     }
 
     void onEngineFrame(const EngineFrameEvent &event)
     {
-        dispatchToHostedMods("on_frame", {event.deltaSeconds, event.elapsedSeconds});
+        dispatchToHostedPlugins("on_frame", {event.deltaSeconds, event.elapsedSeconds});
     }
 
     void onEngineFixedUpdate(const EngineFixedUpdateEvent &event)
     {
-        dispatchToHostedMods("on_fixed_update", {event.deltaSeconds});
+        dispatchToHostedPlugins("on_fixed_update", {event.deltaSeconds});
     }
 
     void onEngineShutdownStarted(const EngineShutdownStartedEvent &)
     {
-        dispatchToHostedMods("on_shutdown");
+        dispatchToHostedPlugins("on_shutdown");
     }
 
     void onWindowKey(const WindowKeyEvent &event)
     {
-        dispatchToHostedMods("on_key_pressed", {}, event.keyName);
+        dispatchToHostedPlugins("on_key_pressed", {}, event.keyName);
     }
 
-    void hostScriptGameMod(const ScriptGameModDescription &description) override
+    void hostScriptPlugin(const ScriptPluginDescription &description) override
     {
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
         ScriptError               error = ScriptError::None;
@@ -756,13 +756,13 @@ private:
         const ScriptRuntimeHandle runtime = createRuntimeImpl(nullptr, &error);
         if (runtime == invalidScriptRuntime)
         {
-            throw std::runtime_error("script mod '" + description.modId
+            throw std::runtime_error("script plugin '" + description.pluginId
                                      + "' could not create a Lua runtime (script_runtime error "
                                      + std::to_string(static_cast<std::uint32_t>(error)) + ")");
         }
-        setGlobalStringImpl(runtime, "engine_mod_id", description.modId.c_str());
-        setGlobalStringImpl(runtime, "engine_mod_version", description.version.c_str());
-        setGlobalStringImpl(runtime, "engine_mod_path", description.scriptPath.string().c_str());
+        setGlobalStringImpl(runtime, "engine_plugin_id", description.pluginId.c_str());
+        setGlobalStringImpl(runtime, "engine_plugin_version", description.version.c_str());
+        setGlobalStringImpl(runtime, "engine_plugin_path", description.scriptPath.string().c_str());
         if (!executeFileImpl(runtime,
                 description.scriptPath.string().c_str(),
                 &error,
@@ -771,23 +771,23 @@ private:
                 nullptr))
         {
             destroyRuntimeImpl(runtime);
-            throw std::runtime_error("script mod '" + description.modId + "' failed to run '"
+            throw std::runtime_error("script plugin '" + description.pluginId + "' failed to run '"
                                      + description.scriptPath.string() + "': " + std::string(errorBuffer.data()));
         }
         callOptionalGlobal(runtime, "on_construct");
         try
         {
             std::lock_guard lock(hostedMutex_);
-            hostedMods_.push_back(HostedMod{.modId = description.modId, .runtime = runtime});
+            hostedPlugins_.push_back(HostedPlugin{.pluginId = description.pluginId, .runtime = runtime});
         }
         catch (...)
         {
             destroyRuntimeImpl(runtime);
-            throw std::runtime_error("script mod '" + description.modId + "' could not be registered");
+            throw std::runtime_error("script plugin '" + description.pluginId + "' could not be registered");
         }
 #else
         (void)description;
-        throw std::runtime_error("script_runtime: the Lua backend is disabled; script mods cannot be hosted");
+        throw std::runtime_error("script_runtime: the Lua backend is disabled; script plugins cannot be hosted");
 #endif
     }
 
@@ -1381,7 +1381,7 @@ private:
     SubscriptionToken   keySubscription_         = invalidSubscriptionToken;
 
     std::mutex             hostedMutex_;
-    std::vector<HostedMod> hostedMods_;
+    std::vector<HostedPlugin> hostedPlugins_;
     std::mutex initializersMutex_;
     std::vector<RuntimeInitializerRecord> initializers_;
     ScriptRuntimeInitializerHandle nextInitializer_ = 1;

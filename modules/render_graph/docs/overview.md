@@ -33,7 +33,7 @@ Consumers still need the `capability.render_graph` permission granted by the ker
 
 | File | Role |
 | --- | --- |
-| `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys` (documentation; the kernel validates only game-mod manifests' keys). |
+| `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys` (documentation; the kernel validates only plugin manifests' keys). |
 | `config.toml` | Default values for the `[render_graph]` configuration section (see `configuration.md`). |
 | `include/engine/render_graph/capabilities.hpp` | Public capability types: sentinel, access/error enums, settings/profile/resource/pass structs, compile result, and the `RenderGraphCapability` function-pointer struct. |
 | `include/engine/render_graph/compiler.hpp` | `RenderGraphPlan` (analysis result) and `buildRenderGraphPlan`, the entry point into the graph analysis. |
@@ -74,7 +74,7 @@ Configurable through the `[render_graph]` section; every key is documented in [c
 - **Events published:** none.
 - **Events subscribed:** none (the module does not touch the event bus; it reads configuration once in `construct()`).
 - **Permissions declared:** none in the entry table; acquisition of the capability is gated by the implicit `capability.render_graph` permission.
-- **Consumers:** the demo application (`demo_character_customisation/source/main.cpp`) is a real consumer. It loads the module as part of its host options, acquires the capability optionally (with the `renderGraphCapabilityAbi` check), applies a device-tuned settings round (`settings` → render `deviceProfile` → `resolveProfile` → `setSettings`), `compile`s a fixed three-pass frame graph once (independent update passes for rocks, tori, and the wandering dragons, each writing a transient scratch resource), and `execute`s it every frame with callbacks dispatched by the original pass index. Any failure degrades to the same updates run inline on the main thread, so the demo keeps rendering without the capability.
+- **Consumers:** the demo application (`demos/character_customisation/source/main.cpp`) is a real consumer. It loads the module as part of its host options, acquires the capability optionally (with the `renderGraphCapabilityAbi` check), applies a device-tuned settings round (`settings` → render `deviceProfile` → `resolveProfile` → `setSettings`), `compile`s a fixed three-pass frame graph once (independent update passes for rocks, tori, and the wandering dragons, each writing a transient scratch resource), and `execute`s it every frame with callbacks dispatched by the original pass index. Any failure degrades to the same updates run inline on the main thread, so the demo keeps rendering without the capability.
 
 Consumer example (real signatures):
 

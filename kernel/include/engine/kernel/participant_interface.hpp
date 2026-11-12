@@ -1,10 +1,10 @@
 // Participant-facing kernel API.
 //
-// ParticipantContext is handed to every module, game mod and the
+// ParticipantContext is handed to every module, plugin and the
 // application; it is the only door to capabilities (permission-checked),
 // configuration, the event bus and the schedulers. ModuleInterface and
-// GameModInterface are the entry points implemented by modules and
-// native mods.
+// PluginInterface are the entry points implemented by modules and
+// native plugins.
 
 #ifndef ENGINE_KERNEL_PARTICIPANT_INTERFACE_HPP
 #define ENGINE_KERNEL_PARTICIPANT_INTERFACE_HPP
@@ -44,14 +44,14 @@ struct CapabilityNameHash
 
 class ConfigurationStore;
 
-// Everything a script-mod host (e.g. script_runtime) needs to load a
-// type = "script" mod package.
-struct ScriptGameModDescription
+// Everything a script-plugin host (e.g. script_runtime) needs to load a
+// type = "script" plugin package.
+struct ScriptPluginDescription
 {
-    std::string           modId;
+    std::string           pluginId;
     std::filesystem::path scriptPath;
 
-    // Capability naming the module that will host this script mod.
+    // Capability naming the module that will host this script plugin.
     std::string hostCapability;
 
     std::vector<std::string> declaredCapabilities;
@@ -61,14 +61,14 @@ struct ScriptGameModDescription
     std::string version;
 };
 
-// Implemented by modules that host script mods (returned from
-// ModuleInterface::scriptModHost).
-class ScriptGameModHost
+// Implemented by modules that host script plugins (returned from
+// ModuleInterface::scriptPluginHost).
+class ScriptPluginHost
 {
 public:
-    virtual ~ScriptGameModHost() = default;
+    virtual ~ScriptPluginHost() = default;
 
-    virtual void hostScriptGameMod(const ScriptGameModDescription &description) = 0;
+    virtual void hostScriptPlugin(const ScriptPluginDescription &description) = 0;
 };
 
 // Thrown by acquireCapability when the permission system blocks access.
@@ -105,7 +105,7 @@ struct EngineFixedUpdateEvent
 
 // Published by the application layer whenever a key press is pumped from the
 // window event queue. The kernel never interprets keys itself: script runtime
-// forwards the event to hosted script mods as on_key_pressed(keyName).
+// forwards the event to hosted script plugins as on_key_pressed(keyName).
 struct WindowKeyEvent
 {
     std::uint32_t keyCode = 0;
@@ -266,7 +266,7 @@ public:
     }
 
     // Reads the participant's own [section] (keyed by participant name) in
-    // the merged configuration; modules and mods get namespaced config for
+    // the merged configuration; modules and plugins get namespaced config for
     // free.
     std::optional<std::string>  configurationString(const std::string &key) const;
     std::optional<std::int64_t> configurationInteger(const std::string &key) const;
@@ -329,19 +329,19 @@ public:
     // declines to provide it right now (the kernel reports the mismatch).
     virtual void *capabilityPointerFor(const std::string &capabilityName) = 0;
 
-    // Non-null when the module hosts script mods.
-    virtual ScriptGameModHost *scriptModHost()
+    // Non-null when the module hosts script plugins.
+    virtual ScriptPluginHost *scriptPluginHost()
     {
         return nullptr;
     }
 };
 
-// Native game-mod entry point; instances are created/destroyed through
-// the mod .so's entry table (see game_mod_api.hpp).
-class GameModInterface
+// Native plugin entry point; instances are created/destroyed through
+// the plugin .so's entry table (see plugin_api.hpp).
+class PluginInterface
 {
 public:
-    virtual ~GameModInterface() = default;
+    virtual ~PluginInterface() = default;
 
     virtual const ParticipantManifest &manifest() const = 0;
 

@@ -1,6 +1,6 @@
 # ui configuration
 
-The ui module reads exactly one boolean key from the `[ui]` section. Defaults ship in `config.toml`; the application config or a profile may override it. `module.toml` mirrors the key under `config_keys` for documentation; the kernel validates known keys for engine sections and game-mod manifests only, so unknown `[ui]` keys are silently accepted.
+The ui module reads exactly one boolean key from the `[ui]` section. Defaults ship in `config.toml`; the application config or a profile may override it. `module.toml` mirrors the key under `config_keys` for documentation; the kernel validates known keys for engine sections and plugin manifests only, so unknown `[ui]` keys are silently accepted.
 
 The key is read once in `construct()` (source/ui.cpp). The module does not subscribe to the kernel `ConfigurationReloadedEvent`, so changing the value requires an application restart; there is no reload path to consider and no clamping to describe.
 

@@ -76,27 +76,25 @@ void applySettingsToState(const GiSettings &settings, GiPipelineState &state)
 {
     state.settings = settings;
     const float scale = settings.quality == 0 ? 1.0f : qualityScale(settings.quality);
+    // lighting.update_speed scales the two lighting refresh budgets on top of
+    // the quality preset (Lumen's "Lumen Scene Lighting Update Speed").
+    const double lightingScale = static_cast<double>(scale) * static_cast<double>(settings.lightingUpdateSpeed);
     state.settings.captureTexelsPerFrame  = std::max<std::uint64_t>(4096,
         static_cast<std::uint64_t>(static_cast<double>(settings.captureTexelsPerFrame) * scale));
     state.settings.directTexelsPerFrame   = std::max<std::uint64_t>(1024,
-        static_cast<std::uint64_t>(static_cast<double>(settings.directTexelsPerFrame) * scale));
+        static_cast<std::uint64_t>(static_cast<double>(settings.directTexelsPerFrame) * lightingScale));
     state.settings.indirectTexelsPerFrame = std::max<std::uint64_t>(1024,
-        static_cast<std::uint64_t>(static_cast<double>(settings.indirectTexelsPerFrame) * scale));
+        static_cast<std::uint64_t>(static_cast<double>(settings.indirectTexelsPerFrame) * lightingScale));
     state.settings.probeUpdatesPerFrame =
         std::max(4u, static_cast<std::uint32_t>(static_cast<float>(settings.probeUpdatesPerFrame) * scale));
 }
 
-// One stage task executed on the scheduler; failures reject the graph.
-// (Referenced by the scheduler-driven stage paths; kept [[maybe_unused]] so
-// configurations that inline the stage work do not warn.)
-[[maybe_unused]] void runStageChunk(const std::function<void()> &work)
-{
-    work();
-}
 
 // The module singleton backing the "lumen_gi" capability. moduleMutex_ guards
 // the registry, settings, and the whole evaluate() call; statistics live in
-// the pipeline state (atomic counters for the parallel stages).
+// the pipeline state (atomic counters for the parallel stages). The probe
+// grid is published as an immutable snapshot, so copyProbes never waits for a
+// running evaluate().
 class LumenGiModule final : public ModuleInterface
 {
 public:
@@ -140,10 +138,12 @@ public:
         context_ = nullptr;
         std::lock_guard<std::mutex> lock(moduleMutex_);
         state_.surfaces.clear();
-        state_.cards.clear();
+        state_.cardRefs.clear();
+        state_.tlas.clear();
+        state_.tlasSurfaces.clear();
         state_.hasView          = false;
         state_.environmentValid = false;
-        probeVersion_.fetch_add(1u, std::memory_order_release);
+        publishSnapshotLocked();
     }
 
     void *capabilityPointerFor(const std::string &name) override
@@ -230,23 +230,29 @@ private:
         settings.texelsPerMeter           = static_cast<float>(floating("cards.texels_per_meter", 24.0, 1.0, 256.0));
         settings.maxTexelsPerCardAxis     = static_cast<std::uint32_t>(
             integer("cards.max_texels_per_card_axis", 128, 4, 512));
+        settings.cardDepthLayers          = static_cast<std::uint32_t>(
+            integer("cards.depth_layers", 2, 1, static_cast<std::int64_t>(maxCardLayers)));
         settings.captureTexelsPerFrame    = static_cast<std::uint64_t>(
             integer("capture.texels_per_frame", 262144, 4096, 16777216));
         settings.directTexelsPerFrame     = static_cast<std::uint64_t>(
             integer("lighting.direct_texels_per_frame", 65536, 1024, 16777216));
         settings.indirectTexelsPerFrame   = static_cast<std::uint64_t>(
             integer("lighting.indirect_texels_per_frame", 65536, 1024, 16777216));
+        settings.indirectRaysPerTexel     = static_cast<std::uint32_t>(
+            integer("lighting.indirect_rays_per_texel", 4, 1, 64));
         settings.sunShadows               = boolean("lighting.sun_shadows", true);
         settings.pointLightShadows        = boolean("lighting.point_light_shadows", false);
         settings.lightingUpdateSpeed      = static_cast<float>(floating("lighting.update_speed", 1.0, 0.05, 16.0));
         settings.indirectTemporalBlend =
-            static_cast<float>(floating("lighting.indirect_temporal_blend", 0.8, 0.0, 1.0));
+            static_cast<float>(floating("lighting.indirect_temporal_blend", 0.8, 0.0, 0.99));
         settings.maxTraceDistance         = static_cast<float>(floating("trace.max_distance_m", 50.0, 1.0, 2000.0));
         settings.probeSpacing             = static_cast<float>(floating("probes.spacing_m", 2.0, 0.25, 32.0));
         settings.probeDirectionResolution = static_cast<std::uint32_t>(
             integer("probes.direction_resolution", 32, 4, 64));
         settings.probeUpdatesPerFrame     = static_cast<std::uint32_t>(
             integer("probes.updates_per_frame", 64, 1, 1458));
+        settings.probeRaysPerUpdate       = static_cast<std::uint32_t>(
+            integer("probes.rays_per_update", 256, 1, 4096));
         settings.probeHysteresis          = static_cast<float>(floating("probes.hysteresis", 0.2, 0.0, 0.99));
         settings.probeLevel1SpacingFactor =
             static_cast<float>(floating("probes.level1_spacing_factor", 4.0, 2.0, 16.0));
@@ -264,6 +270,8 @@ private:
         settings.referenceSamples         = static_cast<std::uint32_t>(integer("debug.reference_samples", 64, 1, 4096));
         settings.referenceBounces         = static_cast<std::uint32_t>(integer("debug.reference_bounces", 4, 1, 16));
         settings.debugIncludeAmbient      = boolean("debug.include_ambient", false);
+        settings.continuousGather         = boolean("debug.continuous_gather", false);
+        settings.exportGatherFrames       = static_cast<std::uint32_t>(integer("debug.export_gather_frames", 16, 1, 64));
         settings_                         = settings;
     }
 
@@ -288,27 +296,47 @@ private:
     }
 
     // Settings that change capacity or layout (probe resolution, spacing,
-    // debug resolution) require rebuilding the derived structures.
+    // card placement, debug resolution) rebuild the derived structures. Every
+    // structure whose inputs actually changed is rebuilt - the old code only
+    // built the probe levels once, so a live change of probes.direction_resolution
+    // left probe maps sized for the previous resolution.
     void rebuildPipelineAfterConfigChangeLocked()
     {
         applySettingsToState(settings_, state_);
         state_.registryCapacity = settings_.maxSurfaces;
-        if (state_.probeDirections.empty()
-            || state_.settings.probeDirectionResolution != builtDirectionResolution_)
+        const std::uint32_t resolution = std::max(settings_.probeDirectionResolution, 4u);
+        const bool probesChanged = state_.probeDirections.empty() || resolution != builtDirectionResolution_
+            || settings_.probeSpacing != builtProbeSpacing_ || settings_.probeLevel1SpacingFactor != builtLevel1Factor_
+            || state_.level0.probes.empty();
+        if (probesChanged)
         {
             buildProbeDirectionTable(state_);
-            builtDirectionResolution_ = state_.settings.probeDirectionResolution;
-        }
-        if (state_.level0.dimensions[0] == 0)
-        {
             buildProbeLevels(state_);
+            builtDirectionResolution_ = resolution;
+            builtProbeSpacing_        = settings_.probeSpacing;
+            builtLevel1Factor_        = settings_.probeLevel1SpacingFactor;
             if (state_.hasView)
             {
                 snapProbeLevels(state_, state_.cameraPosition);
             }
         }
+        const CardKey cardKey{settings_.texelsPerMeter, settings_.maxTexelsPerCardAxis, settings_.maxCardsPerSurface,
+            settings_.cardDepthLayers};
+        if (!(cardKey == builtCardKey_))
+        {
+            builtCardKey_ = cardKey;
+            for (GiSurface &surface : state_.surfaces)
+            {
+                placeSurfaceCards(state_.settings, surface);
+            }
+            rebuildCardRefs(state_);
+        }
         state_.screenProbeWidth  = 0;
         state_.screenProbeHeight = 0;
+        state_.screenProbeRadiance.clear();
+        state_.gatherHasHistory = false;
+        state_.sceneDirty       = true;
+        publishSnapshotLocked();
     }
 
     // ---- surface registry -----------------------------------------------------
@@ -335,9 +363,6 @@ private:
         }
         buildSurfaceBvh(geometry);
         surface.geometry         = std::move(geometry);
-        surface.transform        = makeTransform(description.transform);
-        surface.inverseTransform = glm::inverse(surface.transform);
-        surface.normalMatrix     = glm::inverseTranspose(glm::mat3(surface.transform));
         surface.albedo           = glm::clamp(glm::vec3(description.albedoColor[0], description.albedoColor[1],
             description.albedoColor[2]), glm::vec3(0.0f), glm::vec3(1.0e6f));
         surface.emissive         = glm::max(
@@ -348,20 +373,19 @@ private:
         surface.excluded = (description.flagBits & giSurfaceFlagExcluded) != 0u;
         surface.unlit    = (description.flagBits & giSurfaceFlagUnlit) != 0u;
         surface.dynamic  = (description.flagBits & giSurfaceFlagDynamic) != 0u;
-        updateSurfaceWorldBounds(surface);
+        surface.cards.clear();
+        updateSurfaceTransform(surface, makeTransform(description.transform));
+        // Only this surface's cards are rebuilt (and recaptured); every other
+        // surface keeps its captured and lit data. The old code re-placed the
+        // cards of ALL surfaces on every registry change.
+        placeSurfaceCards(state_.settings, surface);
     }
 
-    void rebuildCardsForSurfaceLocked(std::uint32_t surfaceIndex)
+    void registryChangedLocked()
     {
-        // Rebuild one surface's card range: cards live in a flat vector; the
-        // simple approach for registry mutations is a full re-place (scene
-        // setup is rare; per-frame work never touches this path).
-        state_.cards.clear();
-        for (std::uint32_t index = 0; index < state_.surfaces.size(); ++index)
-        {
-            placeSurfaceCards(state_, state_.surfaces[index], index);
-        }
-        (void) surfaceIndex;
+        rebuildCardRefs(state_);
+        state_.tlasDirty  = true;
+        state_.sceneDirty = true;
     }
 
     GiSurfaceHandle createSurfaceImpl(const GiSurfaceDescription *description, GiError *error)
@@ -387,19 +411,19 @@ private:
             setError(error, GiError::CapacityReached);
             return invalidGiSurface;
         }
-        const GiSurfaceHandle handle = state_.nextHandle++;
-        GiError            localError = GiError::None;
-        GiSurface          surface;
-        surface.handle = handle;
+        GiError   localError = GiError::None;
+        GiSurface surface;
+        surface.handle = state_.nextHandle;
         applySurfaceDescriptionLocked(surface, *description, &localError);
         if (localError != GiError::None)
         {
             setError(error, localError);
             return invalidGiSurface;
         }
+        // The handle is consumed only once the surface really exists.
+        const GiSurfaceHandle handle = state_.nextHandle++;
         state_.surfaces.push_back(std::move(surface));
-        rebuildCardsForSurfaceLocked(0);
-        state_.sceneDirty = true;
+        registryChangedLocked();
         setError(error, GiError::None);
         return handle;
     }
@@ -417,11 +441,14 @@ private:
                 return false;
             }
         }
+        if (!std::isfinite(description.emissiveIntensity) || description.emissiveIntensity < 0.0f)
+        {
+            return false;
+        }
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
             if (!std::isfinite(description.albedoColor[axis]) || description.albedoColor[axis] < 0.0f
-                || !std::isfinite(description.emissiveColor[axis]) || description.emissiveColor[axis] < 0.0f
-                || !std::isfinite(description.emissiveIntensity) || description.emissiveIntensity < 0.0f)
+                || !std::isfinite(description.emissiveColor[axis]) || description.emissiveColor[axis] < 0.0f)
             {
                 return false;
             }
@@ -448,15 +475,19 @@ private:
             setError(error, GiError::InvalidDescription);
             return false;
         }
-        GiError    localError = GiError::None;
-        applySurfaceDescriptionLocked(state_.surfaces[index], *description, &localError);
+        // Build into a copy so a rejected description leaves the live surface
+        // untouched (the old code overwrote it half-way).
+        GiSurface replacement;
+        replacement.handle = handle;
+        GiError localError = GiError::None;
+        applySurfaceDescriptionLocked(replacement, *description, &localError);
         if (localError != GiError::None)
         {
             setError(error, localError);
             return false;
         }
-        rebuildCardsForSurfaceLocked(index);
-        state_.sceneDirty = true;
+        state_.surfaces[index] = std::move(replacement);
+        registryChangedLocked();
         setError(error, GiError::None);
         return true;
     }
@@ -473,7 +504,6 @@ private:
         {
             return false;
         }
-        GiSurface &surface = state_.surfaces[index];
         for (std::uint32_t element = 0; element < 16; ++element)
         {
             if (!std::isfinite(transformColumnMajor16[element]))
@@ -481,10 +511,14 @@ private:
                 return false;
             }
         }
-        surface.transform        = makeTransform(transformColumnMajor16);
-        surface.inverseTransform = glm::inverse(surface.transform);
-        surface.normalMatrix     = glm::inverseTranspose(glm::mat3(surface.transform));
-        updateSurfaceWorldBounds(surface);
+        GiSurface &     surface   = state_.surfaces[index];
+        const glm::mat4 transform = makeTransform(transformColumnMajor16);
+        if (transform == surface.transform)
+        {
+            return true; // unchanged: keep the frame clean for the static skip
+        }
+        updateSurfaceTransform(surface, transform);
+        state_.tlasDirty  = true;
         state_.sceneDirty = true;
         return true;
     }
@@ -498,8 +532,7 @@ private:
             return false;
         }
         state_.surfaces.erase(state_.surfaces.begin() + index);
-        rebuildCardsForSurfaceLocked(0);
-        state_.sceneDirty = true;
+        registryChangedLocked();
         return true;
     }
 
@@ -517,10 +550,15 @@ private:
                 return false;
             }
         }
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            if (!std::isfinite(cameraPosition3[axis]))
+            {
+                return false;
+            }
+        }
         // Static-frame skip change detection: an identical repeated setView
-        // (same matrices, same eye) leaves the frame clean. Column-major
-        // float compare; -0.0 vs 0.0 counts as changed (harmless: one extra
-        // evaluate).
+        // (same matrices, same eye) leaves the frame clean.
         bool viewChanged = true;
         if (state_.hasView)
         {
@@ -529,8 +567,7 @@ private:
             {
                 for (std::uint32_t row = 0; row < 4; ++row)
                 {
-                    if (state_.viewProjection[column][row]
-                        != viewProjectionColumnMajor16[column * 4 + row])
+                    if (state_.viewProjection[column][row] != viewProjectionColumnMajor16[column * 4 + row])
                     {
                         viewChanged = true;
                     }
@@ -558,15 +595,13 @@ private:
 
     // Snapshots the pbr environment and direct lights into the frame state.
     // Returns true when the snapshot differs from the previous one (version
-    // compare against the stored environmentVersion/directLightsVersion),
-    // which is the environment-change signal for the static-frame skip.
+    // compare), which is the environment-change signal for the static-frame skip.
     bool snapshotEnvironmentLocked()
     {
         GiEnvironmentSnapshot snapshot;
         std::uint64_t         pbrVersion    = 0;
         std::uint64_t         lightsVersion = 0;
-        const glm::vec3       defaultSunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
-        snapshot.sunDirection = defaultSunDirection;
+        snapshot.sunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
         snapshot.sunColor     = glm::vec3(1.0f, 0.96f, 0.88f);
         snapshot.sunIntensity = 3.0f;
         snapshot.sunEnabled   = true;
@@ -584,8 +619,11 @@ private:
                 pbrVersion = version;
                 snapshot.hasSun           = true;
                 snapshot.sunEnabled       = environment.sun.enabled;
-                snapshot.sunDirection     = glm::normalize(glm::vec3(
-                    environment.sun.direction[0], environment.sun.direction[1], environment.sun.direction[2]));
+                const glm::vec3 sun(environment.sun.direction[0], environment.sun.direction[1], environment.sun.direction[2]);
+                if (glm::dot(sun, sun) > 1.0e-12f)
+                {
+                    snapshot.sunDirection = glm::normalize(sun);
+                }
                 snapshot.sunColor         = glm::vec3(
                     environment.sun.color[0], environment.sun.color[1], environment.sun.color[2]);
                 snapshot.sunIntensity     = environment.sun.intensity;
@@ -600,15 +638,11 @@ private:
         }
         if (directLightingCapability_ != nullptr && directLightingCapability_->copyLights != nullptr)
         {
-            directLightingCapability_->copyLights(directLightingCapability_->self, nullptr, 0, &lightsVersion);
-            std::vector<direct_lighting::DirectLight> lights(
-                std::min<std::uint64_t>(lightsVersion == 0 ? 0 : 64, direct_lighting::maxDirectLights));
-            // maxDirectLights caps the snapshot; the registry may hold more.
-            lights.assign(direct_lighting::maxDirectLights, direct_lighting::DirectLight{});
+            std::vector<direct_lighting::DirectLight> lights(direct_lighting::maxDirectLights);
             const std::uint32_t count = directLightingCapability_->copyLights(directLightingCapability_->self,
                 lights.data(), static_cast<std::uint32_t>(lights.size()), &lightsVersion);
-            lights.resize(count);
-            snapshot.hasDirectLights = count > 0;
+            lights.resize(std::min<std::size_t>(count, lights.size()));
+            snapshot.hasDirectLights = !lights.empty();
             snapshot.directLights    = std::move(lights);
         }
         const bool environmentChanged = !state_.environmentValid
@@ -621,6 +655,11 @@ private:
     }
 
     // ---- evaluate: the Lumen-style frame -----------------------------------------
+
+    TaskScheduler *schedulerLocked()
+    {
+        return context_ != nullptr ? &context_->taskScheduler() : nullptr;
+    }
 
     bool evaluateImpl(double deltaSeconds, GiError *error)
     {
@@ -642,16 +681,17 @@ private:
         state_.captureTexelsThisFrame.store(0, std::memory_order_relaxed);
         state_.directTexelsThisFrame.store(0, std::memory_order_relaxed);
         state_.indirectTexelsThisFrame.store(0, std::memory_order_relaxed);
+        state_.indirectRaysThisFrame.store(0, std::memory_order_relaxed);
         state_.probeTracesThisFrame.store(0, std::memory_order_relaxed);
         state_.screenProbesThisFrame.store(0, std::memory_order_relaxed);
         state_.gatherRaysThisFrame.store(0, std::memory_order_relaxed);
 
         // Static-frame skip: when the camera, the scene, and the environment
-        // are all unchanged and the caches have had a full probe-update cycle
-        // to converge, re-running the pipeline would only re-blend the same
-        // radiance with fresh random rays. Return early instead - and do not
-        // bump the probe version, so a renderer polling copyProbes also skips
-        // its per-frame snapshot upload.
+        // are all unchanged and every cache has had enough updates to settle
+        // (the pipeline derives that count from the budgets and the amount of
+        // cached texels and probes), re-running would only re-blend the same
+        // radiance with fresh rays. Return early - and keep the probe version
+        // so a renderer polling copyProbes skips its upload too.
         const bool viewChanged  = state_.viewDirty;
         const bool sceneChanged = state_.sceneDirty;
         state_.viewDirty  = false;
@@ -660,12 +700,8 @@ private:
         {
             state_.framesSinceDirty = 0;
         }
-        const std::uint32_t probeBudget = std::max(1u, state_.settings.probeUpdatesPerFrame);
-        const std::size_t   largestLevel = std::max(state_.level0.probes.size(), state_.level1.probes.size());
-        const std::uint32_t staticSkipAfterFrames = static_cast<std::uint32_t>(
-            (largestLevel + probeBudget - 1) / probeBudget) + 2u;
         if (settings_.skipUnchangedFrames && state_.hasPreviousView && !viewChanged && !sceneChanged
-            && !environmentChanged && state_.framesSinceDirty >= staticSkipAfterFrames)
+            && !environmentChanged && state_.framesSinceDirty >= state_.convergenceFrames)
         {
             state_.framesSkippedStatic.fetch_add(1, std::memory_order_relaxed);
             lastEvaluateMilliseconds_ = 0.0;
@@ -674,153 +710,36 @@ private:
         }
         ++state_.framesSinceDirty;
 
-        // Update camera-distance priorities for capture amortization.
-        for (GiSurface &surface : state_.surfaces)
+        TaskScheduler *scheduler = schedulerLocked();
+        if (!runGiFrame(state_, scheduler))
         {
-            const glm::vec3 center = 0.5f * (surface.worldMin + surface.worldMax);
-            for (std::uint32_t cardIndex = surface.firstCard; cardIndex < surface.firstCard + surface.cardCount;
-                ++cardIndex)
+            // A stage failed half-way: restart capture and lighting so no card
+            // keeps a partially written state.
+            for (GiSurface &surface : state_.surfaces)
             {
-                state_.cards[cardIndex].cameraDistance = glm::distance(center, state_.cameraPosition);
+                invalidateSurfaceCards(surface);
             }
-        }
-        snapProbeLevels(state_, state_.cameraPosition);
-
-        // Build the per-stage work: capture, direct, and indirect budgets are
-        // filled by camera distance and staleness (Lumen's priority scheme).
-        std::vector<GiTexelWork> captureWork;
-        std::vector<GiTexelWork> directWork;
-        std::vector<GiTexelWork> indirectWork;
-        buildTexelWork(captureWork, directWork, indirectWork);
-
-        TaskScheduler &scheduler = context_->taskScheduler();
-        TaskGraph      graph;
-        constexpr std::uint32_t workChunk = 8; // work items per task
-        auto addChunks = [&](std::vector<GiTexelWork> &work, std::vector<std::uint32_t> &nodeIds,
-                             void (*chunkFunction)(GiPipelineState &, const GiTexelWork *, std::uint32_t))
-        {
-            for (std::size_t begin = 0; begin < work.size(); begin += workChunk)
-            {
-                const std::size_t count = std::min(work.size() - begin, static_cast<std::size_t>(workChunk));
-                const std::uint32_t node = graph.addTask([&state = state_, &work, begin, count, chunkFunction]()
-                    { chunkFunction(state, work.data() + begin, static_cast<std::uint32_t>(count)); });
-                nodeIds.push_back(node);
-            }
-        };
-        std::vector<std::uint32_t> captureNodes;
-        std::vector<std::uint32_t> directNodes;
-        std::vector<std::uint32_t> indirectNodes;
-        addChunks(captureWork, captureNodes, captureWorkChunk);
-        addChunks(directWork, directNodes, directWorkChunk);
-        addChunks(indirectWork, indirectNodes, indirectWorkChunk);
-
-        // Probe updates: chunk the probe indices of both levels.
-        std::vector<std::uint32_t> probeNodes;
-        const std::uint32_t        probeUpdateBudget = state_.settings.probeUpdatesPerFrame;
-        // Rolling update window: each frame refreshes the next
-        // probeUpdatesPerFrame probes of every level (round-robin), so the
-        // whole cache cycles like Lumen's amortized probe updates.
-        auto addProbeChunks = [&](GiPipelineState::ProbeLevel &level, std::uint32_t levelIndex)
-        {
-            const std::uint32_t total   = static_cast<std::uint32_t>(level.probes.size());
-            const std::uint32_t updates = std::min(probeUpdateBudget, total);
-            constexpr std::uint32_t probeChunk = 12;
-            std::uint32_t emitted = 0;
-            while (emitted < updates)
-            {
-                const std::uint32_t begin = (level.updateCursor + emitted) % total;
-                const std::uint32_t span  = std::min({updates - emitted, probeChunk, total - begin});
-                const std::uint32_t node = graph.addTask([&state = state_, levelIndex, begin, span]()
-                    { updateProbeChunk(state, levelIndex, begin, begin + span); });
-                probeNodes.push_back(node);
-                emitted += span;
-            }
-            level.updateCursor = (level.updateCursor + updates) % total;
-        };
-        addProbeChunks(state_.level0, 0);
-        addProbeChunks(state_.level1, 1);
-
-        // Screen gather + compose (debug view buffers), single nodes.
-        const std::uint32_t rasterNode = graph.addTask(
-            [&state = state_]()
-            {
-                rasterizeViewGBuffer(state);
-            });
-        const std::uint32_t screenProbeNode = graph.addTask(
-            [&state = state_]()
-            {
-                traceScreenProbes(state);
-            });
-        const std::uint32_t resolveNode = graph.addTask(
-            [&state = state_]()
-            {
-                resolvePixelIrradiance(state);
-            });
-
-        // Stage dependencies: capture -> direct -> indirect -> probes ->
-        // raster -> screen probes -> resolve. Direct and indirect also depend
-        // on capture; probes depend on indirect (fresh radiance).
-        for (const std::uint32_t node : captureNodes)
-        {
-            for (const std::uint32_t consumer : directNodes)
-            {
-                graph.addDependency(node, consumer);
-            }
-        }
-        for (const std::uint32_t node : directNodes)
-        {
-            for (const std::uint32_t consumer : indirectNodes)
-            {
-                graph.addDependency(node, consumer);
-            }
-        }
-        for (const std::uint32_t node : indirectNodes)
-        {
-            for (const std::uint32_t consumer : probeNodes)
-            {
-                graph.addDependency(node, consumer);
-            }
-        }
-        for (const std::uint32_t node : indirectNodes)
-        {
-            graph.addDependency(node, rasterNode);
-        }
-        graph.addDependency(rasterNode, screenProbeNode);
-        graph.addDependency(screenProbeNode, resolveNode);
-
-        try
-        {
-            graph.execute(scheduler);
-        }
-        catch (...)
-        {
-            setError(error, GiError::None);
+            state_.framesSinceDirty = 0;
+            state_.sceneDirty       = true;
+            setError(error, GiError::EvaluationFailed);
             return false;
         }
-
-        // Lifetime ray counter (GiStatistics::totalRaysTraced): this frame's
-        // probe traces plus screen-space gather rays. The per-frame counters
-        // reset at the start of the next evaluate.
-        state_.totalRaysTraced.fetch_add(
-            static_cast<std::uint64_t>(state_.probeTracesThisFrame.load(std::memory_order_relaxed))
-                + static_cast<std::uint64_t>(state_.gatherRaysThisFrame.load(std::memory_order_relaxed)),
-            std::memory_order_relaxed);
-
-        // Roll the temporal state: previous indirect becomes current, the
-        // screen gather buffers become the reprojection source.
-        for (GiCard &card : state_.cards)
+        state_.hasPreviousView = true;
+        if (settings_.continuousGather)
         {
-            card.indirectPrevious.swap(card.indirectRadiance);
+            try
+            {
+                prepareDebugBuffers(state_, scheduler, 1);
+            }
+            catch (...)
+            {
+                setError(error, GiError::EvaluationFailed);
+                return false;
+            }
+            state_.totalRaysTraced.fetch_add(state_.gatherRaysThisFrame.load(std::memory_order_relaxed),
+                std::memory_order_relaxed);
         }
-        // Keep both buffer views consistent: gatherIrradiancePrevious was
-        // swapped inside resolvePixelIrradiance.
-        state_.previousViewProjection  = state_.viewProjection;
-        state_.previousCameraPosition  = state_.cameraPosition;
-        state_.previousViewWidth       = state_.viewWidth;
-        state_.previousViewHeight      = state_.viewHeight;
-        state_.previousViewDepth       = state_.viewDepth;
-        state_.hasPreviousView         = true;
-        probeVersion_.fetch_add(1u, std::memory_order_release);
+        publishSnapshotLocked();
 
         const auto endTime = std::chrono::steady_clock::now();
         lastEvaluateMilliseconds_ =
@@ -830,184 +749,54 @@ private:
         return true;
     }
 
-    static void captureWorkChunk(GiPipelineState &state, const GiTexelWork *work, std::uint32_t count)
-    {
-        for (std::uint32_t item = 0; item < count; ++item)
-        {
-            GiCard &         card    = state.cards[work[item].cardIndex];
-            const GiSurface &surface = state.surfaces[card.surfaceIndex];
-            captureCard(state, card, surface, work[item].texelBegin, work[item].texelEnd);
-            card.lastCaptureFrame = state.frameIndex;
-        }
-        std::uint32_t processed = 0;
-        for (std::uint32_t item = 0; item < count; ++item)
-        {
-            processed += work[item].texelEnd - work[item].texelBegin;
-        }
-        state.captureTexelsThisFrame.fetch_add(processed, std::memory_order_relaxed);
-    }
-
-    static void directWorkChunk(GiPipelineState &state, const GiTexelWork *work, std::uint32_t count)
-    {
-        gatherDirectLightingChunk(state, work, count);
-    }
-
-    static void indirectWorkChunk(GiPipelineState &state, const GiTexelWork *work, std::uint32_t count)
-    {
-        gatherIndirectLightingChunk(state, work, count);
-    }
-
-    // Builds the amortized work lists. Priority follows Lumen's
-    // LastUsed - LastUpdated scheme: the stalest cards come first, with
-    // camera distance as the tiebreak, so every card cycles through each
-    // budget instead of near cards starving far ones permanently.
-    void buildTexelWork(std::vector<GiTexelWork> &captureWork, std::vector<GiTexelWork> &directWork,
-        std::vector<GiTexelWork> &indirectWork)
-    {
-        captureWork.clear();
-        directWork.clear();
-        indirectWork.clear();
-        std::vector<std::uint32_t> cardOrder(state_.cards.size());
-        for (std::uint32_t index = 0; index < cardOrder.size(); ++index)
-        {
-            cardOrder[index] = index;
-        }
-        const std::uint64_t frame = state_.frameIndex;
-        std::sort(cardOrder.begin(),
-            cardOrder.end(),
-            [this, frame](std::uint32_t left, std::uint32_t right)
-            {
-                const GiCard &leftCard  = state_.cards[left];
-                const GiCard &rightCard = state_.cards[right];
-                // Staleness: frames since the card was last touched, per use.
-                const std::uint64_t leftCaptureAge  = frame - leftCard.lastCaptureFrame;
-                const std::uint64_t rightCaptureAge = frame - rightCard.lastCaptureFrame;
-                if (leftCaptureAge != rightCaptureAge)
-                {
-                    return leftCaptureAge > rightCaptureAge;
-                }
-                return leftCard.cameraDistance < rightCard.cameraDistance;
-            });
-        std::vector<std::uint32_t> lightingOrder = cardOrder;
-        std::sort(lightingOrder.begin(),
-            lightingOrder.end(),
-            [this, frame](std::uint32_t left, std::uint32_t right)
-            {
-                const GiCard &leftCard  = state_.cards[left];
-                const GiCard &rightCard = state_.cards[right];
-                const std::uint64_t leftAge  = std::min(frame - leftCard.lastDirectFrame,
-                    frame - leftCard.lastIndirectFrame);
-                const std::uint64_t rightAge = std::min(frame - rightCard.lastDirectFrame,
-                    frame - rightCard.lastIndirectFrame);
-                if (leftAge != rightAge)
-                {
-                    return leftAge > rightAge;
-                }
-                return leftCard.cameraDistance < rightCard.cameraDistance;
-            });
-        // Capture: nearest, stalest cards first within the texel budget.
-        std::uint64_t captureBudget = state_.settings.captureTexelsPerFrame;
-        for (const std::uint32_t cardIndex : cardOrder)
-        {
-            if (captureBudget == 0)
-            {
-                break;
-            }
-            GiCard &card = state_.cards[cardIndex];
-            const std::uint32_t texelCount = card.texelWidth * card.texelHeight;
-            const std::uint32_t count      = static_cast<std::uint32_t>(
-                std::min<std::uint64_t>(texelCount, captureBudget));
-            captureWork.push_back(GiTexelWork{cardIndex, 0, count});
-            captureBudget -= count;
-        }
-        // Direct + indirect: stalest-first ordering.
-        std::uint64_t directBudget   = state_.settings.directTexelsPerFrame;
-        std::uint64_t indirectBudget = state_.settings.indirectTexelsPerFrame;
-        constexpr std::uint32_t texelStride = 4096; // work unit granularity
-        for (const std::uint32_t cardIndex : lightingOrder)
-        {
-            GiCard &card = state_.cards[cardIndex];
-            const std::uint32_t texelCount = card.texelWidth * card.texelHeight;
-            for (std::uint32_t begin = 0; begin < texelCount; begin += texelStride)
-            {
-                const std::uint32_t end = std::min(begin + texelStride, texelCount);
-                if (directBudget > 0)
-                {
-                    const std::uint32_t count = static_cast<std::uint32_t>(
-                        std::min<std::uint64_t>(end - begin, directBudget));
-                    directWork.push_back(GiTexelWork{cardIndex, begin, begin + count});
-                    directBudget -= count;
-                }
-                if (indirectBudget > 0)
-                {
-                    const std::uint32_t count = static_cast<std::uint32_t>(
-                        std::min<std::uint64_t>(end - begin, indirectBudget));
-                    indirectWork.push_back(GiTexelWork{cardIndex, begin, begin + count});
-                    indirectBudget -= count;
-                }
-                if (directBudget == 0 && indirectBudget == 0)
-                {
-                    return;
-                }
-            }
-        }
-    }
-
     // ---- read side ---------------------------------------------------------------
+
+    // Builds and publishes the immutable probe snapshot (module mutex held).
+    void publishSnapshotLocked()
+    {
+        auto snapshot     = std::make_shared<GiProbeSnapshot>();
+        buildProbeSnapshot(state_, *snapshot);
+        snapshot->version = probeVersion_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+        std::lock_guard<std::mutex> lock(snapshotMutex_);
+        snapshot_ = std::move(snapshot);
+    }
 
     std::uint32_t copyProbesImpl(GiProbe *output, std::uint32_t capacity, GiProbeHeader *outHeader,
         std::uint64_t *outVersion) const
     {
-        std::lock_guard<std::mutex> lock(moduleMutex_);
+        // Only the tiny snapshot mutex: a renderer polling every frame never
+        // waits for a running evaluate().
+        std::shared_ptr<const GiProbeSnapshot> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(snapshotMutex_);
+            snapshot = snapshot_;
+        }
+        if (snapshot == nullptr)
+        {
+            if (outVersion != nullptr)
+            {
+                *outVersion = 0;
+            }
+            if (outHeader != nullptr)
+            {
+                *outHeader = GiProbeHeader{};
+            }
+            return 0;
+        }
         if (outVersion != nullptr)
         {
-            *outVersion = probeVersion_.load(std::memory_order_acquire);
+            *outVersion = snapshot->version;
         }
         if (outHeader != nullptr)
         {
-            outHeader->gridCenter[0] = state_.cameraPosition.x;
-            outHeader->gridCenter[1] = state_.cameraPosition.y;
-            outHeader->gridCenter[2] = state_.cameraPosition.z;
-            outHeader->level0Spacing = state_.level0.spacing;
-            for (std::uint32_t axis = 0; axis < 3; ++axis)
-            {
-                outHeader->level0Dimensions[axis] = state_.level0.dimensions[axis];
-                outHeader->level1Dimensions[axis] = state_.level1.dimensions[axis];
-            }
-            outHeader->level1Spacing = state_.level1.spacing;
-            outHeader->directionResolution = state_.settings.probeDirectionResolution;
-            outHeader->level0ProbeOffset  = 0;
-            outHeader->level1ProbeOffset  = static_cast<std::uint32_t>(state_.level0.probes.size());
-            outHeader->probeCount         = static_cast<std::uint32_t>(
-                state_.level0.probes.size() + state_.level1.probes.size());
+            *outHeader = snapshot->header;
         }
         if (output == nullptr || capacity == 0)
         {
             return 0;
         }
-        std::uint32_t copied = 0;
-        auto copyLevel = [&](const GiPipelineState::ProbeLevel &level, std::uint32_t levelIndex)
-        {
-            for (const GiPipelineState::ProbeLevel::Probe &probe : level.probes)
-            {
-                if (copied >= capacity)
-                {
-                    return;
-                }
-                GiProbe &target = output[copied++];
-                target.position[0] = probe.position.x;
-                target.position[1] = probe.position.y;
-                target.position[2] = probe.position.z;
-                for (std::uint32_t coefficient = 0; coefficient < 27; ++coefficient)
-                {
-                    target.sh2[coefficient / 3][coefficient % 3] = probe.sh2[coefficient];
-                }
-                target.validity = probe.validity;
-                target.level    = levelIndex;
-            }
-        };
-        copyLevel(state_.level0, 0);
-        copyLevel(state_.level1, 1);
+        const std::uint32_t copied = std::min<std::uint32_t>(capacity, static_cast<std::uint32_t>(snapshot->probes.size()));
+        std::copy(snapshot->probes.begin(), snapshot->probes.begin() + copied, output);
         return copied;
     }
 
@@ -1025,17 +814,18 @@ private:
         for (const GiSurface &surface : state_.surfaces)
         {
             triangles += surface.geometry.indices.size() / 3;
-        }
-        for (const GiCard &card : state_.cards)
-        {
-            cardTexels += static_cast<std::uint64_t>(card.texelWidth) * card.texelHeight;
+            for (const GiCard &card : surface.cards)
+            {
+                cardTexels += card.totalTexels();
+            }
         }
         outStatistics->triangles                = triangles;
-        outStatistics->cards                    = static_cast<std::uint32_t>(state_.cards.size());
+        outStatistics->cards                    = static_cast<std::uint32_t>(state_.cardRefs.size());
         outStatistics->cardTexels               = cardTexels;
         outStatistics->captureTexelsThisFrame   = state_.captureTexelsThisFrame.load(std::memory_order_relaxed);
         outStatistics->directTexelsThisFrame    = state_.directTexelsThisFrame.load(std::memory_order_relaxed);
         outStatistics->indirectTexelsThisFrame  = state_.indirectTexelsThisFrame.load(std::memory_order_relaxed);
+        outStatistics->indirectRaysThisFrame    = state_.indirectRaysThisFrame.load(std::memory_order_relaxed);
         outStatistics->probeTracesThisFrame     = state_.probeTracesThisFrame.load(std::memory_order_relaxed);
         outStatistics->screenProbesThisFrame    = state_.screenProbesThisFrame.load(std::memory_order_relaxed);
         outStatistics->gatherRaysThisFrame      = state_.gatherRaysThisFrame.load(std::memory_order_relaxed);
@@ -1052,8 +842,9 @@ private:
             return false;
         }
         // Device-class scaling like the render graph's profile resolution:
-        // non-Vulkan 0.125, Vulkan discrete 1.0, integrated 0.5, otherwise
-        // 0.25. CPU devices get the floor so headless use stays responsive.
+        // Vulkan discrete 1.0, integrated 0.5, everything else (other Vulkan
+        // classes, non-Vulkan, CPU) the 0.25 floor so headless use stays
+        // responsive.
         float scale = 0.25f;
         if (device->isVulkan)
         {
@@ -1070,10 +861,6 @@ private:
                 break;
             }
         }
-        else if (device->deviceClass == renderer::DeviceClass::Cpu)
-        {
-            scale = 0.25f;
-        }
         outProfile->captureTexelsPerFrame =
             std::max(4096u, static_cast<std::uint32_t>(static_cast<float>(settings_.captureTexelsPerFrame) * scale));
         outProfile->directTexelsPerFrame =
@@ -1085,6 +872,10 @@ private:
         return true;
     }
 
+    // The debug views are produced on demand: the GBuffer is rasterized for
+    // the current camera and, for the views that include the screen-space
+    // gather, a few accumulation passes run first so the temporal filter has
+    // converged (unless debug.continuous_gather keeps it warm every frame).
     bool debugExportImpl(GiDebugView view, const char *filePath, GiError *error)
     {
         if (filePath == nullptr)
@@ -1098,9 +889,36 @@ private:
             setError(error, GiError::ViewNotSet);
             return false;
         }
-        const bool exported = exportDebugView(state_, view, filePath, error);
-        return exported;
+        try
+        {
+            ensureSceneTlas(state_);
+            TaskScheduler *scheduler = schedulerLocked();
+            const bool needsGather = view == GiDebugView::FinalImage || view == GiDebugView::GiOnly;
+            const std::uint32_t passes = needsGather
+                ? (settings_.continuousGather ? 1u : std::max(settings_.exportGatherFrames, 1u))
+                : 0u;
+            prepareDebugBuffers(state_, scheduler, passes);
+            return exportDebugView(state_, scheduler, view, filePath, error);
+        }
+        catch (...)
+        {
+            setError(error, GiError::ExportFailed);
+            return false;
+        }
     }
+
+    struct CardKey
+    {
+        float         texelsPerMeter;
+        std::uint32_t maxAxis;
+        std::uint32_t maxCards;
+        std::uint32_t layers;
+        bool operator==(const CardKey &other) const
+        {
+            return texelsPerMeter == other.texelsPerMeter && maxAxis == other.maxAxis && maxCards == other.maxCards
+                && layers == other.layers;
+        }
+    };
 
     ParticipantManifest        manifest_;
     LumenGiCapability          capability_{};
@@ -1113,8 +931,13 @@ private:
     GiSettings         settings_;
     GiPipelineState    state_;
     std::uint32_t      builtDirectionResolution_ = 0;
+    float              builtProbeSpacing_        = 0.0f;
+    float              builtLevel1Factor_        = 0.0f;
+    CardKey            builtCardKey_{0.0f, 0, 0, 0};
     double             lastEvaluateMilliseconds_ = 0.0;
-    std::atomic<std::uint64_t> probeVersion_{1};
+    std::atomic<std::uint64_t> probeVersion_{0};
+    mutable std::mutex                     snapshotMutex_;
+    std::shared_ptr<const GiProbeSnapshot> snapshot_;
 };
 
 } // namespace
