@@ -1,6 +1,6 @@
 # audio lua bridge
 
-The audio module installs an `audio.*` Lua function namespace into every script runtime the engine hosts. Scripts use it to create audio engines, buses, and sounds; to drive playback (play/pause/stop/seek, fades, scheduled start/stop); and to control spatialization (positions, cones, attenuation, listeners). The bridge is optional: when `script_runtime` is absent the C++ `audio` capability works exactly as before, and scripts simply never see the `audio` table.
+The audio module installs an `audio.*` Lua function namespace into every script runtime the engine hosts. Scripts use it to create audio engines, buses, and sounds; to drive playback (play/pause/stop/seek, fades, scheduled start/stop); to query state (master volume, transport state, object counts, bus and sound parameters, playback times); and to control spatialization (positions, cones, attenuation, listeners). The bridge is optional: when `script_runtime` is absent the C++ `audio` capability works exactly as before, and scripts simply never see the `audio` table.
 
 ## Installation
 
@@ -25,14 +25,18 @@ Functions are listed alphabetically. `engine`/`bus`/`sound` are handles, `?` mar
 | Function | Arguments | Returns | Notes |
 | --- | --- | --- | --- |
 | `audio.at_end` | engine, sound | boolean | True when the sound reached its end. |
+| `audio.bus_info` | engine, bus | parent, volume, muted | Observed bus state; parent `0` is the master output. Returns `nil, nil, nil` for an unknown bus. |
 | `audio.create_bus` | engine, parent? (=0), volume? (=1.0), muted? (=false) | handle or nil, error | Parent 0 creates a top-level bus. |
 | `audio.create_engine` | sample_rate? (=0), channels? (=0), listeners? (=0), master_volume? (=-1), no_device? (=false), no_auto_start? (=false) | handle or nil, error | `0` sample rate/channels/listeners and negative master volume mean "use `[audio]` configuration defaults". `no_device = true` creates a manual-render engine (see `readFrames` note above). |
 | `audio.create_sound` | engine, path, bus? (=0), volume? (=1.0), pitch? (=1.0), pan? (=0.0), looping? (=false), spatialized? (=false), streaming? (=false), decode? (=false), asynchronous? (=false), disable_pitch? (=false) | handle or nil, error | Flags map onto miniaudio load flags; `streaming` and `decode` are mutually exclusive. |
-| `audio.destroy_bus` | engine, bus | (none) | Refuses buses with children or attached sounds (`Busy`). |
+| `audio.destroy_bus` | engine, bus | ok, error | Refuses buses with children or attached sounds (`Busy`). |
 | `audio.destroy_engine` | engine | (none) | Releases all sounds and buses of the engine. |
 | `audio.destroy_sound` | engine, sound | (none) | |
 | `audio.engine_info` | engine | sample_rate, channels, has_device, backend_name | Returns `nil` for an unknown engine. |
+| `audio.engine_statistics` | engine | sound_count, bus_count | Live object counts for budget monitoring. Returns `nil, nil` for an unknown engine. |
 | `audio.fade_sound_gain` | engine, sound, gain, seconds | ok, error | Frame-clock-based gain envelope on the engine graph. |
+| `audio.get_master_volume` | engine | volume or nil | Current master gain. Returns `nil` for an unknown engine. |
+| `audio.is_engine_started` | engine | boolean | True while the engine's device transport runs; false for stopped and device-less engines. |
 | `audio.is_playing` | engine, sound | boolean | |
 | `audio.pause` | engine, sound | ok, error | Stops without rewinding; `play` resumes from the cursor. |
 | `audio.play` | engine, sound | ok, error | |
@@ -56,6 +60,7 @@ Functions are listed alphabetically. `engine`/`bus`/`sound` are handles, `?` mar
 | `audio.set_sound_spatialization_enabled` | engine, sound, enabled | boolean | |
 | `audio.set_sound_velocity` | engine, sound, x, y, z | boolean | |
 | `audio.set_sound_volume` | engine, sound, volume | boolean | |
+| `audio.sound_info` | engine, sound | volume, pitch, pan, bus, looping, spatialized | Observed sound state read back from the backend; bus `0` is the master output. Returns six `nil`s for an unknown sound. |
 | `audio.sound_times` | engine, sound | cursor_seconds, length_seconds | Returns `nil, nil` for an unknown sound. |
 | `audio.start_engine` | engine | ok, error | |
 | `audio.stop` | engine, sound | ok, error | Stops and rewinds to PCM frame 0. |
@@ -63,7 +68,7 @@ Functions are listed alphabetically. `engine`/`bus`/`sound` are handles, `?` mar
 
 ## Limits
 
-- script_runtime caps apply per runtime: at most `script_runtime.maximum_native_functions` (default 256) registered functions - the bridge registers 35 - at most `maximum_native_arguments` (default 32) per call (the widest call is `audio.set_listener` with 14) and at most `maximum_native_results` (default 16) per call (the widest is `audio.engine_info` with 4).
+- script_runtime caps apply per runtime: at most `script_runtime.maximum_native_functions` (default 256) registered functions - the bridge registers 41 - at most `maximum_native_arguments` (default 32) per call (the widest call is `audio.set_listener` with 14) and at most `maximum_native_results` (default 16) per call (the widest is `audio.sound_info` with 6).
 - The bridge runs on the caller's thread and serializes on the owning engine's mutex like the native capability; per-engine calls from scripts and native consumers are mutually exclusive but calls on different engines proceed concurrently.
 - Object budgets (`audio.max_engines`, `audio.max_sounds_per_engine`, `audio.max_buses_per_engine`) surface as error code 8 (`CapacityExceeded`) in the second result.
 
@@ -87,6 +92,15 @@ audio.play(engine, shot)
 local cursor, length = audio.sound_times(engine, music)
 if cursor ~= nil then
     print(string.format("music at %.1f / %.1f s", cursor, length))
+end
+
+local volume = audio.get_master_volume(engine)
+if volume ~= nil then
+    print(string.format("master volume %.2f", volume))
+end
+local sounds, buses = audio.engine_statistics(engine)
+if sounds ~= nil then
+    print(string.format("live sounds %d, buses %d", sounds, buses))
 end
 ```
 

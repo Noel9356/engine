@@ -193,6 +193,7 @@ add_library(
     engine_module_audio
     MODULE
     source/audio.cpp
+    source/engine_registry.cpp
     source/lua_bridge.cpp
 )
 target_include_directories(

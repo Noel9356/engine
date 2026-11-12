@@ -1,7 +1,7 @@
 // Public capability surface of the audio module.
 //
 // Declares the POD types and function-pointer table consumers receive through
-// ParticipantContext::acquireCapability for the "audio" capability (ABI 2).
+// ParticipantContext::acquireCapability for the "audio" capability (ABI 3).
 // The implementation lives in source/audio.cpp (miniaudio backend).
 
 #ifndef ENGINE_AUDIO_CAPABILITIES_HPP
@@ -16,7 +16,7 @@ namespace audio
 {
 
 // ABI version of this capability struct; consumers must match it.
-inline constexpr std::uint32_t audioCapabilityAbi = 2u;
+inline constexpr std::uint32_t audioCapabilityAbi = 3u;
 
 // Opaque handle kinds; 0 is the invalid sentinel for each (see constants below).
 using AudioEngineHandle = std::uint32_t;
@@ -96,10 +96,26 @@ struct AudioEngineInfo
     bool          hasDevice   = false;
 };
 
+// Live engine object counts for budget monitoring and leak triage.
+struct AudioEngineStatistics
+{
+    std::uint32_t soundCount = 0;
+    std::uint32_t busCount   = 0;
+};
+
 // Mix-group parameters; parent = invalidAudioBus attaches the bus directly to
 // the engine's master output. A muted bus keeps its volume setting and plays
 // at gain 0 until unmuted.
 struct AudioBusDescription
+{
+    AudioBusHandle parent = invalidAudioBus;
+    float          volume = 1.0f;
+    bool           muted  = false;
+};
+
+// Observed bus facts; volume is the bus's own setting (a muted bus keeps it)
+// and parent identifies the owning bus (invalidAudioBus = master output).
+struct AudioBusInfo
 {
     AudioBusHandle parent = invalidAudioBus;
     float          volume = 1.0f;
@@ -163,6 +179,19 @@ struct AudioListenerDescription
     float velocity[3]  = {0.0f, 0.0f, 0.0f};
 };
 
+// Observed sound facts; volume/pitch/pan/looping/spatialized are read back
+// from the backend and bus identifies the mix group the sound feeds
+// (invalidAudioBus = master output).
+struct AudioSoundInfo
+{
+    float          volume      = 1.0f;
+    float          pitch       = 1.0f;
+    float          pan         = 0.0f;
+    AudioBusHandle bus         = invalidAudioBus;
+    bool           looping     = false;
+    bool           spatialized = false;
+};
+
 // Function-pointer table for the "audio" capability. Every call takes the
 // module's self pointer first; AudioError out-parameters are optional and
 // always written on failing paths that report errors. Calls targeting the same
@@ -179,15 +208,24 @@ struct AudioCapability
     AudioEngineHandle (*createEngine)(void *self, const AudioEngineDescription *description, AudioError *error);
     void (*destroyEngine)(void *self, AudioEngineHandle engine);
     bool (*engineInfo)(void *self, AudioEngineHandle engine, AudioEngineInfo *outInfo);
+    // Live object counts for budget monitoring and leak triage.
+    bool (*engineStatistics)(void *self, AudioEngineHandle engine, AudioEngineStatistics *outStatistics);
     bool (*startEngine)(void *self, AudioEngineHandle engine, AudioError *error);
     bool (*stopEngine)(void *self, AudioEngineHandle engine, AudioError *error);
+    // True while the engine's device transport runs; false for stopped and
+    // device-less engines.
+    bool (*isEngineStarted)(void *self, AudioEngineHandle engine);
     bool (*setMasterVolume)(void *self, AudioEngineHandle engine, float volume);
+    // Reads the engine's current master gain into outVolume.
+    bool (*getMasterVolume)(void *self, AudioEngineHandle engine, float *outVolume);
 
     AudioBusHandle (*createBus)(
         void *self, AudioEngineHandle engine, const AudioBusDescription *description, AudioError *error);
     bool (*destroyBus)(void *self, AudioEngineHandle engine, AudioBusHandle bus, AudioError *error);
     bool (*setBusVolume)(void *self, AudioEngineHandle engine, AudioBusHandle bus, float volume);
     bool (*setBusMuted)(void *self, AudioEngineHandle engine, AudioBusHandle bus, bool muted);
+    // Observed bus state: parent, volume, and muted flag.
+    bool (*busInfo)(void *self, AudioEngineHandle engine, AudioBusHandle bus, AudioBusInfo *outInfo);
 
     AudioSoundHandle (*createSound)(
         void *self, AudioEngineHandle engine, const AudioSoundDescription *description, AudioError *error);
@@ -200,6 +238,9 @@ struct AudioCapability
     bool (*atEnd)(void *self, AudioEngineHandle engine, AudioSoundHandle sound);
     bool (*soundTimes)(void *self, AudioEngineHandle engine, AudioSoundHandle sound, double *outCursorSeconds,
         double *outLengthSeconds);
+    // Observed sound state: base volume, pitch, pan, looping, spatialization,
+    // and the bus the sound feeds.
+    bool (*soundInfo)(void *self, AudioEngineHandle engine, AudioSoundHandle sound, AudioSoundInfo *outInfo);
     bool (*setSoundVolume)(void *self, AudioEngineHandle engine, AudioSoundHandle sound, float volume);
     bool (*setSoundPitch)(void *self, AudioEngineHandle engine, AudioSoundHandle sound, float pitch);
     bool (*setSoundPan)(void *self, AudioEngineHandle engine, AudioSoundHandle sound, float pan);

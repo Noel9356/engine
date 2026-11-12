@@ -27,7 +27,7 @@ All keys live in the `[audio]` section. Defaults ship in `config.toml`; the appl
 
 ## Output defaults
 
-A device-less engine requires nonzero sample rate and channel count after resolving its `AudioEngineDescription` against the configured defaults. Each mixer-tuning field can also be overridden for an individual engine through `AudioEngineDescription`. These are tuning controls, not guaranteed latency or CPU targets; validate them on the target backend and workload.
+A device-less engine requires nonzero sample rate and channel count after resolving its `AudioEngineDescription` against the configured defaults. Explicit description values share the configured bounds: channel counts above 254 are rejected (`0` still selects the device-native layout) and listener counts must stay within the backend's maximum. Each mixer-tuning field can also be overridden for an individual engine through `AudioEngineDescription`. These are tuning controls, not guaranteed latency or CPU targets; validate them on the target backend and workload.
 
 ## Resource manager
 
