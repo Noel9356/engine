@@ -203,6 +203,46 @@ bool viewPosition(void *userData, const ScriptValue *args, std::uint32_t count, 
     return true;
 }
 
+bool viewPose(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
+    std::uint32_t capacity, std::uint32_t *outCount)
+{
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::uint32_t handle = 0;
+    if (count != 1 || capacity < 12 || !uint32Value(args, count, 0, handle))
+        return false;
+    CameraPose pose{};
+    std::lock_guard lock(bridge.apiMutex);
+    if (bridge.camera == nullptr)
+        return false;
+    if (!bridge.camera->cameraPose(bridge.camera->self, handle, &pose))
+        return false;
+    const float *vectors[4] = {pose.position, pose.forward, pose.up, pose.right};
+    std::uint32_t result = 0;
+    for (const float *vector : vectors)
+        for (std::uint32_t i = 0; i < 3; ++i)
+            resultNumber(results, result++, vector[i]);
+    *outCount = 12;
+    return true;
+}
+
+bool setOrbitTarget(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *,
+    std::uint32_t, std::uint32_t *outCount)
+{
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::uint32_t handle = 0;
+    float target[3]{};
+    if (count != 4 || !uint32Value(args, count, 0, handle)
+        || !floatValue(args, count, 1, target[0]) || !floatValue(args, count, 2, target[1])
+        || !floatValue(args, count, 3, target[2]))
+        return false;
+    std::lock_guard lock(bridge.apiMutex);
+    if (bridge.camera == nullptr)
+        return false;
+    bridge.camera->setOrbitTarget(bridge.camera->self, handle, target);
+    *outCount = 0;
+    return true;
+}
+
 bool worldToViewport(void *userData, const ScriptValue *args, std::uint32_t count, ScriptValue *results,
     std::uint32_t capacity, std::uint32_t *outCount)
 {
@@ -296,9 +336,11 @@ constexpr Binding bindings[] = {
     {"camera.destroy", destroyCamera},
     {"camera.set_mode", setMode},
     {"camera.look_at", lookAt},
+    {"camera.set_orbit_target", setOrbitTarget},
     {"camera.set_projection", setProjection},
     {"camera.update", updateCamera},
     {"camera.view_position", viewPosition},
+    {"camera.view_pose", viewPose},
     {"camera.world_to_viewport", worldToViewport},
     {"camera.viewport_to_world_ray", viewportToWorldRay},
     {"camera.set_control_settings", setControlSettings},

@@ -1,7 +1,7 @@
 // Public capability surface of the camera module.
 //
 // Declares the POD types and function-pointer table consumers receive through
-// ParticipantContext::acquireCapability for the "camera" capability (ABI 9):
+// ParticipantContext::acquireCapability for the "camera" capability (ABI 11):
 // handle-based cameras with fixed, orbit, and fly control modes that produce
 // view/projection matrices for a caller-supplied viewport size.
 
@@ -17,8 +17,9 @@ namespace camera
 
 // ABI version of this capability struct; consumers must match it.
 // ABI history: 9 added per-camera pitch/control limits; 10 added viewport
-// projection and viewport-to-world ray queries.
-inline constexpr std::uint32_t cameraCapabilityAbi = 10u;
+// projection and viewport-to-world ray queries; 11 added the combined
+// view-projection matrix, the pose query, and orbit-target control.
+inline constexpr std::uint32_t cameraCapabilityAbi = 11u;
 
 // Opaque camera handle; 0 (invalidCamera) means "none". Handles start at 1.
 using CameraHandle                          = std::uint32_t;
@@ -120,15 +121,33 @@ struct CameraParameters
     bool hasUp       = false;
 };
 
-// Render-ready matrices: column-major 4x4 view and projection (16 floats
-// each) plus the world-space eye position.
+// Render-ready matrices: column-major 4x4 view, projection, and combined
+// view-projection (16 floats each) plus the world-space eye position. The
+// combined matrix is the projection multiplied by the view, so consumers that
+// only need world-to-clip transforms skip the per-frame multiplication.
 struct ViewState
 {
     float view[16] = {};
 
     float projection[16] = {};
 
+    float viewProjection[16] = {};
+
     float position[3] = {0.0f, 0.0f, 0.0f};
+};
+
+// World-space pose of a camera: the eye position, the view direction, the
+// up vector, and the strafe-right direction (the horizontal right of the
+// view; normalized and perpendicular to up).
+struct CameraPose
+{
+    float position[3] = {0.0f, 0.0f, 0.0f};
+
+    float forward[3] = {0.0f, 0.0f, 1.0f};
+
+    float up[3] = {0.0f, 1.0f, 0.0f};
+
+    float right[3] = {1.0f, 0.0f, 0.0f};
 };
 
 // Function-pointer table for the "camera" capability. Calls are not
@@ -150,11 +169,17 @@ struct CameraCapability
     // parallel up and direction, non-finite values).
     void (*setLookAt)(void *self, CameraHandle camera, const float eye[3], const float target[3], const float up[3]);
 
-    // Entering Orbit from Fly re-derives the orbit radius from the current
-    // pose; other transitions keep the pose as is.
+    // Entering Orbit re-derives the orbit radius from the current pose; other
+    // transitions keep the pose as is.
     void (*setControlMode)(void *self, CameraHandle camera, CameraControlMode mode);
 
     void (*setOrbitDistance)(void *self, CameraHandle camera, float distance);
+
+    // Moves the orbit pivot without changing yaw/pitch or radius; in Orbit
+    // mode the eye travels with the pivot (its offset is preserved), in the
+    // other modes the value is stored for a later switch to Orbit. Silently
+    // ignored for non-finite targets.
+    void (*setOrbitTarget)(void *self, CameraHandle camera, const float target[3]);
 
     void (*setMovementSpeed)(void *self, CameraHandle camera, float unitsPerSecond);
     void (*setLookSpeed)(void *self, CameraHandle camera, float degreesPerSecond);
@@ -177,6 +202,11 @@ struct CameraCapability
     // to call every frame with the current viewport size.
     void (*viewState)(void *self, CameraHandle camera, std::uint32_t viewportWidth, std::uint32_t viewportHeight,
         ViewState *outState);
+
+    // Fills outPose with the world-space eye position, view direction, up
+    // vector, and strafe-right direction. Returns false for an invalid
+    // camera or a null outPose.
+    bool (*cameraPose)(void *self, CameraHandle camera, CameraPose *outPose);
 
     // Projects a world-space point to top-left-origin viewport pixel
     // coordinates. outDepth is mapped from OpenGL NDC [-1, 1] to [0, 1].

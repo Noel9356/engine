@@ -29,12 +29,14 @@ add_library(
     engine_module_camera
     MODULE
     source/camera.cpp
+    source/camera_configuration.cpp
+    source/camera_record.cpp
     source/lua_bridge.cpp
 )
 
 target_compile_definitions(
     engine_module_camera
-    PRIVATE ENGINE_CAMERA_MODULE_VERSION="0.1.0"
+    PRIVATE ENGINE_CAMERA_MODULE_VERSION="0.2.0"
 )
 
 target_include_directories(
