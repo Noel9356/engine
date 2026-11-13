@@ -259,14 +259,14 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
     const std::uint8_t blue  = toByte(frame.clearColor[2]);
     const std::uint8_t alpha = toByte(frame.clearColor[3]);
 
-    for (std::size_t pixel = 0; pixel < color.size() / 4; ++pixel)
-    {
-        const std::size_t offset = pixel * 4;
-        color[offset + 0] = red;
-        color[offset + 1] = green;
-        color[offset + 2] = blue;
-        color[offset + 3] = alpha;
-    }
+    // One word per pixel: the pattern is built by copying the four bytes in
+    // memory order and written back the same way, so byte order cancels out.
+    std::uint8_t clearBytes[4] = {red, green, blue, alpha};
+    std::uint32_t clearWord    = 0;
+    std::memcpy(&clearWord, clearBytes, sizeof(clearWord));
+    std::fill(reinterpret_cast<std::uint32_t *>(color.data()),
+        reinterpret_cast<std::uint32_t *>(color.data() + color.size()),
+        clearWord);
     std::fill(depth.begin(), depth.end(), 1.0f);
 
     std::fill(pixelLocks.begin(), pixelLocks.end(), 0);
@@ -354,7 +354,7 @@ bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &descripti
         mesh.boundsRadius = std::sqrt(radiusSquared);
         mesh.boundsValid  = std::isfinite(mesh.boundsRadius);
 
-        if (lodEnabled_ && mesh.indices.size() >= 4096 * 3)
+        if (lodEnabled_ && mesh.indices.size() >= lodMinTriangles_ * 3)
         {
             // LOD 0 is the full mesh; each level strides over the triangle
             // list, so quality drops 4x/16x/64x with no spatial coherence.
@@ -506,19 +506,21 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
     const HeadlessMesh &meshData = found->second;
 
     const std::vector<std::uint32_t> *activeIndices = &meshData.indices;
+    DrawBounds                        bounds{glm::vec3(0.0f), 0.0f};
+    bool                              haveBounds = false;
     if (lodEnabled_ && !meshData.lodIndices.empty() && meshData.boundsValid && cameraInitialized_)
     {
-        const glm::mat4 model        = glm::make_mat4(modelMatrix);
-        const glm::vec4 worldCenter4 = model * glm::vec4(meshData.boundsCenter, 1.0f);
-        const glm::vec3 worldCenter  = glm::vec3(worldCenter4);
-        const float     dist         = glm::distance(cameraPosition_, worldCenter);
-        const glm::vec3 basisX       = glm::vec3(model[0]);
-        const glm::vec3 basisY       = glm::vec3(model[1]);
-        const glm::vec3 basisZ       = glm::vec3(model[2]);
+        const glm::mat4 model = glm::make_mat4(modelMatrix);
+        bounds.center         = glm::vec3(model * glm::vec4(meshData.boundsCenter, 1.0f));
+        const glm::vec3 basisX = glm::vec3(model[0]);
+        const glm::vec3 basisY = glm::vec3(model[1]);
+        const glm::vec3 basisZ = glm::vec3(model[2]);
         const float     worldScale
             = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
-        const float worldRadius = meshData.boundsRadius * worldScale;
-        const float angularSize = dist > 0.0f ? worldRadius / dist : 1.0f; // ~screen fraction the mesh spans
+        bounds.radius = meshData.boundsRadius * worldScale;
+        haveBounds    = true;
+        const float dist        = glm::distance(cameraPosition_, bounds.center);
+        const float angularSize = dist > 0.0f ? bounds.radius / dist : 1.0f; // ~screen fraction the mesh spans
         int         lodLevel    = 0;
         if (angularSize < lodThresholds_[0])
             lodLevel = static_cast<int>(meshData.lodIndices.size()) - 1;
@@ -536,7 +538,8 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
     statistics_.trianglesSubmitted += triCount;
 
     RasterSetup setup;
-    if (!prepareRasterization(meshData, modelMatrix, material, activeIndices->data(), activeIndices->size(), setup))
+    if (!prepareRasterization(meshData, modelMatrix, material, activeIndices->data(), activeIndices->size(), setup,
+            haveBounds ? &bounds : nullptr))
     {
         return;
     }
@@ -910,6 +913,13 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
             if (left >= right || top >= bottom)
                 continue;
 
+            // Per-vertex RGBA channels are constant across the triangle's
+            // pixels: decode them once instead of per pixel.
+            const float vertexChannels[3][4]
+                = {{channel(a.color, 0), channel(a.color, 8), channel(a.color, 16), channel(a.color, 24)},
+                    {channel(b.color, 0), channel(b.color, 8), channel(b.color, 16), channel(b.color, 24)},
+                    {channel(c.color, 0), channel(c.color, 8), channel(c.color, 16), channel(c.color, 24)}};
+
             for (std::int32_t y = top; y < bottom; ++y)
             {
                 for (std::int32_t x = left; x < right; ++x)
@@ -927,10 +937,10 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
                     float       texel[4]{};
                     sampleRgba(u, v, texel);
                     const float vertexColor[4]
-                        = {channel(a.color, 0) * wa + channel(b.color, 0) * wb + channel(c.color, 0) * wc,
-                            channel(a.color, 8) * wa + channel(b.color, 8) * wb + channel(c.color, 8) * wc,
-                            channel(a.color, 16) * wa + channel(b.color, 16) * wb + channel(c.color, 16) * wc,
-                            channel(a.color, 24) * wa + channel(b.color, 24) * wb + channel(c.color, 24) * wc};
+                        = {vertexChannels[0][0] * wa + vertexChannels[1][0] * wb + vertexChannels[2][0] * wc,
+                            vertexChannels[0][1] * wa + vertexChannels[1][1] * wb + vertexChannels[2][1] * wc,
+                            vertexChannels[0][2] * wa + vertexChannels[1][2] * wb + vertexChannels[2][2] * wc,
+                            vertexChannels[0][3] * wa + vertexChannels[1][3] * wb + vertexChannels[2][3] * wc};
                     const float alpha = std::clamp(texel[3] * vertexColor[3], 0.0f, 1.0f);
                     if (alpha <= 0.0f)
                         continue;
@@ -977,7 +987,7 @@ const HeadlessTexture *HeadlessBackend::mapFor(TextureHandle handle, const Headl
 // across the edge) used to flip the sign and cull nearly every front face.
 bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float *modelMatrix,
     const MeshMaterial &material, const std::uint32_t *activeIndices, std::size_t activeIndexCount,
-    RasterSetup &outSetup)
+    RasterSetup &outSetup, const DrawBounds *precomputedBounds)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
@@ -993,15 +1003,38 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.modelNormalMatrix = material.unlit ? glm::mat3(1.0f) : glm::mat3(outSetup.model);
     outSetup.unlit             = material.unlit;
 
+    // World-space bounds sphere, computed at most once per draw. drawMesh
+    // already builds one for its LOD pick and passes it in; otherwise it is
+    // derived here on first use by frustum culling or the winding vote.
+    bool boundsReady = false;
+    const auto ensureWorldBounds = [&]()
+    {
+        if (boundsReady)
+            return;
+        if (precomputedBounds != nullptr)
+        {
+            outSetup.boundsWorldCenter = precomputedBounds->center;
+            outSetup.boundsWorldRadius = precomputedBounds->radius;
+        }
+        else
+        {
+            const glm::vec4 worldCenter4 = outSetup.model * glm::vec4(mesh.boundsCenter, 1.0f);
+            outSetup.boundsWorldCenter   = glm::vec3(worldCenter4);
+            const glm::vec3 basisX       = glm::vec3(outSetup.model[0]);
+            const glm::vec3 basisY       = glm::vec3(outSetup.model[1]);
+            const glm::vec3 basisZ       = glm::vec3(outSetup.model[2]);
+            const float     worldScale   = std::sqrt(
+                glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+            outSetup.boundsWorldRadius = mesh.boundsRadius * worldScale;
+        }
+        boundsReady = true;
+    };
+
     if (frustumCullingEnabled_ && cameraInitialized_ && mesh.boundsValid && triangleCount >= 4)
     {
-        const glm::vec4 worldCenter = outSetup.model * glm::vec4(mesh.boundsCenter, 1.0f);
-        const glm::vec3 basisX      = glm::vec3(outSetup.model[0]);
-        const glm::vec3 basisY      = glm::vec3(outSetup.model[1]);
-        const glm::vec3 basisZ      = glm::vec3(outSetup.model[2]);
-        const float     worldScale
-            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
-        const float worldRadius = mesh.boundsRadius * worldScale;
+        ensureWorldBounds();
+        const glm::vec4 worldCenter(outSetup.boundsWorldCenter, 1.0f);
+        const float     worldRadius = outSetup.boundsWorldRadius;
         for (const glm::vec4 &plane : frustumPlanes_)
         {
             const float signedDistance = glm::dot(plane, worldCenter);
@@ -1124,16 +1157,9 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     if (backFaceCullingEnabled_ && !outSetup.unlit && outSetup.useTransformCache && cameraInitialized_
         && mesh.boundsValid && triangleCount >= 4)
     {
-        const glm::vec4 worldCenter4 = outSetup.model * glm::vec4(mesh.boundsCenter, 1.0f);
-        const glm::vec3 worldCenter  = glm::vec3(worldCenter4);
-        const glm::vec3 basisX       = glm::vec3(outSetup.model[0]);
-        const glm::vec3 basisY       = glm::vec3(outSetup.model[1]);
-        const glm::vec3 basisZ       = glm::vec3(outSetup.model[2]);
-        const float     worldScale
-            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
-        const float worldRadius = mesh.boundsRadius * worldScale;
-        const float cameraDist  = glm::distance(cameraPosition_, worldCenter);
-        if (cameraDist > worldRadius)
+        ensureWorldBounds();
+        const float cameraDist = glm::distance(cameraPosition_, outSetup.boundsWorldCenter);
+        if (cameraDist > outSetup.boundsWorldRadius)
         {
             // Majority vote over a spread of triangles: face winding against
             // vertex normals identifies the outward orientation
@@ -1141,41 +1167,75 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
             // back faces balance on a closed mesh). A crease triangle whose
             // smooth corner normals lean across the edge loses the vote
             // instead of flipping the whole mesh.
-            const std::size_t sampleStride = std::max<std::size_t>(1, triangleCount / 64);
-            std::uint32_t     positive = 0, negative = 0;
-            for (std::size_t t = 0; t < triangleCount; t += sampleStride)
+            //
+            // The outcome is a pure function of the mesh geometry, the
+            // sampled index list and the sign of the model's linear part
+            // (((M a) x (M b)) . (M c) = det(M) . ((a x b) . c)), so it is
+            // memoized per mesh and re-derived only when the transform
+            // mirrors or the index subset changes.
+            const unsigned determinantSlot = glm::determinant(glm::mat3(outSetup.model)) < 0.0f ? 1u : 0u;
+            HeadlessMesh::WindingVoteMemo &memo = mesh.windingVotes[determinantSlot];
+            float frontSign = 0.0f;
+            bool  memoHit   = false;
+            for (std::size_t slot = 0; slot < HeadlessMesh::WindingVoteMemo::capacity; ++slot)
             {
-                const std::uint32_t i0 = activeIndices[t * 3 + 0];
-                const std::uint32_t i1 = activeIndices[t * 3 + 1];
-                const std::uint32_t i2 = activeIndices[t * 3 + 2];
-                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
-                    continue;
-                const glm::vec3 &wp0 = transformedVertices_[i0].worldPosition;
-                const glm::vec3 &wp1 = transformedVertices_[i1].worldPosition;
-                const glm::vec3 &wp2 = transformedVertices_[i2].worldPosition;
-                const glm::vec3  faceNormal = glm::cross(wp1 - wp0, wp2 - wp0);
-                const float      fnLen2     = glm::dot(faceNormal, faceNormal);
-                if (fnLen2 < 1e-12f)
-                    continue;
-                const glm::vec3 &wn0 = transformedVertices_[i0].worldNormal;
-                const glm::vec3 &wn1 = transformedVertices_[i1].worldNormal;
-                const glm::vec3 &wn2 = transformedVertices_[i2].worldNormal;
-                const glm::vec3  avgNormal = wn0 + wn1 + wn2;
-                const float      anLen2    = glm::dot(avgNormal, avgNormal);
-                if (anLen2 < 1e-12f)
-                    continue;
-                const float dotFN = glm::dot(faceNormal, avgNormal);
-                if (dotFN > 1e-6f)
-                    ++positive;
-                else if (dotFN < -1e-6f)
-                    ++negative;
+                if (memo.sources[slot] == activeIndices)
+                {
+                    frontSign = memo.signs[slot];
+                    memoHit   = true;
+                    break;
+                }
             }
-            if (positive > negative && positive > 0)
-                outSetup.frontSign = 1.0f;
-            else if (negative > positive && negative > 0)
-                outSetup.frontSign = -1.0f;
-            if (outSetup.frontSign != 0.0f)
+            if (!memoHit)
             {
+                const std::size_t sampleStride = std::max<std::size_t>(1, triangleCount / 64);
+                std::uint32_t     positive = 0, negative = 0;
+                for (std::size_t t = 0; t < triangleCount; t += sampleStride)
+                {
+                    const std::uint32_t i0 = activeIndices[t * 3 + 0];
+                    const std::uint32_t i1 = activeIndices[t * 3 + 1];
+                    const std::uint32_t i2 = activeIndices[t * 3 + 2];
+                    if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                        continue;
+                    const glm::vec3 &wp0 = transformedVertices_[i0].worldPosition;
+                    const glm::vec3 &wp1 = transformedVertices_[i1].worldPosition;
+                    const glm::vec3 &wp2 = transformedVertices_[i2].worldPosition;
+                    const glm::vec3  faceNormal = glm::cross(wp1 - wp0, wp2 - wp0);
+                    const float      fnLen2     = glm::dot(faceNormal, faceNormal);
+                    if (fnLen2 < 1e-12f)
+                        continue;
+                    const glm::vec3 &wn0 = transformedVertices_[i0].worldNormal;
+                    const glm::vec3 &wn1 = transformedVertices_[i1].worldNormal;
+                    const glm::vec3 &wn2 = transformedVertices_[i2].worldNormal;
+                    const glm::vec3  avgNormal = wn0 + wn1 + wn2;
+                    const float      anLen2    = glm::dot(avgNormal, avgNormal);
+                    if (anLen2 < 1e-12f)
+                        continue;
+                    const float dotFN = glm::dot(faceNormal, avgNormal);
+                    if (dotFN > 1e-6f)
+                        ++positive;
+                    else if (dotFN < -1e-6f)
+                        ++negative;
+                }
+                if (positive > negative && positive > 0)
+                    frontSign = 1.0f;
+                else if (negative > positive && negative > 0)
+                    frontSign = -1.0f;
+                // Record the outcome for this index list, reusing the first
+                // free slot (or slot 0 once every slot is taken).
+                for (std::size_t slot = 0; slot < HeadlessMesh::WindingVoteMemo::capacity; ++slot)
+                {
+                    if (memo.sources[slot] == nullptr)
+                    {
+                        memo.sources[slot] = activeIndices;
+                        memo.signs[slot]   = frontSign;
+                        break;
+                    }
+                }
+            }
+            if (frontSign != 0.0f)
+            {
+                outSetup.frontSign          = frontSign;
                 outSetup.enableBackFaceCull = true; // winding convention confirmed; culling is safe
             }
         }

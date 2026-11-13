@@ -144,9 +144,10 @@ public:
     bool mergeDefaultsFile(const std::filesystem::path &path, ConfigProvenance::Layer layer, const std::string &source,
         std::string &errorMessage);
 
-    // Merges a runtime profile as overrides, restricted to the whitelisted
-    // [engine]/[diagnostics] tuning keys; profiles cannot touch scene,
-    // providers, permissions or trust.
+    // Merges a runtime profile as overrides. The [engine]/[diagnostics]
+    // sections are restricted to the whitelisted tuning keys; profiles cannot
+    // touch scene, providers, permissions or trust. Any other section merges
+    // freely as Profile-layer overrides (module tuning such as [renderer]).
     bool mergeProfileFile(const std::filesystem::path &path, std::string &errorMessage);
 
     // Replaces the store's [scene] section with the scene file's content.

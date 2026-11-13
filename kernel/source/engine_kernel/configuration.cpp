@@ -300,15 +300,39 @@ bool EngineKernel::reloadConfiguration(std::string &report)
     configurationStore.resetForReload();
     configurationLoaded = false;
     std::string reloadError;
-    if (!loadConfiguration(reloadError))
+    if (!loadConfiguration(reloadError) || !configurationStore.applyCommandLineOverrides(reloadError))
     {
-        report = "engine reload failed after the pre-parse pass (unexpected; the report names the file):\n- "
-               + reloadError + "\n";
-        return false;
-    }
-    if (!configurationStore.applyCommandLineOverrides(reloadError))
-    {
-        report = "engine reload failed after the pre-parse pass (unexpected):\n- " + reloadError + "\n";
+        // The pre-parse pass validated every file, so a failure here means a
+        // file changed (or was removed) between the pre-parse and the reload.
+        // Best-effort restore: rebuild the previous configuration from the
+        // same sources so the engine keeps running with a usable store
+        // instead of an empty one.
+        std::string restoreReport;
+        configurationStore.resetForReload();
+        const bool restored = loadConfiguration(restoreReport)
+                           && configurationStore.applyCommandLineOverrides(restoreReport);
+        for (const auto &[defaultsFile, source] : pluginDefaultsFiles)
+        {
+            if (restored
+                && !configurationStore.mergeDefaultsFile(
+                    defaultsFile, ConfigProvenance::Layer::PluginDefaults, source, restoreReport))
+            {
+                break;
+            }
+        }
+        if (restored)
+        {
+            std::string finishError;
+            if (finishConfiguration(finishError))
+            {
+                configurationLoaded = true;
+                report = "engine reload refused (the running configuration is restored):\n- " + reloadError + "\n";
+                return false;
+            }
+        }
+        configurationLoaded = true;
+        report = "engine reload failed and the previous configuration could not be fully restored:\n- reload error: "
+               + reloadError + "\n- restore status: " + (restored ? "partial" : "failed") + "\n";
         return false;
     }
     for (const auto &[defaultsFile, source] : pluginDefaultsFiles)

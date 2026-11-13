@@ -59,7 +59,7 @@ Consumers need the kernel permissions `capability.ecs` / `capability.entity_worl
 - `ecs` facade component/entity calls translate the public handle to the internal ecs entity before delegating. Command-buffer destroys record the mirror handles so `applyCommandBuffer` can destroy the entity-world side after ecs applied the buffer.
 - `entity_world` facade destroys (including recursive ones) first collect the affected handles, let the entity_world layer perform the destroy, then destroy the corresponding ecs entities and unbind them.
 - `queryChunks` on the ecs facade installs a bridge callback that rewrites each chunk's entity handles into entity-world handles before the consumer sees it, and raises a query-active counter that blocks structural facade calls (destroy entity/world, apply buffer, load world) until the query ends.
-- `loadWorld` on the entity_world facade rebuilds the ecs mirror from scratch: old command buffers and ecs entities are discarded, then one ecs entity is created for every loaded entity.
+- `loadWorld` on the entity_world facade rebuilds the ecs mirror from scratch: old command buffers and ecs entities are discarded, then one ecs entity is created for every loaded entity. A mirror-creation failure part-way through rolls the whole load back (the mirrors created by this call and the loaded entity-world entities are destroyed, the binding is left empty, and `ResourceFailure` is reported) instead of leaving a half-mirrored world.
 
 ## Threading and lifetime
 

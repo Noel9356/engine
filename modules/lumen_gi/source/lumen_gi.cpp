@@ -645,6 +645,45 @@ private:
             snapshot.hasDirectLights = !lights.empty();
             snapshot.directLights    = std::move(lights);
         }
+        // Precompute the per-light constants the shading loop needs and drop
+        // inactive lights; the per-texel evaluation then skips them without
+        // re-normalizing directions or re-evaluating cone cosines.
+        snapshot.preparedLights.clear();
+        snapshot.preparedLights.reserve(snapshot.directLights.size());
+        for (const direct_lighting::DirectLight &light : snapshot.directLights)
+        {
+            const direct_lighting::DirectLightDescription &description = light.description;
+            const glm::vec3 color(description.color[0], description.color[1], description.color[2]);
+            if (description.intensity <= 0.0f || (color.x <= 0.0f && color.y <= 0.0f && color.z <= 0.0f))
+            {
+                continue;
+            }
+            GiEnvironmentSnapshot::PreparedDirectLight prepared;
+            prepared.type      = description.type;
+            prepared.color     = color;
+            prepared.intensity = description.intensity;
+            prepared.position  = glm::vec3(description.position[0], description.position[1], description.position[2]);
+            prepared.range     = std::max(description.range, 1.0e-3f);
+            if (description.type == direct_lighting::DirectLightType::Directional)
+            {
+                prepared.direction = -glm::normalize(
+                    glm::vec3(description.direction[0], description.direction[1], description.direction[2]));
+            }
+            else if (description.type == direct_lighting::DirectLightType::Spot)
+            {
+                prepared.direction = glm::normalize(
+                    glm::vec3(description.direction[0], description.direction[1], description.direction[2]));
+                prepared.innerCosine = std::cos(description.innerConeRadians);
+                prepared.outerCosine = std::cos(description.outerConeRadians);
+                prepared.coneDivisor = std::max(prepared.innerCosine - prepared.outerCosine, 1.0e-5f);
+            }
+            else
+            {
+                prepared.direction = glm::vec3(0.0f);
+            }
+            snapshot.preparedLights.push_back(prepared);
+        }
+        snapshot.hasDirectLights = !snapshot.preparedLights.empty();
         const bool environmentChanged = !state_.environmentValid
             || pbrVersion != state_.environmentVersion || lightsVersion != state_.directLightsVersion;
         state_.environmentVersion    = pbrVersion;
@@ -752,9 +791,23 @@ private:
     // ---- read side ---------------------------------------------------------------
 
     // Builds and publishes the immutable probe snapshot (module mutex held).
+    // The previous snapshot's probe buffer is recycled into the new snapshot
+    // when no renderer still holds a reference, so steady-state publishing
+    // does not reallocate per frame.
     void publishSnapshotLocked()
     {
-        auto snapshot     = std::make_shared<GiProbeSnapshot>();
+        std::shared_ptr<GiProbeSnapshot> previous;
+        {
+            std::lock_guard<std::mutex> lock(snapshotMutex_);
+            previous = snapshot_;
+        }
+        auto snapshot = std::make_shared<GiProbeSnapshot>();
+        if (previous != nullptr && previous.use_count() == 1)
+        {
+            // Sole owner: reuse the buffer (buildProbeSnapshot clears and
+            // refills; the capacity survives).
+            snapshot->probes = std::move(previous->probes);
+        }
         buildProbeSnapshot(state_, *snapshot);
         snapshot->version = probeVersion_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
         std::lock_guard<std::mutex> lock(snapshotMutex_);
@@ -937,7 +990,7 @@ private:
     double             lastEvaluateMilliseconds_ = 0.0;
     std::atomic<std::uint64_t> probeVersion_{0};
     mutable std::mutex                     snapshotMutex_;
-    std::shared_ptr<const GiProbeSnapshot> snapshot_;
+    std::shared_ptr<GiProbeSnapshot> snapshot_;
 };
 
 } // namespace

@@ -25,10 +25,23 @@
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
+#include <array>
+
 namespace engine
 {
 namespace planet
 {
+
+// Per-octave noise seeds for one fBm stream. hashCombine64(baseSeed, octave)
+// does not depend on the sample position, so the tables are derived once per
+// field instead of once per sample. Octave counts are clamped to 12 by
+// parameter validation; the field's fbm() streams index into tables of this
+// type (see DensityField).
+struct FbmStreamSeeds
+{
+    std::uint32_t                count = 0;
+    std::array<std::int64_t, 12> perOctave{};
+};
 
 // Relief sampled along one radial direction, before 3D displacement.
 struct ReliefSample
@@ -75,6 +88,26 @@ private:
     // reliefImpl(direction, 0)).
     ReliefSample reliefImpl(const Vec3 &unitDirection, double lowPassCutoffMeters) const;
 
+    // The fBm streams (see fbm()/ridgedFbm() in density.cpp), indexed for the
+    // fbmSeeds_ table below.
+    enum FbmStream : std::size_t
+    {
+        streamWarpX = 0,
+        streamWarpY,
+        streamWarpZ,
+        streamContinents,
+        streamRangeCluster,
+        streamMountainMass,
+        streamMountains,
+        streamRegional,
+        streamHills,
+        streamCliffMask,
+        streamDetail,
+        streamCaveA,
+        streamCaveB,
+        streamCount
+    };
+
     const PlanetGenerationParams &params_;
     ClimateSampler                climate_;
 
@@ -92,6 +125,9 @@ private:
     std::int64_t seedMountainMass_;
     std::int64_t seedRangeCluster_;
     std::int64_t seedRegional_;
+
+    // Per-octave seed tables for the fBm streams (derived in the constructor).
+    std::array<FbmStreamSeeds, streamCount> fbmSeeds_;
 
     double terraceStepMeters_ = 1.0;
 };

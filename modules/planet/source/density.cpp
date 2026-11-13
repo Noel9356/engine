@@ -5,6 +5,7 @@
 #include <engine/planet/noise.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace engine
@@ -31,8 +32,25 @@ double lowPassFade(double cutoffMeters, double termWavelengthMeters)
     return smoothstep(cutoffMeters, 2.0 * cutoffMeters, termWavelengthMeters);
 }
 
+// Octave counts are clamped to [1, 12] by parameter validation; literal
+// FbmParams in this file stay below the cap.
+inline constexpr std::uint32_t maxFbmOctaves = 12;
+
+FbmStreamSeeds makeFbmSeeds(std::int64_t baseSeed, std::uint32_t octaves)
+{
+    octaves = std::min(octaves, maxFbmOctaves);
+    FbmStreamSeeds seeds;
+    seeds.count = octaves;
+    for (std::uint32_t octave = 0; octave < octaves; ++octave)
+    {
+        seeds.perOctave[octave] = static_cast<std::int64_t>(
+            hashCombine64(static_cast<std::uint64_t>(baseSeed), octave));
+    }
+    return seeds;
+}
+
 // fBm over planet-local positions with a metric wavelength; returns [-1, 1].
-double fbm(std::int64_t seed, const Vec3 &point, double wavelengthMeters, const FbmParams &fbmParams,
+double fbm(const FbmStreamSeeds &seeds, const Vec3 &point, double wavelengthMeters, const FbmParams &fbmParams,
     double lowPassCutoffMeters)
 {
     const double frequency = 1.0 / std::max(1.0, wavelengthMeters);
@@ -43,14 +61,14 @@ double fbm(std::int64_t seed, const Vec3 &point, double wavelengthMeters, const 
     double       sum       = 0.0;
     double       norm      = 0.0;
     double       octaveWavelength = wavelengthMeters;
-    for (std::uint32_t octave = 0; octave < fbmParams.octaves; ++octave)
+    for (std::uint32_t octave = 0; octave < seeds.count; ++octave)
     {
         const double fade = lowPassFade(lowPassCutoffMeters, octaveWavelength);
         if (fade <= 0.0)
         {
             break; // octaves shorten monotonically: every later fade is also zero
         }
-        sum += amplitude * noise::simplex3ImproveXY(hashCombine64(seed, octave), x, y, z);
+        sum += amplitude * noise::simplex3ImproveXY(seeds.perOctave[octave], x, y, z);
         norm += amplitude;
         x *= fbmParams.lacunarity;
         y *= fbmParams.lacunarity;
@@ -62,7 +80,7 @@ double fbm(std::int64_t seed, const Vec3 &point, double wavelengthMeters, const 
 }
 
 // Ridged fBm in [0, 1]: mountain crests from |noise| inverted per octave.
-double ridgedFbm(std::int64_t seed, const Vec3 &point, double wavelengthMeters, const FbmParams &fbmParams,
+double ridgedFbm(const FbmStreamSeeds &seeds, const Vec3 &point, double wavelengthMeters, const FbmParams &fbmParams,
     double lowPassCutoffMeters)
 {
     const double frequency = 1.0 / std::max(1.0, wavelengthMeters);
@@ -73,14 +91,14 @@ double ridgedFbm(std::int64_t seed, const Vec3 &point, double wavelengthMeters, 
     double       sum       = 0.0;
     double       norm      = 0.0;
     double       octaveWavelength = wavelengthMeters;
-    for (std::uint32_t octave = 0; octave < fbmParams.octaves; ++octave)
+    for (std::uint32_t octave = 0; octave < seeds.count; ++octave)
     {
         const double fade = lowPassFade(lowPassCutoffMeters, octaveWavelength);
         if (fade <= 0.0)
         {
             break; // octaves shorten monotonically: every later fade is also zero
         }
-        const double n = noise::simplex3ImproveXY(hashCombine64(seed, octave), x, y, z);
+        const double n = noise::simplex3ImproveXY(seeds.perOctave[octave], x, y, z);
         sum += amplitude * (1.0 - std::abs(n));
         norm += amplitude;
         x *= fbmParams.lacunarity;
@@ -113,6 +131,23 @@ DensityField::DensityField(const PlanetGenerationParams &params)
 {
     const double reliefRange = params.continentAmplitudeMeters + params.mountainAmplitudeMeters + params.hillAmplitudeMeters;
     terraceStepMeters_ = std::max(1.0, reliefRange / std::max(1.0, params.terraceSteps));
+
+    // Per-octave fBm seeds, derived once per field (see FbmStreamSeeds).
+    const auto streamSeed = [](std::int64_t base, std::uint64_t tag)
+    { return static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(base), tag)); };
+    fbmSeeds_[streamWarpX]        = makeFbmSeeds(streamSeed(seedWarp_, 0), 2);
+    fbmSeeds_[streamWarpY]        = makeFbmSeeds(streamSeed(seedWarp_, 1), 2);
+    fbmSeeds_[streamWarpZ]        = makeFbmSeeds(streamSeed(seedWarp_, 2), 2);
+    fbmSeeds_[streamContinents]   = makeFbmSeeds(seedContinents_, params.continentsFbm.octaves);
+    fbmSeeds_[streamRangeCluster] = makeFbmSeeds(seedRangeCluster_, 2);
+    fbmSeeds_[streamMountainMass] = makeFbmSeeds(seedMountainMass_, 3);
+    fbmSeeds_[streamMountains]    = makeFbmSeeds(seedMountains_, params.mountainsFbm.octaves);
+    fbmSeeds_[streamRegional]     = makeFbmSeeds(seedRegional_, params.regionalFbm.octaves);
+    fbmSeeds_[streamHills]        = makeFbmSeeds(seedHills_, params.hillsFbm.octaves);
+    fbmSeeds_[streamCliffMask]    = makeFbmSeeds(seedCliffMask_, 2);
+    fbmSeeds_[streamDetail]       = makeFbmSeeds(seedDetail_, params.detailFbm.octaves);
+    fbmSeeds_[streamCaveA]        = makeFbmSeeds(seedCaveA_, 2);
+    fbmSeeds_[streamCaveB]        = makeFbmSeeds(seedCaveB_, 2);
 }
 
 ReliefSample DensityField::reliefAt(const Vec3 &unitDirection) const
@@ -134,14 +169,14 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // noise for swirling coastlines and bays.
     const Vec3 warpDirection = normalized(unitDirection
         + params_.domainWarpAmplitude
-            * Vec3{fbm(hashCombine64(seedWarp_, 0), unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters),
-                fbm(hashCombine64(seedWarp_, 1), unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters),
-                fbm(hashCombine64(seedWarp_, 2), unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters)});
+            * Vec3{fbm(fbmSeeds_[streamWarpX], unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters),
+                fbm(fbmSeeds_[streamWarpY], unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters),
+                fbm(fbmSeeds_[streamWarpZ], unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters)});
     const Vec3 warpedPosition = warpDirection * datumRadius;
 
     // Continent base: signed low-frequency field; positive rises above the
     // datum (land), negative dips below (ocean basins).
-    const double continents = fbm(seedContinents_, warpedPosition, params_.continentWavelengthMeters, params_.continentsFbm, lowPassCutoffMeters);
+    const double continents = fbm(fbmSeeds_[streamContinents], warpedPosition, params_.continentWavelengthMeters, params_.continentsFbm, lowPassCutoffMeters);
     double       height     = params_.continentAmplitudeMeters * continents;
 
     // Mountains grow where the continent field is strongly positive. A broad
@@ -149,7 +184,7 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // into distinct ranges separated by lower foothill country (a uniform
     // mask carpets every landmass with peaks - the globe reads spiky).
     const double baseMountainMask = smoothstep(params_.mountainMaskLow, params_.mountainMaskHigh, continents);
-    const double clusterField     = fbm(seedRangeCluster_, warpedPosition, params_.rangeClusterWavelengthMeters,
+    const double clusterField     = fbm(fbmSeeds_[streamRangeCluster], warpedPosition, params_.rangeClusterWavelengthMeters,
                                   FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
     const double clusterGate      = smoothstep(-0.35, 0.45, clusterField);
     const double mountainMask     = clamp01(baseMountainMask * mix(1.0 - params_.rangeClusterStrength, 1.0, clusterGate));
@@ -160,8 +195,8 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // concentrates all height in narrow crest lines - needles from orbit,
     // all-rib slopes up close. The crest is weighted toward the mass so the
     // highest ridges crown the biggest massifs.
-    const double ridges     = ridgedFbm(seedMountains_, warpedPosition, params_.mountainWavelengthMeters, params_.mountainsFbm, lowPassCutoffMeters);
-    const double mass       = 0.5 + 0.5 * fbm(seedMountainMass_, warpedPosition, params_.derivedMountainMassWavelengthMeters,
+    const double ridges     = ridgedFbm(fbmSeeds_[streamMountains], warpedPosition, params_.mountainWavelengthMeters, params_.mountainsFbm, lowPassCutoffMeters);
+    const double mass       = 0.5 + 0.5 * fbm(fbmSeeds_[streamMountainMass], warpedPosition, params_.derivedMountainMassWavelengthMeters,
                               FbmParams{3, 2.0, 0.5}, lowPassCutoffMeters);
     const double crest      = std::pow(ridges, params_.mountainSharpness);
     const double mountainProfile = params_.mountainMassFraction * mass
@@ -206,18 +241,18 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     const double regionalTaper = mix(1.0, coastalTaperOf(height), 0.5);
     height += params_.regionalAmplitudeMeters * detailFade
         * regionalTaper
-        * fbm(seedRegional_, unitDirection * datumRadius, params_.regionalWavelengthMeters, params_.regionalFbm, lowPassCutoffMeters);
+        * fbm(fbmSeeds_[streamRegional], unitDirection * datumRadius, params_.regionalWavelengthMeters, params_.regionalFbm, lowPassCutoffMeters);
 
     const double coastalTaper = coastalTaperOf(height);
 
     // Rolling medium-frequency hills everywhere on land.
     height += params_.hillAmplitudeMeters * detailFade * coastalTaper
-        * fbm(seedHills_, unitDirection * datumRadius, params_.hillWavelengthMeters, params_.hillsFbm, lowPassCutoffMeters);
+        * fbm(fbmSeeds_[streamHills], unitDirection * datumRadius, params_.hillWavelengthMeters, params_.hillsFbm, lowPassCutoffMeters);
 
     // Terraced-country mask drives both the terrace quantization below and
     // the detail/overhang weighting; compute it before the fine layers.
     const double cliffMask = clamp01(0.5
-        + 0.9 * fbm(seedCliffMask_, unitDirection * datumRadius, params_.cliffWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters));
+        + 0.9 * fbm(fbmSeeds_[streamCliffMask], unitDirection * datumRadius, params_.cliffWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters));
 
     // Fine detail layer: rock ribs, soil ripples, scree - the roughness that
     // keeps close-range views from reading as smooth plastic. Carried fully
@@ -227,7 +262,7 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     const double detailMaskLevel = clamp01(params_.detailPlainsFraction
         + (1.0 - params_.detailPlainsFraction) * (0.8 * mountainMask + 0.6 * cliffMask));
     height += params_.detailAmplitudeMeters * detailFade * coastalTaper * detailMaskLevel
-        * fbm(seedDetail_, unitDirection * datumRadius, params_.detailWavelengthMeters, params_.detailFbm, lowPassCutoffMeters);
+        * fbm(fbmSeeds_[streamDetail], unitDirection * datumRadius, params_.detailWavelengthMeters, params_.detailFbm, lowPassCutoffMeters);
 
     // Terraces: quantize the height profile inside a noise-masked band,
     // producing flat plateaus joined by steep cliff steps (mesa country).
@@ -296,8 +331,8 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     // term.
     if (params_.cavesEnabled)
     {
-        const double wormA = fbm(seedCaveA_, point, params_.caveWormWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
-        const double wormB = fbm(seedCaveB_, point, params_.caveWormWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
+        const double wormA = fbm(fbmSeeds_[streamCaveA], point, params_.caveWormWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
+        const double wormB = fbm(fbmSeeds_[streamCaveB], point, params_.caveWormWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
         const double wormSquared = wormA * wormA + wormB * wormB;
         const double threshold   = params_.caveThreshold;
         if (wormSquared < threshold * threshold)

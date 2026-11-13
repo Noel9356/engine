@@ -11,6 +11,7 @@ config_keys = [
     "script_runtime.maximum_script_size_mb",
     "script_runtime.maximum_total_memory_mb",
     "script_runtime.memory_limit_mb",
+    "script_runtime.wall_clock_limit_milliseconds",
 ]
 name        = "script_runtime"
 provides    = ["script_runtime"]

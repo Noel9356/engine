@@ -57,7 +57,7 @@ struct HeadlessBackendOptions
 
     bool           lodEnabled                = true;
     // Tile-based parallel rasterization (renderer.headless_tile_parallel,
-    // default ON). Bins triangles into 64x64 screen tiles with exclusive
+    // default OFF). Bins triangles into 64x64 screen tiles with exclusive
     // per-worker ownership (no per-pixel locks). The serial binning phase
     // makes this slower than the default band/triangle-range split on
     // low-core machines (measured: ~+55% frame time on a 2-core host); it
@@ -68,7 +68,7 @@ struct HeadlessBackendOptions
     std::uint32_t  parallelTriangleThreshold = 4096;    // triangles per draw before splitting across workers
     std::size_t    pixelsPerLockGroup        = 16;      // pixels per depth lock during parallel rasterization
     std::size_t    lodMinTriangles
-        = 4096; // plumbed in but currently unused; LOD generation uses a fixed 4096*3-index threshold
+        = 4096; // meshes below this triangle count get no LOD chain
 
     // Draws with at most this many triangles are split by framebuffer bands
     // instead of triangle ranges: full-screen, few-triangle draws (floor,
@@ -99,7 +99,8 @@ public:
           taskScheduler_(options.taskScheduler),
           window_(windowCapability),
           bandSplitTriangleThreshold_(options.bandSplitTriangleThreshold),
-          bandSplitMinimumScreenFraction_(options.bandSplitMinimumScreenFraction)
+          bandSplitMinimumScreenFraction_(options.bandSplitMinimumScreenFraction),
+          lodMinTriangles_(options.lodMinTriangles)
     {
         directLights_.reserve(direct_lighting::maxDirectLights);
     }
@@ -143,13 +144,17 @@ public:
     // Copies the borrowed lumen_gi probe-grid snapshot; the rasterizer's
     // pbrShade calls then sample it per pixel (validity-weighted trilinear
     // SH2 irradiance). An empty snapshot keeps the legacy hemispheric
-    // ambient.
+    // ambient. Level descriptors are built once here so per-pixel shading
+    // skips rebuilding them.
     void setProbeGrid(const GiProbeGrid &grid) override
     {
         probeGridProbes_.assign(grid.probes, grid.probes + grid.probeCount);
-        probeGrid_.header     = grid.header;
-        probeGrid_.probeCount = grid.probeCount;
-        probeGrid_.probes     = probeGridProbes_.empty() ? nullptr : probeGridProbes_.data();
+        GiProbeGrid copied;
+        copied.header     = grid.header;
+        copied.probeCount = grid.probeCount;
+        copied.probes     = probeGridProbes_.empty() ? nullptr : probeGridProbes_.data();
+        buildProbeLevels(copied);
+        probeGrid_ = copied;
     }
 
     void setEnvironment(const pbr::PbrEnvironment &environment) override
@@ -253,6 +258,10 @@ private:
         bool                   useTransformCache       = false;
         std::uint32_t          transformGeneration     = 0;
         std::size_t            vertexCount             = 0;
+        // World-space bounds sphere (valid only while the mesh's local bounds
+        // are valid), shared by the frustum pass and the winding vote.
+        glm::vec3              boundsWorldCenter       = glm::vec3(0.0f);
+        float                  boundsWorldRadius       = 0.0f;
         const HeadlessTexture *baseColorMap            = nullptr;
         const HeadlessTexture *normalMap               = nullptr;
         const HeadlessTexture *metallicRoughnessMap    = nullptr;
@@ -278,12 +287,23 @@ private:
 
     [[nodiscard]] std::uint32_t parallelWorkerCount() const noexcept;
 
+    // World-space bounds sphere of a draw, computed once per draw call: the
+    // LOD pick in drawMesh needs it, and so do frustum culling and the
+    // winding vote inside prepareRasterization. Passing the instance computed
+    // for the LOD pick saves the recomputation.
+    struct DrawBounds
+    {
+        glm::vec3 center;
+        float     radius;
+    };
+
     // Computes the draw's matrices, culls against the frustum, transforms
     // vertices (through the cache when it pays off), and probes winding to
     // decide whether back-face culling is safe. Returns false when the draw
     // is fully culled or the framebuffer is gone.
     bool prepareRasterization(const HeadlessMesh &mesh, const float *modelMatrix, const MeshMaterial &material,
-        const std::uint32_t *activeIndices, std::size_t activeIndexCount, RasterSetup &outSetup);
+        const std::uint32_t *activeIndices, std::size_t activeIndexCount, RasterSetup &outSetup,
+        const DrawBounds *precomputedBounds = nullptr);
 
     // ---- tile-parallel path (opt-in) ----
     // Shared geometry pipeline: transform/clip/project one draw triangle

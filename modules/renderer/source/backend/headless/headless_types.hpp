@@ -19,6 +19,7 @@
 
 #include <glm/ext/vector_float3.hpp>
 #include <glm/geometric.hpp>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -43,6 +44,23 @@ struct HeadlessMesh
     bool                       boundsValid  = false;
 
     std::vector<std::vector<std::uint32_t>> lodIndices;
+
+    // Memo for the back-face winding vote (see HeadlessBackend's
+    // prepareRasterization): the vote compares face normals against vertex
+    // normals in world space, and ((M a) x (M b)) . (M c) = det(M) . ((a x b)
+    // . c) for any invertible linear part M, so its outcome is a pure
+    // function of the mesh geometry, the sampled index list, and the sign of
+    // the model matrix determinant. It is therefore computed once per (index
+    // list, determinant sign) pair and reused. Slot 0 = positive
+    // determinant, slot 1 = negative (mirrored) transform; each slot holds
+    // one entry per index list the mesh is drawn with (base plus LODs).
+    struct WindingVoteMemo
+    {
+        static constexpr std::size_t capacity = 8;
+        std::array<const std::uint32_t *, capacity> sources{};
+        std::array<float, capacity>                 signs{};
+    };
+    mutable std::array<WindingVoteMemo, 2> windingVotes;
 
     [[nodiscard]] std::size_t vertexCount() const noexcept
     {

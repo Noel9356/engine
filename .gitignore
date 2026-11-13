@@ -28,8 +28,8 @@ runtime/
 
 screenshots/
 
-core
-core.*
+/core
+/core.*
 *.dump
 *.dmp
 

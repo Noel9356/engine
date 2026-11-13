@@ -47,7 +47,11 @@ void blendColors(const double *rowA, const double *rowB, double weight, double o
 
 // fbm in [-1, 1] sampled at a PHYSICAL position (meters) over a metric
 // wavelength, so climate features keep their size at any planet radius.
-double sphereFbm(std::int64_t seed, const Vec3 &surfacePosition, double wavelengthMeters, std::uint32_t octaves)
+// octaveSeeds holds `octaves` per-octave seeds derived once per sampler (see
+// ClimateSampler's constructor) - hashCombine64(baseSeed, octave) is
+// sample-independent, so recomputing it per octave per sample is waste.
+double sphereFbm(const std::int64_t *octaveSeeds, const Vec3 &surfacePosition, double wavelengthMeters,
+    std::uint32_t octaves)
 {
     const double frequency = 1.0 / std::max(1.0, wavelengthMeters);
     double       x         = surfacePosition.x * frequency;
@@ -58,7 +62,7 @@ double sphereFbm(std::int64_t seed, const Vec3 &surfacePosition, double waveleng
     double       norm      = 0.0;
     for (std::uint32_t octave = 0; octave < octaves; ++octave)
     {
-        sum += amplitude * noise::simplex3ImproveXY(hashCombine64(seed, octave), x, y, z);
+        sum += amplitude * noise::simplex3ImproveXY(octaveSeeds[octave], x, y, z);
         norm += amplitude;
         x *= 2.0;
         y *= 2.0;
@@ -76,6 +80,20 @@ ClimateSampler::ClimateSampler(const PlanetGenerationParams &params)
     , seedMoisture_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x40157)))
     , seedMoistureWarp_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A9E51)))
 {
+    const auto octaveSeeds = [](std::int64_t base, std::uint32_t octaves)
+    {
+        std::array<std::int64_t, 12> seeds{};
+        for (std::uint32_t octave = 0; octave < octaves; ++octave)
+        {
+            seeds[octave] = static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(base), octave));
+        }
+        return seeds;
+    };
+    seedTemperatureOctaves_    = octaveSeeds(seedTemperature_, 3);
+    seedMoistureOctaves_       = octaveSeeds(seedMoisture_, 4);
+    seedJitterOctaves_         = octaveSeeds(
+        static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(seedMoisture_), 0xB10B)), 2);
+    seedMoistureWarpOctaves_   = octaveSeeds(seedMoistureWarp_, 3);
 }
 
 ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
@@ -93,7 +111,7 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
                        + (params_.poleTemperature - params_.equatorTemperature) * absSinLatitude;
     const Vec3 surfacePosition = direction * params_.radiusMeters;
     temperature += params_.temperaturePerturbation
-                 * sphereFbm(seedTemperature_, surfacePosition, params_.temperatureWavelengthMeters, 3);
+                 * sphereFbm(seedTemperatureOctaves_.data(), surfacePosition, params_.temperatureWavelengthMeters, 3);
     sample.temperature01 = clamp01(temperature);
 
     // Moisture: base humidity noise plus the latitude belts (ITCZ wet belt,
@@ -105,16 +123,16 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
     if (params_.moistureWarpAmplitude > 0.0)
     {
         const double warpScale = 1.0 / std::max(1.0, params_.moistureWavelengthMeters * 1.6);
-        const double warpX = noise::simplex3ImproveXY(hashCombine64(seedMoistureWarp_, 0),
+        const double warpX = noise::simplex3ImproveXY(seedMoistureWarpOctaves_[0],
             surfacePosition.x * warpScale, surfacePosition.y * warpScale, surfacePosition.z * warpScale);
-        const double warpY = noise::simplex3ImproveXY(hashCombine64(seedMoistureWarp_, 1),
+        const double warpY = noise::simplex3ImproveXY(seedMoistureWarpOctaves_[1],
             surfacePosition.x * warpScale, surfacePosition.y * warpScale, surfacePosition.z * warpScale);
-        const double warpZ = noise::simplex3ImproveXY(hashCombine64(seedMoistureWarp_, 2),
+        const double warpZ = noise::simplex3ImproveXY(seedMoistureWarpOctaves_[2],
             surfacePosition.x * warpScale, surfacePosition.y * warpScale, surfacePosition.z * warpScale);
         moisturePosition = surfacePosition
             + params_.moistureWarpAmplitude * params_.moistureWavelengthMeters * Vec3{warpX, warpY, warpZ};
     }
-    double moisture = 0.5 + params_.moisturePerturbation * sphereFbm(seedMoisture_, moisturePosition, params_.moistureWavelengthMeters, 4);
+    double moisture = 0.5 + params_.moisturePerturbation * sphereFbm(seedMoistureOctaves_.data(), moisturePosition, params_.moistureWavelengthMeters, 4);
     if (params_.moistureLatitudeBands)
     {
         moisture += 0.20 * latitudeBelt(latitudeDegrees, 0.0, 11.0);   // ITCZ
@@ -338,7 +356,7 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     // not read as flat plastic sheets. The jitter noise is a pure function of
     // direction (order independent).
     const double jitter
-        = 1.0 + params_.colorVariation * sphereFbm(hashCombine64(seedMoisture_, 0xB10B), direction * params_.radiusMeters, 260.0, 2);
+        = 1.0 + params_.colorVariation * sphereFbm(seedJitterOctaves_.data(), direction * params_.radiusMeters, 260.0, 2);
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
         sample.color[channel] = static_cast<float>(clamp01(color[channel] * jitter));

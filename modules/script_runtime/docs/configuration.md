@@ -15,7 +15,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 | Key | Type | Range | Default | Effect |
 | --- | --- | --- | --- | --- |
 | `script_runtime.default_enabled_libraries` | integer | 0 - 31 (bitmask) | `15` | Default library whitelist for runtimes created with a `nullptr` description (hosted plugins, application-created runtimes). Bits: `1 = math`, `2 = string`, `4 = table`, `8 = utf8`, `16 = coroutine`. Bits outside the mask are dropped at runtime-create time. |
-| `script_runtime.instruction_hook_granularity` | integer | 1 - 100000 | `1000` | VM instructions between count-hook fires. Lower values stop runaway scripts sooner at higher overhead; higher values are cheaper but let a script overshoot the instruction limit by up to the granularity. The budget is decremented by the granularity each fire. |
+| `script_runtime.instruction_hook_granularity` | integer | 1 - 100000 | `1000` | VM instructions between count-hook fires. Lower values stop runaway scripts sooner at higher overhead; higher values are cheaper but let a script overshoot the instruction limit by up to the granularity. When an instruction limit is active, the effective granularity is clamped to at most a quarter of that limit so the overshoot stays bounded. The budget is decremented by the effective granularity each fire. |
 | `script_runtime.instruction_limit` | integer | >= 1000 | `10000000` | VM instructions allowed per execute/call, enforced by the count hook. Runs of pure C code inside one call are not counted. |
 | `script_runtime.maximum_native_arguments` | integer | 1 - 32 | `32` | Maximum arguments a native function accepts from Lua. |
 | `script_runtime.maximum_native_functions` | integer | 1 - 4096 | `256` | Maximum registered native functions per runtime. |
@@ -25,6 +25,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `script_runtime.maximum_script_size_mb` | integer | 1 - 256 | `4` | Largest source (string or file) a runtime will compile, in MiB. |
 | `script_runtime.maximum_total_memory_mb` | integer | 1 - 65536 | `1024` | Module-wide heap budget in MiB shared by all runtimes. |
 | `script_runtime.memory_limit_mb` | integer | 1 - 4096 | `64` | Per-runtime Lua heap budget in MiB. Allocations beyond the budget fail inside Lua. Ignored when `auto_config = true`. |
+| `script_runtime.wall_clock_limit_milliseconds` | integer | >= 0 | `0` | Wall-clock budget per execute/call in milliseconds; `0` disables the budget. The clock runs while the VM executes and while native functions registered on the runtime run, so a budget bounds whole executions even when time is spent in C code the instruction counter cannot see. An over-budget execution fails with `ScriptError::WallClockLimitExceeded` (Lua sees the equivalent error string). Read at module construction; runtimes created afterwards inherit the value. |
 
 A value outside its documented range is ignored and the built-in default stays active.
 

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -207,7 +208,9 @@ public:
     }
 
     // Swaps the queue under the lock, then publishes outside it so handlers
-    // may enqueue deferred events again without deadlock.
+    // may enqueue deferred events again without deadlock. An exception from a
+    // handler leaves already-delivered events dropped and the undelivered
+    // remainder queued for the next flush, so delivery is never duplicated.
     void flushDeferred()
     {
         {
@@ -218,9 +221,24 @@ public:
             }
             deferredDrain.swap(deferredEvents);
         }
-        for (const EventType &event : deferredDrain)
+        std::size_t delivered = 0;
+        try
         {
-            publish(event);
+            for (; delivered < deferredDrain.size(); ++delivered)
+            {
+                publish(deferredDrain[delivered]);
+            }
+        }
+        catch (...)
+        {
+            // Re-queue only the events that were not delivered; the processed
+            // prefix is consumed permanently.
+            std::lock_guard<std::mutex> lock(deferredMutex);
+            deferredEvents.insert(deferredEvents.begin(),
+                std::make_move_iterator(deferredDrain.begin() + static_cast<std::ptrdiff_t>(delivered)),
+                std::make_move_iterator(deferredDrain.end()));
+            deferredDrain.clear();
+            throw;
         }
         deferredDrain.clear();
     }
@@ -622,11 +640,15 @@ public:
     }
 
     // Creates the channel for EventType on first use and wires the bus-wide
-    // flags into it.
+    // flags into it. The channel map is guarded by channelMutex so a deferred
+    // publish from a worker thread cannot race a first subscription or publish
+    // happening on the main thread; the per-channel publish path itself stays
+    // on the caller's thread.
     template <typename EventType>
     EventChannel<EventType> &channel()
     {
         const std::type_index eventType = typeid(EventType);
+        std::lock_guard<std::mutex> lock(channelMutex);
         auto                  found     = channels.find(eventType);
         if (found == channels.end())
         {
@@ -645,8 +667,9 @@ public:
     // (does not create one). Useful for callers that want to publish only when
     // a subscriber already exists.
     template <typename EventType>
-    EventChannel<EventType> *tryChannel() noexcept
+    EventChannel<EventType> *tryChannel()
     {
+        std::lock_guard<std::mutex> lock(channelMutex);
         const auto found = channels.find(typeid(EventType));
         if (found == channels.end())
         {
@@ -658,15 +681,17 @@ public:
     // True when a channel for EventType has been created (i.e. someone has
     // already subscribed or published).
     template <typename EventType>
-    bool hasChannel() const noexcept
+    bool hasChannel() const
     {
+        std::lock_guard<std::mutex> lock(channelMutex);
         return channels.find(typeid(EventType)) != channels.end();
     }
 
     // Number of channels created so far (one per event type ever published or
     // subscribed). Lives outside the per-channel subscriber count.
-    [[nodiscard]] std::size_t channelCount() const noexcept
+    [[nodiscard]] std::size_t channelCount() const
     {
+        std::lock_guard<std::mutex> lock(channelMutex);
         return channels.size();
     }
 
@@ -686,17 +711,23 @@ public:
     }
 
     // Thread-safe: enqueues on the event's channel; delivered by
-    // flushDeferredEvents.
+    // flushDeferredEvents. Creating the channel on first use from a worker
+    // thread is safe: the channel map is guarded by the bus mutex.
     template <typename EventValue>
     bool publishDeferred(EventValue &&event)
     {
         using EventType = std::remove_cvref_t<EventValue>;
+        if (EventChannel<EventType> *existing = tryChannel<EventType>())
+            return existing->publishDeferred(std::forward<EventValue>(event));
         return channel<EventType>().publishDeferred(std::forward<EventValue>(event));
     }
 
     // Main-thread drain point: flushes every channel's deferred queue and
     // every worker queue. deferredPending makes the common empty case one
-    // relaxed atomic load.
+    // relaxed atomic load. Handlers may create new channels (e.g. by
+    // publishing a first-time event type), so the channel list is snapshotted
+    // before dispatching instead of iterated while handlers run; channels
+    // created during this flush are drained on the next call.
     void flushDeferredEvents()
     {
         if (!deferredPending.load(std::memory_order_relaxed))
@@ -704,7 +735,12 @@ public:
             return;
         }
         deferredPending.store(false, std::memory_order_relaxed);
-        for (ChannelHolderBase *channelHolder : channelOrder)
+        std::vector<ChannelHolderBase *> pendingChannels;
+        {
+            std::lock_guard<std::mutex> lock(channelMutex);
+            pendingChannels = channelOrder;
+        }
+        for (ChannelHolderBase *channelHolder : pendingChannels)
         {
             channelHolder->flushDeferredChannel();
         }
@@ -735,6 +771,7 @@ public:
     // channel template.
     void unsubscribeThrough(std::type_index eventType, SubscriptionToken token)
     {
+        std::lock_guard<std::mutex> lock(channelMutex);
         const auto found = channels.find(eventType);
         if (found != channels.end())
         {
@@ -750,6 +787,7 @@ public:
         {
             workerQueue->closeQueue();
         }
+        std::lock_guard<std::mutex> lock(channelMutex);
         channels.clear();
         channelOrder.clear();
         workerQueues.clear();
@@ -761,12 +799,15 @@ public:
     {
         std::string                            report;
         std::vector<const ChannelHolderBase *> ordered;
-        ordered.reserve(channels.size());
-        for (const auto &entry : channels)
         {
-            if (entry.second->subscriberCount() > 0)
+            std::lock_guard<std::mutex> lock(channelMutex);
+            ordered.reserve(channels.size());
+            for (const auto &entry : channels)
             {
-                ordered.push_back(entry.second.get());
+                if (entry.second->subscriberCount() > 0)
+                {
+                    ordered.push_back(entry.second.get());
+                }
             }
         }
         if (ordered.empty())
@@ -792,10 +833,13 @@ public:
     {
         std::string                            report;
         std::vector<const ChannelHolderBase *> ordered;
-        ordered.reserve(channels.size());
-        for (const auto &entry : channels)
         {
-            ordered.push_back(entry.second.get());
+            std::lock_guard<std::mutex> lock(channelMutex);
+            ordered.reserve(channels.size());
+            for (const auto &entry : channels)
+            {
+                ordered.push_back(entry.second.get());
+            }
         }
 
         std::sort(ordered.begin(),
@@ -893,7 +937,9 @@ private:
     };
 
     // channelOrder preserves creation order for deterministic flushes;
-    // channels is the type_index lookup.
+    // channels is the type_index lookup. Both are guarded by channelMutex so
+    // worker-thread deferred publishes can create channels safely.
+    mutable std::mutex channelMutex;
     std::unordered_map<std::type_index, std::unique_ptr<ChannelHolderBase>> channels;
 
     std::vector<ChannelHolderBase *> channelOrder;

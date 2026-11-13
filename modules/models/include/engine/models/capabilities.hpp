@@ -21,7 +21,7 @@ namespace models
 inline constexpr std::uint32_t modelsCapabilityAbi = 7u;
 
 // Opaque loaded-model id. 0 means "none" and is never handed out; handles stay
-// valid until destroyPluginel() or module stop.
+// valid until destroyModel() or module stop.
 using ModelHandle                         = std::uint32_t;
 inline constexpr ModelHandle invalidModel = 0;
 // Per-triangle material index meaning "no material" (OBJ faces without usemtl,
@@ -120,10 +120,10 @@ struct ModelsCapability
     void         *self = nullptr;             // module instance, pass back as the first argument
 
     ModelHandle (*loadModel)(void *self, const char *path, ModelLoadError *error); // uses configured defaults
-    void (*destroyPluginel)(void *self, ModelHandle model);
+    void (*destroyModel)(void *self, ModelHandle model);
     std::uint32_t (*partCount)(void *self, ModelHandle model);
     // Fills a render-ready description of one part. The vertex/index pointers alias
-    // module-owned buffers that stay valid until destroyPluginel(model) or module stop.
+    // module-owned buffers that stay valid until destroyModel(model) or module stop.
     bool (*part)(void *self, ModelHandle model, std::uint32_t partIndex, renderer::MeshDescription *outDescription);
     const char *(*partName)(void *self, ModelHandle model, std::uint32_t partIndex);     // nullptr when out of range
     bool (*bounds)(void *self, ModelHandle model, float *outMinimum, float *outMaximum); // either out may be null

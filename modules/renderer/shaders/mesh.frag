@@ -19,8 +19,6 @@ layout(constant_id = 6) const int SRGB_OUTPUT = 0;
 // behind existing geometry skip the expensive PBR math entirely. Zero
 // regression risk — the shader produces identical output, just faster.
 
-layout(early_fragment_tests) in;
-
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec3 vColor;
 layout(location = 2) in vec2 vUv;
@@ -407,7 +405,7 @@ void main()
     color = toneMap(color * frameData.uToneMapping.x, frameData.uToneMapping.y);
     if (SRGB_OUTPUT == 0)
     {
-        if (SRGB_OUTPUT == 0) { color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)); }
+        color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
     }
 
     oColor = vec4(color, 1.0);

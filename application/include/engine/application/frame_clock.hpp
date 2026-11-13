@@ -19,7 +19,8 @@ struct FrameClockOptions
     // Clamp on a single frame's simulated delta (seconds); excess time is dropped, not simulated.
     double maxFrameDeltaSeconds = 0.25;
 
-    // Fixed-step rate (Hz); 0 disables fixed updates.
+    // Fixed-step rate (Hz); 0 disables fixed updates, values in (0, 1) are
+    // clamped up to 1 Hz at construction.
     double fixedUpdateHz = 0.0;
 
     // Cap on fixed steps per frame; backlog beyond it is dropped.

@@ -102,16 +102,22 @@ public:
     }
 
     // Participates: runs scheduler tasks on the calling thread until the
-    // group drains (avoids deadlock when the pool is saturated).
+    // group drains (avoids deadlock when the pool is saturated). Every
+    // waiter of a failed batch rethrows its exception (see add()/wait()).
     void wait(TaskScheduler &scheduler);
 
 private:
     friend class TaskScheduler;
     friend class TaskGraph;
 
+    // Begins a batch. The exception recorded by a previous batch is cleared
+    // here (under the same mutex wait() reads it) so each batch reports its
+    // own failures and a failed batch keeps reporting until reuse.
     void add() noexcept
     {
-        outstanding_.fetch_add(1, std::memory_order_acq_rel);
+        std::lock_guard lock(mutex_);
+        if (outstanding_.fetch_add(1, std::memory_order_acq_rel) == 0)
+            exception_ = nullptr;
     }
     void complete() noexcept;
     void setException(std::exception_ptr exception) noexcept;
@@ -311,9 +317,10 @@ public:
         return runningWorkerCount_.load(std::memory_order_acquire);
     }
 
-    // Returns false (counting a rejection) when stopping, not running, or the
-    // outstanding bound is hit. Worker callers push to their own deque;
-    // everyone else to the shared injection queue.
+    // Returns false (counting a rejection) when stopping, not running, the
+    // outstanding bound is hit, or queueing the task fails (allocation).
+    // Worker callers push to their own deque; everyone else to the shared
+    // injection queue.
     bool schedule(Task task, TaskPriority priority = TaskPriority::Normal)
     {
         if (!task)
@@ -328,15 +335,22 @@ public:
             if (!canAcceptLocked())
                 return rejectLocked();
 
-            if (currentScheduler_ == this && currentWorkerIndex_ < workerQueues_.size())
+            try
             {
-                WorkerQueue    &queue = *workerQueues_[currentWorkerIndex_];
-                std::lock_guard workerLock(queue.mutex);
-                queue.tasks[priorityIndex].push_back(std::move(item));
+                if (currentScheduler_ == this && currentWorkerIndex_ < workerQueues_.size())
+                {
+                    WorkerQueue    &queue = *workerQueues_[currentWorkerIndex_];
+                    std::lock_guard workerLock(queue.mutex);
+                    queue.tasks[priorityIndex].push_back(std::move(item));
+                }
+                else
+                {
+                    injectionQueues_[priorityIndex].push_back(std::move(item));
+                }
             }
-            else
+            catch (const std::bad_alloc &)
             {
-                injectionQueues_[priorityIndex].push_back(std::move(item));
+                return rejectLocked();
             }
             // queuedApprox_ counts tasks sitting in a queue (pops decrement it
             // after taking the item). The increment happens under mutex_ so the
@@ -617,19 +631,20 @@ private:
         return runningWorkerCount_.load(std::memory_order_acquire);
     }
 
-    // Aging pass first: when several priorities are non-empty and the oldest
-    // head exceeded the threshold, take it; otherwise strict priority order.
-    // fromBack = LIFO for own-queue pops (better cache locality).
+    // Aging pass first: when the head of a queue has waited longer than the
+    // threshold it is served FIFO, whatever the priority landscape looks
+    // like. This covers two starvation patterns: low-priority heads buried
+    // under other non-empty priorities, and the head of a single saturated
+    // queue that LIFO pops would otherwise never reach. fromBack = LIFO for
+    // own-queue pops (better cache locality) in the common, no-aging case.
     bool popPriorityQueue(std::array<std::deque<WorkItem>, 4> &queues, WorkItem &out, bool fromBack)
     {
         const auto agingThreshold = options_.priorityAgingThreshold;
         if (agingThreshold.count() > 0)
         {
-            // Single pass: count non-empty priorities and track the oldest
-            // expired head simultaneously, so the common "no aging needed"
-            // case costs one scan instead of two.
-            std::size_t       nonEmptyPriorities = 0;
-            std::size_t       oldestQueue        = queues.size();
+            // Single pass: track the oldest expired head across all queues,
+            // so the common "no aging needed" case costs one scan.
+            std::size_t       oldestQueue = queues.size();
             Clock::time_point oldestEnqueue{};
             const auto        now = Clock::now();
             for (std::size_t index = 0; index < queues.size(); ++index)
@@ -639,7 +654,6 @@ private:
                 {
                     continue;
                 }
-                ++nonEmptyPriorities;
                 const auto enqueuedAt = queue.front().enqueuedAt;
                 if (now - enqueuedAt >= agingThreshold
                     && (oldestQueue == queues.size() || enqueuedAt < oldestEnqueue))
@@ -648,7 +662,7 @@ private:
                     oldestEnqueue = enqueuedAt;
                 }
             }
-            if (nonEmptyPriorities > 1 && oldestQueue != queues.size())
+            if (oldestQueue != queues.size())
             {
                 auto &queue = queues[oldestQueue];
                 out         = std::move(queue.front());
@@ -966,8 +980,10 @@ inline void TaskGroup::setException(std::exception_ptr exception) noexcept
         exception_ = std::move(exception);
 }
 
-// Loop because helpers can complete tasks between the atomic check and
-// the condition wait; the exception is cleared so the group is reusable.
+// Every waiter of a failed batch rethrows: the exception stays recorded
+// until the next add() from the empty state starts a new batch, so both
+// concurrent waiters and later wait() calls observe the failure. Groups are
+// reusable - starting a new batch clears the recorded exception.
 inline void TaskGroup::wait(TaskScheduler &scheduler)
 {
     while (outstanding_.load(std::memory_order_acquire) != 0)
@@ -980,8 +996,7 @@ inline void TaskGroup::wait(TaskScheduler &scheduler)
     std::exception_ptr exception;
     {
         std::lock_guard lock(mutex_);
-        exception  = exception_;
-        exception_ = nullptr;
+        exception = exception_;
     }
     if (exception)
         std::rethrow_exception(exception);

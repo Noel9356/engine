@@ -107,7 +107,11 @@ public:
             return invalidProxy;
         try
         {
-            nodes_.reserve(nodes_.size() + (root_ == invalidNode ? 1u : 2u));
+            // Grow geometrically: reserving only the exact shortfall would
+            // reallocate (and copy every node) on every subsequent insert.
+            const std::size_t required = nodes_.size() + (root_ == invalidNode ? 1u : 2u);
+            if (nodes_.capacity() < required)
+                nodes_.reserve(std::max(required, nodes_.capacity() + nodes_.capacity() / 2u));
         }
         catch (...)
         {
@@ -123,7 +127,13 @@ public:
         node.categoryMask = categoryMask;
         node.height       = 0;
         node.left = node.right = invalidNode;
-        insertLeaf(leaf);
+        if (!insertLeaf(leaf))
+        {
+            // The sibling parent could not be allocated; roll the leaf back so
+            // the tree and the proxy count stay consistent.
+            freeNode(leaf);
+            return invalidProxy;
+        }
         ++proxyCount_;
         return makeHandle(leaf, node.generation);
     }
@@ -162,7 +172,9 @@ public:
     // Moves a proxy. If the new bounds still fit inside the current fat bound
     // the tree is untouched (only the tight bound is refreshed); otherwise the
     // leaf is removed and reinserted, pre-grown along `displacement` to reduce
-    // future reinserts.
+    // future reinserts. Reinsertion after a removal always has a free parent
+    // slot available (removeLeaf freed one, or the tree emptied), so this
+    // cannot fail through allocation.
     bool update(ProxyHandle handle, const Aabb &bounds, const std::array<float, 3> &displacement = {})
     {
         if (!bounds.valid())
@@ -205,20 +217,18 @@ public:
         return true;
     }
 
-    // Area query over the tree; same fixed-stack traversal as StaticBvh (early
-    // out with partial results if a path would overflow the 128-entry stack).
+    // Area query over the tree; same traversal shape as StaticBvh. Deep or
+    // skewed trees spill to a heap-backed stack instead of truncating results.
     QueryStatistics query(const Aabb &area, std::vector<SpatialHit> &out,
         std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
     {
         QueryStatistics stats{};
         if (!area.valid() || root_ == invalidNode || categoryMask == 0)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t                    stackSize = 0;
-        stack[stackSize++]                       = root_;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(root_);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node         &node  = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !node.bounds.intersects(area))
@@ -232,14 +242,8 @@ public:
                     ++stats.hits;
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }
@@ -255,12 +259,10 @@ public:
             || !std::isfinite(center[1]) || !std::isfinite(center[2])
             || !std::isfinite(radius) || radius < 0.0f)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t stackSize = 0;
-        stack[stackSize++] = root_;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(root_);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node &node = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsSphereValid(node.bounds, center, radius))
@@ -275,13 +277,8 @@ public:
                     ++stats.hits;
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }
@@ -294,12 +291,10 @@ public:
         QueryStatistics stats{};
         if (!frustum.valid() || root_ == invalidNode || categoryMask == 0)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t stackSize = 0;
-        stack[stackSize++] = root_;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(root_);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node &node = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsFrustumValid(node.bounds, frustum))
@@ -313,13 +308,8 @@ public:
                     ++stats.hits;
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }
@@ -460,20 +450,18 @@ public:
     }
 
     // Ray query: appends exact tight-bound hits in tree traversal order.
-    // categoryMask filters whole subtrees; out is not cleared. Traversal uses
-    // a fixed stack and returns partial results if it would overflow.
+    // categoryMask filters whole subtrees; out is not cleared. Deep or skewed
+    // trees spill to a heap-backed stack instead of truncating results.
     QueryStatistics raycast(const Ray3 &ray, std::vector<DynamicRayHit> &out,
         std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
     {
         QueryStatistics stats{};
         if (root_ == invalidNode || categoryMask == 0)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t stackSize = 0;
-        stack[stackSize++] = root_;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(root_);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node &node = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !intersectRay(node.bounds, ray))
@@ -488,13 +476,8 @@ public:
                     ++stats.hits;
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }
@@ -666,15 +649,16 @@ private:
     // Standard dynamic-BVH leaf insert. Descends from the root choosing the
     // child with the smallest inherited area increase, stops early when making
     // the current node the sibling is cheapest, splices in a new parent, then
-    // refits and rebalances the ancestor chain. Leaves the tree unchanged if
-    // the new parent node cannot be allocated.
-    void insertLeaf(std::uint32_t leaf)
+    // refits and rebalances the ancestor chain. Returns false (tree unchanged,
+    // leaf unlinked) if the new parent node cannot be allocated; callers must
+    // then roll the leaf back themselves.
+    bool insertLeaf(std::uint32_t leaf)
     {
         if (root_ == invalidNode)
         {
             root_                = leaf;
             nodes_[root_].parent = invalidNode;
-            return;
+            return true;
         }
         const Aabb    leafBounds = nodes_[leaf].bounds;
         std::uint32_t sibling    = root_;
@@ -699,7 +683,7 @@ private:
         const std::uint32_t oldParent = nodes_[sibling].parent;
         const std::uint32_t newParent = allocateNode();
         if (newParent == invalidNode)
-            return;
+            return false;
         nodes_[newParent].parent       = oldParent;
         nodes_[newParent].bounds       = merge(leafBounds, nodes_[sibling].bounds);
         nodes_[newParent].height       = nodes_[sibling].height + 1;
@@ -715,6 +699,7 @@ private:
         else
             nodes_[oldParent].right = newParent;
         refitAndBalance(nodes_[newParent].parent);
+        return true;
     }
 
     // Detaches a leaf and replaces its parent with the leaf's sibling, then

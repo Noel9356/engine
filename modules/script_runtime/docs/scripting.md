@@ -52,6 +52,7 @@ Timing notes:
 ## Performance and safety
 
 - Scripts share the module-wide memory budget; keep per-frame allocations low and prefer reusing tables.
-- The instruction limit applies per execute/call and is checked in batches (`instruction_hook_granularity`, default 1000 Lua instructions) to limit hook overhead: one `on_frame` invocation that loops forever is stopped, but the budget restarts next frame. Lower granularity catches runaway loops sooner at higher overhead.
+- The instruction limit applies per execute/call and is checked in batches (`instruction_hook_granularity`, default 1000 Lua instructions) to limit hook overhead: one `on_frame` invocation that loops forever is stopped, but the budget restarts next frame. Lower granularity catches runaway loops sooner at higher overhead; with an instruction limit active the effective granularity is clamped to at most a quarter of that limit.
+- A wall-clock budget (`wall_clock_limit_milliseconds`, 0 = off) can additionally bound each execute/call by real time, covering native calls the instruction counter cannot see; over-budget executions fail with `ScriptError::WallClockLimitExceeded`.
 - Native calls are the expensive boundary; batch data (tables of numbers are not supported — use multiple numbers or strings) rather than calling in a tight loop.
 - The sandbox is text-only: scripts are compiled with `luaL_loadbufferx` in `"t"` mode, and the `load` global is removed so a script cannot load binary chunks at runtime.

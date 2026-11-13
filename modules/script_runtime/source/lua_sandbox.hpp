@@ -12,6 +12,7 @@
 #include <engine/script_runtime/capabilities.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -56,13 +57,15 @@ bool copyText(std::string_view text, char *output, std::uint32_t capacity, std::
 
 // Records the category of the most recent Lua failure so the capability can
 // classify errors without parsing Lua's message text. Set by the allocator
-// (MemoryLimit) and the instruction hook (InstructionLimit); cleared at the
-// start of each execute/call by resetLastError().
+// (MemoryLimit), the instruction hook (InstructionLimit, WallClockLimit), and
+// the native-function bridge (WallClockLimit); cleared at the start of each
+// execute/call by resetLastError().
 enum class LastErrorCategory : std::uint8_t
 {
     None = 0,
     MemoryLimit,
     InstructionLimit,
+    WallClockLimit,
 };
 
 // One registered native function. The record is owned by the runtime so the
@@ -101,6 +104,11 @@ struct RuntimeRecord
     std::uint32_t                                      hookGranularity        = 1000;
     std::atomic<std::uint64_t>                        *globalMemoryUsed       = nullptr;
     std::uint64_t                                      globalMemoryLimitBytes = 0;
+    // Optional wall-clock budget (description.wallClockLimitMilliseconds > 0);
+    // armed before each execute/call and checked by the instruction hook and
+    // the native-function bridge.
+    std::chrono::steady_clock::time_point              wallClockDeadline{};
+    bool                                               wallClockDeadlineEnabled = false;
     LastErrorCategory                                  lastErrorCategory      = LastErrorCategory::None;
     std::vector<std::unique_ptr<NativeFunctionRecord>> nativeFunctions;
     std::string                                        lastCallbackError;

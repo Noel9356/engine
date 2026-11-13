@@ -111,8 +111,11 @@ FramePacingSample FramePacer::pace(PerformanceProfiler *profiler)
     nextDeadline_ += period;
     if (nextDeadline_ <= now)
     {
-        const auto lateBy = now - nextDeadline_;
-        const auto missed = lateBy / period + 1;
+        // Jump forward whole periods. Cap the jump so a long suspension
+        // (lateBy near the duration's limit) cannot overflow the signed
+        // duration arithmetic.
+        const auto lateBy     = now - nextDeadline_;
+        const auto missed     = std::min(lateBy / period + 1, Clock::duration::max() / period);
         nextDeadline_ += period * missed;
     }
 

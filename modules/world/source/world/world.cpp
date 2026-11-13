@@ -1232,6 +1232,22 @@ private:
             for (const auto external : entities)
                 if (module.createEcsEntityForEntityWorld(*binding, external) == engine::ecs::invalidEntity)
                 {
+                    // Mirror creation failed mid-load: release everything
+                    // this call brought in (all mirrors, then the loaded
+                    // entity-world population the inner load replaced) so the
+                    // binding is left empty instead of half-mirrored.
+                    for (std::uint32_t mirrorSlot = 0; mirrorSlot < binding->entityToEcs.size(); ++mirrorSlot)
+                    {
+                        const EntityMapEntry mirror = binding->entityToEcs[mirrorSlot];
+                        if (mirror.generation != 0)
+                            module.ecsCapability_->destroyEntity(
+                                module.ecsCapability_->self, binding->ecsWorld, mirror.mappedHandle, nullptr);
+                    }
+                    binding->entityToEcs.clear();
+                    binding->ecsToEntity.clear();
+                    for (const auto remaining : entities)
+                        module.entityWorldCapability_->destroyEntity(
+                            module.entityWorldCapability_->self, binding->entityWorld, remaining, false, nullptr);
                     if (error)
                         *error = engine::entity_world::EntityWorldError::ResourceFailure;
                     return false;

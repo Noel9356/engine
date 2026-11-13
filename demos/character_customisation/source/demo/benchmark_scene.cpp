@@ -130,7 +130,7 @@ void createBenchmarkScene(BenchmarkScene &scene, renderer::RenderCapability &ren
                 }
                 scene.dragonMeshes.push_back(handle);
             }
-            modelsCapability.destroyPluginel(modelsCapability.self, dragonModel);
+            modelsCapability.destroyModel(modelsCapability.self, dragonModel);
             std::cout << "demo: loaded Inigo model " << dragonStatistics.vertexCount << " vertices, "
                       << dragonStatistics.indexCount / 3 << " triangles, " << scene.dragonMeshes.size()
                       << " GPU mesh parts\n";

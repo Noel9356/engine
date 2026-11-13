@@ -44,13 +44,18 @@ std::string AssetCache::canonicalPath(const char *path) const
     // would at worst cause a duplicate record, never a correctness bug.
     if (config_->canonicalPathCacheSize > 0)
     {
-        const auto cached = canonicalPathCache_.find(input);
+        std::lock_guard lock(canonicalPathMutex_);
+        const auto      cached = canonicalPathCache_.find(input);
         if (cached != canonicalPathCache_.end())
             return cached->second;
     }
 
     std::error_code             error;
     std::filesystem::path requested(input);
+    // Without a restricted root, allow_absolute_paths = false serves only
+    // relative requests (resolved against the process working directory).
+    if (!config_->rootRestricted && !config_->allowAbsolutePaths && requested.is_absolute())
+        return {};
     if (config_->rootRestricted && !requested.is_absolute())
         requested = config_->rootDirectory / requested;
     std::filesystem::path value = std::filesystem::weakly_canonical(requested, error);
@@ -71,6 +76,7 @@ std::string AssetCache::canonicalPath(const char *path) const
 
     if (config_->canonicalPathCacheSize > 0)
     {
+        std::lock_guard lock(canonicalPathMutex_);
         if (canonicalPathCache_.size() >= config_->canonicalPathCacheSize && !canonicalPathCacheOrder_.empty())
         {
             // FIFO eviction: drop the oldest entry to make room.
@@ -132,6 +138,27 @@ AssetHandle AssetCache::createRecord(const std::filesystem::path &resolvedPath, 
     std::shared_ptr<AssetRecord> record;
     {
         std::lock_guard lock(mutex_);
+        // Two threads can pass the findByIdentity miss window concurrently;
+        // the loser of the race adopts the winner's record (with an extra
+        // reference) instead of storing a second record for one identity.
+        const auto raced = pathIndex_.find(identity);
+        if (raced != pathIndex_.end())
+        {
+            const auto found = records_.find(raced->second);
+            if (found != records_.end())
+            {
+                const std::uint32_t references = found->second->references.load(std::memory_order_relaxed);
+                if (references != std::numeric_limits<std::uint32_t>::max())
+                {
+                    found->second->references.store(references + 1u, std::memory_order_relaxed);
+                    touch(found->second);
+                    error = AssetError::None;
+                    return raced->second;
+                }
+                error = AssetError::CapacityExceeded;
+                return invalidAsset;
+            }
+        }
         if (records_.size() >= config_->maximumAssets)
             evictLocked(0, 1);
         if (records_.size() >= config_->maximumAssets)

@@ -20,6 +20,8 @@
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
+#include <array>
+
 namespace engine
 {
 namespace planet
@@ -46,6 +48,14 @@ private:
     std::int64_t seedTemperature_;
     std::int64_t seedMoisture_;
     std::int64_t seedMoistureWarp_;
+
+    // Per-octave noise seeds, derived once per sampler from the base seeds
+    // (hashCombine64(baseSeed, octave) is sample-independent). The moisture
+    // warp table holds the three single-octave warp stream seeds.
+    std::array<std::int64_t, 12> seedTemperatureOctaves_{};
+    std::array<std::int64_t, 12> seedMoistureOctaves_{};
+    std::array<std::int64_t, 12> seedJitterOctaves_{};
+    std::array<std::int64_t, 12> seedMoistureWarpOctaves_{};
 };
 
 } // namespace planet

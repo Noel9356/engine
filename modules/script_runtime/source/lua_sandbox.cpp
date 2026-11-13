@@ -177,15 +177,43 @@ void *luaAllocator(void *userData, void *pointer, std::size_t oldSize, std::size
     return replacement;
 }
 
+// True when the runtime's optional wall-clock budget has expired. Checked at
+// every hook and native-call boundary; the budget bounds whole executions
+// (including native callback time the instruction counter cannot see).
+bool wallClockExpired(const RuntimeRecord &runtime) noexcept
+{
+    return runtime.wallClockDeadlineEnabled && std::chrono::steady_clock::now() >= runtime.wallClockDeadline;
+}
+
+void armWallClockBudget(RuntimeRecord &runtime) noexcept
+{
+    if (runtime.description.wallClockLimitMilliseconds == 0)
+    {
+        runtime.wallClockDeadlineEnabled = false;
+        return;
+    }
+    const std::uint64_t milliseconds = runtime.description.wallClockLimitMilliseconds;
+    runtime.wallClockDeadline
+        = std::chrono::steady_clock::now()
+          + std::chrono::milliseconds(std::min<std::uint64_t>(milliseconds, std::numeric_limits<std::int64_t>::max()));
+    runtime.wallClockDeadlineEnabled = true;
+}
+
 void instructionHook(lua_State *state, lua_Debug * /*debug*/) noexcept
 {
     auto         **slot    = static_cast<RuntimeRecord **>(lua_getextraspace(state));
     RuntimeRecord *runtime = *slot;
     if (runtime == nullptr)
         return;
-    // The hook fires every `hookGranularity` VM instructions (the count passed
-    // to lua_sethook in setExecutionBudget). Decrement by the same amount so
-    // the budget tracks the configured instruction limit accurately.
+    if (wallClockExpired(*runtime))
+    {
+        runtime->lastErrorCategory = LastErrorCategory::WallClockLimit;
+        luaL_error(state, "wall-clock limit exceeded");
+        return;
+    }
+    // The hook fires every `hookGranularity` VM instructions (the clamped count
+    // passed to lua_sethook in setExecutionBudget). Decrement by the same
+    // amount so the budget tracks the configured instruction limit accurately.
     const std::uint32_t granularity = runtime->hookGranularity != 0 ? runtime->hookGranularity : 1000;
     if (runtime->instructionsRemaining < granularity)
     {
@@ -246,12 +274,22 @@ int invokeNativeFunction(lua_State *state) noexcept
     bool          succeeded   = false;
     try
     {
+        auto         **slot    = static_cast<RuntimeRecord **>(lua_getextraspace(state));
+        RuntimeRecord *runtime = slot != nullptr ? *slot : nullptr;
         succeeded = function->callback(function->userData,
             arguments.data(),
             static_cast<std::uint32_t>(luaArgumentCount),
             results.data(),
             maximumResults,
             &resultCount);
+        // Native callback time is invisible to the count hook; a wall-clock
+        // budget is re-checked as soon as the callback returns so an execution
+        // cannot extend its budget through repeated native calls.
+        if (succeeded && runtime != nullptr && wallClockExpired(*runtime))
+        {
+            runtime->lastErrorCategory = LastErrorCategory::WallClockLimit;
+            return luaL_error(state, "wall-clock limit exceeded");
+        }
     }
     catch (...)
     {
@@ -292,10 +330,16 @@ int invokeNativeFunction(lua_State *state) noexcept
 void setExecutionBudget(RuntimeRecord &runtime) noexcept
 {
     runtime.instructionsRemaining = runtime.description.instructionLimit;
-    // The count hook fires every `count` VM instructions. Use the runtime's
-    // configured granularity (clamped to int range) so very small instruction
-    // budgets still arm the hook before the limit is reached.
-    const std::uint32_t granularity = runtime.hookGranularity != 0 ? runtime.hookGranularity : 1000;
+    armWallClockBudget(runtime);
+    // The count hook fires every `count` VM instructions. Clamp the configured
+    // granularity against the budget: a hook interval larger than a fraction
+    // of the limit would overshoot the budget by up to one interval before the
+    // first check. One quarter keeps the hook overhead negligible for large
+    // budgets while bounding the overshoot to 25%.
+    const std::uint32_t configuredGranularity = runtime.hookGranularity != 0 ? runtime.hookGranularity : 1000;
+    const std::uint64_t granularityCeiling = std::max<std::uint64_t>(1u, runtime.description.instructionLimit / 4u);
+    const std::uint32_t granularity        = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(configuredGranularity, std::min<std::uint64_t>(granularityCeiling, std::numeric_limits<std::uint32_t>::max())));
     lua_sethook(runtime.state,
         instructionHook,
         LUA_MASKCOUNT,
@@ -323,6 +367,8 @@ ScriptError classifyError(RuntimeRecord &runtime, ScriptError fallback) noexcept
         return ScriptError::MemoryLimitExceeded;
     case LastErrorCategory::InstructionLimit:
         return ScriptError::InstructionLimitExceeded;
+    case LastErrorCategory::WallClockLimit:
+        return ScriptError::WallClockLimitExceeded;
     default:
         return fallback;
     }

@@ -65,6 +65,12 @@ struct AssetStoreConfig
     std::filesystem::path rootDirectory;
     bool                  rootConfigured  = false;
     bool                  rootRestricted  = false;
+    // Whether requests may address files outside the configured root. With a
+    // restricted root this only accepts absolute paths that still resolve
+    // inside the root; without a root it rejects absolute paths entirely, so
+    // only relative paths (resolved against the process working directory)
+    // are served.
+    bool allowAbsolutePaths = true;
 
     // Cooked-asset object directory (set when the catalog loads).
     std::filesystem::path cookedObjectDirectory;

@@ -10,7 +10,7 @@ The module provides the `models` capability, ABI version 7 (`modelsCapabilityAbi
 | --- | --- |
 | `loadModel(self, path, outError)` | Loads a model with the configured module defaults. |
 | `loadModelWithOptions(self, path, options, outError)` | Loads with caller-supplied `ModelLoadOptions`; a null `options` selects the module defaults. |
-| `destroyPluginel(self, model)` | Drops the model; every `MeshDescription` previously handed out for it becomes invalid. |
+| `destroyModel(self, model)` | Drops the model; every `MeshDescription` previously handed out for it becomes invalid. |
 | `partCount(self, model)` | Number of renderable parts (0 for unknown handles). |
 | `part(self, model, partIndex, outDescription)` | Fills a `renderer::MeshDescription` that aliases module-owned buffers. |
 | `partName(self, model, partIndex)` | Part name (OBJ shape, glTF node/mesh, or file stem); null when out of range. |
@@ -69,13 +69,13 @@ From `module.toml` and from the exported entry table at the bottom of `source/co
 6. **Optimization.** When `optimize_mesh` is set, `optimizeModelRecord` runs the module-configured meshoptimizer passes over every part in a fixed order: vertex cache and overdraw reorder triangles (only for parts whose triangles map to a single fully opaque material, or carry no material at all, so blending order survives), then simplification reduces the triangle count (only for the same single-material-or-none parts, and only when `simplify` is enabled), then vertex fetch reorders the vertex buffer along the final index order. Simplification re-stamps the single material across the new triangle count so material assignments survive; multi-material parts are never simplified. Simplification also re-runs the vertex cache pass on the simplified topology.
 7. **Registration.** Statistics are filled from the post-optimization record, a fresh handle is allocated (monotonic counter that skips 0 and live ids), and the record moves into the module's map.
 
-**ModelHandle to GPU-facing data.** `part()` fills a `renderer::MeshDescription` whose `vertices`/`indices` pointers alias the part's own vectors (`vertexCount` = floats / 11, `indexCount` triangles x 3, `MeshIndexFormat::UInt32`); stride and attribute tables stay at the description defaults, the renderer knows the 11-float layout via `renderer::meshVertexFloatCount`. The pointers stay valid until `destroyPluginel`, module stop, or (for `partTriangleMaterials`/names) the same lifetime.
+**ModelHandle to GPU-facing data.** `part()` fills a `renderer::MeshDescription` whose `vertices`/`indices` pointers alias the part's own vectors (`vertexCount` = floats / 11, `indexCount` triangles x 3, `MeshIndexFormat::UInt32`); stride and attribute tables stay at the description defaults, the renderer knows the 11-float layout via `renderer::meshVertexFloatCount`. The pointers stay valid until `destroyModel`, module stop, or (for `partTriangleMaterials`/names) the same lifetime.
 
 ## Threading and lifetime
 
 All capability entries and the configuration-reload handler run synchronously on the caller's thread; the module keeps no mutexes. Treat the capability as single-threaded: load, query, and destroy models from the thread that owns the engine (the kernel drives construct/start/stop and event dispatch there) and do not share `MeshDescription` pointers across threads without external synchronization.
 
-The module owns everything: `ModelRecord` (vertex/index buffers, material strings, statistics, bounds) lives in the registry until `destroyPluginel` erases it or `stop()` clears the registry. `part()`, `partName()`, `materialName()`, `materialTexturePath()`, and `partTriangleMaterials()` return views into that storage, not copies. Importers allocate their own scratch (cgltf's document is freed via `unique_ptr` before `loadModelWithOptions` returns); nothing imported is retained beyond what the record holds.
+The module owns everything: `ModelRecord` (vertex/index buffers, material strings, statistics, bounds) lives in the registry until `destroyModel` erases it or `stop()` clears the registry. `part()`, `partName()`, `materialName()`, `materialTexturePath()`, and `partTriangleMaterials()` return views into that storage, not copies. Importers allocate their own scratch (cgltf's document is freed via `unique_ptr` before `loadModelWithOptions` returns); nothing imported is retained beyond what the record holds.
 
 ## Configuration
 
@@ -116,6 +116,6 @@ else
             // upload description.vertices / description.indices to the renderer
         }
     }
-    models.destroyPluginel(models.self, model); // invalidates the descriptions above
+    models.destroyModel(models.self, model); // invalidates the descriptions above
 }
 ```

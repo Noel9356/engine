@@ -42,7 +42,9 @@ bool sunShadowed(const GiPipelineState &state, const glm::vec3 &position, const 
 // Directional/point/spot radiance arriving at position from the module's
 // light snapshot; formulas mirror the renderer's shading (range fade
 // (1 - (d/r)^2)^2 / d^2, smoothstep cone). Shadow rays follow
-// lighting.point_light_shadows.
+// lighting.point_light_shadows. Light directions and cone cosines come from
+// the snapshot's prepared array (see GiEnvironmentSnapshot), so the loop
+// body is pure per-texel math.
 glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal)
 {
     const GiEnvironmentSnapshot &environment = state.environment;
@@ -53,19 +55,13 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
     }
     const bool shadows = state.settings.pointLightShadows;
     const glm::vec3 origin = position + normal * 0.03f;
-    for (const direct_lighting::DirectLight &light : environment.directLights)
+    for (const GiEnvironmentSnapshot::PreparedDirectLight &light : environment.preparedLights)
     {
-        const direct_lighting::DirectLightDescription &description = light.description;
-        const glm::vec3 color(description.color[0], description.color[1], description.color[2]);
-        const float     intensity = description.intensity;
-        if (intensity <= 0.0f || (color.x <= 0.0f && color.y <= 0.0f && color.z <= 0.0f))
+        const glm::vec3 &color     = light.color;
+        const float      intensity = light.intensity;
+        if (light.type == direct_lighting::DirectLightType::Directional)
         {
-            continue;
-        }
-        if (description.type == direct_lighting::DirectLightType::Directional)
-        {
-            const glm::vec3 direction = -glm::normalize(glm::vec3(description.direction[0], description.direction[1],
-                description.direction[2]));
+            const glm::vec3 &direction = light.direction;
             const float nDotL = glm::dot(normal, direction);
             if (nDotL > 0.0f)
             {
@@ -77,11 +73,9 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
             }
             continue;
         }
-        const glm::vec3 lightPosition(description.position[0], description.position[1], description.position[2]);
-        const glm::vec3 toLight           = lightPosition - position;
+        const glm::vec3 toLight           = light.position - position;
         const float     distanceSquared   = std::max(glm::dot(toLight, toLight), 1.0e-4f);
-        const float     range             = std::max(description.range, 1.0e-3f);
-        const float     rangeRatioSquared = distanceSquared / (range * range);
+        const float     rangeRatioSquared = distanceSquared / (light.range * light.range);
         if (rangeRatioSquared >= 1.0f)
         {
             continue;
@@ -90,14 +84,11 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
         const glm::vec3 direction   = toLight * (1.0f / distance);
         const float     rangeFade   = 1.0f - rangeRatioSquared * rangeRatioSquared;
         float           attenuation = rangeFade * rangeFade / distanceSquared;
-        if (description.type == direct_lighting::DirectLightType::Spot)
+        if (light.type == direct_lighting::DirectLightType::Spot)
         {
-            const glm::vec3 spotDirection(description.direction[0], description.direction[1], description.direction[2]);
-            const float     coneCosine = glm::dot(-direction, glm::normalize(spotDirection));
-            const float     inner      = std::cos(description.innerConeRadians);
-            const float     outer      = std::cos(description.outerConeRadians);
+            const float coneCosine = glm::dot(-direction, light.direction);
             const float coneT =
-                std::clamp((coneCosine - outer) / std::max(inner - outer, 1.0e-5f), 0.0f, 1.0f);
+                std::clamp((coneCosine - light.outerCosine) / light.coneDivisor, 0.0f, 1.0f);
             attenuation *= coneT * coneT * (3.0f - 2.0f * coneT);
         }
         const float nDotL = glm::dot(normal, direction);

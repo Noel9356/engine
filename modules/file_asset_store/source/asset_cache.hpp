@@ -120,9 +120,12 @@ private:
     std::uint64_t evictableBytes_ = 0;
     std::size_t   evictableCount_ = 0;
     // Canonical-path cache (input → canonical). Bounded FIFO; cleared when
-    // full so the common case stays O(1) without a linked list.
-    mutable std::unordered_map<std::string, std::string> canonicalPathCache_;
-    mutable std::vector<std::string>                     canonicalPathCacheOrder_;
+    // full so the common case stays O(1) without a linked list. Guarded by
+    // canonicalPathMutex_: requestAsset is callable from any thread, so the
+    // cache must not rely on external serialization.
+    mutable std::mutex                                    canonicalPathMutex_;
+    mutable std::unordered_map<std::string, std::string>  canonicalPathCache_;
+    mutable std::vector<std::string>                      canonicalPathCacheOrder_;
 };
 
 } // namespace engine::file_asset_store

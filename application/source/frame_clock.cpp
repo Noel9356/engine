@@ -33,7 +33,9 @@ FrameClock::FrameClock(FrameClockOptions options)
     }
     else
     {
-        options_.fixedUpdateHz = std::min(options_.fixedUpdateHz, 1000.0);
+        // A rate below 1 Hz would make the fixed step exceed the frame-delta
+        // clamp, so fixed updates would silently never run; clamp upward.
+        options_.fixedUpdateHz = std::clamp(options_.fixedUpdateHz, 1.0, 1000.0);
     }
     options_.maxFixedUpdatesPerFrame = std::clamp<std::uint32_t>(options_.maxFixedUpdatesPerFrame, 1, 256);
     fixedDeltaSeconds_               = options_.fixedUpdateHz > 0.0 ? 1.0 / options_.fixedUpdateHz : 0.0;

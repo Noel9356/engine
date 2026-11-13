@@ -7,12 +7,14 @@
 
 #include <engine/planet/meshing.hpp>
 
+#include <engine/planet/flat_key_map.hpp>
 #include <engine/planet/noise.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <unordered_map>
 
 namespace engine
@@ -453,22 +455,6 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     const double ownCutoff    = step * params.lodBandLimitFactor;
     const double coarseCutoff = coord.depth > 0 ? coarseStep * params.lodBandLimitFactor : 0.0;
 
-    const auto setAxisComponent = [](Vec3 &vector, std::uint32_t axis, double value)
-    {
-        if (axis == 0)
-        {
-            vector.x = value;
-        }
-        else if (axis == 1)
-        {
-            vector.y = value;
-        }
-        else
-        {
-            vector.z = value;
-        }
-    };
-
     const auto floorDiv = [](std::int64_t value, std::int64_t divisor)
     {
         std::int64_t quotient = value / divisor;
@@ -485,6 +471,59 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // coarse lattice plane); tangentialGlobalU/V are the other two axes. At
     // coarse lattice points both weights vanish and the bilinear degenerates
     // to the coarse sample itself.
+    //
+    // Coarse-corner density memo: every conforming plane (and the apron
+    // trilinear) re-evaluates the same coarse lattice corners two to eight
+    // times, and each evaluation is a full raw-field pass. The memo keys a
+    // mixed hash of the coarse indices and stores the indices alongside the
+    // density so a (vanishingly rare) hash collision is detected and simply
+    // recomputed instead of reused. Allocated on first use: chunks without a
+    // conforming boundary never pay for it.
+    struct CoarseDensityEntry
+    {
+        std::int64_t x       = 0;
+        std::int64_t y       = 0;
+        std::int64_t z       = 0;
+        double       density = 0.0;
+    };
+    using CoarseDensityMemo = FlatKeyMap<CoarseDensityEntry>;
+    std::unique_ptr<CoarseDensityMemo> coarseDensityMemo;
+    const auto coarseDensityAt = [&](std::int64_t coarseX, std::int64_t coarseY, std::int64_t coarseZ) -> double
+    {
+        // splitMix64 mutates its state parameter, so the mixed coordinates are
+        // materialized into locals before each pass.
+        std::uint64_t mixedU = static_cast<std::uint64_t>(coarseY) * 0xC2B2AE3D27D4EB4Full
+                             ^ static_cast<std::uint64_t>(coarseZ) * 0x165667B19E3779F9ull;
+        mixedU = splitMix64(mixedU) ^ static_cast<std::uint64_t>(coarseX) * 0x9E3779B97F4A7C15ull;
+        const std::uint64_t mixed = splitMix64(mixedU);
+        if (coarseDensityMemo != nullptr)
+        {
+            if (const CoarseDensityEntry *cached = coarseDensityMemo->find(mixed))
+            {
+                if (cached->x == coarseX && cached->y == coarseY && cached->z == coarseZ)
+                    return cached->density;
+                // Hash collision with a different lattice point (probability
+                // is negligible, but the exact field value matters):
+                // recompute without disturbing the cached entry.
+                const Vec3 corner{-half + coarseStep * static_cast<double>(coarseX),
+                    -half + coarseStep * static_cast<double>(coarseY),
+                    -half + coarseStep * static_cast<double>(coarseZ)};
+                return field.densityAt(corner, coarseCutoff);
+            }
+        }
+        else
+        {
+            coarseDensityMemo = std::make_unique<CoarseDensityMemo>(1024);
+        }
+        CoarseDensityEntry &entry = coarseDensityMemo->findOrInsert(mixed);
+        entry.x                   = coarseX;
+        entry.y                   = coarseY;
+        entry.z                   = coarseZ;
+        const Vec3 corner{-half + coarseStep * static_cast<double>(coarseX),
+            -half + coarseStep * static_cast<double>(coarseY), -half + coarseStep * static_cast<double>(coarseZ)};
+        entry.density = field.densityAt(corner, coarseCutoff);
+        return entry.density;
+    };
     const auto coarsePlaneDensity = [&](std::uint32_t axis, std::int64_t perpGlobalFine, std::int64_t tangentialGlobalU,
                                         std::int64_t tangentialGlobalV) -> double
     {
@@ -494,47 +533,42 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         const double       weightU    = (tangentialGlobalU & 1) != 0 ? 0.5 : 0.0;
         const double       weightV    = (tangentialGlobalV & 1) != 0 ? 0.5 : 0.0;
 
-        // The four surrounding on-plane coarse lattice points.
-        Vec3 point00{0.0, 0.0, 0.0};
-        Vec3 point10{0.0, 0.0, 0.0};
-        Vec3 point01{0.0, 0.0, 0.0};
-        Vec3 point11{0.0, 0.0, 0.0};
-        const double perpValue = -half + coarseStep * static_cast<double>(perpCoarse);
-        const double u0Value   = -half + coarseStep * static_cast<double>(coarseU0);
-        const double u1Value   = -half + coarseStep * static_cast<double>(coarseU0 + ((tangentialGlobalU & 1) != 0 ? 1 : 0));
-        const double v0Value   = -half + coarseStep * static_cast<double>(coarseV0);
-        const double v1Value   = -half + coarseStep * static_cast<double>(coarseV0 + ((tangentialGlobalV & 1) != 0 ? 1 : 0));
-        const std::uint32_t axisU   = axis == 0 ? 1u : 0u;
-        const std::uint32_t axisV   = axis == 2 ? 1u : 2u;
-        setAxisComponent(point00, axis, perpValue);
-        setAxisComponent(point00, axisU, u0Value);
-        setAxisComponent(point00, axisV, v0Value);
-        setAxisComponent(point10, axis, perpValue);
-        setAxisComponent(point10, axisU, u1Value);
-        setAxisComponent(point10, axisV, v0Value);
-        setAxisComponent(point01, axis, perpValue);
-        setAxisComponent(point01, axisU, u0Value);
-        setAxisComponent(point01, axisV, v1Value);
-        setAxisComponent(point11, axis, perpValue);
-        setAxisComponent(point11, axisU, u1Value);
-        setAxisComponent(point11, axisV, v1Value);
+        // Per-axis coarse indices of the four surrounding on-plane coarse
+        // lattice points: the perpendicular axis sits at perpCoarse; the
+        // tangential axes span coarseU0/u1 and coarseV0/v1. A zero weight
+        // degenerates to the coarse sample itself.
+        const std::int64_t u1 = coarseU0 + ((tangentialGlobalU & 1) != 0 ? 1 : 0);
+        const std::int64_t v1 = coarseV0 + ((tangentialGlobalV & 1) != 0 ? 1 : 0);
+        const std::uint32_t axisU  = axis == 0 ? 1u : 0u;
+        const std::uint32_t axisV  = axis == 2 ? 1u : 2u;
+        std::int64_t        cornerCoarse[4][3] = {};
+        const auto          fillCornerCoarse   = [&](std::int64_t (&corner)[3], std::int64_t u, std::int64_t v)
+        {
+            corner[axis]  = perpCoarse;
+            corner[axisU] = u;
+            corner[axisV] = v;
+        };
+        fillCornerCoarse(cornerCoarse[0], coarseU0, coarseV0);
+        fillCornerCoarse(cornerCoarse[1], u1, coarseV0);
+        fillCornerCoarse(cornerCoarse[2], coarseU0, v1);
+        fillCornerCoarse(cornerCoarse[3], u1, v1);
 
         if (weightV == 0.0)
         {
-            const double d0 = field.densityAt(point00, coarseCutoff);
-            const double d1 = field.densityAt(point10, coarseCutoff);
+            const double d0 = coarseDensityAt(cornerCoarse[0][0], cornerCoarse[0][1], cornerCoarse[0][2]);
+            const double d1 = coarseDensityAt(cornerCoarse[1][0], cornerCoarse[1][1], cornerCoarse[1][2]);
             return d0 + (d1 - d0) * weightU;
         }
         if (weightU == 0.0)
         {
-            const double d0 = field.densityAt(point00, coarseCutoff);
-            const double d1 = field.densityAt(point01, coarseCutoff);
+            const double d0 = coarseDensityAt(cornerCoarse[0][0], cornerCoarse[0][1], cornerCoarse[0][2]);
+            const double d1 = coarseDensityAt(cornerCoarse[2][0], cornerCoarse[2][1], cornerCoarse[2][2]);
             return d0 + (d1 - d0) * weightV;
         }
-        const double d00 = field.densityAt(point00, coarseCutoff);
-        const double d10 = field.densityAt(point10, coarseCutoff);
-        const double d01 = field.densityAt(point01, coarseCutoff);
-        const double d11 = field.densityAt(point11, coarseCutoff);
+        const double d00 = coarseDensityAt(cornerCoarse[0][0], cornerCoarse[0][1], cornerCoarse[0][2]);
+        const double d10 = coarseDensityAt(cornerCoarse[1][0], cornerCoarse[1][1], cornerCoarse[1][2]);
+        const double d01 = coarseDensityAt(cornerCoarse[2][0], cornerCoarse[2][1], cornerCoarse[2][2]);
+        const double d11 = coarseDensityAt(cornerCoarse[3][0], cornerCoarse[3][1], cornerCoarse[3][2]);
         return d00 * (1.0 - weightU) * (1.0 - weightV) + d10 * weightU * (1.0 - weightV)
              + d01 * (1.0 - weightU) * weightV + d11 * weightU * weightV;
     };
@@ -559,10 +593,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             const double weight = (offset[0] != 0 ? fraction[0] : 1.0 - fraction[0])
                                 * (offset[1] != 0 ? fraction[1] : 1.0 - fraction[1])
                                 * (offset[2] != 0 ? fraction[2] : 1.0 - fraction[2]);
-            const Vec3 cornerPoint{-half + coarseStep * static_cast<double>(base[0] + offset[0]),
-                -half + coarseStep * static_cast<double>(base[1] + offset[1]),
-                -half + coarseStep * static_cast<double>(base[2] + offset[2])};
-            sum += weight * field.densityAt(cornerPoint, coarseCutoff);
+            sum += weight * coarseDensityAt(base[0] + offset[0], base[1] + offset[1], base[2] + offset[2]);
         }
         return sum;
     };

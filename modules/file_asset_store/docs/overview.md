@@ -52,7 +52,7 @@ From the entry table at the bottom of `source/file_asset_store.cpp` (`engineQuer
 
 ### Request path and identity
 
-1. `requestAsset` canonicalizes the requested path (`AssetCache::canonicalPath`): `weakly_canonical` + `lexically_normal`, resolving relative paths against the configured `root_directory` when one is set. Any violation (empty, too long, escaping the root, unusable root) yields an empty string and the request fails with `InvalidPath`. When a root is configured but does not resolve to a real directory, every request is rejected. When `canonical_path_cache_size` is non-zero, recently resolved inputs are cached so repeated requests for the same path skip the `weakly_canonical` syscall.
+1. `requestAsset` canonicalizes the requested path (`AssetCache::canonicalPath`): `weakly_canonical` + `lexically_normal`, resolving relative paths against the configured `root_directory` when one is set. With `allow_absolute_paths = false` and no root configured, absolute requests are rejected the same way. Any violation (empty, too long, escaping the root, unusable root) yields an empty string and the request fails with `InvalidPath`. When a root is configured but does not resolve to a real directory, every request is rejected. When `canonical_path_cache_size` is non-zero, recently resolved inputs are cached so repeated requests for the same path skip the `weakly_canonical` syscall.
 2. The canonical path (or `"cooked://<logical key>"` for cooked requests) is the record identity. `pathIndex_` maps identity to handle, so repeat requests return the same record with one extra reference.
 3. If the record cache is at `maximum_cached_assets`, one unreferenced asset is evicted to make room; if that fails, the request reports `CapacityExceeded`.
 
@@ -84,7 +84,7 @@ The catalog format itself (`asset_catalog.cpp`) is little-endian: 8-byte magic `
 
 ## Threading and lifetime
 
-- Capability calls are safe from any thread. `AssetCache::mutex_` guards `records_`, `pathIndex_`, `residentBytes_`, `reservedBytes_`, and the handle counter; each record has a `dataMutex` for its byte buffer and a `stateMutex` + `stateCondition` pair that `waitForAsset` sleeps on.
+- Capability calls are safe from any thread. `AssetCache::mutex_` guards `records_`, `pathIndex_`, `residentBytes_`, `reservedBytes_`, and the handle counter; a dedicated `canonicalPathMutex_` guards the canonical-path cache and the identity dedupe between concurrent requests; each record has a `dataMutex` for its byte buffer and a `stateMutex` + `stateCondition` pair that `waitForAsset` sleeps on.
 - Reads run either inline on the caller's thread or on task-scheduler worker threads; the scheduler pointer is captured in `construct()`.
 - `AssetInfo::canonicalPath` points into the record's string and is only valid until that record is evicted, purged, or the module stops.
 - `copyAssetData` re-checks the record's state under `dataMutex` before copying, guaranteeing the bytes and state are consistent at the time of the copy (a concurrent reload could otherwise swap bytes between an unlocked state check and the data lock).
@@ -99,7 +99,7 @@ Default values and per-key validation ranges live in `config.toml`; every key is
 
 - Events: none. The module never touches the kernel `EventBus`; it reports progress purely through asset state and the optional `PerformanceMetric::AssetRead` profiler timer around scheduled reads, plus `PerformanceMetric::AssetEviction` around eviction passes.
 - Permissions: none declared (`declaredPermissions` is empty in the entry table and `module.toml` declares no permissions).
-- Filesystem access is confined to the configured `root_directory` when one is set, and to the cooked object directory for cooked requests. On Linux, file reads use `O_NOFOLLOW` on the final path component as a defensive measure against symlink replacement after canonicalization.
+- Filesystem access is confined to the configured `root_directory` when one is set (and `allow_absolute_paths = false` narrows a rootless store to relative paths), and to the cooked object directory for cooked requests. On Linux, file reads use `O_NOFOLLOW` on the final path component as a defensive measure against symlink replacement after canonicalization.
 
 Consumer usage (all signatures taken from `capabilities.hpp`):
 

@@ -10,6 +10,7 @@ config_keys           = [
     "renderer.frustum_culling",
     "renderer.gi_indirect_lighting",
     "renderer.gpu_timestamps_enabled",
+    "renderer.headless_band_split_min_screen_fraction",
     "renderer.headless_band_split_triangles",
     "renderer.headless_tile_parallel",
     "renderer.headless_transform_cache_mb",

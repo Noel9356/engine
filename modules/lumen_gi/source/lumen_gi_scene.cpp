@@ -210,6 +210,16 @@ SurfaceHit traceSurfaces(const GiPipelineState &state, const GiRay &worldRay, st
                     continue;
                 }
                 const GiSurface &surface = state.surfaces[surfaceIndex];
+                // World-space bounds test before any per-surface transform:
+                // the TLAS leaf slab only proves the leaf's combined bounds
+                // are grazed; individual surfaces inside it are frequently
+                // missed, and the inverse-transform work is the dominant
+                // per-leaf cost for those.
+                float worldEntry = 0.0f;
+                if (!slabTest(worldRay.origin, inverseDirection, surface.worldMin, surface.worldMax, bestT, worldEntry))
+                {
+                    continue;
+                }
                 // Transform the ray into the surface's local space; local t
                 // values scale by the local direction length.
                 const glm::vec3 localOrigin = glm::vec3(surface.inverseTransform * glm::vec4(worldRay.origin, 1.0f));

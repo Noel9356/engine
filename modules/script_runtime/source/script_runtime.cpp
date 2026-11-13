@@ -210,6 +210,11 @@ private:
         {
             instructionHookGranularity_ = static_cast<std::uint32_t>(*value);
         }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "wall_clock_limit_milliseconds");
+            value && *value >= 0)
+        {
+            defaultDescription_.wallClockLimitMilliseconds = static_cast<std::uint64_t>(*value);
+        }
         // Optional: override the default library mask. Bits outside the
         // allowed set are silently dropped at runtime-create time.
         if (const auto value = context.configurationIntegerInSection("script_runtime", "default_enabled_libraries");

@@ -26,29 +26,22 @@ constexpr std::uint32_t lightingUnitTexels = 2048;
 // Indirect refreshes needed for the cache to settle (history ramp + bounces).
 constexpr std::uint32_t indirectSettlePasses = 12;
 
-struct CardOrderKey
-{
-    std::uint64_t age;
-    float         distance;
-    std::uint32_t index;
-};
-
 // Emits work units covering `budget` texels of the cards in priority order,
 // continuing each card at its rotating cursor (wrapping), so a card larger
 // than the per-frame budget still gets every texel refreshed in turn.
-void planCursorWork(GiPipelineState &state, std::vector<CardOrderKey> &keys, std::uint64_t budget,
+void planCursorWork(GiPipelineState &state, std::vector<GiCardOrderKey> &keys, std::uint64_t budget,
     std::uint32_t GiCard::*cursorMember, std::vector<GiTexelWork> &out)
 {
     std::sort(keys.begin(), keys.end(),
-        [](const CardOrderKey &left, const CardOrderKey &right)
+        [](const GiCardOrderKey &left, const GiCardOrderKey &right)
         {
-            if (left.age != right.age)
+            if (left.ageFrames != right.ageFrames)
             {
-                return left.age > right.age;
+                return left.ageFrames > right.ageFrames;
             }
-            return left.distance < right.distance;
+            return left.cameraDistance < right.cameraDistance;
         });
-    for (const CardOrderKey &key : keys)
+    for (const GiCardOrderKey &key : keys)
     {
         if (budget == 0)
         {
@@ -95,7 +88,8 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
         snapProbeLevels(state, state.cameraPosition);
 
         // ---- capture (incremental: only cards that are not captured yet) ----
-        std::vector<std::uint32_t> pendingCards;
+        std::vector<std::uint32_t> &pendingCards = state.scratchPendingCards;
+        pendingCards.clear();
         std::uint64_t              pendingTexels = 0;
         for (std::uint32_t index = 0; index < state.cardRefs.size(); ++index)
         {
@@ -109,8 +103,10 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
         std::sort(pendingCards.begin(), pendingCards.end(),
             [&](std::uint32_t left, std::uint32_t right)
             { return state.card(left).cameraDistance < state.card(right).cameraDistance; });
-        std::vector<GiTexelWork>   captureWork;
-        std::vector<std::uint32_t> finishing;
+        std::vector<GiTexelWork>   &captureWork = state.scratchCaptureWork;
+        std::vector<std::uint32_t> &finishing    = state.scratchFinishingCards;
+        captureWork.clear();
+        finishing.clear();
         std::uint64_t              captureBudget = settings.captureTexelsPerFrame;
         for (const std::uint32_t index : pendingCards)
         {
@@ -163,8 +159,10 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
         }
 
         // ---- plan lighting + probes --------------------------------------
-        std::vector<CardOrderKey> directKeys;
-        std::vector<CardOrderKey> indirectKeys;
+        std::vector<GiCardOrderKey> &directKeys   = state.scratchDirectKeys;
+        std::vector<GiCardOrderKey> &indirectKeys = state.scratchIndirectKeys;
+        directKeys.clear();
+        indirectKeys.clear();
         std::uint64_t             eligibleTexels = 0;
         for (std::uint32_t index = 0; index < state.cardRefs.size(); ++index)
         {
@@ -174,18 +172,21 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                 continue;
             }
             eligibleTexels += card.totalTexels();
-            directKeys.push_back(CardOrderKey{state.frameIndex - card.lastDirectFrame, card.cameraDistance, index});
-            indirectKeys.push_back(CardOrderKey{state.frameIndex - card.lastIndirectFrame, card.cameraDistance, index});
+            directKeys.push_back(GiCardOrderKey{state.frameIndex - card.lastDirectFrame, card.cameraDistance, index});
+            indirectKeys.push_back(GiCardOrderKey{state.frameIndex - card.lastIndirectFrame, card.cameraDistance, index});
         }
-        std::vector<GiTexelWork> directWork;
-        std::vector<GiTexelWork> indirectWork;
+        std::vector<GiTexelWork> &directWork   = state.scratchDirectWork;
+        std::vector<GiTexelWork> &indirectWork = state.scratchIndirectWork;
+        directWork.clear();
+        indirectWork.clear();
         planCursorWork(state, directKeys, settings.directTexelsPerFrame, &GiCard::directCursor, directWork);
         planCursorWork(state, indirectKeys, settings.indirectTexelsPerFrame, &GiCard::indirectCursor, indirectWork);
         for (const GiTexelWork &unit : directWork)
         {
             state.card(unit.cardIndex).lastDirectFrame = state.frameIndex;
         }
-        std::vector<std::size_t> scratchOffsets(indirectWork.size());
+        std::vector<std::size_t> &scratchOffsets = state.scratchOffsets;
+        scratchOffsets.resize(indirectWork.size());
         std::size_t              scratchTotal = 0;
         for (std::size_t index = 0; index < indirectWork.size(); ++index)
         {
@@ -193,14 +194,13 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
             scratchTotal += indirectWork[index].texelEnd - indirectWork[index].texelBegin;
             state.card(indirectWork[index].cardIndex).lastIndirectFrame = state.frameIndex;
         }
-        std::vector<glm::vec3> scratch(scratchTotal);
+        // Gather output staging: every element is written before the commit
+        // step reads it, so the reused buffer needs no re-initialization.
+        state.scratchRadiance.resize(scratchTotal);
+        glm::vec3 *const scratch = state.scratchRadiance.data();
 
-        struct ProbeItem
-        {
-            std::uint32_t level;
-            std::uint32_t slot;
-        };
-        std::vector<ProbeItem> probeItems;
+        std::vector<GiProbeItem> &probeItems = state.scratchProbeItems;
+        probeItems.clear();
         const std::uint32_t    probeBudget = std::max(settings.probeUpdatesPerFrame, 1u);
         std::uint32_t          largestLevel = 0;
         for (std::uint32_t levelIndex = 0; levelIndex < 2; ++levelIndex)
@@ -212,7 +212,8 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
             {
                 continue;
             }
-            std::vector<std::uint8_t> taken(total, 0u);
+            std::vector<std::uint8_t> &taken = state.scratchTaken;
+            taken.assign(total, 0u);
             std::uint32_t             count = 0;
             // Probes that scrolled into the box (no data yet) come first.
             for (std::uint32_t slot = 0; slot < total && count < probeBudget; ++slot)
@@ -220,7 +221,7 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                 if (level.probes[slot].fresh)
                 {
                     taken[slot] = 1u;
-                    probeItems.push_back(ProbeItem{levelIndex, slot});
+                    probeItems.push_back(GiProbeItem{levelIndex, slot});
                     ++count;
                 }
             }
@@ -231,7 +232,7 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                 if (taken[slot] == 0u)
                 {
                     taken[slot] = 1u;
-                    probeItems.push_back(ProbeItem{levelIndex, slot});
+                    probeItems.push_back(GiProbeItem{levelIndex, slot});
                     ++count;
                 }
                 level.updateCursor = (slot + 1) % total;
@@ -255,18 +256,18 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                 {
                     if (item < indirectCount)
                     {
-                        gatherIndirectLightingUnit(state, indirectWork[item], scratch.data() + scratchOffsets[item]);
+                        gatherIndirectLightingUnit(state, indirectWork[item], scratch + scratchOffsets[item]);
                     }
                     else
                     {
-                        const ProbeItem &probe = probeItems[item - indirectCount];
+                        const GiProbeItem &probe = probeItems[item - indirectCount];
                         updateProbe(state, probe.level, probe.slot);
                     }
                 }
             });
         for (std::size_t index = 0; index < indirectWork.size(); ++index)
         {
-            commitIndirectUnit(state, indirectWork[index], scratch.data() + scratchOffsets[index]);
+            commitIndirectUnit(state, indirectWork[index], scratch + scratchOffsets[index]);
         }
 
         // ---- convergence estimate for the static-frame skip --------------

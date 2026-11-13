@@ -1,4 +1,5 @@
 config_keys = [
+    "file_asset_store.allow_absolute_paths",
     "file_asset_store.auto_config",
     "file_asset_store.cache_eviction_batch_mb",
     "file_asset_store.cache_unreferenced_assets",

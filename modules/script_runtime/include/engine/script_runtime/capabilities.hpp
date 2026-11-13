@@ -43,7 +43,8 @@ enum class ScriptError : std::uint32_t
     CompilationFailed,
     RuntimeFailed,
     IoFailed,
-    TypeMismatch
+    TypeMismatch,
+    WallClockLimitExceeded
 };
 
 // The only value types a script and native code exchange.
@@ -85,6 +86,12 @@ struct ScriptRuntimeDescription
     std::uint64_t instructionLimit   = 10'000'000ull;
     std::uint64_t maximumScriptBytes = 4ull * 1024ull * 1024ull;
     std::uint32_t enabledLibraries   = ScriptLibraryMath | ScriptLibraryString | ScriptLibraryTable | ScriptLibraryUtf8;
+    // Optional wall-clock budget for one execute/call (0 = unlimited). The
+    // budget covers the whole execution including native callbacks, which the
+    // instruction counter cannot see; it is enforced at the next hook or
+    // native-call boundary, so a single native call can still run to its own
+    // completion before the abort is raised.
+    std::uint64_t wallClockLimitMilliseconds = 0;
 };
 
 struct ScriptRuntimeInfo

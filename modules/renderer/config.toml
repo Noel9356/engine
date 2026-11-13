@@ -10,6 +10,7 @@ draw_sort_mode                       = "mesh_material"
 frustum_culling                      = true
 gi_indirect_lighting                 = true
 gpu_timestamps_enabled               = false
+headless_band_split_min_screen_fraction = 0.125
 headless_band_split_triangles        = 4096
 headless_tile_parallel               = false
 headless_transform_cache_mb          = 32

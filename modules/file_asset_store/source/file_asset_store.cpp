@@ -331,6 +331,8 @@ private:
         // every path is confined to it; if the root does not resolve to an
         // existing directory, all requests are rejected rather than silently
         // falling back to unrestricted filesystem access.
+        config_.allowAbsolutePaths
+            = context.configurationBooleanInSection("file_asset_store", "allow_absolute_paths").value_or(true);
         if (const auto value = context.configurationStringInSection("file_asset_store", "root_directory");
             value && !value->empty())
         {

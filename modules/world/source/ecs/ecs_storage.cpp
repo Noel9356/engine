@@ -440,17 +440,44 @@ struct Storage::Impl
         }
     }
 
-    // Appends one row: opens a new chunk when the last is full, constructs
-    // every column (values moved from the source row, or the added
-    // component's initial value), and reports the row.
+    // Appends one row: reuses any chunk that still has room (preferring the
+    // back chunk so steady growth keeps its allocation pattern), opens a new
+    // chunk only when none fits, constructs every column (values moved from
+    // the source row, or the added component's initial value), and reports
+    // the row. Chunk indices are stable: no chunk is ever relocated, so
+    // EntityLocation bookkeeping stays valid across the call.
     bool appendToArchetype(std::uint32_t archetypeIndex, Entity entity, const Archetype *sourceArchetype,
         const Chunk *sourceChunk, std::uint32_t sourceRow, ComponentId addedComponent, const void *addedValue,
         std::uint32_t &outChunk, std::uint32_t &outRow)
     {
-        Archetype &target = *archetypes[archetypeIndex];
-        if (target.chunks.empty() || target.chunks.back().count == settings.chunkCapacity)
-            target.chunks.emplace_back(target.signature, componentTypes, settings.chunkCapacity);
-        Chunk              &chunk = target.chunks.back();
+        Archetype  &target          = *archetypes[archetypeIndex];
+        std::size_t targetChunkIndex = target.chunks.size();
+        if (!target.chunks.empty() && target.chunks.back().count < settings.chunkCapacity)
+        {
+            targetChunkIndex = target.chunks.size() - 1u;
+        }
+        else
+        {
+            // Search earlier chunks before paying for a fresh block; churn
+            // leaves holes behind that would otherwise stay reserved for the
+            // lifetime of the storage. Scanning back-to-front reuses the most
+            // recently populated chunk first, which keeps eviction-friendly
+            // locality.
+            for (std::size_t chunkIndex = target.chunks.size(); chunkIndex > 0; --chunkIndex)
+            {
+                if (target.chunks[chunkIndex - 1u].count < settings.chunkCapacity)
+                {
+                    targetChunkIndex = chunkIndex - 1u;
+                    break;
+                }
+            }
+            if (targetChunkIndex == target.chunks.size())
+            {
+                target.chunks.emplace_back(target.signature, componentTypes, settings.chunkCapacity);
+                targetChunkIndex = target.chunks.size() - 1u;
+            }
+        }
+        Chunk              &chunk = target.chunks[targetChunkIndex];
         const std::uint32_t row   = chunk.count;
         for (std::size_t targetColumn = 0; targetColumn < target.signature.size(); ++targetColumn)
         {
@@ -469,13 +496,16 @@ struct Storage::Impl
         }
         chunk.entities.push_back(entity);
         ++chunk.count;
-        outChunk = static_cast<std::uint32_t>(target.chunks.size() - 1u);
+        outChunk = static_cast<std::uint32_t>(targetChunkIndex);
         outRow   = row;
         return true;
     }
 
     // Swap-removes a row: destroys the values, moves the last row into the
     // hole (copy + destroy), and fixes the moved entity's stored location.
+    // A chunk emptied by the removal is released (swap-popped, with the
+    // former back chunk's rows retargeted) so churn does not retain every
+    // block ever allocated.
     void eraseAt(std::uint32_t archetypeIndex, std::uint32_t chunkIndex, std::uint32_t row)
     {
         Archetype          &archetype = *archetypes[archetypeIndex];
@@ -500,6 +530,27 @@ struct Storage::Impl
         }
         chunk.entities.pop_back();
         --chunk.count;
+        if (chunk.count == 0u && archetype.chunks.size() > 1u)
+            releaseArchetypeChunk(archetype, chunkIndex);
+    }
+
+    // Removes one empty chunk from the archetype by swapping it with the
+    // back chunk. Rows of the former back chunk now live at chunkIndex, so
+    // their stored locations are retargeted; the removed entity's own slot
+    // is expected to be rebuilt by the caller.
+    void releaseArchetypeChunk(Archetype &archetype, std::uint32_t chunkIndex) noexcept
+    {
+        const std::size_t backIndex = archetype.chunks.size() - 1u;
+        if (chunkIndex != backIndex)
+        {
+            archetype.chunks[chunkIndex] = std::move(archetype.chunks[backIndex]);
+            for (const Entity movedEntity : archetype.chunks[chunkIndex].entities)
+            {
+                const std::uint32_t movedSlot = encodeSlot(movedEntity);
+                entities[movedSlot].chunk = chunkIndex;
+            }
+        }
+        archetype.chunks.pop_back();
     }
 
     StorageOptions                               settings;
@@ -611,8 +662,9 @@ ComponentId Storage::registerComponent(const ComponentDescription &description, 
 }
 
 // Pops a free slot or grows the slot vector, places the entity in archetype
-// 0 (no components), and bumps the alive count. A reserved slot is returned
-// to the free list on allocation failure.
+// 0 (no components), and bumps the alive count. A slot whose allocation
+// actually completed is returned to the free list on a later failure; a
+// growth that failed before the slot existed leaves nothing to restore.
 Entity Storage::createEntity(StorageError *error)
 {
     setError(error, StorageError::None);
@@ -631,7 +683,8 @@ Entity Storage::createEntity(StorageError *error)
         setError(error, StorageError::CapacityExceeded);
         return invalidEntity;
     }
-    std::uint32_t slot = invalidIndex;
+    std::uint32_t slot        = invalidIndex;
+    bool          slotReserved = false;
     try
     {
         if (impl_->freeSlotHead != invalidIndex)
@@ -639,6 +692,7 @@ Entity Storage::createEntity(StorageError *error)
             slot                           = impl_->freeSlotHead;
             impl_->freeSlotHead            = impl_->entities[slot].nextFree;
             impl_->entities[slot].nextFree = invalidIndex;
+            slotReserved                   = true;
         }
         else
         {
@@ -649,6 +703,9 @@ Entity Storage::createEntity(StorageError *error)
             }
             slot = static_cast<std::uint32_t>(impl_->entities.size());
             impl_->entities.emplace_back();
+            // vector growth either appended the slot or threw without
+            // touching the vector, so indexing slot is safe exactly here.
+            slotReserved = true;
         }
         Impl::EntityLocation &location = impl_->entities[slot];
         const Entity          entity   = makeEntity(slot, location.generation);
@@ -664,7 +721,7 @@ Entity Storage::createEntity(StorageError *error)
     }
     catch (const std::bad_alloc &)
     {
-        if (slot != invalidIndex)
+        if (slotReserved)
         {
             impl_->entities[slot].nextFree = impl_->freeSlotHead;
             impl_->freeSlotHead            = slot;
@@ -674,7 +731,7 @@ Entity Storage::createEntity(StorageError *error)
     }
     catch (const std::length_error &)
     {
-        if (slot != invalidIndex)
+        if (slotReserved)
         {
             impl_->entities[slot].nextFree = impl_->freeSlotHead;
             impl_->freeSlotHead            = slot;

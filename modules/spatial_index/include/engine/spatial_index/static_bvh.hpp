@@ -264,20 +264,18 @@ public:
 
     // Area query: appends the indices of items whose bounds intersect `area`
     // and whose categoryMask overlaps `categoryMask` (0 disables the query).
-    // Traversal is iterative with a fixed 128-entry stack; a tree deeper than
-    // that aborts the query with partial results (visible in the statistics).
+    // Traversal is iterative; trees deeper than the inline stack spill to a
+    // heap-backed buffer instead of truncating results.
     QueryStatistics query(const Aabb &area, std::vector<std::uint32_t> &out,
         std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
     {
         QueryStatistics stats{};
         if (!area.valid() || nodes_.empty() || categoryMask == 0)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t                    stackSize = 0;
-        stack[stackSize++]                       = 0u;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(0u);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node         &node  = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !node.bounds.intersects(area))
@@ -296,13 +294,8 @@ public:
                     }
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }
@@ -318,12 +311,10 @@ public:
             || !std::isfinite(center[1]) || !std::isfinite(center[2])
             || !std::isfinite(radius) || radius < 0.0f)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t stackSize = 0;
-        stack[stackSize++] = 0u;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(0u);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node &node = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsSphereValid(node.bounds, center, radius))
@@ -343,13 +334,8 @@ public:
                     }
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }
@@ -362,12 +348,10 @@ public:
         QueryStatistics stats{};
         if (!frustum.valid() || nodes_.empty() || categoryMask == 0)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t stackSize = 0;
-        stack[stackSize++] = 0u;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(0u);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node &node = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !query_detail::intersectsFrustumValid(node.bounds, frustum))
@@ -386,32 +370,25 @@ public:
                     }
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }
 
     // Ray query: appends exact item-bound hits in BVH traversal order.
-    // Distance is in world units; out is not cleared. Traversal uses a fixed
-    // stack and returns partial results if it would overflow.
+    // Distance is in world units; out is not cleared. Deep or skewed trees
+    // spill to a heap-backed stack instead of truncating results.
     QueryStatistics raycast(const Ray3 &ray, std::vector<StaticRayHit> &out,
         std::uint64_t categoryMask = std::numeric_limits<std::uint64_t>::max()) const
     {
         QueryStatistics stats{};
         if (nodes_.empty() || categoryMask == 0)
             return stats;
-        std::array<std::uint32_t, 128> stack{};
-        std::size_t stackSize = 0;
-        stack[stackSize++] = 0u;
-        while (stackSize != 0)
+        query_detail::TraversalStack stack(0u);
+        while (!stack.empty())
         {
-            const std::uint32_t index = stack[--stackSize];
+            const std::uint32_t index = stack.pop();
             const Node &node = nodes_[index];
             ++stats.nodesVisited;
             if ((node.categoryMask & categoryMask) == 0 || !intersectRay(node.bounds, ray))
@@ -431,13 +408,8 @@ public:
                     }
                 }
             }
-            else
-            {
-                if (stackSize + 2u > stack.size())
-                    return stats;
-                stack[stackSize++] = node.right;
-                stack[stackSize++] = node.left;
-            }
+            else if (!stack.pushChildren(node.right, node.left))
+                return stats;
         }
         return stats;
     }

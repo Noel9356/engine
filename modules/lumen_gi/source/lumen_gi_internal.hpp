@@ -317,6 +317,24 @@ struct GiTlasNode
 // Snapshot of the pbr environment + direct lights taken each evaluate().
 struct GiEnvironmentSnapshot
 {
+    // Direct light with the per-light constants the shading loop needs
+    // (normalized direction, cone cosines) precomputed at snapshot time, so
+    // per-texel evaluation does not re-normalize or re-trigonometrise every
+    // frame. Inactive lights (zero intensity or black color) are dropped.
+    struct PreparedDirectLight
+    {
+        direct_lighting::DirectLightType type = direct_lighting::DirectLightType::Directional;
+        glm::vec3 color{0.0f};
+        float     intensity   = 0.0f;
+        // Directional: unit direction toward the light. Spot: unit cone axis.
+        glm::vec3 direction{0.0f};
+        glm::vec3 position{0.0f};
+        float     range       = 0.0f;
+        float     innerCosine = 0.0f;
+        float     outerCosine = 0.0f;
+        float     coneDivisor = 1.0e-5f;
+    };
+
     bool     hasSun       = false;
     bool     sunEnabled   = false;
     glm::vec3 sunDirection{0.45f, 0.62f, 0.35f}; // toward the sun (unit)
@@ -327,6 +345,7 @@ struct GiEnvironmentSnapshot
     float     ambientIntensity = 0.5f;
     bool      hasDirectLights  = false;
     std::vector<direct_lighting::DirectLight> directLights;
+    std::vector<PreparedDirectLight>          preparedLights;
     float            exposure   = 1.0f;
     pbr::ToneMapping toneMapping = pbr::ToneMapping::AcesFilmic;
 
@@ -449,6 +468,22 @@ struct GiTexelWork
     std::uint32_t texelEnd   = 0;
 };
 
+// Priority key ordering cards into the lighting budgets: stale cards first,
+// then nearer ones.
+struct GiCardOrderKey
+{
+    std::uint64_t ageFrames;
+    float         cameraDistance;
+    std::uint32_t index;
+};
+
+// One probe update queued for the frame.
+struct GiProbeItem
+{
+    std::uint32_t level;
+    std::uint32_t slot;
+};
+
 // The whole pipeline state owned by the module instance. Mutators (surface
 // registry, setView, evaluate, config) hold the module mutex; stage tasks
 // touch disjoint buffers and read only state frozen before they run.
@@ -540,6 +575,23 @@ struct GiPipelineState
     std::atomic<std::uint32_t> gatherRaysThisFrame{0};
     std::atomic<std::uint64_t> totalRaysTraced{0};
     std::atomic<std::uint32_t> framesSkippedStatic{0};
+
+    // Per-frame work lists and scratch, reused across frames: capacities
+    // persist (the largest frame sets the footprint) and each stage clears
+    // its list before refilling, so a steady-state frame does not hit the
+    // allocator. Task stages read disjoint entries; no stage runs while a
+    // later stage rebuilds one of these lists.
+    std::vector<std::uint32_t>  scratchPendingCards;
+    std::vector<GiTexelWork>    scratchCaptureWork;
+    std::vector<std::uint32_t>  scratchFinishingCards;
+    std::vector<GiCardOrderKey> scratchDirectKeys;
+    std::vector<GiCardOrderKey> scratchIndirectKeys;
+    std::vector<GiTexelWork>    scratchDirectWork;
+    std::vector<GiTexelWork>    scratchIndirectWork;
+    std::vector<std::size_t>    scratchOffsets;
+    std::vector<glm::vec3>      scratchRadiance;   // indirect gather output, committed after the stage
+    std::vector<GiProbeItem>    scratchProbeItems;
+    std::vector<std::uint8_t>   scratchTaken;      // probe refresh dedup flags (zeroed per level)
 
     GiCard &card(std::uint32_t flatIndex)
     {
