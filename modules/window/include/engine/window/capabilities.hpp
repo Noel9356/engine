@@ -20,8 +20,8 @@ namespace window
 // changes so consumers can reject mismatched providers. History:
 // 9 -> 10 added mouse button state and button events.
 // 10 -> 11 added cursor movement, scroll, and Unicode text-input events.
-// 11 -> 12 adds standardized gamepad events and a platform-neutral touch ingress; 12 -> 13 adds clipboard text access; 13 -> 14 adds dropped-file batches.
-inline constexpr std::uint32_t windowCapabilityAbi = 14u;
+// 11 -> 12 added standardized gamepad events and a platform-neutral touch ingress; 12 -> 13 added clipboard text access; 13 -> 14 added dropped-file batches; 14 -> 15 added runtime window control (visibility, attributes, opacity, focus/attention, iconify/restore/maximize), position/content-scale queries, event waiting, the Hidden cursor mode, and twelve text-editing keys.
+inline constexpr std::uint32_t windowCapabilityAbi = 15u;
 
 // Opaque window identifier; 0 (invalidWindow) means "none".
 using WindowHandle = std::uint32_t;
@@ -112,16 +112,33 @@ enum class Key : std::uint32_t
     LeftAlt,
     RightShift,
     RightControl,
-    RightAlt
+    RightAlt,
+
+    // Text-editing and console-toggle keys; Slash is the last tracked key
+    // (value 63) because the key state mask is exactly 64 bits wide.
+    Delete,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    Grave,
+    Minus,
+    Equal,
+    Comma,
+    Period,
+    Slash
 };
 
-static_assert(static_cast<std::uint32_t>(Key::RightAlt) < 64, "Window key masks require Key values below 64");
+static_assert(static_cast<std::uint32_t>(Key::Slash) < 64, "Window key masks require Key values below 64");
 
-// Normal shows the OS cursor; Captured hides and confines it (raw motion
-// where the platform supports it) for camera-style controls.
+// Normal shows the OS cursor; Hidden only makes it invisible while it hovers
+// the window; Captured hides and confines it (raw motion where the platform
+// supports it) for camera-style controls.
 enum class CursorMode : std::uint32_t
 {
     Normal = 0,
+    Hidden,
     Captured
 };
 
@@ -281,6 +298,30 @@ struct TouchEventDescription
     float pressure = 1.0f;
 };
 
+// Live window state snapshot returned by getWindowAttributes. The headless
+// backend reports the requested state (it has no window manager), the GLFW
+// backend queries the window system. contentScale* convert logical window
+// units to framebuffer pixels on HiDPI displays (1.0 when unknown or uniform).
+struct WindowAttributes
+{
+    bool focused   = false;
+    bool visible   = true;
+    bool iconified = false;
+    bool maximized = false;
+
+    bool resizable = true;
+    bool decorated = true;
+    bool floating  = false;
+
+    // True while the cursor hovers the window's client area (GLFW only).
+    bool hover = false;
+
+    float opacity = 1.0f;
+
+    float contentScaleX = 1.0f;
+    float contentScaleY = 1.0f;
+};
+
 // Creation parameters. The has* flags distinguish "caller set this" from the
 // struct default so module configuration only fills genuinely unset fields;
 // size limits of 0 mean "no limit".
@@ -305,10 +346,26 @@ struct WindowDescription
     bool decorated = true;
     bool floating  = false;
 
+    // Open the window maximized (GLFW_MAXIMIZED hint); the restore size is
+    // the requested width/height clamped into the size limits.
+    bool maximized = false;
+
+    // Steal focus when the window is shown (GLFW_FOCUS_ON_SHOW hint).
+    bool focusOnShow = true;
+
+    // Whole-window opacity in [0, 1] applied when the window is created;
+    // 1.0 means fully opaque. Not all platforms support translucent windows;
+    // the value is still tracked and reported by getWindowAttributes.
+    float opacity = 1.0f;
+
     bool hasResizable = false;
     bool hasVisible   = false;
     bool hasDecorated = false;
     bool hasFloating  = false;
+    bool hasMaximized = false;
+
+    bool hasFocusOnShow = false;
+    bool hasOpacity     = false;
 
     // Queue capacity per window. Only consulted when hasEventQueueCapacity
     // is set (0 there means unbounded); otherwise the configured
@@ -368,10 +425,41 @@ struct WindowCapability
     bool (*setSize)(void *self, WindowHandle window, std::uint32_t width, std::uint32_t height);
 
     bool (*setPosition)(void *self, WindowHandle window, std::int32_t x, std::int32_t y);
+    bool (*getPosition)(void *self, WindowHandle window, std::int32_t *outX, std::int32_t *outY);
+
+    void (*setOpacity)(void *self, WindowHandle window, float opacity);
+    void (*setVisible)(void *self, WindowHandle window, bool visible);
+
+    void (*setResizable)(void *self, WindowHandle window, bool resizable);
+    void (*setDecorated)(void *self, WindowHandle window, bool decorated);
+    void (*setFloating)(void *self, WindowHandle window, bool floating);
+
+    void (*focus)(void *self, WindowHandle window);
+    void (*requestAttention)(void *self, WindowHandle window);
+    void (*iconify)(void *self, WindowHandle window);
+    void (*restore)(void *self, WindowHandle window);
+    void (*maximize)(void *self, WindowHandle window);
+
+    // One-shot snapshot of the live window state; false on unknown handles.
+    bool (*getWindowAttributes)(void *self, WindowHandle window, WindowAttributes *outAttributes);
+
     void (*getSize)(void *self, WindowHandle window, std::uint32_t *outWidth, std::uint32_t *outHeight);
     void (*getFramebufferSize)(void *self, WindowHandle window, std::uint32_t *outWidth, std::uint32_t *outHeight);
 
+    // Content scale of a window's monitor (HiDPI), for UI scaling.
+    bool (*getContentScale)(void *self, WindowHandle window, float *outX, float *outY);
+
+    // True when captured cursor mode can report raw (unaccelerated) motion
+    // on the active platform; independent of any particular window.
+    bool (*rawMouseMotionSupported)(void *self);
+
     void (*pollEvents)(void *self);
+
+    // Blocks the calling thread until events arrive or timeoutSeconds pass
+    // (idle-friendly alternative to repeated pollEvents). timeoutSeconds
+    // <= 0 waits indefinitely. Gamepad state is re-polled after waking.
+    void (*waitEvents)(void *self, double timeoutSeconds);
+
     bool (*popEvent)(void *self, WindowHandle window, WindowEvent *outEvent);
 
     std::uint32_t (*popEvents)(void *self, WindowHandle window, WindowEvent *outEvents, std::uint32_t capacity);

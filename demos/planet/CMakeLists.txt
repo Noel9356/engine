@@ -6,6 +6,7 @@ engine_add_application(
     source/demo/planet_camera_input.cpp
     source/demo/planet_chunk_renderer.cpp
     source/demo/planet_demo_tests.cpp
+    source/demo/planet_frame_timing.cpp
     source/demo/planet_viewpoints.cpp
     CAPABILITIES
     window

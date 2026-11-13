@@ -11,6 +11,9 @@ add_library(
     engine_module_skeletal_animation
     MODULE
     source/skeletal_animation.cpp
+    source/sampler.cpp
+    source/event_collector.cpp
+    source/blending.cpp
     source/lua_bridge.cpp
 )
 target_compile_definitions(

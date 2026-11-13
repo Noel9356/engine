@@ -45,14 +45,32 @@ public:
 
     bool setSize(WindowRecord &record, std::uint32_t width, std::uint32_t height) override;
     bool setPosition(WindowRecord &record, std::int32_t x, std::int32_t y) override;
+    bool getPosition(const WindowRecord &record, std::int32_t *outX, std::int32_t *outY) const override;
+
+    void setOpacity(WindowRecord &record, float opacity) override;
+    void setVisible(WindowRecord &record, bool visible) override;
+    void setResizable(WindowRecord &record, bool resizable) override;
+    void setDecorated(WindowRecord &record, bool decorated) override;
+    void setFloating(WindowRecord &record, bool floating) override;
+    void focus(const WindowRecord &record) override;
+    void requestAttention(const WindowRecord &record) override;
+    void iconify(WindowRecord &record) override;
+    void restore(WindowRecord &record) override;
+    void maximize(WindowRecord &record) override;
+    bool getWindowAttributes(const WindowRecord &record, WindowAttributes *outAttributes) const override;
+    bool getContentScale(const WindowRecord &record, float *outX, float *outY) const override;
+    bool rawMouseMotionSupported() const override;
 
     void pollEvents() override;
+    void waitEvents(double timeoutSeconds) override;
 
     void setCursorMode(const WindowRecord &record, CursorMode mode) override;
 
     bool cursorPosition(const WindowRecord &record, double *outX, double *outY) const override;
     bool setClipboardText(const WindowRecord &record, const char *text) override;
-    bool copyClipboardText(const WindowRecord &record, std::string &output) const override;
+    bool copyClipboardText(const WindowRecord &record, const char **outText) const override;
+
+    void configureGamepads(const GamepadPollingOptions &options) override;
 
     const char *const *requiredInstanceExtensions(std::uint32_t *outCount) const override;
 
@@ -71,6 +89,8 @@ private:
 
     std::array<GamepadSnapshot, 16> gamepads_{};
     std::vector<WindowRecord *> windows_;
+
+    GamepadPollingOptions gamepadOptions_{};
 };
 
 } // namespace window

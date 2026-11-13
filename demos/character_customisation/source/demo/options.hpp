@@ -28,6 +28,7 @@ struct Options
     bool          hidePanel = false;           // --hide-panel: capture the viewport without the studio UI.
     std::string   viewName      = "character"; // --view character|benchmark|sun; picks the screen.
     bool          characterTest = false;       // --character-test: run the assembly test operations and exit.
+    bool          characterLab = false;        // --character-lab: run the merged character_lab Lua exercise.
     std::string   characterDrive;              // --character-drive: named configuration for the character screen.
 };
 

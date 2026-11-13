@@ -15,6 +15,10 @@ add_library(
     engine_module_input_actions
     MODULE
     source/input_actions.cpp
+    source/device_state.cpp
+    source/context_registry.cpp
+    source/window_adapter.cpp
+    source/frame_evaluator.cpp
     source/lua_bridge.cpp
 )
 target_compile_definitions(

@@ -1,10 +1,12 @@
 [window]
-backend              = "auto"
-event_queue_capacity = 4096
-height               = 720
-maximum_height       = 0
-maximum_width        = 0
-minimum_height       = 0
-minimum_width        = 0
-title                = "engine"
-width                = 1280
+backend                = "auto"
+event_queue_capacity   = 4096
+gamepad_axis_threshold = 0.0005
+gamepad_polling        = true
+height                 = 720
+maximum_height         = 0
+maximum_width          = 0
+minimum_height         = 0
+minimum_width          = 0
+title                  = "engine"
+width                  = 1280

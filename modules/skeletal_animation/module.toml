@@ -1,4 +1,5 @@
 config_keys           = [
+    "skeletal_animation.cache_inverse_bind_pose",
     "skeletal_animation.default_interpolation",
     "skeletal_animation.maximum_blend_poses",
     "skeletal_animation.maximum_clips",

@@ -17,6 +17,9 @@ Planet::Planet(const PlanetGenerationParams &params, TaskScheduler *taskSchedule
     , octree_(params_, field_)
     , taskScheduler_(taskScheduler)
 {
+    // Reserve the whole cache capacity up front so streaming never rehashes on the main thread.
+    readyMeshes_.reserve(static_cast<std::size_t>(params_.chunkCacheCapacity) + 1024u);
+
     // Dedicated build pool: one thread per permitted concurrent build, at
     // least one (see requestBuild - the pool fully replaces the scheduler
     // path for chunk builds).
@@ -65,184 +68,140 @@ void Planet::update(const Vec3 &eyeLocal)
     const auto updateStart = std::chrono::steady_clock::now();
     ++updateCount_;
 
-    // 1. Collect finished builds from the previous frames (workers push into
-    //    the pending map; the main thread owns the ready cache).
-    collectPendingBuilds();
+    // 1. Collect finished builds from the previous frames (workers push into the pending list; the main thread owns
+    //    the ready cache).
+    const std::uint32_t delivered = collectPendingBuilds();
 
     // 2. Select the visible set for this eye.
     octree_.selectVisible(eyeLocal, lastVisible_);
     const std::vector<ChunkCoord> &visible = lastVisible_;
 
-    // 2b. Conforming masks. A chunk's mask is a pure function of the sorted
-    // visible list and its coordinate (each face segment conforms when the
-    // depth-(depth-1) cell beyond it is itself a rendered leaf - see
-    // octree.hpp), so the masks only change when the visible set changes.
-    // Chunks whose stored mesh was built under a different mask are rebuilt;
-    // the stale mesh keeps rendering until the conforming rebuild lands.
+    // 2b. Conforming masks. A chunk's mask is a pure function of the sorted visible list and its coordinate (each
+    // face segment conforms when the depth-(depth-1) cell beyond it is itself a rendered leaf - see octree.hpp), so
+    // the masks only change when the visible set changes. Chunks whose stored mesh was built under a different mask
+    // are rebuilt; the stale mesh keeps rendering until the conforming rebuild lands.
     if (visible != previousVisible_)
     {
-        conformMasks_.clear();
-        for (const ChunkCoord &coord : visible)
+        visibleLeafSet_.assign(visible);
+        visibleMasks_.resize(visible.size());
+        for (std::size_t index = 0; index < visible.size(); ++index)
         {
-            ConformMask mask;
-            octree_.computeConformMask(coord, visible, mask);
-            conformMasks_.emplace(makeChunkKey(coord.depth, coord.x, coord.y, coord.z), mask);
+            octree_.computeConformMask(visible[index], visibleLeafSet_, visibleMasks_[index]);
         }
         previousVisible_ = visible;
     }
 
-    // 3. Request missing meshes (OLD scan order - bisect).
-    std::uint32_t newRequests    = 0;
+    // 3. One pass over the visible set: stamp ready meshes (eviction age + statistics) and request missing or
+    //    mask-stale meshes while the build queue has room.
     std::uint32_t inflightBuilds = 0;
     {
         std::lock_guard<std::mutex> lock(inflightMutex_);
         inflightBuilds = static_cast<std::uint32_t>(inflightBuild_.size());
     }
-    if (inflightBuilds < params_.maxConcurrentBuilds)
-    {
-        for (const ChunkCoord &coord : visible)
-        {
-            const ChunkKey key = makeChunkKey(coord.depth, coord.x, coord.y, coord.z);
-            const auto     maskIt = conformMasks_.find(key);
-            const ConformMask mask = maskIt != conformMasks_.end() ? maskIt->second : ConformMask{};
-            const auto     readyIt = readyMeshes_.find(key);
-            if (readyIt != readyMeshes_.end() && readyIt->second.conformMask == mask)
-            {
-                continue;
-            }
-            bool alreadyInflight = false;
-            {
-                std::lock_guard<std::mutex> lock(inflightMutex_);
-                alreadyInflight = inflightBuild_.find(key) != inflightBuild_.end();
-            }
-            if (alreadyInflight)
-            {
-                continue;
-            }
-            if (newRequests >= params_.maxNewBuildsPerUpdate || inflightBuilds + newRequests >= params_.maxConcurrentBuilds)
-            {
-                break;
-            }
-            requestBuild(coord, mask);
-            ++newRequests;
-        }
-    }
-    std::uint32_t lastNewRequests = newRequests;
-
-    // 3b. Inline build slice. The dedicated pool threads compete with the
-    // host's render workers for cores; on small machines a heavy frame can
-    // starve them to a trickle. Building a bounded slice ON the calling
-    // thread guarantees the visible set converges: the slice costs a few
-    // milliseconds per update and every mesh is a pure function of
-    // (params, coordinate, mask), so this changes scheduling only, never
-    // contents. Completed meshes go through the same pending handoff.
-    {
-        const auto inlineDeadline = std::chrono::steady_clock::now()
-            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(inlineBuildSliceSeconds_));
-        while (std::chrono::steady_clock::now() < inlineDeadline)
-        {
-            ChunkCoord coord{};
-            ConformMask conformMask{};
-            {
-                std::lock_guard<std::mutex> lock(buildQueueMutex_);
-                if (buildQueue_.empty())
-                {
-                    break;
-                }
-                coord       = buildQueue_.front().first;
-                conformMask = buildQueue_.front().second;
-                buildQueue_.pop_front();
-            }
-            try
-            {
-                ChunkMesh mesh = buildChunkMesh(params_, field_, coord, conformMask);
-                std::lock_guard<std::mutex> lock(pendingMutex_);
-                pendingBuilds_.push_back(PendingBuild{coord, conformMask, std::move(mesh)});
-            }
-            catch (...)
-            {
-                std::lock_guard<std::mutex> lock(pendingMutex_);
-                pendingFailures_.push_back(coord);
-            }
-        }
-    }
-
-    // 4. Refresh selection stamps (used by eviction) and statistics.
-    std::uint64_t triangles   = 0;
-    std::uint64_t vertexCount = 0;
+    const bool    mayRequest   = inflightBuilds < params_.maxConcurrentBuilds;
+    bool          requestFull  = !mayRequest;
+    std::uint32_t newRequests  = 0;
+    std::uint64_t triangles    = 0;
+    std::uint64_t vertexCount  = 0;
     std::uint32_t readyVisible = 0;
-    for (const ChunkCoord &coord : visible)
+    for (std::size_t index = 0; index < visible.size(); ++index)
     {
-        const ChunkKey key = makeChunkKey(coord.depth, coord.x, coord.y, coord.z);
-        const auto     it  = readyMeshes_.find(key);
-        if (it != readyMeshes_.end())
+        const ChunkCoord &coord = visible[index];
+        const ChunkKey    key   = makeChunkKey(coord.depth, coord.x, coord.y, coord.z);
+        const auto        readyIt = readyMeshes_.find(key);
+        if (readyIt != readyMeshes_.end())
         {
             ++readyVisible;
-            it->second.lastSelectedUpdate = updateCount_;
-            triangles += it->second.mesh.triangleCount;
-            vertexCount += it->second.mesh.terrainVertices.size() + it->second.mesh.waterVertices.size();
-        }
-    }
-
-    evictStaleMeshes();
-
-    if (updateCount_ % 100 == 0)
-    {
-        std::uint32_t depthHistogram[16] = {};
-        for (const ChunkCoord &coord : visible)
-        {
-            if (coord.depth < 16)
-            {
-                ++depthHistogram[coord.depth];
-            }
-        }
-        std::fprintf(stderr, "planet-diag: update %llu visible %zu readyVisible %u requests %u cache %zu started %u completed %u eye(%.1f,%.1f,%.1f) depths",
-            static_cast<unsigned long long>(updateCount_), visible.size(), readyVisible, lastNewRequests, readyMeshes_.size(),
-            workerStartedCount_.load(), workerCompletedCount_.load(),
-            eyeLocal.x, eyeLocal.y, eyeLocal.z);
-        for (std::uint32_t depth = 0; depth < 16; ++depth)
-        {
-            if (depthHistogram[depth] != 0)
-            {
-                std::fprintf(stderr, " d%u:%u", depth, depthHistogram[depth]);
-            }
-        }
-        // Max center distance per depth (up to a few leaves each) - verifies
-        // where each depth's leaves actually sit.
-        double maxDistPerDepth[16] = {};
-        for (const ChunkCoord &coord : visible)
-        {
-            if (coord.depth >= 16)
+            readyIt->second.lastSelectedUpdate = updateCount_;
+            triangles += readyIt->second.mesh.triangleCount;
+            vertexCount += readyIt->second.mesh.terrainVertices.size() + readyIt->second.mesh.waterVertices.size();
+            if (readyIt->second.conformMask == visibleMasks_[index])
             {
                 continue;
             }
-            const double nodeSize = chunkSizeMeters(params_, coord.depth);
-            const Vec3 nodeCenter{-params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.x) + 0.5),
-                -params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.y) + 0.5),
-                -params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.z) + 0.5)};
-            const double dist = length(nodeCenter - eyeLocal);
-            maxDistPerDepth[coord.depth] = std::max(maxDistPerDepth[coord.depth], dist);
         }
-        std::fprintf(stderr, " maxdist");
-        for (std::uint32_t depth = 0; depth < 16; ++depth)
+        if (requestFull)
         {
-            if (depthHistogram[depth] != 0)
-            {
-                std::fprintf(stderr, " d%u:%.0f", depth, maxDistPerDepth[depth]);
-            }
+            continue;
         }
-        std::fprintf(stderr, "\n");
+        bool alreadyInflight = false;
+        {
+            std::lock_guard<std::mutex> lock(inflightMutex_);
+            alreadyInflight = inflightBuild_.find(key) != inflightBuild_.end();
+        }
+        if (alreadyInflight)
+        {
+            continue;
+        }
+        if (newRequests >= params_.maxNewBuildsPerUpdate || inflightBuilds + newRequests >= params_.maxConcurrentBuilds)
+        {
+            requestFull = true;
+            continue;
+        }
+        requestBuild(coord, visibleMasks_[index]);
+        ++newRequests;
+    }
+
+    // 3b. Starvation fallback. The dedicated pool threads compete with the host's render workers for cores; on a
+    // machine small enough that they receive no CPU at all, nothing would ever finish. Building a chunk on the calling
+    // thread costs a full chunk build, so it only happens after the pool has delivered nothing for a sustained run of
+    // updates with work queued. Every mesh is a pure function of (params, coordinate, mask), so this changes
+    // scheduling only, never contents.
+    bool queuedWork = false;
+    {
+        std::lock_guard<std::mutex> lock(buildQueueMutex_);
+        queuedWork = !buildQueue_.empty();
+    }
+    starvedUpdates_ = (queuedWork && delivered == 0) ? starvedUpdates_ + 1 : 0;
+    if (starvedUpdates_ >= kStarvedUpdatesBeforeInlineBuild)
+    {
+        buildOneInline();
+        starvedUpdates_ = 0;
+    }
+
+    // 4. Eviction scans the whole cache; ready meshes only age out over hundreds of updates, so a coarse cadence
+    // bounds the same set while keeping the scan off most frames.
+    if (updateCount_ % kEvictionScanInterval == 0)
+    {
+        evictStaleMeshes();
     }
 
     statistics_.chunksVisible    = static_cast<std::uint32_t>(visible.size());
     statistics_.chunksReady      = readyVisible;
-    statistics_.chunksBuilding   = inflightBuilds + lastNewRequests;
+    statistics_.chunksBuilding   = inflightBuilds + newRequests;
     statistics_.chunksReadyTotal = static_cast<std::uint32_t>(readyMeshes_.size());
     statistics_.triangleCount    = triangles;
     statistics_.verticesTotal    = vertexCount;
     statistics_.octreeDepthUsed  = params_.derivedMaxDepth;
     statistics_.lastUpdateMilliseconds
         = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
+}
+
+void Planet::buildOneInline()
+{
+    ChunkCoord  coord{};
+    ConformMask conformMask{};
+    {
+        std::lock_guard<std::mutex> lock(buildQueueMutex_);
+        if (buildQueue_.empty())
+        {
+            return;
+        }
+        coord       = buildQueue_.front().first;
+        conformMask = buildQueue_.front().second;
+        buildQueue_.pop_front();
+    }
+    try
+    {
+        ChunkMesh mesh = buildChunkMesh(params_, field_, coord, conformMask);
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        pendingBuilds_.push_back(PendingBuild{coord, conformMask, std::move(mesh)});
+    }
+    catch (...)
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        pendingFailures_.push_back(coord);
+    }
 }
 
 std::uint32_t Planet::copyVisibleChunks(PlanetChunkView *output, std::uint32_t capacity)
@@ -373,16 +332,6 @@ void Planet::buildWorkerLoop()
             conformMask = buildQueue_.front().second;
             buildQueue_.pop_front();
         }
-        {
-            std::lock_guard<std::mutex> lock(pendingMutex_);
-            ++workerStartedCount_;
-            if (workerStartedCount_.load() <= 24)
-            {
-                std::fprintf(stderr, "  worker START d%u(%u,%u,%u) at %.3f s\n", coord.depth, coord.x, coord.y, coord.z,
-                    std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
-            }
-        }
-        const auto buildStart = std::chrono::steady_clock::now();
         ChunkMesh mesh;
         try
         {
@@ -395,7 +344,6 @@ void Planet::buildWorkerLoop()
             std::fprintf(stderr, "  build EXCEPTION d%u(%u,%u,%u): %s\n", coord.depth, coord.x, coord.y,
                 coord.z, error.what());
             std::lock_guard<std::mutex> lock(pendingMutex_);
-            ++workerCompletedCount_;
             pendingFailures_.push_back(coord);
             continue;
         }
@@ -403,26 +351,17 @@ void Planet::buildWorkerLoop()
         {
             std::fprintf(stderr, "  build EXCEPTION d%u(%u,%u,%u): unknown\n", coord.depth, coord.x, coord.y, coord.z);
             std::lock_guard<std::mutex> lock(pendingMutex_);
-            ++workerCompletedCount_;
             pendingFailures_.push_back(coord);
             continue;
         }
         {
             std::lock_guard<std::mutex> lock(pendingMutex_);
-            ++workerCompletedCount_;
-            if (workerCompletedCount_.load() <= 24)
-            {
-                std::fprintf(stderr, "  worker DONE  d%u(%u,%u,%u) at %.3f s, build %.1f ms\n", coord.depth, coord.x,
-                    coord.y, coord.z,
-                    std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(),
-                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count());
-            }
             pendingBuilds_.push_back(PendingBuild{coord, conformMask, std::move(mesh)});
         }
     }
 }
 
-void Planet::collectPendingBuilds()
+std::uint32_t Planet::collectPendingBuilds()
 {
     std::vector<PendingBuild> finished;
     std::vector<ChunkCoord>   failures;
@@ -431,6 +370,7 @@ void Planet::collectPendingBuilds()
         finished.swap(pendingBuilds_);
         failures.swap(pendingFailures_);
     }
+    const std::uint32_t deliveredCount = static_cast<std::uint32_t>(finished.size());
 
     for (PendingBuild &entry : finished)
     {
@@ -463,6 +403,7 @@ void Planet::collectPendingBuilds()
         std::lock_guard<std::mutex> lock(inflightMutex_);
         inflightBuild_.erase(makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
     }
+    return deliveredCount;
 }
 
 void Planet::evictStaleMeshes()

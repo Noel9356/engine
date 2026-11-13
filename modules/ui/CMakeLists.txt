@@ -49,6 +49,14 @@ add_library(
     engine_module_ui
     MODULE
     source/ui.cpp
+    source/ui_mappings.cpp
+    source/ui_context.cpp
+    source/ui_input.cpp
+    source/ui_widgets.cpp
+    source/ui_layout.cpp
+    source/ui_popup.cpp
+    source/ui_table.cpp
+    source/ui_fonts_style.cpp
 )
 
 target_compile_definitions(

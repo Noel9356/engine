@@ -21,6 +21,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -86,11 +87,12 @@ private:
     engine::character::InstanceId instanceByName(const std::string &name) const;
     bool                          rebuildAssembly();  // (re)create the assembly for the active body plan
     bool                          setPlan(int plan);  // 0 humanoid, 1 centaur, 2 naga, 3 quadruped
-    bool                          setQuadSpecies(int species); // 0 horse, 1 wolf, 2 deer, 3 bull
+    bool                          setQuadSpecies(int species); // index into the generated species tables
     bool                          setHeadCount(int count);     // 1..3 heads on the neck connector
     bool                          setWingPairs(int pairs);     // 0..3 stacked wing pairs
     bool                          setArmPairs(int pairs);      // 1..3 arm pairs along the torso
-    bool                          setTail(bool present);       // reptile tail on humanoid/centaur
+    bool                          setTail(bool present);       // active tail variant on humanoid/centaur
+    bool                          setTailPart(const std::string &partId); // swap the tail variant live
     bool                          addWingPairToSlot(int slot);
     void                          applyParameterHeights(); // keeps the feet/hooves near the ground plane
     void                          resetToDefault();
@@ -108,6 +110,16 @@ private:
     void submitOverlay();
     void cacheParameterDefinitions();
     const engine::character::ParameterDefinition *parameterDefinition(const char *parameterId) const;
+
+    // Panel tabs (Character Studio: Plan / Body / Parts / Motion / File).
+    void drawPlanTab();
+    void drawBodyTab();
+    void drawPartsTab();
+    void drawMotionTab();
+    void drawFileTab();
+    void uiOptionRow(const char *const *options, int optionCount, const char *idSuffix, int activeIndex,
+        float width, const std::function<void(int)> &onPick);
+    bool uiParameterSlider(const char *parameterId);
 
     // UI helpers (thin wrappers around the capability).
     void uiText(const char *text) const;
@@ -158,8 +170,9 @@ private:
     float                                           statusSeconds_       = 0.0f;
     float                                           framesPerSecond_     = 0.0f;
     std::string                                     activeHeadPart_      = "head_human";
+    std::string                                     activeTailPart_      = "tail_fox";
     int                                             activePlan_          = 0;   // body.plan index
-    int                                             quadSpecies_         = 0;   // quadruped variant index
+    int                                             quadSpecies_         = 0;   // species index (generated tables)
     int                                             headCount_           = 1;   // 1..3
     int                                             wingPairs_           = 0;   // 0..3
     int                                             armPairs_            = 1;   // 1..3
@@ -167,6 +180,12 @@ private:
     bool                                            panelFirstPlacement_ = true;
     bool                                            panelVisible_        = true;
     bool                                            userCameraFraming_   = false; // explicit CLI framing active
+    int                                             activePanelTab_      = 0;   // panel tab index
+    // Authored per-slot outward roll for stacked wing pairs (degrees, left
+    // sign). The flap driver composes with these instead of replacing them
+    // (rev-9 replaced the whole connection rotation while animating, so all
+    // stacked pairs collapsed to the same roll).
+    std::array<float, 4>                            wingSlotRolls_       = {0.0f, 0.0f, 0.0f, 0.0f};
     std::vector<engine::character::ValidationIssue> issues_;
     bool                                            created_ = false;
 

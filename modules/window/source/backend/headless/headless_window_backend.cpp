@@ -1,5 +1,7 @@
 // Headless backend implementation: window creation allocates the zeroed CPU
-// RGBA surface, setSize resizes it (copying the overlapping region), and
+// RGBA surface and seeds the tracked window state, setSize resizes it
+// (copying the overlapping region), the runtime-control calls update the
+// tracked state (iconify/restore also publish the matching events), and
 // Vulkan support exists only when ENGINE_WINDOW_HEADLESS_VULKAN is defined.
 
 #include "headless_window_backend.hpp"
@@ -18,10 +20,9 @@ namespace window
 
 // Allocates the CPU surface (width * height * 4 zeroed bytes) after
 // overflow-checking the pixel count; the framebuffer size follows the window
-// size.
+// size and the tracked window state follows the creation description.
 bool HeadlessWindowBackend::createWindow(WindowRecord &record, const WindowDescription &description)
 {
-    (void)description;
     const std::size_t width  = record.width;
     const std::size_t height = record.height;
     if (height != 0 && width > std::numeric_limits<std::size_t>::max() / height / 4)
@@ -44,6 +45,16 @@ bool HeadlessWindowBackend::createWindow(WindowRecord &record, const WindowDescr
     }
     record.framebufferWidth  = record.width;
     record.framebufferHeight = record.height;
+
+    record.resizable = description.resizable;
+    record.decorated = description.decorated;
+    record.floating  = description.floating;
+    record.visible   = description.visible;
+    record.iconified = false;
+    record.maximized = description.maximized;
+    record.opacity   = description.hasOpacity ? std::clamp(description.opacity, 0.0f, 1.0f) : 1.0f;
+    record.positionX = description.hasPosition ? description.x : 0;
+    record.positionY = description.hasPosition ? description.y : 0;
     return true;
 }
 
@@ -114,8 +125,106 @@ bool HeadlessWindowBackend::setSize(WindowRecord &record, std::uint32_t width, s
     return true;
 }
 
-bool HeadlessWindowBackend::setPosition(WindowRecord &, std::int32_t, std::int32_t)
+// There is no window system to talk to, so positions are tracked (and
+// reported by getPosition) instead of applied.
+bool HeadlessWindowBackend::setPosition(WindowRecord &record, std::int32_t x, std::int32_t y)
 {
+    record.positionX = x;
+    record.positionY = y;
+    return true;
+}
+
+bool HeadlessWindowBackend::getPosition(const WindowRecord &record, std::int32_t *outX, std::int32_t *outY) const
+{
+    if (outX == nullptr || outY == nullptr)
+    {
+        return false;
+    }
+    *outX = record.positionX;
+    *outY = record.positionY;
+    return true;
+}
+
+void HeadlessWindowBackend::setOpacity(WindowRecord &record, float opacity)
+{
+    record.opacity = std::clamp(opacity, 0.0f, 1.0f);
+}
+
+void HeadlessWindowBackend::setVisible(WindowRecord &record, bool visible)
+{
+    record.visible = visible;
+}
+
+void HeadlessWindowBackend::setResizable(WindowRecord &record, bool resizable)
+{
+    record.resizable = resizable;
+}
+
+void HeadlessWindowBackend::setDecorated(WindowRecord &record, bool decorated)
+{
+    record.decorated = decorated;
+}
+
+void HeadlessWindowBackend::setFloating(WindowRecord &record, bool floating)
+{
+    record.floating = floating;
+}
+
+// Iconify/restore publish the same Minimized/Restored events the GLFW
+// backend produces, so event-driven code can be exercised headlessly.
+void HeadlessWindowBackend::iconify(WindowRecord &record)
+{
+    if (!record.iconified)
+    {
+        record.iconified = true;
+        queueWindowEvent(record, WindowEvent{.kind = WindowEventKind::Minimized});
+    }
+}
+
+void HeadlessWindowBackend::restore(WindowRecord &record)
+{
+    if (record.iconified || record.maximized)
+    {
+        record.iconified = false;
+        record.maximized = false;
+        queueWindowEvent(record, WindowEvent{.kind = WindowEventKind::Restored});
+    }
+}
+
+// Maximization changes no pixels on a headless surface, so only the tracked
+// state moves; there is no matching event kind.
+void HeadlessWindowBackend::maximize(WindowRecord &record)
+{
+    record.maximized = true;
+}
+
+bool HeadlessWindowBackend::getWindowAttributes(const WindowRecord &record, WindowAttributes *outAttributes) const
+{
+    if (outAttributes == nullptr)
+    {
+        return false;
+    }
+    *outAttributes             = {};
+    outAttributes->visible     = record.visible;
+    outAttributes->iconified   = record.iconified;
+    outAttributes->maximized   = record.maximized;
+    outAttributes->resizable   = record.resizable;
+    outAttributes->decorated   = record.decorated;
+    outAttributes->floating    = record.floating;
+    outAttributes->opacity     = record.opacity;
+    outAttributes->contentScaleX = 1.0f;
+    outAttributes->contentScaleY = 1.0f;
+    return true;
+}
+
+bool HeadlessWindowBackend::getContentScale(const WindowRecord &, float *outX, float *outY) const
+{
+    if (outX == nullptr || outY == nullptr)
+    {
+        return false;
+    }
+    *outX = 1.0f;
+    *outY = 1.0f;
     return true;
 }
 
@@ -139,17 +248,12 @@ bool HeadlessWindowBackend::setClipboardText(const WindowRecord &, const char *t
     }
 }
 
-bool HeadlessWindowBackend::copyClipboardText(const WindowRecord &, std::string &output) const
+bool HeadlessWindowBackend::copyClipboardText(const WindowRecord &, const char **outText) const
 {
-    try
-    {
-        output = clipboardText_;
-        return true;
-    }
-    catch (...)
-    {
+    if (outText == nullptr)
         return false;
-    }
+    *outText = clipboardText_.c_str();
+    return true;
 }
 
 // VK_KHR_surface + VK_EXT_headless_surface when the build has headless

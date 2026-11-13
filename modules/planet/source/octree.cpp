@@ -42,9 +42,35 @@ constexpr double kCornerDelta[8][3] = {
 
 } // namespace
 
+VisibleLeafSet::VisibleLeafSet()
+    : keys_(16384)
+{
+}
+
+void VisibleLeafSet::assign(const std::vector<ChunkCoord> &sortedLeaves)
+{
+    keys_.clear();
+    keys_.reserve(sortedLeaves.size());
+    depthCounts_.fill(0);
+    for (const ChunkCoord &leaf : sortedLeaves)
+    {
+        keys_.findOrInsert(makeChunkKey(leaf.depth, leaf.x, leaf.y, leaf.z)) = 1;
+        if (leaf.depth < depthCounts_.size())
+        {
+            ++depthCounts_[leaf.depth];
+        }
+    }
+}
+
+bool VisibleLeafSet::contains(const ChunkCoord &coord) const noexcept
+{
+    return keys_.contains(makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
+}
+
 PlanetOctree::PlanetOctree(const PlanetGenerationParams &params, const DensityField &field)
     : params_(params)
     , field_(field)
+    , nodes_(32768)
 {
     // Density variation bound of the 3D terms across any node (they are
     // bounded fields, not gradient-limited): overhang and strata contribute
@@ -116,35 +142,17 @@ bool PlanetOctree::horizonHidden(const Vec3 &nodeCenter, double nodeSize, const 
 
 PlanetOctree::NodeRecord *PlanetOctree::findRecord(ChunkKey key)
 {
-    const auto it = std::lower_bound(nodes_.begin(), nodes_.end(), key,
-        [](const std::pair<ChunkKey, NodeRecord> &entry, ChunkKey value) { return entry.first < value; });
-    if (it != nodes_.end() && it->first == key)
-    {
-        return &it->second;
-    }
-    return nullptr;
+    return nodes_.find(key);
 }
 
 const PlanetOctree::NodeRecord *PlanetOctree::findRecord(ChunkKey key) const
 {
-    const auto it = std::lower_bound(nodes_.begin(), nodes_.end(), key,
-        [](const std::pair<ChunkKey, NodeRecord> &entry, ChunkKey value) { return entry.first < value; });
-    if (it != nodes_.end() && it->first == key)
-    {
-        return &it->second;
-    }
-    return nullptr;
+    return nodes_.find(key);
 }
 
 PlanetOctree::NodeRecord &PlanetOctree::recordFor(ChunkKey key)
 {
-    const auto it = std::lower_bound(nodes_.begin(), nodes_.end(), key,
-        [](const std::pair<ChunkKey, NodeRecord> &entry, ChunkKey value) { return entry.first < value; });
-    if (it != nodes_.end() && it->first == key)
-    {
-        return it->second;
-    }
-    return nodes_.emplace(it, key, NodeRecord{})->second;
+    return nodes_.findOrInsert(key);
 }
 
 ChunkState PlanetOctree::stateOf(const ChunkCoord &coord) const
@@ -174,8 +182,8 @@ bool PlanetOctree::rendersMesh(ChunkState state)
 
 // Pruning + refinement tests of a single node, shared by the main descent and
 // by the balancing pass (which classifies children of force-split nodes).
-ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLocal,
-    std::vector<ChunkCoord> *outRefineChildren) const
+ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLocal, ChildList *outRefineChildren,
+    NodeRecord &record) const
 {
     const double nodeSize    = chunkSizeMeters(params_, coord.depth);
     const double halfSize    = 0.5 * nodeSize;
@@ -219,32 +227,36 @@ ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLo
         }
         if (!straddlesSea)
         {
-            const double probeCutoff = chunkStepMeters(params_, coord.depth) * params_.lodBandLimitFactor;
-            const double probeMargin = std::max(solidMarginMeters_, chunkStepMeters(params_, coord.depth));
-            double minDensity = 0.0;
-            double maxDensity = 0.0;
-            bool   undecided  = false;
-            for (std::uint32_t corner = 0; corner < 8; ++corner)
+            if (record.probe == ProbeVerdict::Unknown)
             {
-                const Vec3 probePoint{nodeCenter.x + kCornerDelta[corner][0] * nodeSize,
-                    nodeCenter.y + kCornerDelta[corner][1] * nodeSize,
-                    nodeCenter.z + kCornerDelta[corner][2] * nodeSize};
-                const double density = field_.densityAt(probePoint, probeCutoff);
-                if (corner == 0 || density < minDensity)
+                const double probeCutoff = chunkStepMeters(params_, coord.depth) * params_.lodBandLimitFactor;
+                const double probeMargin = std::max(solidMarginMeters_, chunkStepMeters(params_, coord.depth));
+                double minDensity = 0.0;
+                double maxDensity = 0.0;
+                bool   undecided  = false;
+                for (std::uint32_t corner = 0; corner < 8; ++corner)
                 {
-                    minDensity = density;
+                    const Vec3 probePoint{nodeCenter.x + kCornerDelta[corner][0] * nodeSize,
+                        nodeCenter.y + kCornerDelta[corner][1] * nodeSize,
+                        nodeCenter.z + kCornerDelta[corner][2] * nodeSize};
+                    const double density = field_.densityAt(probePoint, probeCutoff);
+                    if (corner == 0 || density < minDensity)
+                    {
+                        minDensity = density;
+                    }
+                    if (corner == 0 || density > maxDensity)
+                    {
+                        maxDensity = density;
+                    }
+                    if (minDensity <= probeMargin && maxDensity >= -probeMargin)
+                    {
+                        undecided = true; // neither fully solid nor fully air
+                        break;
+                    }
                 }
-                if (corner == 0 || density > maxDensity)
-                {
-                    maxDensity = density;
-                }
-                if (minDensity <= probeMargin && maxDensity >= -probeMargin)
-                {
-                    undecided = true; // neither fully solid nor fully air
-                    break;
-                }
+                record.probe = undecided ? ProbeVerdict::Undecided : ProbeVerdict::Empty;
             }
-            if (!undecided)
+            if (record.probe == ProbeVerdict::Empty)
             {
                 return ChunkState::Empty;
             }
@@ -280,8 +292,10 @@ ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLo
             const std::uint32_t nextDepth = coord.depth + 1u;
             for (std::uint32_t child = 0; child < 8; ++child)
             {
-                outRefineChildren->push_back(ChunkCoord{nextDepth, x2 + (child & 1u), y2 + ((child >> 1) & 1u), z2 + ((child >> 2) & 1u)});
+                outRefineChildren->items[child]
+                    = ChunkCoord{nextDepth, x2 + (child & 1u), y2 + ((child >> 1) & 1u), z2 + ((child >> 2) & 1u)};
             }
+            outRefineChildren->count = 8;
         }
         return ChunkState::Split;
     }
@@ -301,7 +315,11 @@ void PlanetOctree::forceSplit(const ChunkCoord &coord, const Vec3 &eyeLocal, std
     const std::uint32_t z2 = coord.z * 2u;
     const std::uint32_t nextDepth = coord.depth + 1u;
 
-    recordFor(makeChunkKey(coord.depth, coord.x, coord.y, coord.z)) = NodeRecord{ChunkState::Split, updateIndex_};
+    {
+        NodeRecord &record       = recordFor(makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
+        record.state             = ChunkState::Split;
+        record.lastSelectedUpdate = updateIndex_;
+    }
     for (std::uint32_t child = 0; child < 8; ++child)
     {
         const ChunkCoord childCoord{nextDepth, x2 + (child & 1u), y2 + ((child >> 1) & 1u), z2 + ((child >> 2) & 1u)};
@@ -314,14 +332,20 @@ void PlanetOctree::forceSplit(const ChunkCoord &coord, const Vec3 &eyeLocal, std
 // every newly rendered leaf.
 void PlanetOctree::classifyAndRecord(const ChunkCoord &coord, const Vec3 &eyeLocal, std::vector<ChunkCoord> &outNewLeaves)
 {
-    std::vector<ChunkCoord> children;
-    const ChunkState state = classifyNode(coord, eyeLocal, &children);
-    recordFor(makeChunkKey(coord.depth, coord.x, coord.y, coord.z)) = NodeRecord{state, updateIndex_};
+    ChildList  children;
+    ChunkState state = ChunkState::Empty;
+    {
+        // The reference dies before recursing: child insertions may grow the table.
+        NodeRecord &record        = recordFor(makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
+        state                     = classifyNode(coord, eyeLocal, &children, record);
+        record.state              = state;
+        record.lastSelectedUpdate = updateIndex_;
+    }
     if (state == ChunkState::Split)
     {
-        for (const ChunkCoord &child : children)
+        for (std::uint32_t child = 0; child < children.count; ++child)
         {
-            classifyAndRecord(child, eyeLocal, outNewLeaves);
+            classifyAndRecord(children.items[child], eyeLocal, outNewLeaves);
         }
     }
     else if (state == ChunkState::Wanted)
@@ -379,8 +403,13 @@ int PlanetOctree::neighborMaterialDepth(const ChunkCoord &coord, int offsetX, in
     return -1;
 }
 
-void PlanetOctree::computeConformMask(const ChunkCoord &coord, const std::vector<ChunkCoord> &visibleSortedLeaves,
-    ConformMask &outMask) const
+namespace
+{
+
+// Shared conform decision: `visibleContains(probe)` answers membership in the visible leaf list.
+template <typename Contains>
+void computeConformMaskImpl(const PlanetGenerationParams &params, const ChunkCoord &coord, ConformMask &outMask,
+    const Contains &visibleContains)
 {
     outMask = ConformMask{};
     if (coord.depth == 0)
@@ -388,31 +417,7 @@ void PlanetOctree::computeConformMask(const ChunkCoord &coord, const std::vector
         return; // nothing coarser than the root
     }
 
-    // Membership over the sorted visible leaves (depth, x, y, z order, the
-    // exact ordering selectVisible emits).
-    const auto visibleContains = [&visibleSortedLeaves](const ChunkCoord &probe)
-    {
-        const auto it = std::lower_bound(visibleSortedLeaves.begin(), visibleSortedLeaves.end(), probe,
-            [](const ChunkCoord &a, const ChunkCoord &b)
-            {
-                if (a.depth != b.depth)
-                {
-                    return a.depth < b.depth;
-                }
-                if (a.x != b.x)
-                {
-                    return a.x < b.x;
-                }
-                if (a.y != b.y)
-                {
-                    return a.y < b.y;
-                }
-                return a.z < b.z;
-            });
-        return it != visibleSortedLeaves.end() && *it == probe;
-    };
-
-    const std::int64_t n          = static_cast<std::int64_t>(params_.leafGridN);
+    const std::int64_t n          = static_cast<std::int64_t>(params.leafGridN);
     const std::int64_t coarseSpan = 2 * n; // a depth-(d-1) cell spans 2n fine grid steps
 
     const auto floorDiv = [](std::int64_t value, std::int64_t divisor)
@@ -508,6 +513,48 @@ void PlanetOctree::computeConformMask(const ChunkCoord &coord, const std::vector
     }
 }
 
+} // namespace
+
+void PlanetOctree::computeConformMask(const ChunkCoord &coord, const std::vector<ChunkCoord> &visibleSortedLeaves,
+    ConformMask &outMask) const
+{
+    // Membership over the sorted visible leaves (depth, x, y, z order, the exact ordering selectVisible emits).
+    const auto visibleContains = [&visibleSortedLeaves](const ChunkCoord &probe)
+    {
+        const auto it = std::lower_bound(visibleSortedLeaves.begin(), visibleSortedLeaves.end(), probe,
+            [](const ChunkCoord &a, const ChunkCoord &b)
+            {
+                if (a.depth != b.depth)
+                {
+                    return a.depth < b.depth;
+                }
+                if (a.x != b.x)
+                {
+                    return a.x < b.x;
+                }
+                if (a.y != b.y)
+                {
+                    return a.y < b.y;
+                }
+                return a.z < b.z;
+            });
+        return it != visibleSortedLeaves.end() && *it == probe;
+    };
+    computeConformMaskImpl(params_, coord, outMask, visibleContains);
+}
+
+void PlanetOctree::computeConformMask(const ChunkCoord &coord, const VisibleLeafSet &visibleLeaves,
+    ConformMask &outMask) const
+{
+    if (coord.depth == 0 || !visibleLeaves.hasDepth(coord.depth - 1u))
+    {
+        outMask = ConformMask{}; // no rendered leaf one level coarser exists anywhere: nothing can conform
+        return;
+    }
+    computeConformMaskImpl(params_, coord, outMask,
+        [&visibleLeaves](const ChunkCoord &probe) { return visibleLeaves.contains(probe); });
+}
+
 void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &outVisible)
 {
     ++updateIndex_;
@@ -518,28 +565,31 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
     // Iterative descent with an explicit stack; every visited node is recorded
     // (Split and Hidden included) so the balancing pass can reason about the
     // tree shape afterwards.
-    std::vector<ChunkCoord> stack;
+    std::vector<ChunkCoord> &stack = descentStack_;
+    stack.clear();
     stack.push_back(ChunkCoord{0u, 0u, 0u, 0u});
 
-    std::vector<ChunkCoord> leaves;
+    std::vector<ChunkCoord> &leaves = leavesScratch_;
+    leaves.clear();
     while (!stack.empty())
     {
         const ChunkCoord coord = stack.back();
         stack.pop_back();
 
-        std::vector<ChunkCoord> children;
-        const ChunkState state = classifyNode(coord, eyeLocal, &children);
-        NodeRecord       &record = recordFor(makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
-        const ChunkState  previous = record.state;
-        const bool        hadLifecycle = previous == ChunkState::Requested || previous == ChunkState::Building
+        ChildList        children;
+        NodeRecord      &record   = recordFor(makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
+        const ChunkState state    = classifyNode(coord, eyeLocal, &children, record);
+        const ChunkState previous = record.state;
+        const bool       hadLifecycle = previous == ChunkState::Requested || previous == ChunkState::Building
                                       || previous == ChunkState::Ready;
-        record = NodeRecord{state, updateIndex_};
+        record.state              = state;
+        record.lastSelectedUpdate = updateIndex_;
 
         if (state == ChunkState::Split)
         {
-            for (const ChunkCoord &child : children)
+            for (std::uint32_t child = 0; child < children.count; ++child)
             {
-                stack.push_back(child);
+                stack.push_back(children.items[child]);
             }
         }
         else if (state == ChunkState::Wanted)
@@ -656,11 +706,13 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
     // shapes; dropping them keeps the node map bounded and guarantees the
     // balancing walks only ever see fresh states (neighborMaterialDepth
     // already skips stale records, this just reclaims the memory).
-    const std::uint64_t staleThreshold = updateIndex_ > 64 ? updateIndex_ - 64 : 1;
-    nodes_.erase(std::remove_if(nodes_.begin(), nodes_.end(),
-                     [staleThreshold](const std::pair<ChunkKey, NodeRecord> &entry)
-                     { return entry.second.lastSelectedUpdate < staleThreshold; }),
-        nodes_.end());
+    // Pruning runs on a cadence: a rebuild pass per update would cost more than the stale records it reclaims.
+    if (updateIndex_ % 16 == 0)
+    {
+        const std::uint64_t staleThreshold = updateIndex_ > 64 ? updateIndex_ - 64 : 1;
+        nodes_.eraseIf([staleThreshold](ChunkKey, const NodeRecord &record)
+            { return record.lastSelectedUpdate < staleThreshold; });
+    }
 }
 
 } // namespace planet

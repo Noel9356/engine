@@ -39,6 +39,7 @@ Functions are listed alphabetically. `t(3)`/`r(4)`/`s(3)` mark 3 translation flo
 | `skeletal_animation.cancel_builder` | builder | ok | Works for skeleton and clip builders; releases reserved budget. |
 | `skeletal_animation.clear_player_events` | player | boolean | Clears all queued events and resets the overflow flag. |
 | `skeletal_animation.clip_duration` | clip | seconds | Returns `nil` for an unknown clip. |
+| `skeletal_animation.clip_info` | clip | name, duration_seconds, track_count, keyframe_count, event_marker_count | Returns `nil` for an unknown clip. `name` is the string the clip was created with. |
 | `skeletal_animation.create_player` | clip, speed? (=1.0), initial_time? (=0.0), looping? (=false), playing? (=true) | handle or nil, error | Optional trailing arguments may be omitted. |
 | `skeletal_animation.destroy_clip` | clip | (none) | |
 | `skeletal_animation.destroy_player` | player | (none) | |
@@ -48,6 +49,7 @@ Functions are listed alphabetically. `t(3)`/`r(4)`/`s(3)` mark 3 translation flo
 | `skeletal_animation.finish_clip` | builder | clip or nil, error | Refused (`InvalidDescription`) when the builder has no tracks or any track has no keyframes. |
 | `skeletal_animation.finish_skeleton` | builder | skeleton or nil, error | Refused (`InvalidDescription`) while any joint index is still unassigned. |
 | `skeletal_animation.global_transform` | player, skeleton, joint_index | 16 numbers | Evaluates the pose, builds global (parent-composed) transforms, and returns joint `joint_index`'s 4x4 matrix as 16 floats. |
+| `skeletal_animation.inverse_bind_pose` | skeleton, joint_index | 16 numbers | Returns joint `joint_index`'s 4x4 inverse bind pose matrix as 16 floats. Uses the cache populated at skeleton creation when `cache_inverse_bind_pose` is enabled; falls back to on-demand computation otherwise. `nil` on failure. |
 | `skeletal_animation.player_event_at` | player, zero_based_index | clip, event_id, user_data, clip_time, direction | Reads one queued event without removing it. `direction` is `1` or `-1`; unavailable entries return `nil`. |
 | `skeletal_animation.player_event_count` | player | count, overflowed | Returns the pending event count and whether queue limits have skipped any notifications since the last clear. Invalid players return `nil, false`. |
 | `skeletal_animation.player_state` | player | time_seconds, normalized_time, playing, finished | Returns `nil` for an unknown player. |
@@ -56,11 +58,13 @@ Functions are listed alphabetically. `t(3)`/`r(4)`/`s(3)` mark 3 translation flo
 | `skeletal_animation.set_player_clip` | player, clip, restart | ok | |
 | `skeletal_animation.set_player_playing` | player, playing | ok | |
 | `skeletal_animation.set_player_speed` | player, speed | ok | |
+| `skeletal_animation.set_player_time` | player, time_seconds | ok | Jumps the playback clock. Looping players wrap the supplied time into `[0, duration)`; one-shot players clamp. Pending events are cleared and `finished` is recomputed. |
 | `skeletal_animation.skeleton_joint_count` | skeleton | count | Returns `nil` for an unknown skeleton. |
+| `skeletal_animation.skinning_matrix` | player, skeleton, joint_index | 16 numbers | Evaluates the player's pose, builds the per-joint skinning palette (`global * inverseBindPose`), and returns joint `joint_index`'s 4x4 matrix as 16 floats. |
 
 ## Limits
 
-- script_runtime caps apply per runtime: at most `script_runtime.maximum_native_functions` (default 256) registered functions - the bridge registers 27 - at most `maximum_native_arguments` (default 32) per call (the widest calls take 13) and at most `maximum_native_results` (default 16) per call (the widest is `skeletal_animation.global_transform` with 16).
+- script_runtime caps apply per runtime: at most `script_runtime.maximum_native_functions` (default 256) registered functions - the bridge registers 31 - at most `maximum_native_arguments` (default 32) per call (the widest calls take 13) and at most `maximum_native_results` (default 16) per call (the widest is `skeletal_animation.global_transform`, `skeletal_animation.inverse_bind_pose`, and `skeletal_animation.skinning_matrix` with 16).
 - Bridge builder tables serialize on their own mutex; capability calls serialize on the module's API mutex, so script and native callers never race.
 - Sampling and evaluation allocate pose scratch per call; `sampling_cache_enabled` only benefits players driven by the native `evaluatePlayer` path, while `sample_joint` is stateless binary search by design.
 

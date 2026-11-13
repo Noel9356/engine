@@ -18,4 +18,4 @@ name                  = "character"
 optional_capabilities = ["script_runtime"]
 provides              = ["character"]
 requires              = []
-version               = "0.1.0"
+version               = "0.2.0"

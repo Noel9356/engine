@@ -6,6 +6,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 
 | Key | Type | Valid range / values | Default | Effect |
 | --- | --- | --- | --- | --- |
+| `skeletal_animation.cache_inverse_bind_pose` | boolean | `true` / `false` | `true` | When enabled, the module builds and stores each skeleton's inverse bind pose matrices at `createSkeleton` time so `buildInverseBindPose` and `computeSkinningMatrices` avoid per-call allocation. When disabled, those calls compute the inverse on demand from the cached topological order; a degenerate (zero-scale) bind pose produces `InvalidDescription` either way. |
 | `skeletal_animation.default_interpolation` | string | `slerp` / `nlerp` / `step` | `slerp` | Default rotation interpolation for tracks whose `AnimationTrackDescription::interpolation` is `Default`. `nlerp` is cheaper; `slerp` follows spherical interpolation more closely; `step` holds the previous key until the next key. Each track may override this default. |
 | `skeletal_animation.maximum_blend_poses` | integer | 1 - 256 | `16` | Maximum input poses accepted by `blendPoses`. |
 | `skeletal_animation.maximum_event_markers_per_clip` | integer | 1 - 65536 | `4096` | Maximum event markers accepted by one clip. |
@@ -32,3 +33,4 @@ Out-of-range integer values, missing values, and invalid strings are ignored and
 
 - The per-object keys (`maximum_joints`, `maximum_keyframes_per_track`, `maximum_tracks_per_clip`, ...) validate each `create*`/builder call. Module-wide keys bound committed objects; the Lua bridge separately applies the corresponding aggregate limits to unfinished builders.
 - The sampling-cache keys trade memory for seek behavior: with `sampling_cache_enabled` and enough `maximum_total_sampling_cache_entries` budget, sequential playback walks one key interval per track (`maximum_cursor_walk` bounds the walk before a binary-search fallback), while exhausted or disabled caches always binary-search. See [overview.md](overview.md) for the evaluation and event paths and [lua_bridge.md](lua_bridge.md) for how script-side skeleton/clip builders consume these budgets.
+- The `cache_inverse_bind_pose` switch controls whether inverse bind pose matrices are computed once at skeleton creation. Disabling it trades the up-front memory cost for per-call computation in `buildInverseBindPose` and `computeSkinningMatrices`; the public APIs remain identical so callers do not need to branch on the setting.

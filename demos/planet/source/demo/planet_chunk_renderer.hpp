@@ -43,6 +43,9 @@ private:
     {
         engine::renderer::MeshHandle terrain = engine::renderer::invalidMesh;
         engine::renderer::MeshHandle water = engine::renderer::invalidMesh;
+        glm::mat4 terrainTransform{1.0f};
+        glm::mat4 waterTransform{1.0f};
+        std::uint64_t lastSeenUpdate = 0; // update that last listed this chunk as visible
     };
 
     void destroyChunkMeshes(ChunkMeshHandles &handles);
@@ -54,7 +57,8 @@ private:
     engine::planet::PlanetGenerationParams params_{};
 
     std::map<engine::planet::ChunkKey, ChunkMeshHandles> uploadedMeshes_;
-    std::map<engine::planet::ChunkKey, std::pair<glm::mat4, glm::mat4>> chunkTransforms_;
+    std::vector<engine::planet::PlanetChunkView> visibleViews_; // reused every update
+    std::uint64_t updateCounter_ = 0;
     // Draw commands retain pointers to materials until endFrame. Deques keep
     // references stable while the command list is being assembled.
     std::deque<engine::renderer::MeshMaterial> terrainMaterials_;

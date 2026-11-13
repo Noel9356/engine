@@ -22,6 +22,7 @@ using script_runtime::native::int32Value;
 using script_runtime::native::resultBoolean;
 using script_runtime::native::resultNil;
 using script_runtime::native::resultNumber;
+using script_runtime::native::resultString;
 using script_runtime::native::stringValue;
 using script_runtime::native::uint32Value;
 using Bridge = SkeletalAnimationLuaBridgeContext;
@@ -337,6 +338,123 @@ bool clearPlayerEvents(void *userData, const ScriptValue *args, std::uint32_t co
     return true;
 }
 
+bool setPlayerTime(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t player = 0;
+    float timeSeconds = 0.0f;
+    if (count != 2 || capacity < 1 || !uint32Value(args, count, 0, player)
+        || !floatValue(args, count, 1, timeSeconds))
+        return false;
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.apiMutex);
+    resultBoolean(results, 0,
+        bridge.animation->setPlayerTime(bridge.animation->self, player, timeSeconds));
+    *outCount = 1;
+    return true;
+}
+
+bool clipInfo(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t clip = 0;
+    if (count != 1 || capacity < 5 || !uint32Value(args, count, 0, clip))
+        return false;
+    auto &bridge = *static_cast<Bridge *>(userData);
+    AnimationClipInfo info{};
+    std::lock_guard lock(bridge.apiMutex);
+    if (!bridge.animation->clipInfo(bridge.animation->self, clip, &info))
+    {
+        resultNil(results, 0);
+        *outCount = 1;
+        return true;
+    }
+    resultString(results, 0, info.name);
+    resultNumber(results, 1, info.durationSeconds);
+    resultNumber(results, 2, info.trackCount);
+    // uint64 -> double: keyframe counts never approach 2^53 in practice, but
+    // explicit conversion keeps -Wconversion clean.
+    resultNumber(results, 3, static_cast<double>(info.keyframeCount));
+    resultNumber(results, 4, info.eventMarkerCount);
+    *outCount = 5;
+    return true;
+}
+
+bool inverseBindPose(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t skeleton = 0;
+    std::uint32_t joint = 0;
+    if (count != 2 || capacity < 16 || !uint32Value(args, count, 0, skeleton)
+        || !uint32Value(args, count, 1, joint))
+        return false;
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.apiMutex);
+    std::uint32_t jointCount = 0;
+    if (!bridge.animation->skeletonInfo(bridge.animation->self, skeleton, &jointCount)
+        || joint >= jointCount)
+    {
+        resultNil(results, 0);
+        *outCount = 1;
+        return true;
+    }
+    thread_local std::vector<float> matrices;
+    matrices.resize(static_cast<std::size_t>(jointCount) * 16);
+    AnimationError error = AnimationError::None;
+    if (!bridge.animation->buildInverseBindPose(bridge.animation->self, skeleton,
+            matrices.data(), jointCount, &error))
+    {
+        resultNil(results, 0);
+        *outCount = 1;
+        return true;
+    }
+    const float *matrix = matrices.data() + static_cast<std::size_t>(joint) * 16;
+    for (std::uint32_t i = 0; i < 16; ++i)
+        resultNumber(results, i, matrix[i]);
+    *outCount = 16;
+    return true;
+}
+
+bool skinningMatrix(void *userData, const ScriptValue *args, std::uint32_t count,
+    ScriptValue *results, std::uint32_t capacity, std::uint32_t *outCount)
+{
+    std::uint32_t player = 0;
+    std::uint32_t skeleton = 0;
+    std::uint32_t joint = 0;
+    if (count != 3 || capacity < 16 || !uint32Value(args, count, 0, player)
+        || !uint32Value(args, count, 1, skeleton) || !uint32Value(args, count, 2, joint))
+        return false;
+    auto &bridge = *static_cast<Bridge *>(userData);
+    std::lock_guard lock(bridge.apiMutex);
+    std::uint32_t jointCount = 0;
+    if (!bridge.animation->skeletonInfo(bridge.animation->self, skeleton, &jointCount)
+        || joint >= jointCount)
+    {
+        resultNil(results, 0);
+        *outCount = 1;
+        return true;
+    }
+    thread_local std::vector<JointDescription> pose;
+    thread_local std::vector<float> matrices;
+    pose.resize(jointCount);
+    matrices.resize(static_cast<std::size_t>(jointCount) * 16);
+    AnimationError error = AnimationError::None;
+    if (!bridge.animation->evaluatePlayer(bridge.animation->self, player, skeleton,
+            pose.data(), jointCount, &error)
+        || !bridge.animation->computeSkinningMatrices(bridge.animation->self, skeleton,
+            pose.data(), matrices.data(), jointCount, &error))
+    {
+        resultNil(results, 0);
+        *outCount = 1;
+        return true;
+    }
+    const float *matrix = matrices.data() + static_cast<std::size_t>(joint) * 16;
+    for (std::uint32_t i = 0; i < 16; ++i)
+        resultNumber(results, i, matrix[i]);
+    *outCount = 16;
+    return true;
+}
+
 struct Binding{const char*name;ScriptNativeFunction function;};
 constexpr Binding bindings[]={
     {"skeletal_animation.begin_skeleton",beginSkeleton},{"skeletal_animation.set_joint",setJoint},
@@ -355,6 +473,10 @@ constexpr Binding bindings[]={
     {"skeletal_animation.player_event_at",playerEventAt},
     {"skeletal_animation.clear_player_events",clearPlayerEvents},
     {"skeletal_animation.evaluate_joint",evaluateJoint},{"skeletal_animation.global_transform",buildGlobalTransforms},
+    {"skeletal_animation.set_player_time",setPlayerTime},
+    {"skeletal_animation.clip_info",clipInfo},
+    {"skeletal_animation.inverse_bind_pose",inverseBindPose},
+    {"skeletal_animation.skinning_matrix",skinningMatrix},
 };
 }
 

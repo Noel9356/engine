@@ -26,7 +26,9 @@ inline constexpr InputActionHandle  invalidInputAction  = 0;
 // Kind of raw event fed via feedEvent. Key/MouseButton/GamepadButton carry
 // press state in `down`; GamepadAxis carries `value` in [-1, 1]; MouseDelta
 // and MouseWheel carry X in `value`, Y in `secondaryValue`, and accumulate
-// until the next advanceFrame; FocusLost wipes a device's stored state.
+// until the next advanceFrame; MousePosition carries absolute cursor X/Y in
+// `value`/`secondaryValue` (normalized to [0, 1] when produced by
+// feedWindowEvent); FocusLost wipes a device's stored state.
 enum class InputEventKind : std::uint32_t
 {
     Key = 0,
@@ -39,11 +41,13 @@ enum class InputEventKind : std::uint32_t
     TouchBegan,
     TouchMoved,
     TouchEnded,
-    TouchCancelled
+    TouchCancelled,
+    MousePosition
 };
 
 // What a binding reads from device state. MouseDeltaX/Y and MouseWheelX/Y
-// select one component of accumulated per-frame motion; Touch* controls read
+// select one component of accumulated per-frame motion; MousePositionX/Y read
+// the most recently reported absolute cursor position; Touch* controls read
 // a selected contact or the most recently updated contact.
 enum class InputControlKind : std::uint32_t
 {
@@ -60,7 +64,9 @@ enum class InputControlKind : std::uint32_t
     TouchPositionY,
     TouchDeltaX,
     TouchDeltaY,
-    TouchPressure
+    TouchPressure,
+    MousePositionX,
+    MousePositionY
 };
 
 // Action output shape: Button is digital (down flag only), Axis1D uses
@@ -84,7 +90,10 @@ enum class InputActionCombineMode : std::uint32_t
 
 // One raw device event. `device` is a producer-chosen device id (state is
 // created per id on demand); `code` is the kind-specific control code;
-// `down` is only meaningful for the button kinds.
+// `down` is only meaningful for the button kinds. `value` and
+// `secondaryValue` carry the kind-specific payloads documented on
+// InputEventKind. `tertiaryValue` carries touch pressure for Touch* events
+// and is ignored by other event kinds.
 struct InputEvent
 {
     InputEventKind kind           = InputEventKind::Key;

@@ -119,7 +119,7 @@ private:
         return ParticipantManifest{
             .name                 = "camera",
             .kind                 = ParticipantKind::EngineModule,
-            .version              = "0.2.0",
+            .version              = "0.1.0",
             .providedCapabilities = {"camera"},
             .requiredCapabilities = {},
             .optionalCapabilities = {"script_runtime"}};
@@ -437,7 +437,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
     static const engine::EngineModuleEntryTable entry = {
         .abiVersion              = engine::engineModuleAbiVersion,
         .moduleName              = "camera",
-        .moduleVersion           = "0.2.0",
+        .moduleVersion           = "0.1.0",
         .createModule            = []() -> engine::ModuleInterface *
         { return new engine::camera::CameraModule(); },
         .providedCapabilities    = providedCapabilities,

@@ -30,9 +30,11 @@ const char *optionsUsage() noexcept
            "  --view character|benchmark|sun\n"
            "                           Select the screen (default: character).\n"
            "  --character-test         Run the character assembly test operations, then exit.\n"
-           "  --character-drive <name> Apply a named configuration (human, dragonhead, centaur, naga,\n"
-           "                           quadruped, wolf, deer, bull, twoheaded, threewings, fourarms,\n"
-           "                           wingedtail, tall, broad, longtail, compact, noappend).\n";
+           "  --character-lab          Run the merged Character Lab Lua exercise (script_runtime bridge).\n"
+           "  --character-drive <name> Apply a named configuration (human, dragonhead, furryfox, furrywolf,\n"
+           "                           centaur, naga, quadruped, fox, shiba, husky, wolf, donkey, cow, deer,\n"
+           "                           bull, alpaca, horse, stag, twoheaded, threewings, fourarms, wingedtail,\n"
+           "                           tall, broad, longtail, compact, noappend).\n";
 }
 
 // Strict flag parser: every recognized flag consumes the next token as its
@@ -47,7 +49,8 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         if (argument != "--screenshot" && argument != "--screenshot-frame" && argument != "--quit-after"
             && argument != "--camera" && argument != "--camera-yaw" && argument != "--camera-pitch"
             && argument != "--orbit-distance" && argument != "--camera-target-y" && argument != "--hide-panel"
-            && argument != "--view" && argument != "--character-test" && argument != "--character-drive")
+            && argument != "--view" && argument != "--character-test" && argument != "--character-lab"
+            && argument != "--character-drive")
         {
             outError = "unknown application argument '" + argument + "'";
             return false;
@@ -55,6 +58,11 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         if (argument == "--character-test")
         {
             parsedOptions.characterTest = true;
+            continue;
+        }
+        if (argument == "--character-lab")
+        {
+            parsedOptions.characterLab = true;
             continue;
         }
         if (argument == "--hide-panel")
@@ -86,15 +94,20 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         }
         else if (argument == "--character-drive")
         {
-            const char *allowedPresets[] = {"human", "dragonhead", "centaur", "naga", "quadruped", "wolf", "deer",
-                "bull", "twoheaded", "threewings", "fourarms", "wingedtail", "tall", "broad", "longtail",
-                "compact", "noappend"};
+            static const char *const allowedPresets[] = {"human", "dragonhead", "furryfox", "furrywolf",
+                "centaur", "naga", "quadruped", "fox", "shiba", "husky", "wolf", "donkey", "cow", "deer",
+                "bull", "alpaca", "horse", "stag", "twoheaded", "threewings", "fourarms", "wingedtail",
+                "tall", "broad", "longtail", "compact", "noappend",
+                "centaur_fox", "centaur_shibainu", "centaur_husky", "centaur_wolf", "centaur_donkey",
+                "centaur_cow", "centaur_deer", "centaur_bull", "centaur_alpaca", "centaur_horse",
+                "centaur_stag"};
             const bool allowed = std::find(std::begin(allowedPresets), std::end(allowedPresets), value)
                               != std::end(allowedPresets);
             if (!allowed)
             {
                 outError = "invalid character drive preset '" + value
-                         + "'; expected human, dragonhead, centaur, naga, quadruped, wolf, deer, bull, twoheaded,"
+                         + "'; expected human, dragonhead, furryfox, furrywolf, centaur, naga, quadruped, fox,"
+                           " shiba, husky, wolf, donkey, cow, deer, bull, alpaca, horse, stag, twoheaded,"
                            " threewings, fourarms, wingedtail, tall, broad, longtail, compact, or noappend";
                 return false;
             }

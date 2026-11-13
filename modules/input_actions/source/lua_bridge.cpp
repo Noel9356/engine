@@ -59,6 +59,8 @@ bool parseControl(std::string_view value, InputControlKind &out)
     else if (value == "touch_delta_x") out = InputControlKind::TouchDeltaX;
     else if (value == "touch_delta_y") out = InputControlKind::TouchDeltaY;
     else if (value == "touch_pressure") out = InputControlKind::TouchPressure;
+    else if (value == "mouse_position_x") out = InputControlKind::MousePositionX;
+    else if (value == "mouse_position_y") out = InputControlKind::MousePositionY;
     else return false;
     return true;
 }
@@ -76,6 +78,7 @@ bool parseEventKind(std::string_view value, InputEventKind &out)
     else if (value == "touch_moved") out = InputEventKind::TouchMoved;
     else if (value == "touch_ended") out = InputEventKind::TouchEnded;
     else if (value == "touch_cancelled") out = InputEventKind::TouchCancelled;
+    else if (value == "mouse_position") out = InputEventKind::MousePosition;
     else return false;
     return true;
 }
@@ -298,7 +301,7 @@ bool bindingAt(void *userData, const ScriptValue *args, std::uint32_t count, Scr
     static constexpr const char *controlNames[] = {
         "key", "mouse_button", "gamepad_button", "gamepad_axis", "mouse_delta_x", "mouse_delta_y",
         "mouse_wheel_x", "mouse_wheel_y", "touch_contact", "touch_position_x", "touch_position_y",
-        "touch_delta_x", "touch_delta_y", "touch_pressure"};
+        "touch_delta_x", "touch_delta_y", "touch_pressure", "mouse_position_x", "mouse_position_y"};
     const InputBinding &binding = bindings[index];
     const std::uint32_t control = static_cast<std::uint32_t>(binding.control);
     if (control >= sizeof(controlNames) / sizeof(controlNames[0]))

@@ -97,6 +97,86 @@ namespace camera = engine::camera;
 // but before the loop can quit early; --screenshot-frame moves the export to
 // another frame (the Options default in options.hpp mirrors this choice).
 
+// Character Lab (merged from the former character_lab plugin, revision 10):
+// a one-shot Lua exercise through the character.* bridge installed by the
+// character module. It builds a custom assembly from the demo's registered
+// parts, edits parameters, evaluates and validates it, enumerates instances,
+// and destroys it - proving the Lua scripting surface end to end inside the
+// demo (the old plugin package duplicated this against stale part ids).
+bool runCharacterLabExercise(script_runtime::ScriptRuntimeCapability &scriptRuntime)
+{
+    static constexpr const char *kLabScript = R"LUA(
+-- Character Lab exercise (merged from the former character_lab plugin).
+local function report(message)
+    print("character_lab: " .. message)
+end
+
+local assembly = character.create("plan_humanoid")
+if assembly == 0 then
+    report("could not create the plan_humanoid assembly")
+    return
+end
+local parts = character.instance_count(assembly)
+report(string.format("assembly %d created with %d parts", assembly, parts))
+
+-- Parameters: central registry, per-asset bindings.
+character.set_parameter(assembly, "body.height", 1.2)
+character.set_parameter(assembly, "tail.length", 1.4)
+local height, ok = character.get_parameter(assembly, "body.height")
+report(string.format("body.height=%.2f (applied=%s)", height, tostring(ok == true)))
+
+-- Evaluate + validate through the bridge.
+local evaluated = character.evaluate(assembly)
+local issues = character.validate(assembly)
+report(string.format("evaluate=%s issues=%d", tostring(evaluated == true), issues))
+
+-- Instance enumeration through the bridge.
+for index = 1, character.instance_count(assembly) do
+    local id = character.instance_id(assembly, index)
+    local name, part, parent = character.instance_info(assembly, id)
+    local m = {character.instance_transform(assembly, id)}
+    if name == "head" and #m == 16 then
+        report(string.format("head instance %d part=%s parent=%d world_y=%.3f",
+            id, tostring(part), parent or 0, m[14]))
+    end
+end
+
+-- A second character built from scratch on the same registry.
+local custom = character.create(nil)
+local torso_part = character.add_part(custom, "torso_ranger", "torso")
+local head_part = character.add_part(custom, "head_dragon", "head")
+local connected = character.connect(custom, torso_part, "neck.base", head_part, "head.root")
+character.evaluate(custom)
+report(string.format("custom assembly %d: torso=%d head=%d connected=%s",
+    custom, torso_part, head_part, tostring(connected == true)))
+character.destroy(custom)
+
+character.destroy(assembly)
+report("ready")
+)LUA";
+
+    const script_runtime::ScriptRuntimeHandle labRuntime
+        = scriptRuntime.createRuntime(scriptRuntime.self, nullptr, nullptr);
+    if (labRuntime == script_runtime::invalidScriptRuntime)
+    {
+        std::cerr << "demo: character lab runtime creation failed\n";
+        return false;
+    }
+    script_runtime::ScriptError scriptError = script_runtime::ScriptError::None;
+    char  errorText[512] = {};
+    const bool executed = scriptRuntime.executeString(
+        scriptRuntime.self, labRuntime, kLabScript, "character_lab", &scriptError, errorText, sizeof(errorText), nullptr);
+    if (!executed || scriptError != script_runtime::ScriptError::None)
+    {
+        std::cerr << "demo: character lab script failed (" << static_cast<unsigned>(scriptError) << ")"
+                  << (errorText[0] != '\0' ? std::string(": ") + errorText : std::string()) << "\n";
+        scriptRuntime.destroyRuntime(scriptRuntime.self, labRuntime);
+        return false;
+    }
+    scriptRuntime.destroyRuntime(scriptRuntime.self, labRuntime);
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -134,13 +214,14 @@ int main(int argc, char **argv)
     // render_graph are probed optionally below.
     engine::ApplicationHostOptions hostOptions = engine::makeApplicationHostOptions(
         commandLine, {"window", "renderer", "render_graph", "camera", "models", "ui", "character", "script_runtime"});
-    // The character customisation sample includes a small script plugin that
-    // exercises the public character Lua bridge. Keep it in this application's
-    // default set, while preserving explicit --active-plugin/--no-plugins
-    // command-line choices from the caller.
+    // Revision 10 merged the former character_lab script plugin into the
+    // demo itself (the Lua exercise below runs through the script_runtime
+    // capability, no plugin package needed), so only main_menu stays in the
+    // default plugin set. Explicit --active-plugin/--no-plugins command-line
+    // choices from the caller are preserved.
     if (!hostOptions.activePlugins.has_value())
     {
-        hostOptions.activePlugins = std::vector<std::string>{"main_menu", "character_lab"};
+        hostOptions.activePlugins = std::vector<std::string>{"main_menu"};
     }
     engine::ApplicationHost host;
     std::string             startupReport;
@@ -674,6 +755,7 @@ int main(int argc, char **argv)
     demo::CharacterScreen characterScreen;
     bool                  characterScreenReady = false;
     bool                  characterTestPassed  = true;
+    bool                  characterLabPassed   = true;
     if (characterView)
     {
         characterScreenReady = characterScreen.create(windowCapability,
@@ -717,6 +799,14 @@ int main(int argc, char **argv)
                 host.stop();
                 return 1;
             }
+        }
+        // Character Lab (merged from the former character_lab plugin): a
+        // short Lua exercise through the character.* bridge. Runs with the
+        // self test, or standalone with --character-lab.
+        if ((demoOptions.characterTest || demoOptions.characterLab)
+            && scriptCapability != nullptr)
+        {
+            characterLabPassed = runCharacterLabExercise(*scriptCapability);
         }
         if (demoOptions.cameraFramingSet)
         {
@@ -1384,10 +1474,12 @@ int main(int argc, char **argv)
         (void)framePacer.pace(&kernel.profiler());
     }
 
-    // The --character-test run reports failure through the exit code.
-    if (demoOptions.characterTest && characterView && !characterTestPassed)
+    // The --character-test / --character-lab runs report failure through the
+    // exit code.
+    if (characterView && ((demoOptions.characterTest && !characterTestPassed)
+        || (demoOptions.characterLab && !characterLabPassed)))
     {
-        std::cerr << "demo: character test FAILED\n";
+        std::cerr << "demo: character test/lab FAILED\n";
     }
 
     // Headless runs that exited before the screenshot frame get one last
@@ -1443,5 +1535,9 @@ int main(int argc, char **argv)
 
     host.stop();
     std::cout << "demo: stopped cleanly after " << frameIndex << " frames\n";
-    return (demoOptions.characterTest && characterView && !characterTestPassed) ? 1 : 0;
+    return (characterView
+               && ((demoOptions.characterTest && !characterTestPassed)
+                   || (demoOptions.characterLab && !characterLabPassed)))
+        ? 1
+        : 0;
 }

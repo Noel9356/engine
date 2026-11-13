@@ -82,9 +82,10 @@ endif()
 add_library(
     engine_module_window
     MODULE
-    source/window.cpp
-    source/glfw_backend.cpp
-    source/headless_window_backend.cpp
+    source/core/window.cpp
+    source/core/window_configuration.cpp
+    source/backend/glfw/glfw_backend.cpp
+    source/backend/headless/headless_window_backend.cpp
 )
 
 target_compile_definitions(
@@ -128,7 +129,11 @@ endif()
 
 target_include_directories(
     engine_module_window
-    PRIVATE ${CMAKE_INCLUDE_PATH}
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source/core"
+            "${CMAKE_CURRENT_SOURCE_DIR}/source/backend"
+            "${CMAKE_CURRENT_SOURCE_DIR}/source/backend/glfw"
+            "${CMAKE_CURRENT_SOURCE_DIR}/source/backend/headless"
+            ${CMAKE_INCLUDE_PATH}
 )
 
 if(ENGINE_WINDOW_ENABLE_GLFW)

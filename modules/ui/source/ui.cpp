@@ -1,31 +1,22 @@
-// ui module implementation.
+// ui module entry point.
 //
-// Wraps Dear ImGui behind the UiCapability function-pointer table: contexts
-// bound to a single owner thread, the beginFrame -> widgets -> endFrame
-// lifecycle, and per-frame draw data copied into the ABI's plain structs.
-// Without ENGINE_UI_BACKEND_IMGUI every entry fails with BackendUnavailable.
+// Owns the ParticipantManifest, the UiModuleState (context table, owner-thread
+// pin, resolved [ui] configuration), and the UiCapability function-pointer
+// table. The capability lambdas forward to UiModule::...Impl one-liners that
+// delegate to engine::ui::backend:: free functions defined in the dedicated
+// ui_* TUs. Without ENGINE_UI_BACKEND_IMGUI every entry fails with
+// BackendUnavailable.
+
+#include "ui_backend.hpp"
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/ui/capabilities.hpp>
 
-#include <cmath>
-#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
-
-#if defined(ENGINE_UI_BACKEND_IMGUI)
-#include <imgui.h>
-
-#include <algorithm>
-#include <climits>
-#include <limits>
-#include <memory>
-#include <thread>
-#include <unordered_map>
-#include <vector>
-#endif
 
 namespace engine
 {
@@ -34,426 +25,6 @@ namespace ui
 namespace
 {
 
-// Writes an error code through an optional out-parameter.
-void setError(UiError *outError, UiError error)
-{
-    if (outError != nullptr)
-    {
-        *outError = error;
-    }
-}
-
-#if defined(ENGINE_UI_BACKEND_IMGUI)
-
-// One created context: the native ImGui context plus the draw-data buffers
-// the ABI hands out. ownerThread is fixed at creation and checked on every
-// call; nextFont hands out font handles (0 is reserved for the default font).
-struct UiContextRecord
-{
-    ImGuiContext                              *native      = nullptr;
-    std::thread::id                            ownerThread = std::this_thread::get_id();
-    UiContextDescription                       description{};
-    bool                                       frameActive = false;
-    bool                                       touchPointerActive = false;
-    std::uint32_t                              touchPointerId = 0;
-    UiFontHandle                               nextFont    = 1;
-    std::unordered_map<UiFontHandle, ImFont *> fonts;
-    std::vector<UiVertex>                      vertices;
-    std::vector<std::uint32_t>                 indices;
-    std::vector<UiDrawCommand>                 commands;
-    UiDrawData                                 drawData{};
-
-    ~UiContextRecord()
-    {
-        if (native != nullptr)
-        {
-            ImGui::SetCurrentContext(native);
-            if (frameActive)
-            {
-                ImGui::EndFrame();
-            }
-            ImGui::DestroyContext(native);
-        }
-    }
-};
-
-// Maps a UiKey to its ImGui counterpart; ImGuiKey_None for UiKey::None.
-ImGuiKey nativeKey(UiKey key)
-{
-    switch (key)
-    {
-    case UiKey::Tab:
-        return ImGuiKey_Tab;
-    case UiKey::Left:
-        return ImGuiKey_LeftArrow;
-    case UiKey::Right:
-        return ImGuiKey_RightArrow;
-    case UiKey::Up:
-        return ImGuiKey_UpArrow;
-    case UiKey::Down:
-        return ImGuiKey_DownArrow;
-    case UiKey::PageUp:
-        return ImGuiKey_PageUp;
-    case UiKey::PageDown:
-        return ImGuiKey_PageDown;
-    case UiKey::Home:
-        return ImGuiKey_Home;
-    case UiKey::End:
-        return ImGuiKey_End;
-    case UiKey::Insert:
-        return ImGuiKey_Insert;
-    case UiKey::Delete:
-        return ImGuiKey_Delete;
-    case UiKey::Backspace:
-        return ImGuiKey_Backspace;
-    case UiKey::Space:
-        return ImGuiKey_Space;
-    case UiKey::Enter:
-        return ImGuiKey_Enter;
-    case UiKey::Escape:
-        return ImGuiKey_Escape;
-    case UiKey::Apostrophe:
-        return ImGuiKey_Apostrophe;
-    case UiKey::Comma:
-        return ImGuiKey_Comma;
-    case UiKey::Minus:
-        return ImGuiKey_Minus;
-    case UiKey::Period:
-        return ImGuiKey_Period;
-    case UiKey::Slash:
-        return ImGuiKey_Slash;
-    case UiKey::Semicolon:
-        return ImGuiKey_Semicolon;
-    case UiKey::Equal:
-        return ImGuiKey_Equal;
-    case UiKey::LeftBracket:
-        return ImGuiKey_LeftBracket;
-    case UiKey::Backslash:
-        return ImGuiKey_Backslash;
-    case UiKey::RightBracket:
-        return ImGuiKey_RightBracket;
-    case UiKey::GraveAccent:
-        return ImGuiKey_GraveAccent;
-    case UiKey::CapsLock:
-        return ImGuiKey_CapsLock;
-    case UiKey::ScrollLock:
-        return ImGuiKey_ScrollLock;
-    case UiKey::NumLock:
-        return ImGuiKey_NumLock;
-    case UiKey::PrintScreen:
-        return ImGuiKey_PrintScreen;
-    case UiKey::Pause:
-        return ImGuiKey_Pause;
-    case UiKey::KeypadDecimal:
-        return ImGuiKey_KeypadDecimal;
-    case UiKey::KeypadDivide:
-        return ImGuiKey_KeypadDivide;
-    case UiKey::KeypadMultiply:
-        return ImGuiKey_KeypadMultiply;
-    case UiKey::KeypadSubtract:
-        return ImGuiKey_KeypadSubtract;
-    case UiKey::KeypadAdd:
-        return ImGuiKey_KeypadAdd;
-    case UiKey::KeypadEnter:
-        return ImGuiKey_KeypadEnter;
-    case UiKey::KeypadEqual:
-        return ImGuiKey_KeypadEqual;
-    case UiKey::LeftControl:
-        return ImGuiKey_LeftCtrl;
-    case UiKey::LeftShift:
-        return ImGuiKey_LeftShift;
-    case UiKey::LeftAlt:
-        return ImGuiKey_LeftAlt;
-    case UiKey::LeftSuper:
-        return ImGuiKey_LeftSuper;
-    case UiKey::RightControl:
-        return ImGuiKey_RightCtrl;
-    case UiKey::RightShift:
-        return ImGuiKey_RightShift;
-    case UiKey::RightAlt:
-        return ImGuiKey_RightAlt;
-    case UiKey::RightSuper:
-        return ImGuiKey_RightSuper;
-    case UiKey::D0:
-        return ImGuiKey_0;
-    case UiKey::D1:
-        return ImGuiKey_1;
-    case UiKey::D2:
-        return ImGuiKey_2;
-    case UiKey::D3:
-        return ImGuiKey_3;
-    case UiKey::D4:
-        return ImGuiKey_4;
-    case UiKey::D5:
-        return ImGuiKey_5;
-    case UiKey::D6:
-        return ImGuiKey_6;
-    case UiKey::D7:
-        return ImGuiKey_7;
-    case UiKey::D8:
-        return ImGuiKey_8;
-    case UiKey::D9:
-        return ImGuiKey_9;
-    case UiKey::A:
-        return ImGuiKey_A;
-    case UiKey::B:
-        return ImGuiKey_B;
-    case UiKey::C:
-        return ImGuiKey_C;
-    case UiKey::D:
-        return ImGuiKey_D;
-    case UiKey::E:
-        return ImGuiKey_E;
-    case UiKey::F:
-        return ImGuiKey_F;
-    case UiKey::G:
-        return ImGuiKey_G;
-    case UiKey::H:
-        return ImGuiKey_H;
-    case UiKey::I:
-        return ImGuiKey_I;
-    case UiKey::J:
-        return ImGuiKey_J;
-    case UiKey::K:
-        return ImGuiKey_K;
-    case UiKey::L:
-        return ImGuiKey_L;
-    case UiKey::M:
-        return ImGuiKey_M;
-    case UiKey::N:
-        return ImGuiKey_N;
-    case UiKey::O:
-        return ImGuiKey_O;
-    case UiKey::P:
-        return ImGuiKey_P;
-    case UiKey::Q:
-        return ImGuiKey_Q;
-    case UiKey::R:
-        return ImGuiKey_R;
-    case UiKey::S:
-        return ImGuiKey_S;
-    case UiKey::T:
-        return ImGuiKey_T;
-    case UiKey::U:
-        return ImGuiKey_U;
-    case UiKey::V:
-        return ImGuiKey_V;
-    case UiKey::W:
-        return ImGuiKey_W;
-    case UiKey::X:
-        return ImGuiKey_X;
-    case UiKey::Y:
-        return ImGuiKey_Y;
-    case UiKey::Z:
-        return ImGuiKey_Z;
-    case UiKey::F1:
-        return ImGuiKey_F1;
-    case UiKey::F2:
-        return ImGuiKey_F2;
-    case UiKey::F3:
-        return ImGuiKey_F3;
-    case UiKey::F4:
-        return ImGuiKey_F4;
-    case UiKey::F5:
-        return ImGuiKey_F5;
-    case UiKey::F6:
-        return ImGuiKey_F6;
-    case UiKey::F7:
-        return ImGuiKey_F7;
-    case UiKey::F8:
-        return ImGuiKey_F8;
-    case UiKey::F9:
-        return ImGuiKey_F9;
-    case UiKey::F10:
-        return ImGuiKey_F10;
-    case UiKey::F11:
-        return ImGuiKey_F11;
-    case UiKey::F12:
-        return ImGuiKey_F12;
-    case UiKey::Keypad0:
-        return ImGuiKey_Keypad0;
-    case UiKey::Keypad1:
-        return ImGuiKey_Keypad1;
-    case UiKey::Keypad2:
-        return ImGuiKey_Keypad2;
-    case UiKey::Keypad3:
-        return ImGuiKey_Keypad3;
-    case UiKey::Keypad4:
-        return ImGuiKey_Keypad4;
-    case UiKey::Keypad5:
-        return ImGuiKey_Keypad5;
-    case UiKey::Keypad6:
-        return ImGuiKey_Keypad6;
-    case UiKey::Keypad7:
-        return ImGuiKey_Keypad7;
-    case UiKey::Keypad8:
-        return ImGuiKey_Keypad8;
-    case UiKey::Keypad9:
-        return ImGuiKey_Keypad9;
-    case UiKey::None:
-        break;
-    }
-    return ImGuiKey_None;
-}
-
-// Maps a gamepad button to its ImGui gamepad-key counterpart.
-ImGuiKey nativeGamepadButton(UiGamepadButton button)
-{
-    switch (button)
-    {
-    case UiGamepadButton::FaceLeft:
-        return ImGuiKey_GamepadFaceLeft;
-    case UiGamepadButton::FaceRight:
-        return ImGuiKey_GamepadFaceRight;
-    case UiGamepadButton::FaceUp:
-        return ImGuiKey_GamepadFaceUp;
-    case UiGamepadButton::FaceDown:
-        return ImGuiKey_GamepadFaceDown;
-    case UiGamepadButton::DpadLeft:
-        return ImGuiKey_GamepadDpadLeft;
-    case UiGamepadButton::DpadRight:
-        return ImGuiKey_GamepadDpadRight;
-    case UiGamepadButton::DpadUp:
-        return ImGuiKey_GamepadDpadUp;
-    case UiGamepadButton::DpadDown:
-        return ImGuiKey_GamepadDpadDown;
-    case UiGamepadButton::LeftShoulder:
-        return ImGuiKey_GamepadL1;
-    case UiGamepadButton::RightShoulder:
-        return ImGuiKey_GamepadR1;
-    case UiGamepadButton::LeftTrigger:
-        return ImGuiKey_GamepadL2;
-    case UiGamepadButton::RightTrigger:
-        return ImGuiKey_GamepadR2;
-    case UiGamepadButton::LeftStick:
-        return ImGuiKey_GamepadL3;
-    case UiGamepadButton::RightStick:
-        return ImGuiKey_GamepadR3;
-    case UiGamepadButton::Start:
-        return ImGuiKey_GamepadStart;
-    case UiGamepadButton::Back:
-        return ImGuiKey_GamepadBack;
-    }
-    return ImGuiKey_None;
-}
-
-// Translates the ABI bit flags into ImGui window flags.
-ImGuiWindowFlags nativeWindowFlags(UiWindowFlags flags)
-{
-    const std::uint32_t value  = static_cast<std::uint32_t>(flags);
-    ImGuiWindowFlags    result = 0;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoTitleBar))
-        result |= ImGuiWindowFlags_NoTitleBar;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoResize))
-        result |= ImGuiWindowFlags_NoResize;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoMove))
-        result |= ImGuiWindowFlags_NoMove;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoScrollbar))
-        result |= ImGuiWindowFlags_NoScrollbar;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoCollapse))
-        result |= ImGuiWindowFlags_NoCollapse;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::AlwaysAutoResize))
-        result |= ImGuiWindowFlags_AlwaysAutoResize;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoBackground))
-        result |= ImGuiWindowFlags_NoBackground;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoSavedSettings))
-        result |= ImGuiWindowFlags_NoSavedSettings;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::MenuBar))
-        result |= ImGuiWindowFlags_MenuBar;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoBringToFront))
-        result |= ImGuiWindowFlags_NoBringToFrontOnFocus;
-    if (value & static_cast<std::uint32_t>(UiWindowFlags::NoNavigation))
-        result |= ImGuiWindowFlags_NoNav;
-    return result;
-}
-
-// Maps a style color slot to its ImGui color (Text as the fallback).
-ImGuiCol nativeColor(UiColor color)
-{
-    switch (color)
-    {
-    case UiColor::Text:
-        return ImGuiCol_Text;
-    case UiColor::TextDisabled:
-        return ImGuiCol_TextDisabled;
-    case UiColor::WindowBackground:
-        return ImGuiCol_WindowBg;
-    case UiColor::ChildBackground:
-        return ImGuiCol_ChildBg;
-    case UiColor::PopupBackground:
-        return ImGuiCol_PopupBg;
-    case UiColor::Border:
-        return ImGuiCol_Border;
-    case UiColor::FrameBackground:
-        return ImGuiCol_FrameBg;
-    case UiColor::FrameHovered:
-        return ImGuiCol_FrameBgHovered;
-    case UiColor::FrameActive:
-        return ImGuiCol_FrameBgActive;
-    case UiColor::TitleBackground:
-        return ImGuiCol_TitleBg;
-    case UiColor::TitleBackgroundActive:
-        return ImGuiCol_TitleBgActive;
-    case UiColor::Button:
-        return ImGuiCol_Button;
-    case UiColor::ButtonHovered:
-        return ImGuiCol_ButtonHovered;
-    case UiColor::ButtonActive:
-        return ImGuiCol_ButtonActive;
-    case UiColor::Header:
-        return ImGuiCol_Header;
-    case UiColor::HeaderHovered:
-        return ImGuiCol_HeaderHovered;
-    case UiColor::HeaderActive:
-        return ImGuiCol_HeaderActive;
-    case UiColor::CheckMark:
-        return ImGuiCol_CheckMark;
-    case UiColor::SliderGrab:
-        return ImGuiCol_SliderGrab;
-    case UiColor::SliderGrabActive:
-        return ImGuiCol_SliderGrabActive;
-    }
-    return ImGuiCol_Text;
-}
-
-// Maps a style variable to its ImGui style-var counterpart.
-ImGuiStyleVar nativeStyleVariable(UiStyleVariable variable)
-{
-    switch (variable)
-    {
-    case UiStyleVariable::Alpha:
-        return ImGuiStyleVar_Alpha;
-    case UiStyleVariable::DisabledAlpha:
-        return ImGuiStyleVar_DisabledAlpha;
-    case UiStyleVariable::WindowRounding:
-        return ImGuiStyleVar_WindowRounding;
-    case UiStyleVariable::WindowBorderSize:
-        return ImGuiStyleVar_WindowBorderSize;
-    case UiStyleVariable::ChildRounding:
-        return ImGuiStyleVar_ChildRounding;
-    case UiStyleVariable::FrameRounding:
-        return ImGuiStyleVar_FrameRounding;
-    case UiStyleVariable::FrameBorderSize:
-        return ImGuiStyleVar_FrameBorderSize;
-    case UiStyleVariable::PopupRounding:
-        return ImGuiStyleVar_PopupRounding;
-    case UiStyleVariable::PopupBorderSize:
-        return ImGuiStyleVar_PopupBorderSize;
-    case UiStyleVariable::ScrollbarRounding:
-        return ImGuiStyleVar_ScrollbarRounding;
-    case UiStyleVariable::GrabRounding:
-        return ImGuiStyleVar_GrabRounding;
-    case UiStyleVariable::TabRounding:
-        return ImGuiStyleVar_TabRounding;
-    }
-    return ImGuiStyleVar_Alpha;
-}
-
-#endif
-
-// Module implementation behind the "ui" capability. All ImGui work happens
-// on the thread that created the context; the module owns its contexts until
-// stop() destroys them.
 class UiModule final : public ModuleInterface
 {
 public:
@@ -468,14 +39,46 @@ public:
         return manifest_;
     }
 
-    // Reads [ui] save_window_layout (default false). Dear ImGui persists its
-    // window layout by writing imgui.ini from inside NewFrame, rate-limited to
-    // once every ~5 seconds - synchronous file I/O in the frame path that
-    // surfaces as a frame-time spike. Debug-overlay layout persistence stays
-    // off unless explicitly enabled.
+    // Reads [ui] configuration once. The module does not subscribe to
+    // ConfigurationReloadedEvent because context creation freezes the values
+    // into each UiContextRecord: a reload would only affect later contexts
+    // and the host can already override every field per-context.
     void construct(ParticipantContext &context) override
     {
-        saveWindowLayout_ = context.configurationBooleanInSection("ui", "save_window_layout").value_or(false);
+        state_.saveWindowLayout = context.configurationBooleanInSection("ui", "save_window_layout").value_or(false);
+
+        if (const auto path = context.configurationStringInSection("ui", "ini_filename"))
+        {
+            state_.iniFilename = *path;
+        }
+
+        if (const auto style = context.configurationStringInSection("ui", "default_style"))
+        {
+            if (*style == "dark")
+                state_.defaultStyle = UiStyle::Dark;
+            else if (*style == "light")
+                state_.defaultStyle = UiStyle::Light;
+            else if (*style == "classic")
+                state_.defaultStyle = UiStyle::Classic;
+            else
+                std::fprintf(stderr,
+                    "ui module: ignoring [ui] default_style %s; expected dark, light, or classic\n",
+                    style->c_str());
+        }
+
+        if (const auto fontSize = context.configurationFloatingInSection("ui", "default_font_size"))
+        {
+            if (std::isfinite(*fontSize) && *fontSize >= 0.0)
+            {
+                state_.defaultFontSize = static_cast<float>(*fontSize);
+            }
+            else
+            {
+                std::fprintf(stderr,
+                    "ui module: ignoring [ui] default_font_size %g; expected a non-negative finite value\n",
+                    *fontSize);
+            }
+        }
     }
 
     void start() override
@@ -483,11 +86,14 @@ public:
 
     void stop() override
     {
-        // ImGui state does not survive module restart: drop every context.
+        // ImGui state does not survive module restart: drop every context
+        // and release the owner-thread pin so a fresh start can re-establish
+        // it on whichever thread constructs the first context.
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        contexts_.clear();
-        ownerThread_    = {};
-        hasOwnerThread_ = false;
+        state_.contexts.clear();
+        state_.ownerThread    = {};
+        state_.hasOwnerThread = false;
+        state_.nextContext    = 1;
 #endif
     }
 
@@ -504,7 +110,9 @@ private:
     }
 
     // Wires every capability function pointer to a lambda that forwards to
-    // the matching *Impl method on this module.
+    // the matching *Impl method on this module. The lambdas keep the C-style
+    // self pointer convention so consumers call ui.field(ui.self, ...) and
+    // land on a method that has the typed UiModuleState available.
     void assignCapabilityPointers()
     {
         capability_.self = this;
@@ -543,10 +151,108 @@ private:
         ENGINE_UI_BIND(dragFloat, dragFloatImpl);
         ENGINE_UI_BIND(combo, comboImpl);
         ENGINE_UI_BIND(selectable, selectableImpl);
+        ENGINE_UI_BIND(selectableEx, selectableExImpl);
         ENGINE_UI_BIND(radioButton, radioButtonImpl);
         ENGINE_UI_BIND(progressBar, progressBarImpl);
         ENGINE_UI_BIND(image, imageImpl);
+        ENGINE_UI_BIND(bulletText, bulletTextImpl);
+        ENGINE_UI_BIND(beginChild, beginChildImpl);
+        ENGINE_UI_BIND(endChild, endChildImpl);
+        ENGINE_UI_BIND(beginGroup, beginGroupImpl);
+        ENGINE_UI_BIND(endGroup, endGroupImpl);
+        ENGINE_UI_BIND(indent, indentImpl);
+        ENGINE_UI_BIND(unindent, unindentImpl);
+        ENGINE_UI_BIND(newLine, newLineImpl);
+        ENGINE_UI_BIND(dummy, dummyImpl);
+        ENGINE_UI_BIND(treeNode, treeNodeImpl);
+        ENGINE_UI_BIND(treeNodeEx, treeNodeExImpl);
+        ENGINE_UI_BIND(treePop, treePopImpl);
+        ENGINE_UI_BIND(setNextItemOpen, setNextItemOpenImpl);
+        ENGINE_UI_BIND(collapsingHeader, collapsingHeaderImpl);
+        ENGINE_UI_BIND(collapsingHeaderBool, collapsingHeaderBoolImpl);
+        ENGINE_UI_BIND(beginDisabled, beginDisabledImpl);
+        ENGINE_UI_BIND(endDisabled, endDisabledImpl);
+        ENGINE_UI_BIND(openPopup, openPopupImpl);
+        ENGINE_UI_BIND(openPopupId, openPopupIdImpl);
+        ENGINE_UI_BIND(beginPopup, beginPopupImpl);
+        ENGINE_UI_BIND(beginPopupModal, beginPopupModalImpl);
+        ENGINE_UI_BIND(beginPopupContextItem, beginPopupContextItemImpl);
+        ENGINE_UI_BIND(beginPopupContextWindow, beginPopupContextWindowImpl);
+        ENGINE_UI_BIND(beginPopupContextVoid, beginPopupContextVoidImpl);
+        ENGINE_UI_BIND(endPopup, endPopupImpl);
+        ENGINE_UI_BIND(closeCurrentPopup, closeCurrentPopupImpl);
+        ENGINE_UI_BIND(isPopupOpen, isPopupOpenImpl);
+        ENGINE_UI_BIND(beginMenuBar, beginMenuBarImpl);
+        ENGINE_UI_BIND(endMenuBar, endMenuBarImpl);
+        ENGINE_UI_BIND(beginMenu, beginMenuImpl);
+        ENGINE_UI_BIND(endMenu, endMenuImpl);
+        ENGINE_UI_BIND(menuItem, menuItemImpl);
+        ENGINE_UI_BIND(menuItemActivated, menuItemActivatedImpl);
+        ENGINE_UI_BIND(beginTabBar, beginTabBarImpl);
+        ENGINE_UI_BIND(endTabBar, endTabBarImpl);
+        ENGINE_UI_BIND(beginTabItem, beginTabItemImpl);
+        ENGINE_UI_BIND(endTabItem, endTabItemImpl);
+        ENGINE_UI_BIND(setTabItemClosed, setTabItemClosedImpl);
+        ENGINE_UI_BIND(beginTable, beginTableImpl);
+        ENGINE_UI_BIND(endTable, endTableImpl);
+        ENGINE_UI_BIND(tableNextRow, tableNextRowImpl);
+        ENGINE_UI_BIND(tableNextColumn, tableNextColumnImpl);
+        ENGINE_UI_BIND(tableSetColumnIndex, tableSetColumnIndexImpl);
+        ENGINE_UI_BIND(tableSetupColumn, tableSetupColumnImpl);
+        ENGINE_UI_BIND(tableSetupScrollFreeze, tableSetupScrollFreezeImpl);
+        ENGINE_UI_BIND(tableHeadersRow, tableHeadersRowImpl);
+        ENGINE_UI_BIND(tableHeader, tableHeaderImpl);
+        ENGINE_UI_BIND(tableColumnCount, tableColumnCountImpl);
+        ENGINE_UI_BIND(tableColumnIndex, tableColumnIndexImpl);
+        ENGINE_UI_BIND(tableRowIndex, tableRowIndexImpl);
+        ENGINE_UI_BIND(tableColumnName, tableColumnNameImpl);
+        ENGINE_UI_BIND(tableColumnIsEnabled, tableColumnIsEnabledImpl);
+        ENGINE_UI_BIND(tableColumnIsSorted, tableColumnIsSortedImpl);
+        ENGINE_UI_BIND(tableSetBgColor, tableSetBgColorImpl);
+        ENGINE_UI_BIND(setTooltip, setTooltipImpl);
+        ENGINE_UI_BIND(beginTooltip, beginTooltipImpl);
+        ENGINE_UI_BIND(endTooltip, endTooltipImpl);
+        ENGINE_UI_BIND(sliderFloat2, sliderFloat2Impl);
+        ENGINE_UI_BIND(sliderFloat3, sliderFloat3Impl);
+        ENGINE_UI_BIND(sliderFloat4, sliderFloat4Impl);
+        ENGINE_UI_BIND(sliderInt2, sliderInt2Impl);
+        ENGINE_UI_BIND(sliderInt3, sliderInt3Impl);
+        ENGINE_UI_BIND(sliderInt4, sliderInt4Impl);
+        ENGINE_UI_BIND(dragFloat2, dragFloat2Impl);
+        ENGINE_UI_BIND(dragFloat3, dragFloat3Impl);
+        ENGINE_UI_BIND(dragInt2, dragInt2Impl);
+        ENGINE_UI_BIND(dragInt3, dragInt3Impl);
+        ENGINE_UI_BIND(colorEdit3, colorEdit3Impl);
+        ENGINE_UI_BIND(colorEdit4, colorEdit4Impl);
+        ENGINE_UI_BIND(colorButton, colorButtonImpl);
+        ENGINE_UI_BIND(plotLines, plotLinesImpl);
+        ENGINE_UI_BIND(plotHistogram, plotHistogramImpl);
+        ENGINE_UI_BIND(isItemHovered, isItemHoveredImpl);
+        ENGINE_UI_BIND(isItemActive, isItemActiveImpl);
+        ENGINE_UI_BIND(isItemFocused, isItemFocusedImpl);
+        ENGINE_UI_BIND(isItemClicked, isItemClickedImpl);
+        ENGINE_UI_BIND(isItemVisible, isItemVisibleImpl);
+        ENGINE_UI_BIND(isItemActivated, isItemActivatedImpl);
+        ENGINE_UI_BIND(isItemDeactivated, isItemDeactivatedImpl);
+        ENGINE_UI_BIND(isItemDeactivatedAfterEdit, isItemDeactivatedAfterEditImpl);
+        ENGINE_UI_BIND(isAnyItemHovered, isAnyItemHoveredImpl);
+        ENGINE_UI_BIND(isAnyItemActive, isAnyItemActiveImpl);
+        ENGINE_UI_BIND(isWindowAppearing, isWindowAppearingImpl);
+        ENGINE_UI_BIND(isWindowCollapsed, isWindowCollapsedImpl);
+        ENGINE_UI_BIND(isWindowFocused, isWindowFocusedImpl);
+        ENGINE_UI_BIND(isWindowHovered, isWindowHoveredImpl);
+        ENGINE_UI_BIND(windowWidth, windowWidthImpl);
+        ENGINE_UI_BIND(windowHeight, windowHeightImpl);
+        ENGINE_UI_BIND(windowPositionX, windowPositionXImpl);
+        ENGINE_UI_BIND(windowPositionY, windowPositionYImpl);
+        ENGINE_UI_BIND(setNextWindowFocus, setNextWindowFocusImpl);
+        ENGINE_UI_BIND(setNextWindowCollapsed, setNextWindowCollapsedImpl);
+        ENGINE_UI_BIND(setWindowFocus, setWindowFocusImpl);
+        ENGINE_UI_BIND(setWindowCollapsedNamed, setWindowCollapsedNamedImpl);
+        ENGINE_UI_BIND(setMouseCursor, setMouseCursorImpl);
+        ENGINE_UI_BIND(mouseCursor, mouseCursorImpl);
         ENGINE_UI_BIND(addFontFromFile, addFontFromFileImpl);
+        ENGINE_UI_BIND(addFontFromMemoryTTF, addFontFromMemoryTTFImpl);
         ENGINE_UI_BIND(pushFont, pushFontImpl);
         ENGINE_UI_BIND(popFont, popFontImpl);
         ENGINE_UI_BIND(fontAtlas, fontAtlasImpl);
@@ -560,241 +266,15 @@ private:
 #undef ENGINE_UI_BIND
     }
 
-#if defined(ENGINE_UI_BACKEND_IMGUI)
-    // Returns null for unknown handles and for handles owned by another
-    // thread; callers then report InvalidHandle (createContext reports
-    // WrongThread separately for the same rule).
-    UiContextRecord *findContext(UiContextHandle handle)
-    {
-        const auto iterator = contexts_.find(handle);
-        if (iterator == contexts_.end() || iterator->second->ownerThread != std::this_thread::get_id())
-        {
-            return nullptr;
-        }
-        return iterator->second.get();
-    }
+    // --- Context lifetime --------------------------------------------------
 
-    static bool inFrame(const UiContextRecord *context)
-    {
-        return context != nullptr && context->frameActive;
-    }
-
-    static void makeCurrent(UiContextRecord &context)
-    {
-        ImGui::SetCurrentContext(context.native);
-    }
-
-    // Resets the per-frame buffers; called before NewFrame and on failures.
-    static void clearDrawData(UiContextRecord &context)
-    {
-        context.vertices.clear();
-        context.indices.clear();
-        context.commands.clear();
-        context.drawData = {};
-    }
-
-    // Flattens ImGui's draw lists into the ABI structs, rebasing per-command
-    // offsets across lists and dropping commands with custom callbacks (only
-    // the reset-render-state marker survives). Totals above the description's
-    // maximums clear the buffers and fail the frame.
-    static bool copyDrawData(UiContextRecord &context)
-    {
-        const ImDrawData *source = ImGui::GetDrawData();
-        if (source == nullptr || !source->Valid)
-        {
-            clearDrawData(context);
-            return true;
-        }
-
-        std::uint64_t vertexCount  = 0;
-        std::uint64_t indexCount   = 0;
-        std::uint64_t commandCount = 0;
-        for (int listIndex = 0; listIndex < source->CmdListsCount; ++listIndex)
-        {
-            const ImDrawList *list = source->CmdLists[listIndex];
-            vertexCount += static_cast<std::uint64_t>(list->VtxBuffer.Size);
-            indexCount += static_cast<std::uint64_t>(list->IdxBuffer.Size);
-            commandCount += static_cast<std::uint64_t>(list->CmdBuffer.Size);
-        }
-
-        if (vertexCount > context.description.maximumVertices || indexCount > context.description.maximumIndices
-            || commandCount > context.description.maximumCommands
-            || vertexCount > std::numeric_limits<std::uint32_t>::max()
-            || indexCount > std::numeric_limits<std::uint32_t>::max()
-            || commandCount > std::numeric_limits<std::uint32_t>::max())
-        {
-            clearDrawData(context);
-            return false;
-        }
-
-        context.vertices.clear();
-        context.indices.clear();
-        context.commands.clear();
-        context.vertices.reserve(static_cast<std::size_t>(vertexCount));
-        context.indices.reserve(static_cast<std::size_t>(indexCount));
-        context.commands.reserve(static_cast<std::size_t>(commandCount));
-
-        std::uint32_t vertexBase = 0;
-        std::uint32_t indexBase  = 0;
-        for (int listIndex = 0; listIndex < source->CmdListsCount; ++listIndex)
-        {
-            const ImDrawList *list = source->CmdLists[listIndex];
-            for (const ImDrawVert &vertex : list->VtxBuffer)
-            {
-                UiVertex output{};
-                output.position[0] = vertex.pos.x;
-                output.position[1] = vertex.pos.y;
-                output.uv[0]       = vertex.uv.x;
-                output.uv[1]       = vertex.uv.y;
-                output.color       = vertex.col;
-                context.vertices.push_back(output);
-            }
-            for (const ImDrawIdx index : list->IdxBuffer)
-            {
-                context.indices.push_back(static_cast<std::uint32_t>(index));
-            }
-            for (const ImDrawCmd &command : list->CmdBuffer)
-            {
-                if (command.UserCallback != nullptr && command.UserCallback != ImDrawCallback_ResetRenderState)
-                {
-                    continue;
-                }
-                UiDrawCommand output{};
-                output.indexOffset      = indexBase + command.IdxOffset;
-                output.vertexOffset     = vertexBase + command.VtxOffset;
-                output.elementCount     = command.ElemCount;
-                output.clipRectangle[0] = command.ClipRect.x;
-                output.clipRectangle[1] = command.ClipRect.y;
-                output.clipRectangle[2] = command.ClipRect.z;
-                output.clipRectangle[3] = command.ClipRect.w;
-                output.texture          = static_cast<UiTextureHandle>(command.TextureId);
-                output.resetRenderState = command.UserCallback == ImDrawCallback_ResetRenderState;
-                context.commands.push_back(output);
-            }
-            vertexBase += static_cast<std::uint32_t>(list->VtxBuffer.Size);
-            indexBase += static_cast<std::uint32_t>(list->IdxBuffer.Size);
-        }
-
-        context.drawData.vertices            = context.vertices.empty() ? nullptr : context.vertices.data();
-        context.drawData.vertexCount         = static_cast<std::uint32_t>(context.vertices.size());
-        context.drawData.indices             = context.indices.empty() ? nullptr : context.indices.data();
-        context.drawData.indexCount          = static_cast<std::uint32_t>(context.indices.size());
-        context.drawData.commands            = context.commands.empty() ? nullptr : context.commands.data();
-        context.drawData.commandCount        = static_cast<std::uint32_t>(context.commands.size());
-        context.drawData.displayPosition[0]  = source->DisplayPos.x;
-        context.drawData.displayPosition[1]  = source->DisplayPos.y;
-        context.drawData.displaySize[0]      = source->DisplaySize.x;
-        context.drawData.displaySize[1]      = source->DisplaySize.y;
-        context.drawData.framebufferScale[0] = source->FramebufferScale.x;
-        context.drawData.framebufferScale[1] = source->FramebufferScale.y;
-        return true;
-    }
-#endif
-
-    // Creates a context. A null description uses the defaults; zero-valued
-    // reserve/maximum fields fall back to the same defaults; reserve above
-    // maximum is rejected. The first context fixes the owner thread for all.
     UiContextHandle createContextImpl(const UiContextDescription *description, UiError *error)
     {
-        setError(error, UiError::None);
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextDescription resolved{};
-        if (description != nullptr)
-        {
-            resolved = *description;
-        }
-        const std::thread::id currentThread = std::this_thread::get_id();
-        if (hasOwnerThread_ && ownerThread_ != currentThread)
-        {
-            setError(error, UiError::WrongThread);
-            return invalidUiContext;
-        }
-        if (!std::isfinite(resolved.globalScale) || resolved.globalScale <= 0.0f)
-        {
-            setError(error, UiError::InvalidDescription);
-            return invalidUiContext;
-        }
-        if (resolved.reserveVertices == 0)
-            resolved.reserveVertices = 4096;
-        if (resolved.reserveIndices == 0)
-            resolved.reserveIndices = 8192;
-        if (resolved.reserveCommands == 0)
-            resolved.reserveCommands = 256;
-        if (resolved.maximumVertices == 0)
-            resolved.maximumVertices = 1'048'576;
-        if (resolved.maximumIndices == 0)
-            resolved.maximumIndices = 2'097'152;
-        if (resolved.maximumCommands == 0)
-            resolved.maximumCommands = 65'536;
-        if (resolved.reserveVertices > resolved.maximumVertices || resolved.reserveIndices > resolved.maximumIndices
-            || resolved.reserveCommands > resolved.maximumCommands)
-        {
-            setError(error, UiError::InvalidDescription);
-            return invalidUiContext;
-        }
-        auto record         = std::make_unique<UiContextRecord>();
-        record->ownerThread = currentThread;
-        record->description = resolved;
-        record->vertices.reserve(resolved.reserveVertices);
-        record->indices.reserve(resolved.reserveIndices);
-        record->commands.reserve(resolved.reserveCommands);
-        record->native = ImGui::CreateContext();
-        if (record->native == nullptr)
-        {
-            setError(error, UiError::CreationFailed);
-            return invalidUiContext;
-        }
-        makeCurrent(*record);
-        IMGUI_CHECKVERSION();
-        ImGui::StyleColorsDark();
-        ImGui::GetStyle().ScaleAllSizes(resolved.globalScale);
-        ImGuiIO &io        = ImGui::GetIO();
-        io.FontGlobalScale = resolved.globalScale;
-        if (resolved.keyboardNavigation)
-            io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        if (resolved.gamepadNavigation)
-        {
-            io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-            io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
-        }
-        io.BackendPlatformName = "engine_ui_input";
-        io.BackendRendererName = "engine_ui_draw_data";
-        io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
-        // Null disables the automatic ini load/save; without it ImGui writes
-        // imgui.ini from NewFrame every ~5s after any window change, which is
-        // a synchronous file write inside the frame (frame-time spike).
-        if (!saveWindowLayout_)
-            io.IniFilename = nullptr;
-        record->fonts.emplace(defaultUiFont, io.Fonts->AddFontDefault());
-
-        // Handles start at 1; skip 0 (invalidUiContext) if the counter wraps.
-        const UiContextHandle handle = nextContext_++;
-        if (handle == invalidUiContext)
-        {
-            setError(error, UiError::CreationFailed);
-            return invalidUiContext;
-        }
-        try
-        {
-            const auto [iterator, inserted] = contexts_.emplace(handle, std::move(record));
-            (void)iterator;
-            if (!inserted)
-            {
-                setError(error, UiError::CreationFailed);
-                return invalidUiContext;
-            }
-        }
-        catch (...)
-        {
-            setError(error, UiError::CreationFailed);
-            return invalidUiContext;
-        }
-        ownerThread_    = currentThread;
-        hasOwnerThread_ = true;
-        return handle;
+        return backend::createContext(state_, description, error);
 #else
         (void)description;
-        setError(error, UiError::BackendUnavailable);
+        backend::setError(error, UiError::BackendUnavailable);
         return invalidUiContext;
 #endif
     }
@@ -802,106 +282,39 @@ private:
     void destroyContextImpl(UiContextHandle handle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        const auto iterator = contexts_.find(handle);
-        if (iterator == contexts_.end() || iterator->second->ownerThread != std::this_thread::get_id())
-            return;
-        contexts_.erase(iterator);
-        if (contexts_.empty())
-        {
-            ownerThread_    = {};
-            hasOwnerThread_ = false;
-        }
+        backend::destroyContext(state_, handle);
 #else
         (void)handle;
 #endif
     }
 
-    // Starts a frame: validates the description (positive finite sizes and
-    // delta), clamps deltaSeconds to [1 ms, 0.25 s] for ImGui's timers, clears
-    // the previous frame's draw data, and calls ImGui::NewFrame().
     bool beginFrameImpl(UiContextHandle handle, const UiFrameDescription *description, UiError *error)
     {
-        setError(error, UiError::None);
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        if (description == nullptr || !std::isfinite(description->displayWidth)
-            || !std::isfinite(description->displayHeight) || description->displayWidth <= 0.0f
-            || description->displayHeight <= 0.0f || !std::isfinite(description->framebufferScaleX)
-            || !std::isfinite(description->framebufferScaleY) || description->framebufferScaleX <= 0.0f
-            || description->framebufferScaleY <= 0.0f || !std::isfinite(description->deltaSeconds)
-            || description->deltaSeconds <= 0.0f)
-        {
-            setError(error, UiError::InvalidDescription);
-            return false;
-        }
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr)
-        {
-            setError(error, UiError::InvalidHandle);
-            return false;
-        }
-        if (record->frameActive)
-        {
-            setError(error, UiError::FrameAlreadyActive);
-            return false;
-        }
-        makeCurrent(*record);
-        ImGuiIO &io                = ImGui::GetIO();
-        io.DisplaySize             = ImVec2(description->displayWidth, description->displayHeight);
-        io.DisplayFramebufferScale = ImVec2(description->framebufferScaleX, description->framebufferScaleY);
-        io.DeltaTime               = std::clamp(description->deltaSeconds, 1.0f / 1000.0f, 0.25f);
-        clearDrawData(*record);
-        ImGui::NewFrame();
-        record->frameActive = true;
-        return true;
+        return backend::beginFrame(state_, handle, description, error);
 #else
         (void)handle;
         (void)description;
-        setError(error, UiError::BackendUnavailable);
+        backend::setError(error, UiError::BackendUnavailable);
         return false;
 #endif
     }
 
-    // Ends the frame: ImGui::Render() produces the draw lists, which are
-    // copied into the ABI buffers. CapacityExceeded (with cleared draw data)
-    // is reported when a configured maximum was exceeded.
     bool endFrameImpl(UiContextHandle handle, UiError *error)
     {
-        setError(error, UiError::None);
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr)
-        {
-            setError(error, UiError::InvalidHandle);
-            return false;
-        }
-        if (!record->frameActive)
-        {
-            setError(error, UiError::FrameNotActive);
-            return false;
-        }
-        makeCurrent(*record);
-        ImGui::Render();
-        record->frameActive = false;
-        if (!copyDrawData(*record))
-        {
-            setError(error, UiError::CapacityExceeded);
-            return false;
-        }
-        return true;
+        return backend::endFrame(state_, handle, error);
 #else
         (void)handle;
-        setError(error, UiError::BackendUnavailable);
+        backend::setError(error, UiError::BackendUnavailable);
         return false;
 #endif
     }
 
-    // Draw data of the last ended frame; the pointer lives until the next
-    // beginFrame on the same context.
     const UiDrawData *drawDataImpl(UiContextHandle handle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        return record != nullptr ? &record->drawData : nullptr;
+        return backend::drawData(state_, handle);
 #else
         (void)handle;
         return nullptr;
@@ -911,17 +324,7 @@ private:
     bool captureStateImpl(UiContextHandle handle, UiCaptureState *outState)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        if (outState == nullptr)
-            return false;
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr)
-            return false;
-        makeCurrent(*record);
-        const ImGuiIO &io   = ImGui::GetIO();
-        outState->mouse     = io.WantCaptureMouse;
-        outState->keyboard  = io.WantCaptureKeyboard;
-        outState->textInput = io.WantTextInput;
-        return true;
+        return backend::captureState(state_, handle, outState);
 #else
         (void)handle;
         (void)outState;
@@ -929,16 +332,12 @@ private:
 #endif
     }
 
-    // Input sink: events are queued into ImGui's IO and take effect on the
-    // next NewFrame. Non-finite or out-of-range input is silently dropped.
+    // --- Input -------------------------------------------------------------
+
     void addMousePositionImpl(UiContextHandle handle, float x, float y)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr || !std::isfinite(x) || !std::isfinite(y))
-            return;
-        makeCurrent(*record);
-        ImGui::GetIO().AddMousePosEvent(x, y);
+        backend::addMousePosition(state_, handle, x, y);
 #else
         (void)handle;
         (void)x;
@@ -949,11 +348,7 @@ private:
     void addMouseButtonImpl(UiContextHandle handle, std::uint32_t button, bool down)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr || button >= ImGuiMouseButton_COUNT)
-            return;
-        makeCurrent(*record);
-        ImGui::GetIO().AddMouseButtonEvent(static_cast<int>(button), down);
+        backend::addMouseButton(state_, handle, button, down);
 #else
         (void)handle;
         (void)button;
@@ -964,36 +359,7 @@ private:
     void addTouchImpl(UiContextHandle handle, std::uint32_t touchId, UiTouchPhase phase, float x, float y)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr || static_cast<std::uint32_t>(phase) > static_cast<std::uint32_t>(UiTouchPhase::Cancelled)
-            || !std::isfinite(x) || !std::isfinite(y))
-            return;
-        makeCurrent(*record);
-        ImGuiIO &io = ImGui::GetIO();
-        switch (phase)
-        {
-        case UiTouchPhase::Began:
-            if (record->touchPointerActive)
-                return;
-            record->touchPointerActive = true;
-            record->touchPointerId = touchId;
-            io.AddMousePosEvent(x, y);
-            io.AddMouseButtonEvent(0, true);
-            break;
-        case UiTouchPhase::Moved:
-            if (record->touchPointerActive && record->touchPointerId == touchId)
-                io.AddMousePosEvent(x, y);
-            break;
-        case UiTouchPhase::Ended:
-        case UiTouchPhase::Cancelled:
-            if (record->touchPointerActive && record->touchPointerId == touchId)
-            {
-                io.AddMousePosEvent(x, y);
-                io.AddMouseButtonEvent(0, false);
-                record->touchPointerActive = false;
-            }
-            break;
-        }
+        backend::addTouch(state_, handle, touchId, phase, x, y);
 #else
         (void)handle;
         (void)touchId;
@@ -1006,11 +372,7 @@ private:
     void addMouseWheelImpl(UiContextHandle handle, float horizontal, float vertical)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr || !std::isfinite(horizontal) || !std::isfinite(vertical))
-            return;
-        makeCurrent(*record);
-        ImGui::GetIO().AddMouseWheelEvent(horizontal, vertical);
+        backend::addMouseWheel(state_, handle, horizontal, vertical);
 #else
         (void)handle;
         (void)horizontal;
@@ -1021,12 +383,7 @@ private:
     void addKeyImpl(UiContextHandle handle, UiKey key, bool down)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        const ImGuiKey   mapped = nativeKey(key);
-        if (record == nullptr || mapped == ImGuiKey_None)
-            return;
-        makeCurrent(*record);
-        ImGui::GetIO().AddKeyEvent(mapped, down);
+        backend::addKey(state_, handle, key, down);
 #else
         (void)handle;
         (void)key;
@@ -1037,12 +394,7 @@ private:
     void addGamepadButtonImpl(UiContextHandle handle, UiGamepadButton button, bool down)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        const ImGuiKey   mapped = nativeGamepadButton(button);
-        if (record == nullptr || mapped == ImGuiKey_None)
-            return;
-        makeCurrent(*record);
-        ImGui::GetIO().AddKeyEvent(mapped, down);
+        backend::addGamepadButton(state_, handle, button, down);
 #else
         (void)handle;
         (void)button;
@@ -1050,44 +402,10 @@ private:
 #endif
     }
 
-    // Analog axes are split into ImGui's positive/negative directional keys;
-    // the value is clamped to [-1, 1] and triggers only drive the positive
-    // key.
     void addGamepadAxisImpl(UiContextHandle handle, UiGamepadAxis axis, float value)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr || !std::isfinite(value))
-            return;
-        makeCurrent(*record);
-        ImGuiIO    &io       = ImGui::GetIO();
-        const float amount   = std::clamp(value, -1.0f, 1.0f);
-        const auto  sendAxis = [&io](ImGuiKey positive, ImGuiKey negative, float position)
-        {
-            io.AddKeyAnalogEvent(positive, position > 0.0f, std::max(position, 0.0f));
-            io.AddKeyAnalogEvent(negative, position < 0.0f, std::max(-position, 0.0f));
-        };
-        switch (axis)
-        {
-        case UiGamepadAxis::LeftStickX:
-            sendAxis(ImGuiKey_GamepadLStickRight, ImGuiKey_GamepadLStickLeft, amount);
-            break;
-        case UiGamepadAxis::LeftStickY:
-            sendAxis(ImGuiKey_GamepadLStickDown, ImGuiKey_GamepadLStickUp, amount);
-            break;
-        case UiGamepadAxis::RightStickX:
-            sendAxis(ImGuiKey_GamepadRStickRight, ImGuiKey_GamepadRStickLeft, amount);
-            break;
-        case UiGamepadAxis::RightStickY:
-            sendAxis(ImGuiKey_GamepadRStickDown, ImGuiKey_GamepadRStickUp, amount);
-            break;
-        case UiGamepadAxis::LeftTrigger:
-            io.AddKeyAnalogEvent(ImGuiKey_GamepadL2, amount > 0.0f, std::max(amount, 0.0f));
-            break;
-        case UiGamepadAxis::RightTrigger:
-            io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, amount > 0.0f, std::max(amount, 0.0f));
-            break;
-        }
+        backend::addGamepadAxis(state_, handle, axis, value);
 #else
         (void)handle;
         (void)axis;
@@ -1095,17 +413,10 @@ private:
 #endif
     }
 
-    // Text input as a Unicode codepoint; surrogates and values above
-    // 0x10FFFF are rejected.
     void addTextImpl(UiContextHandle handle, std::uint32_t codepoint)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr || codepoint == 0 || codepoint > 0x10FFFFu
-            || (codepoint >= 0xD800u && codepoint <= 0xDFFFu))
-            return;
-        makeCurrent(*record);
-        ImGui::GetIO().AddInputCharacter(codepoint);
+        backend::addText(state_, handle, codepoint);
 #else
         (void)handle;
         (void)codepoint;
@@ -1115,33 +426,19 @@ private:
     void addFocusImpl(UiContextHandle handle, bool focused)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr)
-            return;
-        makeCurrent(*record);
-        ImGuiIO &io = ImGui::GetIO();
-        if (!focused && record->touchPointerActive)
-        {
-            io.AddMouseButtonEvent(0, false);
-            record->touchPointerActive = false;
-        }
-        io.AddFocusEvent(focused);
+        backend::addFocus(state_, handle, focused);
 #else
         (void)handle;
         (void)focused;
 #endif
     }
 
-    // Begins an immediate-mode window. Returns ImGui::Begin's result: false
-    // means collapsed or closed, but endWindow must still be called.
+    // --- Windows and widgets ----------------------------------------------
+
     bool beginWindowImpl(UiContextHandle handle, const char *name, bool *open, UiWindowFlags flags)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || name == nullptr)
-            return false;
-        makeCurrent(*record);
-        return ImGui::Begin(name, open, nativeWindowFlags(flags));
+        return backend::beginWindow(state_, handle, name, open, flags);
 #else
         (void)handle;
         (void)name;
@@ -1154,11 +451,7 @@ private:
     void endWindowImpl(UiContextHandle handle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record))
-            return;
-        makeCurrent(*record);
-        ImGui::End();
+        backend::endWindow(state_, handle);
 #else
         (void)handle;
 #endif
@@ -1167,11 +460,7 @@ private:
     void textImpl(UiContextHandle handle, const char *value)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || value == nullptr)
-            return;
-        makeCurrent(*record);
-        ImGui::TextUnformatted(value);
+        backend::text(state_, handle, value);
 #else
         (void)handle;
         (void)value;
@@ -1181,12 +470,7 @@ private:
     void textColoredImpl(UiContextHandle handle, float red, float green, float blue, float alpha, const char *value)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || value == nullptr || !std::isfinite(red) || !std::isfinite(green) || !std::isfinite(blue)
-            || !std::isfinite(alpha))
-            return;
-        makeCurrent(*record);
-        ImGui::TextColored(ImVec4(red, green, blue, alpha), "%s", value);
+        backend::textColored(state_, handle, red, green, blue, alpha, value);
 #else
         (void)handle;
         (void)red;
@@ -1200,11 +484,7 @@ private:
     void separatorImpl(UiContextHandle handle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record))
-            return;
-        makeCurrent(*record);
-        ImGui::Separator();
+        backend::separator(state_, handle);
 #else
         (void)handle;
 #endif
@@ -1213,11 +493,7 @@ private:
     void sameLineImpl(UiContextHandle handle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record))
-            return;
-        makeCurrent(*record);
-        ImGui::SameLine();
+        backend::sameLine(state_, handle);
 #else
         (void)handle;
 #endif
@@ -1226,11 +502,7 @@ private:
     void spacingImpl(UiContextHandle handle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record))
-            return;
-        makeCurrent(*record);
-        ImGui::Spacing();
+        backend::spacing(state_, handle);
 #else
         (void)handle;
 #endif
@@ -1239,11 +511,7 @@ private:
     bool buttonImpl(UiContextHandle handle, const char *label, float width, float height)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || !std::isfinite(width) || !std::isfinite(height))
-            return false;
-        makeCurrent(*record);
-        return ImGui::Button(label, ImVec2(width, height));
+        return backend::button(state_, handle, label, width, height);
 #else
         (void)handle;
         (void)label;
@@ -1256,11 +524,7 @@ private:
     bool checkboxImpl(UiContextHandle handle, const char *label, bool *value)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || value == nullptr)
-            return false;
-        makeCurrent(*record);
-        return ImGui::Checkbox(label, value);
+        return backend::checkbox(state_, handle, label, value);
 #else
         (void)handle;
         (void)label;
@@ -1273,12 +537,7 @@ private:
         UiContextHandle handle, const char *label, float *value, float minimum, float maximum, const char *format)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || value == nullptr || !std::isfinite(minimum)
-            || !std::isfinite(maximum) || minimum > maximum)
-            return false;
-        makeCurrent(*record);
-        return ImGui::SliderFloat(label, value, minimum, maximum, format != nullptr ? format : "%.3f");
+        return backend::sliderFloat(state_, handle, label, value, minimum, maximum, format);
 #else
         (void)handle;
         (void)label;
@@ -1293,11 +552,7 @@ private:
     bool inputTextImpl(UiContextHandle handle, const char *label, char *buffer, std::uint32_t bufferSize)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || buffer == nullptr || bufferSize == 0)
-            return false;
-        makeCurrent(*record);
-        return ImGui::InputText(label, buffer, static_cast<std::size_t>(bufferSize));
+        return backend::inputText(state_, handle, label, buffer, bufferSize);
 #else
         (void)handle;
         (void)label;
@@ -1311,14 +566,7 @@ private:
         std::int32_t step, std::int32_t fastStep)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || value == nullptr || step < 0 || fastStep < 0)
-            return false;
-        makeCurrent(*record);
-        int nativeValue = static_cast<int>(*value);
-        const bool changed = ImGui::InputInt(label, &nativeValue, static_cast<int>(step), static_cast<int>(fastStep));
-        *value = static_cast<std::int32_t>(nativeValue);
-        return changed;
+        return backend::inputInt(state_, handle, label, value, step, fastStep);
 #else
         (void)handle;
         (void)label;
@@ -1332,11 +580,7 @@ private:
     bool inputFloatImpl(UiContextHandle handle, const char *label, float *value, const char *format)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || value == nullptr || !std::isfinite(*value))
-            return false;
-        makeCurrent(*record);
-        return ImGui::InputFloat(label, value, 0.0f, 0.0f, format != nullptr ? format : "%.3f");
+        return backend::inputFloat(state_, handle, label, value, format);
 #else
         (void)handle;
         (void)label;
@@ -1350,15 +594,7 @@ private:
         std::int32_t minimum, std::int32_t maximum, const char *format)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || value == nullptr || minimum > maximum)
-            return false;
-        makeCurrent(*record);
-        int nativeValue = static_cast<int>(*value);
-        const bool changed = ImGui::SliderInt(label, &nativeValue, static_cast<int>(minimum),
-            static_cast<int>(maximum), format != nullptr ? format : "%d");
-        *value = static_cast<std::int32_t>(nativeValue);
-        return changed;
+        return backend::sliderInt(state_, handle, label, value, minimum, maximum, format);
 #else
         (void)handle;
         (void)label;
@@ -1374,13 +610,7 @@ private:
         float minimum, float maximum, const char *format)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || value == nullptr || !std::isfinite(*value)
-            || !std::isfinite(speed) || speed < 0.0f || !std::isfinite(minimum)
-            || !std::isfinite(maximum) || minimum >= maximum)
-            return false;
-        makeCurrent(*record);
-        return ImGui::DragFloat(label, value, speed, minimum, maximum, format != nullptr ? format : "%.3f");
+        return backend::dragFloat(state_, handle, label, value, speed, minimum, maximum, format);
 #else
         (void)handle;
         (void)label;
@@ -1397,19 +627,7 @@ private:
         const char *const *items, std::uint32_t itemCount)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || currentItem == nullptr || items == nullptr
-            || itemCount == 0 || itemCount > static_cast<std::uint32_t>(INT_MAX)
-            || *currentItem < -1 || (*currentItem >= 0 && static_cast<std::uint32_t>(*currentItem) >= itemCount))
-            return false;
-        for (std::uint32_t index = 0; index < itemCount; ++index)
-            if (items[index] == nullptr)
-                return false;
-        makeCurrent(*record);
-        int nativeCurrentItem = static_cast<int>(*currentItem);
-        const bool changed = ImGui::Combo(label, &nativeCurrentItem, items, static_cast<int>(itemCount));
-        *currentItem = static_cast<std::int32_t>(nativeCurrentItem);
-        return changed;
+        return backend::combo(state_, handle, label, currentItem, items, itemCount);
 #else
         (void)handle;
         (void)label;
@@ -1423,15 +641,7 @@ private:
     bool selectableImpl(UiContextHandle handle, const char *label, bool *selected, float width, float height)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || selected == nullptr
-            || !std::isfinite(width) || !std::isfinite(height))
-            return false;
-        makeCurrent(*record);
-        const bool activated = ImGui::Selectable(label, *selected, ImGuiSelectableFlags_None, ImVec2(width, height));
-        if (activated)
-            *selected = !*selected;
-        return activated;
+        return backend::selectable(state_, handle, label, selected, width, height);
 #else
         (void)handle;
         (void)label;
@@ -1442,17 +652,26 @@ private:
 #endif
     }
 
+    bool selectableExImpl(UiContextHandle handle, const char *label, const bool *selected, float width, float height,
+        UiSelectableFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::selectableEx(state_, handle, label, selected, width, height, flags);
+#else
+        (void)handle;
+        (void)label;
+        (void)selected;
+        (void)width;
+        (void)height;
+        (void)flags;
+        return false;
+#endif
+    }
+
     bool radioButtonImpl(UiContextHandle handle, const char *label, std::int32_t *value, std::int32_t buttonValue)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || label == nullptr || value == nullptr)
-            return false;
-        makeCurrent(*record);
-        int nativeValue = static_cast<int>(*value);
-        const bool changed = ImGui::RadioButton(label, &nativeValue, static_cast<int>(buttonValue));
-        *value = static_cast<std::int32_t>(nativeValue);
-        return changed;
+        return backend::radioButton(state_, handle, label, value, buttonValue);
 #else
         (void)handle;
         (void)label;
@@ -1465,11 +684,7 @@ private:
     void progressBarImpl(UiContextHandle handle, float fraction, float width, float height, const char *overlay)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || !std::isfinite(fraction) || !std::isfinite(width) || !std::isfinite(height))
-            return;
-        makeCurrent(*record);
-        ImGui::ProgressBar(std::clamp(fraction, 0.0f, 1.0f), ImVec2(width, height), overlay);
+        backend::progressBar(state_, handle, fraction, width, height, overlay);
 #else
         (void)handle;
         (void)fraction;
@@ -1483,11 +698,7 @@ private:
         float uv1x, float uv1y)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || !std::isfinite(width) || !std::isfinite(height))
-            return;
-        makeCurrent(*record);
-        ImGui::Image(static_cast<ImTextureID>(texture), ImVec2(width, height), ImVec2(uv0x, uv0y), ImVec2(uv1x, uv1y));
+        backend::image(state_, handle, texture, width, height, uv0x, uv0y, uv1x, uv1y);
 #else
         (void)handle;
         (void)texture;
@@ -1500,25 +711,1139 @@ private:
 #endif
     }
 
-    // Loads a TTF font; only valid outside an active frame because it builds
-    // the font atlas. Fails when the file cannot be loaded or built.
+    void bulletTextImpl(UiContextHandle handle, const char *value)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::bulletText(state_, handle, value);
+#else
+        (void)handle;
+        (void)value;
+#endif
+    }
+
+    // --- Layout ------------------------------------------------------------
+
+    bool beginChildImpl(UiContextHandle handle, const char *name, float width, float height, UiChildFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginChild(state_, handle, name, width, height, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)width;
+        (void)height;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    void endChildImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endChild(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void beginGroupImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::beginGroup(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void endGroupImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endGroup(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void indentImpl(UiContextHandle handle, float width)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::indent(state_, handle, width);
+#else
+        (void)handle;
+        (void)width;
+#endif
+    }
+
+    void unindentImpl(UiContextHandle handle, float width)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::unindent(state_, handle, width);
+#else
+        (void)handle;
+        (void)width;
+#endif
+    }
+
+    void newLineImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::newLine(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void dummyImpl(UiContextHandle handle, float width, float height)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::dummy(state_, handle, width, height);
+#else
+        (void)handle;
+        (void)width;
+        (void)height;
+#endif
+    }
+
+    // --- Tree --------------------------------------------------------------
+
+    bool treeNodeImpl(UiContextHandle handle, const char *label)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::treeNode(state_, handle, label);
+#else
+        (void)handle;
+        (void)label;
+        return false;
+#endif
+    }
+
+    bool treeNodeExImpl(UiContextHandle handle, const char *label, UiTreeNodeFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::treeNodeEx(state_, handle, label, flags);
+#else
+        (void)handle;
+        (void)label;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    void treePopImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::treePop(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void setNextItemOpenImpl(UiContextHandle handle, bool open)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setNextItemOpen(state_, handle, open);
+#else
+        (void)handle;
+        (void)open;
+#endif
+    }
+
+    bool collapsingHeaderImpl(UiContextHandle handle, const char *label, UiTreeNodeFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::collapsingHeader(state_, handle, label, flags);
+#else
+        (void)handle;
+        (void)label;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    bool collapsingHeaderBoolImpl(UiContextHandle handle, const char *label, bool *open, UiTreeNodeFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::collapsingHeaderBool(state_, handle, label, open, flags);
+#else
+        (void)handle;
+        (void)label;
+        (void)open;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    // --- Disabled ----------------------------------------------------------
+
+    void beginDisabledImpl(UiContextHandle handle, bool disabled)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::beginDisabled(state_, handle, disabled);
+#else
+        (void)handle;
+        (void)disabled;
+#endif
+    }
+
+    void endDisabledImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endDisabled(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    // --- Popups ------------------------------------------------------------
+
+    void openPopupImpl(UiContextHandle handle, const char *name, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::openPopup(state_, handle, name, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)flags;
+#endif
+    }
+
+    void openPopupIdImpl(UiContextHandle handle, std::uint32_t identifier, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::openPopupId(state_, handle, identifier, flags);
+#else
+        (void)handle;
+        (void)identifier;
+        (void)flags;
+#endif
+    }
+
+    bool beginPopupImpl(UiContextHandle handle, const char *name, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginPopup(state_, handle, name, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    bool beginPopupModalImpl(UiContextHandle handle, const char *name, bool *open, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginPopupModal(state_, handle, name, open, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)open;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    bool beginPopupContextItemImpl(UiContextHandle handle, const char *name, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginPopupContextItem(state_, handle, name, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    bool beginPopupContextWindowImpl(UiContextHandle handle, const char *name, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginPopupContextWindow(state_, handle, name, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    bool beginPopupContextVoidImpl(UiContextHandle handle, const char *name, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginPopupContextVoid(state_, handle, name, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    void endPopupImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endPopup(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void closeCurrentPopupImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::closeCurrentPopup(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    bool isPopupOpenImpl(UiContextHandle handle, const char *name, UiPopupFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isPopupOpen(state_, handle, name, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    // --- Menus -------------------------------------------------------------
+
+    bool beginMenuBarImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginMenuBar(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    void endMenuBarImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endMenuBar(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    bool beginMenuImpl(UiContextHandle handle, const char *label, bool enabled)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginMenu(state_, handle, label, enabled);
+#else
+        (void)handle;
+        (void)label;
+        (void)enabled;
+        return false;
+#endif
+    }
+
+    void endMenuImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endMenu(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    bool menuItemImpl(UiContextHandle handle, const char *label, const char *shortcut, bool *selected, bool enabled)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::menuItem(state_, handle, label, shortcut, selected, enabled);
+#else
+        (void)handle;
+        (void)label;
+        (void)shortcut;
+        (void)selected;
+        (void)enabled;
+        return false;
+#endif
+    }
+
+    bool menuItemActivatedImpl(UiContextHandle handle, const char *label, const char *shortcut, bool enabled)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::menuItemActivated(state_, handle, label, shortcut, enabled);
+#else
+        (void)handle;
+        (void)label;
+        (void)shortcut;
+        (void)enabled;
+        return false;
+#endif
+    }
+
+    // --- Tabs --------------------------------------------------------------
+
+    bool beginTabBarImpl(UiContextHandle handle, const char *name, UiTabBarFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginTabBar(state_, handle, name, flags);
+#else
+        (void)handle;
+        (void)name;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    void endTabBarImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endTabBar(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    bool beginTabItemImpl(UiContextHandle handle, const char *label, bool *open, UiTabItemFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginTabItem(state_, handle, label, open, flags);
+#else
+        (void)handle;
+        (void)label;
+        (void)open;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    void endTabItemImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endTabItem(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void setTabItemClosedImpl(UiContextHandle handle, const char *label)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setTabItemClosed(state_, handle, label);
+#else
+        (void)handle;
+        (void)label;
+#endif
+    }
+
+    // --- Tables ------------------------------------------------------------
+
+    bool beginTableImpl(UiContextHandle handle, const char *name, std::uint32_t columns, UiTableFlags flags,
+        float outerSizeX, float outerSizeY, float innerWidth)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::beginTable(state_, handle, name, columns, flags, outerSizeX, outerSizeY, innerWidth);
+#else
+        (void)handle;
+        (void)name;
+        (void)columns;
+        (void)flags;
+        (void)outerSizeX;
+        (void)outerSizeY;
+        (void)innerWidth;
+        return false;
+#endif
+    }
+
+    void endTableImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endTable(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void tableNextRowImpl(UiContextHandle handle, UiTableRowFlags flags, float minRowHeight)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::tableNextRow(state_, handle, flags, minRowHeight);
+#else
+        (void)handle;
+        (void)flags;
+        (void)minRowHeight;
+#endif
+    }
+
+    bool tableNextColumnImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableNextColumn(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool tableSetColumnIndexImpl(UiContextHandle handle, std::uint32_t columnIndex)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableSetColumnIndex(state_, handle, columnIndex);
+#else
+        (void)handle;
+        (void)columnIndex;
+        return false;
+#endif
+    }
+
+    void tableSetupColumnImpl(UiContextHandle handle, const char *label, UiTableColumnFlags flags,
+        float initWidthOrWeight, std::uint32_t identifier)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::tableSetupColumn(state_, handle, label, flags, initWidthOrWeight, identifier);
+#else
+        (void)handle;
+        (void)label;
+        (void)flags;
+        (void)initWidthOrWeight;
+        (void)identifier;
+#endif
+    }
+
+    void tableSetupScrollFreezeImpl(UiContextHandle handle, std::uint32_t columns, std::uint32_t rows)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::tableSetupScrollFreeze(state_, handle, columns, rows);
+#else
+        (void)handle;
+        (void)columns;
+        (void)rows;
+#endif
+    }
+
+    void tableHeadersRowImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::tableHeadersRow(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void tableHeaderImpl(UiContextHandle handle, const char *label)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::tableHeader(state_, handle, label);
+#else
+        (void)handle;
+        (void)label;
+#endif
+    }
+
+    std::int32_t tableColumnCountImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableColumnCount(state_, handle);
+#else
+        (void)handle;
+        return 0;
+#endif
+    }
+
+    std::int32_t tableColumnIndexImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableColumnIndex(state_, handle);
+#else
+        (void)handle;
+        return 0;
+#endif
+    }
+
+    std::int32_t tableRowIndexImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableRowIndex(state_, handle);
+#else
+        (void)handle;
+        return 0;
+#endif
+    }
+
+    const char *tableColumnNameImpl(UiContextHandle handle, std::int32_t columnIndex)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableColumnName(state_, handle, columnIndex);
+#else
+        (void)handle;
+        (void)columnIndex;
+        return nullptr;
+#endif
+    }
+
+    bool tableColumnIsEnabledImpl(UiContextHandle handle, std::int32_t columnIndex)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableColumnIsEnabled(state_, handle, columnIndex);
+#else
+        (void)handle;
+        (void)columnIndex;
+        return false;
+#endif
+    }
+
+    bool tableColumnIsSortedImpl(UiContextHandle handle, std::int32_t columnIndex)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::tableColumnIsSorted(state_, handle, columnIndex);
+#else
+        (void)handle;
+        (void)columnIndex;
+        return false;
+#endif
+    }
+
+    void tableSetBgColorImpl(UiContextHandle handle, UiTableBgTarget target, std::uint32_t color)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::tableSetBgColor(state_, handle, target, color);
+#else
+        (void)handle;
+        (void)target;
+        (void)color;
+#endif
+    }
+
+    // --- Tooltips ----------------------------------------------------------
+
+    void setTooltipImpl(UiContextHandle handle, const char *value)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setTooltip(state_, handle, value);
+#else
+        (void)handle;
+        (void)value;
+#endif
+    }
+
+    void beginTooltipImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::beginTooltip(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void endTooltipImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::endTooltip(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    // --- Vector sliders/drags ---------------------------------------------
+
+    bool sliderFloat2Impl(UiContextHandle handle, const char *label, float values[2], float minimum, float maximum,
+        const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::sliderFloatN(state_, handle, label, values, 2, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool sliderFloat3Impl(UiContextHandle handle, const char *label, float values[3], float minimum, float maximum,
+        const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::sliderFloatN(state_, handle, label, values, 3, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool sliderFloat4Impl(UiContextHandle handle, const char *label, float values[4], float minimum, float maximum,
+        const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::sliderFloatN(state_, handle, label, values, 4, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool sliderInt2Impl(UiContextHandle handle, const char *label, std::int32_t values[2], std::int32_t minimum,
+        std::int32_t maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::sliderIntN(state_, handle, label, values, 2, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool sliderInt3Impl(UiContextHandle handle, const char *label, std::int32_t values[3], std::int32_t minimum,
+        std::int32_t maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::sliderIntN(state_, handle, label, values, 3, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool sliderInt4Impl(UiContextHandle handle, const char *label, std::int32_t values[4], std::int32_t minimum,
+        std::int32_t maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::sliderIntN(state_, handle, label, values, 4, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool dragFloat2Impl(UiContextHandle handle, const char *label, float values[2], float speed, float minimum,
+        float maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::dragFloatN(state_, handle, label, values, 2, speed, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)speed;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool dragFloat3Impl(UiContextHandle handle, const char *label, float values[3], float speed, float minimum,
+        float maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::dragFloatN(state_, handle, label, values, 3, speed, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)speed;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool dragInt2Impl(UiContextHandle handle, const char *label, std::int32_t values[2], float speed,
+        std::int32_t minimum, std::int32_t maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::dragIntN(state_, handle, label, values, 2, speed, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)speed;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    bool dragInt3Impl(UiContextHandle handle, const char *label, std::int32_t values[3], float speed,
+        std::int32_t minimum, std::int32_t maximum, const char *format)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::dragIntN(state_, handle, label, values, 3, speed, minimum, maximum, format);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)speed;
+        (void)minimum;
+        (void)maximum;
+        (void)format;
+        return false;
+#endif
+    }
+
+    // --- Color edits -------------------------------------------------------
+
+    bool colorEdit3Impl(UiContextHandle handle, const char *label, float values[3], UiColorEditFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::colorEdit3(state_, handle, label, values, flags);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    bool colorEdit4Impl(UiContextHandle handle, const char *label, float values[4], UiColorEditFlags flags)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::colorEdit4(state_, handle, label, values, flags);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)flags;
+        return false;
+#endif
+    }
+
+    bool colorButtonImpl(UiContextHandle handle, const char *descriptionId, const float values[4],
+        UiColorEditFlags flags, float width, float height)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::colorButton(state_, handle, descriptionId, values, flags, width, height);
+#else
+        (void)handle;
+        (void)descriptionId;
+        (void)values;
+        (void)flags;
+        (void)width;
+        (void)height;
+        return false;
+#endif
+    }
+
+    // --- Plots -------------------------------------------------------------
+
+    void plotLinesImpl(UiContextHandle handle, const char *label, const float *values, std::uint32_t valueCount,
+        float valueMinimum, float valueMaximum, const char *overlay, float graphWidth, float graphHeight)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::plotLines(state_, handle, label, values, valueCount, valueMinimum, valueMaximum, overlay,
+            graphWidth, graphHeight);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)valueCount;
+        (void)valueMinimum;
+        (void)valueMaximum;
+        (void)overlay;
+        (void)graphWidth;
+        (void)graphHeight;
+#endif
+    }
+
+    void plotHistogramImpl(UiContextHandle handle, const char *label, const float *values, std::uint32_t valueCount,
+        float valueMinimum, float valueMaximum, const char *overlay, float graphWidth, float graphHeight)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::plotHistogram(state_, handle, label, values, valueCount, valueMinimum, valueMaximum, overlay,
+            graphWidth, graphHeight);
+#else
+        (void)handle;
+        (void)label;
+        (void)values;
+        (void)valueCount;
+        (void)valueMinimum;
+        (void)valueMaximum;
+        (void)overlay;
+        (void)graphWidth;
+        (void)graphHeight;
+#endif
+    }
+
+    // --- Item/window state queries ----------------------------------------
+
+    bool isItemHoveredImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemHovered(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isItemActiveImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemActive(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isItemFocusedImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemFocused(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isItemClickedImpl(UiContextHandle handle, std::uint32_t button)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemClicked(state_, handle, button);
+#else
+        (void)handle;
+        (void)button;
+        return false;
+#endif
+    }
+
+    bool isItemVisibleImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemVisible(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isItemActivatedImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemActivated(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isItemDeactivatedImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemDeactivated(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isItemDeactivatedAfterEditImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isItemDeactivatedAfterEdit(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isAnyItemHoveredImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isAnyItemHovered(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isAnyItemActiveImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isAnyItemActive(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isWindowAppearingImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isWindowAppearing(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isWindowCollapsedImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isWindowCollapsed(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isWindowFocusedImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isWindowFocused(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    bool isWindowHoveredImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::isWindowHovered(state_, handle);
+#else
+        (void)handle;
+        return false;
+#endif
+    }
+
+    // --- Window placement --------------------------------------------------
+
+    float windowWidthImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::windowWidth(state_, handle);
+#else
+        (void)handle;
+        return 0.0f;
+#endif
+    }
+
+    float windowHeightImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::windowHeight(state_, handle);
+#else
+        (void)handle;
+        return 0.0f;
+#endif
+    }
+
+    float windowPositionXImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::windowPositionX(state_, handle);
+#else
+        (void)handle;
+        return 0.0f;
+#endif
+    }
+
+    float windowPositionYImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::windowPositionY(state_, handle);
+#else
+        (void)handle;
+        return 0.0f;
+#endif
+    }
+
+    void setNextWindowFocusImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setNextWindowFocus(state_, handle);
+#else
+        (void)handle;
+#endif
+    }
+
+    void setNextWindowCollapsedImpl(UiContextHandle handle, bool collapsed)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setNextWindowCollapsed(state_, handle, collapsed);
+#else
+        (void)handle;
+        (void)collapsed;
+#endif
+    }
+
+    void setWindowFocusImpl(UiContextHandle handle, const char *name)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setWindowFocus(state_, handle, name);
+#else
+        (void)handle;
+        (void)name;
+#endif
+    }
+
+    void setWindowCollapsedNamedImpl(UiContextHandle handle, const char *name, bool collapsed)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setWindowCollapsedNamed(state_, handle, name, collapsed);
+#else
+        (void)handle;
+        (void)name;
+        (void)collapsed;
+#endif
+    }
+
+    // --- Mouse cursor ------------------------------------------------------
+
+    void setMouseCursorImpl(UiContextHandle handle, UiMouseCursor cursor)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        backend::setMouseCursor(state_, handle, cursor);
+#else
+        (void)handle;
+        (void)cursor;
+#endif
+    }
+
+    UiMouseCursor mouseCursorImpl(UiContextHandle handle)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::mouseCursor(state_, handle);
+#else
+        (void)handle;
+        return UiMouseCursor::None;
+#endif
+    }
+
+    // --- Fonts -------------------------------------------------------------
+
     bool addFontFromFileImpl(UiContextHandle handle, const char *filePath, float pixelSize, UiFontHandle *outFont)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr || record->frameActive || filePath == nullptr || filePath[0] == '\0'
-            || !std::isfinite(pixelSize) || pixelSize <= 0.0f || outFont == nullptr)
-            return false;
-        makeCurrent(*record);
-        ImFont *font = ImGui::GetIO().Fonts->AddFontFromFileTTF(filePath, pixelSize);
-        if (font == nullptr || !ImGui::GetIO().Fonts->Build())
-            return false;
-        const UiFontHandle fontHandle = record->nextFont++;
-        if (fontHandle == defaultUiFont)
-            return false;
-        record->fonts.emplace(fontHandle, font);
-        *outFont = fontHandle;
-        return true;
+        return backend::addFontFromFile(state_, handle, filePath, pixelSize, outFont);
 #else
         (void)handle;
         (void)filePath;
@@ -1528,18 +1853,25 @@ private:
 #endif
     }
 
+    bool addFontFromMemoryTTFImpl(UiContextHandle handle, const void *data, std::uint32_t dataSize, float pixelSize,
+        UiFontHandle *outFont)
+    {
+#if defined(ENGINE_UI_BACKEND_IMGUI)
+        return backend::addFontFromMemoryTTF(state_, handle, data, dataSize, pixelSize, outFont);
+#else
+        (void)handle;
+        (void)data;
+        (void)dataSize;
+        (void)pixelSize;
+        (void)outFont;
+        return false;
+#endif
+    }
+
     bool pushFontImpl(UiContextHandle handle, UiFontHandle fontHandle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record))
-            return false;
-        const auto font = record->fonts.find(fontHandle);
-        if (font == record->fonts.end())
-            return false;
-        makeCurrent(*record);
-        ImGui::PushFont(font->second);
-        return true;
+        return backend::pushFont(state_, handle, fontHandle);
 #else
         (void)handle;
         (void)fontHandle;
@@ -1550,38 +1882,16 @@ private:
     void popFontImpl(UiContextHandle handle)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record))
-            return;
-        makeCurrent(*record);
-        ImGui::PopFont();
+        backend::popFont(state_, handle);
 #else
         (void)handle;
 #endif
     }
 
-    // RGBA pixels of the built font atlas (owned by ImGui, see UiFontAtlas).
     bool fontAtlasImpl(UiContextHandle handle, UiFontAtlas *outAtlas)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        if (outAtlas == nullptr)
-            return false;
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr)
-            return false;
-        makeCurrent(*record);
-        unsigned char *pixels        = nullptr;
-        int            width         = 0;
-        int            height        = 0;
-        int            bytesPerPixel = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height, &bytesPerPixel);
-        if (pixels == nullptr || width <= 0 || height <= 0 || bytesPerPixel != 4)
-            return false;
-        outAtlas->pixels        = pixels;
-        outAtlas->width         = static_cast<std::uint32_t>(width);
-        outAtlas->height        = static_cast<std::uint32_t>(height);
-        outAtlas->bytesPerPixel = static_cast<std::uint32_t>(bytesPerPixel);
-        return true;
+        return backend::fontAtlas(state_, handle, outAtlas);
 #else
         (void)handle;
         (void)outAtlas;
@@ -1592,12 +1902,7 @@ private:
     bool setFontTextureImpl(UiContextHandle handle, UiTextureHandle texture)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (record == nullptr)
-            return false;
-        makeCurrent(*record);
-        ImGui::GetIO().Fonts->SetTexID(static_cast<ImTextureID>(texture));
-        return true;
+        return backend::setFontTexture(state_, handle, texture);
 #else
         (void)handle;
         (void)texture;
@@ -1605,16 +1910,12 @@ private:
 #endif
     }
 
+    // --- Style and window placement ---------------------------------------
+
     bool pushStyleColorImpl(UiContextHandle handle, UiColor color, float red, float green, float blue, float alpha)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || !std::isfinite(red) || !std::isfinite(green) || !std::isfinite(blue)
-            || !std::isfinite(alpha))
-            return false;
-        makeCurrent(*record);
-        ImGui::PushStyleColor(nativeColor(color), ImVec4(red, green, blue, alpha));
-        return true;
+        return backend::pushStyleColor(state_, handle, color, red, green, blue, alpha);
 #else
         (void)handle;
         (void)color;
@@ -1629,11 +1930,7 @@ private:
     void popStyleColorImpl(UiContextHandle handle, std::uint32_t count)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || count == 0)
-            return;
-        makeCurrent(*record);
-        ImGui::PopStyleColor(static_cast<int>(std::min<std::uint32_t>(count, INT_MAX)));
+        backend::popStyleColor(state_, handle, count);
 #else
         (void)handle;
         (void)count;
@@ -1643,12 +1940,7 @@ private:
     bool pushStyleVariableImpl(UiContextHandle handle, UiStyleVariable variable, float value)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || !std::isfinite(value))
-            return false;
-        makeCurrent(*record);
-        ImGui::PushStyleVar(nativeStyleVariable(variable), value);
-        return true;
+        return backend::pushStyleVariable(state_, handle, variable, value);
 #else
         (void)handle;
         (void)variable;
@@ -1660,11 +1952,7 @@ private:
     void popStyleVariableImpl(UiContextHandle handle, std::uint32_t count)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || count == 0)
-            return;
-        makeCurrent(*record);
-        ImGui::PopStyleVar(static_cast<int>(std::min<std::uint32_t>(count, INT_MAX)));
+        backend::popStyleVariable(state_, handle, count);
 #else
         (void)handle;
         (void)count;
@@ -1674,12 +1962,7 @@ private:
     void setNextWindowPositionImpl(UiContextHandle handle, float x, float y, float pivotX, float pivotY)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(pivotX)
-            || !std::isfinite(pivotY))
-            return;
-        makeCurrent(*record);
-        ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always, ImVec2(pivotX, pivotY));
+        backend::setNextWindowPosition(state_, handle, x, y, pivotX, pivotY);
 #else
         (void)handle;
         (void)x;
@@ -1692,11 +1975,7 @@ private:
     void setNextWindowSizeImpl(UiContextHandle handle, float width, float height)
     {
 #if defined(ENGINE_UI_BACKEND_IMGUI)
-        UiContextRecord *record = findContext(handle);
-        if (!inFrame(record) || !std::isfinite(width) || !std::isfinite(height))
-            return;
-        makeCurrent(*record);
-        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+        backend::setNextWindowSize(state_, handle, width, height);
 #else
         (void)handle;
         (void)width;
@@ -1704,23 +1983,13 @@ private:
 #endif
     }
 
-    ParticipantManifest manifest_;
-    UiCapability        capability_{};
-    // See construct(): false keeps ImGui from touching imgui.ini in NewFrame.
-    bool saveWindowLayout_ = false;
-#if defined(ENGINE_UI_BACKEND_IMGUI)
-    // ownerThread_ pins every context to one thread (creation and use).
-    // nextContext_ hands out monotonic handles starting at 1.
-    std::unordered_map<UiContextHandle, std::unique_ptr<UiContextRecord>> contexts_;
-    std::thread::id                                                       ownerThread_{};
-    bool                                                                  hasOwnerThread_ = false;
-    UiContextHandle                                                       nextContext_    = 1;
-#endif
+    ParticipantManifest                       manifest_{};
+    UiCapability                             capability_{};
+    backend::UiModuleState                   state_;
 };
 
 } // namespace
 } // namespace ui
-
 } // namespace engine
 
 // Module entry point queried by the kernel after dlopen: provides "ui" and

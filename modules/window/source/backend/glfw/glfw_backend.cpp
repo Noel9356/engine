@@ -1,11 +1,12 @@
 // GLFW implementation of the window module's WindowBackend: window creation
 // with hints, callback wiring into the per-window event queues, key mapping,
-// cursor modes, and Vulkan surface support (VK_KHR_surface plus the platform
-// surface extension).
+// cursor modes, runtime window control, and Vulkan surface support
+// (VK_KHR_surface plus the platform surface extension).
 
 #if defined(ENGINE_WINDOW_BACKEND_GLFW)
 
 #include "glfw_backend.hpp"
+#include "glfw_key_map.hpp"
 
 #define GLFW_INCLUDE_NONE
 #if defined(_WIN32)
@@ -38,230 +39,8 @@ namespace window
 namespace
 {
 
-// GLFW key code -> engine Key (Unknown for keys the module does not track).
-Key mapGlfwKey(int key)
-{
-    switch (key)
-    {
-    case GLFW_KEY_ESCAPE:
-        return Key::Escape;
-    case GLFW_KEY_SPACE:
-        return Key::Space;
-    case GLFW_KEY_W:
-        return Key::W;
-    case GLFW_KEY_A:
-        return Key::A;
-    case GLFW_KEY_S:
-        return Key::S;
-    case GLFW_KEY_D:
-        return Key::D;
-    case GLFW_KEY_LEFT:
-        return Key::Left;
-    case GLFW_KEY_RIGHT:
-        return Key::Right;
-    case GLFW_KEY_UP:
-        return Key::Up;
-    case GLFW_KEY_DOWN:
-        return Key::Down;
-    case GLFW_KEY_LEFT_SHIFT:
-        return Key::LeftShift;
-    case GLFW_KEY_LEFT_CONTROL:
-        return Key::LeftControl;
-    case GLFW_KEY_Q:
-        return Key::Q;
-    case GLFW_KEY_E:
-        return Key::E;
-    case GLFW_KEY_R:
-        return Key::R;
-    case GLFW_KEY_F:
-        return Key::F;
-    case GLFW_KEY_Z:
-        return Key::Z;
-    case GLFW_KEY_X:
-        return Key::X;
-    case GLFW_KEY_C:
-        return Key::C;
-    case GLFW_KEY_V:
-        return Key::V;
-    case GLFW_KEY_B:
-        return Key::B;
-    case GLFW_KEY_N:
-        return Key::N;
-    case GLFW_KEY_M:
-        return Key::M;
-    case GLFW_KEY_T:
-        return Key::T;
-    case GLFW_KEY_G:
-        return Key::G;
-    case GLFW_KEY_Y:
-        return Key::Y;
-    case GLFW_KEY_U:
-        return Key::U;
-    case GLFW_KEY_I:
-        return Key::I;
-    case GLFW_KEY_O:
-        return Key::O;
-    case GLFW_KEY_P:
-        return Key::P;
-    case GLFW_KEY_J:
-        return Key::J;
-    case GLFW_KEY_K:
-        return Key::K;
-    case GLFW_KEY_L:
-        return Key::L;
-    case GLFW_KEY_H:
-        return Key::H;
-    case GLFW_KEY_0:
-        return Key::Num0;
-    case GLFW_KEY_1:
-        return Key::Num1;
-    case GLFW_KEY_2:
-        return Key::Num2;
-    case GLFW_KEY_3:
-        return Key::Num3;
-    case GLFW_KEY_4:
-        return Key::Num4;
-    case GLFW_KEY_5:
-        return Key::Num5;
-    case GLFW_KEY_6:
-        return Key::Num6;
-    case GLFW_KEY_7:
-        return Key::Num7;
-    case GLFW_KEY_8:
-        return Key::Num8;
-    case GLFW_KEY_9:
-        return Key::Num9;
-    case GLFW_KEY_TAB:
-        return Key::Tab;
-    case GLFW_KEY_ENTER:
-        return Key::Enter;
-    case GLFW_KEY_BACKSPACE:
-        return Key::Backspace;
-    case GLFW_KEY_LEFT_ALT:
-        return Key::LeftAlt;
-    case GLFW_KEY_RIGHT_SHIFT:
-        return Key::RightShift;
-    case GLFW_KEY_RIGHT_CONTROL:
-        return Key::RightControl;
-    case GLFW_KEY_RIGHT_ALT:
-        return Key::RightAlt;
-    default:
-        return Key::Unknown;
-    }
-}
-
-// Engine Key -> GLFW key code (GLFW_KEY_UNKNOWN for Key::Unknown).
-int mapEngineKey(Key key)
-{
-    switch (key)
-    {
-    case Key::Escape:
-        return GLFW_KEY_ESCAPE;
-    case Key::Space:
-        return GLFW_KEY_SPACE;
-    case Key::W:
-        return GLFW_KEY_W;
-    case Key::A:
-        return GLFW_KEY_A;
-    case Key::S:
-        return GLFW_KEY_S;
-    case Key::D:
-        return GLFW_KEY_D;
-    case Key::Left:
-        return GLFW_KEY_LEFT;
-    case Key::Right:
-        return GLFW_KEY_RIGHT;
-    case Key::Up:
-        return GLFW_KEY_UP;
-    case Key::Down:
-        return GLFW_KEY_DOWN;
-    case Key::LeftShift:
-        return GLFW_KEY_LEFT_SHIFT;
-    case Key::LeftControl:
-        return GLFW_KEY_LEFT_CONTROL;
-    case Key::Q:
-        return GLFW_KEY_Q;
-    case Key::E:
-        return GLFW_KEY_E;
-    case Key::R:
-        return GLFW_KEY_R;
-    case Key::F:
-        return GLFW_KEY_F;
-    case Key::Z:
-        return GLFW_KEY_Z;
-    case Key::X:
-        return GLFW_KEY_X;
-    case Key::C:
-        return GLFW_KEY_C;
-    case Key::V:
-        return GLFW_KEY_V;
-    case Key::B:
-        return GLFW_KEY_B;
-    case Key::N:
-        return GLFW_KEY_N;
-    case Key::M:
-        return GLFW_KEY_M;
-    case Key::T:
-        return GLFW_KEY_T;
-    case Key::G:
-        return GLFW_KEY_G;
-    case Key::Y:
-        return GLFW_KEY_Y;
-    case Key::U:
-        return GLFW_KEY_U;
-    case Key::I:
-        return GLFW_KEY_I;
-    case Key::O:
-        return GLFW_KEY_O;
-    case Key::P:
-        return GLFW_KEY_P;
-    case Key::J:
-        return GLFW_KEY_J;
-    case Key::K:
-        return GLFW_KEY_K;
-    case Key::L:
-        return GLFW_KEY_L;
-    case Key::H:
-        return GLFW_KEY_H;
-    case Key::Num0:
-        return GLFW_KEY_0;
-    case Key::Num1:
-        return GLFW_KEY_1;
-    case Key::Num2:
-        return GLFW_KEY_2;
-    case Key::Num3:
-        return GLFW_KEY_3;
-    case Key::Num4:
-        return GLFW_KEY_4;
-    case Key::Num5:
-        return GLFW_KEY_5;
-    case Key::Num6:
-        return GLFW_KEY_6;
-    case Key::Num7:
-        return GLFW_KEY_7;
-    case Key::Num8:
-        return GLFW_KEY_8;
-    case Key::Num9:
-        return GLFW_KEY_9;
-    case Key::Tab:
-        return GLFW_KEY_TAB;
-    case Key::Enter:
-        return GLFW_KEY_ENTER;
-    case Key::Backspace:
-        return GLFW_KEY_BACKSPACE;
-    case Key::LeftAlt:
-        return GLFW_KEY_LEFT_ALT;
-    case Key::RightShift:
-        return GLFW_KEY_RIGHT_SHIFT;
-    case Key::RightControl:
-        return GLFW_KEY_RIGHT_CONTROL;
-    case Key::RightAlt:
-        return GLFW_KEY_RIGHT_ALT;
-    case Key::Unknown:
-        break;
-    }
-    return GLFW_KEY_UNKNOWN;
-}
+using glfw_keys::mapEngineKey;
+using glfw_keys::mapGlfwKey;
 
 // Bit for a Key in the 64-bit key state mask; 0 for Unknown/out-of-range.
 std::uint64_t keyMaskBit(Key key)
@@ -279,10 +58,11 @@ std::uint8_t mouseButtonMaskBit(MouseButton button)
 
 // Rebuilds the held-mouse-button mask from GLFW's live button state. Used at
 // creation and on focus gain: while unfocused, button events are missed.
+// GLFW exposes eight buttons; every tracked slot is probed.
 void synchronizeMouseButtonState(GLFWwindow *window, WindowRecord &record)
 {
-    std::uint8_t        mask       = 0;
-    constexpr std::uint32_t maximumButton = static_cast<std::uint32_t>(MouseButton::Forward);
+    std::uint8_t mask = 0;
+    constexpr std::uint32_t maximumButton = static_cast<std::uint32_t>(MouseButton::Button8);
     for (std::uint32_t value = 0; value <= maximumButton; ++value)
     {
         if (glfwGetMouseButton(window, static_cast<int>(value)) == GLFW_PRESS)
@@ -298,7 +78,7 @@ void synchronizeMouseButtonState(GLFWwindow *window, WindowRecord &record)
 void synchronizeKeyState(GLFWwindow *window, WindowRecord &record)
 {
     std::uint64_t       mask       = 0;
-    const std::uint32_t maximumKey = static_cast<std::uint32_t>(Key::RightAlt);
+    const std::uint32_t maximumKey = static_cast<std::uint32_t>(Key::Slash);
     for (std::uint32_t value = 1; value <= maximumKey; ++value)
     {
         const Key key     = static_cast<Key>(value);
@@ -313,7 +93,7 @@ void synchronizeKeyState(GLFWwindow *window, WindowRecord &record)
 
 // GLFW callbacks: resolve the WindowRecord from the window's user pointer
 // and translate the event into the record's queue. They fire inside
-// glfwPollEvents(), i.e. during the module's pollEvents capability call.
+// glfwPollEvents()/glfwWaitEvents(), i.e. during the module's event pump.
 
 // Close button pressed: queue CloseRequested (the window stays alive).
 void glfwCloseCallback(GLFWwindow *glfwWindow)
@@ -394,6 +174,7 @@ void glfwIconifyCallback(GLFWwindow *glfwWindow, int iconified)
     auto *record = static_cast<WindowRecord *>(glfwGetWindowUserPointer(glfwWindow));
     if (record != nullptr)
     {
+        record->iconified = iconified == GLFW_TRUE;
         queueWindowEvent(
             *record, WindowEvent{.kind = iconified ? WindowEventKind::Minimized : WindowEventKind::Restored});
     }
@@ -446,8 +227,8 @@ void glfwMouseButtonCallback(GLFWwindow *glfwWindow, int button, int action, int
         return;
     }
 
-    const MouseButton mappedButton  = static_cast<MouseButton>(static_cast<std::uint32_t>(button));
-    const std::uint8_t bit          = mouseButtonMaskBit(mappedButton);
+    const MouseButton mappedButton = static_cast<MouseButton>(static_cast<std::uint32_t>(button));
+    const std::uint8_t bit         = mouseButtonMaskBit(mappedButton);
     if (action == GLFW_PRESS)
     {
         record->mouseButtonStateMask |= bit;
@@ -563,6 +344,8 @@ bool GlfwWindowBackend::createWindow(WindowRecord &record, const WindowDescripti
     glfwWindowHint(GLFW_VISIBLE, description.visible ? GLFW_TRUE : GLFW_FALSE);
     glfwWindowHint(GLFW_DECORATED, description.decorated ? GLFW_TRUE : GLFW_FALSE);
     glfwWindowHint(GLFW_FLOATING, description.floating ? GLFW_TRUE : GLFW_FALSE);
+    glfwWindowHint(GLFW_MAXIMIZED, description.maximized ? GLFW_TRUE : GLFW_FALSE);
+    glfwWindowHint(GLFW_FOCUS_ON_SHOW, description.focusOnShow ? GLFW_TRUE : GLFW_FALSE);
 
     GLFWwindow *glfwWindow
         = glfwCreateWindow((int)record.width, (int)record.height, record.title.c_str(), nullptr, nullptr);
@@ -620,6 +403,17 @@ bool GlfwWindowBackend::createWindow(WindowRecord &record, const WindowDescripti
     {
         synchronizeKeyState(glfwWindow, record);
         synchronizeMouseButtonState(glfwWindow, record);
+    }
+
+    // Track the requested state; getWindowAttributes prefers GLFW's live
+    // attributes whenever they are available.
+    record.visible   = glfwGetWindowAttrib(glfwWindow, GLFW_VISIBLE) == GLFW_TRUE;
+    record.iconified = glfwGetWindowAttrib(glfwWindow, GLFW_ICONIFIED) == GLFW_TRUE;
+    record.maximized = glfwGetWindowAttrib(glfwWindow, GLFW_MAXIMIZED) == GLFW_TRUE;
+    record.opacity   = std::clamp(description.hasOpacity ? description.opacity : 1.0f, 0.0f, 1.0f);
+    if (description.hasOpacity)
+    {
+        glfwSetWindowOpacity(glfwWindow, record.opacity);
     }
 
     int framebufferWidth  = 0;
@@ -695,6 +489,155 @@ bool GlfwWindowBackend::setPosition(WindowRecord &record, std::int32_t x, std::i
     return true;
 }
 
+bool GlfwWindowBackend::getPosition(const WindowRecord &record, std::int32_t *outX, std::int32_t *outY) const
+{
+    if (record.platformWindow == nullptr || outX == nullptr || outY == nullptr)
+    {
+        return false;
+    }
+    int x = 0;
+    int y = 0;
+    glfwGetWindowPos(static_cast<GLFWwindow *>(record.platformWindow), &x, &y);
+    *outX = static_cast<std::int32_t>(x);
+    *outY = static_cast<std::int32_t>(y);
+    return true;
+}
+
+void GlfwWindowBackend::setOpacity(WindowRecord &record, float opacity)
+{
+    record.opacity = std::clamp(opacity, 0.0f, 1.0f);
+    if (record.platformWindow != nullptr)
+    {
+        glfwSetWindowOpacity(static_cast<GLFWwindow *>(record.platformWindow), record.opacity);
+    }
+}
+
+void GlfwWindowBackend::setVisible(WindowRecord &record, bool visible)
+{
+    record.visible = visible;
+    if (record.platformWindow == nullptr)
+    {
+        return;
+    }
+    GLFWwindow *window = static_cast<GLFWwindow *>(record.platformWindow);
+    if (visible)
+    {
+        glfwShowWindow(window);
+    }
+    else
+    {
+        glfwHideWindow(window);
+    }
+}
+
+void GlfwWindowBackend::setResizable(WindowRecord &record, bool resizable)
+{
+    if (record.platformWindow != nullptr)
+    {
+        glfwSetWindowAttrib(static_cast<GLFWwindow *>(record.platformWindow), GLFW_RESIZABLE,
+            resizable ? GLFW_TRUE : GLFW_FALSE);
+    }
+}
+
+void GlfwWindowBackend::setDecorated(WindowRecord &record, bool decorated)
+{
+    if (record.platformWindow != nullptr)
+    {
+        glfwSetWindowAttrib(static_cast<GLFWwindow *>(record.platformWindow), GLFW_DECORATED,
+            decorated ? GLFW_TRUE : GLFW_FALSE);
+    }
+}
+
+void GlfwWindowBackend::setFloating(WindowRecord &record, bool floating)
+{
+    if (record.platformWindow != nullptr)
+    {
+        glfwSetWindowAttrib(static_cast<GLFWwindow *>(record.platformWindow), GLFW_FLOATING,
+            floating ? GLFW_TRUE : GLFW_FALSE);
+    }
+}
+
+void GlfwWindowBackend::focus(const WindowRecord &record)
+{
+    if (record.platformWindow != nullptr)
+    {
+        glfwFocusWindow(static_cast<GLFWwindow *>(record.platformWindow));
+    }
+}
+
+void GlfwWindowBackend::requestAttention(const WindowRecord &record)
+{
+    if (record.platformWindow != nullptr)
+    {
+        glfwRequestWindowAttention(static_cast<GLFWwindow *>(record.platformWindow));
+    }
+}
+
+void GlfwWindowBackend::iconify(WindowRecord &record)
+{
+    record.iconified = true;
+    if (record.platformWindow != nullptr)
+    {
+        glfwIconifyWindow(static_cast<GLFWwindow *>(record.platformWindow));
+    }
+}
+
+void GlfwWindowBackend::restore(WindowRecord &record)
+{
+    record.iconified = false;
+    record.maximized = false;
+    if (record.platformWindow != nullptr)
+    {
+        glfwRestoreWindow(static_cast<GLFWwindow *>(record.platformWindow));
+    }
+}
+
+void GlfwWindowBackend::maximize(WindowRecord &record)
+{
+    record.maximized = true;
+    if (record.platformWindow != nullptr)
+    {
+        glfwMaximizeWindow(static_cast<GLFWwindow *>(record.platformWindow));
+    }
+}
+
+bool GlfwWindowBackend::getWindowAttributes(const WindowRecord &record, WindowAttributes *outAttributes) const
+{
+    if (record.platformWindow == nullptr || outAttributes == nullptr)
+    {
+        return false;
+    }
+    GLFWwindow *window = static_cast<GLFWwindow *>(record.platformWindow);
+
+    *outAttributes                    = {};
+    outAttributes->focused            = glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
+    outAttributes->visible            = glfwGetWindowAttrib(window, GLFW_VISIBLE) == GLFW_TRUE;
+    outAttributes->iconified          = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+    outAttributes->maximized          = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) == GLFW_TRUE;
+    outAttributes->resizable          = glfwGetWindowAttrib(window, GLFW_RESIZABLE) == GLFW_TRUE;
+    outAttributes->decorated          = glfwGetWindowAttrib(window, GLFW_DECORATED) == GLFW_TRUE;
+    outAttributes->floating           = glfwGetWindowAttrib(window, GLFW_FLOATING) == GLFW_TRUE;
+    outAttributes->hover              = glfwGetWindowAttrib(window, GLFW_HOVERED) == GLFW_TRUE;
+    outAttributes->opacity            = glfwGetWindowOpacity(window);
+    glfwGetWindowContentScale(window, &outAttributes->contentScaleX, &outAttributes->contentScaleY);
+    return true;
+}
+
+bool GlfwWindowBackend::getContentScale(const WindowRecord &record, float *outX, float *outY) const
+{
+    if (record.platformWindow == nullptr || outX == nullptr || outY == nullptr)
+    {
+        return false;
+    }
+    glfwGetWindowContentScale(static_cast<GLFWwindow *>(record.platformWindow), outX, outY);
+    return true;
+}
+
+bool GlfwWindowBackend::rawMouseMotionSupported() const
+{
+    return glfwRawMouseMotionSupported() == GLFW_TRUE;
+}
+
 bool GlfwWindowBackend::setClipboardText(const WindowRecord &record, const char *text)
 {
     if (record.platformWindow == nullptr || text == nullptr)
@@ -708,9 +651,9 @@ bool GlfwWindowBackend::setClipboardText(const WindowRecord &record, const char 
     return true;
 }
 
-bool GlfwWindowBackend::copyClipboardText(const WindowRecord &record, std::string &output) const
+bool GlfwWindowBackend::copyClipboardText(const WindowRecord &record, const char **outText) const
 {
-    if (record.platformWindow == nullptr)
+    if (record.platformWindow == nullptr || outText == nullptr)
         return false;
     const char *text = glfwGetClipboardString(static_cast<GLFWwindow *>(record.platformWindow));
     if (text == nullptr)
@@ -720,21 +663,32 @@ bool GlfwWindowBackend::copyClipboardText(const WindowRecord &record, std::strin
         ++length;
     if (length > maximumClipboardTextBytes || !isValidUtf8(text, length))
         return false;
-    try
-    {
-        output.assign(text, length);
-        return true;
-    }
-    catch (...)
-    {
-        return false;
-    }
+    *outText = text;
+    return true;
 }
 
 void GlfwWindowBackend::pollEvents()
 {
     glfwPollEvents();
     pollGamepads();
+}
+
+void GlfwWindowBackend::waitEvents(double timeoutSeconds)
+{
+    if (timeoutSeconds > 0.0)
+    {
+        glfwWaitEventsTimeout(timeoutSeconds);
+    }
+    else
+    {
+        glfwWaitEvents();
+    }
+    pollGamepads();
+}
+
+void GlfwWindowBackend::configureGamepads(const GamepadPollingOptions &options)
+{
+    gamepadOptions_ = options;
 }
 
 void GlfwWindowBackend::queueGamepadEvent(const WindowEvent &event)
@@ -752,6 +706,11 @@ void GlfwWindowBackend::queueGamepadEvent(const WindowEvent &event)
 // coalesced per device/control by queueWindowEvent to bound queue growth.
 void GlfwWindowBackend::pollGamepads()
 {
+    if (!gamepadOptions_.enabled)
+    {
+        return;
+    }
+
     constexpr int buttonCount = GLFW_GAMEPAD_BUTTON_LAST + 1;
     constexpr int axisCount = GLFW_GAMEPAD_AXIS_LAST + 1;
     static_assert(buttonCount == 15);
@@ -808,7 +767,7 @@ void GlfwWindowBackend::pollGamepads()
                 ? (rawValue + 1.0f) * 0.5f
                 : rawValue;
             float &oldValue = previous.axes[static_cast<std::size_t>(axis)];
-            if (std::abs(value - oldValue) <= 0.0005f)
+            if (std::abs(value - oldValue) <= gamepadOptions_.axisEpsilon)
                 continue;
             oldValue = value;
             queueGamepadEvent(WindowEvent{.kind = WindowEventKind::GamepadAxisMoved,
@@ -819,20 +778,35 @@ void GlfwWindowBackend::pollGamepads()
     }
 }
 
-// Normal/Captured map to GLFW_CURSOR normal/disabled; captured also enables
-// raw mouse motion where the platform supports it.
+// Normal/Hidden/Captured map to GLFW_CURSOR normal/hidden/disabled; captured
+// also enables raw mouse motion where the platform supports it (the support
+// check keeps unsupported systems off GLFW's error path).
 void GlfwWindowBackend::setCursorMode(const WindowRecord &record, CursorMode mode)
 {
     if (record.platformWindow == nullptr)
     {
         return;
     }
-    GLFWwindow *window   = static_cast<GLFWwindow *>(record.platformWindow);
-    const int   glfwMode = mode == CursorMode::Captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL;
+    GLFWwindow *window = static_cast<GLFWwindow *>(record.platformWindow);
+
+    int glfwMode = GLFW_CURSOR_NORMAL;
+    if (mode == CursorMode::Hidden)
+    {
+        glfwMode = GLFW_CURSOR_HIDDEN;
+    }
+    else if (mode == CursorMode::Captured)
+    {
+        glfwMode = GLFW_CURSOR_DISABLED;
+    }
     glfwSetInputMode(window, GLFW_CURSOR, glfwMode);
+
 #if defined(GLFW_RAW_MOUSE_MOTION)
 
-    glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, mode == CursorMode::Captured ? GLFW_TRUE : GLFW_FALSE);
+    const bool captureRaw = mode == CursorMode::Captured && glfwRawMouseMotionSupported() == GLFW_TRUE;
+    if (captureRaw || glfwGetInputMode(window, GLFW_RAW_MOUSE_MOTION) == GLFW_TRUE)
+    {
+        glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, captureRaw ? GLFW_TRUE : GLFW_FALSE);
+    }
 #endif
 }
 

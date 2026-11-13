@@ -6,6 +6,113 @@ from it, and how the demo content implements that contract. Read
 `overview.md` first for the module's data model; this document explains the
 deformation and junction decisions on top of it.
 
+## 0e. Tenth revision: species roster, measured grafts, UI rebuild (current)
+
+The revision-9 delivery kept four defects the user called out directly:
+"Dragon head is too big", "There are size mismatch in centaur body plan.
+Horse and bull bodies are too big. Wolf, deer, and bull lower bodies are
+disconnected from the upper body", "In naga body plan, two parts are
+disconnected and tail is too spiky (unrealistic)", "Alignments of multiple
+heads/wing pairs/arm pairs are weird", "There are conflicting IDs problems",
+"Tail is very weird", plus bad UX/UI and unrendered triangles. Revision 10
+is a research pass (how shipped games actually do character customisation)
+followed by fixes across the whole pipeline.
+
+### Research findings applied (see the section-1 sources for the originals)
+
+- **CCI design guides (UX Collective, Game UI Database)**: character
+  creators organise by tabs/categories, keep visual cues for the active
+  option, give contextual help text, and let players experiment freely.
+  The rev-9 panel was one long scroll of duplicated-id buttons with no
+  grouping. The rev-10 panel is tabbed (Plan / Body / Parts / Motion /
+  File) with per-group tip lines and stable ids (below).
+- **Modular-socket practice (Unreal's modular characters, Spore's creature
+  creator)**: attachments follow consistent pivot conventions, and parts
+  attach as single midline pieces OR mirrored pairs with per-pair placement
+  (Spore's bilateral rule). Multi-head / multi-wing / multi-arm layouts now
+  stagger deliberately per slot instead of sharing one transform.
+- **Furry-fandom rosters (FurScience species popularity, VRChat avatar
+  conventions)**: wolf, fox, and dragon are the fandom's most popular
+  species; avatars ship multiple ear/tail style options and coat colors.
+  The species roster grew from 4 to 11 downloaded animals (fox, shiba,
+  husky, wolf, donkey, cow, deer, bull, alpaca, horse, stag), species
+  heads/tails graft onto every plan, and a fur coat palette tints the
+  grafts.
+
+### Defect fixes (all verified in captured frames)
+
+- **Dragon head too big**: rigidly rescaled to 0.36 m over neck+skull
+  (human head measures 0.275 m; rev-9 shipped ~0.50 m).
+- **Unrendered triangles**: the Cethiel serpent/reptile pieces measured
+  52.6% mixed winding - the headless renderer's majority-vote cull probe
+  culled the minority half. `scripts/repair_obj_winding.py` reorders each
+  triangle to agree with its vertex normals (winding repair only, no
+  geometry authored); all parts now audit at 0% disagreement.
+- **Centaur size mismatch / disconnection**: rev-9 registered ONE horse rig
+  for all four species, so wolf/deer/bull torsos mounted at the horse's
+  neck-base height and floated. Every species now carries its own rig
+  anchored at its MEASURED stump opening (`kQuadMountY/kQuadMountZ` per
+  species), the torso sink is the same on all of them, and grounding uses
+  each species' own hoof line (`kQuadGroundY[species]` for both the centaur
+  and quadruped plans).
+- **Naga disconnection + spiky tail**: the serpent piece's root ring centre
+  sat ~0.13 m below the part origin and its tube dove downward - the
+  extractor now re-centres the piece on its measured root ring, pitches the
+  tube axis horizontal, and normalises the ring radius to 0.140 m (4.6x ->
+  ~2.3x effective), and the profile connection buries the ring inside the
+  torso hip opening. The spikes are baked geometry of the only downloaded
+  serpent we could source licence-clean (OGA/Quaternius/Sketchfab/poly.pizza
+  serpent candidates all needed auth or shipped .blend-only); the piece is
+  slimmed instead, and stays as the explicit dragon look.
+- **Multi-head alignment**: extra skulls yaw outward around the shared
+  collar (+/-24 deg) with a small roll (+/-9 deg) instead of a pure roll.
+- **Multi-wing alignment**: the flap driver COMPOSES with the authored
+  per-slot outward roll (angle sum on the shared roll axis) instead of
+  replacing the connection rotation - rev-9's driver collapsed all stacked
+  pairs to the same roll the moment they flapped.
+- **Multi-arm alignment**: extra pairs fan outward per slot with a small
+  vertical lift so the shoulder rings do not clip the first pair's
+  deltoids.
+- **Conflicting IDs**: rev-9 reused bare "1"/"2"/"3" button labels across
+  the Heads/Wings/Arms sections (same ImGui id, several buttons firing
+  together) and mutated labels with a "* " prefix. Every rev-10 control
+  carries a "##group" id suffix; selection marks sit before the "##" so ids
+  stay stable.
+- **Tail weirdness**: the Cethiel tail's root ring was off the part origin
+  (a visible step at the tailbone) - it is re-centred; the default tail is
+  now the fox tail, and the spiked Cethiel piece stays as the explicit
+  "Dragon Tail (Spiked)" option.
+- **Skin tone never applied**: `isSkinPart` matched rev-6 part ids
+  (torso_humanoid, arm_humanoid_*...) that no longer existed; it matches
+  the current registry now, and a new fur.coat palette handles the species
+  grafts.
+
+### UX/UI rebuild
+
+The Character Studio panel is five tabs - Plan (body plan + species combo),
+Body (proportions + skin tone + fur coat swatches), Parts (head/tail
+variants, counts), Motion (drivers), File (recipes, status, validation) -
+with contextual tip lines under each group. Species selection is a combo
+(11 species overflow a button grid); tail variants are a combo over every
+registered slot:tail part.
+
+### character_lab merged into the demo
+
+The `character_lab` plugin package is deleted. Its Lua exercise now ships
+inside the demo (`--character-lab`, and part of `--character-test`), run
+through the script_runtime capability with CURRENT part ids (the plugin had
+gone stale against rev-6 ids). `config/engine.toml` trust list and the demo
+default plugin set mention only main_menu now.
+
+### Verification
+
+- Build: 0 warnings (cmake Ninja Release, GLFW off, headless CPU
+  rasterizer).
+- `--character-test`: extended (species/tail/head loops over all 11
+  species); all checks pass, exit code 0.
+- Frame matrix re-shot for every plan/species/preset and personally
+  reviewed (`scripts/shoot_samples10.sh`).
+
 ## 0c. Seventh revision: downloaded models only, body plans, natural necks
 
 The sixth revision's delivery was rejected: "The character customisation is
@@ -512,7 +619,7 @@ Joint partition cuts follow the animation boundary, so the extracted pieces
 are exactly the regions the source skeleton deforms - the same seam the
 source artists authored.
 
-## Revision 9: downloaded-only parts, verbatim (current)
+## Revision 9: downloaded-only parts, verbatim
 
 User mandate: "Ensure no character parts are generated by you. Character
 parts must be downloaded only." Revisions 4-8 still baked vertex-level

@@ -16,8 +16,10 @@ namespace engine::skeletal_animation
 // Increment when any public capability structure or function-table layout changes.
 // ABI history: 3 added masked/additive blending and global transforms; 4 adds
 // root-motion extraction from a clip interval; 5 adds clip event markers and
-// bounded per-player event retrieval.
-inline constexpr std::uint32_t skeletalAnimationCapabilityAbi = 5u;
+// bounded per-player event retrieval; 6 adds explicit player time control,
+// clip metadata queries, inverse bind pose matrices, and skinning matrix
+// palette generation.
+inline constexpr std::uint32_t skeletalAnimationCapabilityAbi = 6u;
 using SkeletonHandle                                          = std::uint32_t;
 using AnimationClipHandle                                     = std::uint32_t;
 using AnimationPlayerHandle                                   = std::uint32_t;
@@ -94,6 +96,17 @@ struct AnimationClipDescription
     std::uint32_t                    trackCount      = 0;
     const AnimationEventMarker      *eventMarkers    = nullptr;
     std::uint32_t                    eventMarkerCount = 0;
+};
+
+// Clip metadata returned by `clipInfo`. The name pointer references storage
+// owned by the clip and remains valid until the clip is destroyed.
+struct AnimationClipInfo
+{
+    const char  *name                 = nullptr;
+    float       durationSeconds      = 0.0f;
+    std::uint32_t trackCount          = 0;
+    std::uint64_t keyframeCount      = 0;
+    std::uint32_t eventMarkerCount   = 0;
 };
 
 // Event delivered when a player crosses a clip marker. direction is +1 for
@@ -209,6 +222,37 @@ struct SkeletalAnimationCapability
     bool (*copyPlayerEvents)(void *, AnimationPlayerHandle, std::uint32_t firstIndex,
         AnimationPlayerEvent *output, std::uint32_t capacity, std::uint32_t *outCopied);
     bool (*clearPlayerEvents)(void *, AnimationPlayerHandle);
+
+    // --- ABI 6 additions ---
+
+    // Sets a player's playback clock to an explicit time. Looping players wrap
+    // the supplied time into [0, duration); one-shot players clamp to that
+    // range. Pending events are cleared and the finished flag is recomputed
+    // (one-shot players with time >= duration finish). Negating playback via a
+    // negative time only makes sense for looping clips, where it is equivalent
+    // to `duration - |time|`.
+    bool (*setPlayerTime)(void *, AnimationPlayerHandle, float timeSeconds);
+
+    // Returns clip metadata (name, duration, track count, keyframe count,
+    // event marker count). The name pointer references clip-owned storage and
+    // is valid until the clip is destroyed.
+    bool (*clipInfo)(void *, AnimationClipHandle, AnimationClipInfo *outInfo);
+
+    // Computes per-joint inverse bind pose matrices in column-major 4x4 form.
+    // Each matrix is the inverse of the joint's global bind pose (parent chain
+    // composed into the joint's local bind transform). `matrixCapacity` counts
+    // matrices; output storage must hold matrixCapacity * 16 floats. The
+    // module caches inverse bind poses at skeleton creation when configured to
+    // do so, otherwise they are computed on demand.
+    bool (*buildInverseBindPose)(void *, SkeletonHandle, float *outputMatrices, std::uint32_t matrixCapacity,
+        AnimationError *);
+
+    // Computes per-joint skinning matrices: `global(localPose) * inverseBindPose`.
+    // Output is column-major 4x4 matrices, one per joint. `matrixCapacity` counts
+    // matrices; output storage must hold matrixCapacity * 16 floats. This is the
+    // typical vertex-skinning palette consumed by mesh shaders.
+    bool (*computeSkinningMatrices)(void *, SkeletonHandle, const JointDescription *localPose,
+        float *outputMatrices, std::uint32_t matrixCapacity, AnimationError *);
 };
 
 } // namespace engine::skeletal_animation

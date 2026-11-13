@@ -1,0 +1,455 @@
+{
+ "species": {
+  "fox": {
+   "display": "Fox",
+   "scale": 0.30670136240773443,
+   "holeVerts": 3,
+   "groundY": -0.1454897759946801,
+   "mountY": 0.55,
+   "mountZ": 0.33045209771938444,
+   "neckBaseY": 0.42760416333679585,
+   "neckBaseZ": 0.34877111152678614,
+   "withersY": 0.5593316194973291,
+   "lengthZ": 1.8043411211850415,
+   "headTopY": 0.33,
+   "headFrontZ": 0.1977731269794164,
+   "headNeckRing": 0.1087015465887199,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.33422938855166756,
+   "tailYMin": -0.5581979763017306,
+   "tailYMax": 0.06180202369826943,
+   "tailScale": 0.18415872740535097
+  },
+  "shibainu": {
+   "display": "Shiba",
+   "scale": 0.29299826589822425,
+   "holeVerts": 3,
+   "groundY": -0.13712715646847473,
+   "mountY": 0.555,
+   "mountZ": 0.2721816973277018,
+   "neckBaseY": 0.42893922631801634,
+   "neckBaseZ": 0.38315280312340033,
+   "withersY": 0.5025457753312397,
+   "lengthZ": 1.1568879810730226,
+   "headTopY": 0.33,
+   "headFrontZ": 0.12302102402491391,
+   "headNeckRing": 0.10810392217332915,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.62,
+   "tailYMin": -0.1891580404091674,
+   "tailYMax": 0.22165029397824032,
+   "tailScale": 0.34743977217729705
+  },
+  "husky": {
+   "display": "Husky",
+   "scale": 0.30202554015831773,
+   "holeVerts": 3,
+   "groundY": -0.14177069001910986,
+   "mountY": 0.575,
+   "mountZ": 0.2769496782006176,
+   "neckBaseY": 0.4421548404958493,
+   "neckBaseZ": 0.3949577379639362,
+   "withersY": 0.5180292067032951,
+   "lengthZ": 1.1746367142541345,
+   "headTopY": 0.33,
+   "headFrontZ": 0.1030404761291962,
+   "headNeckRing": 0.09237707162234073,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.6199999999999999,
+   "tailYMin": -0.24846638282721362,
+   "tailYMax": 0.023755483532893192,
+   "tailScale": 0.3131382259564569
+  },
+  "wolf": {
+   "display": "Wolf",
+   "scale": 0.33378314384609087,
+   "holeVerts": 3,
+   "groundY": -0.16109762398427915,
+   "mountY": 0.585,
+   "mountZ": 0.37767019792408574,
+   "neckBaseY": 0.4653616822558782,
+   "neckBaseZ": 0.379567658826841,
+   "withersY": 0.6087206947589218,
+   "lengthZ": 1.853527313082541,
+   "headTopY": 0.33,
+   "headFrontZ": 0.17372102109794277,
+   "headNeckRing": 0.13407567954155822,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.36794543862681284,
+   "tailYMin": -0.5946201711930484,
+   "tailYMax": 0.025379828806951544,
+   "tailScale": 0.20655412238606446
+  },
+  "donkey": {
+   "display": "Donkey",
+   "scale": 0.28128899016004194,
+   "holeVerts": 3,
+   "groundY": -0.20384085560790594,
+   "mountY": 0.6,
+   "mountZ": 0.2483145997565439,
+   "neckBaseY": 0.44586006866104566,
+   "neckBaseZ": 0.33423676418853193,
+   "withersY": 0.6161130204601634,
+   "lengthZ": 1.324316866115156,
+   "headTopY": 0.33,
+   "headFrontZ": 0.16370537828342108,
+   "headNeckRing": 0.09046325777461146,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.62,
+   "tailYMin": -0.27075054063816084,
+   "tailYMax": 0.12458844018520754,
+   "tailScale": 0.35311560590227226
+  },
+  "cow": {
+   "display": "Cow",
+   "scale": 0.1731423217729092,
+   "holeVerts": 3,
+   "groundY": -0.16752839720244425,
+   "mountY": 0.62,
+   "mountZ": 0.31302104510418605,
+   "neckBaseY": 0.3695998951780997,
+   "neckBaseZ": 0.32619291131397643,
+   "withersY": 0.5218338376226334,
+   "lengthZ": 1.3967364113283791,
+   "headTopY": 0.33,
+   "headFrontZ": 0.20939068936911667,
+   "headNeckRing": 0.10521561784919642,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.41848043198264223,
+   "tailYMin": -0.5067042007629382,
+   "tailYMax": 0.11329579923706173,
+   "tailScale": 0.20644664710913954
+  },
+  "deer": {
+   "display": "Deer",
+   "scale": 0.2644445374573144,
+   "holeVerts": 3,
+   "groundY": -0.19641974741698529,
+   "mountY": 0.625,
+   "mountZ": 0.257758339234463,
+   "neckBaseY": 0.4713552362853534,
+   "neckBaseZ": 0.34579407135481294,
+   "withersY": 0.602749396506882,
+   "lengthZ": 1.1628449291515282,
+   "headTopY": 0.33,
+   "headFrontZ": 0.06393429791052493,
+   "headNeckRing": 0.06457688485474244,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.6200000000000001,
+   "tailYMin": -0.4704746304775276,
+   "tailYMax": 0.06077225730618602,
+   "tailScale": 0.8248422286419467
+  },
+  "bull": {
+   "display": "Bull",
+   "scale": 0.1787275579591321,
+   "holeVerts": 3,
+   "groundY": -0.17293253904768438,
+   "mountY": 0.64,
+   "mountZ": 0.323118498172063,
+   "neckBaseY": 0.3815224724419094,
+   "neckBaseZ": 0.33671526329184664,
+   "withersY": 0.5386671872233635,
+   "lengthZ": 1.4417924245970366,
+   "headTopY": 0.33,
+   "headFrontZ": 0.20939068936911667,
+   "headNeckRing": 0.1220149885379264,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.4184804319826423,
+   "tailYMin": -0.5067042007629382,
+   "tailYMax": 0.11329579923706173,
+   "tailScale": 0.20644664710913954
+  },
+  "alpaca": {
+   "display": "Alpaca",
+   "scale": 0.2806201787234982,
+   "holeVerts": 3,
+   "groundY": -0.2033547542993055,
+   "mountY": 0.65,
+   "mountZ": 0.24438333622073405,
+   "neckBaseY": 0.494844827108903,
+   "neckBaseZ": 0.35804196240349456,
+   "withersY": 0.6396184650548219,
+   "lengthZ": 1.2064955450705408,
+   "headTopY": 0.32999999999999996,
+   "headFrontZ": 0.45274093481838945,
+   "headNeckRing": 0.07281650252002594,
+   "dropped": {
+    "body": 4,
+    "hind": 0,
+    "head": 4,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.5377024925170024,
+   "tailYMin": -0.5408421054043239,
+   "tailYMax": 0.07915789459567613,
+   "tailScale": 0.7695741491711895
+  },
+  "horse": {
+   "display": "Horse",
+   "scale": 0.24650144089387802,
+   "holeVerts": 3,
+   "groundY": -0.22759217792230982,
+   "mountY": 0.67,
+   "mountZ": 0.27394328091913256,
+   "neckBaseY": 0.4883995205387516,
+   "neckBaseZ": 0.3661262383120823,
+   "withersY": 0.674896407027732,
+   "lengthZ": 1.399170299973961,
+   "headTopY": 0.33,
+   "headFrontZ": 0.13503111580134738,
+   "headNeckRing": 0.05980745716590912,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.62,
+   "tailYMin": -0.30508679056604776,
+   "tailYMax": 0.14954671364944497,
+   "tailScale": 0.3187735789140906
+  },
+  "stag": {
+   "display": "Stag",
+   "scale": 0.26976867563672396,
+   "holeVerts": 3,
+   "groundY": -0.19422069637645653,
+   "mountY": 0.6849999999999999,
+   "mountZ": 0.2802290326101159,
+   "neckBaseY": 0.4866231117211307,
+   "neckBaseZ": 0.3826730477180167,
+   "withersY": 0.6404335166865442,
+   "lengthZ": 1.305002939021242,
+   "headTopY": 0.33,
+   "headFrontZ": 0.0973216703631766,
+   "headNeckRing": 0.09099591691841924,
+   "dropped": {
+    "body": 0,
+    "hind": 0,
+    "head": 0,
+    "tail": 0
+   },
+   "flipped": false,
+   "tailLengthZ": 0.6199999999999999,
+   "tailYMin": -0.39543091275698583,
+   "tailYMax": 0.08935087734501745,
+   "tailScale": 0.613869114806732
+  }
+ },
+ "pieces": {
+  "quad_body_fox": {
+   "triangles": 1848
+  },
+  "quad_centaur_fox": {
+   "triangles": 1324
+  },
+  "head_fox": {
+   "triangles": 524
+  },
+  "tail_fox": {
+   "triangles": 220
+  },
+  "quad_body_shibainu": {
+   "triangles": 1950
+  },
+  "quad_centaur_shibainu": {
+   "triangles": 1222
+  },
+  "head_shibainu": {
+   "triangles": 728
+  },
+  "tail_shibainu": {
+   "triangles": 162
+  },
+  "quad_body_husky": {
+   "triangles": 1920
+  },
+  "quad_centaur_husky": {
+   "triangles": 1226
+  },
+  "head_husky": {
+   "triangles": 694
+  },
+  "tail_husky": {
+   "triangles": 182
+  },
+  "quad_body_wolf": {
+   "triangles": 1962
+  },
+  "quad_centaur_wolf": {
+   "triangles": 1362
+  },
+  "head_wolf": {
+   "triangles": 600
+  },
+  "tail_wolf": {
+   "triangles": 226
+  },
+  "quad_body_donkey": {
+   "triangles": 2000
+  },
+  "quad_centaur_donkey": {
+   "triangles": 1254
+  },
+  "head_donkey": {
+   "triangles": 746
+  },
+  "tail_donkey": {
+   "triangles": 122
+  },
+  "quad_body_cow": {
+   "triangles": 2450
+  },
+  "quad_centaur_cow": {
+   "triangles": 1360
+  },
+  "head_cow": {
+   "triangles": 1090
+  },
+  "tail_cow": {
+   "triangles": 142
+  },
+  "quad_body_deer": {
+   "triangles": 2098
+  },
+  "quad_centaur_deer": {
+   "triangles": 1258
+  },
+  "head_deer": {
+   "triangles": 840
+  },
+  "tail_deer": {
+   "triangles": 90
+  },
+  "quad_body_bull": {
+   "triangles": 2418
+  },
+  "quad_centaur_bull": {
+   "triangles": 1332
+  },
+  "head_bull": {
+   "triangles": 1086
+  },
+  "tail_bull": {
+   "triangles": 142
+  },
+  "quad_body_alpaca": {
+   "triangles": 2056
+  },
+  "quad_centaur_alpaca": {
+   "triangles": 1263
+  },
+  "head_alpaca": {
+   "triangles": 793
+  },
+  "tail_alpaca": {
+   "triangles": 66
+  },
+  "quad_body_horse": {
+   "triangles": 2182
+  },
+  "quad_centaur_horse": {
+   "triangles": 1419
+  },
+  "head_horse": {
+   "triangles": 763
+  },
+  "tail_horse": {
+   "triangles": 202
+  },
+  "quad_body_stag": {
+   "triangles": 2054
+  },
+  "quad_centaur_stag": {
+   "triangles": 1210
+  },
+  "head_stag": {
+   "triangles": 844
+  },
+  "tail_stag": {
+   "triangles": 91
+  },
+  "head_dragon": {
+   "rescale": 1.0,
+   "triangles": 3520,
+   "dropped": 0,
+   "flipped": false,
+   "yMin": -0.064358,
+   "yMax": 0.295642
+  },
+  "tail_naga": {
+   "slim": 0.5027038284487279,
+   "triangles": 156,
+   "dropped": 0,
+   "flipped": false,
+   "windingRepaired": true,
+   "floodFlipped": 16,
+   "rootRingRadius": 0.1400015136868141,
+   "rootCenterY": -0.07403565834190093,
+   "rootCenterZ": -0.1212841923969251,
+   "lengthZ": 1.0555250574920307,
+   "groundY": -0.37613808137504845,
+   "yMin": -0.37613808137504845,
+   "yMax": 0.14468745393188673
+  },
+  "tail_reptile": {
+   "triangles": 156,
+   "dropped": 0,
+   "flipped": true,
+   "lengthZ": 0.7204259999999999,
+   "yMin": -0.3169066578947368,
+   "yMax": 0.09883134210526316
+  }
+ }
+}

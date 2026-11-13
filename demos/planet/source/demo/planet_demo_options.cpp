@@ -14,6 +14,8 @@ const char *planetOptionsUsage() noexcept
            "  --frames <n>              Render exactly n frames, then exit.\n"
            "  --screenshot <file.ppm>   Export the rendered frame as PPM.\n"
            "  --screenshot-frame <n>    Frame index for --screenshot (default last).\n"
+           "  --frame-times <file.csv>  Export per-frame timings as CSV (a percentile summary\n"
+           "                            of the rendered frames is always printed).\n"
            "  --stats-every <n>         Print planet statistics every n frames.\n"
            "  --orbit                   Sweep the camera (globe: around the planet;\n"
            "                            surface views: a short circle at the pose).\n"
@@ -56,6 +58,10 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
         else if (argument == "--screenshot" && hasValue)
         {
             options.screenshotPath = arguments[++index];
+        }
+        else if (argument == "--frame-times" && hasValue)
+        {
+            options.frameTimesPath = arguments[++index];
         }
         else if (argument == "--screenshot-frame" && hasValue)
         {

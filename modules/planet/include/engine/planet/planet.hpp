@@ -26,7 +26,8 @@
 
 #include <chrono>
 #include <cstdint>
-#include <map>
+#include <atomic>
+#include <unordered_map>
 #include <thread>
 #include <condition_variable>
 #include <deque>
@@ -86,6 +87,11 @@ public:
     std::uint64_t buildChunkHash(const ChunkCoord &coord, const ConformMask &conformMask) const;
 
 private:
+    // Updates without a delivered mesh (while work is queued) before one chunk is built on the calling thread.
+    static constexpr std::uint32_t kStarvedUpdatesBeforeInlineBuild = 30;
+    // Cache eviction scan cadence, in updates.
+    static constexpr std::uint64_t kEvictionScanInterval = 8;
+
     struct BuiltMesh
     {
         ChunkMesh     mesh;
@@ -104,7 +110,8 @@ private:
     };
 
     void requestBuild(const ChunkCoord &coord, const ConformMask &conformMask);
-    void collectPendingBuilds();
+    std::uint32_t collectPendingBuilds(); // returns the number of meshes delivered
+    void buildOneInline();
     void evictStaleMeshes();
     void buildWorkerLoop();
     void finishBuild(const ChunkCoord &coord, const ConformMask &conformMask); // scheduler-less inline path
@@ -119,15 +126,16 @@ private:
 
     std::vector<ChunkCoord> lastVisible_;
 
-    // Conforming masks of the current visible set, recomputed whenever the
-    // visible list changes (a chunk's mask is a pure function of the sorted
-    // visible list and its own coordinate, so an unchanged list pins the
-    // masks). Keyed by chunk key.
-    std::map<ChunkKey, ConformMask> conformMasks_;
-    std::vector<ChunkCoord>         previousVisible_;
+    // Conforming masks of the current visible set, index-aligned with lastVisible_ and recomputed whenever the
+    // visible list changes (a chunk's mask is a pure function of the sorted visible list and its own coordinate, so
+    // an unchanged list pins the masks).
+    std::vector<ConformMask> visibleMasks_;
+    std::vector<ChunkCoord>  previousVisible_;
+    VisibleLeafSet           visibleLeafSet_;
 
-    // Ready cache: chunk key -> built mesh (std::map keeps references stable).
-    std::map<ChunkKey, BuiltMesh> readyMeshes_;
+    // Ready cache: chunk key -> built mesh. Node-based, so mesh storage stays put while the table grows; capacity is
+    // reserved up front so streaming never rehashes.
+    std::unordered_map<ChunkKey, BuiltMesh> readyMeshes_;
 
     // Worker -> main handoff.
     std::mutex                                   pendingMutex_;
@@ -149,12 +157,11 @@ private:
     std::deque<std::pair<ChunkCoord, ConformMask>> buildQueue_;
     std::vector<std::thread>                     buildThreads_;
     bool                                         buildThreadsStopping_ = false;
-    // Main-thread build slice per update (seconds) - see update().
-    double                                       inlineBuildSliceSeconds_ = 0.006;
+    // Consecutive updates that had queued work but received no finished mesh. When the pool is starved of CPU for this
+    // long, one chunk is built on the calling thread so the visible set still converges (see update()).
+    std::uint32_t                                starvedUpdates_ = 0;
 
     std::uint64_t updateCount_ = 0;
-    std::atomic<std::uint32_t> workerStartedCount_{0};   // TEMP diag
-    std::atomic<std::uint32_t> workerCompletedCount_{0}; // TEMP diag
     PlanetStatistics statistics_{};
 };
 

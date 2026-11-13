@@ -36,7 +36,7 @@ add_library(
 
 target_compile_definitions(
     engine_module_camera
-    PRIVATE ENGINE_CAMERA_MODULE_VERSION="0.2.0"
+    PRIVATE ENGINE_CAMERA_MODULE_VERSION="0.1.0"
 )
 
 target_include_directories(

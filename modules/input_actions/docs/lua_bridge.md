@@ -13,8 +13,8 @@ The module declares `optional_capabilities = ["script_runtime"]`. In `construct(
 - String selectors are validated exactly:
     - action types: `"button"`, `"axis1d"`, `"axis2d"`
     - combine modes: `"sum"`, `"maximum"`, `"last"`
-    - binding controls: `"key"`, `"mouse_button"`, `"gamepad_button"`, `"gamepad_axis"`, `"mouse_delta_x"`, `"mouse_delta_y"`, `"mouse_wheel_x"`, `"mouse_wheel_y"`, `"touch_contact"`, `"touch_position_x"`, `"touch_position_y"`, `"touch_delta_x"`, `"touch_delta_y"`, `"touch_pressure"`
-    - event kinds: `"key"`, `"mouse_button"`, `"gamepad_button"`, `"gamepad_axis"`, `"mouse_delta"`, `"mouse_wheel"`, `"focus_lost"`, `"touch_began"`, `"touch_moved"`, `"touch_ended"`, `"touch_cancelled"`
+    - binding controls: `"key"`, `"mouse_button"`, `"gamepad_button"`, `"gamepad_axis"`, `"mouse_delta_x"`, `"mouse_delta_y"`, `"mouse_wheel_x"`, `"mouse_wheel_y"`, `"touch_contact"`, `"touch_position_x"`, `"touch_position_y"`, `"touch_delta_x"`, `"touch_delta_y"`, `"touch_pressure"`, `"mouse_position_x"`, `"mouse_position_y"`
+    - event kinds: `"key"`, `"mouse_button"`, `"gamepad_button"`, `"gamepad_axis"`, `"mouse_delta"`, `"mouse_wheel"`, `"focus_lost"`, `"touch_began"`, `"touch_moved"`, `"touch_ended"`, `"touch_cancelled"`, `"mouse_position"`
 - Booleans must be real booleans. A malformed call (wrong argument count, wrong types, unknown selector) is rejected without touching input state; unlike the creation functions, the mutation and query functions return plain booleans rather than error codes.
 
 For touch bindings, `code` is a contact id or `0xffffffff` for `anyTouchContact` (the contact id `0xffffffff` is reserved); `device` identifies the touch surface. When forwarding window events, device ids use the reserved `touchDeviceIdBase` mapping described in [overview.md](overview.md).
@@ -27,7 +27,7 @@ Functions are listed alphabetically.
 | --- | --- | --- | --- |
 | `input_actions.action_state` | context, action | value_0, value_1, down, pressed, released | The five results of `InputActionState`. Returns `nil` for an unknown context/action pair. `pressed`/`released` are single-frame edges. |
 | `input_actions.advance_frame` | delta_seconds | (none) | Runs the per-frame pipeline (priority evaluation, combine, deadzone/curve shaping, smoothing, consumption) and then resets the accumulated mouse deltas and wheel values. |
-| `input_actions.bind_action` | context, action, control, device, code, component, scale, deadzone, response_exponent, invert | ok | `deadzone < 0` selects the module default (gamepad axes only); exponent must be in (0, 8]. Button actions accept only digital controls with component 0. |
+| `input_actions.bind_action` | context, action, control, device, code, component, scale, deadzone, response_exponent, invert | ok | `deadzone < 0` selects the module default (gamepad axes only); exponent must be in (0, 8]. Button actions accept only digital controls with component 0; the `mouse_position_*`, `touch_position_*`, `touch_delta_*`, `touch_pressure`, and `gamepad_axis` controls are analog. |
 | `input_actions.clear_bindings` | context, action | ok | Removes every binding of the action. |
 | `input_actions.binding_count` | context, action | count | Returns the number of bindings; returns 0 for an invalid action. |
 | `input_actions.binding_at` | context, action, binding_index | control, device, code, component, scale, deadzone, response_exponent, invert | Returns one binding by zero-based index, or `nil` when the action/index is invalid. |
@@ -35,7 +35,7 @@ Functions are listed alphabetically.
 | `input_actions.create_action` | context, name, type, threshold, combine, smoothing_seconds | handle or nil | `type` and `combine` are the selectors above; `threshold` must be in [0, 1] and `smoothing_seconds` at most `input_actions.maximum_smoothing_seconds`. Duplicate names within a context are refused. |
 | `input_actions.create_context` | name, priority, enabled, consume_when_active | handle or nil | Higher priority evaluates first; `consume_when_active` hides the context's active controls from lower-priority contexts for that frame. |
 | `input_actions.destroy_context` | handle | (none) | Invalidates the context's action handles. |
-| `input_actions.feed_event` | kind, device, code, value, secondary_value, down, [pressure] | ok | Injects one raw event. The optional seventh argument is touch pressure (default 1); touch positions/pressure are normalized to [0, 1]. `focus_lost` wipes all stored state for that device. |
+| `input_actions.feed_event` | kind, device, code, value, secondary_value, down, [pressure] | ok | Injects one raw event. The optional seventh argument is touch pressure (default 1); touch positions/pressure are normalized to [0, 1]. `mouse_position` carries the absolute cursor X/Y in `value`/`secondary_value`. `focus_lost` wipes all stored state for that device. |
 | `input_actions.remove_action` | context, action | ok | |
 | `input_actions.reset_device` | device | (none) | Drops all stored state for one device id (reconnect/swap). |
 | `input_actions.set_context_enabled` | handle, enabled | ok | Disabling clears the context's action states so no stale edges are observed. |

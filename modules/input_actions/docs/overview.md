@@ -11,8 +11,9 @@ Key capability facts:
 - Context and action handles are `std::uint32_t` ids starting at 1; the constants `invalidInputContext` / `invalidInputAction` (`0`) are never handed out.
 - Every function takes the `self` pointer first; all caller buffers stay caller-owned.
 - Frame flow: `feedEvent` or `feedWindowEvent` as events arrive, `advanceFrame` once per frame, then `actionState` per action. `pressed`/`released` are single-frame edges.
-- `advanceFrame` consumes the accumulated mouse deltas and wheel values, so those controls read as zero until new events arrive.
+- `advanceFrame` consumes the accumulated mouse deltas and wheel values, so those controls read as zero until new events arrive. Mouse absolute position is retained across frames (it stores the most recently reported value).
 - `feedWindowEvent` maps keyboard/mouse to `keyboardMouseDevice`, gamepads to `gamepadDeviceIdBase | GLFW joystick id`, and touch surfaces to `touchDeviceIdBase | native device id`; touch device ids above `0x7fffffff` are rejected to preserve the reserved device-id namespace. Raw `feedEvent` callers choose device ids themselves. State for an id is created on demand and dropped by `resetDeviceState`.
+- Control and event enums are open-ended: existing values keep their numeric assignments while new kinds (such as `MousePosition` events and `MousePositionX`/`MousePositionY` controls) are appended without changing the ABI constant.
 
 ### Runtime rebinding
 
@@ -58,7 +59,13 @@ From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryMo
 | `module.toml` | On-disk descriptor: name, version, provided capability, and the declared `config_keys` documenting the configuration surface. Copied next to the built .so by CMake. |
 | `config.toml` | Default values for the `[input_actions]` section (see `configuration.md`). |
 | `include/engine/input_actions/capabilities.hpp` | Public capability types: ABI constant, handles, event/control/action enums, description and state structs, and the function-pointer vtable. |
-| `source/input_actions.cpp` | The implementation: per-device state, contexts/actions/bindings, the per-frame evaluation pipeline, synchronized capability calls, optional Lua bridge registration, capability binding, module entry table. |
+| `source/input_actions.cpp` | The module entry point: `InputActionsModule` wires the cooperating pieces together, serializes capability calls with one mutex, binds the C capability vtable, and exports the module entry table. |
+| `source/internal.hpp` | Shared private declarations: `TouchState`, `DeviceState`, `ControlKey`, `ControlKeyHash`, and the analog/touch control classifiers used by the registry and the evaluator. |
+| `source/configuration.hpp` | Header-only `InputActionsConfiguration` aggregate plus the loader that reads `[input_actions]` keys from `ParticipantContext` with range validation. |
+| `source/device_state.hpp` / `source/device_state.cpp` | `DeviceStateRegistry`: per-device control snapshots, raw event ingestion, touch-contact lookup, per-frame delta reset. |
+| `source/context_registry.hpp` / `source/context_registry.cpp` | `ContextRegistry`: contexts, actions, bindings, handle allocation, ordered iteration, name-uniqueness tracking. |
+| `source/window_adapter.hpp` / `source/window_adapter.cpp` | `feedWindowEvent` translator from `window::WindowEvent` to `InputEvent`(s). |
+| `source/frame_evaluator.hpp` / `source/frame_evaluator.cpp` | `FrameEvaluator`: the per-frame pipeline (binding reads, combine modes, shaping, smoothing, threshold, consumption). |
 | `source/lua_bridge.cpp`, `source/lua_bridge.hpp` | Optional `script_runtime` bridge for context/action creation, binding, event submission, frame advancement, and action-state queries. |
 | `docs/` | This documentation. |
 
@@ -66,12 +73,12 @@ From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryMo
 
 ### Data model
 
-- `DeviceState` (per device id): maps of pressed keys, mouse buttons, and gamepad buttons plus stored gamepad axis values, multitouch contact snapshots, and accumulated pairs (mouse delta X/Y, wheel X/Y). All control maps and touch contacts are capped together by `maximum_controls_per_device`.
-- `ContextRecord`: name, integer priority, `enabled` flag, `consumeWhenActive` flag, and its actions (`ActionRecord`: description, bindings, last computed `InputActionState`).
+- `DeviceState` (per device id, owned by `DeviceStateRegistry`): maps of pressed keys, mouse buttons, and gamepad buttons plus stored gamepad axis values, multitouch contact snapshots, accumulated pairs (mouse delta X/Y, wheel X/Y), and the most recently reported absolute cursor position. A cached `controlCount` sums the sizes of every control map and the touch map so the per-device control cap is checked without re-summing five containers per event.
+- `ContextRecord` (owned by `ContextRegistry`): name, integer priority, `enabled` flag, `consumeWhenActive` flag, its actions (`ActionRecord`: description, bindings, last computed `InputActionState`), and a parallel name set so duplicate-name detection is constant time.
 
 ### Events to device state
 
-`feedEvent` validates the event (finite values, known kind) and stores it: button kinds store `down` per code, `GamepadAxis` stores stick axes in [-1, 1] and trigger axes in [0, 1], `MouseDelta`/`MouseWheel` accumulate X/Y, and touch events maintain each contact's normalized position, per-frame delta, pressure, and active state. A begin/end pair received within one frame still produces a one-frame active contact, so a tap is not lost. `FocusLost` wipes all stored state for that device. `feedWindowEvent` translates the window module's key, mouse, gamepad, touch, and focus events to these raw events; unrelated window events are ignored. Unknown devices are created on demand until `maximum_devices` is reached.
+`feedEvent` validates the event (finite values, known kind) and stores it: button kinds store `down` per code, `GamepadAxis` stores stick axes in [-1, 1] and trigger axes in [0, 1], `MouseDelta`/`MouseWheel` accumulate X/Y, `MousePosition` records the latest absolute cursor X/Y, and touch events maintain each contact's normalized position, per-frame delta, pressure, and active state. A begin/end pair received within one frame still produces a one-frame active contact, so a tap is not lost. `FocusLost` wipes all stored state for that device. `feedWindowEvent` translates the window module's key, mouse, gamepad, touch, and focus events to these raw events; a `CursorMoved` window event emits both `MouseDelta` (for accumulated relative motion) and `MousePosition` (for absolute cursor coordinates) so consumers can bind either. Unrelated window events are ignored. Unknown devices are created on demand until `maximum_devices` is reached.
 
 ### The per-frame pipeline
 
@@ -94,15 +101,19 @@ From the entry table at the bottom of `source/input_actions.cpp` (`engineQueryMo
 
 ### Binding rules
 
-`bindAction` validates the control enum, finite scalars, deadzone in [-1, 1), exponent in (0, 8], and the per-type component rules: Button actions accept only digital controls with component 0 (`TouchContact` is digital; touch position/delta/pressure and gamepad axes are analog), Axis1D requires component 0, and Axis2D accepts components 0 and 1. `createAction` additionally rejects duplicate action names within a context, thresholds outside [0, 1], and smoothing above the configured cap. `setContextEnabled(false)` clears the context's action states, so no stale pressed/released edges are observed while it is off.
+`bindAction` validates the control enum, finite scalars, deadzone in [-1, 1), exponent in (0, 8], and the per-type component rules: Button actions accept only digital controls with component 0 (`TouchContact` is digital; touch position/delta/pressure, gamepad axes, and mouse position are analog), Axis1D requires component 0, and Axis2D accepts components 0 and 1. `createAction` additionally rejects duplicate action names within a context, thresholds outside [0, 1], and smoothing above the configured cap. `setContextEnabled(false)` clears the context's action states, so no stale pressed/released edges are observed while it is off.
 
 ### Touch bindings
 
 Touch controls use the binding `device` to select a touch surface and `code` to select a contact id. Set `code = anyTouchContact` (`0xffffffff`; this contact id is reserved) to select the most recently updated active contact, or the latest contact when none remain active. `TouchContact` reads as down while the contact is active, including a begin/end tap wholly contained in one input frame. Position and pressure are normalized to [0, 1]; touch deltas are normalized coordinate differences accumulated until `advanceFrame` completes. `TouchContact` can drive Button actions; the position, delta, and pressure controls drive Axis1D/Axis2D actions.
 
+### Mouse position bindings
+
+`MousePositionX` and `MousePositionY` read the most recently reported absolute cursor position for the binding's `device` (typically `keyboardMouseDevice`). When the window adapter produces the event, coordinates are normalized to the drawable window area [0, 1]; raw `feedEvent` callers may use any unit they prefer. The position is retained across frames, so an Axis2D action bound to `(MousePositionX, MousePositionY)` exposes the cursor location even when no motion occurred this frame. These controls are analog and therefore cannot drive Button actions.
+
 ### Window event adapter
 
-After popping each `window::WindowEvent`, call `feedWindowEvent(self, windowHandle, &event)`. Feed events from one window queue only once per event; gamepad events are broadcast to all live window queues. It forwards key and mouse state, cursor deltas, wheel offsets, standardized gamepad controls, focus loss, and forwarded touch contacts. Gamepad ids use `gamepadDeviceIdBase | joystickId`; touch ids use `touchDeviceIdBase | touchDevice`; touch device ids above `0x7fffffff` are rejected rather than aliased. The reserved high-bit ranges are reserved for the adapter; use other device ids for raw `feedEvent` producers. The adapter does not poll a window or native input source itself; call the window module's `pollEvents` first. See the window module overview for touch host integration requirements.
+After popping each `window::WindowEvent`, call `feedWindowEvent(self, windowHandle, &event)`. Feed events from one window queue only once per event; gamepad events are broadcast to all live window queues. It forwards key and mouse state, cursor deltas and absolute cursor position, wheel offsets, standardized gamepad controls, focus loss, and forwarded touch contacts. A `CursorMoved` window event emits two raw events (`MouseDelta` for accumulated relative motion and `MousePosition` for the absolute coordinate) so a binding can read either. Gamepad ids use `gamepadDeviceIdBase | joystickId`; touch ids use `touchDeviceIdBase | touchDevice`; touch device ids above `0x7fffffff` are rejected rather than aliased. The reserved high-bit ranges are reserved for the adapter; use other device ids for raw `feedEvent` producers. The adapter does not poll a window or native input source itself; call the window module's `pollEvents` first. See the window module overview for touch host integration requirements.
 
 ## Lua bridge
 

@@ -1,2 +1,5 @@
 [ui]
 save_window_layout = false
+ini_filename      = ""
+default_style     = "dark"
+default_font_size = 0.0

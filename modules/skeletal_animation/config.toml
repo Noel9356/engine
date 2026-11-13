@@ -1,4 +1,5 @@
 [skeletal_animation]
+cache_inverse_bind_pose               = true
 default_interpolation                = "slerp"
 maximum_blend_poses                  = 16
 maximum_clips                        = 4096

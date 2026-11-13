@@ -1,4 +1,4 @@
-config_keys = ["ui.save_window_layout"]
+config_keys = ["ui.save_window_layout", "ui.ini_filename", "ui.default_style", "ui.default_font_size"]
 name        = "ui"
 provides    = ["ui"]
 requires    = []

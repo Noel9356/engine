@@ -23,6 +23,7 @@ struct PlanetDemoOptions
     double radius = 0.0;
     std::uint64_t frames = 0;
     std::string screenshotPath;
+    std::string frameTimesPath;
     std::uint64_t screenshotFrame = 0;
     std::uint32_t warmupFrames = 0;
     std::uint32_t statsEveryFrames = 30;

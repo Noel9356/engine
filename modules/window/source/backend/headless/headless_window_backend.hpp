@@ -14,7 +14,10 @@ namespace window
 
 // Window backend without a windowing system: the framebuffer is a zeroed CPU
 // RGBA buffer that can be locked for inspection or exported as a PPM.
-// pollEvents does nothing, so only setSize and requestClose produce events.
+// pollEvents does nothing, so only setSize, requestClose, and the iconify and
+// restore calls produce events. Window state requested through the
+// runtime-control calls is tracked in the WindowRecord and reported by
+// getWindowAttributes; focus and hover are always false (no window system).
 class HeadlessWindowBackend final : public WindowBackend
 {
 public:
@@ -61,6 +64,18 @@ public:
 
     bool setSize(WindowRecord &record, std::uint32_t width, std::uint32_t height) override;
     bool setPosition(WindowRecord &record, std::int32_t x, std::int32_t y) override;
+    bool getPosition(const WindowRecord &record, std::int32_t *outX, std::int32_t *outY) const override;
+
+    void setOpacity(WindowRecord &record, float opacity) override;
+    void setVisible(WindowRecord &record, bool visible) override;
+    void setResizable(WindowRecord &record, bool resizable) override;
+    void setDecorated(WindowRecord &record, bool decorated) override;
+    void setFloating(WindowRecord &record, bool floating) override;
+    void iconify(WindowRecord &record) override;
+    void restore(WindowRecord &record) override;
+    void maximize(WindowRecord &record) override;
+    bool getWindowAttributes(const WindowRecord &record, WindowAttributes *outAttributes) const override;
+    bool getContentScale(const WindowRecord &record, float *outX, float *outY) const override;
 
     void pollEvents() override
     {}
@@ -74,7 +89,7 @@ public:
     }
 
     bool setClipboardText(const WindowRecord &, const char *text) override;
-    bool copyClipboardText(const WindowRecord &, std::string &output) const override;
+    bool copyClipboardText(const WindowRecord &, const char **outText) const override;
 
     const char *const *requiredInstanceExtensions(std::uint32_t *outCount) const override;
 

@@ -31,6 +31,7 @@
 #include <engine/window/capabilities.hpp>
 
 #include "demo/planet_demo_support.hpp"
+#include "demo/planet_frame_timing.hpp"
 #include "demo/planet_camera_input.hpp"
 #include "demo/planet_chunk_renderer.hpp"
 #include "engine/application/application_host.hpp"
@@ -483,6 +484,7 @@ int main(int argc, char **argv)
 
     // ---- frame loop -------------------------------------------------------------------
     std::uint64_t framesRendered = 0;
+    FrameTimingRecorder frameTiming;
     bool          screenshotTaken = false;
     double        orbitAngle      = 0.0;
     std::array<window::WindowEvent, 64> eventBuffer;
@@ -504,6 +506,7 @@ int main(int argc, char **argv)
 
     for (std::uint64_t frameIndex = 0; runUntilClosed || frameIndex < totalFrames; ++frameIndex)
     {
+        frameTiming.beginFrame();
         windowCapability.pollEvents(windowCapability.self);
 
         std::uint32_t eventCount = 0;
@@ -616,14 +619,17 @@ int main(int argc, char **argv)
         {
             continue;
         }
+        frameTiming.markUpdateDone();
         chunkRenderer.updateVisibleChunks();
         chunkRenderer.rebuildDrawCommands();
         const auto &drawCommands = chunkRenderer.drawCommands();
+        frameTiming.markUploadDone();
 
         renderCapability.beginFrame(renderCapability.self, rendererHandle, nullptr);
         renderCapability.drawMeshes(renderCapability.self, rendererHandle, drawCommands.data(),
             static_cast<std::uint32_t>(drawCommands.size()));
         renderCapability.endFrame(renderCapability.self, rendererHandle);
+        frameTiming.markDrawDone();
         ++framesRendered;
         if (framesRendered % 100 == 0)
         {
@@ -679,6 +685,18 @@ int main(int argc, char **argv)
     }
 
     // ---- teardown -----------------------------------------------------------------------
+    std::cout << frameTiming.summary();
+    if (!options.frameTimesPath.empty())
+    {
+        if (frameTiming.writeCsv(options.frameTimesPath))
+        {
+            std::cout << "demo_planet: frame timings written to " << options.frameTimesPath << "\n";
+        }
+        else
+        {
+            std::cerr << "demo_planet: could not write frame timings to " << options.frameTimesPath << "\n";
+        }
+    }
     chunkRenderer.destroy();
     planet::PlanetStatistics finalStatistics{};
     if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &finalStatistics))

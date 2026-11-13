@@ -20,10 +20,13 @@
 #define ENGINE_PLANET_OCTREE_HPP
 
 #include <engine/planet/density.hpp>
+#include <engine/planet/flat_key_map.hpp>
 #include <engine/planet/meshing.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
+#include <array>
+#include <cstdint>
 #include <vector>
 
 namespace engine
@@ -40,6 +43,27 @@ enum class ChunkState : std::uint32_t
     Ready,       // mesh built and cached
     Split,       // interior node: its children are the rendered selection
     Hidden       // culled by the horizon test (nothing rendered here)
+};
+
+// Hash index over the sorted visible leaf list: O(1) membership for conform-mask derivation. Rebuilt once whenever
+// the visible list changes.
+class VisibleLeafSet final
+{
+public:
+    VisibleLeafSet();
+
+    void assign(const std::vector<ChunkCoord> &sortedLeaves);
+    [[nodiscard]] bool contains(const ChunkCoord &coord) const noexcept;
+
+    // True when at least one leaf of this depth is rendered (cheap early-out for masks).
+    [[nodiscard]] bool hasDepth(std::uint32_t depth) const noexcept
+    {
+        return depth < depthCounts_.size() && depthCounts_[depth] != 0;
+    }
+
+private:
+    FlatKeyMap<std::uint8_t>       keys_;
+    std::array<std::uint32_t, 32>  depthCounts_{};
 };
 
 class PlanetOctree final
@@ -66,16 +90,35 @@ public:
     void computeConformMask(const ChunkCoord &coord, const std::vector<ChunkCoord> &visibleSortedLeaves,
         ConformMask &outMask) const;
 
+    // Same decision against a prebuilt hash index of the visible leaves (identical result, O(1) membership).
+    void computeConformMask(const ChunkCoord &coord, const VisibleLeafSet &visibleLeaves, ConformMask &outMask) const;
+
     // Current lifecycle state of a node (Empty when pruned).
     ChunkState stateOf(const ChunkCoord &coord) const;
 
     void setState(const ChunkCoord &coord, ChunkState state);
 
 private:
+    // Outcome of the solid/air corner probe. The probe depends only on the node's coordinate and the planet
+    // parameters (never on the eye), so the verdict is computed once per node and kept with its record.
+    enum class ProbeVerdict : std::uint8_t
+    {
+        Unknown = 0,
+        Undecided,
+        Empty
+    };
+
     struct NodeRecord
     {
-        ChunkState    state = ChunkState::Wanted;
         std::uint64_t lastSelectedUpdate = 0;
+        ChunkState    state              = ChunkState::Wanted;
+        ProbeVerdict  probe              = ProbeVerdict::Unknown;
+    };
+
+    struct ChildList
+    {
+        std::array<ChunkCoord, 8> items{};
+        std::uint32_t             count = 0;
     };
 
     const PlanetGenerationParams &params_;
@@ -86,7 +129,9 @@ private:
 
     // Sparse node map: only nodes touched by selection (visited + pruned).
     // Keys via makeChunkKey; max depth 20 keeps coordinates in 20 bits.
-    std::vector<std::pair<ChunkKey, NodeRecord>> nodes_; // sorted flat map
+    FlatKeyMap<NodeRecord> nodes_;
+    std::vector<ChunkCoord> descentStack_;  // scratch buffers reused across updates
+    std::vector<ChunkCoord> leavesScratch_;
 
     const NodeRecord *findRecord(ChunkKey key) const;
     NodeRecord *findRecord(ChunkKey key);
@@ -100,8 +145,8 @@ private:
     // node map. Returns the resulting state (Empty, Hidden, Split, or a
     // rendered-leaf state); outRefineChildren receives the children when the
     // state is Split.
-    ChunkState classifyNode(const ChunkCoord &coord, const Vec3 &eyeLocal,
-        std::vector<ChunkCoord> *outRefineChildren) const;
+    ChunkState classifyNode(const ChunkCoord &coord, const Vec3 &eyeLocal, ChildList *outRefineChildren,
+        NodeRecord &record) const;
 
     // True when the node's state renders a mesh (lifecycle states kept by the
     // facade plus this update's fresh selection).

@@ -67,16 +67,19 @@ void PlanetChunkRenderer::updateVisibleChunks()
         return;
     }
 
-    std::vector<planet::PlanetChunkView> views(capacity);
+    ++updateCounter_;
+    if (visibleViews_.size() < capacity)
+    {
+        visibleViews_.resize(capacity);
+    }
     const std::uint32_t count = std::min(
-        planet_->copyVisibleChunks(planet_->self, planetHandle_, views.data(), capacity), capacity);
-    std::map<planet::ChunkKey, bool> seen;
+        planet_->copyVisibleChunks(planet_->self, planetHandle_, visibleViews_.data(), capacity), capacity);
     for (std::uint32_t index = 0; index < count; ++index)
     {
-        const planet::PlanetChunkView &view = views[index];
-        seen[view.key] = true;
+        const planet::PlanetChunkView &view = visibleViews_[index];
         auto found = uploadedMeshes_.try_emplace(view.key, ChunkMeshHandles{}).first;
         ChunkMeshHandles &handles = found->second;
+        handles.lastSeenUpdate = updateCounter_;
 
         const bool wantTerrain = !view.isWater;
         renderer::MeshHandle &slot = wantTerrain ? handles.terrain : handles.water;
@@ -108,20 +111,19 @@ void PlanetChunkRenderer::updateVisibleChunks()
                 static_cast<float>(view.centerMeters.z - params_.centerMeters[2])));
         if (wantTerrain)
         {
-            chunkTransforms_[view.key].first = transform;
+            handles.terrainTransform = transform;
         }
         else
         {
-            chunkTransforms_[view.key].second = transform;
+            handles.waterTransform = transform;
         }
     }
 
     for (auto it = uploadedMeshes_.begin(); it != uploadedMeshes_.end();)
     {
-        if (seen.find(it->first) == seen.end())
+        if (it->second.lastSeenUpdate != updateCounter_)
         {
             destroyChunkMeshes(it->second);
-            chunkTransforms_.erase(it->first);
             it = uploadedMeshes_.erase(it);
         }
         else
@@ -139,11 +141,6 @@ void PlanetChunkRenderer::rebuildDrawCommands()
 
     for (const auto &entry : uploadedMeshes_)
     {
-        const auto transformIt = chunkTransforms_.find(entry.first);
-        if (transformIt == chunkTransforms_.end())
-        {
-            continue;
-        }
         if (entry.second.terrain != renderer::invalidMesh)
         {
             renderer::MeshMaterial material{};
@@ -155,7 +152,7 @@ void PlanetChunkRenderer::rebuildDrawCommands()
 
             renderer::RenderDrawCommand command{};
             command.mesh = entry.second.terrain;
-            command.modelMatrix = glm::value_ptr(transformIt->second.first);
+            command.modelMatrix = glm::value_ptr(entry.second.terrainTransform);
             command.material = &terrainMaterials_.back();
             drawCommands_.push_back(command);
         }
@@ -170,7 +167,7 @@ void PlanetChunkRenderer::rebuildDrawCommands()
 
             renderer::RenderDrawCommand command{};
             command.mesh = entry.second.water;
-            command.modelMatrix = glm::value_ptr(transformIt->second.second);
+            command.modelMatrix = glm::value_ptr(entry.second.waterTransform);
             command.material = &waterMaterials_.back();
             drawCommands_.push_back(command);
         }
@@ -184,7 +181,6 @@ void PlanetChunkRenderer::destroy()
         destroyChunkMeshes(entry.second);
     }
     uploadedMeshes_.clear();
-    chunkTransforms_.clear();
     terrainMaterials_.clear();
     waterMaterials_.clear();
     drawCommands_.clear();

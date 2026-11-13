@@ -1,4 +1,5 @@
 #include "../character_screen_internal.hpp"
+#include "../character_metrics.gen.hpp"
 #include "../geometry.hpp"
 
 #include <glm/glm.hpp>
@@ -58,6 +59,58 @@ void CharacterScreen::setStatusMessage(std::string message)
     statusSeconds_ = 5.0f;
 }
 
+// ---- panel helpers ------------------------------------------------------------
+
+// Draws one row of radio-style option buttons. Every button's label carries
+// a "##group" suffix so the ImGui id is unique per group (the rev-9 panel
+// reused bare "1"/"2"/"3" labels across the Heads/Wings/Arms sections, so
+// several buttons shared one id and fired together). The active option is
+// also text-marked; because the marker sits BEFORE the "##", the id stays
+// stable whether or not the item is selected.
+void CharacterScreen::uiOptionRow(const char *const *options, int optionCount, const char *idSuffix,
+    int activeIndex, float width, const std::function<void(int)> &onPick)
+{
+    for (int index = 0; index < optionCount; ++index)
+    {
+        char label[96];
+        std::snprintf(label, sizeof(label), "%s%s##%s", activeIndex == index ? "* " : "", options[index], idSuffix);
+        if (uiButton(label, width))
+        {
+            onPick(index);
+        }
+        if (index == optionCount - 1 || (index + 1) % 4 == 0)
+        {
+            ui_->spacing(ui_->self, uiContext_);
+        }
+        else
+        {
+            ui_->sameLine(ui_->self, uiContext_);
+        }
+    }
+}
+
+// One labelled slider row driven by the cached parameter registry. Returns
+// true when the value changed (the caller then applies plan-specific fixes).
+bool CharacterScreen::uiParameterSlider(const char *parameterId)
+{
+    const ParameterDefinition *definition = parameterDefinition(parameterId);
+    if (definition == nullptr)
+    {
+        return false;
+    }
+    float value = definition->defaultV != 0.0f ? definition->defaultV : 1.0f;
+    character_->getParameter(character_->self, characterHandle_, parameterId, &value);
+    const float before = value;
+    if (uiSlider(definition->displayName, &value, definition->minimum, definition->maximum)
+        && std::fabs(value - before) > 1.0e-6f)
+    {
+        CharacterError error = CharacterError::None;
+        character_->setParameter(character_->self, characterHandle_, parameterId, value, &error);
+        return true;
+    }
+    return false;
+}
+
 void CharacterScreen::drawPanel(double deltaSeconds)
 {
     const float delta = static_cast<float>(std::max(deltaSeconds, 1.0e-4));
@@ -76,8 +129,8 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         std::uint32_t width  = 0;
         std::uint32_t height = 0;
         window_->getSize(window_->self, windowHandle_, &width, &height);
-        ui_->setNextWindowPosition(ui_->self, uiContext_, static_cast<float>(width) - 372.0f, 20.0f, 0.0f, 0.0f);
-        ui_->setNextWindowSize(ui_->self, uiContext_, 352.0f, std::max(static_cast<float>(height) - 40.0f, 380.0f));
+        ui_->setNextWindowPosition(ui_->self, uiContext_, static_cast<float>(width) - 384.0f, 16.0f, 0.0f, 0.0f);
+        ui_->setNextWindowSize(ui_->self, uiContext_, 364.0f, std::max(static_cast<float>(height) - 32.0f, 380.0f));
         panelFirstPlacement_ = false;
     }
 
@@ -95,25 +148,209 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         return;
     }
 
-    // ---- header + validation -------------------------------------------------
     static const char *const kPlanNames[4] = {"Humanoid Biped", "Centaur", "Naga", "Quadruped"};
+    static const char *const kTabs[5] = {"Plan", "Body", "Parts", "Motion", "File"};
+
+    // ---- header ---------------------------------------------------------------
     uiTextColored(0.60f, 0.75f, 0.98f, kPlanNames[std::clamp(activePlan_, 0, 3)]);
     ui_->sameLine(ui_->self, uiContext_);
     if (issues_.empty())
     {
-        uiTextColored(0.55f, 0.92f, 0.55f, "[assembly valid]");
+        uiTextColored(0.55f, 0.92f, 0.55f, "assembly valid");
     }
     else
     {
         char badge[64];
-        std::snprintf(badge, sizeof(badge), "[validation: %u issue(s)]", static_cast<unsigned>(issues_.size()));
+        std::snprintf(badge, sizeof(badge), "validation: %u issue(s)", static_cast<unsigned>(issues_.size()));
         uiTextColored(0.98f, 0.45f, 0.40f, badge);
     }
     ui_->separator(ui_->self, uiContext_);
 
-    // ---- head variants ---------------------------------------------------------
+    // ---- tab row ---------------------------------------------------------------
+    // Tabs are radio buttons bound to activePanelTab_ with "##tab" id
+    // suffixes; the row wraps after every tab so it never overflows.
+    std::int32_t tab = activePanelTab_;
+    for (int index = 0; index < 5; ++index)
+    {
+        char label[32];
+        std::snprintf(label, sizeof(label), "%s##tab%d", kTabs[index], index);
+        ui_->radioButton(ui_->self, uiContext_, label, &tab, index);
+        if (index < 4)
+        {
+            ui_->sameLine(ui_->self, uiContext_);
+        }
+    }
+    if (tab != activePanelTab_)
+    {
+        activePanelTab_ = static_cast<int>(tab);
+    }
+    ui_->separator(ui_->self, uiContext_);
+
+    switch (activePanelTab_)
+    {
+    case 0:
+        drawPlanTab();
+        break;
+    case 1:
+        drawBodyTab();
+        break;
+    case 2:
+        drawPartsTab();
+        break;
+    case 3:
+        drawMotionTab();
+        break;
+    default:
+        drawFileTab();
+        break;
+    }
+
+    ui_->endWindow(ui_->self, uiContext_);
+
+    // Remember whether the UI wants the mouse next frame (gates orbit drag).
+    UiCaptureState capture{};
+    if (ui_->captureState(ui_->self, uiContext_, &capture))
+    {
+        uiWantsMouse_ = capture.mouse;
+    }
+}
+
+// ---- tab: plan + species -------------------------------------------------------
+
+void CharacterScreen::drawPlanTab()
+{
+    uiHeading("Body Plan");
+    // One radio button per plan; stable ids via the "##plan" suffix.
+    static const char *const kPlanChoices[4] = {"Humanoid", "Centaur", "Naga", "Quadruped"};
+    std::int32_t             plan = activePlan_;
+    for (int index = 0; index < 4; ++index)
+    {
+        char label[48];
+        std::snprintf(label, sizeof(label), "%s##plan%d", kPlanChoices[index], index);
+        ui_->radioButton(ui_->self, uiContext_, label, &plan, index);
+        if (index % 2 == 1)
+        {
+            ui_->spacing(ui_->self, uiContext_);
+        }
+        else
+        {
+            ui_->sameLine(ui_->self, uiContext_);
+        }
+    }
+    if (plan != activePlan_)
+    {
+        const int requested = static_cast<int>(plan);
+        if (setPlan(requested))
+        {
+            CharacterError error = CharacterError::None;
+            character_->setParameter(character_->self, characterHandle_, "body.plan",
+                static_cast<float>(requested), &error);
+            setStatusMessage(std::string("Body plan: ") + kPlanChoices[requested]);
+        }
+        else
+        {
+            setStatusMessage("Body plan rebuild failed");
+        }
+    }
+
+    // Species picker for the centaur and quadruped plans (a combo - 11
+    // species overflow a button grid).
+    if (activePlan_ == 1 || activePlan_ == 3)
+    {
+        uiHeading("Species");
+        uiText(activePlan_ == 1 ? "The hindquarters + graft band below the torso:"
+                                : "The whole animal (own head, own tail):");
+        char speciesLabel[64];
+        std::snprintf(speciesLabel, sizeof(speciesLabel), "%s##species", kQuadSpeciesNames[std::clamp(quadSpecies_,
+            0, kQuadSpeciesCount - 1)]);
+        const std::int32_t before = quadSpecies_;
+        std::int32_t       species = before;
+        if (ui_->combo(ui_->self, uiContext_, speciesLabel, &species, kQuadSpeciesNames,
+                static_cast<std::uint32_t>(kQuadSpeciesCount))
+            && species != before)
+        {
+            if (setQuadSpecies(static_cast<int>(species)))
+            {
+                setStatusMessage(std::string("Species: ") + kQuadSpeciesNames[species]);
+            }
+            else
+            {
+                setStatusMessage("Species swap rejected");
+            }
+        }
+    }
+    ui_->spacing(ui_->self, uiContext_);
+    uiTextColored(0.62f, 0.66f, 0.72f,
+        "Tip: every plan keeps head, wings and tail options where the anatomy allows them.");
+}
+
+// ---- tab: body parameters --------------------------------------------------------
+
+void CharacterScreen::drawBodyTab()
+{
+    uiHeading("Body");
+    if (uiParameterSlider("body.height"))
+    {
+        applyParameterHeights();
+    }
+    if (uiParameterSlider("body.width"))
+    {
+    }
+    if (uiParameterSlider("body.muscle_mass"))
+    {
+    }
+    if (uiParameterSlider("limbs.length"))
+    {
+        applyParameterHeights();
+    }
+    uiParameterSlider("limbs.thickness");
+
     uiHeading("Head");
-    std::size_t headButtons = 0;
+    uiParameterSlider("head.size");
+
+    // Skin tone palette (industry pattern: swatches, not a raw color picker).
+    // The value is the tone index; drawCharacter maps it to a material tint
+    // on the skin parts (torso, human limbs, human head).
+    uiHeading("Skin Tone");
+    {
+        static const char *const toneNames[5] = {"Default", "Fair", "Tan", "Bronze", "Umber"};
+        float       tone        = 0.0f;
+        character_->getParameter(character_->self, characterHandle_, "skin.tone", &tone);
+        const int currentTone = static_cast<int>(tone + 0.5f);
+        uiOptionRow(toneNames, 5, "skin", currentTone, 62.0f, [this](int candidate)
+        {
+            CharacterError error = CharacterError::None;
+            character_->setParameter(
+                character_->self, characterHandle_, "skin.tone", static_cast<float>(candidate), &error);
+        });
+    }
+
+    // Fur coat palette for the downloaded animal grafts (species heads and
+    // tails). The quadruped bodies keep the source pack's own coat colors -
+    // the tint applies to the graft pieces only.
+    uiHeading("Fur Coat (species grafts)");
+    {
+        static const char *const coatNames[6] = {"Natural", "Rust", "Snow", "Charcoal", "Cream", "Silver"};
+        float       coat       = 0.0f;
+        character_->getParameter(character_->self, characterHandle_, "fur.coat", &coat);
+        const int currentCoat = static_cast<int>(coat + 0.5f);
+        uiOptionRow(coatNames, 6, "fur", currentCoat, 52.0f, [this](int candidate)
+        {
+            CharacterError error = CharacterError::None;
+            character_->setParameter(
+                character_->self, characterHandle_, "fur.coat", static_cast<float>(candidate), &error);
+        });
+    }
+}
+
+// ---- tab: parts ---------------------------------------------------------------------
+
+void CharacterScreen::drawPartsTab()
+{
+    // Head variants: every registered slot:head part, listed as selectable
+    // rows (the dragon head reads oversized no more - it is rescaled to the
+    // human graft band this revision).
+    uiHeading("Head");
     for (const std::string &partId : content_.partsInSlot("head"))
     {
         const PartRenderInfo *info = content_.renderInfoForPart(partId);
@@ -122,8 +359,9 @@ void CharacterScreen::drawPanel(double deltaSeconds)
             continue;
         }
         char label[96];
-        std::snprintf(label, sizeof(label), "%s%s", partId == activeHeadPart_ ? "* " : "", info->displayName.c_str());
-        if (uiButton(label, 96.0f))
+        std::snprintf(label, sizeof(label), "%s##head", info->displayName.c_str());
+        bool selected = partId == activeHeadPart_;
+        if (ui_->selectable(ui_->self, uiContext_, label, &selected, 0.0f, 0.0f))
         {
             CharacterError error = CharacterError::None;
             bool swapped = true;
@@ -147,291 +385,125 @@ void CharacterScreen::drawPanel(double deltaSeconds)
                 setStatusMessage("Head replacement rejected");
             }
         }
-        ++headButtons;
-        if (headButtons % 3 == 0)
+    }
+
+    // Head count.
+    uiText("Heads");
+    static const char *const headCounts[3] = {"1", "2", "3"};
+    uiOptionRow(headCounts, 3, "heads", headCount_ - 1, 40.0f, [this](int index)
+    {
+        setStatusMessage(setHeadCount(index + 1) ? "Head count updated" : "Head attach failed");
+    });
+
+    // Tail variants + toggle (the naga carries the serpent body instead, the
+    // quadruped its own tail).
+    if (activePlan_ != 2 && activePlan_ != 3)
+    {
+        uiHeading("Tail");
+        bool tail = tailPresent_;
+        if (uiCheckbox("Attach tail##tailtoggle", &tail))
         {
-            ui_->spacing(ui_->self, uiContext_);
+            setStatusMessage(setTail(tail) ? (tail ? "Tail attached" : "Tail removed") : "Tail op failed");
         }
-        else
+        if (tailPresent_)
         {
-            ui_->sameLine(ui_->self, uiContext_);
+            // Combo over every registered slot:tail part (species tails +
+            // the spiked dragon tail).
+            const std::vector<std::string> &tailParts = content_.partsInSlot("tail");
+            static std::vector<const char *> tailItems;
+            static std::vector<std::string> tailItemStorage;
+            tailItems.clear();
+            tailItemStorage.clear();
+            int currentIndex = 0;
+            for (std::size_t index = 0; index < tailParts.size(); ++index)
+            {
+                const PartRenderInfo *info = content_.renderInfoForPart(tailParts[index]);
+                if (info == nullptr)
+                {
+                    continue;
+                }
+                tailItemStorage.push_back(info->displayName);
+                tailItems.push_back(tailItemStorage.back().c_str());
+                if (tailParts[index] == activeTailPart_)
+                {
+                    currentIndex = static_cast<int>(tailItems.size()) - 1;
+                }
+            }
+            if (!tailItems.empty())
+            {
+                char comboLabel[64];
+                std::snprintf(comboLabel, sizeof(comboLabel), "%s##tailvariant",
+                    tailItems[std::clamp(currentIndex, 0, static_cast<int>(tailItems.size()) - 1)]);
+                std::int32_t picked = currentIndex;
+                if (ui_->combo(ui_->self, uiContext_, comboLabel, &picked, tailItems.data(),
+                        static_cast<std::uint32_t>(tailItems.size()))
+                    && picked != currentIndex)
+                {
+                    const std::string &pickedId = tailParts[static_cast<std::size_t>(picked)];
+                    setStatusMessage(setTailPart(pickedId) ? std::string("Tail: ") + tailItems[picked]
+                                                           : "Tail swap rejected");
+                }
+            }
+            uiParameterSlider("tail.length");
+            uiParameterSlider("tail.thickness");
         }
     }
+
+    // Wing pairs (0..3): stacked down the back on dedicated connectors.
+    uiHeading("Wings");
+    static const char *const wingCounts[4] = {"0", "1", "2", "3"};
+    uiOptionRow(wingCounts, 4, "wings", wingPairs_, 40.0f, [this](int index)
+    {
+        setStatusMessage(setWingPairs(index) ? "Wing pairs updated" : "Wing attach failed");
+    });
+    uiParameterSlider("wings.span");
+
+    // Arm pairs (1..3; quadruped keeps its own four limbs).
+    uiHeading("Arm Pairs");
+    const int armMax = activePlan_ == 3 ? 1 : 3;
+    static const char *const armCounts[3] = {"1", "2", "3"};
+    uiOptionRow(armCounts, armMax, "arms", armPairs_ - 1, 40.0f, [this](int index)
+    {
+        setStatusMessage(setArmPairs(index + 1) ? "Arm pairs updated" : "Arm attach failed");
+    });
     ui_->spacing(ui_->self, uiContext_);
+    uiTextColored(0.62f, 0.66f, 0.72f,
+        "Tip: stacked wing pairs roll outward so three pairs never merge into one wall.");
+}
 
-    // ---- body parameters (central registry, per-asset bindings) ---------------
-    uiHeading("Body Parameters");
-    const char *bodySliders[] = {
-        "body.height", "body.width", "body.muscle_mass", "head.size",
-    };
-    for (const char *parameter : bodySliders)
-    {
-        float  value    = 1.0f;
-        char   label[96] = {};
-        // Slider ranges come from the cached registry snapshot (no per-frame
-        // capability scans).
-        const ParameterDefinition *definition = parameterDefinition(parameter);
-        if (definition == nullptr)
-        {
-            continue;
-        }
-        const float minimum = definition->minimum;
-        const float maximum = definition->maximum;
-        std::snprintf(label, sizeof(label), "%s", definition->displayName);
-        character_->getParameter(character_->self, characterHandle_, parameter, &value);
-        const float before = value;
-        if (uiSlider(label, &value, minimum, maximum) && std::fabs(value - before) > 1.0e-6f)
-        {
-            CharacterError error = CharacterError::None;
-            character_->setParameter(character_->self, characterHandle_, parameter, value, &error);
-        }
-    }
-    {
-        float limbLength = 1.0f;
-        const ParameterDefinition *lengthDefinition = parameterDefinition("limbs.length");
-        const float limbMinimum = lengthDefinition != nullptr ? lengthDefinition->minimum : 0.75f;
-        const float limbMaximum = lengthDefinition != nullptr ? lengthDefinition->maximum : 1.35f;
-        character_->getParameter(character_->self, characterHandle_, "limbs.length", &limbLength);
-        const float before = limbLength;
-        if (uiSlider("Limb Length", &limbLength, limbMinimum, limbMaximum) && std::fabs(limbLength - before) > 1.0e-6f)
-        {
-            CharacterError error = CharacterError::None;
-            character_->setParameter(character_->self, characterHandle_, "limbs.length", limbLength, &error);
-            applyParameterHeights();
-        }
-        float limbThickness = 1.0f;
-        const ParameterDefinition *thicknessDefinition = parameterDefinition("limbs.thickness");
-        const float thicknessMinimum = thicknessDefinition != nullptr ? thicknessDefinition->minimum : 0.65f;
-        const float thicknessMaximum = thicknessDefinition != nullptr ? thicknessDefinition->maximum : 1.55f;
-        character_->getParameter(character_->self, characterHandle_, "limbs.thickness", &limbThickness);
-        const float thicknessBefore = limbThickness;
-        if (uiSlider("Limb Thickness", &limbThickness, thicknessMinimum, thicknessMaximum)
-            && std::fabs(limbThickness - thicknessBefore) > 1.0e-6f)
-        {
-            CharacterError error = CharacterError::None;
-            character_->setParameter(character_->self, characterHandle_, "limbs.thickness", limbThickness, &error);
-        }
-    }
-    // Skin tone palette (industry pattern: swatches, not a raw color picker).
-    // The value is the tone index; drawCharacter maps it to a material tint on
-    // the skin-tagged parts.
-    {
-        const char *toneNames[] = {"Fair", "Tan", "Bronze", "Umber", "Charcoal"};
-        float       tone        = 0.0f;
-        character_->getParameter(character_->self, characterHandle_, "skin.tone", &tone);
-        const int currentTone = static_cast<int>(tone + 0.5f);
-        for (int candidate = 0; candidate < 5; ++candidate)
-        {
-            char label[32];
-            std::snprintf(label, sizeof(label), "%s%s", candidate == currentTone ? "* " : "", toneNames[candidate]);
-            if (uiButton(label, 58.0f))
-            {
-                CharacterError error = CharacterError::None;
-                character_->setParameter(
-                    character_->self, characterHandle_, "skin.tone", static_cast<float>(candidate), &error);
-            }
-            if (candidate % 3 == 2 || candidate == 4)
-            {
-                ui_->spacing(ui_->self, uiContext_);
-            }
-            else
-            {
-                ui_->sameLine(ui_->self, uiContext_);
-            }
-        }
-    }
+// ---- tab: motion -----------------------------------------------------------------
 
-    // ---- body plan ---------------------------------------------------------------
-    uiHeading("Body Plan");
-    {
-        const char *planNames[4] = {"Humanoid", "Centaur", "Naga", "Quadruped"};
-        for (int plan = 0; plan < 4; ++plan)
-        {
-            char label[48];
-            std::snprintf(label, sizeof(label), "%s%s", activePlan_ == plan ? "* " : "", planNames[plan]);
-            if (uiButton(label, 78.0f))
-            {
-                if (setPlan(plan))
-                {
-                    CharacterError error = CharacterError::None;
-                    character_->setParameter(
-                        character_->self, characterHandle_, "body.plan", static_cast<float>(plan), &error);
-                    setStatusMessage(std::string("Body plan: ") + planNames[plan]);
-                }
-                else
-                {
-                    setStatusMessage("Body plan rebuild failed");
-                }
-            }
-            if (plan % 4 == 3)
-            {
-                ui_->spacing(ui_->self, uiContext_);
-            }
-            else
-            {
-                ui_->sameLine(ui_->self, uiContext_);
-            }
-        }
-    }
-    if (activePlan_ == 3 || activePlan_ == 1)
-    {
-        // Quadruped species (visible on the quadruped and centaur plans).
-        const char *speciesNames[4] = {"Horse", "Wolf", "Deer", "Bull"};
-        for (int species = 0; species < 4; ++species)
-        {
-            char label[48];
-            std::snprintf(label, sizeof(label), "%s%s", quadSpecies_ == species ? "* " : "", speciesNames[species]);
-            if (uiButton(label, 62.0f))
-            {
-                if (setQuadSpecies(species))
-                {
-                    setStatusMessage(std::string("Species: ") + speciesNames[species]);
-                }
-                else
-                {
-                    setStatusMessage("Species swap rejected");
-                }
-            }
-            if (species % 4 == 3)
-            {
-                ui_->spacing(ui_->self, uiContext_);
-            }
-            else
-            {
-                ui_->sameLine(ui_->self, uiContext_);
-            }
-        }
-    }
-
-    // ---- appendage counts ---------------------------------------------------------
-    uiHeading("Appendages");
-    {
-        // Head count (1..3): extra skulls share the collar connector.
-        uiText("Heads");
-        for (int count = 1; count <= 3; ++count)
-        {
-            char label[32];
-            std::snprintf(label, sizeof(label), "%s%d", headCount_ == count ? "* " : "", count);
-            if (uiButton(label, 30.0f))
-            {
-                setStatusMessage(setHeadCount(count) ? "Head count updated" : "Head attach failed");
-            }
-            if (count == 3)
-            {
-                ui_->spacing(ui_->self, uiContext_);
-            }
-            else
-            {
-                ui_->sameLine(ui_->self, uiContext_);
-            }
-        }
-        // Wing pairs (0..3): stacked down the back on dedicated connectors.
-        uiText("Wing Pairs");
-        for (int pairs = 0; pairs <= 3; ++pairs)
-        {
-            char label[32];
-            std::snprintf(label, sizeof(label), "%s%d", wingPairs_ == pairs ? "* " : "", pairs);
-            if (uiButton(label, 30.0f))
-            {
-                setStatusMessage(setWingPairs(pairs) ? "Wing pairs updated" : "Wing attach failed");
-            }
-            if (pairs == 3)
-            {
-                ui_->spacing(ui_->self, uiContext_);
-            }
-            else
-            {
-                ui_->sameLine(ui_->self, uiContext_);
-            }
-        }
-        // Arm pairs (1..3; quadruped keeps its own four limbs).
-        uiText("Arm Pairs");
-        const int armMax = activePlan_ == 3 ? 1 : 3;
-        for (int pairs = 1; pairs <= armMax; ++pairs)
-        {
-            char label[32];
-            std::snprintf(label, sizeof(label), "%s%d", armPairs_ == pairs ? "* " : "", pairs);
-            if (uiButton(label, 30.0f))
-            {
-                setStatusMessage(setArmPairs(pairs) ? "Arm pairs updated" : "Arm attach failed");
-            }
-            if (pairs == armMax)
-            {
-                ui_->spacing(ui_->self, uiContext_);
-            }
-            else
-            {
-                ui_->sameLine(ui_->self, uiContext_);
-            }
-        }
-        // Reptile tail toggle (the naga carries the serpent body instead).
-        if (activePlan_ != 2 && activePlan_ != 3)
-        {
-            bool tail = tailPresent_;
-            if (uiCheckbox("Reptile Tail", &tail))
-            {
-                setStatusMessage(setTail(tail) ? (tail ? "Tail attached" : "Tail removed") : "Tail op failed");
-            }
-        }
-    }
-    {
-        const ParameterDefinition *spanDefinition = parameterDefinition("wings.span");
-        const float spanMinimum = spanDefinition != nullptr ? spanDefinition->minimum : 0.55f;
-        const float spanMaximum = spanDefinition != nullptr ? spanDefinition->maximum : 1.45f;
-        float wingSpan = 1.0f;
-        character_->getParameter(character_->self, characterHandle_, "wings.span", &wingSpan);
-        const float before = wingSpan;
-        if (uiSlider("Wingspan", &wingSpan, spanMinimum, spanMaximum) && std::fabs(wingSpan - before) > 1.0e-6f)
-        {
-            CharacterError error = CharacterError::None;
-            character_->setParameter(character_->self, characterHandle_, "wings.span", wingSpan, &error);
-        }
-        const ParameterDefinition *tailLengthDefinition = parameterDefinition("tail.length");
-        const float tailLengthMinimum = tailLengthDefinition != nullptr ? tailLengthDefinition->minimum : 0.55f;
-        const float tailLengthMaximum = tailLengthDefinition != nullptr ? tailLengthDefinition->maximum : 1.50f;
-        float tailLength = 1.0f;
-        character_->getParameter(character_->self, characterHandle_, "tail.length", &tailLength);
-        const float tailBefore = tailLength;
-        if (uiSlider("Tail Length", &tailLength, tailLengthMinimum, tailLengthMaximum)
-            && std::fabs(tailLength - tailBefore) > 1.0e-6f)
-        {
-            CharacterError error = CharacterError::None;
-            character_->setParameter(character_->self, characterHandle_, "tail.length", tailLength, &error);
-        }
-        const ParameterDefinition *tailThicknessDefinition = parameterDefinition("tail.thickness");
-        const float thicknessMinimum = tailThicknessDefinition != nullptr ? tailThicknessDefinition->minimum : 0.55f;
-        const float thicknessMaximum = tailThicknessDefinition != nullptr ? tailThicknessDefinition->maximum : 1.65f;
-        float tailThickness = 1.0f;
-        character_->getParameter(character_->self, characterHandle_, "tail.thickness", &tailThickness);
-        const float thicknessBefore = tailThickness;
-        if (uiSlider("Tail Thickness", &tailThickness, thicknessMinimum, thicknessMaximum)
-            && std::fabs(tailThickness - thicknessBefore) > 1.0e-6f)
-        {
-            CharacterError error = CharacterError::None;
-            character_->setParameter(character_->self, characterHandle_, "tail.thickness", tailThickness, &error);
-        }
-    }
+void CharacterScreen::drawMotionTab()
+{
+    uiHeading("Motion");
     bool tailAnimation = animateTail_;
-    if (uiCheckbox("Animate tail (offset drivers)", &tailAnimation))
+    if (uiCheckbox("Animate tail##animtail", &tailAnimation))
     {
         animateTail_ = tailAnimation;
     }
     {
         float sway = tailSwaySpeed_;
-        if (uiSlider("Tail Sway Speed", &sway, 0.0f, 2.0f))
+        if (uiSlider("Tail sway speed", &sway, 0.0f, 2.0f))
         {
             tailSwaySpeed_ = sway;
         }
     }
     bool wingAnimation = animateWings_;
-    if (uiCheckbox("Flap wings", &wingAnimation))
+    if (uiCheckbox("Flap wings##animwings", &wingAnimation))
     {
         animateWings_ = wingAnimation;
     }
+    ui_->spacing(ui_->self, uiContext_);
+    uiTextColored(0.62f, 0.66f, 0.72f,
+        "The drivers edit connection offsets each frame; the assembly re-evaluates on top of them.");
+}
 
-    // ---- recipes -----------------------------------------------------------------
-    uiHeading("Presets & Recipes");
-    if (uiButton("Save Recipe", 104.0f))
+// ---- tab: presets, status, validation ----------------------------------------------
+
+void CharacterScreen::drawFileTab()
+{
+    uiHeading("Recipes");
+    if (uiButton("Save Recipe##recipe-save", 104.0f))
     {
         CharacterError error = CharacterError::None;
         if (character_->saveRecipe(character_->self, characterHandle_, kRecipeFileName, &error))
@@ -444,7 +516,7 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         }
     }
     ui_->sameLine(ui_->self, uiContext_);
-    if (uiButton("Load Recipe", 104.0f))
+    if (uiButton("Load Recipe##recipe-load", 104.0f))
     {
         CharacterError error = CharacterError::None;
         if (character_->loadRecipe(character_->self, characterHandle_, kRecipeFileName, &error))
@@ -459,19 +531,21 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         }
     }
     ui_->sameLine(ui_->self, uiContext_);
-    if (uiButton("Reset", 84.0f))
+    if (uiButton("Reset##recipe-reset", 84.0f))
     {
         resetToDefault();
     }
 
-    // ---- status -----------------------------------------------------------------
     uiHeading("Status");
     uiTextColored(0.75f, 0.82f, 0.95f, statusMessage_.c_str());
 
-    // ---- validation issues ---------------------------------------------------------
-    if (!issues_.empty())
+    uiHeading("Validation");
+    if (issues_.empty())
     {
-        uiHeading("Validation Issues");
+        uiTextColored(0.55f, 0.92f, 0.55f, "No issues - the assembly is consistent.");
+    }
+    else
+    {
         const std::size_t shown = std::min<std::size_t>(issues_.size(), 8);
         for (std::size_t index = 0; index < shown; ++index)
         {
@@ -482,15 +556,6 @@ void CharacterScreen::drawPanel(double deltaSeconds)
                 line, sizeof(line), "%u %s: %s", static_cast<unsigned>(issue.code), issue.subject, issue.message);
             uiTextColored(0.98f, 0.55f, 0.45f, line);
         }
-    }
-
-    ui_->endWindow(ui_->self, uiContext_);
-
-    // Remember whether the UI wants the mouse next frame (gates orbit drag).
-    UiCaptureState capture{};
-    if (ui_->captureState(ui_->self, uiContext_, &capture))
-    {
-        uiWantsMouse_ = capture.mouse;
     }
 }
 

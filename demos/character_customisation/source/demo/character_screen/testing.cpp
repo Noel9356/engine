@@ -1,4 +1,5 @@
 #include "../character_screen_internal.hpp"
+#include "../character_metrics.gen.hpp"
 #include "../geometry.hpp"
 
 #include <glm/glm.hpp>
@@ -38,19 +39,61 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     { return character_->setParameter(character_->self, characterHandle_, parameter, value, &error); };
     bool applied = true;
 
-    if (name == "human" || name == "dragonhead")
+    if (name == "human")
     {
-        // Head variant on the humanoid plan.
+        // Head variant on the humanoid plan with the default fox tail.
         if (activePlan_ != 0)
         {
             applied = setPlan(0) && setParameter("body.plan", 0.0f);
         }
-        activeHeadPart_ = name == "human" ? "head_human" : "head_dragon";
+        activeHeadPart_ = "head_human";
         setHeadCount(1);
         const InstanceId head = instanceByName("head");
         applied = applied && head != engine::character::invalidInstance
             && character_->replacePart(character_->self, characterHandle_, head, activeHeadPart_.c_str(), &error);
-        setTail(name == "human");
+        setTail(true);
+    }
+    else if (name == "dragonhead")
+    {
+        if (activePlan_ != 0)
+        {
+            applied = setPlan(0) && setParameter("body.plan", 0.0f);
+        }
+        activeHeadPart_ = "head_dragon";
+        setHeadCount(1);
+        const InstanceId head = instanceByName("head");
+        applied = applied && head != engine::character::invalidInstance
+            && character_->replacePart(character_->self, characterHandle_, head, activeHeadPart_.c_str(), &error);
+        setTail(true);
+    }
+    else if (name == "furryfox")
+    {
+        // Furry-fandom look: fox head graft + fox tail on the humanoid plan.
+        if (activePlan_ != 0)
+        {
+            applied = setPlan(0) && setParameter("body.plan", 0.0f);
+        }
+        activeHeadPart_ = "head_fox";
+        setHeadCount(1);
+        const InstanceId head = instanceByName("head");
+        applied = applied && head != engine::character::invalidInstance
+            && character_->replacePart(character_->self, characterHandle_, head, "head_fox", &error);
+        applied = setTailPart("tail_fox") && applied;
+        setTail(true);
+    }
+    else if (name == "furrywolf")
+    {
+        if (activePlan_ != 0)
+        {
+            applied = setPlan(0) && setParameter("body.plan", 0.0f);
+        }
+        activeHeadPart_ = "head_wolf";
+        setHeadCount(1);
+        const InstanceId head = instanceByName("head");
+        applied = applied && head != engine::character::invalidInstance
+            && character_->replacePart(character_->self, characterHandle_, head, "head_wolf", &error);
+        applied = setTailPart("tail_wolf") && applied;
+        setTail(true);
     }
     else if (name == "centaur")
     {
@@ -67,18 +110,67 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         applied = setPlan(3) && setParameter("body.plan", 3.0f);
         setHeadCount(1);
     }
-    else if (name == "wolf" || name == "deer" || name == "bull")
+    else if (name == "horse" || name == "wolf" || name == "deer" || name == "bull" || name == "fox"
+        || name == "stag" || name == "husky" || name == "cow" || name == "donkey" || name == "alpaca")
     {
         // Quadruped species variant: the WHOLE animal (own head, own tail).
         // quadSpecies_ is deliberately NOT assigned here: setQuadSpecies()
         // early-returns when the field already equals the request, so
         // pre-assigning it silently skipped the body replacement (rev-7
         // bug - every species preset rendered the horse).
+        int speciesIndex = -1;
+        for (int index = 0; index < kQuadSpeciesCount; ++index)
+        {
+            if (name == kQuadSpeciesIds[index])
+            {
+                speciesIndex = index;
+                break;
+            }
+        }
+        if (speciesIndex < 0)
+        {
+            speciesIndex = 0;
+        }
         if (activePlan_ != 3)
         {
             applied = setPlan(3) && setParameter("body.plan", 3.0f);
         }
-        applied = setQuadSpecies(name == "wolf" ? 1 : name == "deer" ? 2 : 3) && applied;
+        applied = setQuadSpecies(speciesIndex) && applied;
+    }
+    else if (name == "shiba")
+    {
+        // the shiba's registry id differs from the preset name
+        if (activePlan_ != 3)
+        {
+            applied = setPlan(3) && setParameter("body.plan", 3.0f);
+        }
+        applied = setQuadSpecies(1) && applied;
+    }
+    else if (name.rfind("centaur_", 0) == 0)
+    {
+        // Centaur plan on a chosen species: the plan first (the profile's
+        // default hindquarters), then the species swap on the live assembly.
+        applied = setPlan(1) && setParameter("body.plan", 1.0f);
+        setHeadCount(1);
+        int speciesIndex = -1;
+        const std::string species = name.substr(8);
+        for (int index = 0; index < kQuadSpeciesCount; ++index)
+        {
+            if (species == kQuadSpeciesIds[index])
+            {
+                speciesIndex = index;
+                break;
+            }
+        }
+        if (speciesIndex < 0)
+        {
+            std::fprintf(stderr, "demo: unknown centaur species '%s'\n", species.c_str());
+            applied = false;
+        }
+        else
+        {
+            applied = setQuadSpecies(speciesIndex) && applied;
+        }
     }
     else if (name == "twoheaded")
     {
@@ -150,11 +242,26 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     {
         std::fprintf(
             stderr, "demo: character drive preset '%s' failed (%u)\n", name.c_str(), static_cast<unsigned>(error));
+        for (const ValidationIssue &issue : issues_)
+        {
+            std::fprintf(stderr, "  issue %u: %s: %s\n", static_cast<unsigned>(issue.code), issue.subject,
+                issue.message);
+        }
         return false;
     }
     std::cout << "demo: character drive preset '" << name << "' applied\n";
     applyParameterHeights();
-    return evaluateCharacter(true);
+    const bool evaluated = evaluateCharacter(true);
+    if (!evaluated)
+    {
+        std::fprintf(stderr, "  evaluate failed: %s\n", character_->lastErrorMessage(character_->self));
+        for (const ValidationIssue &issue : issues_)
+        {
+            std::fprintf(stderr, "  issue %u: %s: %s\n", static_cast<unsigned>(issue.code), issue.subject,
+                issue.message);
+        }
+    }
+    return evaluated;
 }
 
 // ---- the design document's first implementation test -----------------------------
@@ -190,9 +297,17 @@ bool CharacterScreen::runSelfTest()
     resetToDefault();
     check("humanoid profile validates", activePlan_ == 0 && evaluateCharacter(true) && issues_.empty());
 
-    // 2. Every head variant swaps on the live assembly (downloaded meshes).
+    // 2. Every head variant swaps on the live assembly (downloaded meshes:
+    //    the human, the dragon, and every species graft).
     CharacterError error = CharacterError::None;
     bool headsOk = true;
+    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    {
+        std::string speciesHead = std::string("head_") + kQuadSpeciesIds[species];
+        const InstanceId head = instanceByName("head");
+        headsOk = headsOk && head != engine::character::invalidInstance
+            && character_->replacePart(character_->self, characterHandle_, head, speciesHead.c_str(), &error);
+    }
     for (const char *headId : {"head_human", "head_dragon"})
     {
         const InstanceId head = instanceByName("head");
@@ -239,17 +354,35 @@ bool CharacterScreen::runSelfTest()
     check("arm pairs back to one", setArmPairs(1)
         && instanceByName("arm2_left") == engine::character::invalidInstance);
 
-    // 7. The reptile tail attaches at the tailbone socket.
-    check("reptile tail attaches", setTail(true) && evaluateCharacter(true) && issues_.empty()
+    // 7. The tail variants attach at the tailbone socket and swap live.
+    check("fox tail attaches", setTail(true) && evaluateCharacter(true) && issues_.empty()
         && instanceByName("tail") != engine::character::invalidInstance);
+    bool tailsOk = true;
+    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    {
+        std::string speciesTail = std::string("tail_") + kQuadSpeciesIds[species];
+        tailsOk = setTailPart(speciesTail) && tailsOk;
+    }
+    tailsOk = setTailPart("tail_reptile") && tailsOk;
+    check("tail variants swap", tailsOk && evaluateCharacter(true) && issues_.empty());
+    setTailPart("tail_fox");
     check("tail removes", setTail(false) && instanceByName("tail") == engine::character::invalidInstance);
 
-    // 8. The centaur plan rebuilds (quadruped hindquarters + torso + arms).
+    // 8. The centaur plan rebuilds (quadruped hindquarters + torso + arms)
+    //    and EVERY species grafts the torso at its own measured stump
+    //    opening (rev-9 registered one horse rig for all species, so the
+    //    smaller animals floated below the torso).
     check("centaur plan builds", setPlan(1) && evaluateCharacter(true) && issues_.empty()
         && instanceByName("body") != engine::character::invalidInstance
         && instanceByName("chest") != engine::character::invalidInstance
         && instanceByName("leg_left") == engine::character::invalidInstance);
-    check("centaur species swap", setQuadSpecies(2) && evaluateCharacter(true) && issues_.empty());
+    bool centaurSpeciesOk = true;
+    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    {
+        centaurSpeciesOk = setQuadSpecies(species) && centaurSpeciesOk && evaluateCharacter(true)
+            && issues_.empty();
+    }
+    check("centaur species graft per species", centaurSpeciesOk);
 
     // 9. The naga plan rebuilds (torso on the serpent lower body).
     check("naga plan builds", setPlan(2) && evaluateCharacter(true) && issues_.empty()
@@ -257,10 +390,16 @@ bool CharacterScreen::runSelfTest()
         && instanceByName("leg_left") == engine::character::invalidInstance);
 
     // 10. The quadruped plan rebuilds as the WHOLE animal (own head) and
-    //     swaps species live.
+    //     swaps species live through all eleven downloaded animals.
     check("quadruped plan builds", setPlan(3) && evaluateCharacter(true) && issues_.empty()
         && instanceByName("body") != engine::character::invalidInstance);
-    check("quadruped species swap", setQuadSpecies(1) && evaluateCharacter(true) && issues_.empty());
+    bool quadrupedSpeciesOk = true;
+    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    {
+        quadrupedSpeciesOk = setQuadSpecies(species) && quadrupedSpeciesOk && evaluateCharacter(true)
+            && issues_.empty();
+    }
+    check("quadruped species swap", quadrupedSpeciesOk);
     check("wing pairs on quadruped", setWingPairs(2) && evaluateCharacter(true) && issues_.empty());
     setWingPairs(0);
 
@@ -273,6 +412,8 @@ bool CharacterScreen::runSelfTest()
         character_->setParameter(character_->self, characterHandle_, "body.muscle_mass", 1.55f, &rangeError);
         character_->setParameter(character_->self, characterHandle_, "head.size", 1.35f, &rangeError);
         character_->setParameter(character_->self, characterHandle_, "limbs.length", 1.35f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "skin.tone", 4.0f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "fur.coat", 5.0f, &rangeError);
         applyParameterHeights();
         const bool extremesOk = evaluateCharacter(true) && issues_.empty();
         if (!issues_.empty())

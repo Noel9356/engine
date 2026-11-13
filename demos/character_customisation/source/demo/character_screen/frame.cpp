@@ -217,10 +217,18 @@ void CharacterScreen::updateAnimationDrivers(double deltaSeconds, double elapsed
     // Wing flap: rotate the connection offsets around the forward axis; the
     // right wing's socket is mirrored, so the sign flips. Up to three pairs
     // flap with a phase offset per pair (lower pairs trail the upper pair).
+    // The flap COMPOSES with the authored per-slot outward roll instead of
+    // replacing it: rev-9 wrote a fresh roll-only rotation every frame,
+    // which threw away the stacked pairs' stagger (-12/-22 deg) and collapsed
+    // them all into the same roll as soon as they animated. Both rotations
+    // are rolls about the same axis, so composition is an angle sum.
     for (int slot = 1; slot <= wingPairs_; ++slot)
     {
         const float flap = animateWings_
             ? std::sin(static_cast<float>(elapsedSeconds) * 2.4f - 0.55f * static_cast<float>(slot - 1)) * 0.15f
+            : 0.0f;
+        const float authoredRoll = slot >= 0 && slot < static_cast<int>(wingSlotRolls_.size())
+            ? wingSlotRolls_[static_cast<std::size_t>(slot)]
             : 0.0f;
         const std::string leftName = "wing" + std::to_string(slot) + "_left";
         const std::string rightName = "wing" + std::to_string(slot) + "_right";
@@ -228,14 +236,14 @@ void CharacterScreen::updateAnimationDrivers(double deltaSeconds, double elapsed
         if (wingLeft != engine::character::invalidInstance)
         {
             float rotation[4];
-            setRollRotation(rotation, flap);
+            setRollRotation(rotation, authoredRoll + flap);
             character_->setConnectionOffset(character_->self, characterHandle_, wingLeft, nullptr, rotation);
         }
         const InstanceId wingRight = instanceByName(rightName);
         if (wingRight != engine::character::invalidInstance)
         {
             float rotation[4];
-            setRollRotation(rotation, -flap);
+            setRollRotation(rotation, -authoredRoll - flap);
             character_->setConnectionOffset(character_->self, characterHandle_, wingRight, nullptr, rotation);
         }
     }

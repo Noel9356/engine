@@ -1,6 +1,7 @@
 // Internal backend interface shared between the window module's source
-// files: the per-window record, the event queueing rules, and the abstract
-// WindowBackend that the GLFW and headless implementations fulfill.
+// files: the per-window record, the event queueing rules, the touch-ingress
+// bookkeeping, and the abstract WindowBackend that the GLFW and headless
+// implementations fulfill.
 
 #ifndef ENGINE_WINDOW_MODULE_BACKEND_HPP
 #define ENGINE_WINDOW_MODULE_BACKEND_HPP
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <deque>
 #include <limits>
 #include <string>
@@ -26,6 +28,16 @@ inline constexpr std::size_t maximumDroppedFilePathBytes = 32768u;
 inline constexpr std::size_t maximumDroppedFileBatchBytes = 8u * 1024u * 1024u;
 inline constexpr std::size_t maximumDroppedFilesPerBatch = 256u;
 inline constexpr std::size_t maximumPendingDroppedFileBatches = 64u;
+
+// Runtime knobs for backend gamepad polling. enabled skips the per-frame
+// joystick scan entirely; axisEpsilon is the minimum absolute change an axis
+// must report before a GamepadAxisMoved event is queued (smaller changes are
+// treated as noise).
+struct GamepadPollingOptions
+{
+    bool  enabled    = true;
+    float axisEpsilon = 0.0005f;
+};
 
 // Validates a bounded UTF-8 byte sequence without allocating. Rejects overlong
 // encodings, surrogate code points, truncated sequences, and values above U+10FFFF.
@@ -93,7 +105,10 @@ inline bool isValidUtf8(const char *text, std::size_t length) noexcept
 // swapchain-size pixels (both pixels); keyStateMask mirrors pressed keys;
 // events is the queue drained by the module's popEvent(s). headlessRgba backs
 // the software surface; platformWindow is the backend-native handle
-// (GLFWwindow* for the GLFW backend).
+// (GLFWwindow* for the GLFW backend). The window-state block holds the state
+// requested through the runtime window-control calls: the headless backend
+// reports it directly, while the GLFW backend seeds it at creation and then
+// prefers the live window-system attributes.
 struct WindowRecord
 {
     WindowHandle id = invalidWindow;
@@ -110,6 +125,19 @@ struct WindowRecord
     std::uint32_t minimumHeight = 0;
     std::uint32_t maximumWidth  = 0;
     std::uint32_t maximumHeight = 0;
+
+    // Window state requested through the runtime-control calls, seeded from
+    // the creation description. The headless backend reports them directly;
+    // the GLFW backend seeds them and then prefers live attributes.
+    bool        resizable  = true;
+    bool        decorated  = true;
+    bool        floating   = false;
+    bool        visible    = true;
+    bool        iconified  = false;
+    bool        maximized  = false;
+    float       opacity    = 1.0f;
+    std::int32_t positionX = 0;
+    std::int32_t positionY = 0;
 
     bool closeRequested = false;
 
@@ -262,6 +290,77 @@ inline void cancelActiveTouches(WindowRecord &record) noexcept
     record.activeTouches.clear();
 }
 
+// Applies one platform-adapter touch contact to a window record: validates
+// the description, tracks the (device, touchId) contact, queues the matching
+// event, and rolls the contact table back when the queue rejects the event so
+// the stored state always matches the published events.
+inline bool submitTouchContact(WindowRecord &record, const TouchEventDescription &description)
+{
+    if (static_cast<std::uint32_t>(description.phase) > static_cast<std::uint32_t>(TouchPhase::Cancelled)
+        || !std::isfinite(description.x) || !std::isfinite(description.y)
+        || description.touchId == invalidTouchId || !std::isfinite(description.pressure) || description.x < 0.0f || description.x > 1.0f
+        || description.y < 0.0f || description.y > 1.0f || description.pressure < 0.0f
+        || description.pressure > 1.0f)
+        return false;
+
+    const std::uint64_t key = (static_cast<std::uint64_t>(description.device) << 32u) | description.touchId;
+    auto contact = record.activeTouches.find(key);
+    if (description.phase == TouchPhase::Began)
+    {
+        if (contact != record.activeTouches.end()
+            || record.activeTouches.size() >= maximumTouchContactsPerWindow)
+            return false;
+        try
+        {
+            contact = record.activeTouches.emplace(
+                key, WindowRecord::TouchContact{description.x, description.y, description.pressure}).first;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+    else if (contact == record.activeTouches.end())
+    {
+        return false;
+    }
+
+    const WindowRecord::TouchContact previousContact = contact->second;
+    const float deltaX = description.phase == TouchPhase::Began ? 0.0f : description.x - contact->second.x;
+    const float deltaY = description.phase == TouchPhase::Began ? 0.0f : description.y - contact->second.y;
+    contact->second = {description.x, description.y, description.pressure};
+
+    WindowEventKind kind = WindowEventKind::TouchBegan;
+    switch (description.phase)
+    {
+    case TouchPhase::Began: kind = WindowEventKind::TouchBegan; break;
+    case TouchPhase::Moved: kind = WindowEventKind::TouchMoved; break;
+    case TouchPhase::Ended: kind = WindowEventKind::TouchEnded; break;
+    case TouchPhase::Cancelled: kind = WindowEventKind::TouchCancelled; break;
+    }
+    const bool queued = queueWindowEvent(record, WindowEvent{.kind = kind,
+        .touchDevice = description.device,
+        .touchId = description.touchId,
+        .touchX = description.x,
+        .touchY = description.y,
+        .touchPressure = description.pressure,
+        .touchDeltaX = deltaX,
+        .touchDeltaY = deltaY});
+
+    if (description.phase == TouchPhase::Ended || description.phase == TouchPhase::Cancelled)
+    {
+        record.activeTouches.erase(key);
+    }
+    else if (!queued)
+    {
+        if (description.phase == TouchPhase::Began)
+            record.activeTouches.erase(key);
+        else
+            contact->second = previousContact;
+    }
+    return queued;
+}
+
 // Stores a complete drop batch before publishing its event. The count, each
 // path length, total bytes, UTF-8 encoding and outstanding-batch count are
 // bounded so native callbacks cannot retain arbitrary memory.
@@ -347,7 +446,8 @@ inline bool releaseDroppedFileBatch(WindowRecord &record, std::uint64_t batchId)
 
 // Interface every window backend implements (GLFW, headless). Calls come
 // from the module on the main thread; OS callbacks fire during pollEvents()
-// and land in the WindowRecord queues.
+// and land in the WindowRecord queues. Runtime window-control calls have
+// no-op defaults so a backend only overrides what its platform provides.
 class WindowBackend
 {
 public:
@@ -370,7 +470,97 @@ public:
     virtual bool setSize(WindowRecord &record, std::uint32_t width, std::uint32_t height) = 0;
     virtual bool setPosition(WindowRecord &record, std::int32_t x, std::int32_t y)        = 0;
 
+    virtual bool getPosition(const WindowRecord &record, std::int32_t *outX, std::int32_t *outY) const
+    {
+        (void)record;
+        (void)outX;
+        (void)outY;
+        return false;
+    }
+
+    virtual void setOpacity(WindowRecord &record, float opacity)
+    {
+        (void)record;
+        (void)opacity;
+    }
+
+    virtual void setVisible(WindowRecord &record, bool visible)
+    {
+        (void)record;
+        (void)visible;
+    }
+
+    virtual void setResizable(WindowRecord &record, bool resizable)
+    {
+        (void)record;
+        (void)resizable;
+    }
+
+    virtual void setDecorated(WindowRecord &record, bool decorated)
+    {
+        (void)record;
+        (void)decorated;
+    }
+
+    virtual void setFloating(WindowRecord &record, bool floating)
+    {
+        (void)record;
+        (void)floating;
+    }
+
+    virtual void focus(const WindowRecord &record)
+    {
+        (void)record;
+    }
+
+    virtual void requestAttention(const WindowRecord &record)
+    {
+        (void)record;
+    }
+
+    virtual void iconify(WindowRecord &record)
+    {
+        (void)record;
+    }
+
+    virtual void restore(WindowRecord &record)
+    {
+        (void)record;
+    }
+
+    virtual void maximize(WindowRecord &record)
+    {
+        (void)record;
+    }
+
+    virtual bool getWindowAttributes(const WindowRecord &record, WindowAttributes *outAttributes) const
+    {
+        (void)record;
+        (void)outAttributes;
+        return false;
+    }
+
+    virtual bool getContentScale(const WindowRecord &record, float *outX, float *outY) const
+    {
+        (void)record;
+        (void)outX;
+        (void)outY;
+        return false;
+    }
+
+    virtual bool rawMouseMotionSupported() const
+    {
+        return false;
+    }
+
     virtual void pollEvents() = 0;
+
+    // Idle-friendly alternative to pollEvents: block until events arrive or
+    // the timeout passes (<= 0 waits indefinitely).
+    virtual void waitEvents(double timeoutSeconds)
+    {
+        (void)timeoutSeconds;
+    }
 
     virtual void setCursorMode(const WindowRecord &record, CursorMode mode)                   = 0;
     virtual bool cursorPosition(const WindowRecord &record, double *outX, double *outY) const = 0;
@@ -379,9 +569,20 @@ public:
     {
         return false;
     }
-    virtual bool copyClipboardText(const WindowRecord &, std::string &) const
+
+    // Borrows the backend's clipboard text as a NUL-terminated UTF-8 string;
+    // the pointer is only valid until the next clipboard call.
+    virtual bool copyClipboardText(const WindowRecord &, const char **outText) const
     {
+        (void)outText;
         return false;
+    }
+
+    // Applies gamepad polling options at runtime (enable/disable, axis noise
+    // threshold); backends without gamepads ignore it.
+    virtual void configureGamepads(const GamepadPollingOptions &options)
+    {
+        (void)options;
     }
 
     virtual const char *const *requiredInstanceExtensions(std::uint32_t *outCount) const = 0;
