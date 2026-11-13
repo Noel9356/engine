@@ -41,38 +41,55 @@ engine::character::InstanceId CharacterScreen::instanceByName(const std::string 
     return engine::character::invalidInstance;
 }
 
-// ---- assembly helpers (body plans, counts, variants) -------------------------
+std::string CharacterScreen::partIdOfInstance(const std::string &name) const
+{
+    const InstanceId instance = instanceByName(name);
+    if (instance == engine::character::invalidInstance)
+    {
+        return {};
+    }
+    const char *partId = nullptr;
+    if (character_->instanceInfo(character_->self, characterHandle_, instance, nullptr, &partId, nullptr)
+        && partId != nullptr)
+    {
+        return partId;
+    }
+    return {};
+}
+
+// ---- assembly helpers (body plans, variants, clothing) ------------------------
 
 bool CharacterScreen::rebuildAssembly()
 {
     // (Re)create the assembly from the active body-plan profile and re-apply
-    // the current counts/variants. Plan changes alter the skeleton topology,
-    // so the assembly is rebuilt; counts and variants re-attach afterwards.
+    // the current variants. Plan changes alter the skeleton topology, so the
+    // assembly is rebuilt; variants re-attach afterwards.
     CharacterError error = CharacterError::None;
     if (characterHandle_ != engine::character::invalidCharacter)
     {
         character_->destroyAssembly(character_->self, characterHandle_);
         characterHandle_ = engine::character::invalidCharacter;
     }
-    characterHandle_ = character_->createAssembly(character_->self, profileIdForPlan(activePlan_), &error);
+    const char *profileId = activePlan_ == 1
+        ? CharacterContent::taurProfileId
+        : (activePlan_ == 2 ? CharacterContent::quadrupedProfileId : CharacterContent::humanoidProfileId);
+    characterHandle_ = character_->createAssembly(character_->self, profileId, &error);
     if (characterHandle_ == engine::character::invalidCharacter)
     {
-        std::fprintf(stderr, "demo: could not create the %s assembly (%u)\n", profileIdForPlan(activePlan_),
+        std::fprintf(stderr, "demo: could not create the %s assembly (%u)\n", profileId,
             static_cast<unsigned>(error));
         return false;
     }
-    const int heads = headCount_;
-    const int wings = wingPairs_;
-    const int arms = armPairs_;
-    const bool tail = tailPresent_;
-    headCount_ = 1;
-    wingPairs_ = 0;
-    armPairs_ = 1;
-    tailPresent_ = false;
-    setHeadCount(heads);
-    setWingPairs(wings);
-    setArmPairs(arms);
-    setTail(tail && activePlan_ != 2 && activePlan_ != 3);
+    // Species lower body for the taur/quadruped plans.
+    if (activePlan_ != 0)
+    {
+        setQuadSpecies(quadSpecies_);
+    }
+    // Variants: head (+ears), outfit, tail, wings.
+    setHeadPart(activeHeadPart_);
+    setOutfit(clothed_);
+    setTail(tailPresent_);
+    setWings(wingsPresent_);
     applyParameterHeights();
     evaluateCharacter(true);
     return true;
@@ -80,40 +97,37 @@ bool CharacterScreen::rebuildAssembly()
 
 bool CharacterScreen::setPlan(int plan)
 {
-    if (plan == activePlan_ || plan < 0 || plan > 3)
+    if (plan == activePlan_ || plan < 0 || plan > 2)
     {
         return true;
     }
     activePlan_ = plan;
-    // Extra arm pairs and the reptile tail do not graft onto the quadruped
-    // plan; the naga carries the serpent lower body instead of a tail.
-    if (activePlan_ == 3)
+    // Wings do not graft onto the quadruped plan's silhouette without a
+    // withers socket pair; the taur keeps them.
+    if (activePlan_ == 2)
     {
-        armPairs_ = 1;
-        tailPresent_ = false;
+        wingsPresent_ = false;
     }
     return rebuildAssembly();
 }
 
 bool CharacterScreen::setQuadSpecies(int species)
 {
-    if (species < 0 || species >= kQuadSpeciesCount)
+    if (species < 0 || species >= metrics::kSpeciesCount)
     {
         return true;
     }
     const std::string bodyId = activePlan_ == 1
-        ? std::string("quad_centaur_") + kQuadSpeciesIds[species]
-        : std::string("quad_body_") + kQuadSpeciesIds[species];
+        ? std::string("quad_taur_") + metrics::kSpecies[species].id
+        : std::string("quad_body_") + metrics::kSpecies[species].id;
     const InstanceId body = instanceByName("body");
     if (body == engine::character::invalidInstance)
     {
         return false;
     }
     // Skip only when the body instance already wears the requested part -
-    // comparing species INDICES early-returned when the requested species
-    // happened to equal the field default, silently keeping the profile's
-    // default animal (the rev-7 "every species preset rendered the horse"
-    // bug, reintroduced whenever the default index matched the request).
+    // comparing part ids (comparing species indices silently skipped the
+    // swap whenever the requested index matched the field default).
     const char *currentPartId = nullptr;
     if (character_->instanceInfo(character_->self, characterHandle_, body, nullptr, &currentPartId, nullptr)
         && currentPartId != nullptr && bodyId == currentPartId)
@@ -125,223 +139,176 @@ bool CharacterScreen::setQuadSpecies(int species)
     CharacterError error = CharacterError::None;
     const bool replaced = character_->replacePart(
         character_->self, characterHandle_, body, bodyId.c_str(), &error);
+    // The taur's tail stays with the species: re-point the tail variant to
+    // the matching species tail so the lower body reads as one animal.
+    if (replaced && activePlan_ == 1)
+    {
+        setTailPart(std::string("tail_") + metrics::kSpecies[species].id);
+    }
     applyParameterHeights();
     evaluateCharacter(true);
     return replaced;
 }
 
-bool CharacterScreen::setHeadCount(int count)
+bool CharacterScreen::headHasEarSockets() const
 {
-    count = std::clamp(count, 1, 3);
-    CharacterError error = CharacterError::None;
-    bool ok = true;
-    // Head 1 comes from the profile; heads 2/3 attach beside it. Extra
-    // skulls yaw outward and roll a touch so the pair reads as two skulls
-    // sharing the collar instead of one skull split in half (rev-9 used a
-    // pure roll, which made the outer faces fight each other).
-    while (headCount_ > count)
+    if (activeHeadPart_.rfind("head_", 0) != 0 || activeHeadPart_ == "head_human"
+        || activeHeadPart_ == "head_dragon")
     {
-        const InstanceId extra = instanceByName(headCount_ == 3 ? "head3" : "head2");
-        if (extra != engine::character::invalidInstance)
-        {
-            ok = character_->removePart(character_->self, characterHandle_, extra) && ok;
-        }
-        headCount_ -= 1;
+        return false;
     }
-    while (headCount_ < count)
+    const std::string species = activeHeadPart_.substr(5);
+    for (int index = 0; index < metrics::kSpeciesCount; ++index)
     {
-        headCount_ += 1;
-        InstanceId parent = instanceByName(activePlan_ == 0 || activePlan_ == 2 ? "torso" : "chest");
-        if (parent == engine::character::invalidInstance)
+        if (species == metrics::kSpecies[index].id)
         {
-            parent = instanceByName("body");
+            return metrics::kSpecies[index].hasEarSockets;
         }
-        const InstanceId head = character_->addPart(character_->self, characterHandle_, activeHeadPart_.c_str(),
-            headCount_ == 2 ? "head2" : "head3", &error);
-        if (parent == engine::character::invalidInstance || head == engine::character::invalidInstance)
+    }
+    return false;
+}
+
+bool CharacterScreen::setHeadPart(const std::string &partId)
+{
+    activeHeadPart_ = partId;
+    const InstanceId head = instanceByName("head");
+    if (head == engine::character::invalidInstance)
+    {
+        return true; // remembered; the plan rebuild attaches it
+    }
+    CharacterError error = CharacterError::None;
+    const bool swapped = character_->replacePart(
+        character_->self, characterHandle_, head, partId.c_str(), &error);
+    if (!swapped)
+    {
+        return false;
+    }
+    // Species heads wear their matching ear pair by default; the human and
+    // dragon heads carry their own ears and remove the parts.
+    if (headHasEarSockets())
+    {
+        if (activeEarPart_.empty())
+        {
+            activeEarPart_ = std::string("ear_") + partId.substr(5) + "_left";
+        }
+        setEarParts(activeEarPart_);
+    }
+    else
+    {
+        activeEarPart_.clear();
+        for (const char *earName : {"ear_left", "ear_right"})
+        {
+            const InstanceId ear = instanceByName(earName);
+            if (ear != engine::character::invalidInstance)
+            {
+                character_->removePart(character_->self, characterHandle_, ear);
+            }
+        }
+    }
+    evaluateCharacter(true);
+    return true;
+}
+
+bool CharacterScreen::setEarParts(const std::string &leftPartId)
+{
+    activeEarPart_ = leftPartId;
+    const std::string rightPartId = leftPartId.substr(0, leftPartId.size() - 5) + "_right";
+    CharacterError error = CharacterError::None;
+    const std::tuple<const char *, const char *, std::string> sides[2] = {
+        {"ear_left", "ear.left", leftPartId},
+        {"ear_right", "ear.right", rightPartId},
+    };
+    for (const auto &[earName, earConnector, partId] : sides)
+    {
+        const InstanceId ear = instanceByName(earName);
+        if (ear == engine::character::invalidInstance)
+        {
+            const InstanceId added = character_->addPart(character_->self, characterHandle_, partId.c_str(),
+                earName, &error);
+            if (added == engine::character::invalidInstance)
+            {
+                return false;
+            }
+            const InstanceId parent = instanceByName("head");
+            if (parent == engine::character::invalidInstance)
+            {
+                return false;
+            }
+            const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            if (!character_->connect(character_->self, characterHandle_, parent, earConnector, added, "ear.root",
+                    nullptr, identity, &error))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            const char *currentPartId = nullptr;
+            character_->instanceInfo(character_->self, characterHandle_, ear, nullptr, &currentPartId, nullptr);
+            if (currentPartId == nullptr || partId != currentPartId)
+            {
+                character_->replacePart(character_->self, characterHandle_, ear, partId.c_str(), &error);
+            }
+        }
+    }
+    evaluateCharacter(true);
+    return true;
+}
+
+bool CharacterScreen::setWings(bool present)
+{
+    wingsPresent_ = present;
+    CharacterError error = CharacterError::None;
+    const bool exists = instanceByName("wing_left") != engine::character::invalidInstance;
+    if (!present)
+    {
+        if (exists)
+        {
+            for (const char *wingName : {"wing_left", "wing_right"})
+            {
+                const InstanceId wing = instanceByName(wingName);
+                if (wing != engine::character::invalidInstance)
+                {
+                    character_->removePart(character_->self, characterHandle_, wing);
+                }
+            }
+            evaluateCharacter(true);
+        }
+        return true;
+    }
+    if (exists || activePlan_ == 2)
+    {
+        return true; // already present, or the plan has no wing sockets
+    }
+    // Exactly one pair: on the humanoid torso's back sockets or the taur's
+    // withers sockets.
+    InstanceId parent = instanceByName(activePlan_ == 0 ? "torso" : "body");
+    if (parent == engine::character::invalidInstance)
+    {
+        return false;
+    }
+    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    (void)identity;
+    bool ok = true;
+    const std::tuple<const char *, const char *, const char *> wings[2] = {
+        {"wing_left", "wing_dragon_left", "wings.left"},
+        {"wing_right", "wing_dragon_right", "wings.right"},
+    };
+    for (const auto &[wingName, partId, connector] : wings)
+    {
+        const InstanceId wing = character_->addPart(character_->self, characterHandle_, partId, wingName, &error);
+        if (wing == engine::character::invalidInstance)
         {
             ok = false;
             break;
         }
-        const float lateral = headCount_ == 2 ? -0.150f : 0.150f;
-        const float offset[3] = {lateral, 0.014f, 0.006f};
-        // Yaw outward around the shared collar: the second head turns left,
-        // the third right, and both roll a little away from the centre line.
-        const float outwardYaw = headCount_ == 2 ? -24.0f : 24.0f;
-        const float outwardRoll = headCount_ == 2 ? -9.0f : 9.0f;
-        const glm::quat yaw = glm::angleAxis(glm::radians(outwardYaw), glm::vec3(0.0f, 1.0f, 0.0f));
-        const glm::quat roll = glm::angleAxis(glm::radians(outwardRoll), glm::vec3(0.0f, 0.0f, 1.0f));
-        const glm::quat pose = yaw * roll;
-        const float rotation[4] = {pose.x, pose.y, pose.z, pose.w};
-        ok = character_->connect(character_->self, characterHandle_, parent, "neck.base", head, "head.root",
-            offset, rotation, &error)
+        // A small outward roll keeps the pair readable around the back.
+        const float degrees = wingName[4] == 'l' ? -8.0f : 8.0f;
+        const glm::quat roll = glm::angleAxis(glm::radians(degrees), glm::vec3(0.0f, 0.0f, 1.0f));
+        const float rotation[4] = {roll.x, roll.y, roll.z, roll.w};
+        ok = character_->connect(character_->self, characterHandle_, parent, connector, wing, "wing.root",
+                   nullptr, rotation, &error)
             && ok;
-    }
-    if (ok)
-    {
-        evaluateCharacter(true);
-    }
-    return ok;
-}
-
-bool CharacterScreen::setWingPairs(int pairs)
-{
-    pairs = std::clamp(pairs, 0, 3);
-    CharacterError error = CharacterError::None;
-    (void)error;
-    bool ok = true;
-    while (wingPairs_ > pairs)
-    {
-        const std::string leftName = "wing" + std::to_string(wingPairs_) + "_left";
-        const std::string rightName = "wing" + std::to_string(wingPairs_) + "_right";
-        const InstanceId left = instanceByName(leftName);
-        const InstanceId right = instanceByName(rightName);
-        if (left != engine::character::invalidInstance)
-        {
-            ok = character_->removePart(character_->self, characterHandle_, left) && ok;
-        }
-        if (right != engine::character::invalidInstance)
-        {
-            ok = character_->removePart(character_->self, characterHandle_, right) && ok;
-        }
-        if (wingPairs_ >= 0 && wingPairs_ < static_cast<int>(wingSlotRolls_.size()))
-        {
-            wingSlotRolls_[static_cast<std::size_t>(wingPairs_)] = 0.0f;
-        }
-        wingPairs_ -= 1;
-    }
-    while (wingPairs_ < pairs)
-    {
-        wingPairs_ += 1;
-        ok = addWingPairToSlot(wingPairs_) && ok;
-    }
-    if (ok)
-    {
-        evaluateCharacter(true);
-    }
-    return ok;
-}
-
-bool CharacterScreen::addWingPairToSlot(int slot)
-{
-    CharacterError error = CharacterError::None;
-    InstanceId parent = instanceByName(activePlan_ == 0 || activePlan_ == 2 ? "torso" : "chest");
-    if (parent == engine::character::invalidInstance)
-    {
-        parent = instanceByName("body");
-    }
-    if (parent == engine::character::invalidInstance)
-    {
-        return false;
-    }
-    char leftName[16];
-    char rightName[16];
-    std::snprintf(leftName, sizeof(leftName), "wing%d_left", slot);
-    std::snprintf(rightName, sizeof(rightName), "wing%d_right", slot);
-    char connector[2][16];
-    std::snprintf(connector[0], sizeof(connector[0]), "wings%d.left", slot);
-    std::snprintf(connector[1], sizeof(connector[1]), "wings%d.right", slot);
-    const InstanceId left = character_->addPart(
-        character_->self, characterHandle_, "wing_dragon_left", leftName, &error);
-    const InstanceId right = left != engine::character::invalidInstance
-        ? character_->addPart(character_->self, characterHandle_, "wing_dragon_right", rightName, &error)
-        : engine::character::invalidInstance;
-    if (left == engine::character::invalidInstance || right == engine::character::invalidInstance)
-    {
-        return false;
-    }
-    // Stacked pairs share the same wing geometry, so each slot rolls a
-    // little further outward - otherwise three 1.55 m wings intersect into
-    // one shark-fin wall (rev-7 frames 08/09). The authored roll is STORED
-    // per slot so the flap driver can compose with it every frame instead
-    // of overwriting it (the rev-9 driver replaced the connection rotation,
-    // collapsing all pairs to the same roll as soon as they flapped).
-    const float rollL = slot == 1 ? 0.0f : slot == 2 ? -12.0f : -22.0f;
-    if (slot >= 0 && slot < static_cast<int>(wingSlotRolls_.size()))
-    {
-        wingSlotRolls_[static_cast<std::size_t>(slot)] = rollL;
-    }
-    const float rollR = -rollL;
-    float leftRoll[4];
-    float rightRoll[4];
-    setRollRotation(leftRoll, rollL);
-    setRollRotation(rightRoll, rollR);
-    bool connected = character_->connect(
-        character_->self, characterHandle_, parent, connector[0], left, "wing.root", nullptr, leftRoll, &error);
-    connected = character_->connect(
-                   character_->self, characterHandle_, parent, connector[1], right, "wing.root", nullptr, rightRoll,
-                   &error)
-        && connected;
-    return connected;
-}
-
-bool CharacterScreen::setArmPairs(int pairs)
-{
-    pairs = std::clamp(pairs, 1, 3);
-    if (activePlan_ == 3)
-    {
-        pairs = 1; // the quadruped plan keeps the animal's own four limbs
-    }
-    CharacterError error = CharacterError::None;
-    bool ok = true;
-    while (armPairs_ > pairs)
-    {
-        const std::string leftName = "arm" + std::to_string(armPairs_) + "_left";
-        const std::string rightName = "arm" + std::to_string(armPairs_) + "_right";
-        const InstanceId left = instanceByName(leftName);
-        const InstanceId right = instanceByName(rightName);
-        if (left != engine::character::invalidInstance)
-        {
-            ok = character_->removePart(character_->self, characterHandle_, left) && ok;
-        }
-        if (right != engine::character::invalidInstance)
-        {
-            ok = character_->removePart(character_->self, characterHandle_, right) && ok;
-        }
-        armPairs_ -= 1;
-    }
-    while (armPairs_ < pairs)
-    {
-        armPairs_ += 1;
-        const int slot = armPairs_; // 2 or 3
-        const InstanceId parent = instanceByName(activePlan_ == 0 || activePlan_ == 2 ? "torso" : "chest");
-        if (parent == engine::character::invalidInstance)
-        {
-            ok = false;
-            break;
-        }
-        const std::string leftName = "arm" + std::to_string(slot) + "_left";
-        const std::string rightName = "arm" + std::to_string(slot) + "_right";
-        const std::string connectorLeft = "arm" + std::to_string(slot) + ".left";
-        const std::string connectorRight = "arm" + std::to_string(slot) + ".right";
-        const InstanceId left = character_->addPart(
-            character_->self, characterHandle_, "arm_human_left", leftName.c_str(), &error);
-        const InstanceId right = left != engine::character::invalidInstance
-            ? character_->addPart(character_->self, characterHandle_, "arm_human_right", rightName.c_str(), &error)
-            : engine::character::invalidInstance;
-        if (left == engine::character::invalidInstance || right == engine::character::invalidInstance)
-        {
-            ok = false;
-            break;
-        }
-        // Extra pairs fan OUTWARD in the coronal plane, lower pairs swinging
-        // wider than the first (marilith-style fan). A small upward offset
-        // keeps the second/third shoulder rings from clipping the first
-        // pair's deltoids; the roll about the forward axis does the visible
-        // work (the rev-7 yaw attempt only spun hanging arms in place).
-        const float fanRoll = slot == 2 ? 24.0f : 40.0f;
-        const float lift = slot == 2 ? 0.030f : 0.010f;
-        const float offset[3] = {0.0f, lift, 0.0f};
-        float leftPose[4];
-        float rightPose[4];
-        setRollRotation(leftPose, -fanRoll);
-        setRollRotation(rightPose, fanRoll);
-        bool connected = character_->connect(character_->self, characterHandle_, parent, connectorLeft.c_str(), left,
-            "shoulder.root", offset, leftPose, &error);
-        connected = character_->connect(character_->self, characterHandle_, parent, connectorRight.c_str(), right,
-            "shoulder.root", offset, rightPose, &error)
-            && connected;
-        ok = connected && ok;
     }
     if (ok)
     {
@@ -367,27 +334,28 @@ bool CharacterScreen::setTail(bool present)
         }
         return true;
     }
-    if (tail != engine::character::invalidInstance || activePlan_ == 2 || activePlan_ == 3)
+    if (tail != engine::character::invalidInstance || activePlan_ == 2)
     {
         return true; // already present, or the plan carries its own tail
     }
     CharacterError error = CharacterError::None;
-    (void)error;
-    const InstanceId parent = instanceByName(activePlan_ == 1 ? "chest" : "torso");
+    // Taur: the lower body's own tail socket. Humanoid: the torso tailbone.
+    const bool        taur  = activePlan_ == 1;
+    const InstanceId  parent = instanceByName(taur ? "body" : "torso");
+    const char       *parentConnector = taur ? "tail.mount" : "tail.base";
     if (parent == engine::character::invalidInstance)
     {
         return false;
     }
     const InstanceId tailPart = character_->addPart(
         character_->self, characterHandle_, activeTailPart_.c_str(), "tail", &error);
-    (void)error;
     if (tailPart == engine::character::invalidInstance)
     {
         return false;
     }
     const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     const bool connected = character_->connect(
-        character_->self, characterHandle_, parent, "tail.base", tailPart, "tail.root", nullptr, identity, &error);
+        character_->self, characterHandle_, parent, parentConnector, tailPart, "tail.root", nullptr, identity, &error);
     if (connected)
     {
         evaluateCharacter(true);
@@ -399,7 +367,7 @@ bool CharacterScreen::setTailPart(const std::string &partId)
 {
     activeTailPart_ = partId;
     const InstanceId tail = instanceByName("tail");
-    if (tail == engine::character::invalidInstance || activePlan_ == 2 || activePlan_ == 3)
+    if (tail == engine::character::invalidInstance || activePlan_ == 2)
     {
         return true; // variant remembered; applies when a tail is attached
     }
@@ -413,70 +381,198 @@ bool CharacterScreen::setTailPart(const std::string &partId)
     return swapped;
 }
 
+bool CharacterScreen::setOutfit(bool clothed)
+{
+    clothed_ = clothed;
+    CharacterError error = CharacterError::None;
+    const char *torsoId   = clothed ? "torso_ranger" : "torso_bare";
+    const char *armId     = clothed ? "arm_ranger_left" : "arm_bare_left";
+    const char *armIdRight = clothed ? "arm_ranger_right" : "arm_bare_right";
+    const char *legId     = clothed ? "leg_ranger_left" : "leg_bare_left";
+    const char *legIdRight = clothed ? "leg_ranger_right" : "leg_bare_right";
+    const char *torsoInstance = activePlan_ == 1 ? "chest" : "torso";
+    bool ok = true;
+    const auto swap = [&](const char *instanceName, const char *partId) {
+        const InstanceId instance = instanceByName(instanceName);
+        if (instance == engine::character::invalidInstance)
+        {
+            return; // plan without this slot (quadruped)
+        }
+        const char *currentPartId = nullptr;
+        character_->instanceInfo(character_->self, characterHandle_, instance, nullptr, &currentPartId, nullptr);
+        if (currentPartId != nullptr && partId == currentPartId)
+        {
+            return;
+        }
+        ok = character_->replacePart(character_->self, characterHandle_, instance, partId, &error) && ok;
+    };
+    swap(torsoInstance, torsoId);
+    swap("arm_left", armId);
+    swap("arm_right", armIdRight);
+    swap("leg_left", legId);
+    swap("leg_right", legIdRight);
+    // The garment overlays only read correctly over the clothed variant;
+    // strip them when going bare.
+    if (!clothed)
+    {
+        setClothingPiece("belt", false);
+        setClothingPiece("bracer_left", false);
+        setClothingPiece("bracer_right", false);
+        setClothingPiece("pauldron_left", false);
+        setClothingPiece("pauldron_right", false);
+        beltPresent_      = false;
+        bracersPresent_  = false;
+        pauldronsPresent_ = false;
+    }
+    else if (!beltPresent_ && !bracersPresent_ && !pauldronsPresent_)
+    {
+        // first switch back to the outfit: restore the shipped look
+        beltPresent_      = true;
+        bracersPresent_  = true;
+        pauldronsPresent_ = true;
+        setClothingPiece("belt", true);
+        setClothingPiece("bracer_left", true);
+        setClothingPiece("bracer_right", true);
+        setClothingPiece("pauldron_left", true);
+        setClothingPiece("pauldron_right", true);
+    }
+    applyParameterHeights();
+    evaluateCharacter(true);
+    return ok;
+}
+
+bool CharacterScreen::setClothingPiece(const char *instanceName, bool present)
+{
+    CharacterError error = CharacterError::None;
+    const InstanceId piece = instanceByName(instanceName);
+    if (!present)
+    {
+        if (piece != engine::character::invalidInstance)
+        {
+            const bool removed = character_->removePart(character_->self, characterHandle_, piece);
+            evaluateCharacter(true);
+            return removed;
+        }
+        return true;
+    }
+    if (piece != engine::character::invalidInstance)
+    {
+        return true;
+    }
+    // Parent + connector per piece.
+    const char *partId = nullptr;
+    const char *parentName = nullptr;
+    const char *parentConnector = nullptr;
+    const char *childConnector = "garment.root";
+    if (std::strcmp(instanceName, "belt") == 0)
+    {
+        partId = "clothes_belt";
+        parentName = activePlan_ == 1 ? "chest" : "torso";
+        parentConnector = "belt.mount";
+    }
+    else if (std::strcmp(instanceName, "bracer_left") == 0)
+    {
+        partId = "clothes_bracer_left";
+        parentName = "arm_left";
+        parentConnector = "bracer.mount";
+    }
+    else if (std::strcmp(instanceName, "bracer_right") == 0)
+    {
+        partId = "clothes_bracer_right";
+        parentName = "arm_right";
+        parentConnector = "bracer.mount";
+    }
+    else if (std::strcmp(instanceName, "pauldron_left") == 0)
+    {
+        partId = "clothes_pauldron_left";
+        parentName = activePlan_ == 1 ? "chest" : "torso";
+        parentConnector = "pad.left";
+    }
+    else if (std::strcmp(instanceName, "pauldron_right") == 0)
+    {
+        partId = "clothes_pauldron_right";
+        parentName = activePlan_ == 1 ? "chest" : "torso";
+        parentConnector = "pad.right";
+    }
+    else if (std::strcmp(instanceName, "hood") == 0)
+    {
+        partId = "clothes_hood";
+        parentName = "head";
+        parentConnector = "hood.mount";
+    }
+    else
+    {
+        return false;
+    }
+    const InstanceId parent = instanceByName(parentName);
+    if (parent == engine::character::invalidInstance)
+    {
+        return false;
+    }
+    const InstanceId added = character_->addPart(character_->self, characterHandle_, partId, instanceName, &error);
+    if (added == engine::character::invalidInstance)
+    {
+        return false;
+    }
+    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    const bool connected = character_->connect(
+        character_->self, characterHandle_, parent, parentConnector, added, childConnector, nullptr, identity, &error);
+    if (connected)
+    {
+        evaluateCharacter(true);
+    }
+    return connected;
+}
+
 void CharacterScreen::applyParameterHeights()
 {
     // Keep the feet (or hooves) near the ground plane: limb length scales the
     // leg mesh about its hip anchor, so the assembly root drops by the scaled
-    // sole offset below the anchor. Quadruped and centaur plans ground on the
-    // animal body instead (the measured hooves' lowest point below the stub),
-    // PER SPECIES - rev-9 grounded every centaur species on the horse's
-    // hoof line, which left the smaller animals floating.
+    // sole offset below the anchor. The taur and quadruped plans ground on
+    // the animal body instead (the measured hooves' lowest point below the
+    // body origin, per species, riding the lower-body scale).
     const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    const int species = std::clamp(quadSpecies_, 0, metrics::kSpeciesCount - 1);
+    if (activePlan_ == 1 || activePlan_ == 2)
+    {
+        float taurScale = 1.0f;
+        character_->getParameter(character_->self, characterHandle_, "taur.scale", &taurScale);
+        const float ground = metrics::kSpecies[species].groundY * taurScale;
+        const float translation[3] = {0.0f, -ground - 0.01f, 0.0f};
+        character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
+        return;
+    }
+    const std::string legPart = partIdOfInstance("leg_left");
+    const float footY = content_.legFootYForPart(legPart);
     float limbLength = 1.0f;
     character_->getParameter(character_->self, characterHandle_, "limbs.length", &limbLength);
-    float height = 1.0f;
-    character_->getParameter(character_->self, characterHandle_, "body.height", &height);
-    const int species = std::clamp(quadSpecies_, 0, kQuadSpeciesCount - 1);
-    if (activePlan_ == 3)
-    {
-        const float ground = kQuadGroundY[species] * height;
-        const float translation[3] = {0.0f, -ground - 0.01f, 0.0f};
-        character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
-        return;
-    }
-    if (activePlan_ == 1)
-    {
-        // Centaur: ground on the (headless) animal body - its hooves define
-        // the lowest point below the Body-joint origin, per species.
-        const float ground = kQuadGroundY[species] * height;
-        const float translation[3] = {0.0f, -ground - 0.01f, 0.0f};
-        character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
-        return;
-    }
-    if (activePlan_ == 2)
-    {
-        // Naga: ground on the pitched serpent lower body. The profile
-        // connection drops the ring centre by 0.031 m below the tailbone
-        // socket; the piece's measured lowest point sits serpentGroundY
-        // (negative) below the part origin. The lift keeps the tube's
-        // bottom surface just ABOVE the floor plane - the tube is a wide
-        // flat surface, and letting it dip below y=0 z-fights the floor
-        // quad into vanishing at grazing camera angles (the piece would
-        // read as disconnected from the rear views).
-        const float lift = -(kCharacterMetrics.serpentGroundY + 0.065f - 0.031f) * height;
-        const float translation[3] = {0.0f, lift + 0.02f, 0.0f};
-        character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
-        return;
-    }
     const float legScale = 1.0f + (limbLength - 1.0f);
     // legFootY is the sole's offset BELOW the hip anchor (negative); the
     // root rises by its absolute value so the soles touch the ground plane.
-    const float translation[3] = {0.0f, -kCharacterMetrics.legFootY * legScale - 0.01f, 0.0f};
+    const float translation[3] = {0.0f, -footY * legScale - 0.01f, 0.0f};
     character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
 }
 
 void CharacterScreen::resetToDefault()
 {
     activeHeadPart_ = "head_human";
+    activeEarPart_.clear();
     activeTailPart_ = "tail_fox";
     activePlan_ = 0;
     quadSpecies_ = 0;
-    headCount_ = 1;
-    wingPairs_ = 0;
-    armPairs_ = 1;
+    wingsPresent_ = false;
     tailPresent_ = false;
+    clothed_ = true;
+    beltPresent_ = true;
+    bracersPresent_ = true;
+    pauldronsPresent_ = true;
+    hoodPresent_ = false;
     CharacterError error = CharacterError::None;
     character_->setParameter(character_->self, characterHandle_, "body.plan", 0.0f, &error);
+    character_->setParameter(character_->self, characterHandle_, "muzzle.length", 1.0f, &error);
+    character_->setParameter(character_->self, characterHandle_, "eyes.width", 1.0f, &error);
+    character_->setParameter(character_->self, characterHandle_, "fur.markings", 0.0f, &error);
+    refreshDeformations();
     if (!rebuildAssembly())
     {
         return;
@@ -501,8 +597,5 @@ bool CharacterScreen::evaluateCharacter(bool validate)
     }
     return evaluated;
 }
-
-// ---- input ---------------------------------------------------------------------
-
 
 } // namespace demo

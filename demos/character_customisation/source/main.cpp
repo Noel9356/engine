@@ -97,12 +97,6 @@ namespace camera = engine::camera;
 // but before the loop can quit early; --screenshot-frame moves the export to
 // another frame (the Options default in options.hpp mirrors this choice).
 
-// Character Lab (merged from the former character_lab plugin, revision 10):
-// a one-shot Lua exercise through the character.* bridge installed by the
-// character module. It builds a custom assembly from the demo's registered
-// parts, edits parameters, evaluates and validates it, enumerates instances,
-// and destroys it - proving the Lua scripting surface end to end inside the
-// demo (the old plugin package duplicated this against stale part ids).
 bool runCharacterLabExercise(script_runtime::ScriptRuntimeCapability &scriptRuntime)
 {
     static constexpr const char *kLabScript = R"LUA(
@@ -214,11 +208,7 @@ int main(int argc, char **argv)
     // render_graph are probed optionally below.
     engine::ApplicationHostOptions hostOptions = engine::makeApplicationHostOptions(
         commandLine, {"window", "renderer", "render_graph", "camera", "models", "ui", "character", "script_runtime"});
-    // Revision 10 merged the former character_lab script plugin into the
-    // demo itself (the Lua exercise below runs through the script_runtime
-    // capability, no plugin package needed), so only main_menu stays in the
-    // default plugin set. Explicit --active-plugin/--no-plugins command-line
-    // choices from the caller are preserved.
+
     if (!hostOptions.activePlugins.has_value())
     {
         hostOptions.activePlugins = std::vector<std::string>{"main_menu"};
@@ -817,6 +807,34 @@ int main(int argc, char **argv)
         if (demoOptions.hidePanel)
         {
             characterScreen.setPanelVisible(false);
+        }
+        if (demoOptions.panelTab >= 0)
+        {
+            characterScreen.setPanelTab(demoOptions.panelTab);
+        }
+        if (!demoOptions.partPreviewsDirectory.empty())
+        {
+            // --part-previews: one standalone render per part, exported as
+            // PPM through the headless surface (the host script converts
+            // them to the panel's PNG thumbnails).
+            characterScreen.setPanelVisible(false);
+            const auto exportPpm =
+                [&windowCapability, &windowHandle, &headlessWindowCapability](const std::string &path) {
+                if (headlessWindowCapability == nullptr)
+                {
+                    return false;
+                }
+                engine::window::WindowError windowError = engine::window::WindowError::None;
+                return headlessWindowCapability->exportSurfacePpm(
+                    headlessWindowCapability->self, windowHandle, path.c_str(), &windowError);
+            };
+            const bool previewsOk = characterScreen.renderPartPreviews(demoOptions.partPreviewsDirectory, exportPpm);
+            menuBridge.destroy();
+            cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
+            renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
+            windowCapability.destroyWindow(windowCapability.self, windowHandle);
+            host.stop();
+            return previewsOk ? 0 : 1;
         }
         std::cout << "demo: character screen ready (drag to orbit, panel on the right)\n";
     }

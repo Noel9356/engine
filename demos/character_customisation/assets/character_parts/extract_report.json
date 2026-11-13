@@ -1,455 +1,1330 @@
 {
- "species": {
-  "fox": {
-   "display": "Fox",
-   "scale": 0.30670136240773443,
-   "holeVerts": 3,
-   "groundY": -0.1454897759946801,
-   "mountY": 0.55,
-   "mountZ": 0.33045209771938444,
-   "neckBaseY": 0.42760416333679585,
-   "neckBaseZ": 0.34877111152678614,
-   "withersY": 0.5593316194973291,
-   "lengthZ": 1.8043411211850415,
-   "headTopY": 0.33,
-   "headFrontZ": 0.1977731269794164,
-   "headNeckRing": 0.1087015465887199,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
-   },
-   "flipped": false,
-   "tailLengthZ": 0.33422938855166756,
-   "tailYMin": -0.5581979763017306,
-   "tailYMax": 0.06180202369826943,
-   "tailScale": 0.18415872740535097
+ "human": {
+  "Belt": {
+   "center": [
+    -0.00311,
+    0.23145,
+    0.05061
+   ],
+   "triangles": 3216
   },
-  "shibainu": {
-   "display": "Shiba",
-   "scale": 0.29299826589822425,
-   "holeVerts": 3,
-   "groundY": -0.13712715646847473,
-   "mountY": 0.555,
-   "mountZ": 0.2721816973277018,
-   "neckBaseY": 0.42893922631801634,
-   "neckBaseZ": 0.38315280312340033,
-   "withersY": 0.5025457753312397,
-   "lengthZ": 1.1568879810730226,
-   "headTopY": 0.33,
-   "headFrontZ": 0.12302102402491391,
-   "headNeckRing": 0.10810392217332915,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+  "armBare": {
+   "extent": [
+    [
+     -0.09263,
+     -0.71659,
+     -0.09487
+    ],
+    [
+     0.06552,
+     0.06114,
+     0.1127
+    ]
+   ],
+   "handY": -0.71659,
+   "shoulderRing": {
+    "center": [
+     0.21864,
+     1.45606,
+     -0.05395
+    ],
+    "normal": [
+     0.56863,
+     -0.73093,
+     -0.37736
+    ],
+    "radius": 0.0579
    },
-   "flipped": false,
-   "tailLengthZ": 0.62,
-   "tailYMin": -0.1891580404091674,
-   "tailYMax": 0.22165029397824032,
-   "tailScale": 0.34743977217729705
+   "triangles": 4614
   },
-  "husky": {
-   "display": "Husky",
-   "scale": 0.30202554015831773,
-   "holeVerts": 3,
-   "groundY": -0.14177069001910986,
-   "mountY": 0.575,
-   "mountZ": 0.2769496782006176,
-   "neckBaseY": 0.4421548404958493,
-   "neckBaseZ": 0.3949577379639362,
-   "withersY": 0.5180292067032951,
-   "lengthZ": 1.1746367142541345,
-   "headTopY": 0.33,
-   "headFrontZ": 0.1030404761291962,
-   "headNeckRing": 0.09237707162234073,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+  "armRanger": {
+   "shoulderRing": {
+    "center": [
+     0.21878,
+     1.46922,
+     -0.06622
+    ],
+    "normal": [
+     0.58947,
+     0.80382,
+     0.07998
+    ],
+    "radius": 0.04778
    },
-   "flipped": false,
-   "tailLengthZ": 0.6199999999999999,
-   "tailYMin": -0.24846638282721362,
-   "tailYMax": 0.023755483532893192,
-   "tailScale": 0.3131382259564569
+   "triangles": 4814
   },
-  "wolf": {
-   "display": "Wolf",
-   "scale": 0.33378314384609087,
-   "holeVerts": 3,
-   "groundY": -0.16109762398427915,
-   "mountY": 0.585,
-   "mountZ": 0.37767019792408574,
-   "neckBaseY": 0.4653616822558782,
-   "neckBaseZ": 0.379567658826841,
-   "withersY": 0.6087206947589218,
-   "lengthZ": 1.853527313082541,
-   "headTopY": 0.33,
-   "headFrontZ": 0.17372102109794277,
-   "headNeckRing": 0.13407567954155822,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+  "bracer": {
+   "rootRing": {
+    "center": [
+     0.18324,
+     1.15982,
+     -0.07017
+    ],
+    "normal": [
+     0.00713,
+     0.99813,
+     -0.06064
+    ],
+    "radius": 0.04222
    },
-   "flipped": false,
-   "tailLengthZ": 0.36794543862681284,
-   "tailYMin": -0.5946201711930484,
-   "tailYMax": 0.025379828806951544,
-   "tailScale": 0.20655412238606446
+   "triangles": 3636
   },
-  "donkey": {
-   "display": "Donkey",
-   "scale": 0.28128899016004194,
-   "holeVerts": 3,
-   "groundY": -0.20384085560790594,
-   "mountY": 0.6,
-   "mountZ": 0.2483145997565439,
-   "neckBaseY": 0.44586006866104566,
-   "neckBaseZ": 0.33423676418853193,
-   "withersY": 0.6161130204601634,
-   "lengthZ": 1.324316866115156,
-   "headTopY": 0.33,
-   "headFrontZ": 0.16370537828342108,
-   "headNeckRing": 0.09046325777461146,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+  "hood": {
+   "rootRing": {
+    "center": [
+     -0.02376,
+     1.58912,
+     -0.08807
+    ],
+    "normal": [
+     0.07555,
+     -0.95618,
+     0.28287
+    ],
+    "radius": 0.1223
    },
-   "flipped": false,
-   "tailLengthZ": 0.62,
-   "tailYMin": -0.27075054063816084,
-   "tailYMax": 0.12458844018520754,
-   "tailScale": 0.35311560590227226
+   "triangles": 2868
   },
-  "cow": {
-   "display": "Cow",
-   "scale": 0.1731423217729092,
-   "holeVerts": 3,
-   "groundY": -0.16752839720244425,
-   "mountY": 0.62,
-   "mountZ": 0.31302104510418605,
-   "neckBaseY": 0.3695998951780997,
-   "neckBaseZ": 0.32619291131397643,
-   "withersY": 0.5218338376226334,
-   "lengthZ": 1.3967364113283791,
-   "headTopY": 0.33,
-   "headFrontZ": 0.20939068936911667,
-   "headNeckRing": 0.10521561784919642,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+  "legBare": {
+   "extent": [
+    [
+     -0.07608,
+     -0.96789,
+     -0.13413
+    ],
+    [
+     0.11284,
+     0.06322,
+     0.15441
+    ]
+   ],
+   "footY": -0.96789,
+   "hipRing": {
+    "center": [
+     0.08231,
+     0.95838,
+     -0.02637
+    ],
+    "normal": [
+     0.6097,
+     -0.79236,
+     0.02079
+    ],
+    "radius": 0.10385
    },
-   "flipped": false,
-   "tailLengthZ": 0.41848043198264223,
-   "tailYMin": -0.5067042007629382,
-   "tailYMax": 0.11329579923706173,
-   "tailScale": 0.20644664710913954
+   "triangles": 3288
   },
-  "deer": {
-   "display": "Deer",
-   "scale": 0.2644445374573144,
-   "holeVerts": 3,
-   "groundY": -0.19641974741698529,
-   "mountY": 0.625,
-   "mountZ": 0.257758339234463,
-   "neckBaseY": 0.4713552362853534,
-   "neckBaseZ": 0.34579407135481294,
-   "withersY": 0.602749396506882,
-   "lengthZ": 1.1628449291515282,
-   "headTopY": 0.33,
-   "headFrontZ": 0.06393429791052493,
-   "headNeckRing": 0.06457688485474244,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+  "legRanger": {
+   "footY": -0.96939,
+   "hipRing": {
+    "center": [
+     0.05817,
+     0.96543,
+     -0.02934
+    ],
+    "normal": [
+     0.77701,
+     -0.62932,
+     -0.01445
+    ],
+    "radius": 0.10817
    },
-   "flipped": false,
-   "tailLengthZ": 0.6200000000000001,
-   "tailYMin": -0.4704746304775276,
-   "tailYMax": 0.06077225730618602,
-   "tailScale": 0.8248422286419467
+   "triangles": 9996
   },
-  "bull": {
-   "display": "Bull",
-   "scale": 0.1787275579591321,
-   "holeVerts": 3,
-   "groundY": -0.17293253904768438,
-   "mountY": 0.64,
-   "mountZ": 0.323118498172063,
-   "neckBaseY": 0.3815224724419094,
-   "neckBaseZ": 0.33671526329184664,
-   "withersY": 0.5386671872233635,
-   "lengthZ": 1.4417924245970366,
-   "headTopY": 0.33,
-   "headFrontZ": 0.20939068936911667,
-   "headNeckRing": 0.1220149885379264,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
-   },
-   "flipped": false,
-   "tailLengthZ": 0.4184804319826423,
-   "tailYMin": -0.5067042007629382,
-   "tailYMax": 0.11329579923706173,
-   "tailScale": 0.20644664710913954
+  "pauldron": {
+   "rootRing": null,
+   "side": "l",
+   "triangles": 1376
   },
-  "alpaca": {
-   "display": "Alpaca",
-   "scale": 0.2806201787234982,
-   "holeVerts": 3,
-   "groundY": -0.2033547542993055,
-   "mountY": 0.65,
-   "mountZ": 0.24438333622073405,
-   "neckBaseY": 0.494844827108903,
-   "neckBaseZ": 0.35804196240349456,
-   "withersY": 0.6396184650548219,
-   "lengthZ": 1.2064955450705408,
-   "headTopY": 0.32999999999999996,
-   "headFrontZ": 0.45274093481838945,
-   "headNeckRing": 0.07281650252002594,
-   "dropped": {
-    "body": 4,
-    "hind": 0,
-    "head": 4,
-    "tail": 0
+  "torsoBare": {
+   "backZ": -0.12045,
+   "bounds": [
+    [
+     -0.24172,
+     -0.05919,
+     -0.12045
+    ],
+    [
+     0.24172,
+     0.66613,
+     0.16834
+    ]
+   ],
+   "hipCenter": [
+    0.0,
+    0.65083,
+    0.02124
+   ],
+   "hipRing": {
+    "center": [
+     0.0,
+     1.59993,
+     -0.02176
+    ],
+    "normal": [
+     0.0,
+     -0.97051,
+     -0.24104
+    ],
+    "radius": 0.06243
    },
-   "flipped": false,
-   "tailLengthZ": 0.5377024925170024,
-   "tailYMin": -0.5408421054043239,
-   "tailYMax": 0.07915789459567613,
-   "tailScale": 0.7695741491711895
+   "neckCenter": [
+    0.0,
+    0.65083,
+    0.02124
+   ],
+   "neckRing": {
+    "center": [
+     0.0,
+     1.59993,
+     -0.02176
+    ],
+    "normal": [
+     0.0,
+     -0.97051,
+     -0.24104
+    ],
+    "radius": 0.06243
+   },
+   "sockets": {
+    "Belt": [
+     0.0,
+     0.2287,
+     0.0469
+    ],
+    "HipLeft": [
+     0.11431,
+     0.0221,
+     0.007
+    ],
+    "HipRight": [
+     -0.11431,
+     0.0221,
+     0.007
+    ],
+    "PadLeft": [
+     0.21201,
+     0.5564,
+     -0.0224
+    ],
+    "PadRight": [
+     -0.21201,
+     0.5564,
+     -0.0224
+    ],
+    "ShoulderLeft": [
+     0.21201,
+     0.5064,
+     -0.0224
+    ],
+    "ShoulderRight": [
+     -0.21201,
+     0.5064,
+     -0.0224
+    ],
+    "Tail": [
+     0.0,
+     0.0621,
+     -0.08516
+    ],
+    "WingLeft": [
+     -0.02,
+     0.53083,
+     -0.09572
+    ],
+    "WingRight": [
+     0.02,
+     0.53083,
+     -0.09572
+    ]
+   },
+   "triangles": 4276
   },
-  "horse": {
-   "display": "Horse",
-   "scale": 0.24650144089387802,
-   "holeVerts": 3,
-   "groundY": -0.22759217792230982,
-   "mountY": 0.67,
-   "mountZ": 0.27394328091913256,
-   "neckBaseY": 0.4883995205387516,
-   "neckBaseZ": 0.3661262383120823,
-   "withersY": 0.674896407027732,
-   "lengthZ": 1.399170299973961,
-   "headTopY": 0.33,
-   "headFrontZ": 0.13503111580134738,
-   "headNeckRing": 0.05980745716590912,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+  "torsoRanger": {
+   "bounds": [
+    [
+     -0.21467,
+     -0.04007,
+     -0.16295
+    ],
+    [
+     0.21467,
+     0.65064,
+     0.17403
+    ]
+   ],
+   "neckCenter": [
+    0.0,
+    0.58895,
+    0.01687
+   ],
+   "neckRing": {
+    "center": [
+     0.0,
+     1.53805,
+     -0.02613
+    ],
+    "normal": [
+     -0.0,
+     0.99973,
+     0.0231
+    ],
+    "radius": 0.05321
    },
-   "flipped": false,
-   "tailLengthZ": 0.62,
-   "tailYMin": -0.30508679056604776,
-   "tailYMax": 0.14954671364944497,
-   "tailScale": 0.3187735789140906
-  },
-  "stag": {
-   "display": "Stag",
-   "scale": 0.26976867563672396,
-   "holeVerts": 3,
-   "groundY": -0.19422069637645653,
-   "mountY": 0.6849999999999999,
-   "mountZ": 0.2802290326101159,
-   "neckBaseY": 0.4866231117211307,
-   "neckBaseZ": 0.3826730477180167,
-   "withersY": 0.6404335166865442,
-   "lengthZ": 1.305002939021242,
-   "headTopY": 0.33,
-   "headFrontZ": 0.0973216703631766,
-   "headNeckRing": 0.09099591691841924,
-   "dropped": {
-    "body": 0,
-    "hind": 0,
-    "head": 0,
-    "tail": 0
+   "sockets": {
+    "Belt": [
+     0.0,
+     0.2287,
+     0.0469
+    ],
+    "HipLeft": [
+     0.0906,
+     0.0221,
+     0.007
+    ],
+    "HipRight": [
+     -0.0906,
+     0.0221,
+     0.007
+    ],
+    "PadLeft": [
+     0.1919,
+     0.5564,
+     -0.0224
+    ],
+    "PadRight": [
+     -0.1919,
+     0.5564,
+     -0.0224
+    ],
+    "ShoulderLeft": [
+     0.1919,
+     0.5064,
+     -0.0224
+    ],
+    "ShoulderRight": [
+     -0.1919,
+     0.5064,
+     -0.0224
+    ],
+    "Tail": [
+     0.0,
+     0.0621,
+     -0.14295
+    ],
+    "WingLeft": [
+     -0.02,
+     0.46895,
+     -0.08359
+    ],
+    "WingRight": [
+     0.02,
+     0.46895,
+     -0.08359
+    ]
    },
-   "flipped": false,
-   "tailLengthZ": 0.6199999999999999,
-   "tailYMin": -0.39543091275698583,
-   "tailYMax": 0.08935087734501745,
-   "tailScale": 0.613869114806732
+   "triangles": 5480
   }
  },
- "pieces": {
-  "quad_body_fox": {
-   "triangles": 1848
+ "species": {
+  "alpaca": {
+   "bindLength": 4.335146,
+   "bindWithers": 5.31117,
+   "bodyMinZ": -0.23144,
+   "display": "Alpaca",
+   "earRightTriangles": 612,
+   "earSockets": [
+    {
+     "center": [
+      0.01001,
+      0.3305,
+      0.07594
+     ],
+     "direction": [
+      0.40381,
+      0.3291,
+      0.8536
+     ],
+     "quat": [
+      0.523552,
+      0.0,
+      -0.247676,
+      0.815199
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.01745,
+      0.32982,
+      0.07814
+     ],
+     "direction": [
+      -0.14571,
+      0.12041,
+      0.98197
+     ],
+     "quat": [
+      0.655989,
+      0.0,
+      0.09734,
+      0.748468
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 516,
+   "groundY": -0.40196,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 500,
+   "lengthZ": 0.7521,
+   "quadGroundY": -0.40196,
+   "quadTriangles": 3576,
+   "quadWithersY": 0.63328,
+   "source": "Alpaca",
+   "stumpCenter": [
+    -0.00942,
+    0.23191,
+    0.43877
+   ],
+   "stumpNormal": [
+    -0.01289,
+    0.65953,
+    0.75157
+   ],
+   "stumpRadius": 0.08939,
+   "tailExtent": [
+    0.11047,
+    0.17931,
+    0.10883
+   ],
+   "tailLength": 0.5,
+   "tailRootRadius": 0.15406,
+   "tailStumpCenter": [
+    0.00431,
+    0.03884,
+    -0.20686
+   ],
+   "tailStumpNormal": [
+    -0.02032,
+    -0.21647,
+    0.97608
+   ],
+   "tailStumpRadius": 0.03294,
+   "tailTriangles": 140,
+   "taurCappedRings": [
+    0.08939,
+    0.03294,
+    0.0201,
+    0.01911,
+    0.02002,
+    0.02354
+   ],
+   "taurScale": 0.207111,
+   "taurTriangles": 1132,
+   "withersY": 0.2871,
+   "withersZ": 0.38462
   },
-  "quad_centaur_fox": {
-   "triangles": 1324
+  "bull": {
+   "bindLength": 8.066984,
+   "bindWithers": 4.531166,
+   "bodyMinZ": -0.28636,
+   "display": "Bull",
+   "earSockets": [],
+   "groundY": -0.74258,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 1116,
+   "lengthZ": 1.4144,
+   "quadGroundY": -0.74258,
+   "quadTriangles": 4268,
+   "quadWithersY": 0.17444,
+   "source": "Bull",
+   "stumpCenter": [
+    0.0,
+    -0.01175,
+    1.03109
+   ],
+   "stumpNormal": [
+    0.0,
+    0.45714,
+    0.88939
+   ],
+   "stumpRadius": 0.145,
+   "tailExtent": [
+    0.1754,
+    0.08205,
+    0.1219
+   ],
+   "tailLength": 1.0,
+   "tailRootRadius": 0.14534,
+   "tailStumpCenter": [
+    0.1299,
+    -0.70696,
+    -0.16703
+   ],
+   "tailStumpNormal": [
+    -0.32176,
+    0.91761,
+    -0.23337
+   ],
+   "tailStumpRadius": 0.03983,
+   "tailTriangles": 288,
+   "taurCappedRings": [
+    0.145,
+    0.03983,
+    0.0332,
+    0.04709,
+    0.03983,
+    0.04709
+   ],
+   "taurScale": 0.213062,
+   "taurTriangles": 1084,
+   "withersY": 0.17444,
+   "withersZ": 0.68851
   },
-  "head_fox": {
-   "triangles": 524
+  "cow": {
+   "bindLength": 8.066984,
+   "bindWithers": 4.531166,
+   "bodyMinZ": -0.30237,
+   "display": "Cow",
+   "earSockets": [],
+   "groundY": -0.78409,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 1120,
+   "lengthZ": 1.49347,
+   "quadGroundY": -0.78409,
+   "quadTriangles": 4332,
+   "quadWithersY": 0.18419,
+   "source": "Cow",
+   "stumpCenter": [
+    0.0,
+    -0.00972,
+    1.07469
+   ],
+   "stumpNormal": [
+    -0.0,
+    0.49768,
+    0.86736
+   ],
+   "stumpRadius": 0.145,
+   "tailExtent": [
+    0.1754,
+    0.08205,
+    0.1219
+   ],
+   "tailLength": 1.0,
+   "tailRootRadius": 0.14523,
+   "tailStumpCenter": [
+    0.13716,
+    -0.74648,
+    -0.17637
+   ],
+   "tailStumpNormal": [
+    -0.32176,
+    0.91761,
+    -0.23337
+   ],
+   "tailStumpRadius": 0.04206,
+   "tailTriangles": 288,
+   "taurCappedRings": [
+    0.145,
+    0.03506,
+    0.04206,
+    0.04584,
+    0.04206,
+    0.04584
+   ],
+   "taurScale": 0.224973,
+   "taurTriangles": 1116,
+   "withersY": 0.18419,
+   "withersZ": 0.727
   },
-  "tail_fox": {
-   "triangles": 220
+  "deer": {
+   "bindLength": 4.397316,
+   "bindWithers": 4.260978,
+   "bodyMinZ": -0.27569,
+   "display": "Deer",
+   "earRightTriangles": 476,
+   "earSockets": [
+    {
+     "center": [
+      0.02316,
+      0.20527,
+      0.09457
+     ],
+     "direction": [
+      0.74651,
+      0.58187,
+      0.32273
+     ],
+     "quat": [
+      0.181443,
+      0.0,
+      -0.419696,
+      0.889344
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.02316,
+      0.20527,
+      0.09457
+     ],
+     "direction": [
+      -0.74787,
+      0.57376,
+      0.33389
+     ],
+     "quat": [
+      0.188202,
+      0.0,
+      0.421543,
+      0.887063
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 488,
+   "groundY": -0.55339,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 846,
+   "lengthZ": 0.92327,
+   "quadGroundY": -0.55339,
+   "quadTriangles": 3584,
+   "quadWithersY": 0.47399,
+   "source": "Deer",
+   "stumpCenter": [
+    0.0,
+    0.18846,
+    0.57209
+   ],
+   "stumpNormal": [
+    0.0,
+    0.56679,
+    0.82386
+   ],
+   "stumpRadius": 0.08127,
+   "tailExtent": [
+    0.15514,
+    0.12289,
+    0.08057
+   ],
+   "tailLength": 0.42,
+   "tailRootRadius": 0.12181,
+   "tailStumpCenter": [
+    0.09265,
+    -0.52329,
+    -0.22685
+   ],
+   "tailStumpNormal": [
+    -0.35658,
+    0.88389,
+    -0.30264
+   ],
+   "tailStumpRadius": 0.02869,
+   "tailTriangles": 196,
+   "taurCappedRings": [
+    0.08127,
+    0.02869,
+    0.02796,
+    0.02808,
+    0.02869,
+    0.02808
+   ],
+   "taurScale": 0.258157,
+   "taurTriangles": 1048,
+   "withersY": 0.24975,
+   "withersZ": 0.52607
   },
-  "quad_body_shibainu": {
-   "triangles": 1950
+  "donkey": {
+   "bindLength": 4.708032,
+   "bindWithers": 3.958774,
+   "bodyMinZ": -0.32211,
+   "display": "Donkey",
+   "earRightTriangles": 264,
+   "earSockets": [
+    {
+     "center": [
+      0.02507,
+      0.15713,
+      0.14313
+     ],
+     "direction": [
+      0.18306,
+      0.8413,
+      0.50863
+     ],
+     "quat": [
+      0.265047,
+      0.0,
+      -0.095392,
+      0.959505
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.02507,
+      0.15713,
+      0.14313
+     ],
+     "direction": [
+      -0.18655,
+      0.83936,
+      0.51056
+     ],
+     "quat": [
+      0.266196,
+      0.0,
+      0.097264,
+      0.958999
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 264,
+   "groundY": -0.62092,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 1004,
+   "lengthZ": 1.06473,
+   "quadGroundY": -0.62092,
+   "quadTriangles": 3456,
+   "quadWithersY": 0.49649,
+   "source": "Donkey",
+   "stumpCenter": [
+    0.0,
+    0.15633,
+    0.67725
+   ],
+   "stumpNormal": [
+    0.0,
+    0.47721,
+    0.87879
+   ],
+   "stumpRadius": 0.10437,
+   "tailExtent": [
+    0.1781,
+    0.07897,
+    0.21799
+   ],
+   "tailLength": 0.95,
+   "tailRootRadius": 0.17637,
+   "tailStumpCenter": [
+    0.10655,
+    -0.58947,
+    -0.28912
+   ],
+   "tailStumpNormal": [
+    0.83875,
+    0.26663,
+    -0.47477
+   ],
+   "tailStumpRadius": 0.03245,
+   "tailTriangles": 244,
+   "taurCappedRings": [
+    0.02109,
+    0.10437,
+    0.02736,
+    0.03245,
+    0.02736,
+    0.03245
+   ],
+   "taurScale": 0.303124,
+   "taurTriangles": 1034,
+   "withersY": 0.25268,
+   "withersZ": 0.62353
   },
-  "quad_centaur_shibainu": {
-   "triangles": 1222
+  "fox": {
+   "bindLength": 5.59969,
+   "bindWithers": 2.664653,
+   "bodyMinZ": -0.37742,
+   "display": "Fox",
+   "earRightTriangles": 328,
+   "earSockets": [
+    {
+     "center": [
+      0.03609,
+      0.09317,
+      0.16129
+     ],
+     "direction": [
+      0.73196,
+      0.42499,
+      0.53255
+     ],
+     "quat": [
+      0.315458,
+      0.0,
+      -0.433577,
+      0.844096
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.03609,
+      0.09317,
+      0.16129
+     ],
+     "direction": [
+      -0.72716,
+      0.45746,
+      0.51183
+     ],
+     "quat": [
+      0.299786,
+      0.0,
+      0.42591,
+      0.853657
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 320,
+   "groundY": -0.58412,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 444,
+   "lengthZ": 1.00228,
+   "quadGroundY": -0.58412,
+   "quadTriangles": 3028,
+   "quadWithersY": 0.24588,
+   "source": "Fox",
+   "stumpCenter": [
+    0.00453,
+    0.03542,
+    0.586
+   ],
+   "stumpNormal": [
+    0.04126,
+    0.30534,
+    0.95135
+   ],
+   "stumpRadius": 0.11009,
+   "tailExtent": [
+    0.09251,
+    0.10411,
+    0.41266
+   ],
+   "tailLength": 0.62,
+   "tailRootRadius": 0.08547,
+   "tailStumpCenter": [
+    0.0,
+    0.04951,
+    -0.31151
+   ],
+   "tailStumpNormal": [
+    -0.0,
+    0.52299,
+    0.85234
+   ],
+   "tailStumpRadius": 0.04944,
+   "tailTriangles": 456,
+   "taurCappedRings": [
+    0.11009,
+    0.04944,
+    0.0329,
+    0.03493,
+    0.0329,
+    0.03493
+   ],
+   "taurScale": 0.318991,
+   "taurTriangles": 966,
+   "withersY": 0.16041,
+   "withersZ": 0.58753
   },
-  "head_shibainu": {
-   "triangles": 728
+  "horse": {
+   "bindLength": 5.676114,
+   "bindWithers": 4.81273,
+   "bodyMinZ": -0.36705,
+   "display": "Horse",
+   "earRightTriangles": 428,
+   "earSockets": [
+    {
+     "center": [
+      0.02842,
+      0.19948,
+      0.16792
+     ],
+     "direction": [
+      0.21621,
+      0.37273,
+      0.9024
+     ],
+     "quat": [
+      0.544618,
+      0.0,
+      -0.130485,
+      0.828471
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.02655,
+      0.19948,
+      0.16792
+     ],
+     "direction": [
+      -0.23448,
+      0.39271,
+      0.88927
+     ],
+     "quat": [
+      0.532829,
+      0.0,
+      0.140497,
+      0.834478
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 432,
+   "groundY": -0.76202,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 778,
+   "lengthZ": 1.23699,
+   "quadGroundY": -0.76202,
+   "quadTriangles": 3736,
+   "quadWithersY": 0.58243,
+   "source": "Horse",
+   "stumpCenter": [
+    -0.0,
+    0.25891,
+    0.81053
+   ],
+   "stumpNormal": [
+    0.0,
+    0.39387,
+    0.91916
+   ],
+   "stumpRadius": 0.11814,
+   "tailExtent": [
+    0.11297,
+    0.10558,
+    0.14514
+   ],
+   "tailLength": 1.05,
+   "tailRootRadius": 0.10524,
+   "tailStumpCenter": [
+    -0.0,
+    0.08596,
+    -0.34116
+   ],
+   "tailStumpNormal": [
+    -0.0,
+    -0.2557,
+    0.96676
+   ],
+   "tailStumpRadius": 0.05397,
+   "tailTriangles": 408,
+   "taurCappedRings": [
+    0.11814,
+    0.03345,
+    0.03547,
+    0.03345,
+    0.03547,
+    0.05397
+   ],
+   "taurScale": 0.301284,
+   "taurTriangles": 1090,
+   "withersY": 0.37866,
+   "withersZ": 0.7554
   },
-  "tail_shibainu": {
-   "triangles": 162
+  "husky": {
+   "bindLength": 3.889195,
+   "bindWithers": 3.185558,
+   "bodyMinZ": -0.34263,
+   "display": "Husky",
+   "earRightTriangles": 412,
+   "earSockets": [
+    {
+     "center": [
+      0.03419,
+      0.15225,
+      0.11469
+     ],
+     "direction": [
+      0.57651,
+      0.48045,
+      0.66092
+     ],
+     "quat": [
+      0.384093,
+      0.0,
+      -0.335036,
+      0.860362
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.03419,
+      0.15225,
+      0.11469
+     ],
+     "direction": [
+      -0.65266,
+      0.36629,
+      0.66322
+     ],
+     "quat": [
+      0.401212,
+      0.0,
+      0.394823,
+      0.826525
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 440,
+   "groundY": -0.5462,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 564,
+   "lengthZ": 0.96514,
+   "quadGroundY": -0.5462,
+   "quadTriangles": 3152,
+   "quadWithersY": 0.44191,
+   "source": "Husky",
+   "stumpCenter": [
+    -0.0,
+    0.20846,
+    0.5406
+   ],
+   "stumpNormal": [
+    -0.0,
+    0.61727,
+    0.78675
+   ],
+   "stumpRadius": 0.11519,
+   "tailExtent": [
+    0.11226,
+    0.36708,
+    0.17693
+   ],
+   "tailLength": 0.62,
+   "tailRootRadius": 0.11497,
+   "tailStumpCenter": [
+    -0.113,
+    -0.48734,
+    -0.26401
+   ],
+   "tailStumpNormal": [
+    0.98209,
+    0.16198,
+    0.09622
+   ],
+   "tailStumpRadius": 0.04691,
+   "tailTriangles": 376,
+   "taurCappedRings": [
+    0.11519,
+    0.03694,
+    0.04691,
+    0.05629,
+    0.04691,
+    0.05629
+   ],
+   "taurScale": 0.313917,
+   "taurTriangles": 914,
+   "withersY": 0.33873,
+   "withersZ": 0.50121
   },
-  "quad_body_husky": {
-   "triangles": 1920
+  "shibainu": {
+   "bindLength": 4.16193,
+   "bindWithers": 3.090909,
+   "bodyMinZ": -0.26429,
+   "display": "Shiba",
+   "earRightTriangles": 440,
+   "earSockets": [
+    {
+     "center": [
+      0.03155,
+      0.15763,
+      0.09864
+     ],
+     "direction": [
+      0.48136,
+      0.15194,
+      0.86325
+     ],
+     "quat": [
+      0.568732,
+      0.0,
+      -0.31713,
+      0.758928
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.03155,
+      0.15763,
+      0.09864
+     ],
+     "direction": [
+      -0.46205,
+      0.13588,
+      0.87638
+     ],
+     "quat": [
+      0.58145,
+      0.0,
+      0.306556,
+      0.753617
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 444,
+   "groundY": -0.40516,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 616,
+   "lengthZ": 0.74098,
+   "quadGroundY": -0.40516,
+   "quadTriangles": 3236,
+   "quadWithersY": 0.30684,
+   "source": "ShibaInu",
+   "stumpCenter": [
+    0.0,
+    0.1407,
+    0.40768
+   ],
+   "stumpNormal": [
+    0.0,
+    0.61098,
+    0.79165
+   ],
+   "stumpRadius": 0.09671,
+   "tailExtent": [
+    0.11722,
+    0.27355,
+    0.24824
+   ],
+   "tailLength": 0.55,
+   "tailRootRadius": 0.11109,
+   "tailStumpCenter": [
+    -0.09008,
+    -0.36638,
+    -0.19804
+   ],
+   "tailStumpNormal": [
+    0.97073,
+    -0.15681,
+    0.18191
+   ],
+   "tailStumpRadius": 0.03396,
+   "tailTriangles": 336,
+   "taurCappedRings": [
+    0.09671,
+    0.03112,
+    0.03396,
+    0.03815,
+    0.03396,
+    0.03815
+   ],
+   "taurScale": 0.232941,
+   "taurTriangles": 950,
+   "withersY": 0.22042,
+   "withersZ": 0.35634
   },
-  "quad_centaur_husky": {
-   "triangles": 1226
+  "stag": {
+   "bindLength": 4.837318,
+   "bindWithers": 4.192247,
+   "bodyMinZ": -0.33663,
+   "display": "Stag",
+   "earSockets": [],
+   "groundY": -0.61234,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 1716,
+   "lengthZ": 1.08354,
+   "quadGroundY": -0.61234,
+   "quadTriangles": 3600,
+   "quadWithersY": 0.45891,
+   "source": "Stag",
+   "stumpCenter": [
+    0.0,
+    0.20293,
+    0.67298
+   ],
+   "stumpNormal": [
+    0.0,
+    0.44785,
+    0.89411
+   ],
+   "stumpRadius": 0.12947,
+   "tailExtent": [
+    0.14349,
+    0.11902,
+    0.07954
+   ],
+   "tailLength": 0.42,
+   "tailRootRadius": 0.1229,
+   "tailStumpCenter": [
+    -0.11135,
+    -0.59072,
+    -0.27498
+   ],
+   "tailStumpNormal": [
+    0.08868,
+    0.996,
+    0.01119
+   ],
+   "tailStumpRadius": 0.03281,
+   "tailTriangles": 190,
+   "taurCappedRings": [
+    0.03227,
+    0.02803,
+    0.02803,
+    0.12947,
+    0.03281,
+    0.03281
+   ],
+   "taurScale": 0.274316,
+   "taurTriangles": 1094,
+   "withersY": 0.3074,
+   "withersZ": 0.613
   },
-  "head_husky": {
-   "triangles": 694
-  },
-  "tail_husky": {
-   "triangles": 182
-  },
-  "quad_body_wolf": {
-   "triangles": 1962
-  },
-  "quad_centaur_wolf": {
-   "triangles": 1362
-  },
-  "head_wolf": {
-   "triangles": 600
-  },
-  "tail_wolf": {
-   "triangles": 226
-  },
-  "quad_body_donkey": {
-   "triangles": 2000
-  },
-  "quad_centaur_donkey": {
-   "triangles": 1254
-  },
-  "head_donkey": {
-   "triangles": 746
-  },
-  "tail_donkey": {
-   "triangles": 122
-  },
-  "quad_body_cow": {
-   "triangles": 2450
-  },
-  "quad_centaur_cow": {
-   "triangles": 1360
-  },
-  "head_cow": {
-   "triangles": 1090
-  },
-  "tail_cow": {
-   "triangles": 142
-  },
-  "quad_body_deer": {
-   "triangles": 2098
-  },
-  "quad_centaur_deer": {
-   "triangles": 1258
-  },
-  "head_deer": {
-   "triangles": 840
-  },
-  "tail_deer": {
-   "triangles": 90
-  },
-  "quad_body_bull": {
-   "triangles": 2418
-  },
-  "quad_centaur_bull": {
-   "triangles": 1332
-  },
-  "head_bull": {
-   "triangles": 1086
-  },
-  "tail_bull": {
-   "triangles": 142
-  },
-  "quad_body_alpaca": {
-   "triangles": 2056
-  },
-  "quad_centaur_alpaca": {
-   "triangles": 1263
-  },
-  "head_alpaca": {
-   "triangles": 793
-  },
-  "tail_alpaca": {
-   "triangles": 66
-  },
-  "quad_body_horse": {
-   "triangles": 2182
-  },
-  "quad_centaur_horse": {
-   "triangles": 1419
-  },
-  "head_horse": {
-   "triangles": 763
-  },
-  "tail_horse": {
-   "triangles": 202
-  },
-  "quad_body_stag": {
-   "triangles": 2054
-  },
-  "quad_centaur_stag": {
-   "triangles": 1210
-  },
-  "head_stag": {
-   "triangles": 844
-  },
-  "tail_stag": {
-   "triangles": 91
-  },
-  "head_dragon": {
-   "rescale": 1.0,
-   "triangles": 3520,
-   "dropped": 0,
-   "flipped": false,
-   "yMin": -0.064358,
-   "yMax": 0.295642
-  },
-  "tail_naga": {
-   "slim": 0.5027038284487279,
-   "triangles": 156,
-   "dropped": 0,
-   "flipped": false,
-   "windingRepaired": true,
-   "floodFlipped": 16,
-   "rootRingRadius": 0.1400015136868141,
-   "rootCenterY": -0.07403565834190093,
-   "rootCenterZ": -0.1212841923969251,
-   "lengthZ": 1.0555250574920307,
-   "groundY": -0.37613808137504845,
-   "yMin": -0.37613808137504845,
-   "yMax": 0.14468745393188673
-  },
-  "tail_reptile": {
-   "triangles": 156,
-   "dropped": 0,
-   "flipped": true,
-   "lengthZ": 0.7204259999999999,
-   "yMin": -0.3169066578947368,
-   "yMax": 0.09883134210526316
+  "wolf": {
+   "bindLength": 5.274368,
+   "bindWithers": 2.663733,
+   "bodyMinZ": -0.47131,
+   "display": "Wolf",
+   "earRightTriangles": 336,
+   "earSockets": [
+    {
+     "center": [
+      0.04727,
+      0.08952,
+      0.12365
+     ],
+     "direction": [
+      0.31185,
+      0.56342,
+      0.76506
+     ],
+     "quat": [
+      0.432654,
+      0.0,
+      -0.17636,
+      0.884142
+     ],
+     "side": "left"
+    },
+    {
+     "center": [
+      -0.04722,
+      0.08952,
+      0.12365
+     ],
+     "direction": [
+      -0.34273,
+      0.59398,
+      0.72782
+     ],
+     "quat": [
+      0.40763,
+      0.0,
+      0.191954,
+      0.892744
+     ],
+     "side": "right"
+    }
+   ],
+   "earTriangles": 340,
+   "groundY": -0.73963,
+   "headMorphs": [
+    "muzzle",
+    "eyes"
+   ],
+   "headRingRadius": 0.093,
+   "headTriangles": 552,
+   "lengthZ": 1.20347,
+   "quadGroundY": -0.73963,
+   "quadTriangles": 3284,
+   "quadWithersY": 0.29739,
+   "source": "Wolf",
+   "stumpCenter": [
+    -0.0,
+    0.06911,
+    0.67763
+   ],
+   "stumpNormal": [
+    -0.0,
+    0.30107,
+    0.9536
+   ],
+   "stumpRadius": 0.145,
+   "tailExtent": [
+    0.10364,
+    0.10332,
+    0.45225
+   ],
+   "tailLength": 0.68,
+   "tailRootRadius": 0.10275,
+   "tailStumpCenter": [
+    0.0,
+    -0.01825,
+    -0.39109
+   ],
+   "tailStumpNormal": [
+    -0.0,
+    0.32663,
+    0.94515
+   ],
+   "tailStumpRadius": 0.05862,
+   "tailTriangles": 456,
+   "taurCappedRings": [
+    0.145,
+    0.05862,
+    0.05532,
+    0.04989,
+    0.05532,
+    0.04989
+   ],
+   "taurScale": 0.391522,
+   "taurTriangles": 1040,
+   "withersY": 0.19323,
+   "withersZ": 0.66881
   }
  }
 }

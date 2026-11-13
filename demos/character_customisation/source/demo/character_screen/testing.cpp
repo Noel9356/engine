@@ -46,11 +46,7 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         {
             applied = setPlan(0) && setParameter("body.plan", 0.0f);
         }
-        activeHeadPart_ = "head_human";
-        setHeadCount(1);
-        const InstanceId head = instanceByName("head");
-        applied = applied && head != engine::character::invalidInstance
-            && character_->replacePart(character_->self, characterHandle_, head, activeHeadPart_.c_str(), &error);
+        applied = setHeadPart("head_human") && applied;
         setTail(true);
     }
     else if (name == "dragonhead")
@@ -59,25 +55,19 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         {
             applied = setPlan(0) && setParameter("body.plan", 0.0f);
         }
-        activeHeadPart_ = "head_dragon";
-        setHeadCount(1);
-        const InstanceId head = instanceByName("head");
-        applied = applied && head != engine::character::invalidInstance
-            && character_->replacePart(character_->self, characterHandle_, head, activeHeadPart_.c_str(), &error);
+        applied = setHeadPart("head_dragon") && applied;
         setTail(true);
     }
     else if (name == "furryfox")
     {
-        // Furry-fandom look: fox head graft + fox tail on the humanoid plan.
+        // Furry-fandom look: fox head + fox ears + fox tail on the humanoid
+        // plan.
         if (activePlan_ != 0)
         {
             applied = setPlan(0) && setParameter("body.plan", 0.0f);
         }
-        activeHeadPart_ = "head_fox";
-        setHeadCount(1);
-        const InstanceId head = instanceByName("head");
-        applied = applied && head != engine::character::invalidInstance
-            && character_->replacePart(character_->self, characterHandle_, head, "head_fox", &error);
+        applied = setHeadPart("head_fox") && applied;
+        applied = setEarParts("ear_fox_left") && applied;
         applied = setTailPart("tail_fox") && applied;
         setTail(true);
     }
@@ -87,41 +77,37 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         {
             applied = setPlan(0) && setParameter("body.plan", 0.0f);
         }
-        activeHeadPart_ = "head_wolf";
-        setHeadCount(1);
-        const InstanceId head = instanceByName("head");
-        applied = applied && head != engine::character::invalidInstance
-            && character_->replacePart(character_->self, characterHandle_, head, "head_wolf", &error);
+        applied = setHeadPart("head_wolf") && applied;
+        applied = setEarParts("ear_wolf_left") && applied;
         applied = setTailPart("tail_wolf") && applied;
         setTail(true);
     }
-    else if (name == "centaur")
+    else if (name == "bare")
+    {
+        if (activePlan_ != 0)
+        {
+            applied = setPlan(0) && setParameter("body.plan", 0.0f);
+        }
+        applied = setOutfit(false) && applied;
+    }
+    else if (name == "taur")
     {
         applied = setPlan(1) && setParameter("body.plan", 1.0f);
-        setHeadCount(1);
-    }
-    else if (name == "naga")
-    {
-        applied = setPlan(2) && setParameter("body.plan", 2.0f);
-        setHeadCount(1);
+        setTail(true);
     }
     else if (name == "quadruped")
     {
-        applied = setPlan(3) && setParameter("body.plan", 3.0f);
-        setHeadCount(1);
+        applied = setPlan(2) && setParameter("body.plan", 2.0f);
     }
-    else if (name == "horse" || name == "wolf" || name == "deer" || name == "bull" || name == "fox"
-        || name == "stag" || name == "husky" || name == "cow" || name == "donkey" || name == "alpaca")
+    else if (name == "fox" || name == "shiba" || name == "husky" || name == "wolf" || name == "donkey"
+        || name == "cow" || name == "deer" || name == "bull" || name == "alpaca" || name == "horse"
+        || name == "stag")
     {
         // Quadruped species variant: the WHOLE animal (own head, own tail).
-        // quadSpecies_ is deliberately NOT assigned here: setQuadSpecies()
-        // early-returns when the field already equals the request, so
-        // pre-assigning it silently skipped the body replacement (rev-7
-        // bug - every species preset rendered the horse).
         int speciesIndex = -1;
-        for (int index = 0; index < kQuadSpeciesCount; ++index)
+        for (int index = 0; index < metrics::kSpeciesCount; ++index)
         {
-            if (name == kQuadSpeciesIds[index])
+            if (name == metrics::kSpecies[index].id)
             {
                 speciesIndex = index;
                 break;
@@ -131,32 +117,32 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         {
             speciesIndex = 0;
         }
-        if (activePlan_ != 3)
+        if (activePlan_ != 2)
         {
-            applied = setPlan(3) && setParameter("body.plan", 3.0f);
+            applied = setPlan(2) && setParameter("body.plan", 2.0f);
         }
         applied = setQuadSpecies(speciesIndex) && applied;
     }
-    else if (name == "shiba")
+    else if (name == "shibainu")
     {
         // the shiba's registry id differs from the preset name
-        if (activePlan_ != 3)
+        if (activePlan_ != 2)
         {
-            applied = setPlan(3) && setParameter("body.plan", 3.0f);
+            applied = setPlan(2) && setParameter("body.plan", 2.0f);
         }
         applied = setQuadSpecies(1) && applied;
     }
-    else if (name.rfind("centaur_", 0) == 0)
+    else if (name.rfind("taur_", 0) == 0)
     {
-        // Centaur plan on a chosen species: the plan first (the profile's
+        // Taur plan on a chosen species: the plan first (the profile's
         // default hindquarters), then the species swap on the live assembly.
         applied = setPlan(1) && setParameter("body.plan", 1.0f);
-        setHeadCount(1);
+        setTail(true);
         int speciesIndex = -1;
-        const std::string species = name.substr(8);
-        for (int index = 0; index < kQuadSpeciesCount; ++index)
+        const std::string species = name.substr(5);
+        for (int index = 0; index < metrics::kSpeciesCount; ++index)
         {
-            if (species == kQuadSpeciesIds[index])
+            if (species == metrics::kSpecies[index].id)
             {
                 speciesIndex = index;
                 break;
@@ -164,7 +150,7 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         }
         if (speciesIndex < 0)
         {
-            std::fprintf(stderr, "demo: unknown centaur species '%s'\n", species.c_str());
+            std::fprintf(stderr, "demo: unknown taur species '%s'\n", species.c_str());
             applied = false;
         }
         else
@@ -172,34 +158,9 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
             applied = setQuadSpecies(speciesIndex) && applied;
         }
     }
-    else if (name == "twoheaded")
+    else if (name == "winged")
     {
-        // Two heads sharing the collar connector (hydra-style spread).
-        applied = setHeadCount(2);
-        if (activeHeadPart_ != "head_dragon")
-        {
-            activeHeadPart_ = "head_dragon";
-            for (const char *headName : {"head", "head2", "head3"})
-            {
-                const InstanceId head = instanceByName(headName);
-                if (head != engine::character::invalidInstance)
-                {
-                    character_->replacePart(character_->self, characterHandle_, head, "head_dragon", &error);
-                }
-            }
-        }
-    }
-    else if (name == "threewings")
-    {
-        applied = setWingPairs(3);
-    }
-    else if (name == "fourarms")
-    {
-        applied = setArmPairs(3);
-    }
-    else if (name == "wingedtail")
-    {
-        applied = setWingPairs(1) && setTail(true);
+        applied = setWings(true) && setTail(true);
     }
     else if (name == "tall")
     {
@@ -213,11 +174,33 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         applied = setParameter("body.width", 1.45f) && setParameter("body.muscle_mass", 1.55f)
                && setParameter("limbs.thickness", 1.55f);
     }
+    else if (name == "longmuzzle")
+    {
+        if (activePlan_ != 0)
+        {
+            applied = setPlan(0) && setParameter("body.plan", 0.0f);
+        }
+        applied = setHeadPart("head_fox") && applied;
+        applied = setEarParts("ear_fox_left") && applied;
+        applied = setParameter("muzzle.length", 1.35f) && setParameter("eyes.width", 1.20f) && applied;
+        refreshDeformations();
+    }
+    else if (name == "marked")
+    {
+        applied = setParameter("fur.markings", 3.0f) && setParameter("fur.coat", 1.0f);
+        refreshDeformations();
+    }
     else if (name == "longtail")
     {
         // Tail length range end on the tailed humanoid.
         applied = setPlan(0) && setTail(true) && setParameter("tail.length", 1.50f)
                && setParameter("tail.thickness", 1.65f);
+    }
+    else if (name == "bigtaur")
+    {
+        // Lower-body size range end on the taur plan.
+        applied = setPlan(1) && setParameter("taur.scale", 1.40f);
+        applyParameterHeights();
     }
     else if (name == "compact")
     {
@@ -229,8 +212,8 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     }
     else if (name == "noappend")
     {
-        // Strip every optional appendage.
-        applied = setWingPairs(0) && setHeadCount(1) && setArmPairs(1) && setTail(false);
+        // Strip every optional appendage and the outfit.
+        applied = setWings(false) && setTail(false) && setOutfit(false);
     }
     else
     {
@@ -264,7 +247,7 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     return evaluated;
 }
 
-// ---- the design document's first implementation test -----------------------------
+// ---- the design document's assembly test ------------------------------------------
 
 bool CharacterScreen::runSelfTest()
 {
@@ -297,123 +280,124 @@ bool CharacterScreen::runSelfTest()
     resetToDefault();
     check("humanoid profile validates", activePlan_ == 0 && evaluateCharacter(true) && issues_.empty());
 
-    // 2. Every head variant swaps on the live assembly (downloaded meshes:
-    //    the human, the dragon, and every species graft).
+    // 2. Every head variant swaps on the live assembly, and every species
+    //    head auto-wears its matching ear pair.
     CharacterError error = CharacterError::None;
     bool headsOk = true;
-    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
-        std::string speciesHead = std::string("head_") + kQuadSpeciesIds[species];
-        const InstanceId head = instanceByName("head");
-        headsOk = headsOk && head != engine::character::invalidInstance
-            && character_->replacePart(character_->self, characterHandle_, head, speciesHead.c_str(), &error);
+        const bool socketed = metrics::kSpecies[species].hasEarSockets;
+        activeEarPart_.clear(); // force the auto-match on the next swap
+        headsOk = setHeadPart(std::string("head_") + metrics::kSpecies[species].id) && headsOk;
+        if (socketed)
+        {
+            headsOk = activeEarPart_ == std::string("ear_") + metrics::kSpecies[species].id + "_left" && headsOk;
+            headsOk = instanceByName("ear_left") != engine::character::invalidInstance && headsOk;
+        }
+        else
+        {
+            // ears (and horns) belong to that species' head mesh
+            headsOk = instanceByName("ear_left") == engine::character::invalidInstance && headsOk;
+        }
     }
     for (const char *headId : {"head_human", "head_dragon"})
     {
-        const InstanceId head = instanceByName("head");
-        headsOk = headsOk && head != engine::character::invalidInstance
-            && character_->replacePart(character_->self, characterHandle_, head, headId, &error);
+        headsOk = setHeadPart(headId) && headsOk;
     }
-    check("head variants swap", headsOk);
-    activeHeadPart_ = "head_human";
+    check("head variants swap with ears", headsOk);
+    setHeadPart("head_human");
+
+    // 3. Ear styles cross-graft: any species ears on the fox head.
     {
-        const InstanceId head = instanceByName("head");
-        character_->replacePart(character_->self, characterHandle_, head, "head_human", &error);
+        bool earsOk = setHeadPart("head_fox");
+        earsOk = setEarParts("ear_wolf_left") && earsOk;
+        earsOk = setEarParts("ear_deer_left") && earsOk;
+        check("ear styles swap on species heads", earsOk && instanceByName("ear_left") != engine::character::invalidInstance);
+        setHeadPart("head_human");
     }
 
-    // 3. The dragon head grafts onto the human collar (its own neck buries
-    //    inside the collar overlap).
-    {
-        const InstanceId head = instanceByName("head");
-        const bool swapped = character_->replacePart(character_->self, characterHandle_, head, "head_dragon", &error);
-        activeHeadPart_ = "head_dragon";
-        check("dragon head grafts on humanoid", swapped && evaluateCharacter(true) && issues_.empty());
-        const InstanceId back = instanceByName("head");
-        character_->replacePart(character_->self, characterHandle_, back, "head_human", &error);
-        activeHeadPart_ = "head_human";
-    }
-
-    // 4. Head count 1..3 attaches and removes extra skulls on one connector.
-    bool heads3Ok = setHeadCount(3) && evaluateCharacter(true) && issues_.empty();
-    check("three heads attach", heads3Ok
-        && instanceByName("head2") != engine::character::invalidInstance
-        && instanceByName("head3") != engine::character::invalidInstance);
-    check("head count back to one", setHeadCount(1)
-        && instanceByName("head2") == engine::character::invalidInstance
-        && instanceByName("head3") == engine::character::invalidInstance);
-
-    // 5. Wing pairs 0..3 stack on the wither connectors.
-    check("three wing pairs attach", setWingPairs(3) && evaluateCharacter(true) && issues_.empty()
-        && instanceByName("wing3_left") != engine::character::invalidInstance);
-    check("wing pairs back to zero", setWingPairs(0)
-        && instanceByName("wing1_left") == engine::character::invalidInstance);
-
-    // 6. Arm pairs 1..3 along the torso.
-    check("three arm pairs attach", setArmPairs(3) && evaluateCharacter(true) && issues_.empty()
-        && instanceByName("arm3_left") != engine::character::invalidInstance);
-    check("arm pairs back to one", setArmPairs(1)
-        && instanceByName("arm2_left") == engine::character::invalidInstance);
-
-    // 7. The tail variants attach at the tailbone socket and swap live.
+    // 4. The tail variants attach at the humanoid tailbone and swap live.
     check("fox tail attaches", setTail(true) && evaluateCharacter(true) && issues_.empty()
         && instanceByName("tail") != engine::character::invalidInstance);
     bool tailsOk = true;
-    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
-        std::string speciesTail = std::string("tail_") + kQuadSpeciesIds[species];
-        tailsOk = setTailPart(speciesTail) && tailsOk;
+        tailsOk = setTailPart(std::string("tail_") + metrics::kSpecies[species].id) && tailsOk;
     }
     tailsOk = setTailPart("tail_reptile") && tailsOk;
     check("tail variants swap", tailsOk && evaluateCharacter(true) && issues_.empty());
     setTailPart("tail_fox");
     check("tail removes", setTail(false) && instanceByName("tail") == engine::character::invalidInstance);
 
-    // 8. The centaur plan rebuilds (quadruped hindquarters + torso + arms)
-    //    and EVERY species grafts the torso at its own measured stump
-    //    opening (rev-9 registered one horse rig for all species, so the
-    //    smaller animals floated below the torso).
-    check("centaur plan builds", setPlan(1) && evaluateCharacter(true) && issues_.empty()
+    // 5. The wing pair attaches and removes (exactly one pair).
+    check("wing pair attaches", setWings(true) && evaluateCharacter(true) && issues_.empty()
+        && instanceByName("wing_left") != engine::character::invalidInstance);
+    check("wing pair removes", setWings(false)
+        && instanceByName("wing_left") == engine::character::invalidInstance);
+
+    // 6. The outfit toggles: bare variants + garment overlays.
+    check("outfit swaps to bare", setOutfit(false) && evaluateCharacter(true) && issues_.empty()
+        && partIdOfInstance("torso") == "torso_bare");
+    check("outfit swaps back to ranger", setOutfit(true) && evaluateCharacter(true) && issues_.empty()
+        && partIdOfInstance("torso") == "torso_ranger"
+        && partIdOfInstance("belt") == "clothes_belt");
+    check("belt removes", setClothingPiece("belt", false) && instanceByName("belt") == engine::character::invalidInstance);
+    setClothingPiece("belt", true);
+    check("hood toggles", setClothingPiece("hood", true) && instanceByName("hood") != engine::character::invalidInstance
+        && setClothingPiece("hood", false) && instanceByName("hood") == engine::character::invalidInstance);
+
+    // 7. The taur plan rebuilds (lower body + chest + arms) and EVERY
+    //    species grafts the chest at its own measured stump; the tail
+    //    follows the lower body (the species tail by default, swappable).
+    check("taur plan builds", setPlan(1) && evaluateCharacter(true) && issues_.empty()
         && instanceByName("body") != engine::character::invalidInstance
         && instanceByName("chest") != engine::character::invalidInstance
         && instanceByName("leg_left") == engine::character::invalidInstance);
-    bool centaurSpeciesOk = true;
-    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    bool taurSpeciesOk = true;
+    for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
-        centaurSpeciesOk = setQuadSpecies(species) && centaurSpeciesOk && evaluateCharacter(true)
+        taurSpeciesOk = setQuadSpecies(species) && taurSpeciesOk && evaluateCharacter(true)
             && issues_.empty();
+        // the tail follows the species swap on the taur plan
+        taurSpeciesOk = activeTailPart_ == std::string("tail_") + metrics::kSpecies[species].id
+            && taurSpeciesOk;
     }
-    check("centaur species graft per species", centaurSpeciesOk);
+    check("taur species graft per species", taurSpeciesOk);
+    // the tail option still affects the taur lower body
+    check("taur tail attaches at the lower-body socket", setTail(true)
+        && instanceByName("tail") != engine::character::invalidInstance);
+    check("taur tail swaps cross-species",
+        setTailPart("tail_fox") && partIdOfInstance("tail") == "tail_fox"
+        && setTailPart("tail_wolf") && partIdOfInstance("tail") == "tail_wolf");
+    check("taur tail removes", setTail(false) && instanceByName("tail") == engine::character::invalidInstance
+        && setTail(true) && instanceByName("tail") != engine::character::invalidInstance);
 
-    // 9. The naga plan rebuilds (torso on the serpent lower body).
-    check("naga plan builds", setPlan(2) && evaluateCharacter(true) && issues_.empty()
-        && instanceByName("naga_body") != engine::character::invalidInstance
-        && instanceByName("leg_left") == engine::character::invalidInstance);
-
-    // 10. The quadruped plan rebuilds as the WHOLE animal (own head) and
-    //     swaps species live through all eleven downloaded animals.
-    check("quadruped plan builds", setPlan(3) && evaluateCharacter(true) && issues_.empty()
+    // 8. The quadruped plan rebuilds as the WHOLE animal (own head) and
+    //    swaps species live through all eleven downloaded animals.
+    check("quadruped plan builds", setPlan(2) && evaluateCharacter(true) && issues_.empty()
         && instanceByName("body") != engine::character::invalidInstance);
     bool quadrupedSpeciesOk = true;
-    for (int species = 0; species < kQuadSpeciesCount; ++species)
+    for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
         quadrupedSpeciesOk = setQuadSpecies(species) && quadrupedSpeciesOk && evaluateCharacter(true)
             && issues_.empty();
     }
     check("quadruped species swap", quadrupedSpeciesOk);
-    check("wing pairs on quadruped", setWingPairs(2) && evaluateCharacter(true) && issues_.empty());
-    setWingPairs(0);
 
-    // 11. Parameter range ends keep every plan valid (extremes re-validated).
+    // 9. Parameter range ends keep every plan valid (extremes re-validated),
+    //    including the lower-body scale on the taur.
     {
-        setPlan(0);
+        setPlan(1);
         CharacterError rangeError = CharacterError::None;
         character_->setParameter(character_->self, characterHandle_, "body.height", 1.35f, &rangeError);
         character_->setParameter(character_->self, characterHandle_, "body.width", 1.45f, &rangeError);
         character_->setParameter(character_->self, characterHandle_, "body.muscle_mass", 1.55f, &rangeError);
         character_->setParameter(character_->self, characterHandle_, "head.size", 1.35f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "limbs.length", 1.35f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "skin.tone", 4.0f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "fur.coat", 5.0f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "taur.scale", 1.40f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "muzzle.length", 1.35f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "eyes.width", 1.20f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "fur.markings", 3.0f, &rangeError);
+        refreshDeformations();
         applyParameterHeights();
         const bool extremesOk = evaluateCharacter(true) && issues_.empty();
         if (!issues_.empty())
@@ -427,9 +411,9 @@ bool CharacterScreen::runSelfTest()
         resetToDefault();
     }
 
-    // 12. Recipes round-trip on the new structure.
+    // 10. Recipes round-trip on the new structure.
     {
-        setWingPairs(1);
+        setWings(true);
         setTail(true);
         const bool saved = character_->saveRecipe(character_->self, characterHandle_, kRecipeFileName, &error);
         bool loaded = false;
@@ -438,11 +422,11 @@ bool CharacterScreen::runSelfTest()
             loaded = character_->loadRecipe(character_->self, characterHandle_, kRecipeFileName, &error);
         }
         check("recipe save + load", saved && loaded);
-        setWingPairs(0);
+        setWings(false);
         setTail(false);
     }
 
-    // 13. Animation drivers run without changing the structure.
+    // 11. Animation drivers run without changing the structure.
     updateAnimationDrivers(1.0 / 60.0, 1.0);
     evaluateCharacter(true);
     check("animation drivers keep assembly valid", issues_.empty());
@@ -451,6 +435,5 @@ bool CharacterScreen::runSelfTest()
     resetToDefault();
     return failed == 0;
 }
-
 
 } // namespace demo

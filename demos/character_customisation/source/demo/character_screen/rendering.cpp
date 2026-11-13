@@ -25,8 +25,9 @@ void CharacterScreen::drawCharacter()
     // skin.tone indexes a five-swatch palette (see the panel); the tint is a
     // draw-time material multiplier on the skin-tagged parts, so vertex
     // colors keep their shading detail underneath. fur.coat does the same
-    // for the downloaded animal grafts (species heads/tails) - the furry
-    // coat palette multiplies the pack's own base colors.
+    // for the downloaded animal grafts (species heads/ears/tails and the
+    // animal bodies) - the furry coat palette multiplies the pack's own base
+    // colors.
     float       skinTone = 0.0f;
     character_->getParameter(character_->self, characterHandle_, "skin.tone", &skinTone);
     static const glm::vec3 toneTints[5] = {
@@ -93,6 +94,5 @@ void CharacterScreen::drawCharacter()
 }
 
 // ---- UI ---------------------------------------------------------------------
-
 
 } // namespace demo

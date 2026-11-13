@@ -43,9 +43,16 @@ void CharacterScreen::handleWindowEvent(const WindowEvent &event)
             ui_->addMouseButton(ui_->self, uiContext_, button, mouseButtons_[button]);
         }
     }
+    else if (event.kind == WindowEventKind::MouseScrolled)
+    {
+        // Wheel scrolling feeds the UI (hovered window scrolls).
+        ui_->addMouseWheel(ui_->self, uiContext_, static_cast<float>(event.scrollX),
+            static_cast<float>(event.scrollY));
+    }
     else if (event.kind == WindowEventKind::FocusLost)
     {
-        orbitDragging_ = false;
+        orbitDragging_  = false;
+        middleScrolling_ = false;
     }
 }
 
@@ -76,6 +83,32 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
             mouseButtons_[button] = down;
             ui_->addMouseButton(ui_->self, uiContext_, button, down);
         }
+    }
+
+    // Middle-mouse grab scrolling: holding the middle button and dragging
+    // scrolls the hovered panel window (the same convention as the viewport
+    // orbit, so either hand can drive the panel).
+    if (mouseButtons_[2] && haveCursor)
+    {
+        if (!middleScrolling_)
+        {
+            middleScrolling_ = true;
+            middleLastX_     = cursorX;
+            middleLastY_     = cursorY;
+        }
+        const double deltaX = cursorX - middleLastX_;
+        const double deltaY = cursorY - middleLastY_;
+        middleLastX_ = cursorX;
+        middleLastY_ = cursorY;
+        if (std::fabs(deltaX) > 0.5 || std::fabs(deltaY) > 0.5)
+        {
+            ui_->addMouseWheel(ui_->self, uiContext_, static_cast<float>(deltaX * 0.02),
+                static_cast<float>(-deltaY * 0.02));
+        }
+    }
+    else
+    {
+        middleScrolling_ = false;
     }
 
     // Animation drivers, then a single evaluation pass per frame: drivers
@@ -179,75 +212,111 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
 void CharacterScreen::updateAnimationDrivers(double deltaSeconds, double elapsedSeconds)
 {
     (void)deltaSeconds;
-    // Tail sway: the reptile tail is one rigid piece riding its root
-    // connection offset, so the sway is a yaw oscillation of that offset
-    // (the module re-derives the attached part's transform from the
-    // connectors). The naga lower body sways slower with the whole body.
-    const float nagaSway = animateTail_ && tailSwaySpeed_ > 0.01f
-        ? std::sin(static_cast<float>(elapsedSeconds) * 0.9f * tailSwaySpeed_) * 0.08f * tailSwaySpeed_
-        : 0.0f;
-    const struct
+    // Tail sway: the tail is one rigid piece riding its root connection
+    // offset, so the sway is a yaw oscillation of that offset (the module
+    // re-derives the attached part's transform from the connectors).
+    if (tailPresent_)
     {
-        const char *name;
-        float       phase;
-        float       amplitude;
-    } tails[] = {
-        {"tail", 0.0f, 0.16f},
-        {"naga_body", 1.1f, 0.0f}, // naga uses nagaSway below
-    };
-    for (const auto &entry : tails)
-    {
-        const InstanceId instance = instanceByName(entry.name);
-        if (instance == engine::character::invalidInstance)
+        const InstanceId tail = instanceByName("tail");
+        if (tail != engine::character::invalidInstance && animateTail_ && tailSwaySpeed_ > 0.01f)
         {
-            continue;
+            const float sway = std::sin(static_cast<float>(elapsedSeconds) * 1.7f * tailSwaySpeed_) * 0.14f
+                             * tailSwaySpeed_;
+            float rotation[4];
+            setYawRotation(rotation, sway);
+            character_->setConnectionOffset(character_->self, characterHandle_, tail, nullptr, rotation);
         }
-        const float amplitude = entry.amplitude > 0.0f ? entry.amplitude : std::fabs(nagaSway);
-        float sway = 0.0f;
-        if (animateTail_ && tailSwaySpeed_ > 0.01f)
-        {
-            sway = std::sin(static_cast<float>(elapsedSeconds) * 1.7f * tailSwaySpeed_ + entry.phase) * amplitude
-                 * tailSwaySpeed_;
-        }
-        float rotation[4];
-        setYawRotation(rotation, sway);
-        character_->setConnectionOffset(character_->self, characterHandle_, instance, nullptr, rotation);
     }
 
     // Wing flap: rotate the connection offsets around the forward axis; the
-    // right wing's socket is mirrored, so the sign flips. Up to three pairs
-    // flap with a phase offset per pair (lower pairs trail the upper pair).
-    // The flap COMPOSES with the authored per-slot outward roll instead of
-    // replacing it: rev-9 wrote a fresh roll-only rotation every frame,
-    // which threw away the stacked pairs' stagger (-12/-22 deg) and collapsed
-    // them all into the same roll as soon as they animated. Both rotations
-    // are rolls about the same axis, so composition is an angle sum.
-    for (int slot = 1; slot <= wingPairs_; ++slot)
+    // right wing's socket is mirrored, so the sign flips. The flap COMPOSES
+    // with the authored outward roll: both rotations are rolls about the
+    // same axis, so composition is an angle sum.
+    for (const char *wingName : {"wing_left", "wing_right"})
     {
+        const InstanceId wing = instanceByName(wingName);
+        if (wing == engine::character::invalidInstance)
+        {
+            continue;
+        }
         const float flap = animateWings_
-            ? std::sin(static_cast<float>(elapsedSeconds) * 2.4f - 0.55f * static_cast<float>(slot - 1)) * 0.15f
+            ? std::sin(static_cast<float>(elapsedSeconds) * 2.4f) * 0.15f
             : 0.0f;
-        const float authoredRoll = slot >= 0 && slot < static_cast<int>(wingSlotRolls_.size())
-            ? wingSlotRolls_[static_cast<std::size_t>(slot)]
-            : 0.0f;
-        const std::string leftName = "wing" + std::to_string(slot) + "_left";
-        const std::string rightName = "wing" + std::to_string(slot) + "_right";
-        const InstanceId wingLeft = instanceByName(leftName);
-        if (wingLeft != engine::character::invalidInstance)
-        {
-            float rotation[4];
-            setRollRotation(rotation, authoredRoll + flap);
-            character_->setConnectionOffset(character_->self, characterHandle_, wingLeft, nullptr, rotation);
-        }
-        const InstanceId wingRight = instanceByName(rightName);
-        if (wingRight != engine::character::invalidInstance)
-        {
-            float rotation[4];
-            setRollRotation(rotation, -authoredRoll - flap);
-            character_->setConnectionOffset(character_->self, characterHandle_, wingRight, nullptr, rotation);
-        }
+        const float authoredRoll = wingName[4] == 'l' ? -8.0f : 8.0f;
+        float rotation[4];
+        setRollRotation(rotation, glm::radians(authoredRoll + flap));
+        character_->setConnectionOffset(character_->self, characterHandle_, wing, nullptr, rotation);
     }
 }
 
+bool CharacterScreen::renderPartPreviews(const std::string &previewDirectory,
+    const std::function<bool(const std::string &)> &exportPpm)
+{
+    // Render one standalone frame per registered part: neutral three-quarter
+    // camera framed on the part's bounds, the stage sky behind it, and a
+    // PPM surface export per part. The capture host converts the PPM files
+    // to PNG thumbnails for the panel (assets/previews/<partId>.png).
+    if (!created_ || character_ == nullptr)
+    {
+        return false;
+    }
+    std::printf("part-previews: rendering part thumbnails into %s\n", previewDirectory.c_str());
+    const std::vector<std::string> slots = {"head", "ears", "tail", "wings", "torso", "arms", "legs",
+        "garment", "quadruped"};
+    std::uint32_t rendered = 0;
+    for (const std::string &slot : slots)
+    {
+        for (const std::string &partId : content_.partsInSlot(slot))
+        {
+            const PartRenderInfo *info = content_.renderInfoForPart(partId);
+            if (info == nullptr)
+            {
+                continue;
+            }
+            const MeshHandle mesh = content_.meshForGeometry(info->geometryId);
+            if (mesh == engine::renderer::invalidMesh)
+            {
+                continue;
+            }
+            // Frame the part's own geometry bounds.
+            float boundsCenter[3] = {0.0f, 0.0f, 0.0f};
+            float boundsRadius    = 0.3f;
+            if (!content_.geometryBounds(info->geometryId, boundsCenter, &boundsRadius))
+            {
+                continue;
+            }
+            const float targetY = boundsCenter[1];
+            // Tight framing: the bounding sphere fills most of the tile.
+            const float distance = std::clamp(boundsRadius * 1.85f, 0.35f, 2.8f);
+            configureCamera(38.0f, 10.0f, distance, targetY);
+            // Push the camera's view state into the renderer (configureCamera
+            // only sets the camera; the renderer needs the matrices).
+            std::uint32_t previewWidth  = 0;
+            std::uint32_t previewHeight = 0;
+            window_->getFramebufferSize(window_->self, windowHandle_, &previewWidth, &previewHeight);
+            engine::camera::ViewState previewView;
+            camera_->viewState(camera_->self, cameraHandle_, previewWidth, previewHeight, &previewView);
+            engine::renderer::CameraMatrices previewMatrices;
+            std::memcpy(previewMatrices.view, previewView.view, sizeof(previewMatrices.view));
+            std::memcpy(previewMatrices.projection, previewView.projection, sizeof(previewMatrices.projection));
+            std::memcpy(previewMatrices.position, previewView.position, sizeof(previewMatrices.position));
+            render_->setCamera(render_->self, rendererHandle_, &previewMatrices);
+            render_->beginFrame(render_->self, rendererHandle_, nullptr);
+            stage_.drawSkyAndSun();
+            const float identity[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                0.0f, 0.0f, 0.0f, 1.0f};
+            engine::renderer::MeshMaterial material = info->material;
+            render_->drawMesh(render_->self, rendererHandle_, mesh, identity, &material);
+            render_->endFrame(render_->self, rendererHandle_);
+            const std::string ppmPath = previewDirectory + "/" + partId + ".ppm";
+            if (exportPpm(ppmPath))
+            {
+                ++rendered;
+            }
+        }
+    }
+    std::printf("part-previews: %u thumbnails rendered\n", rendered);
+    return rendered > 0;
+}
 
 } // namespace demo

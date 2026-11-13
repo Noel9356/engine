@@ -32,9 +32,11 @@ const char *optionsUsage() noexcept
            "  --character-test         Run the character assembly test operations, then exit.\n"
            "  --character-lab          Run the merged Character Lab Lua exercise (script_runtime bridge).\n"
            "  --character-drive <name> Apply a named configuration (human, dragonhead, furryfox, furrywolf,\n"
-           "                           centaur, naga, quadruped, fox, shiba, husky, wolf, donkey, cow, deer,\n"
-           "                           bull, alpaca, horse, stag, twoheaded, threewings, fourarms, wingedtail,\n"
-           "                           tall, broad, longtail, compact, noappend).\n";
+           "                           bare, taur, quadruped, fox, shiba, husky, wolf, donkey, cow, deer,\n"
+           "                           bull, alpaca, horse, stag, taur_<species>, winged, tall, broad,\n"
+           "                           longmuzzle, marked, longtail, bigtaur, compact, noappend).\n"
+           "  --part-previews <dir>    Render one standalone preview frame per part (PPM) and exit.\n"
+           "  --panel-tab <0-4>        Open the studio panel on this tab (Plan/Body/Parts/Motion/File).\n";
 }
 
 // Strict flag parser: every recognized flag consumes the next token as its
@@ -50,7 +52,8 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
             && argument != "--camera" && argument != "--camera-yaw" && argument != "--camera-pitch"
             && argument != "--orbit-distance" && argument != "--camera-target-y" && argument != "--hide-panel"
             && argument != "--view" && argument != "--character-test" && argument != "--character-lab"
-            && argument != "--character-drive")
+            && argument != "--character-drive" && argument != "--part-previews"
+            && argument != "--panel-tab")
         {
             outError = "unknown application argument '" + argument + "'";
             return false;
@@ -65,6 +68,16 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
             parsedOptions.characterLab = true;
             continue;
         }
+        if (argument == "--part-previews")
+        {
+            if (index + 1 >= arguments.size() || arguments[index + 1].starts_with("--"))
+            {
+                outError = "missing value for --part-previews";
+                return false;
+            }
+            parsedOptions.partPreviewsDirectory = arguments[++index];
+            continue;
+        }
         if (argument == "--hide-panel")
         {
             parsedOptions.hidePanel = true;
@@ -77,7 +90,18 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         }
 
         const std::string &value = arguments[++index];
-        if (argument == "--screenshot")
+        if (argument == "--panel-tab")
+        {
+            char           *end    = nullptr;
+            const long long parsed = std::strtoll(value.c_str(), &end, 10);
+            if (end == value.c_str() || *end != '\0' || parsed < 0 || parsed > 4)
+            {
+                outError = "--panel-tab expects a value in 0..4";
+                return false;
+            }
+            parsedOptions.panelTab = static_cast<int>(parsed);
+        }
+        else if (argument == "--screenshot")
         {
             parsedOptions.screenshotPath = value;
         }
@@ -95,20 +119,19 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         else if (argument == "--character-drive")
         {
             static const char *const allowedPresets[] = {"human", "dragonhead", "furryfox", "furrywolf",
-                "centaur", "naga", "quadruped", "fox", "shiba", "husky", "wolf", "donkey", "cow", "deer",
-                "bull", "alpaca", "horse", "stag", "twoheaded", "threewings", "fourarms", "wingedtail",
-                "tall", "broad", "longtail", "compact", "noappend",
-                "centaur_fox", "centaur_shibainu", "centaur_husky", "centaur_wolf", "centaur_donkey",
-                "centaur_cow", "centaur_deer", "centaur_bull", "centaur_alpaca", "centaur_horse",
-                "centaur_stag"};
+                "bare", "taur", "quadruped", "fox", "shiba", "husky", "wolf", "donkey", "cow", "deer",
+                "bull", "alpaca", "horse", "stag", "winged", "tall", "broad", "longmuzzle", "marked",
+                "longtail", "bigtaur", "compact", "noappend",
+                "taur_fox", "taur_shibainu", "taur_husky", "taur_wolf", "taur_donkey",
+                "taur_cow", "taur_deer", "taur_bull", "taur_alpaca", "taur_horse", "taur_stag"};
             const bool allowed = std::find(std::begin(allowedPresets), std::end(allowedPresets), value)
                               != std::end(allowedPresets);
             if (!allowed)
             {
                 outError = "invalid character drive preset '" + value
-                         + "'; expected human, dragonhead, furryfox, furrywolf, centaur, naga, quadruped, fox,"
-                           " shiba, husky, wolf, donkey, cow, deer, bull, alpaca, horse, stag, twoheaded,"
-                           " threewings, fourarms, wingedtail, tall, broad, longtail, compact, or noappend";
+                         + "'; expected human, dragonhead, furryfox, furrywolf, bare, taur, quadruped, fox,"
+                           " shiba, husky, wolf, donkey, cow, deer, bull, alpaca, horse, stag, taur_<species>,"
+                           " winged, tall, broad, longmuzzle, marked, longtail, bigtaur, compact, or noappend";
                 return false;
             }
             parsedOptions.characterDrive = value;

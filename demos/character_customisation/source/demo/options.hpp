@@ -30,6 +30,8 @@ struct Options
     bool          characterTest = false;       // --character-test: run the assembly test operations and exit.
     bool          characterLab = false;        // --character-lab: run the merged character_lab Lua exercise.
     std::string   characterDrive;              // --character-drive: named configuration for the character screen.
+    std::string   partPreviewsDirectory;       // --part-previews: render one PPM per part into this directory.
+    int           panelTab = -1;               // --panel-tab: open the studio panel on this tab (captures).
 };
 
 // One-line description of the application flags, appended to --help output.

@@ -46,12 +46,18 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
         content_.destroy(*character_, *render_, rendererHandle_);
         return false;
     }
+    // Preview thumbnails (rendered offline by --part-previews; optional).
+    if (!content_.loadPreviewTextures(assetRoot))
+    {
+        std::fprintf(stderr, "demo: part preview thumbnails not found; the panel falls back to text\n");
+    }
 
     stage_.create(*render_, rendererHandle_);
 
     // Default character from the humanoid body-plan profile.
     CharacterError        error  = CharacterError::None;
-    const CharacterHandle handle = character_->createAssembly(character_->self, humanoidProfileId, &error);
+    const CharacterHandle handle = character_->createAssembly(character_->self, CharacterContent::humanoidProfileId,
+        &error);
     if (handle == engine::character::invalidCharacter)
     {
         std::fprintf(stderr,
@@ -64,10 +70,17 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
     }
     characterHandle_ = handle;
     activePlan_      = 0;
-    headCount_       = 1;
-    wingPairs_       = 0;
-    armPairs_        = 1;
+    activeHeadPart_  = "head_human";
+    activeEarPart_.clear();
+    activeTailPart_  = "tail_fox";
+    quadSpecies_     = 0;
+    wingsPresent_    = false;
     tailPresent_     = false;
+    clothed_         = true;
+    beltPresent_     = true;
+    bracersPresent_  = true;
+    pauldronsPresent_ = true;
+    hoodPresent_     = false;
 
     // Orbit camera around the character: three-quarter view from the
     // character's front-right so the face stays visible and the tail reads
@@ -84,6 +97,11 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
 void CharacterScreen::setPanelVisible(bool visible)
 {
     panelVisible_ = visible;
+}
+
+void CharacterScreen::setPanelTab(int tab)
+{
+    activePanelTab_ = std::clamp(tab, 0, 4);
 }
 
 void CharacterScreen::setUserCameraFraming(bool user)
@@ -134,6 +152,31 @@ const engine::character::ParameterDefinition *CharacterScreen::parameterDefiniti
         }
     }
     return nullptr;
+}
+
+void CharacterScreen::refreshDeformations()
+{
+    // Morphs + markings re-derive the affected meshes whenever their
+    // parameters change (change-time work, never per frame).
+    float muzzle = 1.0f;
+    float eyes   = 1.0f;
+    character_->getParameter(character_->self, characterHandle_, "muzzle.length", &muzzle);
+    character_->getParameter(character_->self, characterHandle_, "eyes.width", &eyes);
+    content_.applyHeadMorphs(muzzle - 1.0f, eyes - 1.0f);
+    float markings = 0.0f;
+    character_->getParameter(character_->self, characterHandle_, "fur.markings", &markings);
+    float furCoat = 0.0f;
+    character_->getParameter(character_->self, characterHandle_, "fur.coat", &furCoat);
+    static const float markingTints[6][3] = {
+        {0.96f, 0.94f, 0.90f},
+        {0.96f, 0.94f, 0.90f},
+        {0.96f, 0.94f, 0.90f},
+        {0.96f, 0.94f, 0.90f},
+        {0.98f, 0.94f, 0.84f},
+        {0.90f, 0.93f, 0.98f},
+    };
+    const int coat = std::clamp(static_cast<int>(furCoat + 0.5f), 0, 5);
+    content_.applyMarkings(std::clamp(static_cast<int>(markings + 0.5f), 0, 3), markingTints[coat]);
 }
 
 void CharacterScreen::destroy()
@@ -241,6 +284,5 @@ void CharacterScreen::destroyUiContext()
 }
 
 // ---- assembly helpers ---------------------------------------------------------
-
 
 } // namespace demo

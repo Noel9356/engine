@@ -1,12 +1,6 @@
 # lumen_gi configuration
 
-Every key of the `[lumen_gi]` configuration section, in TOML path form. All
-keys are optional; missing, out-of-range, or non-finite values fall back to
-the defaults below. Keys reload live through `ConfigurationReloadedEvent`:
-budget and quality keys apply on the next `evaluate()`, while capacity keys
-(probe spacing/resolution, debug resolution, surface limits) rebuild the
-affected structures. Defaults follow Lumen's published budgets scaled for CPU
-evaluation.
+Every key of the `[lumen_gi]` configuration section, in TOML path form. All keys are optional; missing, out-of-range, or non-finite values fall back to the defaults below. Keys reload live through `ConfigurationReloadedEvent`: budget and quality keys apply on the next `evaluate()`, while capacity keys (probe spacing/resolution, debug resolution, surface limits) rebuild the affected structures. Defaults follow Lumen's published budgets scaled for CPU evaluation.
 
 ## Core
 
@@ -89,8 +83,4 @@ The gather only feeds the debug views (the renderer consumes the world probe gri
 
 ## Device resolution
 
-`resolveProfile` scales the four budgets for a `renderer::DeviceProfile` the
-same way the render graph does: Vulkan discrete 1.0x, integrated 0.5x,
-otherwise 0.25x (CPU devices get the 0.25x floor). The configured values are
-caps; the profile result is what a consumer should hand to a runtime that
-cannot afford the configured budgets.
+`resolveProfile` scales the four budgets for a `renderer::DeviceProfile` the same way the render graph does: Vulkan discrete 1.0x, integrated 0.5x, otherwise 0.25x (CPU devices get the 0.25x floor). The configured values are caps; the profile result is what a consumer should hand to a runtime that cannot afford the configured budgets.

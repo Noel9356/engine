@@ -39,15 +39,17 @@ inline constexpr const char *kFontRelativePath = "fonts/Inter-Variable.ttf";
 inline bool isSkinPart(const char *partId)
 {
     // Parts that read as bare skin and take the skin.tone palette. The
-    // revision-9 list carried stale ids (torso_humanoid, arm_humanoid_*,
-    // neck_transition) that matched nothing, so the tone only ever hit the
-    // human head; these are the current registry ids.
-    static constexpr const char *skinParts[] = {
-        "torso_ranger", "arm_human_left", "arm_human_right", "leg_human_left", "leg_human_right",
-        "head_human",
-    };
+    // ranger garment pieces keep their authored cloth colors.
     if (partId == nullptr)
         return false;
+    static constexpr const char *skinParts[] = {
+        "torso_bare",
+        "arm_bare_left",
+        "arm_bare_right",
+        "leg_bare_left",
+        "leg_bare_right",
+        "head_human",
+    };
     for (const char *candidate : skinParts)
         if (std::strcmp(partId, candidate) == 0)
             return true;
@@ -56,18 +58,18 @@ inline bool isSkinPart(const char *partId)
 
 inline bool isFurPart(const char *partId)
 {
-    // Downloaded animal grafts (species heads and species tails) take the
-    // fur.coat palette instead of the skin palette. The Cethiel serpent and
-    // reptile pieces and the dragon head keep their authored look (they are
-    // not furry), and the quadruped bodies are whole animals whose look is
-    // the source pack's own coat.
+    // Downloaded animal grafts (species heads, ears, tails, and the taur /
+    // quadruped animal bodies) take the fur.coat palette. The Cethiel
+    // reptile piece and the dragon head keep their authored look (they are
+    // not furry).
     if (partId == nullptr)
         return false;
-    static constexpr const char *excluded[] = {"head_human", "head_dragon", "tail_reptile", "tail_naga"};
+    static constexpr const char *excluded[] = {"head_human", "head_dragon", "tail_reptile"};
     for (const char *candidate : excluded)
         if (std::strcmp(partId, candidate) == 0)
             return false;
-    return std::strncmp(partId, "head_", 5) == 0 || std::strncmp(partId, "tail_", 5) == 0;
+    return std::strncmp(partId, "head_", 5) == 0 || std::strncmp(partId, "ear_", 4) == 0
+        || std::strncmp(partId, "tail_", 5) == 0 || std::strncmp(partId, "quad_", 5) == 0;
 }
 
 inline UiKey mapWindowKey(Key key)
