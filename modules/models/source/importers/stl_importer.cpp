@@ -92,7 +92,6 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
     const bool flat   = options.normalMode == ModelNormalMode::GenerateFlat;
     std::unordered_map<StlPositionKey, std::uint32_t, StlPositionKeyHash> weldedVertices;
     const bool    canWeldVertices    = !flat && (options.weldVertices || smooth);
-    bool          haveBounds         = false;
     std::uint64_t triangleCount      = 0;
     bool          indexLimitExceeded = false;
 
@@ -174,13 +173,16 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
         for (std::size_t vertex = 0; vertex < 3; ++vertex)
         {
             const float   *position = transformedTriangle[vertex];
+            // Fold -0.0f into +0.0f on both positions and normals so welding
+            // treats signed-zero normals identically (a face with normal
+            // (0,-0,1) welds the same as one with (0,0,1)).
             StlPositionKey key{
-                .x  = std::bit_cast<std::uint32_t>(position[0] == 0.0f ? 0.0f : position[0]),
-                .y  = std::bit_cast<std::uint32_t>(position[1] == 0.0f ? 0.0f : position[1]),
-                .z  = std::bit_cast<std::uint32_t>(position[2] == 0.0f ? 0.0f : position[2]),
-                .nx = smooth ? 0u : std::bit_cast<std::uint32_t>(sourceNormal[0]),
-                .ny = smooth ? 0u : std::bit_cast<std::uint32_t>(sourceNormal[1]),
-                .nz = smooth ? 0u : std::bit_cast<std::uint32_t>(sourceNormal[2])};
+                .x  = std::bit_cast<std::uint32_t>(canonicalizeZero(position[0])),
+                .y  = std::bit_cast<std::uint32_t>(canonicalizeZero(position[1])),
+                .z  = std::bit_cast<std::uint32_t>(canonicalizeZero(position[2])),
+                .nx = smooth ? 0u : std::bit_cast<std::uint32_t>(canonicalizeZero(sourceNormal[0])),
+                .ny = smooth ? 0u : std::bit_cast<std::uint32_t>(canonicalizeZero(sourceNormal[1])),
+                .nz = smooth ? 0u : std::bit_cast<std::uint32_t>(canonicalizeZero(sourceNormal[2]))};
             const auto found = canWeldVertices ? weldedVertices.find(key) : weldedVertices.end();
             if (found != weldedVertices.end())
             {
@@ -203,26 +205,6 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
             if (canWeldVertices)
             {
                 weldedVertices.emplace(key, localIndex);
-            }
-
-            const float x = position[0];
-            const float y = position[1];
-            const float z = position[2];
-            if (!haveBounds)
-            {
-                record.minimum[0] = record.maximum[0] = x;
-                record.minimum[1] = record.maximum[1] = y;
-                record.minimum[2] = record.maximum[2] = z;
-                haveBounds                            = true;
-            }
-            else
-            {
-                record.minimum[0] = std::min(record.minimum[0], x);
-                record.minimum[1] = std::min(record.minimum[1], y);
-                record.minimum[2] = std::min(record.minimum[2], z);
-                record.maximum[0] = std::max(record.maximum[0], x);
-                record.maximum[1] = std::max(record.maximum[1], y);
-                record.maximum[2] = std::max(record.maximum[2], z);
             }
         }
         ++triangleCount;
@@ -260,8 +242,8 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
             return false;
         }
         const std::size_t maximumVertices = static_cast<std::size_t>(binaryTriangleCount) * 3;
-        if (maximumVertices > std::vector<float>().max_size() / renderer::meshVertexFloatCount
-            || maximumVertices > std::vector<std::uint32_t>().max_size())
+        if (maximumVertices > maximumVertexElementCount / renderer::meshVertexFloatCount
+            || maximumVertices > maximumVertexElementCount)
         {
             reportError(error, ModelLoadError::FileTooLarge);
             return false;
@@ -465,6 +447,11 @@ bool importStlFile(const std::filesystem::path &path, ModelRecord &record, const
         }
     }
     record.parts.push_back(std::move(part));
+    // Bounds are accumulated from the final vertex buffer in one pass. This is
+    // cheaper than touching every corner inside appendTriangle and keeps the
+    // facet loop tight. `record.parts.back()` is the part we just moved in,
+    // so its vertex buffer holds the transformed positions.
+    accumulateBounds(record.parts.back(), record);
     reportError(error, ModelLoadError::None);
     return true;
 }

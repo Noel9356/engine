@@ -57,6 +57,15 @@ struct TaskSchedulerOptions
     // Workers rotate over own deque, injection queue and stealing so no
     // source starves.
     bool queueSourceFairness = true;
+
+    // Yield-retry budget before a worker parks on the condvar. 0 parks
+    // immediately (the historical behaviour); higher values trim fork/join
+    // wake latency at the cost of extra idle spinning.
+    std::uint32_t workerSpinBeforePark = 8;
+
+    // Yield-retry budget in waitIdle() before parking on the condvar. 0 parks
+    // immediately; higher values trade idle CPU for shorter join latency.
+    std::uint32_t waitIdleSpinIterations = 64;
 };
 
 // Point-in-time counters: queuedTasks excludes executing tasks;
@@ -284,6 +293,14 @@ public:
         return running_;
     }
 
+    // Lock-free outstanding-task count (submitted but not finished). Cheap
+    // enough for per-frame checks; use statistics() for the exact, locking
+    // view that also reports queued vs. executing.
+    [[nodiscard]] std::size_t outstandingTaskCount() const noexcept
+    {
+        return outstandingTasks_.load(std::memory_order_acquire);
+    }
+
     // Lock-free worker-count hint: the live worker count while running, 0
     // otherwise. Published in an atomic at start/stop so per-frame callers
     // (parallel rasterization triggers, parallelFor chunking) never need the
@@ -410,19 +427,20 @@ public:
     // Blocks until every submitted task completed, helping run tasks meanwhile.
     void waitIdle()
     {
+        const std::uint32_t spinBudget = options_.waitIdleSpinIterations;
         for (;;)
         {
             if (tryRunOne())
                 continue;
             bool idle = false;
-            for (std::uint32_t spin = 0; spin < 64; ++spin)
+            for (std::uint32_t spin = 0; spin < spinBudget; ++spin)
             {
                 if (outstandingTasks_.load(std::memory_order_acquire) == 0)
                 {
                     idle = true;
                     break;
                 }
-                std::this_thread::yield();
+                engineSpinWaitHint();
             }
             if (idle)
                 return;
@@ -512,6 +530,24 @@ public:
         group.wait(*this);
     }
 
+    // Convenience wrapper over parallelFor that iterates a random-access
+    // container's [0, container.size()) range; the body receives a reference
+    // to each element. Falls back to sequential execution when the scheduler
+    // is not running or the container is small.
+    template <typename Container, typename Body>
+    void parallelForEach(Container &container, std::size_t minItemsPerTask, Body &&body,
+        TaskPriority priority = TaskPriority::Normal)
+    {
+        const std::size_t count = container.size();
+        if (count == 0)
+            return;
+        auto *data = container.data();
+        parallelFor(count, minItemsPerTask, [data, &body](std::size_t begin, std::size_t end) {
+            for (std::size_t index = begin; index < end; ++index)
+                body(data[index]);
+        }, priority);
+    }
+
 private:
     friend class TaskGroup;
 
@@ -555,6 +591,8 @@ private:
             options.workerCount = std::clamp(options.workerCount, 1u, options.maxWorkerCount);
         if (options.priorityAgingThreshold.count() < 0)
             options.priorityAgingThreshold = std::chrono::milliseconds::zero();
+        options.workerSpinBeforePark    = std::clamp(options.workerSpinBeforePark, 0u, 4096u);
+        options.waitIdleSpinIterations = std::clamp(options.waitIdleSpinIterations, 0u, 4096u);
         return options;
     }
 
@@ -587,36 +625,36 @@ private:
         const auto agingThreshold = options_.priorityAgingThreshold;
         if (agingThreshold.count() > 0)
         {
-            std::size_t nonEmptyPriorities = 0;
-            for (const auto &queue : queues)
-                nonEmptyPriorities += queue.empty() ? 0u : 1u;
-
-            if (nonEmptyPriorities > 1)
+            // Single pass: count non-empty priorities and track the oldest
+            // expired head simultaneously, so the common "no aging needed"
+            // case costs one scan instead of two.
+            std::size_t       nonEmptyPriorities = 0;
+            std::size_t       oldestQueue        = queues.size();
+            Clock::time_point oldestEnqueue{};
+            const auto        now = Clock::now();
+            for (std::size_t index = 0; index < queues.size(); ++index)
             {
-                const auto        now           = Clock::now();
-                std::size_t       oldestQueue   = queues.size();
-                Clock::time_point oldestEnqueue = now;
-                for (std::size_t index = 0; index < queues.size(); ++index)
+                const auto &queue = queues[index];
+                if (queue.empty())
                 {
-                    const auto &queue = queues[index];
-                    if (queue.empty())
-                        continue;
-                    const auto enqueuedAt = queue.front().enqueuedAt;
-                    if (now - enqueuedAt >= agingThreshold
-                        && (oldestQueue == queues.size() || enqueuedAt < oldestEnqueue))
-                    {
-                        oldestQueue   = index;
-                        oldestEnqueue = enqueuedAt;
-                    }
+                    continue;
                 }
-                if (oldestQueue != queues.size())
+                ++nonEmptyPriorities;
+                const auto enqueuedAt = queue.front().enqueuedAt;
+                if (now - enqueuedAt >= agingThreshold
+                    && (oldestQueue == queues.size() || enqueuedAt < oldestEnqueue))
                 {
-                    auto &queue = queues[oldestQueue];
-                    out         = std::move(queue.front());
-                    queue.pop_front();
-                    agedTasksDequeued_.fetch_add(1, std::memory_order_relaxed);
-                    return true;
+                    oldestQueue   = index;
+                    oldestEnqueue = enqueuedAt;
                 }
+            }
+            if (nonEmptyPriorities > 1 && oldestQueue != queues.size())
+            {
+                auto &queue = queues[oldestQueue];
+                out         = std::move(queue.front());
+                queue.pop_front();
+                agedTasksDequeued_.fetch_add(1, std::memory_order_relaxed);
+                return true;
             }
         }
 
@@ -820,6 +858,7 @@ private:
     {
         currentScheduler_   = this;
         currentWorkerIndex_ = workerIndex;
+        const std::uint32_t spinBudget = options_.workerSpinBeforePark;
         for (;;)
         {
             WorkItem item;
@@ -829,7 +868,7 @@ private:
                 continue;
             }
             bool resumed = false;
-            for (std::uint32_t spin = 0; spin < workerSpinBeforePark_; ++spin)
+            for (std::uint32_t spin = 0; spin < spinBudget; ++spin)
             {
                 if (tryPopTask(workerIndex, item))
                 {
@@ -839,7 +878,7 @@ private:
                 }
                 if (queuedApprox_.load(std::memory_order_acquire) == 0)
                     break; // nothing is queued anywhere: park now
-                std::this_thread::yield();
+                engineSpinWaitHint();
             }
             if (resumed)
                 continue;
@@ -894,9 +933,6 @@ private:
     // running / stopping); see runningWorkerCountHint().
     std::atomic<std::uint32_t>             runningWorkerCount_{0};
     std::size_t                            activeExternalHelpers_ = 0;
-    // Yield-retry budget before a worker parks on the condvar (0 = park
-    // immediately, the historical behaviour).
-    std::uint32_t                             workerSpinBeforePark_ = 8;
     bool                                      running_        = false;
     bool                                      accepting_      = false;
     bool                                      stopping_       = false;

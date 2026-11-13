@@ -42,8 +42,12 @@ add_library(
     engine_module_character
     MODULE
     source/character.cpp
+    source/configuration.cpp
+    source/evaluation.cpp
     source/lua_bridge.cpp
+    source/registry.cpp
     source/serialization.cpp
+    source/validation.cpp
 )
 
 target_compile_definitions(

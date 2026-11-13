@@ -1,5 +1,7 @@
 config_keys = [
     "script_runtime.auto_config",
+    "script_runtime.default_enabled_libraries",
+    "script_runtime.instruction_hook_granularity",
     "script_runtime.instruction_limit",
     "script_runtime.maximum_native_arguments",
     "script_runtime.maximum_native_functions",

@@ -49,6 +49,36 @@ public:
         deniedPermissions.clear();
     }
 
+    // Lists every permission currently declared for a participant (across all
+    // declarePermissions calls); empty when the participant is unknown. Order
+    // is unspecified; callers that need determinism should sort the result.
+    std::vector<std::string> permissionsOf(const std::string &participantName) const
+    {
+        std::vector<std::string> result;
+        const auto               found = declaredPermissions.find(participantName);
+        if (found == declaredPermissions.end())
+        {
+            return result;
+        }
+        result.reserve(found->second.size());
+        result.assign(found->second.begin(), found->second.end());
+        return result;
+    }
+
+    // Removes a previously-declared permission (no-op when it was never
+    // declared). Does NOT lift an explicit denial - use clearDenials() for
+    // that. Useful for hot reload paths that re-derive a participant's
+    // permission set without rebuilding every other participant's.
+    void revokePermission(const std::string &participantName, const std::string &permission)
+    {
+        const auto found = declaredPermissions.find(participantName);
+        if (found == declaredPermissions.end())
+        {
+            return;
+        }
+        found->second.erase(permission);
+    }
+
     // Order matters: explicit denial, then the trusted set, then the declared
     // set (an unknown participant is granted nothing).
     bool isGranted(const std::string &participantName, const std::string &permission) const

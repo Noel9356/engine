@@ -21,7 +21,7 @@ The module provides the `script_runtime` capability (ABI 3, see `include/engine/
 | `registerRuntimeInitializer(fn, userData)` | Installs a module-owned bridge into every existing runtime and every runtime created later (v3). |
 | `unregisterRuntimeInitializer(handle)` | Stops applying that initializer to runtimes created later. Existing native functions remain registered until their runtime is destroyed. |
 
-**Error convention (important):** for `executeString`, `executeFile`, and `callFunction` the boolean return only reports usage problems (bad handle, bad argument, non-function global) or a truncated error text. Compilation and runtime failures are reported by setting the `ScriptError` out-parameter and filling `errorText`; with a large enough buffer the boolean return is `true` even for a failed script. Callers that need to detect script failures must check the `ScriptError` out-parameter.
+**Error convention (important):** for `executeString`, `executeFile`, and `callFunction` the boolean return only reports usage problems (bad handle, bad argument, non-function global) or a truncated error text. Compilation and runtime failures are reported by setting the `ScriptError` out-parameter and filling `errorText`; with a large enough buffer the boolean return is `true` even for a failed script. Callers that need to detect script failures must check the `ScriptError` out-parameter. The error code is determined by a tagged category set inside the sandbox (the custom allocator tags memory-limit failures, the instruction hook tags instruction-limit failures) rather than by parsing Lua's message text, so a script that calls `error("memory")` no longer trips a false `MemoryLimitExceeded`.
 
 ## Native bridge value helpers
 
@@ -31,12 +31,7 @@ These helpers do not alter the `ScriptRuntimeCapability` ABI or the native-funct
 
 ## Optional module bridges
 
-Modules that install Lua APIs can use `canRegisterRuntimeInitializer()` and
-`tryRegisterRuntimeInitializer()` from the capability header to check provider
-compatibility and register their runtime callback. Call
-`unregisterRuntimeInitializer()` during module shutdown; it clears the local
-initializer handle after attempting removal. The callback context must remain
-alive until the module has unregistered it and completed its bridge shutdown.
+Modules that install Lua APIs can use `canRegisterRuntimeInitializer()` and `tryRegisterRuntimeInitializer()` from the capability header to check provider compatibility and register their runtime callback. Call `unregisterRuntimeInitializer()` during module shutdown; it clears the local initializer handle after attempting removal. The callback context must remain alive until the module has unregistered it and completed its bridge shutdown.
 
 Modules may declare `script_runtime` as an optional capability and register a runtime initializer during `construct()`. The initializer receives each runtime handle and can register that module's native functions with `registerNativeFunction`. Registration also visits runtimes that already exist; future runtimes receive the initializer before `createRuntime()` returns. The configured `maximum_runtime_initializers` limits registered module hooks. Unregister the hook during module shutdown. It does not remove native functions already installed into existing Lua states, so bridge callbacks must remain safe for the lifetime of those states.
 
@@ -44,9 +39,9 @@ Modules may declare `script_runtime` as an optional capability and register a ru
 
 Each runtime is a Lua state created with a custom allocator:
 
-- **Memory:** a per-runtime byte budget and a module-wide byte budget (atomic, shared by all runtimes). Growth beyond either fails the allocation, which Lua surfaces as a memory error.
-- **Instructions:** a count hook every 1000 VM instructions stops runaway scripts with an "instruction limit exceeded" error; the budget is re-armed for every execute/call.
-- **Libraries:** only `math`, `string`, `table`, and `utf8` (plus a trimmed `base`). `dofile`, `loadfile`, and `collectgarbage` are removed and `io`/`os` are never opened, so scripts cannot touch the filesystem or the process.
+- **Memory:** a per-runtime byte budget and a module-wide byte budget (atomic, shared by all runtimes). Growth beyond either fails the allocation, which Lua surfaces as a memory error. The module-wide counter uses compare-and-swap subtraction so accounting drift can never underflow the counter into wraparound.
+- **Instructions:** a count hook every `instruction_hook_granularity` VM instructions (default 1000) stops runaway scripts with an "instruction limit exceeded" error; the budget is re-armed for every execute/call. Lower granularity catches runaway loops sooner at higher overhead; higher granularity is cheaper but lets a runaway script overshoot by up to the granularity.
+- **Libraries:** `math`, `string`, `table`, `utf8`, and a trimmed `base` are on by default; `coroutine` is available when `ScriptLibraryCoroutine` is set in the runtime description or in `default_enabled_libraries`. `load`, `dofile`, `loadfile`, `collectgarbage`, and `string.dump` are removed, and `io`/`os`/`package`/`debug` are never opened, so scripts cannot touch the filesystem, control the VM, or evade the text-only chunk restriction enforced by `luaL_loadbufferx`.
 - **Values:** scripts and native code exchange only nil, boolean, number, and string; argument/result counts are capped per configuration.
 - **Threads:** one mutex per runtime serializes Lua access; runtimes are independent of each other.
 
@@ -74,12 +69,17 @@ A callback that raises a Lua error is reported once per distinct message on stde
 
 A scripting error while hosting (runtime creation failed, script did not compile) throws; the kernel reports it as a construct failure and aborts startup with a diagnostic.
 
+## Implementation layout
+
+The Lua-facing primitives (custom allocator, instruction-count hook, native-function bridge, library whitelist, global-path helpers, error tagging) live in `source/lua_sandbox.hpp` / `source/lua_sandbox.cpp` under the `engine::script_runtime::sandbox` namespace. The module class in `source/script_runtime.cpp` owns the runtime map, the capability binding, the plugin host, and the engine event forwarding, and calls into the sandbox helpers. The split keeps each translation unit focused on one responsibility: sandbox primitives versus module orchestration.
+
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `module.toml` | Module descriptor: name, version, provided capability, declared `config_keys`. Read by the kernel's module discovery so the descriptor does not depend on loading the library. |
 | `config.toml` | Default values for the `[script_runtime]` configuration section (see `configuration.md`). |
-| `include/engine/script_runtime/capabilities.hpp` | The public capability types (ABI, errors, values, native function signature) and optional-module initializer helpers. |
+| `include/engine/script_runtime/capabilities.hpp` | The public capability types (ABI, errors, values, native function signature, library flags) and optional-module initializer helpers. |
 | `include/engine/script_runtime/native_values.hpp` | Allocation-free argument validation and result-slot helpers for native Lua bridge implementations. |
-| `source/script_runtime.cpp` | The whole implementation: sandbox primitives, capability binding, plugin hosting, module entry table. |
+| `source/lua_sandbox.hpp` / `source/lua_sandbox.cpp` | Private Lua sandboxing primitives: `RuntimeRecord`, `NativeFunctionRecord`, custom allocator, instruction hook, native-function bridge, library whitelist, global-path helpers, error tagging. |
+| `source/script_runtime.cpp` | The module class: capability binding, runtime registry, plugin hosting, event forwarding, configuration, module entry table. |

@@ -2,17 +2,22 @@ config_keys = [
     "file_asset_store.auto_config",
     "file_asset_store.cache_eviction_batch_mb",
     "file_asset_store.cache_unreferenced_assets",
+    "file_asset_store.canonical_path_cache_size",
     "file_asset_store.cooked_catalog_path",
     "file_asset_store.cooked_object_directory",
     "file_asset_store.default_async_priority",
+    "file_asset_store.drop_after_read",
+    "file_asset_store.eviction_policy",
     "file_asset_store.maximum_cached_assets",
     "file_asset_store.maximum_file_size_mb",
     "file_asset_store.maximum_inflight_memory_mb",
     "file_asset_store.maximum_path_bytes",
     "file_asset_store.maximum_pending_requests",
     "file_asset_store.maximum_resident_memory_mb",
+    "file_asset_store.readahead_hint",
     "file_asset_store.root_directory",
     "file_asset_store.verify_cooked_asset_hashes",
+    "file_asset_store.verify_loose_asset_hashes",
 ]
 name        = "file_asset_store"
 provides    = ["file_asset_store"]

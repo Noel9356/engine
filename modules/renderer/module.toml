@@ -27,6 +27,7 @@ config_keys           = [
     "renderer.parallel_triangle_threshold",
     "renderer.pipeline_cache_mb",
     "renderer.pixels_per_lock_group",
+    "renderer.present_mode",
     "renderer.texture_mipmaps",
     "renderer.validation",
     "renderer.vsync",

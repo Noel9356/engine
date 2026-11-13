@@ -5,6 +5,11 @@
 // (see ScriptPluginHost). When ENGINE_SCRIPT_RUNTIME_BACKEND_LUA is not
 // defined every capability entry fails gracefully and script plugins cannot be
 // hosted.
+//
+// The Lua-facing primitives (custom allocator, instruction-count hook,
+// native-function bridge, library whitelist, global-path helpers) live in
+// lua_sandbox.hpp / lua_sandbox.cpp. This file owns the runtime map, the
+// capability binding, the plugin host, and the engine event forwarding.
 
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/module_api.hpp>
@@ -13,38 +18,27 @@
 #include <engine/script_runtime/capabilities.hpp>
 #include <engine/util/hardware_info.hpp>
 
+#include "lua_sandbox.hpp"
+
+#include <algorithm>
 #include <atomic>
-#include <cstddef>
+#include <climits>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <climits>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <memory>
-#include <random>
-#include <system_error>
-#include <thread>
-#include <unordered_map>
-#include <utility>
-
 extern "C"
 {
-#include <lauxlib.h>
 #include <lua.h>
-#include <lualib.h>
 }
 #endif
 
@@ -53,448 +47,24 @@ namespace engine::script_runtime
 namespace
 {
 
-struct RuntimeInitializerRecord
-{
-    ScriptRuntimeInitializerHandle handle   = invalidScriptRuntimeInitializer;
-    ScriptRuntimeInitializer       callback = nullptr;
-    void                          *userData = nullptr;
-};
-
-// Writes an error code through an optional out-parameter.
-void setError(ScriptError *output, ScriptError value)
-{
-    if (output != nullptr)
-        *output = value;
-}
+using sandbox::copyText;
+using sandbox::RuntimeInitializerRecord;
+using sandbox::setError;
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
-
-// Copies text into a caller-owned buffer. Reports the required size (including
-// the terminating NUL) through outRequired even when the buffer is too small,
-// so callers can retry with a larger allocation. This is the return convention
-// of the errorText outputs across the capability: on a failed execute/call the
-// boolean return only reports usage problems, the ScriptError out-parameter
-// reports the runtime failure itself.
-bool copyText(std::string_view text, char *output, std::uint32_t capacity, std::uint32_t *outRequired)
-{
-    if (text.size() >= UINT32_MAX)
-        return false;
-    const auto required = static_cast<std::uint32_t>(text.size() + 1u);
-    if (outRequired != nullptr)
-        *outRequired = required;
-    if (output == nullptr || capacity < required)
-        return false;
-    if (!text.empty())
-        std::memcpy(output, text.data(), text.size());
-    output[text.size()] = '\0';
-    return true;
-}
-
-// Resolve a dotted global path without invoking Lua metamethods. The function
-// leaves the final value on the stack; missing or non-table namespace segments
-// restore the original stack top and return false.
-bool pushGlobalPath(lua_State *state, const char *name)
-{
-    constexpr std::size_t maximumGlobalPathBytes = 4096;
-    if (state == nullptr || name == nullptr)
-        return false;
-    const auto *terminator = static_cast<const char *>(std::memchr(name, '\0', maximumGlobalPathBytes + 1u));
-    if (terminator == nullptr || terminator == name)
-        return false;
-    const std::string_view path(name, static_cast<std::size_t>(terminator - name));
-    if (path.find('.') == std::string_view::npos)
-    {
-        lua_pushglobaltable(state);
-        lua_pushstring(state, name);
-        lua_rawget(state, -2);
-        lua_remove(state, -2);
-        return true;
-    }
-
-    const int base = lua_gettop(state);
-    lua_pushglobaltable(state);
-    int parent = lua_absindex(state, -1);
-    std::size_t begin = 0;
-    while (begin < path.size())
-    {
-        const std::size_t separator = path.find('.', begin);
-        const std::size_t end = separator == std::string_view::npos ? path.size() : separator;
-        if (end == begin)
-        {
-            lua_settop(state, base);
-            return false;
-        }
-        lua_pushlstring(state, path.data() + begin, end - begin);
-        lua_rawget(state, parent);
-        if (separator == std::string_view::npos)
-        {
-            lua_remove(state, parent);
-            return true;
-        }
-        if (!lua_istable(state, -1))
-        {
-            lua_settop(state, base);
-            return false;
-        }
-        lua_remove(state, parent);
-        parent = lua_absindex(state, -1);
-        begin = separator + 1u;
-    }
-    lua_settop(state, base);
-    return false;
-}
-
-// Assign a value to a global path. Namespace tables are created lazily; an
-// existing non-table namespace is treated as a collision, not overwritten.
-bool setGlobalPath(lua_State *state, const char *name, int valueIndex)
-{
-    constexpr std::size_t maximumGlobalPathBytes = 4096;
-    if (state == nullptr || name == nullptr)
-        return false;
-    const auto *terminator = static_cast<const char *>(std::memchr(name, '\0', maximumGlobalPathBytes + 1u));
-    if (terminator == nullptr || terminator == name)
-        return false;
-    const std::string_view path(name, static_cast<std::size_t>(terminator - name));
-    valueIndex = lua_absindex(state, valueIndex);
-    if (path.find('.') == std::string_view::npos)
-    {
-        lua_pushglobaltable(state);
-        lua_pushstring(state, name);
-        lua_pushvalue(state, valueIndex);
-        lua_rawset(state, -3);
-        lua_pop(state, 1);
-        return true;
-    }
-
-    const int base = lua_gettop(state);
-    lua_pushglobaltable(state);
-    int parent = lua_absindex(state, -1);
-    std::size_t begin = 0;
-    for (;;)
-    {
-        const std::size_t separator = path.find('.', begin);
-        const std::size_t end = separator == std::string_view::npos ? path.size() : separator;
-        if (end == begin)
-        {
-            lua_settop(state, base);
-            return false;
-        }
-        lua_pushlstring(state, path.data() + begin, end - begin);
-        if (separator == std::string_view::npos)
-        {
-            lua_pushvalue(state, valueIndex);
-            lua_rawset(state, parent);
-            lua_pop(state, 1);
-            return true;
-        }
-
-        lua_rawget(state, parent);
-        if (lua_isnil(state, -1))
-        {
-            lua_pop(state, 1);
-            lua_newtable(state);
-            lua_pushlstring(state, path.data() + begin, end - begin);
-            lua_pushvalue(state, -2);
-            lua_rawset(state, parent);
-        }
-        else if (!lua_istable(state, -1))
-        {
-            lua_settop(state, base);
-            return false;
-        }
-        lua_remove(state, parent);
-        parent = lua_absindex(state, -1);
-        begin = separator + 1u;
-    }
-}
-
-// One registered native function. The record is owned by the runtime so the
-// Lua closure's upvalue pointer stays valid for the lifetime of the state.
-struct NativeFunctionRecord
-{
-    ScriptNativeFunction callback         = nullptr;
-    void                *userData         = nullptr;
-    std::uint32_t        maximumArguments = 32;
-    std::uint32_t        maximumResults   = 16;
-};
-
-// Everything that belongs to one created runtime. Shared pointers allow the
-// capability layer and the plugin host to reference the same record; the mutex
-// serializes all use of the lua_State.
-struct RuntimeRecord
-{
-    explicit RuntimeRecord(const ScriptRuntimeDescription &settings)
-        : description(settings)
-    {}
-    ~RuntimeRecord()
-    {
-        if (state != nullptr)
-            lua_close(state);
-    }
-
-    ScriptRuntimeDescription                           description;
-    lua_State                                         *state = nullptr;
-    mutable std::mutex                                 mutex;
-    std::uint64_t                                      memoryUsed             = 0;
-    std::uint64_t                                      instructionsRemaining  = 0;
-    std::atomic<std::uint64_t>                        *globalMemoryUsed       = nullptr;
-    std::uint64_t                                      globalMemoryLimitBytes = 0;
-    std::vector<std::unique_ptr<NativeFunctionRecord>> nativeFunctions;
-    std::string                                        lastCallbackError;
-};
-
-// Per-process hash seed for Lua's string table (Lua seeds itself; this keeps
-// the engine's own allocations unpredictable as well).
-unsigned int luaHashSeed() noexcept
-{
-    try
-    {
-        std::random_device randomDevice;
-        return randomDevice();
-    }
-    catch (...)
-    {
-        static std::atomic<std::uint32_t> fallbackCounter{0u};
-        const auto    now     = static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-        const auto    counter = fallbackCounter.fetch_add(1u, std::memory_order_relaxed);
-        std::uint64_t value   = now ^ (static_cast<std::uint64_t>(counter) << 32u);
-        value ^= value >> 30u;
-        value *= 0xbf58476d1ce4e5b9ull;
-        value ^= value >> 27u;
-        value *= 0x94d049bb133111ebull;
-        value ^= value >> 31u;
-        return static_cast<unsigned int>(value ^ (value >> 32u));
-    }
-}
-
-// Custom allocator backing every Lua allocation. Enforces two budgets: the
-// per-runtime limit (description.memoryLimitBytes) and the module-wide limit
-// (globalMemoryLimitBytes, shared atomically across all runtimes). A growth
-// beyond either budget returns null, which Lua surfaces as a memory error.
-void *luaAllocator(void *userData, void *pointer, std::size_t oldSize, std::size_t newSize)
-{
-    auto               *runtime       = static_cast<RuntimeRecord *>(userData);
-    const std::uint64_t actualOldSize = pointer == nullptr ? 0u : static_cast<std::uint64_t>(oldSize);
-    if (newSize == 0)
-    {
-        std::free(pointer);
-        runtime->memoryUsed -= std::min(runtime->memoryUsed, actualOldSize);
-        if (runtime->globalMemoryUsed != nullptr)
-            runtime->globalMemoryUsed->fetch_sub(actualOldSize, std::memory_order_acq_rel);
-        return nullptr;
-    }
-
-    const std::uint64_t requestedSize = static_cast<std::uint64_t>(newSize);
-    const bool          growing       = requestedSize > actualOldSize;
-    const std::uint64_t growth        = growing ? requestedSize - actualOldSize : 0u;
-    if (growing)
-    {
-        if (growth > runtime->description.memoryLimitBytes
-                         - std::min(runtime->memoryUsed, runtime->description.memoryLimitBytes))
-            return nullptr;
-        if (runtime->globalMemoryUsed != nullptr)
-        {
-            std::uint64_t current = runtime->globalMemoryUsed->load(std::memory_order_relaxed);
-            for (;;)
-            {
-                if (growth > runtime->globalMemoryLimitBytes - std::min(current, runtime->globalMemoryLimitBytes))
-                    return nullptr;
-                if (runtime->globalMemoryUsed->compare_exchange_weak(
-                        current, current + growth, std::memory_order_acq_rel, std::memory_order_relaxed))
-                    break;
-            }
-        }
-    }
-
-    void *replacement = std::realloc(pointer, newSize);
-    if (replacement == nullptr)
-    {
-        if (growing && runtime->globalMemoryUsed != nullptr)
-            runtime->globalMemoryUsed->fetch_sub(growth, std::memory_order_acq_rel);
-        return nullptr;
-    }
-
-    if (growing)
-        runtime->memoryUsed += growth;
-    else if (requestedSize < actualOldSize)
-    {
-        const std::uint64_t released = actualOldSize - requestedSize;
-        runtime->memoryUsed -= std::min(runtime->memoryUsed, released);
-        if (runtime->globalMemoryUsed != nullptr)
-            runtime->globalMemoryUsed->fetch_sub(released, std::memory_order_acq_rel);
-    }
-    return replacement;
-}
-
-// Count hook that turns description.instructionLimit into a hard wall-clock
-// independent budget: past the limit the VM is stopped with a Lua error.
-// Granularity is 1000 instructions per hook call to keep the overhead low.
-void instructionHook(lua_State *state, lua_Debug *)
-{
-    auto         **slot    = static_cast<RuntimeRecord **>(lua_getextraspace(state));
-    RuntimeRecord *runtime = *slot;
-    if (runtime == nullptr)
-        return;
-    constexpr std::uint64_t hookGranularity = 1000;
-    if (runtime->instructionsRemaining < hookGranularity)
-    {
-        runtime->instructionsRemaining = 0;
-        luaL_error(state, "instruction limit exceeded");
-        return;
-    }
-    runtime->instructionsRemaining -= hookGranularity;
-}
-
-// Bridge between Lua closures and ScriptNativeFunction callbacks: marshals
-// Lua values to ScriptValue (nil/boolean/number/string only), invokes the
-// callback, and pushes the results back. Any violation (bad types, limits,
-// exceptions) becomes a Lua error instead of crossing into C++.
-int invokeNativeFunction(lua_State *state)
-{
-    auto *function = static_cast<NativeFunctionRecord *>(lua_touserdata(state, lua_upvalueindex(1)));
-    if (function == nullptr || function->callback == nullptr)
-        return luaL_error(state, "native function is unavailable");
-    constexpr std::uint32_t hardMaximumArguments = 32;
-    constexpr std::uint32_t hardMaximumResults   = 16;
-    const std::uint32_t     maximumArguments     = function->maximumArguments;
-    const std::uint32_t     maximumResults       = function->maximumResults;
-    const int               luaArgumentCount     = lua_gettop(state);
-    if (maximumArguments > hardMaximumArguments || maximumResults > hardMaximumResults || luaArgumentCount < 0
-        || static_cast<std::uint32_t>(luaArgumentCount) > maximumArguments)
-        return luaL_error(state, "native function argument limit exceeded");
-    std::array<ScriptValue, hardMaximumArguments> arguments{};
-    std::array<ScriptValue, hardMaximumResults>   results{};
-    for (int index = 0; index < luaArgumentCount; ++index)
-    {
-        ScriptValue &value      = arguments[static_cast<std::size_t>(index)];
-        const int    stackIndex = index + 1;
-        switch (lua_type(state, stackIndex))
-        {
-        case LUA_TNIL:
-            value.type = ScriptValueType::Nil;
-            break;
-        case LUA_TBOOLEAN:
-            value.type         = ScriptValueType::Boolean;
-            value.booleanValue = lua_toboolean(state, stackIndex) != 0;
-            break;
-        case LUA_TNUMBER:
-            value.type        = ScriptValueType::Number;
-            value.numberValue = lua_tonumber(state, stackIndex);
-            break;
-        case LUA_TSTRING: {
-            std::size_t length = 0;
-            value.stringData   = lua_tolstring(state, stackIndex, &length);
-            if (length > UINT32_MAX)
-                return luaL_error(state, "native function string argument too large");
-            value.stringSize = static_cast<std::uint32_t>(length);
-            value.type       = ScriptValueType::String;
-            break;
-        }
-        default:
-            return luaL_error(state, "native functions accept only nil, boolean, number, and string arguments");
-        }
-    }
-    std::uint32_t resultCount = 0;
-    bool          succeeded   = false;
-    try
-    {
-        succeeded = function->callback(function->userData,
-            arguments.data(),
-            static_cast<std::uint32_t>(luaArgumentCount),
-            results.data(),
-            maximumResults,
-            &resultCount);
-    }
-    catch (...)
-    {
-        return luaL_error(state, "native function threw an exception");
-    }
-    if (!succeeded)
-        return luaL_error(state, "native function returned failure");
-    if (resultCount > maximumResults)
-        return luaL_error(state, "native function result limit exceeded");
-    for (std::uint32_t index = 0; index < resultCount; ++index)
-    {
-        const ScriptValue &value = results[index];
-        switch (value.type)
-        {
-        case ScriptValueType::Nil:
-            lua_pushnil(state);
-            break;
-        case ScriptValueType::Boolean:
-            lua_pushboolean(state, value.booleanValue);
-            break;
-        case ScriptValueType::Number:
-            if (!std::isfinite(value.numberValue))
-                return luaL_error(state, "native function returned a non-finite number");
-            lua_pushnumber(state, value.numberValue);
-            break;
-        case ScriptValueType::String:
-            if (value.stringSize != 0 && value.stringData == nullptr)
-                return luaL_error(state, "native function returned an invalid string");
-            lua_pushlstring(state, value.stringData != nullptr ? value.stringData : "", value.stringSize);
-            break;
-        default:
-            return luaL_error(state, "native function returned an unsupported value type");
-        }
-    }
-    return static_cast<int>(resultCount);
-}
-
-// Arms the instruction budget for one execute/call. The hook is removed again
-// by the caller once the protected call finished.
-void setExecutionBudget(RuntimeRecord &runtime)
-{
-    runtime.instructionsRemaining = runtime.description.instructionLimit;
-    lua_sethook(runtime.state, instructionHook, LUA_MASKCOUNT, 1000);
-}
-
-std::string_view stackError(lua_State *state)
-{
-    std::size_t length = 0;
-    const char *message = lua_tolstring(state, -1, &length);
-    return message != nullptr ? std::string_view(message, length)
-                              : std::string_view("Lua execution failed without an error message");
-}
-
-void removeGlobal(lua_State *state, const char *name)
-{
-    lua_pushnil(state);
-    lua_setglobal(state, name);
-}
-
-// Opens the base library plus the whitelisted standard libraries and removes
-// the ones that would let a script reach the host filesystem or control the
-// VM (dofile, loadfile, collectgarbage). No io/os library is ever opened.
-void openLibraries(lua_State *state, std::uint32_t libraries)
-{
-    luaL_requiref(state, LUA_GNAME, luaopen_base, 1);
-    lua_pop(state, 1);
-    removeGlobal(state, "dofile");
-    removeGlobal(state, "loadfile");
-    removeGlobal(state, "collectgarbage");
-    if ((libraries & ScriptLibraryMath) != 0)
-    {
-        luaL_requiref(state, LUA_MATHLIBNAME, luaopen_math, 1);
-        lua_pop(state, 1);
-    }
-    if ((libraries & ScriptLibraryString) != 0)
-    {
-        luaL_requiref(state, LUA_STRLIBNAME, luaopen_string, 1);
-        lua_pop(state, 1);
-    }
-    if ((libraries & ScriptLibraryTable) != 0)
-    {
-        luaL_requiref(state, LUA_TABLIBNAME, luaopen_table, 1);
-        lua_pop(state, 1);
-    }
-    if ((libraries & ScriptLibraryUtf8) != 0)
-    {
-        luaL_requiref(state, LUA_UTF8LIBNAME, luaopen_utf8, 1);
-        lua_pop(state, 1);
-    }
-}
-
+using sandbox::classifyError;
+using sandbox::instructionHook;
+using sandbox::invokeNativeFunction;
+using sandbox::luaAllocator;
+using sandbox::luaHashSeed;
+using sandbox::NativeFunctionRecord;
+using sandbox::openLibraries;
+using sandbox::pushGlobalPath;
+using sandbox::resetLastError;
+using sandbox::RuntimeRecord;
+using sandbox::setExecutionBudget;
+using sandbox::setGlobalPath;
+using sandbox::stackError;
 #endif
 
 class ScriptRuntimeModule final : public ModuleInterface, public ScriptPluginHost
@@ -531,44 +101,20 @@ public:
                                .channel<WindowKeyEvent>()
                                .subscribe<ScriptRuntimeModule, &ScriptRuntimeModule::onWindowKey>(this);
 
-        // auto_config = true: the script memory ceilings derive from
-        // installed RAM and the matching [script_runtime] keys have no
-        // effect. Everything else (instruction budget, script size,
-        // runtimes/native-function caps) bounds logic, not memory, and keeps
-        // its built-in default in both modes.
+        // Non-memory keys (instruction budget, script size, runtime/native
+        // caps) are always read from configuration: they bound logic rather
+        // than memory and stay effective regardless of auto_config.
+        applyNonMemoryConfiguration(context);
+
+        // Memory ceilings are either derived from installed RAM (auto_config)
+        // or read from the manual keys.
         if (context.configurationBooleanInSection("script_runtime", "auto_config").value_or(false))
         {
             applyHardwareDerivedMemoryLimits();
         }
         else
         {
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "memory_limit_mb");
-            value && *value >= 1 && *value <= 4096)
-            defaultDescription_.memoryLimitBytes = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "instruction_limit");
-            value && *value >= 1000)
-            defaultDescription_.instructionLimit = static_cast<std::uint64_t>(*value);
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_script_size_mb");
-            value && *value >= 1 && *value <= 256)
-            defaultDescription_.maximumScriptBytes = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_runtimes");
-            value && *value >= 1 && *value <= 4096)
-            maximumRuntimes_ = static_cast<std::size_t>(*value);
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_native_functions");
-            value && *value >= 1 && *value <= 4096)
-            maximumNativeFunctions_ = static_cast<std::size_t>(*value);
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_total_memory_mb");
-            value && *value >= 1 && *value <= 65536)
-            maximumTotalMemoryBytes_ = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_native_arguments");
-            value && *value >= 1 && *value <= 32)
-            maximumNativeArguments_ = static_cast<std::uint32_t>(*value);
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_native_results");
-            value && *value >= 1 && *value <= 16)
-            maximumNativeResults_ = static_cast<std::uint32_t>(*value);
-        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_runtime_initializers");
-            value && *value >= 1 && *value <= 4096)
-            maximumRuntimeInitializers_ = static_cast<std::size_t>(*value);
+            applyManualMemoryConfiguration(context);
         }
     }
 
@@ -597,6 +143,8 @@ public:
         std::lock_guard lock(runtimesMutex_);
         runtimes_.clear();
 #endif
+        dispatchBatch_.clear();
+        dispatchBatch_.shrink_to_fit();
     }
     void *capabilityPointerFor(const std::string &name) override
     {
@@ -618,7 +166,105 @@ private:
             .providedCapabilities = {"script_runtime"}};
     }
 
-    // --- script plugin hosting -------------------------------------------------
+    // --- configuration ---------------------------------------------------------
+
+    void applyNonMemoryConfiguration(ParticipantContext &context)
+    {
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "instruction_limit");
+            value && *value >= 1000)
+        {
+            defaultDescription_.instructionLimit = static_cast<std::uint64_t>(*value);
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_script_size_mb");
+            value && *value >= 1 && *value <= 256)
+        {
+            defaultDescription_.maximumScriptBytes = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_runtimes");
+            value && *value >= 1 && *value <= 4096)
+        {
+            maximumRuntimes_ = static_cast<std::size_t>(*value);
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_native_functions");
+            value && *value >= 1 && *value <= 4096)
+        {
+            maximumNativeFunctions_ = static_cast<std::size_t>(*value);
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_native_arguments");
+            value && *value >= 1 && *value <= 32)
+        {
+            maximumNativeArguments_ = static_cast<std::uint32_t>(*value);
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_native_results");
+            value && *value >= 1 && *value <= 16)
+        {
+            maximumNativeResults_ = static_cast<std::uint32_t>(*value);
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_runtime_initializers");
+            value && *value >= 1 && *value <= 4096)
+        {
+            maximumRuntimeInitializers_ = static_cast<std::size_t>(*value);
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "instruction_hook_granularity");
+            value && *value >= 1 && *value <= 100000)
+        {
+            instructionHookGranularity_ = static_cast<std::uint32_t>(*value);
+        }
+        // Optional: override the default library mask. Bits outside the
+        // allowed set are silently dropped at runtime-create time.
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "default_enabled_libraries");
+            value && *value >= 0)
+        {
+            constexpr std::uint32_t allowedLibraries = ScriptLibraryMath | ScriptLibraryString | ScriptLibraryTable
+                                                     | ScriptLibraryUtf8 | ScriptLibraryCoroutine;
+            defaultDescription_.enabledLibraries     = static_cast<std::uint32_t>(*value) & allowedLibraries;
+        }
+    }
+
+    void applyManualMemoryConfiguration(ParticipantContext &context)
+    {
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "memory_limit_mb");
+            value && *value >= 1 && *value <= 4096)
+        {
+            defaultDescription_.memoryLimitBytes = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
+        }
+        if (const auto value = context.configurationIntegerInSection("script_runtime", "maximum_total_memory_mb");
+            value && *value >= 1 && *value <= 65536)
+        {
+            maximumTotalMemoryBytes_ = static_cast<std::uint64_t>(*value) * 1024ull * 1024ull;
+        }
+    }
+
+    // auto_config = true: per-runtime memory gets ~1.6% of installed RAM
+    // (16..256 MiB), the module-wide total ~12.5% (128..4096 MiB). Unknown
+    // RAM keeps the built-in ceilings (the conservative fallback). Every
+    // derived value stays inside the manual ranges, so switching
+    // auto_config off and hand-writing the derived numbers reproduces the
+    // same behavior exactly.
+    void applyHardwareDerivedMemoryLimits()
+    {
+        constexpr std::uint64_t mib = 1024ull * 1024ull;
+        constexpr std::uint64_t gib = 1024ull * mib;
+        const std::uint64_t     ram = util::physicalMemoryBytes();
+        if (ram == 0u)
+        {
+            std::fprintf(stderr,
+                "script_runtime: auto_config is on; installed RAM unknown, keeping built-in limits; "
+                "other tuning keys in [script_runtime] are ignored\n");
+            return;
+        }
+        defaultDescription_.memoryLimitBytes = std::clamp<std::uint64_t>(ram / 64u, 16u * mib, 256u * mib);
+        maximumTotalMemoryBytes_             = std::clamp<std::uint64_t>(ram / 8u, 128u * mib, 4096u * mib);
+        std::fprintf(stderr,
+            "script_runtime: auto_config is on; memory limits derived from %.1f GiB RAM "
+            "(memory_limit_mb=%llu, maximum_total_memory_mb=%llu); "
+            "other tuning keys in [script_runtime] are ignored\n",
+            static_cast<double>(ram) / static_cast<double>(gib),
+            (unsigned long long)(defaultDescription_.memoryLimitBytes / mib),
+            (unsigned long long)(maximumTotalMemoryBytes_ / mib));
+    }
+
+    // --- script plugin hosting ------------------------------------------------
     //
     // The kernel hands every type = "script" plugin to this module during the
     // construct phase (see ScriptPluginHost). Hosting a plugin means running its
@@ -647,7 +293,7 @@ private:
         if (terminator == nullptr || terminator == pluginId)
             return invalidScriptRuntime;
         const std::string_view requestedId(pluginId, static_cast<std::size_t>(terminator - pluginId));
-        std::lock_guard lock(hostedMutex_);
+        std::lock_guard        lock(hostedMutex_);
         for (const HostedPlugin &plugin : hostedPlugins_)
             if (plugin.pluginId == requestedId)
                 return plugin.runtime;
@@ -656,8 +302,8 @@ private:
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
 
-    // Calls a global function if the plugin defined one. Absent callbacks are the
-    // normal opt-in case, not errors. Runtime failures are printed once per
+    // Calls a global function if the plugin defined one. Absent callbacks are
+    // the normal opt-in case, not errors. Runtime failures are printed once per
     // distinct message so a broken on_frame cannot flood stderr.
     void callOptionalGlobal(ScriptRuntimeHandle handle, const char *name, std::initializer_list<double> numbers = {},
         const char *text = nullptr)
@@ -666,16 +312,21 @@ private:
         if (!runtime)
             return;
         std::lock_guard lock(runtime->mutex);
-        lua_State *state = runtime->state;
-        if (!pushGlobalPath(state, name) || !lua_isfunction(state, -1))
+        lua_State      *state = runtime->state;
+        // pushGlobalPath restores the stack on failure; only pop when it
+        // actually pushed something.
+        const bool found = pushGlobalPath(state, name);
+        if (!found || !lua_isfunction(state, -1))
         {
-            lua_pop(state, 1);
+            if (found)
+                lua_pop(state, 1);
             return;
         }
         for (double number : numbers)
             lua_pushnumber(state, number);
         if (text != nullptr)
             lua_pushstring(state, text);
+        resetLastError(*runtime);
         setExecutionBudget(*runtime);
         const int argumentCount = static_cast<int>(numbers.size()) + (text != nullptr ? 1 : 0);
         const int result        = lua_pcall(state, argumentCount, 0, 0);
@@ -691,7 +342,9 @@ private:
                 }
                 catch (...)
                 {}
-                std::fprintf(stderr, "script_runtime: callback '%s' failed: %.*s\n", name,
+                std::fprintf(stderr,
+                    "script_runtime: callback '%s' failed: %.*s\n",
+                    name,
                     static_cast<int>(std::min<std::size_t>(message.size(), static_cast<std::size_t>(INT_MAX))),
                     message.data());
             }
@@ -707,19 +360,22 @@ private:
     void dispatchToHostedPlugins(
         const char *callback, std::initializer_list<double> numbers = {}, const char *text = nullptr)
     {
-        std::vector<ScriptRuntimeHandle> runtimes;
+        // Reuse a per-module buffer so the per-frame dispatch path does not
+        // allocate. The vector is cleared (not freed) at the start of each
+        // call so the capacity stabilises after the first frame.
+        dispatchBatch_.clear();
         try
         {
             std::lock_guard lock(hostedMutex_);
-            runtimes.reserve(hostedPlugins_.size());
+            dispatchBatch_.reserve(hostedPlugins_.size());
             for (const HostedPlugin &plugin : hostedPlugins_)
-                runtimes.push_back(plugin.runtime);
+                dispatchBatch_.push_back(plugin.runtime);
         }
         catch (...)
         {
             return;
         }
-        for (const ScriptRuntimeHandle runtime : runtimes)
+        for (const ScriptRuntimeHandle runtime : dispatchBatch_)
             callOptionalGlobal(runtime, callback, numbers, text);
     }
 
@@ -818,15 +474,13 @@ private:
     }
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
-    ScriptRuntimeInitializerHandle registerRuntimeInitializerImpl(
-        ScriptRuntimeInitializer initializer, void *userData)
+    ScriptRuntimeInitializerHandle registerRuntimeInitializerImpl(ScriptRuntimeInitializer initializer, void *userData)
     {
         if (initializer == nullptr)
             return invalidScriptRuntimeInitializer;
 
         std::lock_guard initializerLock(initializersMutex_);
-        if (initializers_.size() >= maximumRuntimeInitializers_
-            || nextInitializer_ == invalidScriptRuntimeInitializer
+        if (initializers_.size() >= maximumRuntimeInitializers_ || nextInitializer_ == invalidScriptRuntimeInitializer
             || nextInitializer_ == std::numeric_limits<ScriptRuntimeInitializerHandle>::max())
             return invalidScriptRuntimeInitializer;
 
@@ -842,7 +496,10 @@ private:
 
         // Apply newly registered bridges to existing runtimes as well. The
         // initializer mutex serializes this with createRuntimeImpl so a
-        // runtime cannot miss an initializer or receive it twice.
+        // runtime cannot miss an initializer or receive it twice. A runtime
+        // that has been destroyed between collecting the handle and invoking
+        // the initializer is skipped (findRuntime returns null inside the
+        // callback) rather than failing the whole registration.
         std::vector<ScriptRuntimeHandle> handles;
         try
         {
@@ -873,8 +530,15 @@ private:
             }
             if (!initialized)
             {
-                initializers_.pop_back();
-                return invalidScriptRuntimeInitializer;
+                // The runtime may have been destroyed concurrently; verify
+                // before rolling back so a transient target does not undo an
+                // otherwise valid registration.
+                std::lock_guard runtimeLock(runtimesMutex_);
+                if (runtimes_.find(runtime) != runtimes_.end())
+                {
+                    initializers_.pop_back();
+                    return invalidScriptRuntimeInitializer;
+                }
             }
         }
         return handle;
@@ -885,7 +549,8 @@ private:
         if (handle == invalidScriptRuntimeInitializer)
             return false;
         std::lock_guard lock(initializersMutex_);
-        const auto found = std::find_if(initializers_.begin(), initializers_.end(),
+        const auto      found = std::find_if(initializers_.begin(),
+            initializers_.end(),
             [handle](const RuntimeInitializerRecord &record) { return record.handle == handle; });
         if (found == initializers_.end())
             return false;
@@ -905,7 +570,7 @@ private:
         setError(error, ScriptError::None);
         ScriptRuntimeDescription settings = description != nullptr ? *description : defaultDescription_;
         constexpr std::uint32_t  allowedLibraries
-            = ScriptLibraryMath | ScriptLibraryString | ScriptLibraryTable | ScriptLibraryUtf8;
+            = ScriptLibraryMath | ScriptLibraryString | ScriptLibraryTable | ScriptLibraryUtf8 | ScriptLibraryCoroutine;
         if (settings.memoryLimitBytes < 1024u * 1024u || settings.memoryLimitBytes > (1ull << 40u)
             || settings.instructionLimit < 1000u || settings.maximumScriptBytes == 0
             || settings.maximumScriptBytes > settings.memoryLimitBytes
@@ -916,7 +581,7 @@ private:
             setError(error, ScriptError::InvalidArgument);
             return invalidScriptRuntime;
         }
-        std::lock_guard initializerLock(initializersMutex_);
+        std::lock_guard                initializerLock(initializersMutex_);
         std::shared_ptr<RuntimeRecord> runtime;
         try
         {
@@ -927,9 +592,10 @@ private:
             setError(error, ScriptError::MemoryLimitExceeded);
             return invalidScriptRuntime;
         }
-        runtime->globalMemoryUsed = &totalMemoryUsed_;
+        runtime->globalMemoryUsed       = &totalMemoryUsed_;
         runtime->globalMemoryLimitBytes = maximumTotalMemoryBytes_;
-        runtime->state = lua_newstate(luaAllocator, runtime.get(), luaHashSeed());
+        runtime->hookGranularity        = instructionHookGranularity_;
+        runtime->state                  = lua_newstate(luaAllocator, runtime.get(), luaHashSeed());
         if (runtime->state == nullptr)
         {
             setError(error, ScriptError::MemoryLimitExceeded);
@@ -1015,30 +681,29 @@ private:
             setError(error, ScriptError::InvalidHandle);
             return copyText("invalid script runtime", errorText, errorCapacity, errorRequired);
         }
-        std::lock_guard lock(runtime->mutex);
+        std::lock_guard   lock(runtime->mutex);
         const std::size_t maximumBytes = static_cast<std::size_t>(runtime->description.maximumScriptBytes);
-        const auto *terminator = static_cast<const char *>(std::memchr(source, '\0', maximumBytes + 1u));
+        const auto       *terminator   = static_cast<const char *>(std::memchr(source, '\0', maximumBytes + 1u));
         if (terminator == nullptr)
         {
             setError(error, ScriptError::CapacityExceeded);
             return copyText("script exceeds configured size limit", errorText, errorCapacity, errorRequired);
         }
-        const std::size_t length = static_cast<std::size_t>(terminator - source);
+        const std::size_t     length                = static_cast<std::size_t>(terminator - source);
         constexpr std::size_t maximumChunkNameBytes = 16384;
-        if (chunkName != nullptr
-            && std::memchr(chunkName, '\0', maximumChunkNameBytes + 1u) == nullptr)
+        if (chunkName != nullptr && std::memchr(chunkName, '\0', maximumChunkNameBytes + 1u) == nullptr)
         {
             setError(error, ScriptError::InvalidArgument);
             return copyText("chunk name exceeds configured size limit", errorText, errorCapacity, errorRequired);
         }
         lua_State *state = runtime->state;
+        resetLastError(*runtime);
         setExecutionBudget(*runtime);
         const int loaded = luaL_loadbufferx(state, source, length, chunkName != nullptr ? chunkName : "=(engine)", "t");
         if (loaded != LUA_OK)
         {
             const std::string_view message = stackError(state);
-            const ScriptError code = message.find("memory") != std::string_view::npos ? ScriptError::MemoryLimitExceeded
-                                                                                        : ScriptError::CompilationFailed;
+            const ScriptError      code    = classifyError(*runtime, ScriptError::CompilationFailed);
             setError(error, code);
             lua_sethook(state, nullptr, 0, 0);
             const bool copied = copyText(message, errorText, errorCapacity, errorRequired);
@@ -1050,10 +715,7 @@ private:
         if (executed != LUA_OK)
         {
             const std::string_view message = stackError(state);
-            const ScriptError code = message.find("instruction limit exceeded") != std::string_view::npos
-                                       ? ScriptError::InstructionLimitExceeded
-                                       : (message.find("memory") != std::string_view::npos ? ScriptError::MemoryLimitExceeded
-                                                                                            : ScriptError::RuntimeFailed);
+            const ScriptError      code    = classifyError(*runtime, ScriptError::RuntimeFailed);
             setError(error, code);
             const bool copied = copyText(message, errorText, errorCapacity, errorRequired);
             lua_pop(state, 1);
@@ -1165,15 +827,15 @@ private:
             setError(error, ScriptError::TypeMismatch);
             return copyText("global value is not a function", errorText, errorCapacity, errorRequired);
         }
+        resetLastError(*runtime);
         setExecutionBudget(*runtime);
         const int result = lua_pcall(state, 0, 0, 0);
         lua_sethook(state, nullptr, 0, 0);
         if (result != LUA_OK)
         {
             const std::string_view message = stackError(state);
-            setError(error,
-                message.find("instruction limit exceeded") != std::string_view::npos ? ScriptError::InstructionLimitExceeded
-                                                                                       : ScriptError::RuntimeFailed);
+            const ScriptError      code    = classifyError(*runtime, ScriptError::RuntimeFailed);
+            setError(error, code);
             const bool copied = copyText(message, errorText, errorCapacity, errorRequired);
             lua_pop(state, 1);
             return copied;
@@ -1236,8 +898,8 @@ private:
             return false;
         std::lock_guard lock(runtime->mutex);
         lua_pushnumber(runtime->state, value);
-        const int valueIndex = lua_absindex(runtime->state, -1);
-        const bool assigned = setGlobalPath(runtime->state, name, valueIndex);
+        const int  valueIndex = lua_absindex(runtime->state, -1);
+        const bool assigned   = setGlobalPath(runtime->state, name, valueIndex);
         lua_pop(runtime->state, 1);
         return assigned;
     }
@@ -1265,14 +927,14 @@ private:
         auto runtime = findRuntime(handle);
         if (!runtime || name == nullptr || name[0] == '\0' || value == nullptr)
             return false;
-        std::lock_guard lock(runtime->mutex);
+        std::lock_guard   lock(runtime->mutex);
         const std::size_t maximumBytes = static_cast<std::size_t>(runtime->description.maximumScriptBytes);
-        const auto *terminator = static_cast<const char *>(std::memchr(value, '\0', maximumBytes + 1u));
+        const auto       *terminator   = static_cast<const char *>(std::memchr(value, '\0', maximumBytes + 1u));
         if (terminator == nullptr)
             return false;
         lua_pushlstring(runtime->state, value, static_cast<std::size_t>(terminator - value));
-        const int valueIndex = lua_absindex(runtime->state, -1);
-        const bool assigned = setGlobalPath(runtime->state, name, valueIndex);
+        const int  valueIndex = lua_absindex(runtime->state, -1);
+        const bool assigned   = setGlobalPath(runtime->state, name, valueIndex);
         lua_pop(runtime->state, 1);
         return assigned;
     }
@@ -1380,11 +1042,11 @@ private:
     SubscriptionToken   shutdownSubscription_    = invalidSubscriptionToken;
     SubscriptionToken   keySubscription_         = invalidSubscriptionToken;
 
-    std::mutex             hostedMutex_;
-    std::vector<HostedPlugin> hostedPlugins_;
-    std::mutex initializersMutex_;
+    std::mutex                            hostedMutex_;
+    std::vector<HostedPlugin>             hostedPlugins_;
+    std::mutex                            initializersMutex_;
     std::vector<RuntimeInitializerRecord> initializers_;
-    ScriptRuntimeInitializerHandle nextInitializer_ = 1;
+    ScriptRuntimeInitializerHandle        nextInitializer_ = 1;
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)
     std::mutex                                                              runtimesMutex_;
     std::unordered_map<ScriptRuntimeHandle, std::shared_ptr<RuntimeRecord>> runtimes_;
@@ -1394,38 +1056,13 @@ private:
     std::size_t                maximumNativeFunctions_  = 256;
     std::uint64_t              maximumTotalMemoryBytes_ = 1024ull * 1024ull * 1024ull;
     std::atomic<std::uint64_t> totalMemoryUsed_{0};
-    std::uint32_t              maximumNativeArguments_ = 32;
-    std::uint32_t              maximumNativeResults_   = 16;
+    std::uint32_t              maximumNativeArguments_     = 32;
+    std::uint32_t              maximumNativeResults_       = 16;
     std::size_t                maximumRuntimeInitializers_ = 64;
+    std::uint32_t              instructionHookGranularity_ = 1000;
 
-    // auto_config = true: per-runtime memory gets ~1.6% of installed RAM
-    // (16..256 MiB), the module-wide total ~12.5% (128..4096 MiB). Unknown
-    // RAM keeps the built-in ceilings (the conservative fallback). Every
-    // derived value stays inside the manual ranges, so switching
-    // auto_config off and hand-writing the derived numbers reproduces the
-    // same behavior exactly.
-    void applyHardwareDerivedMemoryLimits()
-    {
-        constexpr std::uint64_t mib = 1024ull * 1024ull;
-        constexpr std::uint64_t gib = 1024ull * mib;
-        const std::uint64_t     ram = util::physicalMemoryBytes();
-        if (ram == 0u)
-        {
-            std::fprintf(stderr,
-                "script_runtime: auto_config is on; installed RAM unknown, keeping built-in limits; "
-                "other tuning keys in [script_runtime] are ignored\n");
-            return;
-        }
-        defaultDescription_.memoryLimitBytes = std::clamp<std::uint64_t>(ram / 64u, 16u * mib, 256u * mib);
-        maximumTotalMemoryBytes_             = std::clamp<std::uint64_t>(ram / 8u, 128u * mib, 4096u * mib);
-        std::fprintf(stderr,
-            "script_runtime: auto_config is on; memory limits derived from %.1f GiB RAM "
-            "(memory_limit_mb=%llu, maximum_total_memory_mb=%llu); "
-            "other tuning keys in [script_runtime] are ignored\n",
-            static_cast<double>(ram) / static_cast<double>(gib),
-            (unsigned long long)(defaultDescription_.memoryLimitBytes / mib),
-            (unsigned long long)(maximumTotalMemoryBytes_ / mib));
-    }
+    // Reused by dispatchToHostedPlugins to avoid a per-frame allocation.
+    std::vector<ScriptRuntimeHandle> dispatchBatch_;
 };
 
 } // namespace

@@ -100,6 +100,34 @@ std::string parseErrorDiagnostic(const std::filesystem::path &path, const toml::
     return message;
 }
 
+// Hard ceiling on the size of any single configuration file the store will
+// parse. Defaults files, scene files and profiles are all bounded by this;
+// engine.toml is bounded by it too. The limit is generous (16 MiB) so
+// legitimate world content fits, but a stray multi-gigabyte file is refused
+// before it can exhaust memory.
+constexpr std::uintmax_t maximumConfigurationFileBytes = 16ull * 1024ull * 1024ull;
+
+// Returns false with a human-readable errorMessage when the file is missing,
+// inaccessible, or oversized; true otherwise.
+bool checkConfigurationFileSize(const std::filesystem::path &path, std::string &errorMessage)
+{
+    std::error_code statError;
+    const std::uintmax_t fileSize = std::filesystem::file_size(path, statError);
+    if (statError)
+    {
+        errorMessage = "configuration file '" + path.string() + "' cannot be stat-ed: " + statError.message();
+        return false;
+    }
+    if (fileSize > maximumConfigurationFileBytes)
+    {
+        errorMessage = "configuration file '" + path.string() + "' is " + std::to_string(fileSize)
+                     + " bytes which exceeds the " + std::to_string(maximumConfigurationFileBytes)
+                     + "-byte limit; refusing to load an oversized configuration";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 // Maps each leaf path to the ConfigProvenance of the layer that last set it.
@@ -492,6 +520,10 @@ void ConfigurationStore::resetForReload()
 bool ConfigurationStore::loadFromFile(const std::filesystem::path &path, std::string &errorMessage)
 {
     errorMessage.clear();
+    if (!checkConfigurationFileSize(path, errorMessage))
+    {
+        return false;
+    }
     try
     {
         toml::table parsed = toml::parse_file(path.string());
@@ -525,6 +557,10 @@ bool ConfigurationStore::mergeDefaultsFile(const std::filesystem::path &path, Co
     {
         errorMessage = "shipped defaults '" + path.string()
                      + "': only the module defaults or plugin defaults layer may merge a defaults file";
+        return false;
+    }
+    if (!checkConfigurationFileSize(path, errorMessage))
+    {
         return false;
     }
     toml::table parsed;
@@ -583,6 +619,10 @@ bool ConfigurationStore::mergeDefaultsFile(const std::filesystem::path &path, Co
 bool ConfigurationStore::mergeProfileFile(const std::filesystem::path &path, std::string &errorMessage)
 {
     errorMessage.clear();
+    if (!checkConfigurationFileSize(path, errorMessage))
+    {
+        return false;
+    }
     toml::table parsed;
     try
     {
@@ -606,6 +646,8 @@ bool ConfigurationStore::mergeProfileFile(const std::filesystem::path &path, std
         "max_outstanding_tasks",
         "priority_aging_ms",
         "queue_source_fairness",
+        "worker_spin_before_park",
+        "wait_idle_spin_iterations",
         "idle_poll_ms",
         "config_reload_poll_seconds",
         "fixed_update_hz",
@@ -679,6 +721,10 @@ bool ConfigurationStore::mergeProfileFile(const std::filesystem::path &path, std
 bool ConfigurationStore::applySceneFile(const std::filesystem::path &path, std::string &errorMessage)
 {
     errorMessage.clear();
+    if (!checkConfigurationFileSize(path, errorMessage))
+    {
+        return false;
+    }
     toml::table parsed;
     try
     {
@@ -850,6 +896,8 @@ void ConfigurationStore::declareAssemblyKnownKeys()
     declareKnownConfigKey("engine.max_outstanding_tasks");
     declareKnownConfigKey("engine.priority_aging_ms");
     declareKnownConfigKey("engine.queue_source_fairness");
+    declareKnownConfigKey("engine.worker_spin_before_park");
+    declareKnownConfigKey("engine.wait_idle_spin_iterations");
     declareKnownConfigKey("engine.idle_poll_ms");
     declareKnownConfigKey(std::string(engineSectionName) + "." + engineFixedUpdateHzKey);
     declareKnownConfigKey(std::string(engineSectionName) + "." + engineMaxFixedUpdateStepsKey);
@@ -982,6 +1030,10 @@ std::map<std::string, std::string> ConfigurationStore::flattenedValueReprs() con
 bool ConfigurationStore::fileParses(const std::filesystem::path &path, std::string &errorMessage)
 {
     errorMessage.clear();
+    if (!checkConfigurationFileSize(path, errorMessage))
+    {
+        return false;
+    }
     try
     {
         const toml::table parsed = toml::parse_file(path.string());

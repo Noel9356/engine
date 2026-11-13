@@ -41,33 +41,37 @@ From the entry table at the bottom of `source/file_asset_store.cpp` (`engineQuer
 | `config.toml` | Default values for the `[file_asset_store]` section (see `configuration.md`). |
 | `include/engine/file_asset_store/capabilities.hpp` | Public capability types: ABI constant, handle/state/error enums, request/info/statistics structs, and the function-pointer vtable. |
 | `include/engine/file_asset_store/catalog.hpp` | Catalog/cook API shared with offline tooling: key normalization, binary catalog read/write, object paths, directory cook. |
-| `source/file_asset_store.cpp` | The whole module: `AssetRecord` cache, budgets and LRU eviction, async job plumbing, capability binding, module entry table. |
-| `source/asset_catalog.cpp` | Implementation of `catalog.hpp`: little-endian catalog format, canonical key rules, content-addressed object installation, cook walk. Built as the static library `engine_asset_catalog` and linked into the module. |
+| `source/asset_record.hpp` | The `AssetRecord` struct shared by the cache and loader: identity, atomic state/error/references, LRU stamp, byte buffer, and the `dataMutex`/`stateMutex` pair that guards them. |
+| `source/asset_config.hpp` | Parsed configuration values (`AssetStoreConfig`) shared between the cache, loader, and module. |
+| `source/asset_cache.hpp` / `source/asset_cache.cpp` | `AssetCache`: owns the record map and the identity-to-handle path index, manages the resident and in-flight byte budgets, runs LRU/FIFO eviction, canonicalizes request paths (with an optional FIFO cache), and exposes budget hooks (`reserveForLoad`, `commitLoad`, `releaseReservation`) that the module's load orchestrator calls. |
+| `source/asset_loader.hpp` / `source/asset_loader.cpp` | `AssetLoader`: stats and reads files into a freshly allocated buffer. On Linux, reads through an opened descriptor with `O_NOFOLLOW` (defensive against symlink replacement after canonicalization) and optional `posix_fadvise` hints (`POSIX_FADV_WILLNEED` before, `POSIX_FADV_DONTNEED` after). On other platforms, uses `std::ifstream`. Also provides SHA-256 verification. |
+| `source/asset_catalog.cpp` | Implementation of `catalog.hpp`: little-endian catalog format, canonical key rules, content-addressed object installation, cook walk. Built as the static library `engine_asset_catalog` and linked into the module. Object and catalog installs `fdatasync` the temp file before rename so a crash does not install partially written data. |
+| `source/file_asset_store.cpp` | The module: `FileAssetStoreModule` parses configuration, binds the capability vtable, manages async job submission, and orchestrates the load path (stat → reserve → read → verify → commit). Contains the module entry table. |
 
 ## How it works
 
 ### Request path and identity
 
-1. `requestAsset` canonicalizes the requested path (`canonicalPath`): `weakly_canonical` + `lexically_normal`, resolving relative paths against the configured `root_directory` when one is set. Any violation (empty, too long, escaping the root, unusable root) yields an empty string and the request fails with `InvalidPath`. When a root is configured but does not resolve to a real directory, every request is rejected.
+1. `requestAsset` canonicalizes the requested path (`AssetCache::canonicalPath`): `weakly_canonical` + `lexically_normal`, resolving relative paths against the configured `root_directory` when one is set. Any violation (empty, too long, escaping the root, unusable root) yields an empty string and the request fails with `InvalidPath`. When a root is configured but does not resolve to a real directory, every request is rejected. When `canonical_path_cache_size` is non-zero, recently resolved inputs are cached so repeated requests for the same path skip the `weakly_canonical` syscall.
 2. The canonical path (or `"cooked://<logical key>"` for cooked requests) is the record identity. `pathIndex_` maps identity to handle, so repeat requests return the same record with one extra reference.
 3. If the record cache is at `maximum_cached_assets`, one unreferenced asset is evicted to make room; if that fails, the request reports `CapacityExceeded`.
 
 ### Loading and budgets
 
-`readAsset` is the single load routine, used by the synchronous path, the scheduler job, and `reloadAsset`:
+`readAsset` (in `file_asset_store.cpp`) is the single load orchestrator, used by the synchronous path, the scheduler job, and `reloadAsset`:
 
-1. Stat the file; reject missing files (`FileNotFound`) and files above `maximum_file_bytes` (`FileTooLarge`).
+1. `AssetLoader::stat` stats the file; reject missing files (`FileNotFound`) and files above `maximum_file_bytes` (`FileTooLarge`).
 2. Cooked records additionally must match the catalog's expected size, else `CookedAssetIntegrityFailed`.
-3. Under `recordsMutex_`, the size is reserved against the in-flight budget and then the resident budget. If resident space is short, LRU eviction runs with a target of the shortfall plus `cache_eviction_batch_mb`; if the size still does not fit, the load fails with `CapacityExceeded`. Reserved bytes move to `residentBytes_` on success.
-4. The bytes are read from the opened file: on Linux through a descriptor-based read loop, elsewhere via `std::ifstream`. Both paths verify that the number of bytes read matches the initial file size; empty files are valid.
+3. `AssetCache::reserveForLoad` reserves the size against the in-flight budget and then the resident budget under `mutex_`. If resident space is short, LRU/FIFO eviction runs with a target of the shortfall plus `cache_eviction_batch_mb`; if the size still does not fit, the load fails with `CapacityExceeded`. Reserved bytes move to `residentBytes_` on success (`commitLoad`).
+4. `AssetLoader::read` reads the bytes from the opened file: on Linux through a descriptor-based read loop (with `O_NOFOLLOW` and optional `posix_fadvise` hints), elsewhere via `std::ifstream`. Both paths verify that the number of bytes read matches the initial file size; empty files are valid.
 5. If `verify_cooked_asset_hashes` is set and the record carries a catalog digest, the SHA-256 of the loaded bytes is checked.
-6. The buffer is swapped in under `dataMutex` and the record's `contentVersion` is bumped, so consumers can detect reloads.
+6. `AssetCache::commitLoad` swaps the buffer in under `dataMutex` and bumps the record's `contentVersion`, so consumers can detect reloads.
 
 Asynchronous requests reserve a slot under the submission/shutdown mutex (capped by `maximum_pending_requests`) and are submitted to the `ParticipantContext::taskScheduler()` at the request's priority (`AssetRequestPriority::Default` resolves to the configured `default_async_priority`). The job sets `Loading`, runs `readAsset`, then releases the slot and wakes `stop()`.
 
 ### Eviction and lifetime
 
-- Eviction candidates are records with zero references that are `Ready` or `Failed`; they are ordered by `lastAccessTick` (a module-wide logical clock bumped on every use), then re-validated under the lock before removal.
+- Eviction candidates are records with zero references that are `Ready` or `Failed`; they are ordered by `lastAccessTick` (LRU) or by handle (FIFO), then re-validated under the lock before removal. Both orders use a min-heap so a partial eviction that meets its target after a few removals never sorts the rest of the cache.
 - References are counted with a 32-bit unsigned value; retain operations stop at the maximum value. Releasing a record with no outstanding references has no effect.
 - Releasing the last reference deletes the record immediately, unless `cache_unreferenced_assets` keeps it as an eviction candidate.
 - `stop()` sets the stopping flag (new submissions fail with `Busy`), drains `pendingJobs_` to zero, then clears the cache.
@@ -76,13 +80,14 @@ Asynchronous requests reserve a slot under the submission/shutdown mutex (capped
 
 `construct()` reads the binary catalog at `cooked_catalog_path` (if set) into an in-memory map from logical key to `{sha256, sizeBytes}`. `requestCookedAsset` normalizes the requested key (see `normalizeAssetKey`: backslashes become slashes, `.`/`..`/absolute/`:`/NUL segments are rejected), looks it up, and loads the object at `<object directory>/<first 2 digest chars>/<digest>`. The object directory defaults to the catalog's parent directory and can be overridden with `cooked_object_directory`. A missing or corrupt catalog only disables cooked requests (stderr note); loose-file requests are unaffected.
 
-The catalog format itself (`asset_catalog.cpp`) is little-endian: 8-byte magic `ENGINEAC`, u32 version (1), u32 entry count, then per entry u32 path size, u64 size, 32 raw SHA-256 bytes, and the key bytes. Readers enforce the magic, version, count, per-entry bounds, canonical and unique keys, and absence of trailing data; writers sort entries by key and install the file via a unique temporary name plus rename. `cookAssetDirectory` walks a source tree (skipping symlinks), hashes every regular file, installs each object once (content-addressed dedup, size+hash re-verified after copying), and writes the catalog, refusing to place objects or catalog inside the source tree.
+The catalog format itself (`asset_catalog.cpp`) is little-endian: 8-byte magic `ENGINEAC`, u32 version (1), u32 entry count, then per entry u32 path size, u64 size, 32 raw SHA-256 bytes, and the key bytes. Readers enforce the magic, version, count, per-entry bounds, canonical and unique keys, and absence of trailing data; writers sort entries by key and install the file via a unique temporary name plus `fdatasync` + rename. `cookAssetDirectory` walks a source tree (skipping symlinks), hashes every regular file, installs each object once (content-addressed dedup, size+hash re-verified after copying, `fdatasync` before rename), and writes the catalog, refusing to place objects or catalog inside the source tree.
 
 ## Threading and lifetime
 
-- Capability calls are safe from any thread. `recordsMutex_` guards `records_`, `pathIndex_`, `residentBytes_`, `reservedBytes_`, and the handle counter; each record has a `dataMutex` for its byte buffer and a `stateMutex` + `stateCondition` pair that `waitForAsset` sleeps on.
+- Capability calls are safe from any thread. `AssetCache::mutex_` guards `records_`, `pathIndex_`, `residentBytes_`, `reservedBytes_`, and the handle counter; each record has a `dataMutex` for its byte buffer and a `stateMutex` + `stateCondition` pair that `waitForAsset` sleeps on.
 - Reads run either inline on the caller's thread or on task-scheduler worker threads; the scheduler pointer is captured in `construct()`.
 - `AssetInfo::canonicalPath` points into the record's string and is only valid until that record is evicted, purged, or the module stops.
+- `copyAssetData` re-checks the record's state under `dataMutex` before copying, guaranteeing the bytes and state are consistent at the time of the copy (a concurrent reload could otherwise swap bytes between an unlocked state check and the data lock).
 - Records live until the last reference is released (or `stop()` clears the cache). The module instance itself is created by the kernel's entry table and destroyed by the kernel after `stop()`.
 - The catalog/cook helpers in `asset_catalog.cpp` share no mutable state except an atomic temporary-name counter, so concurrent use against different destinations is safe; the final rename makes each file install atomic.
 
@@ -92,9 +97,9 @@ Default values and per-key validation ranges live in `config.toml`; every key is
 
 ## Integration
 
-- Events: none. The module never touches the kernel `EventBus`; it reports progress purely through asset state and the optional `PerformanceMetric::AssetRead` profiler timer around scheduled reads.
+- Events: none. The module never touches the kernel `EventBus`; it reports progress purely through asset state and the optional `PerformanceMetric::AssetRead` profiler timer around scheduled reads, plus `PerformanceMetric::AssetEviction` around eviction passes.
 - Permissions: none declared (`declaredPermissions` is empty in the entry table and `module.toml` declares no permissions).
-- Filesystem access is confined to the configured `root_directory` when one is set, and to the cooked object directory for cooked requests.
+- Filesystem access is confined to the configured `root_directory` when one is set, and to the cooked object directory for cooked requests. On Linux, file reads use `O_NOFOLLOW` on the final path component as a defensive measure against symlink replacement after canonicalization.
 
 Consumer usage (all signatures taken from `capabilities.hpp`):
 

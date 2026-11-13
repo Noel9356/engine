@@ -5,6 +5,7 @@
 // rewritten atomically via a temporary file.
 
 #include <engine/kernel/module_descriptor_cache.hpp>
+#include <engine/kernel/sha256.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -229,15 +230,32 @@ void ModuleDescriptorCache::load()
 const ModuleDescriptorCacheEntry *ModuleDescriptorCache::find(const std::filesystem::path &libraryPath,
     std::uintmax_t sizeBytes, std::uintmax_t modificationStamp, const std::string &contentSha256) const
 {
+    const ModuleDescriptorCacheEntry *entry = findByStamps(libraryPath, sizeBytes, modificationStamp);
+    if (entry == nullptr)
+    {
+        return nullptr;
+    }
+    // Case-insensitive so cached lowercase and freshly-computed lowercase (or any
+    // case in [trust] bindings) compare equal.
+    if (!sha256HexDigestsEqual(entry->contentSha256, contentSha256))
+    {
+        return nullptr;
+    }
+    return entry;
+}
+
+// Fast path: trust size+mtime as the validity signal and return the cached sha256
+// alongside the descriptor so the caller can skip re-hashing unchanged binaries.
+const ModuleDescriptorCacheEntry *ModuleDescriptorCache::findByStamps(
+    const std::filesystem::path &libraryPath, std::uintmax_t sizeBytes, std::uintmax_t modificationStamp) const
+{
     const auto found = entries.find(libraryPath.string());
     if (found == entries.end())
     {
         return nullptr;
     }
     const ModuleDescriptorCacheEntry &entry = found->second;
-
-    if (entry.sizeBytes != sizeBytes || entry.modificationStamp != modificationStamp
-        || entry.contentSha256 != contentSha256)
+    if (entry.sizeBytes != sizeBytes || entry.modificationStamp != modificationStamp)
     {
         return nullptr;
     }

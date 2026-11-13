@@ -327,7 +327,8 @@ enum class CharacterChangeKind : std::uint32_t
     StructureChanged = 0, // parts/connections added, removed, or replaced
     ParametersChanged,    // parameter values changed (deformation + anchors)
     OffsetsChanged,       // connection offsets changed (animation drivers)
-    Evaluated             // transforms/bounds were recomputed
+    Evaluated,            // transforms/bounds were recomputed
+    AssemblyDestroyed     // the assembly was destroyed (handle now invalid)
 };
 
 // Published on the engine event bus after any assembly mutation or

@@ -641,6 +641,44 @@ public:
         return static_cast<ChannelHolder<EventType> *>(found->second.get())->channel;
     }
 
+    // Returns nullptr when no channel for EventType has been created yet
+    // (does not create one). Useful for callers that want to publish only when
+    // a subscriber already exists.
+    template <typename EventType>
+    EventChannel<EventType> *tryChannel() noexcept
+    {
+        const auto found = channels.find(typeid(EventType));
+        if (found == channels.end())
+        {
+            return nullptr;
+        }
+        return static_cast<ChannelHolder<EventType> *>(found->second.get())->channelPtr();
+    }
+
+    // True when a channel for EventType has been created (i.e. someone has
+    // already subscribed or published).
+    template <typename EventType>
+    bool hasChannel() const noexcept
+    {
+        return channels.find(typeid(EventType)) != channels.end();
+    }
+
+    // Number of channels created so far (one per event type ever published or
+    // subscribed). Lives outside the per-channel subscriber count.
+    [[nodiscard]] std::size_t channelCount() const noexcept
+    {
+        return channels.size();
+    }
+
+    // Lock-free "any deferred events pending across every channel" check;
+    // cleared by flushDeferredEvents. Cheaper than hasDeferredEvents() on
+    // each channel when the bus has many channels and a typical frame has
+    // no deferred traffic.
+    [[nodiscard]] bool deferredEventPending() const noexcept
+    {
+        return deferredPending.load(std::memory_order_relaxed);
+    }
+
     template <typename EventType>
     void publish(const EventType &event)
     {
@@ -792,6 +830,11 @@ private:
     {
         EventChannel<EventType> channel;
         std::string             name = prettifyChannelName(typeid(EventType));
+
+        EventChannel<EventType> *channelPtr() noexcept
+        {
+            return &channel;
+        }
 
         bool unsubscribe(SubscriptionToken token) override
         {

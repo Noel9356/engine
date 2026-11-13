@@ -1,4 +1,4 @@
-config_keys           = [
+config_keys                       = [
     "character.maximum_bindings_per_part",
     "character.maximum_characters",
     "character.maximum_connectors_per_part",
@@ -14,8 +14,8 @@ config_keys           = [
     "character.maximum_tags_per_part",
     "character.validate_on_evaluate",
 ]
-name                  = "character"
-optional_capabilities = ["script_runtime"]
-provides              = ["character"]
-requires              = []
-version               = "0.2.0"
+name                              = "character"
+optional_capabilities             = ["script_runtime"]
+provides                          = ["character"]
+requires                          = []
+version                           = "0.1.0"

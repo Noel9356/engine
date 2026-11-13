@@ -21,7 +21,7 @@ using ScriptRuntimeHandle = std::uint32_t;
 // Handles are never reused; 0 is reserved so "no runtime" stays unambiguous.
 inline constexpr ScriptRuntimeHandle invalidScriptRuntime = 0;
 
-using ScriptRuntimeInitializerHandle = std::uint64_t;
+using ScriptRuntimeInitializerHandle                                            = std::uint64_t;
 inline constexpr ScriptRuntimeInitializerHandle invalidScriptRuntimeInitializer = 0;
 
 // Called once for every runtime, including runtimes created before registration.
@@ -72,10 +72,11 @@ using ScriptNativeFunction = bool (*)(void *userData, const ScriptValue *argumen
 
 enum ScriptLibrary : std::uint32_t
 {
-    ScriptLibraryMath   = 1u << 0u,
-    ScriptLibraryString = 1u << 1u,
-    ScriptLibraryTable  = 1u << 2u,
-    ScriptLibraryUtf8   = 1u << 3u
+    ScriptLibraryMath      = 1u << 0u,
+    ScriptLibraryString    = 1u << 1u,
+    ScriptLibraryTable     = 1u << 2u,
+    ScriptLibraryUtf8      = 1u << 3u,
+    ScriptLibraryCoroutine = 1u << 4u
 };
 
 struct ScriptRuntimeDescription

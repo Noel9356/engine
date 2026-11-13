@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -424,7 +425,7 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
         return false;
     }
     const std::size_t vertexCount = static_cast<std::size_t>(positionAccessor->count);
-    if (vertexCount > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
+    if (vertexCount > maximumVertexElementCount / renderer::meshVertexFloatCount)
     {
         return false;
     }
@@ -560,6 +561,7 @@ bool appendPrimitive(const cgltf_data &data, const cgltf_mesh &mesh, const cgltf
     {
         return true;
     }
+    accumulateBounds(part, record);
     record.parts.push_back(std::move(part));
     *hasGeometry = true;
     return true;
@@ -592,7 +594,7 @@ bool isSupportedRequiredExtension(const char *extension)
     };
     return std::any_of(std::begin(supported),
         std::end(supported),
-        [extension](const char *candidate) { return std::string(extension) == candidate; });
+        [extension](const char *candidate) { return std::strcmp(extension, candidate) == 0; });
 }
 
 // Loads and validates the glTF document, imports materials, then walks the scene

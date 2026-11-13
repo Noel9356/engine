@@ -14,7 +14,7 @@ The module provides the `models` capability, ABI version 7 (`modelsCapabilityAbi
 | `partCount(self, model)` | Number of renderable parts (0 for unknown handles). |
 | `part(self, model, partIndex, outDescription)` | Fills a `renderer::MeshDescription` that aliases module-owned buffers. |
 | `partName(self, model, partIndex)` | Part name (OBJ shape, glTF node/mesh, or file stem); null when out of range. |
-| `bounds(self, model, outMin, outMax)` | Post-transform axis-aligned bounds; either out-pointer may be null. |
+| `bounds(self, model, outMin, outMax)` | Post-transform axis-aligned bounds; either out-pointer may be null. Returns false when the model has no geometry with computed bounds. |
 | `materialCount` / `material` / `materialName` / `materialTexturePath` / `materialTextureOptions` | Material records in source order; texture paths are the raw URIs from the file. |
 | `partTriangleMaterials(self, model, partIndex, outIndices, outTriangleCount)` | Per-triangle material index array (`invalidMaterial` = 0xffffffff where unassigned). |
 | `statistics(self, model, outStatistics)` | File size, vertex/index/part/material counts of the loaded model. |
@@ -41,14 +41,14 @@ From `module.toml` and from the exported entry table at the bottom of `source/co
 | `config.toml` | Default values for the `[models]` configuration section (see `configuration.md`). |
 | `include/engine/models/capabilities.hpp` | Public capability types: ABI, handles, errors, load options, function-pointer table. Material and texture-slot types live in `shared_types/include/engine/models/material.hpp`. |
 | `source/core/models.cpp` | Module entry point: configuration, the model registry, capability binding, and the load pipeline. |
-| `source/internal/model_import_internal.hpp` | Shared importer plumbing: `ModelRecord`/`ModelPart` types, option transforms, triangle-normal generation, flat-shading expansion, and index helpers. |
+| `source/internal/model_import_internal.hpp` | Shared importer plumbing: `ModelRecord`/`ModelPart` types, option transforms, triangle-normal generation, flat-shading expansion, bounds accumulation, and index helpers. |
 | `source/importers/obj_importer.cpp` | Wavefront OBJ/MTL importer (tinyobjloader v2.0.0rc13, header-only). One part per OBJ shape; MTL materials with PBR inference. |
-| `source/importers/stl_importer.cpp` | STL importer (binary and ASCII). Bit-exact vertex welding on the transformed position. |
+| `source/importers/stl_importer.cpp` | STL importer (binary and ASCII). Bit-exact vertex welding on the transformed position and face normal. |
 | `source/importers/ply_importer.cpp` | PLY importer (ascii, binary little/big endian) with a hand-rolled header parser. |
 | `source/importers/off_importer.cpp` | OFF/COFF importer; polygon fan triangulation, optional COFF vertex colors. |
 | `source/importers/gltf_importer.cpp` | glTF 2.0 importer (cgltf v1.15, header-only): scene walk, node transforms, material extensions. |
 | `source/importers/cgltf_implementation.cpp` | The one translation unit that compiles the cgltf parser implementation. |
-| `source/optimization/model_optimizer.cpp` | meshoptimizer passes (v1.3): vertex cache, overdraw, vertex fetch. |
+| `source/optimization/model_optimizer.cpp` | meshoptimizer passes (v1.3): vertex cache, overdraw, simplification, vertex fetch. |
 
 ## How it works
 
@@ -59,13 +59,14 @@ From `module.toml` and from the exported entry table at the bottom of `source/co
 3. **File resolution and limits.** Absolute paths must exist as given; relative paths are probed through `models.search_paths` in order, then the working directory. Model paths are limited to 16 KiB, and material search paths supplied in load options are limited to 4 KiB. The file size is checked against `models.max_file_size_mb` (0 disables the configured file-size limit) and the live model count against `models.max_loaded_models`. Import allocation failures are returned through `ModelLoadError` rather than escaping the capability call.
 4. **Format detection and importer selection.** An explicit `ModelLoadOptions::format` forces the importer; `Auto` maps the lowercased file extension (`.obj`, `.stl`, `.ply`, `.off`, `.gltf`, `.glb`) to one. Unknown extensions fail with `ParseFailed` after a diagnostic on stderr.
 5. **Import.** Each importer parses its file, applies the transform to every position and normal, and appends parts (OBJ: one per shape; glTF: one per primitive; STL/PLY/OFF: a single part named after the file stem). Common vertex processing:
-    - **Welding** merges coincident corners: OBJ welds by (position, normal, uv) index keys (position-only when the shape has neither normals nor uvs), STL welds bit-exactly on the transformed position plus face normal. PLY, OFF, and glTF keep the source vertex pool as-is.
-    - **Normals** follow `normal_mode`: preserved through the transform (OBJ/PLY/ glTF), generated area-weighted smooth over shared vertices, or flat (which expands triangles to unshared vertices). Files without normals fall back to geometry or a +Y placeholder per the mode.
+    - **Welding** merges coincident corners: OBJ welds by (position, normal, uv) index keys (position-only when the shape has neither normals nor uvs), STL welds bit-exactly on the transformed position plus face normal (signed zeros folded so -0.0f and +0.0f weld identically). PLY, OFF, and glTF keep the source vertex pool as-is.
+    - **Normals** follow `normal_mode`: preserved through the transform (OBJ/PLY/glTF), generated area-weighted smooth over shared vertices, or flat (which expands triangles to unshared vertices). Files without normals fall back to geometry or a +Y placeholder per the mode.
     - **Geometry preparation** uses the transformed triangle positions for face normals. Smooth mode accumulates area-weighted face normals over indexed vertices; flat mode expands each triangle corner into its own vertex and preserves the triangle-material order. Both modes apply the final triangle winding before generating normals.
     - **Colors** are read only when `import_vertex_colors` is set (OBJ `v x y z r g b`, PLY `red/green/blue`, COFF colors, glTF `COLOR_0`); otherwise white.
     - **UVs** get the V flip (`flip_texture_v`), then `uv_scale`/`uv_offset`.
     - **Materials**: OBJ MTL files become material records (with PBR factors inferred from shininess/dissolve/ior where OBJ has none); glTF materials are copied factor-by-factor including the supported KHR extensions. Parts record one material index per triangle (`invalidMaterial` when unassigned).
-6. **Optimization.** When `optimize_mesh` is set, `optimizeModelRecord` runs the module-configured meshoptimizer passes over every part: vertex cache and overdraw reorder triangles (only for parts whose triangles share a single fully opaque material, so blending order survives), then vertex fetch reorders the vertex buffer along the index order.
+    - **Bounds** are accumulated by the shared `detail::accumulateBounds` helper, which every importer calls after a part is built. The helper threads the seeded/not-seeded state through `ModelRecord::haveBounds` so the capability's `bounds()` entry returns false (rather than a zero box) when no vertex has been seen.
+6. **Optimization.** When `optimize_mesh` is set, `optimizeModelRecord` runs the module-configured meshoptimizer passes over every part in a fixed order: vertex cache and overdraw reorder triangles (only for parts whose triangles map to a single fully opaque material, or carry no material at all, so blending order survives), then simplification reduces the triangle count (only for the same single-material-or-none parts, and only when `simplify` is enabled), then vertex fetch reorders the vertex buffer along the final index order. Simplification re-stamps the single material across the new triangle count so material assignments survive; multi-material parts are never simplified. Simplification also re-runs the vertex cache pass on the simplified topology.
 7. **Registration.** Statistics are filled from the post-optimization record, a fresh handle is allocated (monotonic counter that skips 0 and live ids), and the record moves into the module's map.
 
 **ModelHandle to GPU-facing data.** `part()` fills a `renderer::MeshDescription` whose `vertices`/`indices` pointers alias the part's own vectors (`vertexCount` = floats / 11, `indexCount` triangles x 3, `MeshIndexFormat::UInt32`); stride and attribute tables stay at the description defaults, the renderer knows the 11-float layout via `renderer::meshVertexFloatCount`. The pointers stay valid until `destroyPluginel`, module stop, or (for `partTriangleMaterials`/names) the same lifetime.
@@ -74,7 +75,7 @@ From `module.toml` and from the exported entry table at the bottom of `source/co
 
 All capability entries and the configuration-reload handler run synchronously on the caller's thread; the module keeps no mutexes. Treat the capability as single-threaded: load, query, and destroy models from the thread that owns the engine (the kernel drives construct/start/stop and event dispatch there) and do not share `MeshDescription` pointers across threads without external synchronization.
 
-The module owns everything: `ModelRecord` (vertex/index buffers, material strings, statistics) lives in the registry until `destroyPluginel` erases it or `stop()` clears the registry. `part()`, `partName()`, `materialName()`, `materialTexturePath()`, and `partTriangleMaterials()` return views into that storage, not copies. Importers allocate their own scratch (cgltf's document is freed via `unique_ptr` before `loadModelWithOptions` returns); nothing imported is retained beyond what the record holds.
+The module owns everything: `ModelRecord` (vertex/index buffers, material strings, statistics, bounds) lives in the registry until `destroyPluginel` erases it or `stop()` clears the registry. `part()`, `partName()`, `materialName()`, `materialTexturePath()`, and `partTriangleMaterials()` return views into that storage, not copies. Importers allocate their own scratch (cgltf's document is freed via `unique_ptr` before `loadModelWithOptions` returns); nothing imported is retained beyond what the record holds.
 
 ## Configuration
 

@@ -132,8 +132,8 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
     // Header edge count is parsed but unused.
     (void)edgeCount;
 
-    if (vertexCount > std::vector<std::array<float, 11>>().max_size()
-        || faceCount > std::vector<std::uint32_t>().max_size() / 3u)
+    if (vertexCount > maximumVertexElementCount
+        || faceCount > maximumVertexElementCount / 3u)
     {
         reportError(error, ModelLoadError::FileTooLarge);
         return false;
@@ -279,23 +279,7 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
     part.vertices = std::move(interleaved);
     part.indices  = std::move(indices);
     part.name     = path.stem().string();
-    for (std::size_t offset = 0; offset < part.vertices.size(); offset += renderer::meshVertexFloatCount)
-    {
-        const float *position = part.vertices.data() + offset;
-        if (offset == 0)
-        {
-            std::copy_n(position, 3, record.minimum);
-            std::copy_n(position, 3, record.maximum);
-        }
-        else
-        {
-            for (std::size_t axis = 0; axis < 3; ++axis)
-            {
-                record.minimum[axis] = std::min(record.minimum[axis], position[axis]);
-                record.maximum[axis] = std::max(record.maximum[axis], position[axis]);
-            }
-        }
-    }
+    accumulateBounds(part, record);
     record.parts.push_back(std::move(part));
     reportError(error, ModelLoadError::None);
     return true;

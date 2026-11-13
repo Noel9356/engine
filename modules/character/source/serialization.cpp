@@ -28,8 +28,14 @@
 //
 //   [parameters]
 //   "body.height" = 1.0
+//
+// Floats are written with full round-trip precision and every loaded value is
+// resolved and checked before the assembly is touched, so a rejected recipe
+// leaves the current character untouched.
 
-#include "character_module.hpp"
+#include "math_utils.hpp"
+#include "records.hpp"
+#include "registry.hpp"
 
 #include <toml.hpp>
 
@@ -37,9 +43,12 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace engine::character
 {
@@ -65,6 +74,36 @@ double readNumber(const toml::node *node, double fallback)
         return static_cast<double>(value->get());
     }
     return fallback;
+}
+
+// True when node holds an integral TOML value (integers and whole floats).
+bool readIntegral(const toml::node *node, std::uint64_t &outValue)
+{
+    if (node == nullptr)
+    {
+        return false;
+    }
+    if (const auto *value = node->as_integer(); value != nullptr)
+    {
+        if (value->get() < 0)
+        {
+            return false;
+        }
+        outValue = static_cast<std::uint64_t>(value->get());
+        return true;
+    }
+    if (const auto *value = node->as_floating_point(); value != nullptr)
+    {
+        const double number = value->get();
+        if (!std::isfinite(number) || number < 0.0 || number != std::floor(number)
+            || number > static_cast<double>(std::numeric_limits<std::uint64_t>::max()))
+        {
+            return false;
+        }
+        outValue = static_cast<std::uint64_t>(number);
+        return true;
+    }
+    return false;
 }
 
 glm::vec3 readVector3(const toml::node *node, const glm::vec3 &fallback)
@@ -120,7 +159,9 @@ std::string readString(const toml::node *node)
     return node->value_or(std::string{});
 }
 
-// Minimal TOML basic-string escaping for the writer.
+// Minimal TOML basic-string escaping for the writer: quotes, backslashes,
+// and every control character (short control escapes when defined, unicode
+// escapes otherwise) so instance names can never break out of the string.
 std::string tomlString(const std::string &value)
 {
     std::string escaped;
@@ -128,6 +169,7 @@ std::string tomlString(const std::string &value)
     escaped += '"';
     for (const char character : value)
     {
+        const unsigned char code = static_cast<unsigned char>(character);
         switch (character)
         {
         case '"':
@@ -145,8 +187,24 @@ std::string tomlString(const std::string &value)
         case '\t':
             escaped += "\\t";
             break;
+        case '\b':
+            escaped += "\\b";
+            break;
+        case '\f':
+            escaped += "\\f";
+            break;
         default:
-            escaped += character;
+            if (code < 0x20 || code == 0x7f)
+            {
+                static constexpr char digits[] = "0123456789ABCDEF";
+                escaped += "\\u00";
+                escaped += digits[(code >> 4) & 0xF];
+                escaped += digits[code & 0xF];
+            }
+            else
+            {
+                escaped += character;
+            }
             break;
         }
     }
@@ -154,27 +212,44 @@ std::string tomlString(const std::string &value)
     return escaped;
 }
 
+// Full float round-trip precision: max_digits10 for the type, so a
+// save/load cycle reproduces the stored values bit-exactly.
+void writeFloat(std::ostream &stream, float value)
+{
+    char buffer[64] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.9g", static_cast<double>(value));
+    stream << buffer;
+}
+
 void writeVector3(std::ostream &stream, const char *key, const glm::vec3 &value)
 {
-    std::ostringstream row;
-    row << value.x << ", " << value.y << ", " << value.z;
-    stream << key << " = [" << row.str() << "]\n";
+    stream << key << " = [";
+    writeFloat(stream, value.x);
+    stream << ", ";
+    writeFloat(stream, value.y);
+    stream << ", ";
+    writeFloat(stream, value.z);
+    stream << "]\n";
 }
 
 void writeQuaternion(std::ostream &stream, const char *key, const glm::quat &value)
 {
-    std::ostringstream row;
-    row << value.x << ", " << value.y << ", " << value.z << ", " << value.w;
-    stream << key << " = [" << row.str() << "]\n";
+    stream << key << " = [";
+    writeFloat(stream, value.x);
+    stream << ", ";
+    writeFloat(stream, value.y);
+    stream << ", ";
+    writeFloat(stream, value.z);
+    stream << ", ";
+    writeFloat(stream, value.w);
+    stream << "]\n";
 }
 
 } // namespace
 
-bool saveRecipeToFile(
-    const Registry &registry, const CharacterRecord &record, const std::string &filePath, std::string &errorMessage)
+bool saveRecipeToFile(const Registry &registry, const CharacterRecord &record, const std::string &filePath,
+    std::string &errorMessage)
 {
-    (void)registry;
-
     std::ostringstream stream;
     stream << "# Character assembly recipe (engine character module).\n";
     stream << "# Format " << recipeFormatVersion << ": parts, structural attachments, parameters.\n\n";
@@ -197,27 +272,18 @@ bool saveRecipeToFile(
 
     for (const ConnectionRecord &connection : record.connections)
     {
-        const PartInstance *parent = nullptr;
-        const PartInstance *child  = nullptr;
-        for (const PartInstance &part : record.parts)
-        {
-            if (part.id == connection.parent)
-            {
-                parent = &part;
-            }
-            if (part.id == connection.child)
-            {
-                child = &part;
-            }
-        }
-        if (parent == nullptr || child == nullptr)
+        const auto parentIndex = record.instanceIndicesById.find(connection.parent);
+        const auto childIndex  = record.instanceIndicesById.find(connection.child);
+        if (parentIndex == record.instanceIndicesById.end() || childIndex == record.instanceIndicesById.end())
         {
             continue;
         }
+        const PartInstance &parent = record.parts[parentIndex->second];
+        const PartInstance &child  = record.parts[childIndex->second];
         stream << "[[connections]]\n";
-        stream << "parent           = " << tomlString(parent->name) << "\n";
+        stream << "parent           = " << tomlString(parent.name) << "\n";
         stream << "parent_connector = " << tomlString(connection.parentConnector) << "\n";
-        stream << "child            = " << tomlString(child->name) << "\n";
+        stream << "child            = " << tomlString(child.name) << "\n";
         stream << "child_connector  = " << tomlString(connection.childConnector) << "\n";
         writeVector3(stream, "offset_translation", connection.offsetTranslation);
         writeQuaternion(stream, "offset_rotation", connection.offsetRotation);
@@ -225,15 +291,25 @@ bool saveRecipeToFile(
     }
 
     stream << "[parameters]\n";
-    // Deterministic order for stable diffs across saves.
+    // Deterministic (sorted) order for stable diffs across saves.
     std::set<std::string> parameterIds;
-    for (const auto &entry : record.parameterValues)
+    for (const ParameterRecord &parameter : registry.parameters)
     {
-        parameterIds.insert(entry.first);
+        parameterIds.insert(parameter.id);
     }
     for (const std::string &parameterId : parameterIds)
     {
-        stream << tomlString(parameterId) << " = " << record.parameterValues.at(parameterId) << "\n";
+        const auto index = registry.parameterIndices.find(parameterId);
+        if (index == registry.parameterIndices.end())
+        {
+            continue;
+        }
+        const float value = index->second < record.parameterValues.size()
+            ? record.parameterValues[index->second]
+            : registry.parameters[index->second].defaultV;
+        stream << tomlString(parameterId) << " = ";
+        writeFloat(stream, value);
+        stream << "\n";
     }
 
     std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
@@ -253,7 +329,8 @@ bool saveRecipeToFile(
 }
 
 bool loadRecipeFromFile(
-    const Registry &registry, CharacterRecord &record, const std::string &filePath, std::string &errorMessage)
+    const Registry &registry, const Budgets &budgets, CharacterRecord &record, const std::string &filePath,
+    std::string &errorMessage)
 {
     toml::table document;
     try
@@ -273,18 +350,18 @@ bool loadRecipeFromFile(
 
     if (const toml::node *versionNode = document.get("format_version"))
     {
-        const std::uint64_t version = static_cast<std::uint64_t>(readNumber(versionNode, 0.0));
-        if (version != recipeFormatVersion)
+        std::uint64_t version = 0;
+        if (!readIntegral(versionNode, version) || version != recipeFormatVersion)
         {
-            errorMessage = "unsupported recipe format version " + std::to_string(version) + " (expected "
+            errorMessage = "unsupported recipe format version (expected "
                          + std::to_string(recipeFormatVersion) + ")";
             return false;
         }
     }
 
-    // Content replacement happens only after every lookup succeeded, so a
-    // bad recipe leaves the current character untouched.
-    std::string profileId = readString(document.get("profile"));
+    // Content replacement happens only after every lookup and check
+    // succeeded, so a bad recipe leaves the current character untouched.
+    const std::string profileId = readString(document.get("profile"));
     if (!profileId.empty() && registry.profileIndices.count(profileId) == 0)
     {
         errorMessage = "recipe references unregistered profile '" + profileId + "'";
@@ -306,6 +383,13 @@ bool loadRecipeFromFile(
             errorMessage = "'parts' must be an array of tables";
             return false;
         }
+        if (parts->size() > budgets.maximumPartsPerCharacter)
+        {
+            errorMessage = "recipe declares " + std::to_string(parts->size()) + " parts but the per-assembly budget "
+                         "allows " + std::to_string(budgets.maximumPartsPerCharacter);
+            return false;
+        }
+        loadedParts.reserve(parts->size());
         for (const toml::node &element : *parts)
         {
             const auto *entry = element.as_table();
@@ -351,6 +435,14 @@ bool loadRecipeFromFile(
             errorMessage = "'connections' must be an array of tables";
             return false;
         }
+        if (connections->size() > budgets.maximumConnectionsPerCharacter)
+        {
+            errorMessage = "recipe declares " + std::to_string(connections->size())
+                         + " connections but the per-assembly budget allows "
+                         + std::to_string(budgets.maximumConnectionsPerCharacter);
+            return false;
+        }
+        loadedConnections.reserve(connections->size());
         for (const toml::node &element : *connections)
         {
             const auto *entry = element.as_table();
@@ -418,7 +510,7 @@ bool loadRecipeFromFile(
         }
     }
 
-    // Validate name uniqueness before mutating anything.
+    // Name uniqueness before anything else is resolved.
     std::set<std::string> instanceNames;
     for (const LoadedPart &part : loadedParts)
     {
@@ -429,16 +521,76 @@ bool loadRecipeFromFile(
         }
     }
 
+    // Resolve connection names against the loaded parts, and the referenced
+    // connectors and role pairs against the part assets - the same eager
+    // checks connect() applies, so a recipe that connect() would have
+    // rejected never reaches the assembly.
+    std::unordered_map<std::string, const LoadedPart *> partsByName;
+    partsByName.reserve(loadedParts.size() * 2);
+    for (const LoadedPart &part : loadedParts)
+    {
+        partsByName.emplace(part.name, &part);
+    }
+    struct LoadedConnectionTarget
+    {
+        const LoadedPart      *parent            = nullptr;
+        const LoadedPart      *child             = nullptr;
+        const ConnectorRecord *parentConnector   = nullptr;
+        const ConnectorRecord *childConnector    = nullptr;
+        glm::vec3              offsetTranslation{0.0f};
+        glm::quat              offsetRotation{1.0f, 0.0f, 0.0f, 0.0f};
+    };
+    std::vector<LoadedConnectionTarget> resolvedConnections;
+    resolvedConnections.reserve(loadedConnections.size());
+    for (const LoadedConnection &connection : loadedConnections)
+    {
+        LoadedConnectionTarget resolved;
+        const auto             parent = partsByName.find(connection.parentName);
+        const auto             child  = partsByName.find(connection.childName);
+        if (parent == partsByName.end() || child == partsByName.end())
+        {
+            errorMessage = "connection references unknown instance name";
+            return false;
+        }
+        resolved.parent = parent->second;
+        resolved.child  = child->second;
+        resolved.parentConnector = findConnector(*resolved.parent->asset, connection.parentConnector);
+        resolved.childConnector  = findConnector(*resolved.child->asset, connection.childConnector);
+        if (resolved.parentConnector == nullptr)
+        {
+            errorMessage = "parent part '" + resolved.parent->asset->id + "' has no connector '"
+                         + connection.parentConnector + "'";
+            return false;
+        }
+        if (resolved.childConnector == nullptr)
+        {
+            errorMessage = "child part '" + resolved.child->asset->id + "' has no connector '"
+                         + connection.childConnector + "'";
+            return false;
+        }
+        if (resolveCompatibilityRule(registry, *resolved.parentConnector, *resolved.childConnector) == nullptr)
+        {
+            errorMessage = "no compatibility rule allows role pair ('" + resolved.parentConnector->role + "', '"
+                         + resolved.childConnector->role + "')";
+            return false;
+        }
+        resolved.offsetTranslation = connection.offsetTranslation;
+        resolved.offsetRotation    = connection.offsetRotation;
+        resolvedConnections.push_back(std::move(resolved));
+    }
+
     // Commit: rebuild the assembly content.
     record.parts.clear();
     record.connections.clear();
     record.instancesByName.clear();
+    record.instanceIndicesById.clear();
     record.profileId = profileId;
 
+    InstanceId nextInstanceId = 1;
     for (LoadedPart &part : loadedParts)
     {
         PartInstance instance;
-        instance.id     = record.parts.empty() ? 1u : record.parts.back().id + 1u;
+        instance.id     = nextInstanceId++;
         instance.name   = part.name;
         instance.partId = part.asset->id;
         instance.part   = *part.asset;
@@ -446,31 +598,18 @@ bool loadRecipeFromFile(
         part.id = instance.id;
         record.parts.push_back(std::move(instance));
     }
-    for (const LoadedConnection &connection : loadedConnections)
+    record.nextInstanceId = nextInstanceId;
+    for (std::size_t index = 0; index < record.parts.size(); ++index)
     {
-        InstanceId parent = invalidInstance;
-        InstanceId child  = invalidInstance;
-        for (const LoadedPart &part : loadedParts)
-        {
-            if (part.name == connection.parentName)
-            {
-                parent = part.id;
-            }
-            if (part.name == connection.childName)
-            {
-                child = part.id;
-            }
-        }
-        if (parent == invalidInstance || child == invalidInstance)
-        {
-            errorMessage = "connection references unknown instance name";
-            return false;
-        }
+        record.instanceIndicesById.emplace(record.parts[index].id, static_cast<std::uint32_t>(index));
+    }
+    for (const LoadedConnectionTarget &connection : resolvedConnections)
+    {
         ConnectionRecord connectionRecord;
-        connectionRecord.parent            = parent;
-        connectionRecord.parentConnector   = connection.parentConnector;
-        connectionRecord.child             = child;
-        connectionRecord.childConnector    = connection.childConnector;
+        connectionRecord.parent            = connection.parent->id;
+        connectionRecord.parentConnector   = connection.parentConnector->id;
+        connectionRecord.child             = connection.child->id;
+        connectionRecord.childConnector    = connection.childConnector->id;
         connectionRecord.offsetTranslation = connection.offsetTranslation;
         connectionRecord.offsetRotation    = connection.offsetRotation;
         record.connections.push_back(std::move(connectionRecord));
@@ -478,13 +617,18 @@ bool loadRecipeFromFile(
 
     // Parameters: start from the registry defaults, then apply the recipe.
     record.parameterValues.clear();
+    record.parameterValues.reserve(registry.parameters.size());
     for (const ParameterRecord &parameter : registry.parameters)
     {
-        record.parameterValues.emplace(parameter.id, parameter.defaultV);
+        record.parameterValues.push_back(parameter.defaultV);
     }
     for (const auto &entry : loadedParameters)
     {
-        record.parameterValues[entry.first] = entry.second;
+        const auto index = registry.parameterIndices.find(entry.first);
+        if (index != registry.parameterIndices.end())
+        {
+            record.parameterValues[index->second] = entry.second;
+        }
     }
 
     record.rootTranslation = rootTranslation;

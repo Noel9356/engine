@@ -27,6 +27,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace engine::file_asset_store
 {
 namespace
@@ -52,39 +57,78 @@ std::filesystem::path makeTemporaryPath(const std::filesystem::path &path)
          + std::to_string(sequence);
 }
 
-// Append helpers emitting little-endian bytes.
-void appendU32(std::vector<std::uint8_t> &bytes, std::uint32_t value)
+// Little-endian append/read helpers. Templatized so u32 and u64 share one
+// implementation; sizeof(T) decides the shift count and the bounds check.
+template <typename T>
+void appendLE(std::vector<std::uint8_t> &bytes, T value)
 {
-    for (unsigned shift = 0; shift < 32; shift += 8)
+    for (unsigned shift = 0; shift < sizeof(T) * 8u; shift += 8)
         bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
 }
 
-void appendU64(std::vector<std::uint8_t> &bytes, std::uint64_t value)
+template <typename T>
+bool readLE(const std::vector<std::uint8_t> &bytes, std::size_t &offset, T &out)
 {
-    for (unsigned shift = 0; shift < 64; shift += 8)
-        bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
-}
-
-// Bounds-checked little-endian reads; false when not enough bytes remain.
-bool readU32(const std::vector<std::uint8_t> &bytes, std::size_t &offset, std::uint32_t &out)
-{
-    if (offset > bytes.size() || bytes.size() - offset < 4)
+    if (offset > bytes.size() || bytes.size() - offset < sizeof(T))
         return false;
     out = 0;
-    for (unsigned shift = 0; shift < 32; shift += 8)
-        out |= static_cast<std::uint32_t>(bytes[offset++]) << shift;
+    for (unsigned shift = 0; shift < sizeof(T) * 8u; shift += 8)
+        out |= static_cast<T>(bytes[offset++]) << shift;
     return true;
 }
 
-bool readU64(const std::vector<std::uint8_t> &bytes, std::size_t &offset, std::uint64_t &out)
+// Renders 32 raw digest bytes as lowercase hex.
+std::string digestToHex(const std::uint8_t *digestBytes, std::size_t count)
 {
-    if (offset > bytes.size() || bytes.size() - offset < 8)
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(count * 2u);
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        const std::uint8_t byte = digestBytes[index];
+        result.push_back(hex[byte >> 4u]);
+        result.push_back(hex[byte & 0x0fu]);
+    }
+    return result;
+}
+
+// Packs a hex digest string back into raw bytes. Returns false on malformed
+// input (wrong length or non-hex character).
+bool hexToDigest(const std::string &hex, std::uint8_t *out, std::size_t outSize)
+{
+    if (hex.size() != outSize * 2u)
         return false;
-    out = 0;
-    for (unsigned shift = 0; shift < 64; shift += 8)
-        out |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
+    const auto nibble = [](char value) -> std::uint8_t
+    {
+        if (value >= '0' && value <= '9')
+            return static_cast<std::uint8_t>(value - '0');
+        if (value >= 'a' && value <= 'f')
+            return static_cast<std::uint8_t>(value - 'a' + 10);
+        if (value >= 'A' && value <= 'F')
+            return static_cast<std::uint8_t>(value - 'A' + 10);
+        return 0xffu;
+    };
+    for (std::size_t index = 0; index < outSize; ++index)
+    {
+        const std::uint8_t hi = nibble(hex[index * 2u]);
+        const std::uint8_t lo = nibble(hex[index * 2u + 1u]);
+        if (hi == 0xffu || lo == 0xffu)
+            return false;
+        out[index] = static_cast<std::uint8_t>((hi << 4u) | lo);
+    }
     return true;
 }
+
+#if defined(__linux__)
+// fsync the fd and silently ignore the result. Used before rename so a
+// crash does not leave a partially written file installed under its final
+// name.
+void fsyncFd(int fd) noexcept
+{
+    if (fd >= 0)
+        ::fdatasync(fd);
+}
+#endif
 
 // Lexical containment test; a relative path starting with ".." (or an
 // unrelated absolute path) counts as outside the root.
@@ -152,6 +196,20 @@ bool ensureObject(const std::filesystem::path &source, const std::filesystem::pa
         error = "source changed or object copy failed hash verification";
         return false;
     }
+
+#if defined(__linux__)
+    // Durability: flush the temp file's data to disk before the rename so
+    // a crash does not install a partially written object. The directory
+    // entry update (rename) is journaled on modern Linux filesystems.
+    {
+        const int fd = ::open(temporaryPath.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd >= 0)
+        {
+            fsyncFd(fd);
+            ::close(fd);
+        }
+    }
+#endif
 
     filesystemError.clear();
     std::filesystem::rename(temporaryPath, objectPath, filesystemError);
@@ -260,7 +318,7 @@ bool readAssetCatalog(const std::filesystem::path &path, std::vector<AssetCatalo
     std::size_t   offset  = catalogMagic.size();
     std::uint32_t version = 0;
     std::uint32_t count   = 0;
-    if (!readU32(bytes, offset, version) || !readU32(bytes, offset, count) || version != catalogVersion
+    if (!readLE(bytes, offset, version) || !readLE(bytes, offset, count) || version != catalogVersion
         || count > maximumEntries)
     {
         error = "asset catalog version or entry count is invalid";
@@ -276,7 +334,7 @@ bool readAssetCatalog(const std::filesystem::path &path, std::vector<AssetCatalo
         {
             std::uint32_t pathSize  = 0;
             std::uint64_t sizeBytes = 0;
-            if (!readU32(bytes, offset, pathSize) || !readU64(bytes, offset, sizeBytes) || pathSize == 0
+            if (!readLE(bytes, offset, pathSize) || !readLE(bytes, offset, sizeBytes) || pathSize == 0
                 || pathSize > maximumPathBytes || offset > bytes.size()
                 || bytes.size() - offset < engine::Sha256::digestSize + pathSize)
             {
@@ -284,18 +342,9 @@ bool readAssetCatalog(const std::filesystem::path &path, std::vector<AssetCatalo
                 outEntries.clear();
                 return false;
             }
-            std::array<std::uint8_t, engine::Sha256::digestSize> digestBytes{};
-            std::copy_n(bytes.data() + offset, digestBytes.size(), digestBytes.data());
-            offset += digestBytes.size();
-            std::string digest;
-            digest.reserve(engine::Sha256::hexDigestSize);
-            // Render the raw digest bytes as lowercase hex.
-            static constexpr char hex[] = "0123456789abcdef";
-            for (const std::uint8_t byte : digestBytes)
-            {
-                digest.push_back(hex[byte >> 4u]);
-                digest.push_back(hex[byte & 0x0fu]);
-            }
+            const std::uint8_t *digestBytes = bytes.data() + offset;
+            offset += engine::Sha256::digestSize;
+            const std::string digest = digestToHex(digestBytes, engine::Sha256::digestSize);
             std::string key(reinterpret_cast<const char *>(bytes.data() + offset), pathSize);
             offset += pathSize;
             std::string normalized;
@@ -343,8 +392,8 @@ bool writeAssetCatalog(
         std::vector<std::uint8_t> bytes;
         bytes.reserve(catalogMagic.size() + 8u + sorted.size() * 64u);
         bytes.insert(bytes.end(), catalogMagic.begin(), catalogMagic.end());
-        appendU32(bytes, catalogVersion);
-        appendU32(bytes, static_cast<std::uint32_t>(sorted.size()));
+        appendLE(bytes, catalogVersion);
+        appendLE(bytes, static_cast<std::uint32_t>(sorted.size()));
         std::string previous;
         for (const AssetCatalogEntry &entry : sorted)
         {
@@ -358,24 +407,14 @@ bool writeAssetCatalog(
             }
             previous                     = entry.logicalPath;
             const std::uint32_t pathSize = static_cast<std::uint32_t>(entry.logicalPath.size());
-            appendU32(bytes, pathSize);
-            appendU64(bytes, entry.sizeBytes);
+            appendLE(bytes, pathSize);
+            appendLE(bytes, entry.sizeBytes);
+            // Pack the hex digest text into 32 raw bytes.
             std::array<std::uint8_t, engine::Sha256::digestSize> digest{};
-            // Pack the hex digest text back into 32 raw bytes.
-            for (std::size_t index = 0; index < digest.size(); ++index)
+            if (!hexToDigest(entry.sha256, digest.data(), digest.size()))
             {
-                const auto nibble = [](char value) -> std::uint8_t
-                {
-                    if (value >= '0' && value <= '9')
-                        return static_cast<std::uint8_t>(value - '0');
-                    if (value >= 'a' && value <= 'f')
-                        return static_cast<std::uint8_t>(value - 'a' + 10);
-                    if (value >= 'A' && value <= 'F')
-                        return static_cast<std::uint8_t>(value - 'A' + 10);
-                    return 0;
-                };
-                digest[index] = static_cast<std::uint8_t>(
-                    (nibble(entry.sha256[index * 2]) << 4u) | nibble(entry.sha256[index * 2 + 1]));
+                error = "asset catalog contains a malformed SHA-256 digest";
+                return false;
             }
             bytes.insert(bytes.end(), digest.begin(), digest.end());
             bytes.insert(bytes.end(), entry.logicalPath.begin(), entry.logicalPath.end());
@@ -412,7 +451,20 @@ bool writeAssetCatalog(
                 error = "cannot write complete asset catalog";
                 return false;
             }
+            stream.close();
         }
+#if defined(__linux__)
+        // Durability: flush the temp catalog file to disk before the
+        // rename so a crash does not install a truncated catalog.
+        {
+            const int fd = ::open(temporaryPath.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd >= 0)
+            {
+                fsyncFd(fd);
+                ::close(fd);
+            }
+        }
+#endif
         filesystemError.clear();
         std::filesystem::rename(temporaryPath, path, filesystemError);
         if (filesystemError)

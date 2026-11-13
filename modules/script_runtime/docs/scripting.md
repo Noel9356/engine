@@ -25,7 +25,7 @@ Rules enforced by the kernel:
 The entry file runs once in its own sandboxed runtime. Available:
 
 - Globals set by the host: `engine_plugin_id`, `engine_plugin_version`, `engine_plugin_path`.
-- Libraries: `math`, `string`, `table`, `utf8`, and a trimmed `base` (`print` works; `dofile`/`loadfile`/`collectgarbage` do not exist; no `io`/`os`).
+- Libraries: `math`, `string`, `table`, `utf8`, and a trimmed `base` (`print` works; `dofile`/`loadfile`/`load`/`collectgarbage` do not exist; `string.dump` is removed; no `io`/`os`/`package`/`debug`). The `coroutine` library is available when the host enables it (the engine default keeps it off; set the `ScriptLibraryCoroutine` bit when creating a runtime, or enable it through `script_runtime.default_enabled_libraries`).
 - Functions registered by the hosting application (for example the demo's `menu_*` bridge) — check for existence if your plugin must run in several games: `if menu_text ~= nil then ... end`.
 - Anything the application registered via `registerNativeFunction` on the runtime returned by `hostedRuntime(pluginId)`.
 - Functions installed by the optional modules' Lua bridges when those modules are active: `audio.*`, `camera.*`, `input_actions.*`, and `skeletal_animation.*`. Each module's `docs/lua_bridge.md` documents its exact function set.
@@ -52,5 +52,6 @@ Timing notes:
 ## Performance and safety
 
 - Scripts share the module-wide memory budget; keep per-frame allocations low and prefer reusing tables.
-- The instruction limit applies per execute/call and is checked in batches of 1000 Lua instructions to limit hook overhead: one `on_frame` invocation that loops forever is stopped, but the budget restarts next frame.
+- The instruction limit applies per execute/call and is checked in batches (`instruction_hook_granularity`, default 1000 Lua instructions) to limit hook overhead: one `on_frame` invocation that loops forever is stopped, but the budget restarts next frame. Lower granularity catches runaway loops sooner at higher overhead.
 - Native calls are the expensive boundary; batch data (tables of numbers are not supported — use multiple numbers or strings) rather than calling in a tight loop.
+- The sandbox is text-only: scripts are compiled with `luaL_loadbufferx` in `"t"` mode, and the `load` global is removed so a script cannot load binary chunks at runtime.

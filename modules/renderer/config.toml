@@ -1,4 +1,5 @@
 [renderer]
+anisotropy_level                     = 1.0
 auto_config                          = false
 back_face_culling                    = true
 backend                              = "auto"
@@ -9,6 +10,8 @@ draw_sort_mode                       = "mesh_material"
 frustum_culling                      = true
 gi_indirect_lighting                 = true
 gpu_timestamps_enabled               = false
+headless_band_split_triangles        = 4096
+headless_tile_parallel               = false
 headless_transform_cache_mb          = 32
 instance_batch_min_count             = 4
 instance_batching                    = true
@@ -20,10 +23,11 @@ max_material_sets_per_renderer       = 256
 max_pending_uploads                  = 64
 max_textures_per_renderer            = 256
 memory_budget_update_interval_frames = 120
+msaa_samples                         = 1
 parallel_triangle_threshold          = 4096
 pipeline_cache_mb                    = 64
 pixels_per_lock_group                = 16
+present_mode                         = "auto"
 texture_mipmaps                      = true
 validation                           = false
 vsync                                = false
-headless_tile_parallel               = false

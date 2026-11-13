@@ -95,6 +95,34 @@ std::string nativePluginContentHash(const PluginManifest &pluginManifest)
     return {};
 }
 
+// Reads an entire file into a string using a single seek+read rather than
+// the istreambuf_iterator approach (which is noticeably slower on large
+// files). Returns an empty string and sets error on failure; the empty
+// string is the caller's signal that the file could not be read.
+std::string readFileIntoString(const std::filesystem::path &path, std::string &error)
+{
+    std::ifstream stream(path, std::ios::in | std::ios::binary | std::ios::ate);
+    if (!stream.is_open())
+    {
+        error = "cannot open '" + path.string() + "'";
+        return {};
+    }
+    const std::streamoff fileSize = stream.tellg();
+    if (fileSize < 0)
+    {
+        error = "cannot size '" + path.string() + "'";
+        return {};
+    }
+    stream.seekg(0, std::ios::beg);
+    std::string content(static_cast<std::size_t>(fileSize), '\0');
+    if (fileSize > 0 && !stream.read(content.data(), fileSize))
+    {
+        error = "cannot read '" + path.string() + "'";
+        return {};
+    }
+    return content;
+}
+
 // Trust hash of a script package: a length-prefixed digest over the manifest and
 // every .lua file sorted by relative path (the version tag pins the layout, so
 // any rename or reorder changes the hash).
@@ -149,24 +177,23 @@ std::string scriptPluginContentHash(const PluginManifest &pluginManifest)
     feedText("engine-script-plugin-hash-v1");
     feedText("plugin.toml");
     {
-        std::ifstream manifestStream(
-            pluginManifest.directory / PluginManifestLoader::manifestFileName, std::ios::in | std::ios::binary);
-        if (manifestStream.is_open())
+        std::string readError;
+        const std::string manifestBytes
+            = readFileIntoString(pluginManifest.directory / PluginManifestLoader::manifestFileName, readError);
+        if (!manifestBytes.empty())
         {
-            std::string manifestBytes(
-                (std::istreambuf_iterator<char>(manifestStream)), std::istreambuf_iterator<char>());
             feedText(manifestBytes);
         }
     }
     for (const HashedFile &file : files)
     {
         feedText(file.relativePath);
-        std::ifstream scriptStream(file.path, std::ios::in | std::ios::binary);
-        if (!scriptStream.is_open())
+        std::string readError;
+        const std::string scriptBytes = readFileIntoString(file.path, readError);
+        if (scriptBytes.empty() && !readError.empty())
         {
             return {};
         }
-        std::string scriptBytes((std::istreambuf_iterator<char>(scriptStream)), std::istreambuf_iterator<char>());
         feedText(scriptBytes);
     }
 

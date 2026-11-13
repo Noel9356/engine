@@ -56,6 +56,7 @@ Vulkan swapchains require surface support for color-attachment usage. PPM screen
 | `source/backend/render_backend.hpp` | `RenderBackend` - the abstract interface both backends implement. |
 | `source/core/render_shared.hpp` | Shared PBR math (must match the Vulkan shader), default environment, tone mapping, renderer error mapping, and device preference enum. |
 | `source/core/render_data.hpp/.cpp` | Mesh/texture normalization: attribute repacking, index validation, normal generation, pixel format conversion. |
+| `source/backend/headless/headless_types.hpp` | Headless backend data types: `HeadlessMesh` (planar SoA mesh copy with bounding sphere and LOD index chains) and `HeadlessTexture` (RGBA8 upload copy plus float-RGB mip chain) shared between the backend and its rasterizer. |
 | `source/backend/headless/headless_backend.hpp/.cpp` | Headless backend: CPU rasterizer with culling, LOD, transform cache, and task-scheduler parallelism. |
 | `source/backend/vulkan/vulkan_backend.hpp/.cpp` | Vulkan backend: frame lifecycle, command recording, instance streaming, deferred destruction. |
 | `source/backend/vulkan/vulkan_device.hpp/.cpp` | `VulkanDeviceContext`: instance/surface/device/VMA bring-up, device profile, async staging-upload queue. |

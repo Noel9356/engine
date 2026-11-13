@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #if defined(_MSC_VER)
 #include <intrin.h> // _mm_pause
@@ -281,6 +282,59 @@ public:
             counter.histogram.percentile(0.95),
             counter.histogram.percentile(0.99),
             counter.histogram.percentile(0.999)};
+    }
+
+    // Snapshots every metric in enum order; index it with
+    // static_cast<std::size_t>(metric).
+    [[nodiscard]] std::array<PerformanceMetricSnapshot, static_cast<std::size_t>(PerformanceMetric::Count)>
+    snapshotAll() const noexcept
+    {
+        std::array<PerformanceMetricSnapshot, static_cast<std::size_t>(PerformanceMetric::Count)> snapshots{};
+        for (std::size_t index = 0; index < counters_.size(); ++index)
+        {
+            const Counter &counter = counters_[index];
+            snapshots[index] = PerformanceMetricSnapshot{
+                counter.samples.load(std::memory_order_relaxed),
+                counter.totalNanoseconds.load(std::memory_order_relaxed),
+                counter.maximumNanoseconds.load(std::memory_order_relaxed),
+                counter.histogram.percentile(0.50),
+                counter.histogram.percentile(0.90),
+                counter.histogram.percentile(0.95),
+                counter.histogram.percentile(0.99),
+                counter.histogram.percentile(0.999)};
+        }
+        return snapshots;
+    }
+
+    // Human-readable per-metric dump; metrics with zero samples are omitted.
+    // Each non-empty metric yields one line: "<name>: <samples> samples,
+    // mean <ms> ms, p50 <ns> ns, p99 <ns> ns, max <ns> ns".
+    [[nodiscard]] std::string formattedReport() const
+    {
+        std::string report;
+        for (std::size_t index = 0; index < counters_.size(); ++index)
+        {
+            const Counter                &counter  = counters_[index];
+            const PerformanceMetricSnapshot snapshot = {
+                counter.samples.load(std::memory_order_relaxed),
+                counter.totalNanoseconds.load(std::memory_order_relaxed),
+                counter.maximumNanoseconds.load(std::memory_order_relaxed),
+                counter.histogram.percentile(0.50),
+                counter.histogram.percentile(0.90),
+                counter.histogram.percentile(0.95),
+                counter.histogram.percentile(0.99),
+                counter.histogram.percentile(0.999)};
+            if (snapshot.sampleCount == 0)
+                continue;
+            const auto metric = static_cast<PerformanceMetric>(index);
+            report += performanceMetricName(metric);
+            report += ": " + std::to_string(snapshot.sampleCount) + " samples, mean "
+                    + std::to_string(snapshot.averageMilliseconds()) + " ms, p50 "
+                    + std::to_string(snapshot.p50Nanoseconds) + " ns, p99 "
+                    + std::to_string(snapshot.p99Nanoseconds) + " ns, max "
+                    + std::to_string(snapshot.maximumNanoseconds) + " ns\n";
+        }
+        return report;
     }
 
     void reset() noexcept

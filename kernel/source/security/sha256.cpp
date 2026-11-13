@@ -212,29 +212,39 @@ void Sha256::update(const void *data, std::size_t size)
 
 // Padding: 0x80, zeros up to a 56-byte residue, then the 64-bit big-endian bit
 // length. The 8 state words serialize big-endian into the 32-byte digest.
+// Inlined (rather than calling update() per padding byte) so the hot hashing
+// path does not pay per-byte function-call overhead for the final block.
 void Sha256::finish(std::uint8_t outDigest[digestSize])
 {
     const std::uint64_t bitLength = totalBytes * 8;
 
-    const std::uint8_t padding = 0x80u;
-    update(&padding, 1);
-    const std::uint8_t zero = 0x00u;
-    while (bufferedBytes != 56)
+    // Append the 0x80 terminator; if it crosses a block boundary, flush the
+    // current block and continue padding into a fresh one.
+    buffer[bufferedBytes++] = 0x80u;
+    if (bufferedBytes > 56)
     {
-        update(&zero, 1);
+        while (bufferedBytes < 64)
+        {
+            buffer[bufferedBytes++] = 0x00u;
+        }
+        sha256CompressBlock(state, buffer);
+        bufferedBytes = 0;
     }
-    const std::array<std::uint8_t, 8> lengthBytes = {
-        static_cast<std::uint8_t>((bitLength >> 56) & 0xFFu),
-        static_cast<std::uint8_t>((bitLength >> 48) & 0xFFu),
-        static_cast<std::uint8_t>((bitLength >> 40) & 0xFFu),
-        static_cast<std::uint8_t>((bitLength >> 32) & 0xFFu),
-        static_cast<std::uint8_t>((bitLength >> 24) & 0xFFu),
-        static_cast<std::uint8_t>((bitLength >> 16) & 0xFFu),
-        static_cast<std::uint8_t>((bitLength >> 8) & 0xFFu),
-        static_cast<std::uint8_t>(bitLength & 0xFFu),
-    };
+    // Zero-fill the remainder of the block up to the length footer.
+    while (bufferedBytes < 56)
+    {
+        buffer[bufferedBytes++] = 0x00u;
+    }
 
-    std::memcpy(buffer + 56, lengthBytes.data(), 8);
+    // 64-bit big-endian bit length.
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>((bitLength >> 56) & 0xFFu);
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>((bitLength >> 48) & 0xFFu);
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>((bitLength >> 40) & 0xFFu);
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>((bitLength >> 32) & 0xFFu);
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>((bitLength >> 24) & 0xFFu);
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>((bitLength >> 16) & 0xFFu);
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>((bitLength >> 8) & 0xFFu);
+    buffer[bufferedBytes++] = static_cast<std::uint8_t>(bitLength & 0xFFu);
     sha256CompressBlock(state, buffer);
     bufferedBytes = 0;
 

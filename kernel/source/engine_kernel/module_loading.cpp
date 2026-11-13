@@ -68,6 +68,54 @@ void readModuleEntryTableCapabilities(const EngineModuleEntryTable &entry, Modul
     outDescriptor.declaredPermissions  = readList(entry.declaredPermissions, entry.declaredPermissionCount);
 }
 
+// Loads the library, queries engineQueryModuleEntryTable and fills the descriptor's
+// identity/capabilities. Returns the entry table pointer (valid only while the
+// library stays loaded) so the caller can grab the factory; nullptr on failure
+// with a human-readable report appended.
+const EngineModuleEntryTable *loadAndQueryModuleEntryTable(
+    DynamicLibrary &library, const std::filesystem::path &libraryPath, std::string &report)
+{
+    std::string loadError;
+    if (!library.load(libraryPath, loadError))
+    {
+        report += "- " + loadError + "\n";
+        return nullptr;
+    }
+    const auto query = reinterpret_cast<const EngineModuleEntryTable *(*)()>(
+        library.resolveSymbol("engineQueryModuleEntryTable"));
+    if (query == nullptr)
+    {
+        report += "- '" + libraryPath.string()
+                + "' exports no engineQueryModuleEntryTable entry point; not a module.\n";
+        return nullptr;
+    }
+    const EngineModuleEntryTable *moduleEntryTable = query();
+    if (moduleEntryTable == nullptr || moduleEntryTable->abiVersion != engineModuleAbiVersion)
+    {
+        report += "- '" + libraryPath.string()
+                + "' was built against a different module ABI (expected version "
+                + std::to_string(engineModuleAbiVersion) + "); rebuild the module with this kernel.\n";
+        return nullptr;
+    }
+    if (moduleEntryTable->moduleName == nullptr || moduleEntryTable->createModule == nullptr)
+    {
+        report += "- '" + libraryPath.string() + "' returns an incomplete module descriptor.\n";
+        return nullptr;
+    }
+    return moduleEntryTable;
+}
+
+// Fills the descriptor's identity and capability/permission lists from the entry table.
+void fillDescriptorFromEntryTable(const EngineModuleEntryTable &entry, ModuleDescriptor &outDescriptor)
+{
+    outDescriptor.name = entry.moduleName;
+    if (entry.moduleVersion != nullptr)
+    {
+        outDescriptor.version = entry.moduleVersion;
+    }
+    readModuleEntryTableCapabilities(entry, outDescriptor);
+}
+
 } // namespace
 
 // Scans the modules directory (top level plus one nesting level), hashes every
@@ -206,6 +254,37 @@ void EngineKernel::loadModuleLibraries(std::string &report)
             continue;
         }
 
+        // Fast path: when the file-system stamps (size + mtime) match a cached
+        // entry, the cached descriptor and the cached content hash are reused
+        // directly. The hash is recomputed only on a cache miss, which avoids
+        // re-hashing every module library on every startup of an unchanged
+        // build - the cache lives next to the executable, so trusting size+mtime
+        // as the validity signal is as strong as trusting the executable itself.
+        if (const ModuleDescriptorCacheEntry *remembered
+            = descriptorCache.findByStamps(libraryPath, sizeBytes, modificationStamp))
+        {
+            ModuleLibraryRecord record;
+            record.descriptor    = remembered->descriptor;
+            record.contentSha256 = remembered->contentSha256;
+            record.libraryPath   = libraryPath;
+
+            // Two libraries claiming one module name would alias; the later (sorted) path is ignored.
+            if (std::find_if(moduleLibraries.begin(),
+                    moduleLibraries.end(),
+                    [&record](const ModuleLibraryRecord &existing)
+                    { return existing.descriptor.name == record.descriptor.name; })
+                != moduleLibraries.end())
+            {
+                report += "- module '" + record.descriptor.name
+                        + "' is provided by more than one module library; '" + libraryPath.string()
+                        + "' is ignored.\n";
+                continue;
+            }
+
+            moduleLibraries.push_back(std::move(record));
+            continue;
+        }
+
         std::string       hashError;
         const std::string contentSha256 = Sha256::fileHexDigest(libraryPath, hashError);
         if (contentSha256.empty())
@@ -214,15 +293,7 @@ void EngineKernel::loadModuleLibraries(std::string &report)
             continue;
         }
 
-        ModuleLibraryRecord               record;
-        const ModuleDescriptorCacheEntry *remembered = descriptorCache.find(libraryPath, sizeBytes, modificationStamp, contentSha256);
-        if (remembered != nullptr)
-        {
-            record.descriptor    = remembered->descriptor;
-            record.contentSha256 = contentSha256;
-            record.libraryPath   = libraryPath;
-        }
-        else
+        ModuleLibraryRecord record;
         {
             const DirectorySidecar &sidecar            = sidecarFor(libraryDirectory);
             bool                    describedBySidecar = false;
@@ -374,44 +445,15 @@ bool EngineKernel::scanUndescribedModuleLibraryDescriptor(const UndescribedModul
     outRecord.libraryPath   = candidate.libraryPath;
     outRecord.contentSha256 = candidate.contentSha256;
 
-    auto        library = std::make_unique<DynamicLibrary>();
-    std::string loadError;
-    if (!library->load(candidate.libraryPath, loadError))
+    auto library = std::make_unique<DynamicLibrary>();
+    const EngineModuleEntryTable *moduleEntryTable
+        = loadAndQueryModuleEntryTable(*library, candidate.libraryPath, report);
+    if (moduleEntryTable == nullptr)
     {
-        report += "- " + loadError + "\n";
         return false;
-    }
-
-    const auto query
-        = reinterpret_cast<const EngineModuleEntryTable *(*)()>(library->resolveSymbol("engineQueryModuleEntryTable"));
-    if (query == nullptr)
-    {
-        report += "- '" + candidate.libraryPath.string()
-                + "' exports no engineQueryModuleEntryTable entry point; not a module.\n";
-        return false;
-    }
-
-    const EngineModuleEntryTable *moduleEntryTable = query();
-    if (moduleEntryTable == nullptr || moduleEntryTable->abiVersion != engineModuleAbiVersion)
-    {
-        report += "- '" + candidate.libraryPath.string()
-                + "' was built against a different module ABI (expected version "
-                + std::to_string(engineModuleAbiVersion) + "); rebuild the module with this kernel.\n";
-        return false;
-    }
-    if (moduleEntryTable->moduleName == nullptr || moduleEntryTable->createModule == nullptr)
-    {
-        report += "- '" + candidate.libraryPath.string() + "' returns an incomplete module descriptor.\n";
-        return false;
-    }
-
-    outRecord.descriptor.name = moduleEntryTable->moduleName;
-    if (moduleEntryTable->moduleVersion != nullptr)
-    {
-        outRecord.descriptor.version = moduleEntryTable->moduleVersion;
     }
     outRecord.createModule = moduleEntryTable->createModule;
-    readModuleEntryTableCapabilities(*moduleEntryTable, outRecord.descriptor);
+    fillDescriptorFromEntryTable(*moduleEntryTable, outRecord.descriptor);
 
     library->release();
 
@@ -425,44 +467,16 @@ bool EngineKernel::scanUndescribedModuleLibraryDescriptor(const UndescribedModul
 // Same discovery as the scan path, but keeps the library loaded and records its factory.
 bool EngineKernel::loadModuleLibrary(ModuleLibraryRecord &module, std::string &report)
 {
-    auto        library = std::make_unique<DynamicLibrary>();
-    std::string loadError;
-    if (!library->load(module.libraryPath, loadError))
+    auto library = std::make_unique<DynamicLibrary>();
+    const EngineModuleEntryTable *moduleEntryTable
+        = loadAndQueryModuleEntryTable(*library, module.libraryPath, report);
+    if (moduleEntryTable == nullptr)
     {
-        report += "- " + loadError + "\n";
         return false;
     }
-
-    const auto query
-        = reinterpret_cast<const EngineModuleEntryTable *(*)()>(library->resolveSymbol("engineQueryModuleEntryTable"));
-    if (query == nullptr)
-    {
-        report += "- '" + module.libraryPath.string()
-                + "' exports no engineQueryModuleEntryTable entry point; not a module.\n";
-        return false;
-    }
-
-    const EngineModuleEntryTable *moduleEntryTable = query();
-    if (moduleEntryTable == nullptr || moduleEntryTable->abiVersion != engineModuleAbiVersion)
-    {
-        report += "- '" + module.libraryPath.string() + "' was built against a different module ABI (expected version "
-                + std::to_string(engineModuleAbiVersion) + "); rebuild the module with this kernel.\n";
-        return false;
-    }
-    if (moduleEntryTable->moduleName == nullptr || moduleEntryTable->createModule == nullptr)
-    {
-        report += "- '" + module.libraryPath.string() + "' returns an incomplete module descriptor.\n";
-        return false;
-    }
-
     module.descriptor      = ModuleDescriptor{};
-    module.descriptor.name = moduleEntryTable->moduleName;
-    if (moduleEntryTable->moduleVersion != nullptr)
-    {
-        module.descriptor.version = moduleEntryTable->moduleVersion;
-    }
+    fillDescriptorFromEntryTable(*moduleEntryTable, module.descriptor);
     module.createModule = moduleEntryTable->createModule;
-    readModuleEntryTableCapabilities(*moduleEntryTable, module.descriptor);
 
     module.library = std::move(library);
     return true;

@@ -40,6 +40,7 @@ if(ENGINE_SCRIPT_RUNTIME_ENABLE_LUA)
         lzio.c
         lauxlib.c
         lbaselib.c
+        lcorolib.c
         lmathlib.c
         lstrlib.c
         ltablib.c
@@ -88,6 +89,7 @@ add_library(
     engine_module_script_runtime
     MODULE
     source/script_runtime.cpp
+    source/lua_sandbox.cpp
 )
 target_compile_definitions(
     engine_module_script_runtime

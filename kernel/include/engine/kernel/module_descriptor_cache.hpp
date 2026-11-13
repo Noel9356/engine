@@ -50,7 +50,14 @@ public:
     // Silently ignores a missing, empty or unparseable cache file.
     void load();
 
-    // Returns the cached descriptor only when size, mtime and content hash match.
+    // Returns the cached descriptor only when the file-system stamps (size and
+    // mtime) match; the stored content hash is returned alongside the descriptor
+    // so callers can feed the trust gate without re-hashing an unchanged binary.
+    const ModuleDescriptorCacheEntry *findByStamps(
+        const std::filesystem::path &libraryPath, std::uintmax_t sizeBytes, std::uintmax_t modificationStamp) const;
+
+    // Legacy lookup: size, mtime and content hash must all match. Kept for
+    // callers that already computed the hash and want a fully-validated hit.
     const ModuleDescriptorCacheEntry *find(const std::filesystem::path &libraryPath, std::uintmax_t sizeBytes,
         std::uintmax_t modificationStamp, const std::string &contentSha256) const;
 

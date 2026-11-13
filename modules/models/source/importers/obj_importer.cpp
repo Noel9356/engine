@@ -310,7 +310,6 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
         }
     }
 
-    bool                       haveBounds = false;
     std::vector<float>         smoothNormalScratch;
     std::vector<std::uint8_t>  smoothNormalTouchedFlags;
     std::vector<std::uint32_t> smoothNormalTouchedIndices;
@@ -606,28 +605,7 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
         {
             part.name = "part " + std::to_string(record.parts.size());
         }
-        for (std::size_t offset = 0; offset + 2 < part.vertices.size(); offset += renderer::meshVertexFloatCount)
-        {
-            const float x = part.vertices[offset + 0];
-            const float y = part.vertices[offset + 1];
-            const float z = part.vertices[offset + 2];
-            if (!haveBounds)
-            {
-                record.minimum[0] = record.maximum[0] = x;
-                record.minimum[1] = record.maximum[1] = y;
-                record.minimum[2] = record.maximum[2] = z;
-                haveBounds                            = true;
-            }
-            else
-            {
-                record.minimum[0] = std::min(record.minimum[0], x);
-                record.minimum[1] = std::min(record.minimum[1], y);
-                record.minimum[2] = std::min(record.minimum[2], z);
-                record.maximum[0] = std::max(record.maximum[0], x);
-                record.maximum[1] = std::max(record.maximum[1], y);
-                record.maximum[2] = std::max(record.maximum[2], z);
-            }
-        }
+        accumulateBounds(part, record);
         record.parts.push_back(std::move(part));
     }
 

@@ -29,6 +29,8 @@ target_compile_features(
 add_library(
     engine_module_file_asset_store
     MODULE
+    source/asset_cache.cpp
+    source/asset_loader.cpp
     source/file_asset_store.cpp
 )
 target_compile_definitions(

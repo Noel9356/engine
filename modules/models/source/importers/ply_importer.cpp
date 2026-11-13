@@ -324,7 +324,7 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
         reportError(error, ModelLoadError::NoGeometry);
         return false;
     }
-    if (vertexCount > std::vector<std::array<float, 11>>().max_size())
+    if (vertexCount > maximumVertexElementCount)
     {
         reportError(error, ModelLoadError::FileTooLarge);
         return false;
@@ -581,7 +581,7 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
     ModelPart part;
     part.name = path.stem().string();
     const std::size_t outputCount = static_cast<std::size_t>(vertexCount);
-    if (outputCount > std::vector<float>().max_size() / renderer::meshVertexFloatCount)
+    if (outputCount > maximumVertexElementCount / renderer::meshVertexFloatCount)
     {
         reportError(error, ModelLoadError::FileTooLarge);
         return false;
@@ -640,29 +640,7 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
     {
         part.triangleMaterials.assign(part.indices.size() / 3, invalidMaterial);
     }
-    bool haveBounds = false;
-    for (std::size_t offset = 0; offset + 2 < part.vertices.size(); offset += renderer::meshVertexFloatCount)
-    {
-        const float x = part.vertices[offset];
-        const float y = part.vertices[offset + 1];
-        const float z = part.vertices[offset + 2];
-        if (!haveBounds)
-        {
-            record.minimum[0] = record.maximum[0] = x;
-            record.minimum[1] = record.maximum[1] = y;
-            record.minimum[2] = record.maximum[2] = z;
-            haveBounds                            = true;
-        }
-        else
-        {
-            record.minimum[0] = std::min(record.minimum[0], x);
-            record.maximum[0] = std::max(record.maximum[0], x);
-            record.minimum[1] = std::min(record.minimum[1], y);
-            record.maximum[1] = std::max(record.maximum[1], y);
-            record.minimum[2] = std::min(record.minimum[2], z);
-            record.maximum[2] = std::max(record.maximum[2], z);
-        }
-    }
+    accumulateBounds(part, record);
     record.parts.push_back(std::move(part));
     reportError(error, ModelLoadError::None);
     return true;

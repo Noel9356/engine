@@ -276,6 +276,18 @@ bool EngineKernel::construct(std::string &report)
             options.queueSourceFairness = *fairness;
             hasOptions                  = true;
         }
+        if (const auto spin = configurationStore.integerAtPath("engine", "worker_spin_before_park");
+            spin && *spin >= 0)
+        {
+            options.workerSpinBeforePark = static_cast<std::uint32_t>(std::min<std::int64_t>(*spin, 4096));
+            hasOptions                   = true;
+        }
+        if (const auto idleSpin = configurationStore.integerAtPath("engine", "wait_idle_spin_iterations");
+            idleSpin && *idleSpin >= 0)
+        {
+            options.waitIdleSpinIterations = static_cast<std::uint32_t>(std::min<std::int64_t>(*idleSpin, 4096));
+            hasOptions                     = true;
+        }
         if (hasOptions)
             taskScheduler_.setOptions(options);
     }

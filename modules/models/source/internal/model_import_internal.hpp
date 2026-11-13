@@ -46,21 +46,44 @@ struct ModelMaterialRecord
 };
 
 // Meshoptimizer pass selection for the post-import optimization step
-// (module configuration, not per-load options).
+// (module configuration, not per-load options). The passes run in a fixed order:
+// vertex cache -> overdraw -> simplify -> vertex fetch. Simplify is the only pass
+// that can change the vertex/index count; the others only reorder in place.
 struct ModelOptimizationOptions
 {
     bool  vertexCache       = true;  // reorder triangles for post-transform cache hits
     bool  overdraw          = true;  // then reorder again to reduce pixel overdraw
     bool  vertexFetch       = true;  // finally reorder vertices for sequential GPU fetch
     float overdrawThreshold = 1.05f; // allowed overdraw increase for the overdraw pass
+
+    // Triangle-count reduction via meshopt_simplify. Skipped for parts whose
+    // triangles do not map to a single fully opaque material (blending order
+    // would be destroyed), and skipped for parts with fewer than 6 triangles
+    // (meshopt_simplify needs at least one collapsible edge).
+    bool  simplify            = false;
+    // Target index count as a fraction of the source index count, in 0..1.
+    // 0 keeps nothing (meshopt stops at the topology floor); 1 keeps the mesh
+    // intact. A typical LOD setting is 0.25..0.5.
+    float simplifyTargetRatio = 0.5f;
+    // Relative error threshold (in mesh's own scale) accepted during collapses.
+    // Smaller values preserve shape better at the cost of fewer reductions; the
+    // meshopt default of 1e-2f is a reasonable starting point.
+    float simplifyTargetError = 1.0e-2f;
+    // When true, passes meshopt_SimplifyLockBorder so boundary vertices (mesh
+    // edges, attribute seams) are never collapsed. Improves LOD seam behaviour
+    // at the cost of fewer reductions.
+    bool  simplifyLockBorder = false;
 };
 
 // Everything owned by one loaded model handle: post-transform bounds and
 // statistics, the parts in source order, and the materials in source order.
+// `haveBounds` tracks whether `minimum`/`maximum` have been seeded by at least
+// one vertex; importers set it via `accumulateBounds`.
 struct ModelRecord
 {
     float minimum[3] = {0.0f, 0.0f, 0.0f};
     float maximum[3] = {0.0f, 0.0f, 0.0f};
+    bool  haveBounds = false;
 
     ModelStatistics                  statistics;
     std::vector<ModelPart>           parts;
@@ -83,6 +106,12 @@ struct ModelTransform
 // Sanity bound applied to scale/translation/pivot/uv values (|value| must not
 // exceed this) so imports cannot overflow float arithmetic downstream.
 inline constexpr double maximumTransformMagnitude = 1.0e12;
+
+// Practical upper bound on vertex/index element counts. Used in place of
+// `std::vector<T>().max_size()` (which constructs a temporary vector just to
+// read an implementation-defined constant) for overflow guards.
+inline constexpr std::size_t maximumVertexElementCount
+    = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
 
 // Normalizes a 3-vector in place (double precision). Degenerate inputs fall back
 // to `fallback`, or +Y when none is given.
@@ -220,7 +249,7 @@ inline bool accumulateIndexedSmoothNormals(const std::vector<float> &vertices,
     }
 
     const std::size_t vertexCount = vertices.size() / vertexStride;
-    if (vertexCount > std::vector<float>().max_size() / 3)
+    if (vertexCount > maximumVertexElementCount / 3)
     {
         return false;
     }
@@ -266,7 +295,7 @@ inline bool expandFlatShading(ModelPart &part)
     const std::size_t sourceVertexCount = part.vertices.size() / vertexStride;
     if (part.vertices.size() % vertexStride != 0 || part.indices.size() % 3 != 0
         || static_cast<std::uint64_t>(part.indices.size()) > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1ull
-        || part.indices.size() > std::vector<float>().max_size() / vertexStride)
+        || part.indices.size() > maximumVertexElementCount / vertexStride)
     {
         return false;
     }
@@ -313,6 +342,47 @@ inline void reportError(ModelLoadError *error, ModelLoadError value)
     if (error != nullptr)
     {
         *error = value;
+    }
+}
+
+// Folds -0.0f into +0.0f so welding keys treat signed zeros identically.
+inline float canonicalizeZero(float value) noexcept
+{
+    return value == 0.0f ? 0.0f : value;
+}
+
+// Accumulates an axis-aligned bounds box from the interleaved vertex stream of
+// `part` into `record.minimum`/`record.maximum`, threading the seeded/not-seeded
+// state through `record.haveBounds`. Safe to call on empty parts (no-op). All
+// importers use this so bounds handling is identical across formats.
+inline void accumulateBounds(const ModelPart &part, ModelRecord &record) noexcept
+{
+    constexpr std::size_t vertexStride = renderer::meshVertexFloatCount;
+    if (part.vertices.empty() || part.vertices.size() % vertexStride != 0)
+    {
+        return;
+    }
+    for (std::size_t offset = 0; offset + 2 < part.vertices.size(); offset += vertexStride)
+    {
+        const float x = part.vertices[offset + 0];
+        const float y = part.vertices[offset + 1];
+        const float z = part.vertices[offset + 2];
+        if (!record.haveBounds)
+        {
+            record.minimum[0] = record.maximum[0] = x;
+            record.minimum[1] = record.maximum[1] = y;
+            record.minimum[2] = record.maximum[2] = z;
+            record.haveBounds                    = true;
+        }
+        else
+        {
+            record.minimum[0] = std::min(record.minimum[0], x);
+            record.minimum[1] = std::min(record.minimum[1], y);
+            record.minimum[2] = std::min(record.minimum[2], z);
+            record.maximum[0] = std::max(record.maximum[0], x);
+            record.maximum[1] = std::max(record.maximum[1], y);
+            record.maximum[2] = std::max(record.maximum[2], z);
+        }
     }
 }
 

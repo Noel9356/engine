@@ -50,12 +50,14 @@ namespace renderer
 {
 
 // CPU texture sampler: wrap or clamp UVs, then nearest or bilinear filter
-// against the requested mip level (level 0 = the base image).
+// against the requested mip level (level 0 = the base image). mipData holds
+// only the generated (downsampled) levels - level 0 reads pixelsRGB, level
+// N>=1 reads mipData[N-1]. Returns white when empty.
 glm::vec3 HeadlessTexture::sample(float u, float v, std::uint32_t mipLevel) const
 {
     const float  *data;
     std::uint32_t mipW, mipH;
-    if (mipLevel == 0 || mipLevel >= mipData.size() || mipData[0].empty())
+    if (mipLevel == 0 || mipData.empty() || mipLevel - 1u >= mipData.size())
     {
         data = pixelsRGB.data();
         mipW = width;
@@ -63,9 +65,10 @@ glm::vec3 HeadlessTexture::sample(float u, float v, std::uint32_t mipLevel) cons
     }
     else
     {
-        data = mipData[mipLevel].data();
-        mipW = mipWidths[mipLevel];
-        mipH = mipHeights[mipLevel];
+        const std::uint32_t mipIndex = mipLevel - 1u;
+        data = mipData[mipIndex].data();
+        mipW = mipWidths[mipIndex];
+        mipH = mipHeights[mipIndex];
     }
     if (mipW == 0 || mipH == 0 || data == nullptr)
         return glm::vec3(1.0f);
@@ -424,14 +427,17 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
             }
             if (description.width > 1 && description.height > 1)
             {
-                texture.mipData.push_back(texture.pixelsRGB);
-                texture.mipWidths.push_back(description.width);
-                texture.mipHeights.push_back(description.height);
-                std::uint32_t cw = description.width, ch = description.height;
+                // mipData holds only the generated (downsampled) levels, not
+                // the base image - the sampler reads pixelsRGB for mip level 0
+                // directly, so duplicating it in mipData[0] was wasted memory
+                // (3 floats per pixel, e.g. ~12 MiB on a 1024x1024 texture).
+                // The first downsample reads from pixelsRGB; subsequent ones
+                // read from the previous mip in mipData.
+                const std::vector<float> *prev = &texture.pixelsRGB;
+                std::uint32_t             cw   = description.width, ch = description.height;
                 while (cw > 1 || ch > 1)
                 {
                     const std::uint32_t nw = std::max(1u, cw / 2), nh = std::max(1u, ch / 2);
-                    const auto         &prev = texture.mipData.back();
                     std::vector<float>  nxt(static_cast<std::size_t>(nw) * nh * 3);
                     for (std::uint32_t y = 0; y < nh; ++y)
                         for (std::uint32_t x = 0; x < nw; ++x)
@@ -440,17 +446,18 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                                                 sy1 = std::min(sy0 + 1, ch - 1);
                             for (int cc = 0; cc < 3; ++cc)
                                 nxt[(y * nw + x) * 3 + cc]
-                                    = (prev[(sy0 * cw + sx0) * 3 + cc] + prev[(sy0 * cw + sx1) * 3 + cc]
-                                          + prev[(sy1 * cw + sx0) * 3 + cc] + prev[(sy1 * cw + sx1) * 3 + cc])
+                                    = ((*prev)[(sy0 * cw + sx0) * 3 + cc] + (*prev)[(sy0 * cw + sx1) * 3 + cc]
+                                          + (*prev)[(sy1 * cw + sx0) * 3 + cc] + (*prev)[(sy1 * cw + sx1) * 3 + cc])
                                     * 0.25f;
                         }
                     texture.mipData.push_back(std::move(nxt));
                     texture.mipWidths.push_back(nw);
                     texture.mipHeights.push_back(nh);
+                    prev = &texture.mipData.back();
                     cw = nw;
                     ch = nh;
                 }
-                texture.mipLevelCount = static_cast<std::uint32_t>(texture.mipData.size());
+                texture.mipLevelCount = static_cast<std::uint32_t>(texture.mipData.size()) + 1u; // +1 for the base level
             }
         }
         textures.emplace(id, std::move(texture));
@@ -1075,26 +1082,6 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
             else
             {
                 transformRange(0, vertexCount);
-            }
-            // DEBUG: verify cache contents against a fresh transform.
-            {
-                static std::uint64_t verifiedDraws = 0;
-                ++verifiedDraws;
-                const float *dbgPos = mesh.positions.data();
-                for (std::size_t v = 0; v < vertexCount; v += std::max<std::size_t>(1, vertexCount / 3))
-                {
-                    const glm::vec4 localPos(dbgPos[v * 3], dbgPos[v * 3 + 1], dbgPos[v * 3 + 2], 1.0f);
-                    const glm::vec4 expected = viewProjection * localPos;
-                    const glm::vec4 actual = transformedVertices_[v].clip;
-                    if (std::fabs(expected.x - actual.x) > 1.0e-3f || std::fabs(expected.y - actual.y) > 1.0e-3f
-                        || std::fabs(expected.z - actual.z) > 1.0e-3f || std::fabs(expected.w - actual.w) > 1.0e-3f)
-                    {
-                        std::fprintf(stderr,
-                            "CACHE MISMATCH draw #%llu v=%zu/%zu expected=(%.2f, %.2f, %.2f, %.2f) actual=(%.2f, %.2f, %.2f, %.2f)\n",
-                            static_cast<unsigned long long>(verifiedDraws), v, vertexCount, expected.x, expected.y,
-                            expected.z, expected.w, actual.x, actual.y, actual.z, actual.w);
-                    }
-                }
             }
         }
         catch (const std::bad_alloc &)
