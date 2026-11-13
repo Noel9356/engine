@@ -1,4 +1,6 @@
 config_keys = [
+    "render_graph.aliasing_strategy",
+    "render_graph.execution_cache",
     "render_graph.max_passes",
     "render_graph.max_resources",
     "render_graph.plan_cache_entries",

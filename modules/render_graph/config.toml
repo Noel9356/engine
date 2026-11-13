@@ -1,4 +1,6 @@
 [render_graph]
+aliasing_strategy        = "best_fit"
+execution_cache          = true
 max_passes              = 256
 max_resources           = 512
 plan_cache_entries      = 8

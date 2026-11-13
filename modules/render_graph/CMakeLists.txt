@@ -25,6 +25,13 @@ add_library(
     engine_module_render_graph
     MODULE
     source/render_graph.cpp
+    source/aliasing.cpp
+    source/execution.cpp
+    source/plan_cache.cpp
+)
+target_include_directories(
+    engine_module_render_graph
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source"
 )
 target_link_libraries(
     engine_module_render_graph

@@ -3,27 +3,33 @@
 // Binds the "render_graph" capability: compiles graphs (validation,
 // topological order, budgeted transient aliasing), executes them on the
 // kernel task scheduler, and caches compiled plans keyed by graph shape.
+//
+// The heavy lifting lives in dedicated translation units:
+//   - plan_cache.cpp    : LRU cache of compiled plans keyed by graph shape.
+//   - aliasing.cpp      : transient resource aliasing allocator.
+//   - execution.cpp     : cached TaskGraph build and execution.
+//   - render_graph_compiler.cpp : validation, hazard edges, topological order.
+//
+// This file wires those pieces to the kernel module interface and the
+// capability function-pointer table.
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/kernel/profiling.hpp>
 #include <engine/kernel/task_scheduler.hpp>
 #include <engine/render_graph/capabilities.hpp>
 #include <engine/render_graph/compiler.hpp>
 
+#include "internal/aliasing.hpp"
+#include "internal/execution.hpp"
+#include "internal/plan_cache.hpp"
+
 #include <algorithm>
-#include <atomic>
-#include <cstddef>
 #include <cstdint>
-#include <iterator>
-#include <limits>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <utility>
-#include <vector>
 
 namespace engine
 {
@@ -31,33 +37,6 @@ namespace render_graph
 {
 namespace
 {
-
-// One physical allocation that transient resources alias. size and alignment
-// grow to fit every resource assigned to the slot.
-struct TransientSlot
-{
-    std::uint32_t compatibility = 0;
-    std::uint32_t lastUse       = 0;
-    std::uint64_t size          = 0;
-    std::uint64_t alignment     = 1;
-};
-
-// A live slot together with the schedule position where its resource is
-// last used.
-struct PendingSlot
-{
-    std::uint32_t lastUse = 0;
-    std::uint32_t slot    = 0;
-};
-
-// Heap comparator keeping the earliest-expiring slot on top.
-struct PendingSlotLater
-{
-    bool operator()(const PendingSlot &left, const PendingSlot &right) const noexcept
-    {
-        return left.lastUse != right.lastUse ? left.lastUse > right.lastUse : left.slot > right.slot;
-    }
-};
 
 // Ranges accepted through setSettings; construct() clamps config keys to
 // the same limits.
@@ -68,202 +47,33 @@ bool validSettings(const RenderGraphSettings &value)
         && value.transientMemoryBudgetBytes <= (16ull * 1024ull * 1024ull * 1024ull);
 }
 
-// Small LRU cache of compiled plans keyed by structural equality of the
-// graph (values, not pointers). Mutex-protected; allocation failures
-// degrade to "no caching" instead of throwing.
-class RenderGraphPlanCache final
+// Maps the configured quality string to the preset enum.
+renderer::QualityPreset qualityFromString(const std::string &value)
 {
-public:
-    // Entry capacity is hard-capped at 16; zero disables caching.
-    void configure(std::size_t entryCapacity, std::size_t maximumGraphElements) noexcept
-    {
-        std::lock_guard lock(mutex_);
-        entries_.clear();
-        capacity_             = std::min<std::size_t>(entryCapacity, 16u);
-        maximumGraphElements_ = maximumGraphElements;
-        try
-        {
-            entries_.reserve(capacity_);
-        }
-        catch (...)
-        {
-            capacity_ = 0;
-        }
-    }
+    if (value == "low")
+        return renderer::QualityPreset::Low;
+    if (value == "medium")
+        return renderer::QualityPreset::Medium;
+    if (value == "high")
+        return renderer::QualityPreset::High;
+    if (value == "ultra")
+        return renderer::QualityPreset::Ultra;
+    return renderer::QualityPreset::Auto;
+}
 
-    void clear() noexcept
-    {
-        std::lock_guard lock(mutex_);
-        entries_.clear();
-    }
+// Maps the configured aliasing-strategy string to the enum.
+detail::AliasingStrategy strategyFromString(const std::string &value)
+{
+    if (value == "first_fit")
+        return detail::AliasingStrategy::FirstFit;
+    if (value == "worst_fit")
+        return detail::AliasingStrategy::WorstFit;
+    return detail::AliasingStrategy::BestFit;
+}
 
-    [[nodiscard]] bool enabled() const noexcept
-    {
-        return capacity_ != 0 && maximumGraphElements_ != 0;
-    }
-
-    std::shared_ptr<const RenderGraphPlan> find(const RenderGraphPassDescription *passes, std::uint32_t passCount,
-        const RenderGraphResourceDescription *resources, std::uint32_t resourceCount,
-        bool includeResourceLifetimes) const noexcept
-    {
-        if (capacity_ == 0 || (passCount != 0 && passes == nullptr) || (resourceCount != 0 && resources == nullptr))
-            return {};
-        std::lock_guard lock(mutex_);
-        for (Entry &entry : entries_)
-        {
-            if (!matches(entry, passes, passCount, resources, resourceCount, includeResourceLifetimes))
-                continue;
-            entry.lastUse = ++clock_;
-            return entry.plan;
-        }
-        return {};
-    }
-
-    // Copies the graph shape into the entry so later lookups can compare
-    // without the caller's arrays. Returns the stored (or matching) plan.
-    std::shared_ptr<const RenderGraphPlan> store(const RenderGraphPassDescription *passes, std::uint32_t passCount,
-        const RenderGraphResourceDescription *resources, std::uint32_t resourceCount, bool includeResourceLifetimes,
-        std::size_t graphElementCount, RenderGraphPlan &plan) const noexcept
-    {
-        if (capacity_ == 0 || graphElementCount > maximumGraphElements_ || (passCount != 0 && passes == nullptr)
-            || (resourceCount != 0 && resources == nullptr))
-            return {};
-
-        Entry entry;
-        try
-        {
-            entry.includeResourceLifetimes = includeResourceLifetimes;
-            entry.passShapes.reserve(passCount);
-            if (resourceCount != 0)
-                entry.resources.assign(resources, resources + resourceCount);
-            for (std::uint32_t pass = 0; pass < passCount; ++pass)
-            {
-                const RenderGraphPassDescription &description = passes[pass];
-                if ((description.useCount != 0 && description.uses == nullptr)
-                    || (description.dependencyCount != 0 && description.dependencies == nullptr))
-                    return {};
-                PassShape shape;
-                shape.useOffset        = entry.uses.size();
-                shape.useCount         = description.useCount;
-                shape.dependencyOffset = entry.dependencies.size();
-                shape.dependencyCount  = description.dependencyCount;
-                entry.passShapes.push_back(shape);
-                if (description.useCount != 0)
-                    entry.uses.insert(entry.uses.end(), description.uses, description.uses + description.useCount);
-                if (description.dependencyCount != 0)
-                    entry.dependencies.insert(entry.dependencies.end(),
-                        description.dependencies,
-                        description.dependencies + description.dependencyCount);
-            }
-            entry.plan = std::make_shared<RenderGraphPlan>(std::move(plan));
-        }
-        catch (...)
-        {
-            return {};
-        }
-
-        std::lock_guard lock(mutex_);
-        for (Entry &existing : entries_)
-        {
-            if (matches(existing, passes, passCount, resources, resourceCount, includeResourceLifetimes))
-            {
-                existing.lastUse = ++clock_;
-                return existing.plan;
-            }
-        }
-        entry.lastUse = ++clock_;
-        if (entries_.size() >= capacity_)
-        {
-            const auto oldest = std::min_element(entries_.begin(),
-                entries_.end(),
-                [](const Entry &left, const Entry &right) { return left.lastUse < right.lastUse; });
-            if (oldest != entries_.end())
-                entries_.erase(oldest);
-        }
-        const std::shared_ptr<const RenderGraphPlan> result = entry.plan;
-        try
-        {
-            entries_.push_back(std::move(entry));
-        }
-        catch (...)
-        {
-            return result;
-        }
-        return result;
-    }
-
-private:
-    struct PassShape
-    {
-        std::size_t   useOffset        = 0;
-        std::size_t   dependencyOffset = 0;
-        std::uint32_t useCount         = 0;
-        std::uint32_t dependencyCount  = 0;
-    };
-
-    struct Entry
-    {
-        bool                                        includeResourceLifetimes = true;
-        std::uint64_t                               lastUse                  = 0;
-        std::vector<PassShape>                      passShapes;
-        std::vector<RenderGraphResourceDescription> resources;
-        std::vector<RenderGraphResourceUse>         uses;
-        std::vector<std::uint32_t>                  dependencies;
-        std::shared_ptr<const RenderGraphPlan>      plan;
-    };
-
-    static bool sameResource(
-        const RenderGraphResourceDescription &left, const RenderGraphResourceDescription &right) noexcept
-    {
-        return left.sizeBytes == right.sizeBytes && left.alignmentBytes == right.alignmentBytes
-            && left.compatibilityClass == right.compatibilityClass && left.transient == right.transient
-            && left.initiallyDefined == right.initiallyDefined;
-    }
-
-    static bool sameUse(const RenderGraphResourceUse &left, const RenderGraphResourceUse &right) noexcept
-    {
-        return left.resourceIndex == right.resourceIndex && left.access == right.access;
-    }
-
-    // Full structural comparison: a hit must reproduce the same plan.
-    static bool matches(const Entry &entry, const RenderGraphPassDescription *passes, std::uint32_t passCount,
-        const RenderGraphResourceDescription *resources, std::uint32_t resourceCount,
-        bool includeResourceLifetimes) noexcept
-    {
-        if (entry.includeResourceLifetimes != includeResourceLifetimes || entry.passShapes.size() != passCount
-            || entry.resources.size() != resourceCount || (passCount != 0 && passes == nullptr)
-            || (resourceCount != 0 && resources == nullptr))
-            return false;
-        for (std::uint32_t index = 0; index < resourceCount; ++index)
-            if (!sameResource(entry.resources[index], resources[index]))
-                return false;
-        for (std::uint32_t index = 0; index < passCount; ++index)
-        {
-            const RenderGraphPassDescription &description = passes[index];
-            const PassShape                  &shape       = entry.passShapes[index];
-            if (description.useCount != shape.useCount || description.dependencyCount != shape.dependencyCount
-                || (description.useCount != 0 && description.uses == nullptr)
-                || (description.dependencyCount != 0 && description.dependencies == nullptr))
-                return false;
-            for (std::uint32_t use = 0; use < shape.useCount; ++use)
-                if (!sameUse(entry.uses[shape.useOffset + use], description.uses[use]))
-                    return false;
-            for (std::uint32_t dependency = 0; dependency < shape.dependencyCount; ++dependency)
-                if (entry.dependencies[shape.dependencyOffset + dependency] != description.dependencies[dependency])
-                    return false;
-        }
-        return true;
-    }
-
-    mutable std::mutex         mutex_;
-    mutable std::vector<Entry> entries_;
-    mutable std::uint64_t      clock_                = 0;
-    std::size_t                capacity_             = 0;
-    std::size_t                maximumGraphElements_ = 0;
-};
-
-// Module singleton backing RenderGraphCapability. Stateless beyond the
-// settings, the plan cache, and kernel-provided scheduler/profiler pointers.
+// Module singleton backing RenderGraphCapability. Holds the settings, the
+// plan cache, the execution cache, and borrowed scheduler/profiler pointers;
+// delegates compilation and execution to the detail helpers.
 class RenderGraphModule final : public ModuleInterface
 {
 public:
@@ -279,23 +89,14 @@ public:
     }
 
     // Reads [render_graph] with per-key clamping to the valid ranges; absent
-    // or invalid keys keep the defaults (unknown quality strings keep Auto).
-    // Also configures the plan cache.
+    // or invalid keys keep the defaults. Also configures the plan cache and
+    // execution cache.
     void construct(ParticipantContext &context) override
     {
         scheduler_ = &context.taskScheduler();
         settings_  = RenderGraphSettings{};
         if (const auto value = context.configurationStringInSection("render_graph", "quality"); value.has_value())
-        {
-            if (*value == "low")
-                settings_.quality = renderer::QualityPreset::Low;
-            else if (*value == "medium")
-                settings_.quality = renderer::QualityPreset::Medium;
-            else if (*value == "high")
-                settings_.quality = renderer::QualityPreset::High;
-            else if (*value == "ultra")
-                settings_.quality = renderer::QualityPreset::Ultra;
-        }
+            settings_.quality = qualityFromString(*value);
         if (const auto value = context.configurationIntegerInSection("render_graph", "max_passes");
             value.has_value() && *value > 0)
             settings_.maxPasses = static_cast<std::uint32_t>(std::min<std::int64_t>(*value, 4096));
@@ -308,9 +109,17 @@ public:
                 = static_cast<std::uint64_t>(std::min<std::int64_t>(*value, 16384)) * 1024ull * 1024ull;
         settings_.transientAliasing
             = context.configurationBooleanInSection("render_graph", "transient_aliasing").value_or(true);
+
+        // Aliasing strategy is an internal config knob (not exposed through
+        // RenderGraphSettings to keep the ABI stable).
+        aliasingStrategy_ = detail::AliasingStrategy::BestFit;
+        if (const auto value = context.configurationStringInSection("render_graph", "aliasing_strategy");
+            value.has_value())
+            aliasingStrategy_ = strategyFromString(*value);
+
         // Compiling a plan is pure CPU work with the same result for a stable
         // graph shape; caching it removes that per-frame cost. Default 8
-        // entries (set plan_cache_entries = 0 to restore the old behaviour).
+        // entries (set plan_cache_entries = 0 to disable).
         std::size_t planCacheEntries = 8;
         if (const auto value = context.configurationIntegerInSection("render_graph", "plan_cache_entries");
             value && *value >= 0 && *value <= 16)
@@ -320,6 +129,13 @@ public:
             value && *value >= 0 && *value <= 1'000'000)
             planCacheMaxElements = static_cast<std::size_t>(*value);
         planCache_.configure(planCacheEntries, planCacheMaxElements);
+
+        // Execution cache reuses a prebuilt TaskGraph across frames when the
+        // plan came from the cache; disabled only for diagnostics.
+        const bool executionCacheEnabled
+            = context.configurationBooleanInSection("render_graph", "execution_cache").value_or(true);
+        executionCache_.setEnabled(executionCacheEnabled);
+
         profiler_ = &context.profiler();
     }
 
@@ -392,7 +208,7 @@ private:
 
     // Auto quality derives a memory scale from the device class (non-Vulkan
     // gets 0.125); explicit presets scale by 0.25x/0.5x/1x/2x. Scaled limits
-    // are clamped back to the configured settings; asyncCompute stays off.
+    // are clamped back to the configured settings.
     bool resolveProfileImpl(const renderer::DeviceProfile *device, RenderGraphProfile *out) const
     {
         if (device == nullptr || out == nullptr)
@@ -437,7 +253,9 @@ private:
             static_cast<double>(settings_.transientMemoryBudgetBytes) * scale);
         out->transientMemoryBudgetBytes = std::min(budget, settings_.transientMemoryBudgetBytes);
         out->transientAliasing          = settings_.transientAliasing;
-        out->asyncCompute               = false;
+        // asyncCompute is reserved for a future async-queue path; the field
+        // stays false so consumers see a stable contract.
+        out->asyncCompute = false;
         return true;
     }
 
@@ -469,18 +287,11 @@ private:
                 passes, passCount, resources, resourceCount, localPlan, outError, includeResourceLifetimes))
             return false;
 
-        std::size_t graphElementCount = static_cast<std::size_t>(passCount) + resourceCount;
-        for (std::uint32_t pass = 0; pass < passCount; ++pass)
-        {
-            const std::size_t passElements
-                = static_cast<std::size_t>(passes[pass].useCount) + passes[pass].dependencyCount;
-            if (passElements > std::numeric_limits<std::size_t>::max() - graphElementCount)
-            {
-                graphElementCount = std::numeric_limits<std::size_t>::max();
-                break;
-            }
-            graphElementCount += passElements;
-        }
+        // graphElementCount bounds the cache entry's memory; the plan already
+        // knows its pass/resource/edge counts so the sum stays exact without
+        // re-walking the caller's arrays.
+        const std::size_t graphElementCount = static_cast<std::size_t>(passCount)
+            + static_cast<std::size_t>(resourceCount) + localPlan.edges.size();
         cachedPlan = planCache_.store(
             passes, passCount, resources, resourceCount, includeResourceLifetimes, graphElementCount, localPlan);
         outPlan = cachedPlan ? cachedPlan.get() : &localPlan;
@@ -488,8 +299,7 @@ private:
     }
 
     // Validates capacities and pointers, obtains a plan with lifetimes, then
-    // assigns transient resources to physical slots (loop below). Outputs:
-    // pass order, per-resource slot index, and the compile statistics.
+    // delegates slot assignment to the aliasing allocator.
     bool compileImpl(const RenderGraphPassDescription *passes, std::uint32_t passCount,
         const RenderGraphResourceDescription *resources, std::uint32_t resourceCount, std::uint32_t *outOrder,
         std::uint32_t orderCapacity, std::uint32_t *outSlots, std::uint32_t slotCapacity,
@@ -517,90 +327,26 @@ private:
                 passes, passCount, resources, resourceCount, true, localPlan, cachedPlan, analysis, analysisError))
             return fail(analysisError);
 
-        std::vector<TransientSlot>                                                     slots;
-        std::vector<PendingSlot>                                                       pendingSlots;
-        std::unordered_map<std::uint32_t, std::multimap<std::uint64_t, std::uint32_t>> availableSlots;
-        slots.reserve(analysis->resourceOrder.size());
-        pendingSlots.reserve(analysis->resourceOrder.size());
-        if (resourceCount != 0)
-            std::fill(outSlots, outSlots + resourceCount, invalidResourceSlot);
+        detail::AliasingConfig aliasingConfig;
+        aliasingConfig.aliasingEnabled           = settings_.transientAliasing;
+        aliasingConfig.strategy                  = aliasingStrategy_;
+        aliasingConfig.transientMemoryBudgetBytes = settings_.transientMemoryBudgetBytes;
 
-        // Aliasing allocator: walk transient resources in first-use order,
-        // retire slots whose last use is past, then reuse a compatible free
-        // slot (best fit by size) or allocate a new one, budget-checked.
-        std::uint64_t allocatedBytes = 0;
-        for (const std::uint32_t resource : analysis->resourceOrder)
-        {
-            const auto   &description = resources[resource];
-            std::uint32_t selected    = invalidResourceSlot;
-            if (settings_.transientAliasing)
-            {
-                while (!pendingSlots.empty() && pendingSlots.front().lastUse < analysis->firstUse[resource])
-                {
-                    std::pop_heap(pendingSlots.begin(), pendingSlots.end(), PendingSlotLater{});
-                    const PendingSlot released = pendingSlots.back();
-                    pendingSlots.pop_back();
-                    const auto &slot = slots[released.slot];
-                    availableSlots[slot.compatibility].emplace(slot.size, released.slot);
-                }
-                const auto found = availableSlots.find(description.compatibilityClass);
-                if (found != availableSlots.end() && !found->second.empty())
-                {
-                    auto candidate = found->second.lower_bound(description.sizeBytes);
-                    if (candidate == found->second.end())
-                        candidate = std::prev(found->second.end());
-                    selected = candidate->second;
-                    found->second.erase(candidate);
-                }
-            }
-
-            if (selected == invalidResourceSlot)
-            {
-                selected = static_cast<std::uint32_t>(slots.size());
-                slots.push_back(TransientSlot{
-                    description.compatibilityClass,
-                    analysis->lastUse[resource],
-                    description.sizeBytes,
-                    description.alignmentBytes});
-                if (description.sizeBytes > settings_.transientMemoryBudgetBytes
-                                                - std::min(allocatedBytes, settings_.transientMemoryBudgetBytes))
-                    return fail(RenderGraphError::BudgetExceeded);
-                allocatedBytes += description.sizeBytes;
-            }
-            else
-            {
-                TransientSlot &slot = slots[selected];
-                if (description.sizeBytes > slot.size)
-                {
-                    const std::uint64_t growth = description.sizeBytes - slot.size;
-                    if (growth > settings_.transientMemoryBudgetBytes
-                                     - std::min(allocatedBytes, settings_.transientMemoryBudgetBytes))
-                        return fail(RenderGraphError::BudgetExceeded);
-                    allocatedBytes += growth;
-                    slot.size = description.sizeBytes;
-                }
-                slot.lastUse   = analysis->lastUse[resource];
-                slot.alignment = std::max(slot.alignment, description.alignmentBytes);
-            }
-            outSlots[resource] = selected;
-            if (settings_.transientAliasing)
-            {
-                pendingSlots.push_back(PendingSlot{analysis->lastUse[resource], selected});
-                std::push_heap(pendingSlots.begin(), pendingSlots.end(), PendingSlotLater{});
-            }
-        }
+        detail::AliasingResult aliasingResult{};
+        RenderGraphError       aliasingError = RenderGraphError::None;
+        if (!detail::allocateTransientSlots(
+                *analysis, resources, resourceCount, outSlots, aliasingConfig, aliasingResult, aliasingError))
+            return fail(aliasingError);
 
         std::copy(analysis->order.begin(), analysis->order.end(), outOrder);
         *outResult = RenderGraphCompileResult{
-            passCount, resourceCount, static_cast<std::uint32_t>(slots.size()), allocatedBytes};
+            passCount, resourceCount, aliasingResult.slotCount, aliasingResult.allocatedBytes};
         if (outError != nullptr)
             *outError = RenderGraphError::None;
         return true;
     }
 
-    // Builds a TaskGraph with one node per pass, wires the plan's edges, and
-    // blocks on the scheduler until all callbacks ran; failures surface as
-    // ExecutionFailed. Callbacks receive the original pass index.
+    // Obtains a plan (without lifetimes) and delegates to the execution cache.
     bool executeImpl(const RenderGraphPassDescription *passes, std::uint32_t passCount,
         const RenderGraphResourceDescription *resources, std::uint32_t resourceCount,
         RenderGraphExecuteCallback callback, void *userData, RenderGraphError *outError) const
@@ -625,155 +371,25 @@ private:
                 passes, passCount, resources, resourceCount, false, localPlan, cachedPlan, analysis, analysisError))
             return fail(analysisError);
 
-        // Cached plans reuse a prebuilt TaskGraph (executionCache_): node
-        // tasks call the *current* callback through a bindings record, so a
-        // graph compiled once executes every frame without per-frame node,
-        // std::function or adjacency allocations. A single slot covers the
-        // standard one-shape-per-frame case; concurrent or alternating use
-        // falls back to the per-call graph (the historical behaviour).
-        try
-        {
-            const bool   cacheable = planCache_.enabled() && cachedPlan != nullptr;
-            TaskGraph   *graph     = nullptr;
-            std::unique_lock lock(executionMutex_, std::defer_lock);
-            bool claimed = false;
-            if (cacheable)
-            {
-                lock.lock();
-                if (!executionCache_.executing.exchange(true, std::memory_order_acq_rel))
-                {
-                    claimed = true;
-                    if (executionCache_.plan.get() != analysis)
-                    {
-                        executionCache_.graph.reset();
-                        executionCache_.nodeForPass.assign(passCount, invalidResourceSlot);
-                        executionCache_.bindings         = std::make_shared<ExecutionBindings>();
-                        std::vector<std::uint32_t> &nodes = executionCache_.nodeForPass;
-                        for (std::uint32_t pass = 0; pass < passCount; ++pass)
-                            nodes[pass] = executionCache_.graph.addTask(
-                                [bindings = executionCache_.bindings, pass]
-                                {
-                                    const RenderGraphExecuteCallback currentCallback = bindings->callback;
-                                    void                            *currentUserData = bindings->userData;
-                                    if (currentCallback != nullptr)
-                                        currentCallback(currentUserData, pass);
-                                });
-                        for (const auto &[prerequisite, dependent] : analysis->edges)
-                            if (!executionCache_.graph.addDependency(nodes[prerequisite], nodes[dependent]))
-                            {
-                                executionCache_.release();
-                                executionCache_.executing.store(false, std::memory_order_release);
-                                return fail(RenderGraphError::InvalidInput);
-                            }
-                        executionCache_.plan = cachedPlan;
-                    }
-                    executionCache_.bindings->callback = callback;
-                    executionCache_.bindings->userData = userData;
-                    graph                              = &executionCache_.graph;
-                }
-            }
-            if (graph == nullptr)
-            {
-                TaskGraph                 localGraph;
-                std::vector<std::uint32_t> nodes(passCount, invalidResourceSlot);
-                for (std::uint32_t pass = 0; pass < passCount; ++pass)
-                    nodes[pass] = localGraph.addTask([callback, userData, pass] { callback(userData, pass); });
-                for (const auto &[prerequisite, dependent] : analysis->edges)
-                    if (!localGraph.addDependency(nodes[prerequisite], nodes[dependent]))
-                    {
-                        if (claimed)
-                        {
-                            lock.unlock();
-                            executionCache_.release();
-                            executionCache_.executing.store(false, std::memory_order_release);
-                        }
-                        return fail(RenderGraphError::InvalidInput);
-                    }
-                graph = &localGraph;
-                try
-                {
-                    graph->execute(*scheduler_);
-                }
-                catch (...)
-                {
-                    if (claimed)
-                    {
-                        lock.unlock();
-                        executionCache_.release();
-                        executionCache_.executing.store(false, std::memory_order_release);
-                    }
-                    throw;
-                }
-            }
-            else
-            {
-                try
-                {
-                    graph->execute(*scheduler_);
-                }
-                catch (...)
-                {
-                    lock.unlock();
-                    executionCache_.release();
-                    executionCache_.executing.store(false, std::memory_order_release);
-                    throw;
-                }
-                // Clear the bindings so a stale callback can never run if the
-                // cached graph were re-executed outside this call.
-                executionCache_.bindings->callback = nullptr;
-                executionCache_.bindings->userData = nullptr;
-                lock.unlock();
-                executionCache_.executing.store(false, std::memory_order_release);
-            }
-        }
-        catch (...)
-        {
-            return fail(RenderGraphError::ExecutionFailed);
-        }
+        RenderGraphError executeError = RenderGraphError::None;
+        if (!executionCache_.execute(
+                cachedPlan, *analysis, passCount, callback, userData, *scheduler_, executeError))
+            return fail(executeError);
         if (outError != nullptr)
             *outError = RenderGraphError::None;
         return true;
     }
 
-    // Rebindable execution slot: one prebuilt graph per cached plan shape.
-    // plan keeps the analysed plan alive so the pointer key can never be
-    // recycled while the cached graph exists; bindings forward each execute
-    // to the current callback. executing rejects overlapping use (falls back
-    // to the per-call graph path, which is what concurrent callers did before).
-    struct ExecutionBindings
-    {
-        RenderGraphExecuteCallback callback = nullptr;
-        void                      *userData = nullptr;
-    };
-    struct CachedExecution
-    {
-        // Cannot assign the whole struct (atomic member); release() drops the
-        // reusable state instead.
-        void release() noexcept
-        {
-            plan.reset();
-            bindings.reset();
-            graph.reset();
-            nodeForPass.clear();
-        }
-
-        std::shared_ptr<const RenderGraphPlan>   plan;
-        std::shared_ptr<ExecutionBindings>       bindings;
-        TaskGraph                                graph;
-        std::vector<std::uint32_t>               nodeForPass;
-        std::atomic<bool>                        executing{false};
-    };
-
     // scheduler_/profiler_ are borrowed from the ParticipantContext in
     // construct(); the profiler feeds the RenderGraphCompile/Execute metrics.
-    ParticipantManifest     manifest_;
-    RenderGraphCapability   capability_{};
-    RenderGraphSettings     settings_{};
-    TaskScheduler          *scheduler_ = nullptr;
-    PerformanceProfiler    *profiler_  = nullptr;
-    RenderGraphPlanCache    planCache_;
-    mutable std::mutex      executionMutex_;
-    mutable CachedExecution executionCache_;
+    ParticipantManifest         manifest_;
+    RenderGraphCapability       capability_{};
+    RenderGraphSettings         settings_{};
+    TaskScheduler              *scheduler_ = nullptr;
+    PerformanceProfiler        *profiler_  = nullptr;
+    detail::RenderGraphPlanCache planCache_;
+    detail::ExecutionCache      executionCache_;
+    detail::AliasingStrategy    aliasingStrategy_ = detail::AliasingStrategy::BestFit;
 };
 
 } // namespace
