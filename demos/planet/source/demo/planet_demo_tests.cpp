@@ -132,7 +132,7 @@ SelfTestResult runSelfTest(planet::PlanetCapability &capability, void *capabilit
         std::string maskError;
         if (maskParams.validate(maskError))
         {
-            planet::Planet maskPlanet(maskParams, nullptr);
+            planet::Planet maskPlanet(maskParams);
             planet::ConformMask allConform;
             for (std::uint32_t face = 0; face < planet::ConformMask::kFaceCount; ++face)
             {

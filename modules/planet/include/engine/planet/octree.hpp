@@ -123,12 +123,13 @@ private:
 
     const PlanetGenerationParams &params_;
     const DensityField           &field_;
-    double                        solidMarginMeters_ = 0.0;     // density bound for "fully solid/air" probes
+    // Sound corner-probe margin per depth (see the constructor comment).
+    std::array<double, maxSupportedOctreeDepth + 1> probeMargins_{};
     double                        innerOccluderRadius2_ = 0.0;  // squared radius of the guaranteed-solid occluder ball
     std::uint64_t                 updateIndex_ = 0;
 
     // Sparse node map: only nodes touched by selection (visited + pruned).
-    // Keys via makeChunkKey; max depth 20 keeps coordinates in 20 bits.
+    // Keys via makeChunkKey; the depth cap keeps coordinates in 20 bits.
     FlatKeyMap<NodeRecord> nodes_;
     std::vector<ChunkCoord> descentStack_;  // scratch buffers reused across updates
     std::vector<ChunkCoord> leavesScratch_;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <mutex>
 
 namespace engine
@@ -11,11 +12,20 @@ namespace engine
 namespace planet
 {
 
-Planet::Planet(const PlanetGenerationParams &params, TaskScheduler *taskScheduler)
+namespace
+{
+
+bool sameEye(const Vec3 &a, const Vec3 &b)
+{
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+} // namespace
+
+Planet::Planet(const PlanetGenerationParams &params)
     : params_(params)
     , field_(params_)
     , octree_(params_, field_)
-    , taskScheduler_(taskScheduler)
 {
     // Reserve the whole cache capacity up front so streaming never rehashes on the main thread.
     readyMeshes_.reserve(static_cast<std::size_t>(params_.chunkCacheCapacity) + 1024u);
@@ -72,24 +82,32 @@ void Planet::update(const Vec3 &eyeLocal)
     //    the ready cache).
     const std::uint32_t delivered = collectPendingBuilds();
 
-    // 2. Select the visible set for this eye.
-    octree_.selectVisible(eyeLocal, lastVisible_);
-    const std::vector<ChunkCoord> &visible = lastVisible_;
-
-    // 2b. Conforming masks. A chunk's mask is a pure function of the sorted visible list and its coordinate (each
-    // face segment conforms when the depth-(depth-1) cell beyond it is itself a rendered leaf - see octree.hpp), so
-    // the masks only change when the visible set changes. Chunks whose stored mesh was built under a different mask
-    // are rebuilt; the stale mesh keeps rendering until the conforming rebuild lands.
-    if (visible != previousVisible_)
+    // 2. Select the visible set for this eye. The selection is a pure
+    //    function of (eye, params, field): an unchanged eye pins the list,
+    //    so the descent, the 2:1 balancing fixpoint, the conform-mask pass
+    //    and the per-node stamping are skipped entirely - a static camera
+    //    (or a warming-up streamer that renders nothing) costs an update
+    //    only what streaming actually delivered.
+    if (!hasSelectionEye_ || !sameEye(eyeLocal, selectionEye_))
     {
-        visibleLeafSet_.assign(visible);
-        visibleMasks_.resize(visible.size());
-        for (std::size_t index = 0; index < visible.size(); ++index)
+        octree_.selectVisible(eyeLocal, lastVisible_);
+        selectionEye_    = eyeLocal;
+        hasSelectionEye_ = true;
+
+        // 2b. Conforming masks. A chunk's mask is a pure function of the sorted visible list and its coordinate (each
+        // face segment conforms when the depth-(depth-1) cell beyond it is itself a rendered leaf - see octree.hpp), so
+        // the masks only change when the visible set changes. Chunks whose stored mesh was built under a different mask
+        // are rebuilt; the stale mesh keeps rendering until the conforming rebuild lands.
+        visibleLeafSet_.assign(lastVisible_);
+        visibleMasks_.resize(lastVisible_.size());
+        for (std::size_t index = 0; index < lastVisible_.size(); ++index)
         {
-            octree_.computeConformMask(visible[index], visibleLeafSet_, visibleMasks_[index]);
+            octree_.computeConformMask(lastVisible_[index], visibleLeafSet_, visibleMasks_[index]);
         }
-        previousVisible_ = visible;
+        previousVisible_ = lastVisible_;
     }
+
+    const std::vector<ChunkCoord> &visible = lastVisible_;
 
     // 3. One pass over the visible set: stamp ready meshes (eviction age + statistics) and request missing or
     //    mask-stale meshes while the build queue has room.
@@ -104,6 +122,7 @@ void Planet::update(const Vec3 &eyeLocal)
     std::uint64_t triangles    = 0;
     std::uint64_t vertexCount  = 0;
     std::uint32_t readyVisible = 0;
+    std::uint32_t depthUsed    = 0;
     for (std::size_t index = 0; index < visible.size(); ++index)
     {
         const ChunkCoord &coord = visible[index];
@@ -120,6 +139,7 @@ void Planet::update(const Vec3 &eyeLocal)
                 continue;
             }
         }
+        depthUsed = std::max(depthUsed, coord.depth);
         if (requestFull)
         {
             continue;
@@ -160,7 +180,7 @@ void Planet::update(const Vec3 &eyeLocal)
     }
 
     // 4. Eviction scans the whole cache; ready meshes only age out over hundreds of updates, so a coarse cadence
-    // bounds the same set while keeping the scan off most frames.
+    //    bounds the same set while keeping the scan off most frames.
     if (updateCount_ % kEvictionScanInterval == 0)
     {
         evictStaleMeshes();
@@ -172,7 +192,7 @@ void Planet::update(const Vec3 &eyeLocal)
     statistics_.chunksReadyTotal = static_cast<std::uint32_t>(readyMeshes_.size());
     statistics_.triangleCount    = triangles;
     statistics_.verticesTotal    = vertexCount;
-    statistics_.octreeDepthUsed  = params_.derivedMaxDepth;
+    statistics_.octreeDepthUsed  = depthUsed;
     statistics_.lastUpdateMilliseconds
         = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
 }
@@ -378,15 +398,7 @@ std::uint32_t Planet::collectPendingBuilds()
         BuiltMesh      built;
         built.mesh         = std::move(entry.mesh);
         built.conformMask  = entry.conformMask;
-        built.center       = Vec3{-params_.derivedRootHalfMeters
-                                + chunkStepMeters(params_, entry.coord.depth)
-                                    * static_cast<double>(static_cast<std::int64_t>(entry.coord.x) * static_cast<std::int64_t>(params_.leafGridN) + params_.leafGridN / 2),
-            -params_.derivedRootHalfMeters
-                                + chunkStepMeters(params_, entry.coord.depth)
-                                    * static_cast<double>(static_cast<std::int64_t>(entry.coord.y) * static_cast<std::int64_t>(params_.leafGridN) + params_.leafGridN / 2),
-            -params_.derivedRootHalfMeters
-                                + chunkStepMeters(params_, entry.coord.depth)
-                                    * static_cast<double>(static_cast<std::int64_t>(entry.coord.z) * static_cast<std::int64_t>(params_.leafGridN) + params_.leafGridN / 2)};
+        built.center       = chunkCenterMeters(params_, entry.coord);
         built.terrainEmpty = built.mesh.terrainVertices.empty();
         built.waterEmpty   = built.mesh.waterVertices.empty();
         built.lastSelectedUpdate = updateCount_;
@@ -443,31 +455,6 @@ void Planet::evictStaleMeshes()
     {
         readyMeshes_.erase(victim.key);
     }
-}
-
-void Planet::finishBuild(const ChunkCoord &coord, const ConformMask &conformMask)
-{
-    // Scheduler-less path: run the pure build here and insert directly into
-    // the ready cache (main thread; no worker contention).
-    ChunkMesh mesh = buildChunkMesh(params_, field_, coord, conformMask);
-    const ChunkKey key = makeChunkKey(coord.depth, coord.x, coord.y, coord.z);
-    BuiltMesh built;
-    built.mesh         = std::move(mesh);
-    built.conformMask  = conformMask;
-    built.center       = Vec3{-params_.derivedRootHalfMeters
-                           + chunkStepMeters(params_, coord.depth)
-                               * static_cast<double>(static_cast<std::int64_t>(coord.x) * static_cast<std::int64_t>(params_.leafGridN) + params_.leafGridN / 2),
-        -params_.derivedRootHalfMeters
-                           + chunkStepMeters(params_, coord.depth)
-                               * static_cast<double>(static_cast<std::int64_t>(coord.y) * static_cast<std::int64_t>(params_.leafGridN) + params_.leafGridN / 2),
-        -params_.derivedRootHalfMeters
-                           + chunkStepMeters(params_, coord.depth)
-                               * static_cast<double>(static_cast<std::int64_t>(coord.z) * static_cast<std::int64_t>(params_.leafGridN) + params_.leafGridN / 2)};
-    built.terrainEmpty = built.mesh.terrainVertices.empty();
-    built.waterEmpty   = built.mesh.waterVertices.empty();
-    built.lastSelectedUpdate = updateCount_;
-    readyMeshes_.insert_or_assign(key, std::move(built));
-    octree_.setState(coord, ChunkState::Ready);
 }
 
 } // namespace planet

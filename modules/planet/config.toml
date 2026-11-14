@@ -20,7 +20,8 @@ axis                   = [0.0, 1.0, 0.0]
 # octree / LOD
 leaf_grid_n              = 16
 target_voxel_meters      = 2.5
-max_depth_limit          = 18
+# Hard depth cap (also bounded by the chunk key's 4-bit depth field).
+max_depth_limit          = 15
 # refine while the chunk's voxel subtends more than this many radians at the
 # eye (screen-space LOD): detail follows apparent size, independent of planet
 # radius, viewport and zoom. Smaller = finer views everywhere, but the visible
@@ -135,6 +136,22 @@ water_color_deep        = [0.012, 0.060, 0.130]
 # far-water facets then band at grazing angles), high = matte.
 water_roughness         = 0.42
 
+# sea ice: the water surface freezes where the SEA-LEVEL temperature drops
+# below sea_ice_temperature (the same climate field that drives the land's
+# freeze line, so polar oceans ice over where the land turns tundra, with an
+# organic noise-shaped edge). 0 disables. sea_ice_transition blends the ice
+# color in over that much temperature around the threshold.
+sea_ice_temperature     = 0.10
+sea_ice_transition      = 0.05
+water_color_ice         = [0.80, 0.86, 0.90]
+
+# wave slope: deterministic noise tilts the water surface normals around the
+# radial direction, giving the sea sun-glint texture at close range. The
+# amplitude is a radian-scale tilt and fades out under the LOD band limit
+# like every other noise term, so coarse chunks keep a smooth sea.
+water_wave_amplitude          = 0.12
+water_wave_wavelength_meters  = 8.0
+
 # climate
 equator_temperature        = 1.0
 pole_temperature           = 0.02
@@ -154,6 +171,9 @@ coastal_moisture_boost     = 0.18
 coastal_moisture_band_meters = 400.0
 moisture_latitude_bands    = true
 color_variation            = 0.14
+# feature size of the albedo jitter field (the mottling that keeps large
+# biomes from reading as flat plastic sheets).
+color_variation_wavelength_meters = 260.0
 snow_line_meters           = 1600.0
 beach_width_meters         = 2.0
 rock_slope_threshold       = 0.62

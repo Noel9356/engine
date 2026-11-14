@@ -2,6 +2,7 @@
 
 #include <engine/planet/density.hpp>
 
+#include <engine/planet/fbm.hpp>
 #include <engine/planet/noise.hpp>
 
 #include <algorithm>
@@ -15,100 +16,10 @@ namespace planet
 namespace
 {
 
-double clamp01(double value)
-{
-    return std::clamp(value, 0.0, 1.0);
-}
-
-// Per-octave fade of the band-limited field: a term of the given wavelength
-// contributes fully once its wavelength reaches twice the cutoff, and nothing
-// at or below the cutoff. cutoff <= 0 disables the fade (the raw field).
-double lowPassFade(double cutoffMeters, double termWavelengthMeters)
-{
-    if (cutoffMeters <= 0.0)
-    {
-        return 1.0;
-    }
-    return smoothstep(cutoffMeters, 2.0 * cutoffMeters, termWavelengthMeters);
-}
-
-// Octave counts are clamped to [1, 12] by parameter validation; literal
-// FbmParams in this file stay below the cap.
-inline constexpr std::uint32_t maxFbmOctaves = 12;
-
-FbmStreamSeeds makeFbmSeeds(std::int64_t baseSeed, std::uint32_t octaves)
-{
-    octaves = std::min(octaves, maxFbmOctaves);
-    FbmStreamSeeds seeds;
-    seeds.count = octaves;
-    for (std::uint32_t octave = 0; octave < octaves; ++octave)
-    {
-        seeds.perOctave[octave] = static_cast<std::int64_t>(
-            hashCombine64(static_cast<std::uint64_t>(baseSeed), octave));
-    }
-    return seeds;
-}
-
-// fBm over planet-local positions with a metric wavelength; returns [-1, 1].
-double fbm(const FbmStreamSeeds &seeds, const Vec3 &point, double wavelengthMeters, const FbmParams &fbmParams,
-    double lowPassCutoffMeters)
-{
-    const double frequency = 1.0 / std::max(1.0, wavelengthMeters);
-    double       x         = point.x * frequency;
-    double       y         = point.y * frequency;
-    double       z         = point.z * frequency;
-    double       amplitude = 1.0;
-    double       sum       = 0.0;
-    double       norm      = 0.0;
-    double       octaveWavelength = wavelengthMeters;
-    for (std::uint32_t octave = 0; octave < seeds.count; ++octave)
-    {
-        const double fade = lowPassFade(lowPassCutoffMeters, octaveWavelength);
-        if (fade <= 0.0)
-        {
-            break; // octaves shorten monotonically: every later fade is also zero
-        }
-        sum += amplitude * noise::simplex3ImproveXY(seeds.perOctave[octave], x, y, z);
-        norm += amplitude;
-        x *= fbmParams.lacunarity;
-        y *= fbmParams.lacunarity;
-        z *= fbmParams.lacunarity;
-        amplitude *= fbmParams.gain;
-        octaveWavelength /= fbmParams.lacunarity;
-    }
-    return sum / std::max(norm, 1.0e-9);
-}
-
-// Ridged fBm in [0, 1]: mountain crests from |noise| inverted per octave.
-double ridgedFbm(const FbmStreamSeeds &seeds, const Vec3 &point, double wavelengthMeters, const FbmParams &fbmParams,
-    double lowPassCutoffMeters)
-{
-    const double frequency = 1.0 / std::max(1.0, wavelengthMeters);
-    double       x         = point.x * frequency;
-    double       y         = point.y * frequency;
-    double       z         = point.z * frequency;
-    double       amplitude = 1.0;
-    double       sum       = 0.0;
-    double       norm      = 0.0;
-    double       octaveWavelength = wavelengthMeters;
-    for (std::uint32_t octave = 0; octave < seeds.count; ++octave)
-    {
-        const double fade = lowPassFade(lowPassCutoffMeters, octaveWavelength);
-        if (fade <= 0.0)
-        {
-            break; // octaves shorten monotonically: every later fade is also zero
-        }
-        const double n = noise::simplex3ImproveXY(seeds.perOctave[octave], x, y, z);
-        sum += amplitude * (1.0 - std::abs(n));
-        norm += amplitude;
-        x *= fbmParams.lacunarity;
-        y *= fbmParams.lacunarity;
-        z *= fbmParams.lacunarity;
-        amplitude *= fbmParams.gain;
-        octaveWavelength /= fbmParams.lacunarity;
-    }
-    return clamp01(sum / std::max(norm, 1.0e-9));
-}
+// Fixed-shape fBm layers (warp, cluster, mass, cliff mask, caves) share this
+// profile; configured layers (continents, mountains, ...) carry their own.
+constexpr FbmParams kFixedFbm{2, 2.0, 0.5};
+constexpr FbmParams kMassFbm{3, 2.0, 0.5};
 
 } // namespace
 
@@ -164,14 +75,15 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // any planet radius: a 9 km continent wavelength produces 9 km
     // continents whether the radius is 6 km or 6000 km.
     const double datumRadius = params_.radiusMeters;
+    const Vec3   radialPosition = unitDirection * datumRadius;
 
     // Domain warp: bend the sample position with a low-frequency vector
     // noise for swirling coastlines and bays.
     const Vec3 warpDirection = normalized(unitDirection
         + params_.domainWarpAmplitude
-            * Vec3{fbm(fbmSeeds_[streamWarpX], unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters),
-                fbm(fbmSeeds_[streamWarpY], unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters),
-                fbm(fbmSeeds_[streamWarpZ], unitDirection * datumRadius, params_.domainWarpWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters)});
+            * Vec3{fbm(fbmSeeds_[streamWarpX], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
+                fbm(fbmSeeds_[streamWarpY], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
+                fbm(fbmSeeds_[streamWarpZ], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters)});
     const Vec3 warpedPosition = warpDirection * datumRadius;
 
     // Continent base: signed low-frequency field; positive rises above the
@@ -184,33 +96,43 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // into distinct ranges separated by lower foothill country (a uniform
     // mask carpets every landmass with peaks - the globe reads spiky).
     const double baseMountainMask = smoothstep(params_.mountainMaskLow, params_.mountainMaskHigh, continents);
-    const double clusterField     = fbm(fbmSeeds_[streamRangeCluster], warpedPosition, params_.rangeClusterWavelengthMeters,
-                                  FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
-    const double clusterGate      = smoothstep(-0.35, 0.45, clusterField);
-    const double mountainMask     = clamp01(baseMountainMask * mix(1.0 - params_.rangeClusterStrength, 1.0, clusterGate));
+    double       mountainMask     = 0.0;
+    if (baseMountainMask > 0.0)
+    {
+        const double clusterField = fbm(fbmSeeds_[streamRangeCluster], warpedPosition, params_.rangeClusterWavelengthMeters,
+                                  kFixedFbm, lowPassCutoffMeters);
+        const double clusterGate  = smoothstep(-0.35, 0.45, clusterField);
+        mountainMask = clamp01(baseMountainMask * mix(1.0 - params_.rangeClusterStrength, 1.0, clusterGate));
+    }
 
     // Mountain profile: split the amplitude between a broad, smooth mass
     // field (wide uplifted massifs with real silhouette) and the ridged
     // crest field (ridge lines riding on top of the mass). A pure ridge sum
     // concentrates all height in narrow crest lines - needles from orbit,
     // all-rib slopes up close. The crest is weighted toward the mass so the
-    // highest ridges crown the biggest massifs.
-    const double ridges     = ridgedFbm(fbmSeeds_[streamMountains], warpedPosition, params_.mountainWavelengthMeters, params_.mountainsFbm, lowPassCutoffMeters);
-    const double mass       = 0.5 + 0.5 * fbm(fbmSeeds_[streamMountainMass], warpedPosition, params_.derivedMountainMassWavelengthMeters,
-                              FbmParams{3, 2.0, 0.5}, lowPassCutoffMeters);
-    const double crest      = std::pow(ridges, params_.mountainSharpness);
-    const double mountainProfile = params_.mountainMassFraction * mass
-        + (1.0 - params_.mountainMassFraction) * crest * (0.35 + 0.65 * mass);
-    height += params_.mountainAmplitudeMeters * mountainMask * mountainProfile;
+    // highest ridges crown the biggest massifs. Evaluated only where the
+    // mask lets mountains contribute at all: over the oceans (about two
+    // thirds of a typical globe) the crest and mass fields would be pure
+    // waste, and they are the two most expensive layers of the field.
+    if (mountainMask > 0.0)
+    {
+        const double ridges     = ridgedFbm(fbmSeeds_[streamMountains], warpedPosition, params_.mountainWavelengthMeters, params_.mountainsFbm, lowPassCutoffMeters);
+        const double mass       = 0.5 + 0.5 * fbm(fbmSeeds_[streamMountainMass], warpedPosition, params_.derivedMountainMassWavelengthMeters,
+                                  kMassFbm, lowPassCutoffMeters);
+        const double crest      = std::pow(ridges, params_.mountainSharpness);
+        const double mountainProfile = params_.mountainMassFraction * mass
+            + (1.0 - params_.mountainMassFraction) * crest * (0.35 + 0.65 * mass);
+        height += params_.mountainAmplitudeMeters * mountainMask * mountainProfile;
+    }
 
     // Submarine fade: ocean basins are smooth sediment plains. Detail fields
-    // (hills, overhangs, strata) fade out with depth below the datum, so the
-    // sea floor stays clean. The band is HARD and narrow (it closes just
-    // above the datum): a generous fade band let the medium-frequency layers
-    // raise shallow shoals into archipelago speckle at globe scale - shoals
-    // deeper than a few meters must carry NOTHING but the continent field,
-    // whose own fine octaves (tens of meters of amplitude) then cannot cross
-    // the waterline either.
+    // (regional relief, hills, overhangs, strata) fade out with depth below
+    // the datum, so the sea floor stays clean. The band is HARD and narrow
+    // (it closes just above the datum): a generous fade band let the
+    // medium-frequency layers raise shallow shoals into archipelago speckle
+    // at globe scale - shoals deeper than a few meters must carry NOTHING
+    // but the continent field, whose own fine octaves (tens of meters of
+    // amplitude) then cannot cross the waterline either.
     const double detailFade = smoothstep(-0.02 * params_.continentAmplitudeMeters, 0.06 * params_.continentAmplitudeMeters, height);
 
     // Coastal flattening: waves and sediment plan off the small-scale relief
@@ -238,39 +160,45 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // is invisible) and gives mid-altitude views large, readable shapes.
     // Damped halfway toward the coast band so regional basins cannot shred
     // marginal land into islands (basins inland keep their full depth).
-    const double regionalTaper = mix(1.0, coastalTaperOf(height), 0.5);
-    height += params_.regionalAmplitudeMeters * detailFade
-        * regionalTaper
-        * fbm(fbmSeeds_[streamRegional], unitDirection * datumRadius, params_.regionalWavelengthMeters, params_.regionalFbm, lowPassCutoffMeters);
+    double cliffMask   = 0.0;
+    double coastalTaper = coastalTaperOf(height);
+    if (detailFade > 0.0)
+    {
+        const double regionalTaper = mix(1.0, coastalTaper, 0.5);
+        height += params_.regionalAmplitudeMeters * detailFade
+            * regionalTaper
+            * fbm(fbmSeeds_[streamRegional], radialPosition, params_.regionalWavelengthMeters, params_.regionalFbm, lowPassCutoffMeters);
 
-    const double coastalTaper = coastalTaperOf(height);
+        coastalTaper = coastalTaperOf(height);
 
-    // Rolling medium-frequency hills everywhere on land.
-    height += params_.hillAmplitudeMeters * detailFade * coastalTaper
-        * fbm(fbmSeeds_[streamHills], unitDirection * datumRadius, params_.hillWavelengthMeters, params_.hillsFbm, lowPassCutoffMeters);
+        // Rolling medium-frequency hills everywhere on land.
+        height += params_.hillAmplitudeMeters * detailFade * coastalTaper
+            * fbm(fbmSeeds_[streamHills], radialPosition, params_.hillWavelengthMeters, params_.hillsFbm, lowPassCutoffMeters);
 
-    // Terraced-country mask drives both the terrace quantization below and
-    // the detail/overhang weighting; compute it before the fine layers.
-    const double cliffMask = clamp01(0.5
-        + 0.9 * fbm(fbmSeeds_[streamCliffMask], unitDirection * datumRadius, params_.cliffWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters));
+        // Terraced-country mask drives both the terrace quantization below
+        // and the detail/overhang weighting; compute it before the fine
+        // layers.
+        cliffMask = clamp01(0.5
+            + 0.9 * fbm(fbmSeeds_[streamCliffMask], radialPosition, params_.cliffWavelengthMeters, kFixedFbm, lowPassCutoffMeters));
 
-    // Fine detail layer: rock ribs, soil ripples, scree - the roughness that
-    // keeps close-range views from reading as smooth plastic. Carried fully
-    // by mountains and cliffs, partially by plains (a large plains fraction
-    // turns open ground into bump fields), faded under water and along the
-    // flattened shoreline band.
-    const double detailMaskLevel = clamp01(params_.detailPlainsFraction
-        + (1.0 - params_.detailPlainsFraction) * (0.8 * mountainMask + 0.6 * cliffMask));
-    height += params_.detailAmplitudeMeters * detailFade * coastalTaper * detailMaskLevel
-        * fbm(fbmSeeds_[streamDetail], unitDirection * datumRadius, params_.detailWavelengthMeters, params_.detailFbm, lowPassCutoffMeters);
+        // Fine detail layer: rock ribs, soil ripples, scree - the roughness
+        // that keeps close-range views from reading as smooth plastic.
+        // Carried fully by mountains and cliffs, partially by plains (a
+        // large plains fraction turns open ground into bump fields), faded
+        // under water and along the flattened shoreline band.
+        const double detailMaskLevel = clamp01(params_.detailPlainsFraction
+            + (1.0 - params_.detailPlainsFraction) * (0.8 * mountainMask + 0.6 * cliffMask));
+        height += params_.detailAmplitudeMeters * detailFade * coastalTaper * detailMaskLevel
+            * fbm(fbmSeeds_[streamDetail], radialPosition, params_.detailWavelengthMeters, params_.detailFbm, lowPassCutoffMeters);
 
-    // Terraces: quantize the height profile inside a noise-masked band,
-    // producing flat plateaus joined by steep cliff steps (mesa country).
-    const double u    = height / terraceStepMeters_;
-    const double k    = std::floor(u);
-    const double f    = u - k;
-    const double edge = smoothstep(0.30, 0.70, f);
-    height            = mix(height, (k + edge) * terraceStepMeters_, params_.terraceStrength * cliffMask * detailFade * coastalTaper);
+        // Terraces: quantize the height profile inside a noise-masked band,
+        // producing flat plateaus joined by steep cliff steps (mesa country).
+        const double u    = height / terraceStepMeters_;
+        const double k    = std::floor(u);
+        const double f    = u - k;
+        const double edge = smoothstep(0.30, 0.70, f);
+        height            = mix(height, (k + edge) * terraceStepMeters_, params_.terraceStrength * cliffMask * detailFade * coastalTaper);
+    }
 
     relief.heightMeters   = height;
     relief.mountainFactor = mountainMask;
@@ -298,15 +226,19 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     // fraction survives on plains (a large plains fraction boils the whole
     // surface into lumps), it pushes the iso-surface sideways as well as up:
     // the term that makes overhangs, ledges and cave mouths possible.
+    // Evaluated only where its mask survives the band limit.
     const double overhangMask = clamp01(params_.overhangPlainsFraction
         + (1.0 - params_.overhangPlainsFraction) * (0.8 * relief.mountainFactor + 0.6 * relief.cliffFactor))
         * relief.detailFade * relief.coastalTaper;
-    d += noise::simplex3ImproveXY(seedOverhang_,
-             point.x / params_.overhangWavelengthMeters,
-             point.y / params_.overhangWavelengthMeters,
-             point.z / params_.overhangWavelengthMeters)
-        * params_.overhangAmplitudeMeters * overhangMask
-        * lowPassFade(lowPassCutoffMeters, params_.overhangWavelengthMeters);
+    if (overhangMask > 0.0)
+    {
+        d += noise::simplex3ImproveXY(seedOverhang_,
+                 point.x / params_.overhangWavelengthMeters,
+                 point.y / params_.overhangWavelengthMeters,
+                 point.z / params_.overhangWavelengthMeters)
+            * params_.overhangAmplitudeMeters * overhangMask
+            * lowPassFade(lowPassCutoffMeters, params_.overhangWavelengthMeters);
+    }
 
     // Rock strata: sedimentary banding that follows the body's shell, bent by
     // a noise field so the bands are not perfect rings. Gated to GENUINELY
@@ -315,24 +247,31 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     // whole hillsides into lit/shadow corduroy under grazing sun. The warp
     // strength must stay small: a strong phase warp folds the sinusoid around
     // noise extrema and the cliff face dissolves into nested ripple rings.
-    const double strataGate  = smoothstep(0.45, 0.85, relief.cliffFactor);
-    const double bandPhase   = radius / std::max(1.0, params_.strataBandMeters);
-    const double bandWarp    = noise::simplex3ImproveXY(seedStrata_,
-                              point.x / std::max(1.0, params_.strataBandMeters),
-                              point.y / std::max(1.0, params_.strataBandMeters),
-                              point.z / std::max(1.0, params_.strataBandMeters));
-    d += params_.strataAmplitudeMeters * std::sin(6.283185307179586 * bandPhase + params_.strataWarp * bandWarp)
-        * strataGate * relief.detailFade * relief.coastalTaper
-        * lowPassFade(lowPassCutoffMeters, params_.strataBandMeters);
+    if (relief.detailFade > 0.0 && relief.coastalTaper > 0.0)
+    {
+        const double strataGate  = smoothstep(0.45, 0.85, relief.cliffFactor);
+        if (strataGate > 0.0)
+        {
+            const double bandPhase   = radius / std::max(1.0, params_.strataBandMeters);
+            const double bandWarp    = noise::simplex3ImproveXY(seedStrata_,
+                                  point.x / std::max(1.0, params_.strataBandMeters),
+                                  point.y / std::max(1.0, params_.strataBandMeters),
+                                  point.z / std::max(1.0, params_.strataBandMeters));
+            d += params_.strataAmplitudeMeters * std::sin(6.283185307179586 * bandPhase + params_.strataWarp * bandWarp)
+                * strataGate * relief.detailFade * relief.coastalTaper
+                * lowPassFade(lowPassCutoffMeters, params_.strataBandMeters);
+        }
+    }
 
     // Cave worms: two noise fields; where both are near zero their iso-
     // surfaces intersect in tunnels, and the density is carved out. The carve
     // fades with the worm wavelength under the band limit like every other
-    // term.
-    if (params_.cavesEnabled)
+    // term. Like the strata, the carve lives inside the detail band - deep
+    // under the sea floor the term is zero anyway.
+    if (params_.cavesEnabled && relief.detailFade > 0.0)
     {
-        const double wormA = fbm(fbmSeeds_[streamCaveA], point, params_.caveWormWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
-        const double wormB = fbm(fbmSeeds_[streamCaveB], point, params_.caveWormWavelengthMeters, FbmParams{2, 2.0, 0.5}, lowPassCutoffMeters);
+        const double wormA = fbm(fbmSeeds_[streamCaveA], point, params_.caveWormWavelengthMeters, kFixedFbm, lowPassCutoffMeters);
+        const double wormB = fbm(fbmSeeds_[streamCaveB], point, params_.caveWormWavelengthMeters, kFixedFbm, lowPassCutoffMeters);
         const double wormSquared = wormA * wormA + wormB * wormB;
         const double threshold   = params_.caveThreshold;
         if (wormSquared < threshold * threshold)
@@ -347,9 +286,13 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
 
 double DensityField::surfaceRadius(const Vec3 &unitDirection) const
 {
+    // The scan starts below the deepest possible valley and walks outward;
+    // the first solid-to-air bracket holds the surface a camera or probe
+    // would hit first (overhangs and caves may create further crossings
+    // above it that this function deliberately ignores).
     const double band   = params_.derivedMaxReliefMeters * 2.0 + params_.overhangAmplitudeMeters * 2.0 + params_.caveCarveMeters;
-    double       lowRadius  = std::max(1.0, params_.radiusMeters - band);
-    double       highRadius = params_.radiusMeters + band;
+    const double lowRadius  = std::max(1.0, params_.radiusMeters - band);
+    const double highRadius = params_.radiusMeters + band;
 
     if (densityAt(Vec3{unitDirection.x * lowRadius, unitDirection.y * lowRadius, unitDirection.z * lowRadius}) < 0.0)
     {
@@ -358,20 +301,51 @@ double DensityField::surfaceRadius(const Vec3 &unitDirection) const
         return params_.radiusMeters;
     }
 
-    for (int iteration = 0; iteration < 48; ++iteration)
+    // March outward in fixed steps until the density drops below the
+    // isolevel, then bisect inside that bracket. The step count balances
+    // the march cost against the bisection depth: with the bracket at most
+    // one step wide, 32 bisection iterations resolve well below a centimeter
+    // at any supported radius.
+    constexpr std::uint32_t kMarchSteps   = 24;
+    constexpr std::uint32_t kBisectSteps  = 32;
+    const double stepMeters = (highRadius - lowRadius) / static_cast<double>(kMarchSteps);
+    double       belowRadius = lowRadius;
+    double       aboveRadius = highRadius;
+    bool         bracketed   = false;
+    for (std::uint32_t step = 1; step <= kMarchSteps; ++step)
     {
-        const double midRadius = 0.5 * (lowRadius + highRadius);
+        const double testRadius = lowRadius + stepMeters * static_cast<double>(step);
+        const Vec3   testPoint{unitDirection.x * testRadius, unitDirection.y * testRadius, unitDirection.z * testRadius};
+        if (densityAt(testPoint) <= 0.0)
+        {
+            aboveRadius = testRadius;
+            belowRadius = testRadius - stepMeters;
+            bracketed   = true;
+            break;
+        }
+        belowRadius = testRadius;
+    }
+    if (!bracketed)
+    {
+        // The field stays solid across the whole band (degenerate
+        // parameters); give the band top so callers still get a usable
+        // answer outside the body.
+        return highRadius;
+    }
+    for (std::uint32_t iteration = 0; iteration < kBisectSteps; ++iteration)
+    {
+        const double midRadius = 0.5 * (belowRadius + aboveRadius);
         const Vec3   midPoint{unitDirection.x * midRadius, unitDirection.y * midRadius, unitDirection.z * midRadius};
         if (densityAt(midPoint) > 0.0)
         {
-            lowRadius = midRadius;
+            belowRadius = midRadius;
         }
         else
         {
-            highRadius = midRadius;
+            aboveRadius = midRadius;
         }
     }
-    return 0.5 * (lowRadius + highRadius);
+    return 0.5 * (belowRadius + aboveRadius);
 }
 
 } // namespace planet

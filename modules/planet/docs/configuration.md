@@ -18,8 +18,8 @@ The shipped defaults describe the showcase planet: radius 60 km, Earth-like reli
 | Key | Default | Effect |
 | --- | --- | --- |
 | `leaf_grid_n` | `16` | Marching-cubes cells per leaf chunk axis (grid is `(n+1)^3` samples plus a 1-voxel apron). Must be EVEN so chunk faces sit on coarse planes. Range [4, 64]. |
-| `target_voxel_meters` | `2.5` | Desired finest voxel size; drives the derived octree depth (`derivedMaxDepth`). The lower clamp is `radius / 131072` (depth-capped by the 20-bit chunk-key packing). |
-| `max_depth_limit` | `18` | Hard cap for the octree depth (also capped at 20 by the key packing). |
+| `target_voxel_meters` | `2.5` | Desired finest voxel size; drives the derived octree depth (`derivedMaxDepth`). The lower clamp is `radius / 131072` (depth-capped by the chunk key's 15-level limit). |
+| `max_depth_limit` | `15` | Hard cap for the octree depth. The chunk key stores the depth in 4 bits, so 15 is also the structural maximum. |
 | `lod_angular_voxel_radians` | `0.02` | Screen-space LOD: refine a node while its voxel subtends more than this many radians at the eye. Detail follows apparent size, independent of planet radius, viewport and zoom. Smaller = finer views everywhere, visible chunk count grows quadratically. |
 | `lod_band_limit_factor` | `2.0` | Per-depth low-pass: density content below `voxel * factor` fades out before coarse chunks sample it. Marching cubes needs ~4 samples per wavelength; 2.0 renders content at full strength from 4 voxels up and fades it to zero at 2 voxels. Without it, sub-voxel octaves alias into random spikes on every coarse LOD surface (the "spiky globe"). Raise it to trade close-range roughness for cheaper, smoother chunks. |
 | `horizon_culling` | `true` | Skip nodes fully inside the shadow cone of the guaranteed-solid inner shell ball. |
@@ -90,6 +90,11 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `water_color_shallow` | `[0.060, 0.205, 0.275]` | Linear RGB at zero depth. |
 | `water_color_deep` | `[0.012, 0.060, 0.130]` | Linear RGB at full tint depth. |
 | `water_roughness` | `0.42` | Gloss hint handed to the renderer's water material. Low values give mirror-sharp sun glints, which makes the coarse far-water facets band at grazing angles; higher values spread the highlight. |
+| `sea_ice_temperature` | `0.10` | Sea-level temperature below which the water surface freezes. The field is the same climate field that drives the land's freeze line, so polar oceans ice over where the land turns tundra, with an organic, noise-shaped edge. `0` disables sea ice. |
+| `sea_ice_transition` | `0.05` | Temperature range around `sea_ice_temperature` over which the ice color blends in. |
+| `water_color_ice` | `[0.80, 0.86, 0.90]` | Linear RGB of the frozen water surface. |
+| `water_wave_amplitude` | `0.12` | Radian-scale tilt applied to the water surface normals by a deterministic noise field, giving the sea a sun-glint texture at close range. The tilt fades out under the LOD band limit like every other noise term, so coarse chunks keep a smooth sea. `0` gives a perfectly smooth surface. |
+| `water_wave_wavelength_meters` | `8.0` | Feature size of the wave-slope field. |
 
 ## Climate and biomes
 
@@ -106,7 +111,8 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `coastal_moisture_boost` | `0.18` | Onshore humidity: low land near the sea stays green (without it the shoreline belt paints a beige desert fringe around every landmass). |
 | `coastal_moisture_band_meters` | `400.0` | Elevation over which the coastal moisture boost fades out. |
 | `moisture_latitude_bands` | `true` | ITCZ wet belt + subtropical dry belts + temperate wet belt. |
-| `color_variation` | `0.14` | Per-point albedo jitter (0 = flat palette). |
+| `color_variation` | `0.14` | Per-point albedo jitter (0 = flat palette). Each color channel is weighted differently, so the variation reads as subtle hue mottling (warm/cool patches) instead of pure luminance banding. |
+| `color_variation_wavelength_meters` | `260.0` | Feature size of the albedo jitter field. |
 | `snow_line_meters` | `1600.0` | Sea-level snow line; drops as the local climate cools. Only true peaks are glaciated; polar caps come from latitude alone. |
 | `beach_width_meters` | `2.0` | Shoreline band above sea level. Kept narrow: on flattened coastal plains a wide band paints every drainage dip as sand. |
 | `rock_slope_threshold` | `0.62` | Slope (1 - dot(normal, radial)) where bare rock takes over (about 32 degrees). Low enough for genuine cliff faces to show rock, high enough that aliased ridge crests stay snow-covered instead of speckling with rock dots. |
@@ -119,8 +125,8 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 ## Usage notes
 
 - **Scaling a planet.** Raise `radius_meters` and scale the wavelengths you want to keep proportional (continents, mountains, regional, climate fields, snow line); close-range amplitudes stay metric (a 650 m mountain is a 650 m mountain on any planet). The domain warp amplitude is ANGULAR - its metric effect grows with R (0.18 bends ~10 km coastlines at 60 km radius). The derived octree depth grows automatically until voxels reach `target_voxel_meters` (or the depth cap); `validate()`'s lower voxel clamp is `radius / 131072`.
-- **Performance knobs.** Visible chunk count scales roughly with `1 / target_voxel_meters^2` near the camera and with `lod_angular_voxel_radians` overall. `leaf_grid_n` trades chunk granularity against per-chunk cost. `max_concurrent_builds` / `max_new_builds_per_update` pace streaming; caves cost two extra noise fields per sample.
+- **Performance knobs.** Visible chunk count scales roughly with `1 / target_voxel_meters^2` near the camera and with `lod_angular_voxel_radians` overall. `leaf_grid_n` trades chunk granularity against per-chunk cost. `max_concurrent_builds` / `max_new_builds_per_update` pace streaming (builds run on the module's dedicated worker pool, one thread per permitted concurrent build); caves cost two extra noise fields per sample. Terrain layers whose mask is zero for a sample (mountains over the ocean, detail fields under water) are skipped, so coastal and ocean geometry is cheaper than mountainous terrain at the same depth.
 - **Chunk boundaries and seams.** Same-depth chunks weld bit-identically (one global lattice); across depth changes the octree keeps a 2:1 balance and the fine side CONFORMS its boundary-plane samples to the coarse lattice's interpolant on segments whose far cell is a rendered coarse leaf, then EXTENDS its surface one cell layer past those faces - the fine and coarse surfaces interpenetrate along the whole transition, so no viewing ray can slip between them. Conform masks are recomputed whenever the visible set changes; chunks whose stored mesh was built under a different mask rebuild automatically (the stale mesh keeps rendering until the rebuild lands).
 - **Surface normals.** Vertex normals average the gradient of the (up to) four cells adjacent to the edge, in canonical min-corner form - a pure function of the edge's global position, so shared boundary vertices stay bit-identical across chunks. The average removes the per-cell normal steps that used to speckle steep creases with dark facets.
-- **Water patches.** Water depth tint and foam sample `densityAt` directly (one pure field), so the tint is continuous across chunk and LOD boundaries; cells fully buried under terrain are skipped, which removes grazing-angle slivers where the sea sphere grazes the surface.
+- **Water patches.** Water depth tint and foam sample `densityAt` directly (one pure field), so the tint is continuous across chunk and LOD boundaries; cells fully buried under terrain are skipped, which removes grazing-angle slivers where the sea sphere grazes the surface. The surface freezes where `sea_ice_temperature` is reached (see the oceans table) and the wave-slope field roughens the normals at close range; both follow the same pure-field rules, so ice edges and glint texture stay continuous across chunks.
 - **Surface artefacts checklist.** Pale stains on green terrain: raise `biome_blend_width`/`slope_blend_width`. Dotted dark lines along ridges: raise `rock_slope_threshold`. Shredded cliff faces: lower `strata_warp`, raise `strata_band_meters`, lower `overhang_amplitude_meters`. Sub-sea pond webs near coasts: raise `coastal_flatten_meters`. Spiky silhouettes at any scale: raise `lod_band_limit_factor` (and keep the finest detail octave at 2.5+ voxels).

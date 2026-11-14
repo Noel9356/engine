@@ -2,7 +2,10 @@
 
 #include <engine/planet/octree.hpp>
 
+#include <engine/planet/fbm.hpp>
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace engine
@@ -40,6 +43,21 @@ constexpr double kCornerDelta[8][3] = {
     {-0.5, -0.5, 0.5}, {0.5, -0.5, 0.5}, {0.5, 0.5, 0.5}, {-0.5, 0.5, 0.5},
 };
 
+// Edge-midpoint and face-center offsets completing the probe set below (in
+// half-size units, like kCornerDelta). The full set is the cube's 27 lattice
+// points (corners, edge midpoints, face centers, center).
+constexpr double kEdgeMidDelta[12][3] = {
+    {0.0, -0.5, -0.5}, {0.0, 0.5, -0.5}, {0.0, -0.5, 0.5}, {0.0, 0.5, 0.5},
+    {-0.5, 0.0, -0.5}, {0.5, 0.0, -0.5}, {-0.5, 0.0, 0.5}, {0.5, 0.0, 0.5},
+    {-0.5, -0.5, 0.0}, {0.5, -0.5, 0.0}, {-0.5, 0.5, 0.0}, {0.5, 0.5, 0.0},
+};
+
+constexpr double kFaceCenterDelta[7][3] = {
+    {0.0, 0.0, 0.0},
+    {-0.5, 0.0, 0.0}, {0.5, 0.0, 0.0}, {0.0, -0.5, 0.0},
+    {0.0, 0.5, 0.0}, {0.0, 0.0, -0.5}, {0.0, 0.0, 0.5},
+};
+
 } // namespace
 
 VisibleLeafSet::VisibleLeafSet()
@@ -72,21 +90,27 @@ PlanetOctree::PlanetOctree(const PlanetGenerationParams &params, const DensityFi
     , field_(field)
     , nodes_(32768)
 {
-    // Density variation bound of the 3D terms across any node (they are
-    // bounded fields, not gradient-limited): overhang and strata contribute
-    // at most twice their amplitude, caves at most their carve depth. The
-    // radially-shaped relief adds a gradient term (|amp / wavelength| sums,
-    // times 3 for safety) times the node diagonal at the probe depth.
-    const double boundedTerms = 2.0 * (params.overhangAmplitudeMeters + params.strataAmplitudeMeters) + params.caveCarveMeters;
-    const double reliefGradientBound = 3.0
-        * (params.continentAmplitudeMeters / params.continentWavelengthMeters
-            + params.mountainAmplitudeMeters / params.mountainWavelengthMeters
-            + params.mountainAmplitudeMeters / params.derivedMountainMassWavelengthMeters
-            + params.mountainAmplitudeMeters / params.rangeClusterWavelengthMeters
-            + params.regionalAmplitudeMeters / params.regionalWavelengthMeters
-            + params.hillAmplitudeMeters / params.hillWavelengthMeters
-            + params.detailAmplitudeMeters / params.detailWavelengthMeters);
-    solidMarginMeters_ = boundedTerms + reliefGradientBound * std::sqrt(3.0) * chunkSizeMeters(params, params.derivedMaxDepth);
+    // Per-depth probe margins. The corner probe prunes a node as fully
+    // solid/air when every probe point sits beyond `margin` on the same side
+    // of the isolevel; for that verdict to be sound, the margin must cover
+    // the WORST-CASE rise of the density between a probe point and any
+    // interior point. The 20-point probe set (corners + edge midpoints)
+    // covers the node with radius half the node size, and the density moves
+    // at most (1 + relief gradient) per meter - the +1 being the radial -|p|
+    // term of the field - so the sound margin is the band-limited relief
+    // gradient bound plus one radial, times half the node size, plus the
+    // bounded 3D terms (overhang, strata, caves) each weighted by its fade at
+    // the node's own probe cutoff. Margins are precomputed per depth: the
+    // cutoff follows the node's lattice, so both the gradient bound and the
+    // node size are functions of depth alone.
+    for (std::uint32_t depth = 0; depth < probeMargins_.size(); ++depth)
+    {
+        const double nodeSize = chunkSizeMeters(params, depth);
+        const double coveringRadius = 0.5 * nodeSize;
+        const double probeCutoff = chunkStepMeters(params, depth) * params.lodBandLimitFactor;
+        probeMargins_[depth] = (1.0 + bandLimitedReliefGradient(params, probeCutoff)) * coveringRadius
+            + bandLimitedBoundedTerms(params, probeCutoff);
+    }
 
     // Occluder for the horizon test: everything below the inner shell radius
     // is guaranteed solid rock, so a sight line passing through that ball is
@@ -110,6 +134,10 @@ bool PlanetOctree::cubeIntersectsShell(double minCubeRadius, double maxCubeRadiu
 // is the diameter ball of the eye vector - an occluder much larger than the
 // planet itself. Around the limb it culled chunks whose terrain was still
 // visible and shaved the horizon into straight chords.)
+//
+// An eye INSIDE the occluder ball (buried cameras, probes below the inner
+// shell) must disable the test: every sight line then intersects the ball
+// trivially and the whole planet would cull away.
 bool PlanetOctree::horizonHidden(const Vec3 &nodeCenter, double nodeSize, const Vec3 &eyeLocal) const
 {
     if (innerOccluderRadius2_ <= 0.0)
@@ -117,6 +145,10 @@ bool PlanetOctree::horizonHidden(const Vec3 &nodeCenter, double nodeSize, const 
         return false;
     }
     const double a = dot(eyeLocal, eyeLocal);
+    if (a <= innerOccluderRadius2_)
+    {
+        return false; // the eye is inside the guaranteed-solid ball
+    }
     for (std::uint32_t corner = 0; corner < 8; ++corner)
     {
         const Vec3 point{nodeCenter.x + kCornerDelta[corner][0] * nodeSize,
@@ -215,7 +247,7 @@ ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLo
     //     crosses zero there even when every density corner is "air", and
     //     the ocean surface must still render (deep-water holes otherwise
     //     appear at pruning boundaries).
-    if (coord.depth >= 2 && solidMarginMeters_ > 0.0)
+    if (coord.depth >= 2)
     {
         bool straddlesSea = false;
         if (params_.waterEnabled)
@@ -230,28 +262,38 @@ ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLo
             if (record.probe == ProbeVerdict::Unknown)
             {
                 const double probeCutoff = chunkStepMeters(params_, coord.depth) * params_.lodBandLimitFactor;
-                const double probeMargin = std::max(solidMarginMeters_, chunkStepMeters(params_, coord.depth));
+                const double probeMargin = probeMargins_[std::min<std::size_t>(coord.depth, probeMargins_.size() - 1)];
                 double minDensity = 0.0;
                 double maxDensity = 0.0;
                 bool   undecided  = false;
-                for (std::uint32_t corner = 0; corner < 8; ++corner)
+                // The probe samples the node's 27 lattice points (8 corners,
+                // 12 edge midpoints, 6 face centers, the center): that set
+                // covers the node with radius half the node size (the worst
+                // interior points are face centers, nodeSize/2 from their
+                // nearest edge midpoint), versus half the DIAGONAL for
+                // corners alone - a 0.577x tighter sound margin, so the
+                // probe prunes far more of the genuinely empty/solid nodes
+                // around the terrain shell.
+                for (std::uint32_t sample = 0; sample < 27u && !undecided; ++sample)
                 {
-                    const Vec3 probePoint{nodeCenter.x + kCornerDelta[corner][0] * nodeSize,
-                        nodeCenter.y + kCornerDelta[corner][1] * nodeSize,
-                        nodeCenter.z + kCornerDelta[corner][2] * nodeSize};
+                    const double *offset = sample < 8u ? kCornerDelta[sample]
+                        : sample < 20u ? kEdgeMidDelta[sample - 8u]
+                        : kFaceCenterDelta[sample - 20u];
+                    const Vec3 probePoint{nodeCenter.x + offset[0] * nodeSize,
+                        nodeCenter.y + offset[1] * nodeSize,
+                        nodeCenter.z + offset[2] * nodeSize};
                     const double density = field_.densityAt(probePoint, probeCutoff);
-                    if (corner == 0 || density < minDensity)
+                    if (sample == 0 || density < minDensity)
                     {
                         minDensity = density;
                     }
-                    if (corner == 0 || density > maxDensity)
+                    if (sample == 0 || density > maxDensity)
                     {
                         maxDensity = density;
                     }
                     if (minDensity <= probeMargin && maxDensity >= -probeMargin)
                     {
                         undecided = true; // neither fully solid nor fully air
-                        break;
                     }
                 }
                 record.probe = undecided ? ProbeVerdict::Undecided : ProbeVerdict::Empty;

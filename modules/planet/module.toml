@@ -14,6 +14,7 @@ config_keys = [
     "planet.coastal_moisture_band_meters",
     "planet.coastal_moisture_boost",
     "planet.color_variation",
+    "planet.color_variation_wavelength_meters",
     "planet.continent_amplitude_meters",
     "planet.continent_octaves",
     "planet.continent_wavelength_meters",
@@ -62,6 +63,8 @@ config_keys = [
     "planet.rock_slope_threshold",
     "planet.rock_strata_contrast",
     "planet.sea_level_offset_meters",
+    "planet.sea_ice_temperature",
+    "planet.sea_ice_transition",
     "planet.seed",
     "planet.shallow_water_meters",
     "planet.slope_blend_width",
@@ -76,10 +79,13 @@ config_keys = [
     "planet.terrace_steps",
     "planet.terrace_strength",
     "planet.water_color_deep",
+    "planet.water_color_ice",
     "planet.water_color_shallow",
     "planet.water_depth_tint_meters",
     "planet.water_enabled",
     "planet.water_roughness",
+    "planet.water_wave_amplitude",
+    "planet.water_wave_wavelength_meters",
 ]
 name        = "planet"
 provides    = ["planet"]

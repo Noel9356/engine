@@ -17,6 +17,7 @@
 #ifndef ENGINE_PLANET_CLIMATE_HPP
 #define ENGINE_PLANET_CLIMATE_HPP
 
+#include <engine/planet/fbm.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
@@ -42,6 +43,12 @@ public:
     // debugging and the preview tooling.
     ClimateSample sampleSeaLevel(const Vec3 &direction) const;
 
+    // Sea-level temperature01 only (latitude gradient plus the perturbation
+    // noise, no altitude lapse). The water surface's sea-ice edge is keyed to
+    // this field, and sampling it per water vertex costs a fraction of the
+    // full sea-level sample.
+    double seaLevelTemperature(const Vec3 &direction) const;
+
 private:
     const PlanetGenerationParams &params_;
 
@@ -52,10 +59,10 @@ private:
     // Per-octave noise seeds, derived once per sampler from the base seeds
     // (hashCombine64(baseSeed, octave) is sample-independent). The moisture
     // warp table holds the three single-octave warp stream seeds.
-    std::array<std::int64_t, 12> seedTemperatureOctaves_{};
-    std::array<std::int64_t, 12> seedMoistureOctaves_{};
-    std::array<std::int64_t, 12> seedJitterOctaves_{};
-    std::array<std::int64_t, 12> seedMoistureWarpOctaves_{};
+    FbmStreamSeeds seedTemperatureOctaves_{};
+    FbmStreamSeeds seedMoistureOctaves_{};
+    FbmStreamSeeds seedJitterOctaves_{};
+    std::array<std::int64_t, 3> seedMoistureWarpOctaves_{};
 };
 
 } // namespace planet

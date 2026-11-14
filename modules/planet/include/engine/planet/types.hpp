@@ -87,6 +87,12 @@ inline Vec3 normalized(const Vec3 &a)
     return Vec3{a.x / magnitude, a.y / magnitude, a.z / magnitude};
 }
 
+// Clamp into [0, 1] (used throughout the masks and climate fields).
+inline double clamp01(double value)
+{
+    return std::clamp(value, 0.0, 1.0);
+}
+
 // x = clamped linear interpolation.
 inline double mix(double edge0, double edge1, double x)
 {
@@ -141,11 +147,13 @@ inline std::uint64_t hashCombine64(std::uint64_t a, std::uint64_t b)
 // ---- chunk identity ---------------------------------------------------------
 
 // Identifies one octree node: depth in the tree (0 = root cube) plus the
-// node's integer coordinates on that depth's lattice. The key packs all
-// four values into 64 bits; maxDepth is capped so the coordinates fit.
+// node's integer coordinates on that depth's lattice. The key packs the
+// depth into 4 bits and each coordinate into 20 bits (64 bits total); the
+// depth cap keeps both fields collision-free - a deeper tree would wrap its
+// depth modulo 16 and alias nodes of different levels onto one key.
 using ChunkKey = std::uint64_t;
 
-inline constexpr std::uint32_t maxSupportedOctreeDepth = 20;
+inline constexpr std::uint32_t maxSupportedOctreeDepth = 15;
 
 inline ChunkKey makeChunkKey(std::uint32_t depth, std::uint32_t x, std::uint32_t y, std::uint32_t z)
 {

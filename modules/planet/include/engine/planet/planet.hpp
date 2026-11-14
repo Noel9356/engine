@@ -1,10 +1,11 @@
 // Planet: the planet module's generation facade.
 //
 // Owns the parameters, the density field and the LOD octree, drives chunk
-// mesh builds (async through the kernel TaskScheduler when available, inline
-// otherwise) and hands the current visible chunk set to consumers as borrowed
-// views. One Planet instance renders one planet; instances are cheap enough
-// for tools to create several (the demo's determinism self-test builds two).
+// mesh builds (async through a dedicated worker pool, inline on the calling
+// thread when the pool is starved) and hands the current visible chunk set to
+// consumers as borrowed views. One Planet instance renders one planet;
+// instances are cheap enough for tools to create several (the demo's
+// determinism self-test builds two).
 //
 // Threading: update() / copyVisibleChunks() / sampling are MAIN THREAD only
 // (standard for capability calls); worker threads only ever touch the pure
@@ -22,11 +23,8 @@
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
-#include <engine/kernel/task_scheduler.hpp>
-
 #include <chrono>
 #include <cstdint>
-#include <atomic>
 #include <unordered_map>
 #include <thread>
 #include <condition_variable>
@@ -55,7 +53,7 @@ struct PlanetChunkView
 class Planet final
 {
 public:
-    Planet(const PlanetGenerationParams &params, TaskScheduler *taskScheduler);
+    explicit Planet(const PlanetGenerationParams &params);
     ~Planet();
 
     Planet(const Planet &)            = delete;
@@ -114,15 +112,12 @@ private:
     void buildOneInline();
     void evictStaleMeshes();
     void buildWorkerLoop();
-    void finishBuild(const ChunkCoord &coord, const ConformMask &conformMask); // scheduler-less inline path
 
     // Owned copy: capability callers pass temporaries (stack locals layered
     // over the module config), so a reference would dangle.
     PlanetGenerationParams        params_;
     DensityField                  field_;
     PlanetOctree                  octree_;
-    TaskScheduler                *taskScheduler_;
-    TaskGroup                     buildGroup_;
 
     std::vector<ChunkCoord> lastVisible_;
 
@@ -160,6 +155,13 @@ private:
     // Consecutive updates that had queued work but received no finished mesh. When the pool is starved of CPU for this
     // long, one chunk is built on the calling thread so the visible set still converges (see update()).
     std::uint32_t                                starvedUpdates_ = 0;
+
+    // Last eye the visible set was selected for. Selection is a pure
+    // function of (eye, params, field), so an unchanged eye pins the visible
+    // list and the update path skips the descent, balancing and mask pass
+    // entirely (streaming, stamping and eviction still run).
+    bool           hasSelectionEye_ = false;
+    Vec3           selectionEye_{};
 
     std::uint64_t updateCount_ = 0;
     PlanetStatistics statistics_{};

@@ -22,6 +22,7 @@
 #define ENGINE_PLANET_DENSITY_HPP
 
 #include <engine/planet/climate.hpp>
+#include <engine/planet/fbm.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
@@ -31,17 +32,6 @@ namespace engine
 {
 namespace planet
 {
-
-// Per-octave noise seeds for one fBm stream. hashCombine64(baseSeed, octave)
-// does not depend on the sample position, so the tables are derived once per
-// field instead of once per sample. Octave counts are clamped to 12 by
-// parameter validation; the field's fbm() streams index into tables of this
-// type (see DensityField).
-struct FbmStreamSeeds
-{
-    std::uint32_t                count = 0;
-    std::array<std::int64_t, 12> perOctave{};
-};
 
 // Relief sampled along one radial direction, before 3D displacement.
 struct ReliefSample
@@ -72,9 +62,12 @@ public:
     // boundary carries no content the coarse lattice cannot represent.
     double densityAt(const Vec3 &point, double lowPassCutoffMeters = 0.0) const;
 
-    // Convenience: first radius where the density crosses zero along the
-    // given unit direction (surface radius). Bisection over the shell band;
-    // falls back to the datum when the ray never crosses (should not happen
+    // Convenience: FIRST radius where the density crosses zero along the
+    // given unit direction (surface radius). The shell band is scanned
+    // outward for the first solid-to-air bracket, which the bisection then
+    // tightens - overhangs and (optional) caves can create several crossings
+    // along one ray, and the first one is what a camera or probe hits.
+    // Falls back to the datum when the ray never crosses (should not happen
     // for validated parameters).
     double surfaceRadius(const Vec3 &unitDirection) const;
 
@@ -88,7 +81,7 @@ private:
     // reliefImpl(direction, 0)).
     ReliefSample reliefImpl(const Vec3 &unitDirection, double lowPassCutoffMeters) const;
 
-    // The fBm streams (see fbm()/ridgedFbm() in density.cpp), indexed for the
+    // The fBm streams (see fbm()/ridgedFbm() in fbm.hpp), indexed for the
     // fbmSeeds_ table below.
     enum FbmStream : std::size_t
     {

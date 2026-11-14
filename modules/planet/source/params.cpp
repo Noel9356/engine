@@ -66,11 +66,12 @@ bool PlanetGenerationParams::validate(std::string &error)
     {
         leafGridN -= 1u;
     }
-    // Finest-voxel floor: the chunk key packs depth + 20-bit lattice
-    // coordinates per axis, so the finest grid may hold 2^20 cells per root
-    // axis (2^depth * leafGridN). With leafGridN <= 64 that allows voxels down
-    // to rootSize / 2^20 ~= radius / 37449 at the default bounding factor; the
-    // floor below leaves a full extra octave of headroom.
+    // Finest-voxel floor: the chunk key packs a 4-bit depth and 20-bit
+    // lattice coordinates per axis (see types.hpp), so the octree depth is
+    // capped at 15 and the finest grid holds 2^15 chunks per root axis
+    // (2^depth * leafGridN lattice steps). With leafGridN <= 64 that bounds
+    // voxels at rootSize / 2^19; deeper refinement than the cap allows is
+    // silently clamped.
     targetVoxelMeters = clampRange(targetVoxelMeters, radiusMeters / 131072.0, radiusMeters / 4.0);
     maxDepthLimit = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxDepthLimit), 1.0, static_cast<double>(maxSupportedOctreeDepth)));
     lodAngularVoxelRadians = clampRange(lodAngularVoxelRadians, 0.0005, 0.5);
@@ -157,6 +158,7 @@ bool PlanetGenerationParams::validate(std::string &error)
     coastalMoistureBoost        = clampRange(coastalMoistureBoost, 0.0, 1.0);
     coastalMoistureBandMeters   = clampRange(coastalMoistureBandMeters, 1.0, radiusMeters);
     colorVariation       = clampRange(colorVariation, 0.0, 1.0);
+    colorVariationWavelengthMeters = clampRange(colorVariationWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     snowLineMeters       = clampRange(snowLineMeters, 0.0, 0.5 * radiusMeters);
     beachWidthMeters     = clampRange(beachWidthMeters, 0.0, 0.05 * radiusMeters);
     rockSlopeThreshold   = clampRange(rockSlopeThreshold, 0.05, 1.0);
@@ -177,6 +179,14 @@ bool PlanetGenerationParams::validate(std::string &error)
         waterColorDeep[channel]    = std::clamp(waterColorDeep[channel], 0.0f, 1.0f);
     }
     waterRoughness = std::clamp(waterRoughness, 0.0f, 1.0f);
+    seaIceTemperature = clampRange(seaIceTemperature, 0.0, 1.0);
+    seaIceTransition  = clampRange(seaIceTransition, 0.005, 0.5);
+    for (std::size_t channel = 0; channel < 3; ++channel)
+    {
+        waterColorIce[channel] = std::clamp(waterColorIce[channel], 0.0f, 1.0f);
+    }
+    waterWaveAmplitude        = clampRange(waterWaveAmplitude, 0.0, 1.0);
+    waterWaveWavelengthMeters = clampRange(waterWaveWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
 
     // ---- derived values -------------------------------------------------------------
     const double relief = continentAmplitudeMeters + regionalAmplitudeMeters + mountainAmplitudeMeters + hillAmplitudeMeters

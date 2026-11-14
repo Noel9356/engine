@@ -30,6 +30,10 @@ struct FbmParams
     double        gain       = 0.5;  // amplitude multiplier per octave
 };
 
+// Hard cap on fBm octave counts everywhere (validate() clamps configured
+// octave counts to this; the per-octave seed tables are sized accordingly).
+inline constexpr std::uint32_t maxFbmOctaves = 12;
+
 struct PlanetGenerationParams
 {
     // ---- identity and scale --------------------------------------------------
@@ -45,12 +49,13 @@ struct PlanetGenerationParams
 
     // ---- chunk cache -------------------------------------------------------------
     std::uint32_t chunkEvictionUpdates = 240; // updates a hidden mesh stays cached before eviction
-    std::uint32_t chunkCacheCapacity  = 8192; // hard cap on cached chunk meshes (oldest evicted)
+    std::uint32_t chunkCacheCapacity  = 16384; // hard cap on cached chunk meshes (oldest evicted)
 
     // ---- octree / level of detail ---------------------------------------------
     std::uint32_t leafGridN          = 16;   // marching-cubes cells per leaf chunk axis
     double        targetVoxelMeters  = 2.5;  // desired finest voxel size (drives max depth)
-    std::uint32_t maxDepthLimit      = 18;   // hard cap for the octree depth
+    std::uint32_t maxDepthLimit      = 15;   // hard cap for the octree depth (kept within the
+                                             // 4-bit depth field of the chunk key, see types.hpp)
     // Per-depth angular (screen-space) refinement: a chunk refines while its
     // VOXEL subtends more than lodAngularVoxelRadians at the eye. Detail then
     // follows apparent size instead of raw eye distance: the whole visible
@@ -198,6 +203,7 @@ struct PlanetGenerationParams
     double coastalMoistureBandMeters = 400.0; // elevation over which the boost fades out
     bool   moistureLatitudeBands = true;    // ITCZ wet belt + subtropical dry belts
     double colorVariation = 0.14;           // per-point albedo jitter (0 = flat palette)
+    double colorVariationWavelengthMeters = 260.0; // feature size of the albedo jitter field
     double snowLineMeters = 1600.0;          // sea-level snow line (drops as climate cools);
                                             // only the highest massifs are glaciated, polar
                                             // caps come from latitude alone
@@ -238,6 +244,20 @@ struct PlanetGenerationParams
     float waterColorDeep[3]    = {0.012f, 0.060f, 0.130f};
     float waterRoughness      = 0.42f; // consumer hint (exposed via chunk material); low values make the
                                        // coarse far-water facets band with sharp mirror glints
+    // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
+    // below seaIceTemperature (the same climate field that drives the land's
+    // freeze line, so ice caps and snowy poles line up with an organic, noisy
+    // edge). 0 disables. The transition blends ice color in over
+    // seaIceTransition of temperature around the threshold.
+    double seaIceTemperature  = 0.10;
+    double seaIceTransition   = 0.05;
+    float waterColorIce[3]    = {0.80f, 0.86f, 0.90f};
+    // Wave slope: deterministic noise tilts the water surface normals around
+    // the radial direction, giving the sea sun-glint texture at close range.
+    // The amplitude is a radian-scale tilt; it fades out under the LOD band
+    // limit like every other noise term, so coarse chunks keep a smooth sea.
+    double     waterWaveAmplitude          = 0.12;
+    double     waterWaveWavelengthMeters   = 8.0;
 
     // ---- derived values (filled by validate(), read-only afterwards) -----------
     double derivedRootHalfMeters   = 0.0; // root cube half-size

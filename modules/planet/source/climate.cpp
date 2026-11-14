@@ -2,6 +2,7 @@
 
 #include <engine/planet/climate.hpp>
 
+#include <engine/planet/fbm.hpp>
 #include <engine/planet/noise.hpp>
 
 #include <algorithm>
@@ -13,11 +14,6 @@ namespace planet
 {
 namespace
 {
-
-double clamp01(double value)
-{
-    return std::clamp(value, 0.0, 1.0);
-}
 
 // Gaussian-style latitude belt: 1 at centerDegrees, fading over widthDegrees.
 double latitudeBelt(double latitudeDegrees, double centerDegrees, double widthDegrees)
@@ -45,32 +41,25 @@ void blendColors(const double *rowA, const double *rowB, double weight, double o
     }
 }
 
-// fbm in [-1, 1] sampled at a PHYSICAL position (meters) over a metric
-// wavelength, so climate features keep their size at any planet radius.
-// octaveSeeds holds `octaves` per-octave seeds derived once per sampler (see
-// ClimateSampler's constructor) - hashCombine64(baseSeed, octave) is
-// sample-independent, so recomputing it per octave per sample is waste.
-double sphereFbm(const std::int64_t *octaveSeeds, const Vec3 &surfacePosition, double wavelengthMeters,
-    std::uint32_t octaves)
+// Amplitude and wet-belt geometry of the latitude moisture bands (ITCZ wet
+// belt, subtropical dry belts, temperate westerlies, polar highs). Central
+// values follow the classic atmospheric circulation cells; the amplitudes
+// tune how strongly each belt shifts the humidity field.
+struct MoistureBelt
 {
-    const double frequency = 1.0 / std::max(1.0, wavelengthMeters);
-    double       x         = surfacePosition.x * frequency;
-    double       y         = surfacePosition.y * frequency;
-    double       z         = surfacePosition.z * frequency;
-    double       amplitude = 1.0;
-    double       sum       = 0.0;
-    double       norm      = 0.0;
-    for (std::uint32_t octave = 0; octave < octaves; ++octave)
-    {
-        sum += amplitude * noise::simplex3ImproveXY(octaveSeeds[octave], x, y, z);
-        norm += amplitude;
-        x *= 2.0;
-        y *= 2.0;
-        z *= 2.0;
-        amplitude *= 0.5;
-    }
-    return sum / std::max(norm, 1.0e-9);
-}
+    double amplitude;
+    double centerDegrees;
+    double widthDegrees;
+};
+
+constexpr MoistureBelt kMoistureBelts[] = {
+    {+0.20, 0.0, 11.0},   // ITCZ
+    {-0.26, 26.0, 10.0},  // subtropical highs
+    {+0.10, 54.0, 13.0},  // temperate westerlies
+    {-0.06, 88.0, 10.0},  // polar highs
+};
+
+constexpr double kPi = 3.14159265358979323846;
 
 } // namespace
 
@@ -80,30 +69,22 @@ ClimateSampler::ClimateSampler(const PlanetGenerationParams &params)
     , seedMoisture_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x40157)))
     , seedMoistureWarp_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A9E51)))
 {
-    const auto octaveSeeds = [](std::int64_t base, std::uint32_t octaves)
+    const auto streamSeed = [](std::int64_t base, std::uint64_t tag)
+    { return static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(base), tag)); };
+    seedTemperatureOctaves_  = makeFbmSeeds(seedTemperature_, 3);
+    seedMoistureOctaves_     = makeFbmSeeds(seedMoisture_, 4);
+    seedJitterOctaves_       = makeFbmSeeds(streamSeed(seedMoisture_, 0xB10B), 2);
+    for (std::uint32_t octave = 0; octave < 3; ++octave)
     {
-        std::array<std::int64_t, 12> seeds{};
-        for (std::uint32_t octave = 0; octave < octaves; ++octave)
-        {
-            seeds[octave] = static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(base), octave));
-        }
-        return seeds;
-    };
-    seedTemperatureOctaves_    = octaveSeeds(seedTemperature_, 3);
-    seedMoistureOctaves_       = octaveSeeds(seedMoisture_, 4);
-    seedJitterOctaves_         = octaveSeeds(
-        static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(seedMoisture_), 0xB10B)), 2);
-    seedMoistureWarpOctaves_   = octaveSeeds(seedMoistureWarp_, 3);
+        seedMoistureWarpOctaves_[octave] = streamSeed(seedMoistureWarp_, octave);
+    }
 }
 
-ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
+double ClimateSampler::seaLevelTemperature(const Vec3 &direction) const
 {
-    ClimateSample sample;
-
     // Latitude from the configured spin axis: 0 at the equator, pi/2 at the
     // poles (absolute value - climate is hemispherically symmetric).
     const double absSinLatitude = clamp01(std::abs(dot(direction, Vec3{params_.axis[0], params_.axis[1], params_.axis[2]})));
-    const double latitudeDegrees = std::asin(absSinLatitude) * (180.0 / 3.14159265358979323846);
 
     // Temperature: equator-to-pole gradient plus a wandering noise field so
     // climate bands are not perfect circles.
@@ -111,14 +92,23 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
                        + (params_.poleTemperature - params_.equatorTemperature) * absSinLatitude;
     const Vec3 surfacePosition = direction * params_.radiusMeters;
     temperature += params_.temperaturePerturbation
-                 * sphereFbm(seedTemperatureOctaves_.data(), surfacePosition, params_.temperatureWavelengthMeters, 3);
-    sample.temperature01 = clamp01(temperature);
+                 * fbm(seedTemperatureOctaves_, surfacePosition, params_.temperatureWavelengthMeters,
+                     FbmParams{3, 2.0, 0.5});
+    return clamp01(temperature);
+}
+
+ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
+{
+    ClimateSample sample;
+
+    sample.temperature01 = seaLevelTemperature(direction);
 
     // Moisture: base humidity noise plus the latitude belts (ITCZ wet belt,
     // subtropical dry belts, mild temperate wet belt). The humidity field is
     // domain-warped - sampling a bent position turns the round fbm blobs into
     // the elongated, organic shapes real rainfall systems follow (unwarped,
     // biome patches read as camouflage spots on the terrain).
+    const Vec3 surfacePosition = direction * params_.radiusMeters;
     Vec3 moisturePosition = surfacePosition;
     if (params_.moistureWarpAmplitude > 0.0)
     {
@@ -132,13 +122,15 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
         moisturePosition = surfacePosition
             + params_.moistureWarpAmplitude * params_.moistureWavelengthMeters * Vec3{warpX, warpY, warpZ};
     }
-    double moisture = 0.5 + params_.moisturePerturbation * sphereFbm(seedMoistureOctaves_.data(), moisturePosition, params_.moistureWavelengthMeters, 4);
+    double moisture = 0.5 + params_.moisturePerturbation * fbm(seedMoistureOctaves_, moisturePosition, params_.moistureWavelengthMeters,
+        FbmParams{4, 2.0, 0.5});
     if (params_.moistureLatitudeBands)
     {
-        moisture += 0.20 * latitudeBelt(latitudeDegrees, 0.0, 11.0);   // ITCZ
-        moisture -= 0.26 * latitudeBelt(latitudeDegrees, 26.0, 10.0);  // subtropical highs
-        moisture += 0.10 * latitudeBelt(latitudeDegrees, 54.0, 13.0);  // temperate westerlies
-        moisture -= 0.06 * latitudeBelt(latitudeDegrees, 88.0, 10.0);  // polar highs
+        const double latitudeDegrees = std::asin(clamp01(std::abs(dot(direction, Vec3{params_.axis[0], params_.axis[1], params_.axis[2]})))) * (180.0 / kPi);
+        for (const MoistureBelt &belt : kMoistureBelts)
+        {
+            moisture += belt.amplitude * latitudeBelt(latitudeDegrees, belt.centerDegrees, belt.widthDegrees);
+        }
     }
     sample.moisture01 = clamp01(moisture);
     return sample;
@@ -352,14 +344,18 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     blendColors(color, snowRow, snowW, color);
     blendColors(color, rockRow, rockW, color);
 
-    // Albedo: jittered by a per-point luminance variation so large biomes do
-    // not read as flat plastic sheets. The jitter noise is a pure function of
-    // direction (order independent).
-    const double jitter
-        = 1.0 + params_.colorVariation * sphereFbm(seedJitterOctaves_.data(), direction * params_.radiusMeters, 260.0, 2);
+    // Albedo: jittered by a per-point variation field so large biomes do not
+    // read as flat plastic sheets. The jitter is a pure function of direction
+    // (order independent) and weights each channel differently, so the
+    // variation reads as subtle hue mottling (warm/cool patches) instead of
+    // pure luminance banding.
+    const double variation
+        = params_.colorVariation * fbm(seedJitterOctaves_, direction * params_.radiusMeters, params_.colorVariationWavelengthMeters,
+              FbmParams{2, 2.0, 0.5});
+    constexpr double kChannelWeights[3] = {1.0, 0.85, 0.70};
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
-        sample.color[channel] = static_cast<float>(clamp01(color[channel] * jitter));
+        sample.color[channel] = static_cast<float>(clamp01(color[channel] * (1.0 + variation * kChannelWeights[channel])));
     }
     return sample;
 }

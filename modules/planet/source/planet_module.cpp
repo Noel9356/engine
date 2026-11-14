@@ -19,6 +19,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace engine
 {
@@ -35,334 +36,239 @@ void setError(PlanetError *output, PlanetError value)
     }
 }
 
+// Configuration-key table: one row per [planet] key, describing how the value
+// lands in PlanetGenerationParams. The module's config_keys list, the shipped
+// config.toml and this table describe the same set of keys; keeping the
+// mapping data-driven means every new knob is one row here plus its field in
+// the params struct (mirrored in config.toml), not a fresh if-chain.
+enum class SettingKind : std::uint32_t
+{
+    Floating,
+    Integer,
+    Boolean
+};
+
+using Setter = void (*)(PlanetGenerationParams &params, double value);
+
+struct SettingRow
+{
+    const char  *key;
+    SettingKind  kind;
+    Setter       setter;
+};
+
+void setSeed(PlanetGenerationParams &params, double value)
+{
+    // Seeds are hashed through 64-bit streams; the wrap of a negative
+    // integer is as deterministic as any other seed.
+    params.seed = static_cast<std::uint64_t>(static_cast<std::int64_t>(value));
+}
+
+void setRadius(PlanetGenerationParams &params, double value) { params.radiusMeters = value; }
+void setSeaLevel(PlanetGenerationParams &params, double value) { params.seaLevelOffsetMeters = value; }
+void setLeafGridN(PlanetGenerationParams &params, double value) { params.leafGridN = static_cast<std::uint32_t>(value); }
+void setTargetVoxel(PlanetGenerationParams &params, double value) { params.targetVoxelMeters = value; }
+void setMaxDepthLimit(PlanetGenerationParams &params, double value) { params.maxDepthLimit = static_cast<std::uint32_t>(value); }
+void setLodAngularVoxel(PlanetGenerationParams &params, double value) { params.lodAngularVoxelRadians = value; }
+void setLodBandLimit(PlanetGenerationParams &params, double value) { params.lodBandLimitFactor = value; }
+void setHorizonCulling(PlanetGenerationParams &params, double value) { params.horizonCulling = value != 0.0; }
+void setBoundingFactor(PlanetGenerationParams &params, double value) { params.boundingFactor = value; }
+void setMaxConcurrentBuilds(PlanetGenerationParams &params, double value) { params.maxConcurrentBuilds = static_cast<std::uint32_t>(value); }
+void setMaxNewBuildsPerUpdate(PlanetGenerationParams &params, double value) { params.maxNewBuildsPerUpdate = static_cast<std::uint32_t>(value); }
+void setChunkEvictionUpdates(PlanetGenerationParams &params, double value) { params.chunkEvictionUpdates = static_cast<std::uint32_t>(value); }
+void setChunkCacheCapacity(PlanetGenerationParams &params, double value) { params.chunkCacheCapacity = static_cast<std::uint32_t>(value); }
+void setContinentAmplitude(PlanetGenerationParams &params, double value) { params.continentAmplitudeMeters = value; }
+void setContinentWavelength(PlanetGenerationParams &params, double value) { params.continentWavelengthMeters = value; }
+void setContinentOctaves(PlanetGenerationParams &params, double value) { params.continentsFbm.octaves = static_cast<std::uint32_t>(value); }
+void setDomainWarpAmplitude(PlanetGenerationParams &params, double value) { params.domainWarpAmplitude = value; }
+void setDomainWarpWavelength(PlanetGenerationParams &params, double value) { params.domainWarpWavelengthMeters = value; }
+void setMountainAmplitude(PlanetGenerationParams &params, double value) { params.mountainAmplitudeMeters = value; }
+void setMountainWavelength(PlanetGenerationParams &params, double value) { params.mountainWavelengthMeters = value; }
+void setMountainMaskLow(PlanetGenerationParams &params, double value) { params.mountainMaskLow = value; }
+void setMountainMaskHigh(PlanetGenerationParams &params, double value) { params.mountainMaskHigh = value; }
+void setMountainSharpness(PlanetGenerationParams &params, double value) { params.mountainSharpness = value; }
+void setMountainOctaves(PlanetGenerationParams &params, double value) { params.mountainsFbm.octaves = static_cast<std::uint32_t>(value); }
+void setMountainMassFraction(PlanetGenerationParams &params, double value) { params.mountainMassFraction = value; }
+void setRangeClusterStrength(PlanetGenerationParams &params, double value) { params.rangeClusterStrength = value; }
+void setRangeClusterWavelength(PlanetGenerationParams &params, double value) { params.rangeClusterWavelengthMeters = value; }
+void setRegionalAmplitude(PlanetGenerationParams &params, double value) { params.regionalAmplitudeMeters = value; }
+void setRegionalWavelength(PlanetGenerationParams &params, double value) { params.regionalWavelengthMeters = value; }
+void setRegionalOctaves(PlanetGenerationParams &params, double value) { params.regionalFbm.octaves = static_cast<std::uint32_t>(value); }
+void setHillAmplitude(PlanetGenerationParams &params, double value) { params.hillAmplitudeMeters = value; }
+void setHillWavelength(PlanetGenerationParams &params, double value) { params.hillWavelengthMeters = value; }
+void setHillOctaves(PlanetGenerationParams &params, double value) { params.hillsFbm.octaves = static_cast<std::uint32_t>(value); }
+void setDetailAmplitude(PlanetGenerationParams &params, double value) { params.detailAmplitudeMeters = value; }
+void setDetailWavelength(PlanetGenerationParams &params, double value) { params.detailWavelengthMeters = value; }
+void setDetailPlainsFraction(PlanetGenerationParams &params, double value) { params.detailPlainsFraction = value; }
+void setDetailOctaves(PlanetGenerationParams &params, double value) { params.detailFbm.octaves = static_cast<std::uint32_t>(value); }
+void setTerraceStrength(PlanetGenerationParams &params, double value) { params.terraceStrength = value; }
+void setTerraceSteps(PlanetGenerationParams &params, double value) { params.terraceSteps = value; }
+void setCliffWavelength(PlanetGenerationParams &params, double value) { params.cliffWavelengthMeters = value; }
+void setOverhangAmplitude(PlanetGenerationParams &params, double value) { params.overhangAmplitudeMeters = value; }
+void setOverhangWavelength(PlanetGenerationParams &params, double value) { params.overhangWavelengthMeters = value; }
+void setOverhangPlainsFraction(PlanetGenerationParams &params, double value) { params.overhangPlainsFraction = value; }
+void setStrataAmplitude(PlanetGenerationParams &params, double value) { params.strataAmplitudeMeters = value; }
+void setStrataBand(PlanetGenerationParams &params, double value) { params.strataBandMeters = value; }
+void setStrataWarp(PlanetGenerationParams &params, double value) { params.strataWarp = value; }
+void setCoastalFlattenMeters(PlanetGenerationParams &params, double value) { params.coastalFlattenMeters = value; }
+void setCoastalFlattenFloor(PlanetGenerationParams &params, double value) { params.coastalFlattenFloor = value; }
+void setCavesEnabled(PlanetGenerationParams &params, double value) { params.cavesEnabled = value != 0.0; }
+void setCaveThreshold(PlanetGenerationParams &params, double value) { params.caveThreshold = value; }
+void setCaveWormWavelength(PlanetGenerationParams &params, double value) { params.caveWormWavelengthMeters = value; }
+void setCaveCarve(PlanetGenerationParams &params, double value) { params.caveCarveMeters = value; }
+void setShallowWater(PlanetGenerationParams &params, double value) { params.shallowWaterMeters = value; }
+void setDeepWater(PlanetGenerationParams &params, double value) { params.deepWaterMeters = value; }
+void setWaterDepthTint(PlanetGenerationParams &params, double value) { params.waterDepthTintMeters = value; }
+void setEquatorTemperature(PlanetGenerationParams &params, double value) { params.equatorTemperature = value; }
+void setPoleTemperature(PlanetGenerationParams &params, double value) { params.poleTemperature = value; }
+void setTemperaturePerturbation(PlanetGenerationParams &params, double value) { params.temperaturePerturbation = value; }
+void setTemperatureWavelength(PlanetGenerationParams &params, double value) { params.temperatureWavelengthMeters = value; }
+void setTemperatureLapse(PlanetGenerationParams &params, double value) { params.temperatureLapseMeters = value; }
+void setMoistureWavelength(PlanetGenerationParams &params, double value) { params.moistureWavelengthMeters = value; }
+void setMoisturePerturbation(PlanetGenerationParams &params, double value) { params.moisturePerturbation = value; }
+void setMoistureWarpAmplitude(PlanetGenerationParams &params, double value) { params.moistureWarpAmplitude = value; }
+void setCoastalMoistureBoost(PlanetGenerationParams &params, double value) { params.coastalMoistureBoost = value; }
+void setCoastalMoistureBand(PlanetGenerationParams &params, double value) { params.coastalMoistureBandMeters = value; }
+void setMoistureLatitudeBands(PlanetGenerationParams &params, double value) { params.moistureLatitudeBands = value != 0.0; }
+void setColorVariation(PlanetGenerationParams &params, double value) { params.colorVariation = value; }
+void setColorVariationWavelength(PlanetGenerationParams &params, double value) { params.colorVariationWavelengthMeters = value; }
+void setSnowLine(PlanetGenerationParams &params, double value) { params.snowLineMeters = value; }
+void setBeachWidth(PlanetGenerationParams &params, double value) { params.beachWidthMeters = value; }
+void setRockSlopeThreshold(PlanetGenerationParams &params, double value) { params.rockSlopeThreshold = value; }
+void setRockStrataContrast(PlanetGenerationParams &params, double value) { params.rockStrataContrast = value; }
+void setBiomeBlendWidth(PlanetGenerationParams &params, double value) { params.biomeBlendWidth = value; }
+void setSlopeBlendWidth(PlanetGenerationParams &params, double value) { params.slopeBlendWidth = value; }
+void setElevationBlendFraction(PlanetGenerationParams &params, double value) { params.elevationBlendFraction = value; }
+void setWaterEnabled(PlanetGenerationParams &params, double value) { params.waterEnabled = value != 0.0; }
+void setWaterRoughness(PlanetGenerationParams &params, double value) { params.waterRoughness = static_cast<float>(value); }
+void setSeaIceTemperature(PlanetGenerationParams &params, double value) { params.seaIceTemperature = value; }
+void setSeaIceTransition(PlanetGenerationParams &params, double value) { params.seaIceTransition = value; }
+void setWaterWaveAmplitude(PlanetGenerationParams &params, double value) { params.waterWaveAmplitude = value; }
+void setWaterWaveWavelength(PlanetGenerationParams &params, double value) { params.waterWaveWavelengthMeters = value; }
+
+constexpr SettingRow kSettingRows[] = {
+    {"seed",                      SettingKind::Integer, setSeed},
+    {"radius_meters",             SettingKind::Floating, setRadius},
+    {"sea_level_offset_meters",   SettingKind::Floating, setSeaLevel},
+    {"leaf_grid_n",               SettingKind::Integer, setLeafGridN},
+    {"target_voxel_meters",       SettingKind::Floating, setTargetVoxel},
+    {"max_depth_limit",           SettingKind::Integer, setMaxDepthLimit},
+    {"lod_angular_voxel_radians", SettingKind::Floating, setLodAngularVoxel},
+    {"lod_band_limit_factor",     SettingKind::Floating, setLodBandLimit},
+    {"horizon_culling",           SettingKind::Boolean,  setHorizonCulling},
+    {"bounding_factor",           SettingKind::Floating, setBoundingFactor},
+    {"max_concurrent_builds",     SettingKind::Integer, setMaxConcurrentBuilds},
+    {"max_new_builds_per_update", SettingKind::Integer, setMaxNewBuildsPerUpdate},
+    {"chunk_eviction_updates",    SettingKind::Integer, setChunkEvictionUpdates},
+    {"chunk_cache_capacity",      SettingKind::Integer, setChunkCacheCapacity},
+    {"continent_amplitude_meters",    SettingKind::Floating, setContinentAmplitude},
+    {"continent_wavelength_meters",   SettingKind::Floating, setContinentWavelength},
+    {"continent_octaves",             SettingKind::Integer,  setContinentOctaves},
+    {"domain_warp_amplitude",         SettingKind::Floating, setDomainWarpAmplitude},
+    {"domain_warp_wavelength_meters", SettingKind::Floating, setDomainWarpWavelength},
+    {"mountain_amplitude_meters",     SettingKind::Floating, setMountainAmplitude},
+    {"mountain_wavelength_meters",    SettingKind::Floating, setMountainWavelength},
+    {"mountain_mask_low",             SettingKind::Floating, setMountainMaskLow},
+    {"mountain_mask_high",            SettingKind::Floating, setMountainMaskHigh},
+    {"mountain_sharpness",            SettingKind::Floating, setMountainSharpness},
+    {"mountain_octaves",              SettingKind::Integer,  setMountainOctaves},
+    {"mountain_mass_fraction",        SettingKind::Floating, setMountainMassFraction},
+    {"range_cluster_strength",        SettingKind::Floating, setRangeClusterStrength},
+    {"range_cluster_wavelength_meters", SettingKind::Floating, setRangeClusterWavelength},
+    {"regional_amplitude_meters",     SettingKind::Floating, setRegionalAmplitude},
+    {"regional_wavelength_meters",    SettingKind::Floating, setRegionalWavelength},
+    {"regional_octaves",              SettingKind::Integer,  setRegionalOctaves},
+    {"hill_amplitude_meters",         SettingKind::Floating, setHillAmplitude},
+    {"hill_wavelength_meters",        SettingKind::Floating, setHillWavelength},
+    {"hill_octaves",                  SettingKind::Integer,  setHillOctaves},
+    {"detail_amplitude_meters",       SettingKind::Floating, setDetailAmplitude},
+    {"detail_wavelength_meters",      SettingKind::Floating, setDetailWavelength},
+    {"detail_plains_fraction",        SettingKind::Floating, setDetailPlainsFraction},
+    {"detail_octaves",                SettingKind::Integer,  setDetailOctaves},
+    {"terrace_strength",              SettingKind::Floating, setTerraceStrength},
+    {"terrace_steps",                 SettingKind::Floating, setTerraceSteps},
+    {"cliff_wavelength_meters",       SettingKind::Floating, setCliffWavelength},
+    {"overhang_amplitude_meters",     SettingKind::Floating, setOverhangAmplitude},
+    {"overhang_wavelength_meters",    SettingKind::Floating, setOverhangWavelength},
+    {"overhang_plains_fraction",      SettingKind::Floating, setOverhangPlainsFraction},
+    {"strata_amplitude_meters",       SettingKind::Floating, setStrataAmplitude},
+    {"strata_band_meters",            SettingKind::Floating, setStrataBand},
+    {"strata_warp",                   SettingKind::Floating, setStrataWarp},
+    {"coastal_flatten_meters",        SettingKind::Floating, setCoastalFlattenMeters},
+    {"coastal_flatten_floor",         SettingKind::Floating, setCoastalFlattenFloor},
+    {"caves_enabled",                 SettingKind::Boolean,  setCavesEnabled},
+    {"cave_threshold",                SettingKind::Floating, setCaveThreshold},
+    {"cave_worm_wavelength_meters",   SettingKind::Floating, setCaveWormWavelength},
+    {"cave_carve_meters",             SettingKind::Floating, setCaveCarve},
+    {"shallow_water_meters",          SettingKind::Floating, setShallowWater},
+    {"deep_water_meters",             SettingKind::Floating, setDeepWater},
+    {"water_depth_tint_meters",       SettingKind::Floating, setWaterDepthTint},
+    {"equator_temperature",           SettingKind::Floating, setEquatorTemperature},
+    {"pole_temperature",              SettingKind::Floating, setPoleTemperature},
+    {"temperature_perturbation",      SettingKind::Floating, setTemperaturePerturbation},
+    {"temperature_wavelength_meters", SettingKind::Floating, setTemperatureWavelength},
+    {"temperature_lapse_meters",      SettingKind::Floating, setTemperatureLapse},
+    {"moisture_wavelength_meters",    SettingKind::Floating, setMoistureWavelength},
+    {"moisture_perturbation",         SettingKind::Floating, setMoisturePerturbation},
+    {"moisture_warp_amplitude",       SettingKind::Floating, setMoistureWarpAmplitude},
+    {"coastal_moisture_boost",        SettingKind::Floating, setCoastalMoistureBoost},
+    {"coastal_moisture_band_meters",  SettingKind::Floating, setCoastalMoistureBand},
+    {"moisture_latitude_bands",       SettingKind::Boolean,  setMoistureLatitudeBands},
+    {"color_variation",               SettingKind::Floating, setColorVariation},
+    {"color_variation_wavelength_meters", SettingKind::Floating, setColorVariationWavelength},
+    {"snow_line_meters",              SettingKind::Floating, setSnowLine},
+    {"beach_width_meters",            SettingKind::Floating, setBeachWidth},
+    {"rock_slope_threshold",          SettingKind::Floating, setRockSlopeThreshold},
+    {"rock_strata_contrast",          SettingKind::Floating, setRockStrataContrast},
+    {"biome_blend_width",             SettingKind::Floating, setBiomeBlendWidth},
+    {"slope_blend_width",             SettingKind::Floating, setSlopeBlendWidth},
+    {"elevation_blend_fraction",      SettingKind::Floating, setElevationBlendFraction},
+    {"water_enabled",                 SettingKind::Boolean,  setWaterEnabled},
+    {"water_roughness",               SettingKind::Floating, setWaterRoughness},
+    {"sea_ice_temperature",           SettingKind::Floating, setSeaIceTemperature},
+    {"sea_ice_transition",            SettingKind::Floating, setSeaIceTransition},
+    {"water_wave_amplitude",          SettingKind::Floating, setWaterWaveAmplitude},
+    {"water_wave_wavelength_meters",  SettingKind::Floating, setWaterWaveWavelength},
+};
+
 // Reads the module's [planet] configuration section into one params struct.
 // Every key is optional; missing keys keep the struct's documented default
-// (which mirrors config.toml). Values are clamped by validate().
+// (which mirrors config.toml). Array keys (axis, palette, water colors) are
+// read separately; scalar values are clamped by validate().
 PlanetGenerationParams paramsFromConfiguration(ParticipantContext &context)
 {
     PlanetGenerationParams params;
 
-    const auto integer = [&context](const char *key) { return context.configurationIntegerInSection("planet", key); };
-    const auto floating = [&context](const char *key) { return context.configurationFloatingInSection("planet", key); };
-    const auto boolean = [&context](const char *key) { return context.configurationBooleanInSection("planet", key); };
+    for (const SettingRow &row : kSettingRows)
+    {
+        switch (row.kind)
+        {
+            case SettingKind::Floating:
+                if (const auto value = context.configurationFloatingInSection("planet", row.key))
+                {
+                    row.setter(params, *value);
+                }
+                break;
+            case SettingKind::Integer:
+                if (const auto value = context.configurationIntegerInSection("planet", row.key))
+                {
+                    row.setter(params, static_cast<double>(*value));
+                }
+                break;
+            case SettingKind::Boolean:
+                if (const auto value = context.configurationBooleanInSection("planet", row.key))
+                {
+                    row.setter(params, *value ? 1.0 : 0.0);
+                }
+                break;
+        }
+    }
 
-    if (const auto value = integer("seed"))
-    {
-        params.seed = static_cast<std::uint64_t>(*value);
-    }
-    if (const auto value = floating("radius_meters"))
-    {
-        params.radiusMeters = *value;
-    }
-    if (const auto value = floating("sea_level_offset_meters"))
-    {
-        params.seaLevelOffsetMeters = *value;
-    }
     if (const auto array = context.configurationFloatingArrayInSection("planet", "axis"); array.size() == 3)
     {
         params.axis[0] = array[0];
         params.axis[1] = array[1];
         params.axis[2] = array[2];
-    }
-
-    if (const auto value = integer("leaf_grid_n"))
-    {
-        params.leafGridN = static_cast<std::uint32_t>(*value);
-    }
-    if (const auto value = floating("target_voxel_meters"))
-    {
-        params.targetVoxelMeters = *value;
-    }
-    if (const auto value = integer("max_depth_limit"))
-    {
-        params.maxDepthLimit = static_cast<std::uint32_t>(*value);
-    }
-    if (const auto value = floating("lod_angular_voxel_radians"))
-    {
-        params.lodAngularVoxelRadians = *value;
-    }
-    if (const auto value = floating("lod_band_limit_factor"))
-    {
-        params.lodBandLimitFactor = *value;
-    }
-    if (const auto value = boolean("horizon_culling"))
-    {
-        params.horizonCulling = *value;
-    }
-    if (const auto value = floating("bounding_factor"))
-    {
-        params.boundingFactor = *value;
-    }
-    if (const auto value = integer("max_concurrent_builds"))
-    {
-        params.maxConcurrentBuilds = static_cast<std::uint32_t>(*value);
-    }
-    if (const auto value = integer("max_new_builds_per_update"))
-    {
-        params.maxNewBuildsPerUpdate = static_cast<std::uint32_t>(*value);
-    }
-    if (const auto value = integer("chunk_eviction_updates"))
-    {
-        params.chunkEvictionUpdates = static_cast<std::uint32_t>(*value);
-    }
-    if (const auto value = integer("chunk_cache_capacity"))
-    {
-        params.chunkCacheCapacity = static_cast<std::uint32_t>(*value);
-    }
-
-    if (const auto value = floating("continent_amplitude_meters"))
-    {
-        params.continentAmplitudeMeters = *value;
-    }
-    if (const auto value = floating("continent_wavelength_meters"))
-    {
-        params.continentWavelengthMeters = *value;
-    }
-    if (const auto value = integer("continent_octaves"))
-    {
-        params.continentsFbm.octaves = static_cast<std::uint32_t>(*value);
-    }
-    if (const auto value = floating("domain_warp_amplitude"))
-    {
-        params.domainWarpAmplitude = *value;
-    }
-    if (const auto value = floating("domain_warp_wavelength_meters"))
-    {
-        params.domainWarpWavelengthMeters = *value;
-    }
-
-    if (const auto value = floating("mountain_amplitude_meters"))
-    {
-        params.mountainAmplitudeMeters = *value;
-    }
-    if (const auto value = floating("mountain_wavelength_meters"))
-    {
-        params.mountainWavelengthMeters = *value;
-    }
-    if (const auto value = floating("mountain_mask_low"))
-    {
-        params.mountainMaskLow = *value;
-    }
-    if (const auto value = floating("mountain_mask_high"))
-    {
-        params.mountainMaskHigh = *value;
-    }
-    if (const auto value = floating("mountain_sharpness"))
-    {
-        params.mountainSharpness = *value;
-    }
-    if (const auto value = integer("mountain_octaves"))
-    {
-        params.mountainsFbm.octaves = static_cast<std::uint32_t>(*value);
-    }
-    if (const auto value = floating("mountain_mass_fraction"))
-    {
-        params.mountainMassFraction = *value;
-    }
-    if (const auto value = floating("range_cluster_strength"))
-    {
-        params.rangeClusterStrength = *value;
-    }
-    if (const auto value = floating("range_cluster_wavelength_meters"))
-    {
-        params.rangeClusterWavelengthMeters = *value;
-    }
-
-    if (const auto value = floating("regional_amplitude_meters"))
-    {
-        params.regionalAmplitudeMeters = *value;
-    }
-    if (const auto value = floating("regional_wavelength_meters"))
-    {
-        params.regionalWavelengthMeters = *value;
-    }
-    if (const auto value = integer("regional_octaves"))
-    {
-        params.regionalFbm.octaves = static_cast<std::uint32_t>(*value);
-    }
-
-    if (const auto value = floating("hill_amplitude_meters"))
-    {
-        params.hillAmplitudeMeters = *value;
-    }
-    if (const auto value = floating("hill_wavelength_meters"))
-    {
-        params.hillWavelengthMeters = *value;
-    }
-    if (const auto value = integer("hill_octaves"))
-    {
-        params.hillsFbm.octaves = static_cast<std::uint32_t>(*value);
-    }
-
-    if (const auto value = floating("detail_amplitude_meters"))
-    {
-        params.detailAmplitudeMeters = *value;
-    }
-    if (const auto value = floating("detail_wavelength_meters"))
-    {
-        params.detailWavelengthMeters = *value;
-    }
-    if (const auto value = floating("detail_plains_fraction"))
-    {
-        params.detailPlainsFraction = *value;
-    }
-    if (const auto value = integer("detail_octaves"))
-    {
-        params.detailFbm.octaves = static_cast<std::uint32_t>(*value);
-    }
-
-    if (const auto value = floating("terrace_strength"))
-    {
-        params.terraceStrength = *value;
-    }
-    if (const auto value = floating("terrace_steps"))
-    {
-        params.terraceSteps = *value;
-    }
-    if (const auto value = floating("cliff_wavelength_meters"))
-    {
-        params.cliffWavelengthMeters = *value;
-    }
-
-    if (const auto value = floating("overhang_amplitude_meters"))
-    {
-        params.overhangAmplitudeMeters = *value;
-    }
-    if (const auto value = floating("overhang_wavelength_meters"))
-    {
-        params.overhangWavelengthMeters = *value;
-    }
-    if (const auto value = floating("overhang_plains_fraction"))
-    {
-        params.overhangPlainsFraction = *value;
-    }
-    if (const auto value = floating("strata_amplitude_meters"))
-    {
-        params.strataAmplitudeMeters = *value;
-    }
-    if (const auto value = floating("strata_band_meters"))
-    {
-        params.strataBandMeters = *value;
-    }
-    if (const auto value = floating("strata_warp"))
-    {
-        params.strataWarp = *value;
-    }
-
-    if (const auto value = floating("coastal_flatten_meters"))
-    {
-        params.coastalFlattenMeters = *value;
-    }
-    if (const auto value = floating("coastal_flatten_floor"))
-    {
-        params.coastalFlattenFloor = *value;
-    }
-
-    if (const auto value = boolean("caves_enabled"))
-    {
-        params.cavesEnabled = *value;
-    }
-    if (const auto value = floating("cave_threshold"))
-    {
-        params.caveThreshold = *value;
-    }
-    if (const auto value = floating("cave_worm_wavelength_meters"))
-    {
-        params.caveWormWavelengthMeters = *value;
-    }
-    if (const auto value = floating("cave_carve_meters"))
-    {
-        params.caveCarveMeters = *value;
-    }
-
-    if (const auto value = floating("shallow_water_meters"))
-    {
-        params.shallowWaterMeters = *value;
-    }
-    if (const auto value = floating("deep_water_meters"))
-    {
-        params.deepWaterMeters = *value;
-    }
-    if (const auto value = floating("water_depth_tint_meters"))
-    {
-        params.waterDepthTintMeters = *value;
-    }
-
-    if (const auto value = floating("equator_temperature"))
-    {
-        params.equatorTemperature = *value;
-    }
-    if (const auto value = floating("pole_temperature"))
-    {
-        params.poleTemperature = *value;
-    }
-    if (const auto value = floating("temperature_perturbation"))
-    {
-        params.temperaturePerturbation = *value;
-    }
-    if (const auto value = floating("temperature_wavelength_meters"))
-    {
-        params.temperatureWavelengthMeters = *value;
-    }
-    if (const auto value = floating("temperature_lapse_meters"))
-    {
-        params.temperatureLapseMeters = *value;
-    }
-    if (const auto value = floating("moisture_wavelength_meters"))
-    {
-        params.moistureWavelengthMeters = *value;
-    }
-    if (const auto value = floating("moisture_perturbation"))
-    {
-        params.moisturePerturbation = *value;
-    }
-    if (const auto value = floating("moisture_warp_amplitude"))
-    {
-        params.moistureWarpAmplitude = *value;
-    }
-    if (const auto value = floating("coastal_moisture_boost"))
-    {
-        params.coastalMoistureBoost = *value;
-    }
-    if (const auto value = floating("coastal_moisture_band_meters"))
-    {
-        params.coastalMoistureBandMeters = *value;
-    }
-    if (const auto value = boolean("moisture_latitude_bands"))
-    {
-        params.moistureLatitudeBands = *value;
-    }
-    if (const auto value = floating("color_variation"))
-    {
-        params.colorVariation = *value;
-    }
-    if (const auto value = floating("snow_line_meters"))
-    {
-        params.snowLineMeters = *value;
-    }
-    if (const auto value = floating("beach_width_meters"))
-    {
-        params.beachWidthMeters = *value;
-    }
-    if (const auto value = floating("rock_slope_threshold"))
-    {
-        params.rockSlopeThreshold = *value;
-    }
-    if (const auto value = floating("rock_strata_contrast"))
-    {
-        params.rockStrataContrast = *value;
-    }
-    if (const auto value = floating("biome_blend_width"))
-    {
-        params.biomeBlendWidth = *value;
-    }
-    if (const auto value = floating("slope_blend_width"))
-    {
-        params.slopeBlendWidth = *value;
-    }
-    if (const auto value = floating("elevation_blend_fraction"))
-    {
-        params.elevationBlendFraction = *value;
     }
     if (const auto palette = context.configurationFloatingArrayInSection("planet", "biome_palette"); !palette.empty())
     {
@@ -371,11 +277,6 @@ PlanetGenerationParams paramsFromConfiguration(ParticipantContext &context)
         {
             params.biomePalette[index] = static_cast<float>(palette[index]);
         }
-    }
-
-    if (const auto value = boolean("water_enabled"))
-    {
-        params.waterEnabled = *value;
     }
     if (const auto water = context.configurationFloatingArrayInSection("planet", "water_color_shallow"); water.size() == 3)
     {
@@ -389,9 +290,11 @@ PlanetGenerationParams paramsFromConfiguration(ParticipantContext &context)
         params.waterColorDeep[1] = static_cast<float>(water[1]);
         params.waterColorDeep[2] = static_cast<float>(water[2]);
     }
-    if (const auto value = floating("water_roughness"))
+    if (const auto water = context.configurationFloatingArrayInSection("planet", "water_color_ice"); water.size() == 3)
     {
-        params.waterRoughness = static_cast<float>(*value);
+        params.waterColorIce[0] = static_cast<float>(water[0]);
+        params.waterColorIce[1] = static_cast<float>(water[1]);
+        params.waterColorIce[2] = static_cast<float>(water[2]);
     }
 
     return params;
@@ -420,7 +323,7 @@ public:
 
     void construct(ParticipantContext &context) override
     {
-        context_       = &context;
+        context_        = &context;
         templateParams_ = paramsFromConfiguration(context);
         std::string     error;
         if (!templateParams_.validate(error))
@@ -486,8 +389,7 @@ public:
             return invalidPlanet;
         }
 
-        TaskScheduler &scheduler = context_ != nullptr ? context_->taskScheduler() : unusedScheduler_;
-        auto           instance  = std::make_unique<Planet>(params, &scheduler);
+        auto           instance  = std::make_unique<Planet>(params);
         const PlanetHandle handle = nextHandle_++;
         {
             std::lock_guard<std::mutex> lock(planetsMutex_);
@@ -643,6 +545,14 @@ private:
             {
                 return 0;
             }
+            // The chunk key packs the depth into 4 bits (see types.hpp);
+            // out-of-range coordinates would hash a lattice the octree can
+            // never address, so reject them instead of returning a hash of
+            // numerically meaningless geometry.
+            if (depth >= maxSupportedOctreeDepth)
+            {
+                return 0;
+            }
             return planet->buildChunkHash(ChunkCoord{depth, x, y, z});
         };
     }
@@ -654,7 +564,6 @@ private:
     mutable std::mutex                                             planetsMutex_;
     std::map<PlanetHandle, std::unique_ptr<Planet>>               planets_;
     PlanetHandle                                                  nextHandle_ = 1;
-    TaskScheduler                                                 unusedScheduler_{}; // construct()-only fallback
 };
 
 } // namespace

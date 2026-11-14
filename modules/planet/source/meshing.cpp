@@ -8,6 +8,7 @@
 #include <engine/planet/meshing.hpp>
 
 #include <engine/planet/flat_key_map.hpp>
+#include <engine/planet/fbm.hpp>
 #include <engine/planet/noise.hpp>
 
 #include <algorithm>
@@ -15,7 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
-#include <unordered_map>
+#include <vector>
 
 namespace engine
 {
@@ -374,6 +375,19 @@ Vec3 chunkOriginMeters(const PlanetGenerationParams &params, const ChunkCoord &c
         -half + step * static_cast<double>(static_cast<std::int64_t>(coord.z) * static_cast<std::int64_t>(params.leafGridN))};
 }
 
+Vec3 chunkCenterMeters(const PlanetGenerationParams &params, const ChunkCoord &coord)
+{
+    // Deterministic node center: the min corner shifted by half the node
+    // size along every axis (same lattice expression as the min corner, so
+    // the placement offset stays bit-identical to the vertex frame).
+    const double step = chunkStepMeters(params, coord.depth);
+    const double half = params.derivedRootHalfMeters;
+    const std::int64_t base = static_cast<std::int64_t>(params.leafGridN) / 2;
+    return Vec3{-half + step * static_cast<double>(static_cast<std::int64_t>(coord.x) * static_cast<std::int64_t>(params.leafGridN) + base),
+        -half + step * static_cast<double>(static_cast<std::int64_t>(coord.y) * static_cast<std::int64_t>(params.leafGridN) + base),
+        -half + step * static_cast<double>(static_cast<std::int64_t>(coord.z) * static_cast<std::int64_t>(params.leafGridN) + base)};
+}
+
 ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityField &field, const ChunkCoord &coord,
     const ConformMask &conformMask)
 {
@@ -402,6 +416,21 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // Chunk-local origin for the float vertices: the node center. Consumers
     // place chunks with a model matrix; floats stay small at any planet radius.
     const Vec3 center{axisCoordinate(coord.x, n / 2), axisCoordinate(coord.y, n / 2), axisCoordinate(coord.z, n / 2)};
+
+    // ---- water placement ---------------------------------------------------------
+    // Nodes whose bounding sphere misses the sea shell have no water - and
+    // must not pay for the per-point sea-field grid below, so the test runs
+    // BEFORE any sampling. (The sea shell is a thin spherical surface; on
+    // inland or high-sky chunks the whole water pass is pure overhead.)
+    const bool buildWater = params.waterEnabled;
+    bool nodeTouchesSea = false;
+    if (buildWater)
+    {
+        const double centerRadius = length(center);
+        const double nodeBound    = 0.5 * nodeSize * std::sqrt(3.0);
+        const double seaRadius    = params.derivedSeaRadiusMeters;
+        nodeTouchesSea = centerRadius - nodeBound <= seaRadius + step && centerRadius + nodeBound >= seaRadius - step;
+    }
 
     // ---- conforming boundary sampling (LOD seam elimination) --------------------------
     //
@@ -698,10 +727,22 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // ---- sample the padded grids -------------------------------------------------
     std::vector<double> densities(gridSize);
     std::vector<double> waters;
-    const bool          buildWater = params.waterEnabled;
-    if (buildWater)
+    if (nodeTouchesSea)
     {
         waters.resize(gridSize);
+    }
+    // Per-axis sample positions, derived once from the same global lattice
+    // expression the boundary machinery relies on (bit-identical across
+    // chunks at every depth).
+    std::array<double, 64 + 3> axisX{};
+    std::array<double, 64 + 3> axisY{};
+    std::array<double, 64 + 3> axisZ{};
+    for (std::uint32_t index = 0; index < paddedN; ++index)
+    {
+        const std::int64_t inner = static_cast<std::int64_t>(index) - 1;
+        axisX[index] = axisCoordinate(coord.x, inner);
+        axisY[index] = axisCoordinate(coord.y, inner);
+        axisZ[index] = axisCoordinate(coord.z, inner);
     }
     for (std::uint32_t pz = 0; pz < paddedN; ++pz)
     {
@@ -712,10 +753,10 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 const std::int64_t ix = static_cast<std::int64_t>(px) - 1;
                 const std::int64_t iy = static_cast<std::int64_t>(py) - 1;
                 const std::int64_t iz = static_cast<std::int64_t>(pz) - 1;
-                const Vec3 p{axisCoordinate(coord.x, ix), axisCoordinate(coord.y, iy), axisCoordinate(coord.z, iz)};
+                const Vec3 p{axisX[px], axisY[py], axisZ[pz]};
                 const std::size_t index  = px + strideY * py + strideZ * pz;
                 densities[index]         = samplePoint(ix, iy, iz, p);
-                if (buildWater)
+                if (nodeTouchesSea)
                 {
                     waters[index] = params.derivedSeaRadiusMeters - length(p);
                 }
@@ -729,8 +770,21 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // ---- marching cubes over the inner cells --------------------------------------
     std::vector<PlanetVertex>                        &vertices = mesh.terrainVertices;
     std::vector<std::uint32_t>                       &indices  = mesh.terrainIndices;
-    std::unordered_map<std::uint64_t, std::uint32_t> vertexForEdge;
-    vertexForEdge.reserve(4096);
+    // Edge-vertex dedup over the chunk's own lattice points; the flat map is
+    // the project's open-addressing table (single cache line per lookup, no
+    // node allocations) and the keys are chunk-local, so the scratch state is
+    // rebuilt per build and never shared.
+    FlatKeyMap<std::uint32_t> vertexForEdge(4096);
+
+    // Spherical reference frame of the spin axis (see the UV mapping below).
+    // With the default upright axis this reduces to east = +x, north = +z.
+    const Vec3 axisVector{params.axis[0], params.axis[1], params.axis[2]};
+    Vec3 equatorEast = normalized(cross(axisVector, Vec3{0.0, 0.0, 1.0}));
+    if (length(equatorEast) < 1.0e-6)
+    {
+        equatorEast = Vec3{1.0, 0.0, 0.0}; // axis parallel to z: any east works
+    }
+    const Vec3 equatorNorth = cross(equatorEast, axisVector);
 
     // Gradient of the trilinear interpolant at an edge, averaged over the (up
     // to) four cells adjacent to the edge on the canonical side. A single-cell
@@ -910,8 +964,12 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                         aX, aY, aZ, bX, bY, bZ, edgeAxis);
 
                     const std::uint64_t key = edgeKey(aX, aY, aZ, edgeAxis);
-                    auto                it  = vertexForEdge.find(key);
-                    if (it == vertexForEdge.end())
+                    const std::uint32_t *vertexSlot = vertexForEdge.find(key);
+                    if (vertexSlot != nullptr)
+                    {
+                        slotVertex[slot] = *vertexSlot;
+                    }
+                    else
                     {
                         const double densityA = sampleGrid(densities, aX, aY, aZ);
                         const double densityB = sampleGrid(densities, bX, bY, bZ);
@@ -930,12 +988,10 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                         // apron-cell edges; cast before subtracting so the
                         // index never underflows into an astronomically
                         // distant position.
-                        const Vec3 pointA{axisCoordinate(coord.x, static_cast<std::int64_t>(aX) - 1),
-                            axisCoordinate(coord.y, static_cast<std::int64_t>(aY) - 1),
-                            axisCoordinate(coord.z, static_cast<std::int64_t>(aZ) - 1)};
-                        const Vec3 pointB{axisCoordinate(coord.x, static_cast<std::int64_t>(bX) - 1),
-                            axisCoordinate(coord.y, static_cast<std::int64_t>(bY) - 1),
-                            axisCoordinate(coord.z, static_cast<std::int64_t>(bZ) - 1)};
+                        const Vec3 pointA{axisX[static_cast<std::size_t>(aX)], axisY[static_cast<std::size_t>(aY)],
+                            axisZ[static_cast<std::size_t>(aZ)]};
+                        const Vec3 pointB{axisX[static_cast<std::size_t>(bX)], axisY[static_cast<std::size_t>(bY)],
+                            axisZ[static_cast<std::size_t>(bZ)]};
                         const Vec3 point = pointA + (pointB - pointA) * t;
 
                         double gradient[3] = {0.0, 0.0, 0.0};
@@ -973,15 +1029,20 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                         vertex.color[0]    = climate.color[0];
                         vertex.color[1]    = climate.color[1];
                         vertex.color[2]    = climate.color[2];
-                        const double longitude = std::atan2(unitRadial.z, unitRadial.x) * 0.15915494309189535 + 0.5;
-                        const double latitude  = 0.5 - std::asin(std::clamp(unitRadial.y, -1.0, 1.0)) * 0.3183098861837907;
+                        // Spherical mapping around the SPIN AXIS, not the
+                        // world Y axis: climate latitude already follows the
+                        // axis, and the two disagree when the axis is tilted.
+                        // With the default upright axis the frame reduces to
+                        // the plain atan2(z, x) mapping.
+                        const double longitude = std::atan2(dot(unitRadial, equatorNorth), dot(unitRadial, equatorEast)) * 0.15915494309189535 + 0.5;
+                        const double latitude  = 0.5 - std::asin(std::clamp(dot(unitRadial, axisVector), -1.0, 1.0)) * 0.3183098861837907;
                         vertex.uv[0] = static_cast<float>(longitude);
                         vertex.uv[1] = static_cast<float>(latitude);
 
-                        it = vertexForEdge.emplace(key, static_cast<std::uint32_t>(vertices.size())).first;
+                        vertexForEdge.findOrInsert(key) = static_cast<std::uint32_t>(vertices.size());
+                        slotVertex[slot] = static_cast<std::uint32_t>(vertices.size());
                         vertices.push_back(vertex);
                     }
-                    slotVertex[slot] = it->second;
                 }
 
                 for (std::uint32_t triangle = 0; triangle < 5; ++triangle)
@@ -1018,158 +1079,211 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // chord and the fine isoline far below one voxel - invisible, and far
     // cheaper than painted-over crack walls.
     // ---- water surface patch --------------------------------------------------------
-    if (buildWater)
+    if (nodeTouchesSea)
     {
-        // Nodes whose bounding sphere misses the sea shell have no water.
-        const double centerRadius  = length(center);
-        const double nodeBound     = 0.5 * nodeSize * std::sqrt(3.0);
-        const double seaRadius     = params.derivedSeaRadiusMeters;
-        if (centerRadius - nodeBound <= seaRadius + step && centerRadius + nodeBound >= seaRadius - step)
+        std::vector<PlanetVertex>  &waterVertices = mesh.waterVertices;
+        std::vector<std::uint32_t> &waterIndices  = mesh.waterIndices;
+        FlatKeyMap<std::uint32_t>  waterForEdge(1024);
+
+        // Wave-slope band limit: like every noise term of the module, the
+        // wave slope fades out below the chunk's own LOD cutoff, so coarse
+        // chunks keep a smooth sea while fine chunks carry the glint
+        // texture. The wave seeds derive from the planet seed via the same
+        // schedule as every other stream.
+        const std::int64_t seedWaveA = static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A7E51ULL));
+        const std::int64_t seedWaveB = static_cast<std::int64_t>(hashCombine64(params.seed, 0x51B0E5ULL));
+        const double waveWavelength = std::max(1.0, params.waterWaveWavelengthMeters);
+        const double waveFade = lowPassFade(ownCutoff, waveWavelength);
+        const double waveAmplitude = params.waterWaveAmplitude * waveFade;
+        const double waveFrequency = 1.0 / waveWavelength;
+
+        for (std::uint32_t cz = 0; cz < n; ++cz)
         {
-            std::vector<PlanetVertex>                        &waterVertices = mesh.waterVertices;
-            std::vector<std::uint32_t>                       &waterIndices  = mesh.waterIndices;
-            std::unordered_map<std::uint64_t, std::uint32_t> waterForEdge;
-            waterForEdge.reserve(1024);
-
-            for (std::uint32_t cz = 0; cz < n; ++cz)
+            for (std::uint32_t cy = 0; cy < n; ++cy)
             {
-                for (std::uint32_t cy = 0; cy < n; ++cy)
+                for (std::uint32_t cx = 0; cx < n; ++cx)
                 {
-                    for (std::uint32_t cx = 0; cx < n; ++cx)
+                    std::uint32_t cubeIndex = 0;
+                    double minCornerDensity = 1.0e30;
+                    for (std::uint32_t corner = 0; corner < 8; ++corner)
                     {
-                        std::uint32_t cubeIndex = 0;
-                        double minCornerDensity = 1.0e30;
-                        for (std::uint32_t corner = 0; corner < 8; ++corner)
+                        std::uint32_t dx, dy, dz;
+                        cornerOffset(corner, dx, dy, dz);
+                        if (sampleGrid(waters, cx + 1 + dx, cy + 1 + dy, cz + 1 + dz) > 0.0)
                         {
-                            std::uint32_t dx, dy, dz;
-                            cornerOffset(corner, dx, dy, dz);
-                            if (sampleGrid(waters, cx + 1 + dx, cy + 1 + dy, cz + 1 + dz) > 0.0)
-                            {
-                                cubeIndex |= 1u << corner;
-                            }
-                            minCornerDensity = std::min(minCornerDensity, sampleGrid(densities, cx + 1 + dx, cy + 1 + dy, cz + 1 + dz));
+                            cubeIndex |= 1u << corner;
                         }
-                        if (cubeIndex == 0 || cubeIndex == 255)
+                        minCornerDensity = std::min(minCornerDensity, sampleGrid(densities, cx + 1 + dx, cy + 1 + dy, cz + 1 + dz));
+                    }
+                    if (cubeIndex == 0 || cubeIndex == 255)
+                    {
+                        continue;
+                    }
+                    if (minCornerDensity > 0.0)
+                    {
+                        // Fully buried water: the terrain surface is above
+                        // the sea everywhere in this cell. The patch here
+                        // is invisible anyway - except as grazing-angle
+                        // slivers where it grazes the terrain surface.
+                        // Skip it.
+                        continue;
+                    }
+
+                    std::uint32_t slotVertex[12];
+                    for (std::uint32_t slot = 0; slot < 12; ++slot)
+                    {
+                        slotVertex[slot] = 0xFFFFFFFFu;
+                    }
+
+                    const std::uint32_t edges = kEdgeTable[cubeIndex];
+                    for (std::uint32_t slot = 0; slot < 12; ++slot)
+                    {
+                        if ((edges & (1u << slot)) == 0)
                         {
                             continue;
                         }
-                        if (minCornerDensity > 0.0)
+                        std::uint32_t adx, ady, adz, bdx, bdy, bdz;
+                        cornerOffset(kEdgeCorners[slot][0], adx, ady, adz);
+                        cornerOffset(kEdgeCorners[slot][1], bdx, bdy, bdz);
+                        std::uint32_t aX, aY, aZ, bX, bY, bZ, edgeAxis;
+                        canonicalEdge(cx + 1 + adx, cy + 1 + ady, cz + 1 + adz, cx + 1 + bdx, cy + 1 + bdy,
+                            cz + 1 + bdz, aX, aY, aZ, bX, bY, bZ, edgeAxis);
+                        const std::uint64_t key = edgeKey(aX, aY, aZ, edgeAxis);
+                        const std::uint32_t *vertexSlot = waterForEdge.find(key);
+                        if (vertexSlot != nullptr)
                         {
-                            // Fully buried water: the terrain surface is above
-                            // the sea everywhere in this cell. The patch here
-                            // is invisible anyway - except as grazing-angle
-                            // slivers where it grazes the terrain surface.
-                            // Skip it.
-                            continue;
+                            slotVertex[slot] = *vertexSlot;
                         }
-
-                        std::uint32_t slotVertex[12];
-                        for (std::uint32_t slot = 0; slot < 12; ++slot)
+                        else
                         {
-                            slotVertex[slot] = 0xFFFFFFFFu;
-                        }
+                            const double waterA = sampleGrid(waters, aX, aY, aZ);
+                            const double waterB = sampleGrid(waters, bX, bY, bZ);
+                            const double wDenominator = waterA - waterB;
+                            const double t      = std::abs(wDenominator) < 1.0e-12
+                                                      ? 0.5
+                                                      : std::clamp(waterA / wDenominator, 0.0, 1.0);
+                            const Vec3 pointA{axisX[static_cast<std::size_t>(aX)], axisY[static_cast<std::size_t>(aY)],
+                                axisZ[static_cast<std::size_t>(aZ)]};
+                            const Vec3 pointB{axisX[static_cast<std::size_t>(bX)], axisY[static_cast<std::size_t>(bY)],
+                                axisZ[static_cast<std::size_t>(bZ)]};
+                            const Vec3   point  = pointA + (pointB - pointA) * t;
+                            const double radius = std::max(1.0e-9, length(point));
+                            const Vec3   radial = point * (1.0 / radius);
 
-                        const std::uint32_t edges = kEdgeTable[cubeIndex];
-                        for (std::uint32_t slot = 0; slot < 12; ++slot)
-                        {
-                            if ((edges & (1u << slot)) == 0)
+                            // Water depth = the exact terrain density (meters)
+                            // at the sea surface, straight from the field.
+                            // The per-chunk trilinear grid would make the
+                            // tint LOD-dependent: neighboring chunks at
+                            // different depths disagree, painting straight
+                            // color edges into open water. The exact field
+                            // is one pure function - every chunk, at any
+                            // depth, agrees bit-for-bit.
+                            const double terrainDepth = std::max(0.0, field.densityAt(point));
+                            const double depthTint    = std::clamp(terrainDepth / std::max(1.0, params.waterDepthTintMeters), 0.0, 1.0);
+                            const double foam         = smoothstep(2.5, 0.0, terrainDepth) * 0.35;
+
+                            // Sea ice: the water freezes where the sea-level
+                            // temperature drops below the configured freeze
+                            // point. The temperature field is the SAME one
+                            // that drives the land's snow line, so polar
+                            // oceans ice over where the land turns tundra,
+                            // with a noisy organic edge instead of a latitude
+                            // ring. 0 disables.
+                            double iceWeight = 0.0;
+                            if (params.seaIceTemperature > 0.0)
                             {
-                                continue;
+                                const double freeze = params.seaIceTemperature;
+                                const double transition = std::max(1.0e-4, params.seaIceTransition);
+                                iceWeight = 1.0 - smoothstep(freeze - transition, freeze + transition,
+                                    field.climate().seaLevelTemperature(radial));
                             }
-                            std::uint32_t adx, ady, adz, bdx, bdy, bdz;
-                            cornerOffset(kEdgeCorners[slot][0], adx, ady, adz);
-                            cornerOffset(kEdgeCorners[slot][1], bdx, bdy, bdz);
-                            std::uint32_t aX, aY, aZ, bX, bY, bZ, edgeAxis;
-                            canonicalEdge(cx + 1 + adx, cy + 1 + ady, cz + 1 + adz, cx + 1 + bdx, cy + 1 + bdy,
-                                cz + 1 + bdz, aX, aY, aZ, bX, bY, bZ, edgeAxis);
-                            const std::uint64_t key = edgeKey(aX, aY, aZ, edgeAxis);
-                            auto                it  = waterForEdge.find(key);
-                            if (it == waterForEdge.end())
+
+                            // Wave slope: two deterministic noise streams tilt
+                            // the radial normal along a local tangential
+                            // frame, giving the sea surface a sun-glint
+                            // texture at close range. The frame degenerates
+                            // gracefully at the poles (the tangent basis picks
+                            // whichever world axis is least aligned with the
+                            // radial direction).
+                            double nx = radial.x, ny = radial.y, nz = radial.z;
+                            if (waveAmplitude > 0.0)
                             {
-                                const double waterA = sampleGrid(waters, aX, aY, aZ);
-                                const double waterB = sampleGrid(waters, bX, bY, bZ);
-                                const double wDenominator = waterA - waterB;
-                                const double t      = std::abs(wDenominator) < 1.0e-12
-                                                          ? 0.5
-                                                          : std::clamp(waterA / wDenominator, 0.0, 1.0);
-                                const Vec3 pointA{axisCoordinate(coord.x, aX - 1), axisCoordinate(coord.y, aY - 1),
-                                    axisCoordinate(coord.z, aZ - 1)};
-                                const Vec3 pointB{axisCoordinate(coord.x, bX - 1), axisCoordinate(coord.y, bY - 1),
-                                    axisCoordinate(coord.z, bZ - 1)};
-                                const Vec3   point  = pointA + (pointB - pointA) * t;
-                                const double radius = std::max(1.0e-9, length(point));
-                                const Vec3   radial = point * (1.0 / radius);
-
-                                // Water depth = the exact terrain density (meters)
-                                // at the sea surface, straight from the field.
-                                // The per-chunk trilinear grid would make the
-                                // tint LOD-dependent: neighboring chunks at
-                                // different depths disagree, painting straight
-                                // color edges into open water. The exact field
-                                // is one pure function - every chunk, at any
-                                // depth, agrees bit-for-bit.
-                                const double terrainDepth = std::max(0.0, field.densityAt(point));
-                                const double depthTint    = std::clamp(terrainDepth / std::max(1.0, params.waterDepthTintMeters), 0.0, 1.0);
-                                const double foam         = smoothstep(2.5, 0.0, terrainDepth) * 0.35;
-
-                                PlanetVertex vertex{};
-                                vertex.position[0] = static_cast<float>(point.x - center.x);
-                                vertex.position[1] = static_cast<float>(point.y - center.y);
-                                vertex.position[2] = static_cast<float>(point.z - center.z);
-                                vertex.normal[0]   = static_cast<float>(radial.x);
-                                vertex.normal[1]   = static_cast<float>(radial.y);
-                                vertex.normal[2]   = static_cast<float>(radial.z);
-                                for (std::uint32_t channel = 0; channel < 3; ++channel)
+                                Vec3 tangentA = cross(radial, std::abs(radial.y) < 0.9 ? Vec3{0.0, 1.0, 0.0} : Vec3{1.0, 0.0, 0.0});
+                                tangentA = normalized(tangentA);
+                                const Vec3 tangentB = cross(radial, tangentA);
+                                const double slopeA = noise::simplex3ImproveXY(seedWaveA,
+                                    point.x * waveFrequency, point.y * waveFrequency, point.z * waveFrequency);
+                                const double slopeB = noise::simplex3ImproveXY(seedWaveB,
+                                    point.x * waveFrequency, point.y * waveFrequency, point.z * waveFrequency);
+                                const Vec3 waved = radial + (tangentA * slopeA + tangentB * slopeB) * waveAmplitude;
+                                const double wavedLength = length(waved);
+                                if (wavedLength > 1.0e-9)
                                 {
-                                    const float shallow = params.waterColorShallow[channel];
-                                    const float deep    = params.waterColorDeep[channel];
-                                    float blended       = shallow + static_cast<float>((deep - shallow) * depthTint);
-                                    blended             = static_cast<float>(blended + (0.92 - blended) * foam);
-                                    vertex.color[channel] = blended;
+                                    nx = waved.x / wavedLength;
+                                    ny = waved.y / wavedLength;
+                                    nz = waved.z / wavedLength;
                                 }
-                                vertex.uv[0] = 0.0f;
-                                vertex.uv[1] = 0.0f;
-                                it = waterForEdge.emplace(key, static_cast<std::uint32_t>(waterVertices.size())).first;
-                                waterVertices.push_back(vertex);
                             }
-                            slotVertex[slot] = it->second;
-                        }
 
-                        for (std::uint32_t triangle = 0; triangle < 5; ++triangle)
-                        {
-                            const std::int8_t v0 = kTriTable[cubeIndex][triangle * 3 + 0];
-                            if (v0 < 0)
+                            PlanetVertex vertex{};
+                            vertex.position[0] = static_cast<float>(point.x - center.x);
+                            vertex.position[1] = static_cast<float>(point.y - center.y);
+                            vertex.position[2] = static_cast<float>(point.z - center.z);
+                            vertex.normal[0]   = static_cast<float>(nx);
+                            vertex.normal[1]   = static_cast<float>(ny);
+                            vertex.normal[2]   = static_cast<float>(nz);
+                            for (std::uint32_t channel = 0; channel < 3; ++channel)
                             {
-                                break;
+                                const float shallow = params.waterColorShallow[channel];
+                                const float deep    = params.waterColorDeep[channel];
+                                float blended       = shallow + static_cast<float>((deep - shallow) * depthTint);
+                                blended             = static_cast<float>(blended + (0.92 - blended) * foam);
+                                const float icy     = params.waterColorIce[channel];
+                                blended             = static_cast<float>(blended + (icy - blended) * iceWeight);
+                                vertex.color[channel] = blended;
                             }
-                            const std::int8_t v1 = kTriTable[cubeIndex][triangle * 3 + 1];
-                            const std::int8_t v2 = kTriTable[cubeIndex][triangle * 3 + 2];
-                            // The sea surface only ever faces away from the
-                            // center: auto-orient each triangle radially.
-                            const PlanetVertex &pv0 = waterVertices[slotVertex[static_cast<std::uint32_t>(v0)]];
-                            const PlanetVertex &pv1 = waterVertices[slotVertex[static_cast<std::uint32_t>(v1)]];
-                            const PlanetVertex &pv2 = waterVertices[slotVertex[static_cast<std::uint32_t>(v2)]];
-                            const Vec3 p0{pv0.position[0], pv0.position[1], pv0.position[2]};
-                            const Vec3 p1{pv1.position[0], pv1.position[1], pv1.position[2]};
-                            const Vec3 p2{pv2.position[0], pv2.position[1], pv2.position[2]};
-                            // Orient against the TRUE radial direction: the
-                            // centroid in planet-local space (chunk-local
-                            // vertices alone point no particular way - the
-                            // water sheet is flat inside its chunk).
-                            const Vec3 centroidWorld = (p0 + p1 + p2) * (1.0 / 3.0) + center;
-                            const bool flip = dot(cross(p1 - p0, p2 - p0), normalized(centroidWorld)) < 0.0;
-                            if (!flip)
-                            {
-                                waterIndices.insert(waterIndices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
-                                    slotVertex[static_cast<std::uint32_t>(v1)], slotVertex[static_cast<std::uint32_t>(v2)]});
-                            }
-                            else
-                            {
-                                waterIndices.insert(waterIndices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
-                                    slotVertex[static_cast<std::uint32_t>(v2)], slotVertex[static_cast<std::uint32_t>(v1)]});
-                            }
-                            mesh.triangleCount += 1;
+                            vertex.uv[0] = 0.0f;
+                            vertex.uv[1] = 0.0f;
+                            waterForEdge.findOrInsert(key) = static_cast<std::uint32_t>(waterVertices.size());
+                            slotVertex[slot] = static_cast<std::uint32_t>(waterVertices.size());
+                            waterVertices.push_back(vertex);
                         }
+                    }
+
+                    for (std::uint32_t triangle = 0; triangle < 5; ++triangle)
+                    {
+                        const std::int8_t v0 = kTriTable[cubeIndex][triangle * 3 + 0];
+                        if (v0 < 0)
+                        {
+                            break;
+                        }
+                        const std::int8_t v1 = kTriTable[cubeIndex][triangle * 3 + 1];
+                        const std::int8_t v2 = kTriTable[cubeIndex][triangle * 3 + 2];
+                        // The sea surface only ever faces away from the
+                        // center: auto-orient each triangle radially.
+                        const PlanetVertex &pv0 = waterVertices[slotVertex[static_cast<std::uint32_t>(v0)]];
+                        const PlanetVertex &pv1 = waterVertices[slotVertex[static_cast<std::uint32_t>(v1)]];
+                        const PlanetVertex &pv2 = waterVertices[slotVertex[static_cast<std::uint32_t>(v2)]];
+                        const Vec3 p0{pv0.position[0], pv0.position[1], pv0.position[2]};
+                        const Vec3 p1{pv1.position[0], pv1.position[1], pv1.position[2]};
+                        const Vec3 p2{pv2.position[0], pv2.position[1], pv2.position[2]};
+                        // Orient against the TRUE radial direction: the
+                        // centroid in planet-local space (chunk-local
+                        // vertices alone point no particular way - the
+                        // water sheet is flat inside its chunk).
+                        const Vec3 centroidWorld = (p0 + p1 + p2) * (1.0 / 3.0) + center;
+                        const bool flip = dot(cross(p1 - p0, p2 - p0), normalized(centroidWorld)) < 0.0;
+                        if (!flip)
+                        {
+                            waterIndices.insert(waterIndices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
+                                slotVertex[static_cast<std::uint32_t>(v1)], slotVertex[static_cast<std::uint32_t>(v2)]});
+                        }
+                        else
+                        {
+                            waterIndices.insert(waterIndices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
+                                slotVertex[static_cast<std::uint32_t>(v2)], slotVertex[static_cast<std::uint32_t>(v1)]});
+                        }
+                        mesh.triangleCount += 1;
                     }
                 }
             }

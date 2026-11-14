@@ -16,6 +16,7 @@ add_library(
     OBJECT
     source/noise.cpp
     source/params.cpp
+    source/fbm.cpp
     source/climate.cpp
     source/density.cpp
     source/meshing.cpp
