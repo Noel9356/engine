@@ -88,6 +88,13 @@ struct HeadlessTexture
     // Bilinear or nearest sample with repeat/clamp addressing. mipLevel 0 or
     // an out-of-range level samples the base image; returns white when empty.
     glm::vec3 sample(float u, float v, std::uint32_t mipLevel = 0) const;
+
+    // Alpha-channel sample from the RGBA8 upload copy, same addressing and
+    // filtering as sample() at mip level 0. The mip chain stores RGB only, so
+    // alpha always samples the base image - matching the fur pipeline, whose
+    // strand-field fetch (the fur texture's alpha) runs at mip 0 on the GPU
+    // side too. Returns 1 when empty.
+    float sampleAlpha(float u, float v) const;
 };
 
 // 1x1 stand-ins so materials without maps still sample something sensible.

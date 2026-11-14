@@ -33,21 +33,27 @@ using engine::window::WindowHandle;
 
 namespace screen_detail
 {
-inline constexpr const char *kRecipeFileName = "character_recipe.toml";
+inline constexpr const char *kRecipeFileName   = "character_recipe.toml";
 inline constexpr const char *kFontRelativePath = "fonts/Inter-Variable.ttf";
 
 inline bool isSkinPart(const char *partId)
 {
     // Parts that read as bare skin and take the skin.tone palette. The
-    // ranger garment pieces keep their authored cloth colors.
+    // ranger garment pieces keep their authored cloth colors. The round-3
+    // segmentation renames the bare torso into the thoracic + sacrum-coccyx
+    // segments and adds the human neck loft.
     if (partId == nullptr)
         return false;
     static constexpr const char *skinParts[] = {
-        "torso_bare",
+        "torso_thoracic_bare",
+        "torso_thoracic_ranger",
+        "pelvis_bare",
+        "pelvis_ranger",
         "arm_bare_left",
         "arm_bare_right",
         "leg_bare_left",
         "leg_bare_right",
+        "neck_human",
         "head_human",
     };
     for (const char *candidate : skinParts)
@@ -58,8 +64,8 @@ inline bool isSkinPart(const char *partId)
 
 inline bool isFurPart(const char *partId)
 {
-    // Downloaded animal grafts (species heads, ears, tails, and the taur /
-    // quadruped animal bodies) take the fur.coat palette. The Cethiel
+    // Downloaded animal grafts (species heads, necks, ears, tails, and the
+    // taur / quadruped animal bodies) take the fur.coat palette. The Cethiel
     // reptile piece and the dragon head keep their authored look (they are
     // not furry).
     if (partId == nullptr)
@@ -68,43 +74,73 @@ inline bool isFurPart(const char *partId)
     for (const char *candidate : excluded)
         if (std::strcmp(partId, candidate) == 0)
             return false;
-    return std::strncmp(partId, "head_", 5) == 0 || std::strncmp(partId, "ear_", 4) == 0
-        || std::strncmp(partId, "tail_", 5) == 0 || std::strncmp(partId, "quad_", 5) == 0;
+    return std::strncmp(partId, "head_", 5) == 0 || std::strncmp(partId, "neck_", 5) == 0
+        || std::strncmp(partId, "ear_", 4) == 0 || std::strncmp(partId, "tail_", 5) == 0
+        || std::strncmp(partId, "quad_", 5) == 0;
 }
 
 inline UiKey mapWindowKey(Key key)
 {
     switch (key)
     {
-    case Key::Escape: return UiKey::Escape;
-    case Key::Space: return UiKey::Space;
-    case Key::Enter: return UiKey::Enter;
-    case Key::Tab: return UiKey::Tab;
-    case Key::Backspace: return UiKey::Backspace;
-    case Key::Left: return UiKey::Left;
-    case Key::Right: return UiKey::Right;
-    case Key::Up: return UiKey::Up;
-    case Key::Down: return UiKey::Down;
-    case Key::W: return UiKey::W;
-    case Key::A: return UiKey::A;
-    case Key::S: return UiKey::S;
-    case Key::D: return UiKey::D;
-    case Key::Q: return UiKey::Q;
-    case Key::E: return UiKey::E;
-    case Key::LeftShift: return UiKey::LeftShift;
-    case Key::LeftControl: return UiKey::LeftControl;
-    case Key::LeftAlt: return UiKey::LeftAlt;
-    case Key::Num0: return UiKey::D0;
-    case Key::Num1: return UiKey::D1;
-    case Key::Num2: return UiKey::D2;
-    case Key::Num3: return UiKey::D3;
-    case Key::Num4: return UiKey::D4;
-    case Key::Num5: return UiKey::D5;
-    case Key::Num6: return UiKey::D6;
-    case Key::Num7: return UiKey::D7;
-    case Key::Num8: return UiKey::D8;
-    case Key::Num9: return UiKey::D9;
-    default: return UiKey::None;
+    case Key::Escape:
+        return UiKey::Escape;
+    case Key::Space:
+        return UiKey::Space;
+    case Key::Enter:
+        return UiKey::Enter;
+    case Key::Tab:
+        return UiKey::Tab;
+    case Key::Backspace:
+        return UiKey::Backspace;
+    case Key::Left:
+        return UiKey::Left;
+    case Key::Right:
+        return UiKey::Right;
+    case Key::Up:
+        return UiKey::Up;
+    case Key::Down:
+        return UiKey::Down;
+    case Key::W:
+        return UiKey::W;
+    case Key::A:
+        return UiKey::A;
+    case Key::S:
+        return UiKey::S;
+    case Key::D:
+        return UiKey::D;
+    case Key::Q:
+        return UiKey::Q;
+    case Key::E:
+        return UiKey::E;
+    case Key::LeftShift:
+        return UiKey::LeftShift;
+    case Key::LeftControl:
+        return UiKey::LeftControl;
+    case Key::LeftAlt:
+        return UiKey::LeftAlt;
+    case Key::Num0:
+        return UiKey::D0;
+    case Key::Num1:
+        return UiKey::D1;
+    case Key::Num2:
+        return UiKey::D2;
+    case Key::Num3:
+        return UiKey::D3;
+    case Key::Num4:
+        return UiKey::D4;
+    case Key::Num5:
+        return UiKey::D5;
+    case Key::Num6:
+        return UiKey::D6;
+    case Key::Num7:
+        return UiKey::D7;
+    case Key::Num8:
+        return UiKey::D8;
+    case Key::Num9:
+        return UiKey::D9;
+    default:
+        return UiKey::None;
     }
 }
 

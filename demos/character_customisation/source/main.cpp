@@ -13,6 +13,7 @@
 #include <engine/camera/capabilities.hpp>
 #include <engine/character/capabilities.hpp>
 #include <engine/file_asset_store/capabilities.hpp>
+#include <engine/fur/capabilities.hpp>
 #include <engine/kernel/executable_directory.hpp>
 #include <engine/models/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
@@ -74,18 +75,18 @@
 namespace
 {
 
-using demo::DemoCameraKeyBindings;
-using demo::keyMaskBit;
-using demo::loadCameraKeyBindings;
-using demo::windowKeyName;
 using demo::cameraErrorName;
 using demo::capabilityAbiMatches;
+using demo::DemoCameraKeyBindings;
 using demo::deviceClassName;
 using demo::DynamicObject;
-using demo::StaticBatch;
+using demo::keyMaskBit;
+using demo::loadCameraKeyBindings;
 using demo::renderErrorName;
 using demo::renderGraphErrorName;
+using demo::StaticBatch;
 using demo::windowErrorName;
+using demo::windowKeyName;
 
 namespace window       = engine::window;
 namespace render_graph = engine::render_graph;
@@ -105,9 +106,9 @@ local function report(message)
     print("character_lab: " .. message)
 end
 
-local assembly = character.create("plan_humanoid")
+local assembly = character.create("humanoid_biped")
 if assembly == 0 then
-    report("could not create the plan_humanoid assembly")
+    report("could not create the humanoid_biped assembly")
     return
 end
 local parts = character.instance_count(assembly)
@@ -156,10 +157,16 @@ report("ready")
         std::cerr << "demo: character lab runtime creation failed\n";
         return false;
     }
-    script_runtime::ScriptError scriptError = script_runtime::ScriptError::None;
-    char  errorText[512] = {};
-    const bool executed = scriptRuntime.executeString(
-        scriptRuntime.self, labRuntime, kLabScript, "character_lab", &scriptError, errorText, sizeof(errorText), nullptr);
+    script_runtime::ScriptError scriptError    = script_runtime::ScriptError::None;
+    char                        errorText[512] = {};
+    const bool                  executed       = scriptRuntime.executeString(scriptRuntime.self,
+        labRuntime,
+        kLabScript,
+        "character_lab",
+        &scriptError,
+        errorText,
+        sizeof(errorText),
+        nullptr);
     if (!executed || scriptError != script_runtime::ScriptError::None)
     {
         std::cerr << "demo: character lab script failed (" << static_cast<unsigned>(scriptError) << ")"
@@ -207,7 +214,8 @@ int main(int argc, char **argv)
     // Modules loaded by the kernel for this demo; pbr, character and
     // render_graph are probed optionally below.
     engine::ApplicationHostOptions hostOptions = engine::makeApplicationHostOptions(
-        commandLine, {"window", "renderer", "render_graph", "camera", "models", "ui", "character", "script_runtime"});
+        commandLine,
+        {"window", "renderer", "render_graph", "fur", "camera", "models", "ui", "character", "script_runtime"});
 
     if (!hostOptions.activePlugins.has_value())
     {
@@ -273,6 +281,14 @@ int main(int argc, char **argv)
     // pbr is optional: without it the demo falls back to its built-in sun and
     // skips the environment block below.
     const pbr::PbrCapability *pbrCapability = appContext->tryAcquireCapability<pbr::PbrCapability>();
+    // fur is optional too: without it the character demo keeps its legacy
+    // vertex-tint fur and skips the shell-fur path entirely.
+    const engine::fur::FurCapability *furCapability = appContext->tryAcquireCapability<engine::fur::FurCapability>();
+    if (furCapability != nullptr
+        && !capabilityAbiMatches("fur", furCapability->abi, engine::fur::furCapabilityAbi))
+    {
+        furCapability = nullptr;
+    }
     // render_graph is optional too: the demo schedules its per-frame CPU work
     // through it when present and falls back to inline updates otherwise.
     auto *frameGraphCapability = appContext->tryAcquireCapability<render_graph::RenderGraphCapability>();
@@ -470,8 +486,14 @@ int main(int argc, char **argv)
 
     std::cout << "demo: assets at '" << assetRoot.string() << "'\n";
     demo::BenchmarkScene benchmarkScene;
-    demo::createBenchmarkScene(benchmarkScene, renderCapability, rendererHandle, modelsCapability, windowCapability,
-        assetRoot, characterView, hasPbrEnvironment ? &pbrEnvironment : nullptr);
+    demo::createBenchmarkScene(benchmarkScene,
+        renderCapability,
+        rendererHandle,
+        modelsCapability,
+        windowCapability,
+        assetRoot,
+        characterView,
+        hasPbrEnvironment ? &pbrEnvironment : nullptr);
 
     glm::vec3 sunDirectionForView(0.45f, 0.62f, 0.35f);
     if (hasPbrEnvironment)
@@ -638,7 +660,8 @@ int main(int argc, char **argv)
         .unlit                    = true,
     };
     const renderer::MeshMaterial sunMaterial{
-        .baseColor                = {benchmarkScene.sunDiscRadiance.r, benchmarkScene.sunDiscRadiance.g, benchmarkScene.sunDiscRadiance.b},
+        .baseColor
+        = {benchmarkScene.sunDiscRadiance.r, benchmarkScene.sunDiscRadiance.g, benchmarkScene.sunDiscRadiance.b},
         .baseColorTexture         = renderer::invalidTexture,
         .metallicFactor           = 0.0f,
         .roughnessFactor          = 1.0f,
@@ -756,7 +779,8 @@ int main(int argc, char **argv)
             cameraHandle,
             uiCapability,
             *characterCapability,
-            assetRoot.string());
+            assetRoot.string(),
+            furCapability);
         if (!characterScreenReady)
         {
             std::cerr << "demo: the character screen failed to initialise\n";
@@ -777,6 +801,37 @@ int main(int argc, char **argv)
                     = effectiveQuitAfterSeconds > 0.0 ? std::min(effectiveQuitAfterSeconds, 0.25) : 0.25;
             }
         }
+        // Shell-fur CLI knobs: applied after create (the assets exist by
+        // now) and before the first frame. --fur-off switches the shell
+        // stacks off entirely (A/B the cost); --fur-preset picks the coat;
+        // --fur-layers pins the stack height (0 = LOD); --fur-length scales
+        // strand length.
+        characterScreen.furRendering().setEnabled(!demoOptions.furDisabled);
+        if (!demoOptions.furPreset.empty())
+        {
+            if (demoOptions.furPreset == "plush")
+                characterScreen.furRendering().setPreset(engine::fur::FurPreset::Plush);
+            else if (demoOptions.furPreset == "shaggy")
+                characterScreen.furRendering().setPreset(engine::fur::FurPreset::Shaggy);
+            else if (demoOptions.furPreset == "velvety")
+                characterScreen.furRendering().setPreset(engine::fur::FurPreset::Velvety);
+            else
+            {
+                std::cerr << "demo: unknown --fur-preset '" << demoOptions.furPreset << "' (plush|shaggy|velvety)\n";
+            }
+        }
+        characterScreen.furRendering().setLayerOverride(demoOptions.furLayers);
+        characterScreen.furRendering().setLengthScale(demoOptions.furLength);
+        if (demoOptions.furTest)
+        {
+            const bool furTestPassed = characterScreen.runFurSelfTest();
+            characterTestPassed      = characterTestPassed && furTestPassed;
+            if (demoOptions.screenshotPath.empty())
+            {
+                effectiveQuitAfterSeconds
+                    = effectiveQuitAfterSeconds > 0.0 ? std::min(effectiveQuitAfterSeconds, 0.25) : 0.25;
+            }
+        }
         if (!demoOptions.characterDrive.empty())
         {
             if (!characterScreen.applyDrivePreset(demoOptions.characterDrive))
@@ -790,23 +845,61 @@ int main(int argc, char **argv)
                 return 1;
             }
         }
+        if (demoOptions.dumpInstanceBoxes)
+        {
+            characterScreen.dumpInstanceBoxes();
+        }
         // Character Lab (merged from the former character_lab plugin): a
         // short Lua exercise through the character.* bridge. Runs with the
         // self test, or standalone with --character-lab.
-        if ((demoOptions.characterTest || demoOptions.characterLab)
-            && scriptCapability != nullptr)
+        if ((demoOptions.characterTest || demoOptions.characterLab) && scriptCapability != nullptr)
         {
             characterLabPassed = runCharacterLabExercise(*scriptCapability);
         }
+        // Runtime part thumbnails: the panel's picker images are rendered by
+        // the engine itself during startup (never shipped as files). The
+        // exporter mirrors the screenshot path: the Vulkan frame export when
+        // the window has a GPU surface, the headless surface otherwise.
+        const auto previewExportPpm = [&renderCapability,
+                                          &rendererHandle,
+                                          &vulkanCapability,
+                                          &windowCapability,
+                                          &windowHandle,
+                                          &headlessWindowCapability](const std::string &path)
+        {
+            if (vulkanCapability != nullptr)
+            {
+                renderer::RenderError exportError = renderer::RenderError::None;
+                return vulkanCapability->exportFramePpm(
+                    vulkanCapability->self, rendererHandle, path.c_str(), &exportError);
+            }
+            if (headlessWindowCapability != nullptr)
+            {
+                window::WindowError exportError = window::WindowError::None;
+                return headlessWindowCapability->exportSurfacePpm(
+                    headlessWindowCapability->self, windowHandle, path.c_str(), &exportError);
+            }
+            return false;
+        };
+        if (!characterScreen.generatePreviewTextures(previewExportPpm))
+        {
+            std::fprintf(stderr, "demo: runtime part thumbnails unavailable; the panel falls back to text\n");
+        }
         if (demoOptions.cameraFramingSet)
         {
-            characterScreen.configureCamera(demoOptions.cameraYawDegrees, demoOptions.cameraPitchDegrees,
-                demoOptions.orbitDistance, demoOptions.cameraTargetY);
+            characterScreen.configureCamera(demoOptions.cameraYawDegrees,
+                demoOptions.cameraPitchDegrees,
+                demoOptions.orbitDistance,
+                demoOptions.cameraTargetY);
             characterScreen.setUserCameraFraming(true);
         }
         if (demoOptions.hidePanel)
         {
             characterScreen.setPanelVisible(false);
+        }
+        if (demoOptions.hideHud)
+        {
+            characterScreen.setHudVisible(false);
         }
         if (demoOptions.panelTab >= 0)
         {
@@ -818,8 +911,9 @@ int main(int argc, char **argv)
             // PPM through the headless surface (the host script converts
             // them to the panel's PNG thumbnails).
             characterScreen.setPanelVisible(false);
-            const auto exportPpm =
-                [&windowCapability, &windowHandle, &headlessWindowCapability](const std::string &path) {
+            const auto exportPpm
+                = [&windowCapability, &windowHandle, &headlessWindowCapability](const std::string &path)
+            {
                 if (headlessWindowCapability == nullptr)
                 {
                     return false;
@@ -1083,11 +1177,11 @@ int main(int argc, char **argv)
     // A target below the refresh still needs the pacer (it is throttling
     // harder than vsync would). Unknown/legacy modules return false here and
     // keep the previous behaviour.
-    const bool presentedPacing
-        = renderCapability.waitsForPresentation != nullptr
-        && renderCapability.waitsForPresentation(renderCapability.self, rendererHandle);
-    const bool pacerSuppressedByVsync = presentedPacing && maxFps > 0;
-    const double effectiveTargetHz    = pacerSuppressedByVsync ? 0.0 : static_cast<double>(std::max<std::int64_t>(maxFps, 0));
+    const bool   presentedPacing        = renderCapability.waitsForPresentation != nullptr
+                                       && renderCapability.waitsForPresentation(renderCapability.self, rendererHandle);
+    const bool   pacerSuppressedByVsync = presentedPacing && maxFps > 0;
+    const double effectiveTargetHz
+        = pacerSuppressedByVsync ? 0.0 : static_cast<double>(std::max<std::int64_t>(maxFps, 0));
 
     // Paced runs sleep to just before the deadline and spin the remainder:
     // OS sleep granularity (1-4 ms Windows, ~50 us timer slack on Linux)
@@ -1494,8 +1588,8 @@ int main(int argc, char **argv)
 
     // The --character-test / --character-lab runs report failure through the
     // exit code.
-    if (characterView && ((demoOptions.characterTest && !characterTestPassed)
-        || (demoOptions.characterLab && !characterLabPassed)))
+    if (characterView
+        && ((demoOptions.characterTest && !characterTestPassed) || (demoOptions.characterLab && !characterLabPassed)))
     {
         std::cerr << "demo: character test/lab FAILED\n";
     }
@@ -1521,7 +1615,7 @@ int main(int argc, char **argv)
     {
         std::fprintf(stderr, "demo: stage timings ms (count/p50/p99/max):\n");
         for (std::uint8_t metricIndex = 0; metricIndex < static_cast<std::uint8_t>(engine::PerformanceMetric::Count);
-             ++metricIndex)
+            ++metricIndex)
         {
             const auto metric   = static_cast<engine::PerformanceMetric>(metricIndex);
             const auto snapshot = kernel.profiler().snapshot(metric);
@@ -1556,6 +1650,6 @@ int main(int argc, char **argv)
     return (characterView
                && ((demoOptions.characterTest && !characterTestPassed)
                    || (demoOptions.characterLab && !characterLabPassed)))
-        ? 1
-        : 0;
+             ? 1
+             : 0;
 }

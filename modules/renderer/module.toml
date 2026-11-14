@@ -8,6 +8,8 @@ config_keys           = [
     "renderer.draw_sort_min_commands",
     "renderer.draw_sort_mode",
     "renderer.frustum_culling",
+    "renderer.fur_enabled",
+    "renderer.fur_max_layers",
     "renderer.gi_indirect_lighting",
     "renderer.gpu_timestamps_enabled",
     "renderer.headless_band_split_min_screen_fraction",

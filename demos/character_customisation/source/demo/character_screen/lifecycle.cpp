@@ -2,19 +2,11 @@
 #include "../geometry.hpp"
 
 #include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/quaternion.hpp>
-#include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
-#include <array>
-#include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
-#include <iostream>
-#include <limits>
-#include <utility>
+#include <string>
 
 namespace demo
 {
@@ -26,7 +18,8 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
     engine::window::WindowHandle windowHandle, const engine::renderer::RenderCapability &renderCapability,
     engine::renderer::RendererHandle rendererHandle, const engine::camera::CameraCapability &cameraCapability,
     engine::camera::CameraHandle cameraHandle, const engine::ui::UiCapability &uiCapability,
-    engine::character::CharacterCapability &characterCapability, const std::string &assetRoot)
+    engine::character::CharacterCapability &characterCapability, const std::string &assetRoot,
+    const engine::fur::FurCapability *furCapability)
 {
     window_         = &windowCapability;
     windowHandle_   = windowHandle;
@@ -41,23 +34,26 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
     {
         return false;
     }
+    // Shell-fur assets: one strand texture per preset, uploaded once. A
+    // null furCapability (module absent) leaves the demo on its legacy
+    // vertex-tint fur.
+    if (!fur_.create(*render_, rendererHandle_, furCapability))
+    {
+        std::fprintf(stderr, "demo: shell-fur asset creation failed; continuing without fur shells\n");
+    }
     if (!createUiContext(assetRoot))
     {
         content_.destroy(*character_, *render_, rendererHandle_);
         return false;
     }
-    // Preview thumbnails (rendered offline by --part-previews; optional).
-    if (!content_.loadPreviewTextures(assetRoot))
-    {
-        std::fprintf(stderr, "demo: part preview thumbnails not found; the panel falls back to text\n");
-    }
-
+    // Preview thumbnails are generated at runtime (see generatePreviewTextures,
+    // called by the host right after this create).
     stage_.create(*render_, rendererHandle_);
 
     // Default character from the humanoid body-plan profile.
-    CharacterError        error  = CharacterError::None;
-    const CharacterHandle handle = character_->createAssembly(character_->self, CharacterContent::humanoidProfileId,
-        &error);
+    CharacterError        error = CharacterError::None;
+    const CharacterHandle handle
+        = character_->createAssembly(character_->self, CharacterContent::humanoidProfileId, &error);
     if (handle == engine::character::invalidCharacter)
     {
         std::fprintf(stderr,
@@ -72,24 +68,27 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
     activePlan_      = 0;
     activeHeadPart_  = "head_human";
     activeEarPart_.clear();
-    activeTailPart_  = "tail_fox";
-    quadSpecies_     = 0;
-    wingsPresent_    = false;
-    tailPresent_     = false;
-    clothed_         = true;
-    beltPresent_     = true;
-    bracersPresent_  = true;
+    activeTailPart_   = "tail_fox";
+    quadSpecies_      = 0;
+    wingsPresent_     = false;
+    tailPresent_      = false;
+    clothed_          = true;
+    beltPresent_      = true;
+    bracersPresent_   = true;
     pauldronsPresent_ = true;
-    hoodPresent_     = false;
+    hoodPresent_      = false;
 
     // Orbit camera around the character: three-quarter view from the
     // character's front-right so the face stays visible and the tail reads
-    // against the sky instead of hiding behind the torso.
+    // against the sky instead of hiding behind the torso. The final framing
+    // fits the assembled character (plan presets refit it later).
     configureCamera(52.0f, 10.0f, 2.6f, 1.0f);
 
     applyParameterHeights();
     cacheParameterDefinitions();
     evaluateCharacter(true);
+    applyDefaultLook();
+    fitCameraToAssembly();
     created_ = true;
     return true;
 }
@@ -97,6 +96,29 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
 void CharacterScreen::setPanelVisible(bool visible)
 {
     panelVisible_ = visible;
+}
+
+void CharacterScreen::setHudVisible(bool visible)
+{
+    hideHud_ = !visible;
+}
+
+void CharacterScreen::applyDefaultLook()
+{
+    // The studio opens on a complete anthro fox - species head with its ears,
+    // the fox tail, the bare body under the rust fur coat with full markings -
+    // so the customization surface reads as furry from the first frame. The
+    // panel's Reset returns here too.
+    CharacterError error = CharacterError::None;
+    setOutfit(false);
+    setHeadPart("head_fox");
+    setTailPart("tail_fox");
+    setTail(true);
+    character_->setParameter(character_->self, characterHandle_, "body.coat", 1.0f, &error);
+    character_->setParameter(character_->self, characterHandle_, "fur.coat", 1.0f, &error);
+    character_->setParameter(character_->self, characterHandle_, "fur.markings", 3.0f, &error);
+    refreshDeformations();
+    evaluateCharacter(true);
 }
 
 void CharacterScreen::setPanelTab(int tab)
@@ -111,15 +133,17 @@ void CharacterScreen::setUserCameraFraming(bool user)
 
 void CharacterScreen::configureCamera(float yawDegrees, float pitchDegrees, float orbitDistance, float targetY)
 {
-    const float yawRadians   = glm::radians(yawDegrees);
-    const float pitchRadians = glm::radians(std::clamp(pitchDegrees, -80.0f, 80.0f));
+    const float     yawRadians   = glm::radians(yawDegrees);
+    const float     pitchRadians = glm::radians(std::clamp(pitchDegrees, -80.0f, 80.0f));
     const glm::vec3 target(0.0f, targetY, 0.0f);
-    const glm::vec3 eye = target + orbitDistance
-                            * glm::vec3(std::sin(yawRadians) * std::cos(pitchRadians), std::sin(pitchRadians),
-                                std::cos(yawRadians) * std::cos(pitchRadians));
-    const float eyeFloat[3]    = {eye.x, eye.y, eye.z};
-    const float targetFloat[3] = {target.x, target.y, target.z};
-    const float up[3]          = {0.0f, 1.0f, 0.0f};
+    const glm::vec3 eye            = target
+                                   + orbitDistance
+                                         * glm::vec3(std::sin(yawRadians) * std::cos(pitchRadians),
+                                             std::sin(pitchRadians),
+                                             std::cos(yawRadians) * std::cos(pitchRadians));
+    const float     eyeFloat[3]    = {eye.x, eye.y, eye.z};
+    const float     targetFloat[3] = {target.x, target.y, target.z};
+    const float     up[3]          = {0.0f, 1.0f, 0.0f};
     camera_->setLookAt(camera_->self, cameraHandle_, eyeFloat, targetFloat, up);
     camera_->setControlMode(camera_->self, cameraHandle_, engine::camera::CameraControlMode::Orbit);
     camera_->setOrbitDistance(camera_->self, cameraHandle_, orbitDistance);
@@ -156,27 +180,30 @@ const engine::character::ParameterDefinition *CharacterScreen::parameterDefiniti
 
 void CharacterScreen::refreshDeformations()
 {
-    // Morphs + markings re-derive the affected meshes whenever their
-    // parameters change (change-time work, never per frame).
-    float muzzle = 1.0f;
-    float eyes   = 1.0f;
+    // Morphs, the fur coat, and the markings re-derive the affected meshes in
+    // one pass whenever their parameters change (change-time work, never per
+    // frame).
+    float muzzle        = 1.0f;
+    float eyes          = 1.0f;
+    float neckThickness = 1.0f;
+    float headSize      = 1.0f;
+    float markings      = 0.0f;
+    float furCoat       = 0.0f;
+    float bodyCoat      = 0.0f;
     character_->getParameter(character_->self, characterHandle_, "muzzle.length", &muzzle);
     character_->getParameter(character_->self, characterHandle_, "eyes.width", &eyes);
-    content_.applyHeadMorphs(muzzle - 1.0f, eyes - 1.0f);
-    float markings = 0.0f;
+    character_->getParameter(character_->self, characterHandle_, "neck.thickness", &neckThickness);
+    character_->getParameter(character_->self, characterHandle_, "head.size", &headSize);
     character_->getParameter(character_->self, characterHandle_, "fur.markings", &markings);
-    float furCoat = 0.0f;
     character_->getParameter(character_->self, characterHandle_, "fur.coat", &furCoat);
-    static const float markingTints[6][3] = {
-        {0.96f, 0.94f, 0.90f},
-        {0.96f, 0.94f, 0.90f},
-        {0.96f, 0.94f, 0.90f},
-        {0.96f, 0.94f, 0.90f},
-        {0.98f, 0.94f, 0.84f},
-        {0.90f, 0.93f, 0.98f},
-    };
-    const int coat = std::clamp(static_cast<int>(furCoat + 0.5f), 0, 5);
-    content_.applyMarkings(std::clamp(static_cast<int>(markings + 0.5f), 0, 3), markingTints[coat]);
+    character_->getParameter(character_->self, characterHandle_, "body.coat", &bodyCoat);
+    content_.applyDeformations(muzzle - 1.0f,
+        eyes - 1.0f,
+        neckThickness - 1.0f,
+        headSize - 1.0f,
+        std::clamp(static_cast<int>(furCoat + 0.5f), 0, 5),
+        std::clamp(static_cast<int>(markings + 0.5f), 0, 3),
+        bodyCoat >= 0.5f);
 }
 
 void CharacterScreen::destroy()
@@ -185,6 +212,10 @@ void CharacterScreen::destroy()
     {
         character_->destroyAssembly(character_->self, characterHandle_);
         characterHandle_ = engine::character::invalidCharacter;
+    }
+    if (render_ != nullptr)
+    {
+        fur_.destroy(*render_, rendererHandle_);
     }
     stage_.destroy();
     destroyUiContext();

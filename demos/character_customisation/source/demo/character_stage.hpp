@@ -18,12 +18,18 @@ public:
     void drawFloor() const;
     void drawSkyAndSun() const;
 
+    // Soft radial-gradient disc under the character: the flattened gradient
+    // sphere blends from the floor's own colour at the rim to a dark centre,
+    // grounding the silhouette without a shadow-pass.
+    void drawContactShadow(float centerX, float centerZ, float radius) const;
+
 private:
-    const engine::renderer::RenderCapability *renderer_ = nullptr;
-    engine::renderer::RendererHandle rendererHandle_ = engine::renderer::invalidRenderer;
-    engine::renderer::MeshHandle floorMesh_ = engine::renderer::invalidMesh;
-    engine::renderer::MeshHandle skyDomeMesh_ = engine::renderer::invalidMesh;
-    engine::renderer::MeshHandle sunDiscMesh_ = engine::renderer::invalidMesh;
+    const engine::renderer::RenderCapability *renderer_          = nullptr;
+    engine::renderer::RendererHandle          rendererHandle_    = engine::renderer::invalidRenderer;
+    engine::renderer::MeshHandle              floorMesh_         = engine::renderer::invalidMesh;
+    engine::renderer::MeshHandle              skyDomeMesh_       = engine::renderer::invalidMesh;
+    engine::renderer::MeshHandle              sunDiscMesh_       = engine::renderer::invalidMesh;
+    engine::renderer::MeshHandle              contactShadowMesh_ = engine::renderer::invalidMesh;
 };
 
 } // namespace demo

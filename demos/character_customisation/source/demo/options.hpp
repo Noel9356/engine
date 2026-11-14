@@ -16,22 +16,29 @@ namespace demo
 // Demo options after parsing; empty strings mean "use the configured default".
 struct Options
 {
-    std::string   screenshotPath;              // --screenshot: PPM file to write at screenshotFrame; empty = off.
-    std::uint64_t screenshotFrame  = 90;       // --screenshot-frame: frame index for the --screenshot export.
-    double        quitAfterSeconds = -1.0;     // --quit-after: < 0 = unset (falls back to quit_after_seconds).
-    std::string   cameraMode;                  // --camera fly|orbit|fixed; empty = use [camera] mode config.
-    float         cameraYawDegrees = 0.0f;     // --camera-yaw: character-screen orbit azimuth around the target.
-    float         cameraPitchDegrees = 18.0f;  // --camera-pitch: character-screen orbit elevation.
-    float         cameraTargetY = 1.0f;        // --camera-target-y: orbit target height (junction close-ups).
-    float         orbitDistance = 2.6f;        // --orbit-distance: character-screen orbit radius in meters.
-    bool          cameraFramingSet = false;    // true once any framing flag was given.
-    bool          hidePanel = false;           // --hide-panel: capture the viewport without the studio UI.
-    std::string   viewName      = "character"; // --view character|benchmark|sun; picks the screen.
-    bool          characterTest = false;       // --character-test: run the assembly test operations and exit.
-    bool          characterLab = false;        // --character-lab: run the merged character_lab Lua exercise.
-    std::string   characterDrive;              // --character-drive: named configuration for the character screen.
-    std::string   partPreviewsDirectory;       // --part-previews: render one PPM per part into this directory.
-    int           panelTab = -1;               // --panel-tab: open the studio panel on this tab (captures).
+    std::string   screenshotPath;                   // --screenshot: PPM file to write at screenshotFrame; empty = off.
+    std::uint64_t screenshotFrame  = 90;            // --screenshot-frame: frame index for the --screenshot export.
+    double        quitAfterSeconds = -1.0;          // --quit-after: < 0 = unset (falls back to quit_after_seconds).
+    std::string   cameraMode;                       // --camera fly|orbit|fixed; empty = use [camera] mode config.
+    float         cameraYawDegrees   = 0.0f;        // --camera-yaw: character-screen orbit azimuth around the target.
+    float         cameraPitchDegrees = 18.0f;       // --camera-pitch: character-screen orbit elevation.
+    float         cameraTargetY      = 1.0f;        // --camera-target-y: orbit target height (junction close-ups).
+    float         orbitDistance      = 2.6f;        // --orbit-distance: character-screen orbit radius in meters.
+    bool          cameraFramingSet   = false;       // true once any framing flag was given.
+    bool          hidePanel          = false;       // --hide-panel: capture the viewport without the studio UI.
+    bool          hideHud            = false;       // --hide-hud: capture without the stats/hints overlay.
+    std::string   viewName           = "character"; // --view character|benchmark|sun; picks the screen.
+    bool          characterTest      = false;       // --character-test: run the assembly test operations and exit.
+    bool          characterLab       = false;       // --character-lab: run the merged character_lab Lua exercise.
+    std::string   characterDrive;                   // --character-drive: named configuration for the character screen.
+    std::string   partPreviewsDirectory;            // --part-previews: render one PPM per part into this directory.
+    int           panelTab          = -1;           // --panel-tab: open the studio panel on this tab (captures).
+    bool          dumpInstanceBoxes = false;        // --dump-instance-boxes: print per-part world bounds (framing QA).
+    bool          furTest           = false;        // --fur-test: strand-texture determinism + LOD ladder + one fur draw.
+    bool          furDisabled       = false;        // --fur-off: render the character without shell fur (A/B the cost).
+    std::string   furPreset;                        // --fur-preset plush|shaggy|velvety; empty = the module default.
+    std::uint32_t furLayers        = 0;             // --fur-layers N: pin the shell layer count (0 = LOD decides).
+    float         furLength        = 1.0f;          // --fur-length: global strand-length multiplier.
 };
 
 // One-line description of the application flags, appended to --help output.

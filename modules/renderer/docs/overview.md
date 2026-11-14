@@ -6,9 +6,9 @@ The renderer module turns engine scene state into pixels. It provides a backend-
 
 | Capability | ABI | Header |
 | --- | --- | --- |
-| `renderer` | `renderCapabilityAbi = 12` | `modules/renderer/include/engine/renderer/capabilities.hpp` |
-| `renderer.vulkan` (secondary) | `renderCapabilityAbi = 12` (same constant) | same header |
-| `renderer.headless` (secondary) | `renderCapabilityAbi = 12` (same constant) | same header |
+| `renderer` | `renderCapabilityAbi = 13` | `modules/renderer/include/engine/renderer/capabilities.hpp` |
+| `renderer.vulkan` (secondary) | `renderCapabilityAbi = 13` (same constant) | same header |
+| `renderer.headless` (secondary) | `renderCapabilityAbi = 13` (same constant) | same header |
 
 The shared data types the capability references live in `shared_types/include/engine/renderer/` (`mesh.hpp`, `material.hpp`, `device_profile.hpp`) and in `modules/renderer/include/engine/renderer/` (`draw_sort.hpp`, `draw_batch.hpp`, `dynamic_resolution.hpp`).
 
@@ -77,7 +77,7 @@ A consumer creates a renderer per window surface and drives it frame by frame:
 1. `createRenderer(surface, &error)` - resolves the backend (see below), constructs it, and returns a `RendererHandle`.
 2. Optionally `createMesh`/`createTexture`/`createTextureFromFile` (also possible later).
 3. Per frame: `setViewport`, `setCamera`, then `beginFrame(renderer, frame)`.
-4. Record draws: `drawMesh`, `drawMeshes` (sorted/batched command list), `drawMeshInstances` (explicit instancing), `drawOverlay` (UI triangles).
+4. Record draws: `drawMesh`, `drawMeshes` (sorted/batched command list), `drawMeshInstances` (explicit instancing), `drawFur`/`drawFurInstances` (alpha-blended shell-fur layer stacks, ABI 13 - see the fur module's overview), `drawOverlay` (UI triangles).
 5. `endFrame(renderer)` submits/presents (Vulkan) or blits (headless).
 6. `destroyRenderer`, `destroyMesh`, `destroyTexture` as needed.
 

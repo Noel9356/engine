@@ -10,9 +10,11 @@ engine_add_application(
     source/demo/character_screen/frame.cpp
     source/demo/character_screen/lifecycle.cpp
     source/demo/character_screen/panel.cpp
+    source/demo/character_screen/previews.cpp
     source/demo/character_screen/rendering.cpp
     source/demo/character_screen/testing.cpp
     source/demo/diagnostics.cpp
+    source/demo/fur_rendering.cpp
     source/demo/geometry.cpp
     source/demo/menu_bridge.cpp
     source/demo/options.cpp
@@ -21,6 +23,7 @@ engine_add_application(
     renderer
     render_graph
     pbr
+    fur
     camera
     models
     ui

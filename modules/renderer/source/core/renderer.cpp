@@ -270,6 +270,8 @@ private:
         instanceBatchMinimumCount_               = 4;
         instanceStreamMegabytes_                 = 4;
         textureMipmapsEnabled_                   = true;
+        furEnabled_                              = true;
+        furMaximumLayers_                        = 16;
         const std::optional<std::string> backend = context.configurationStringInSection("renderer", "backend");
         if (backend.has_value())
         {
@@ -422,6 +424,18 @@ private:
         lodEnabled_      = context.configurationBooleanInSection("renderer", "lod_enabled").value_or(true);
         giIndirectLighting_
             = context.configurationBooleanInSection("renderer", "gi_indirect_lighting").value_or(true);
+        furEnabled_ = context.configurationBooleanInSection("renderer", "fur_enabled").value_or(true);
+        if (const auto furMaximumLayers = context.configurationIntegerInSection("renderer", "fur_max_layers");
+            furMaximumLayers.has_value())
+        {
+            if (*furMaximumLayers < 0 || *furMaximumLayers > 64)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] fur_max_layers %lld to range 0..64\n",
+                    static_cast<long long>(*furMaximumLayers));
+            }
+            furMaximumLayers_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*furMaximumLayers, 0, 64));
+        }
         gpuTimestampsEnabled_
             = context.configurationBooleanInSection("renderer", "gpu_timestamps_enabled").value_or(false);
         instanceBatchingEnabled_ = context.configurationBooleanInSection("renderer", "instance_batching").value_or(true);
@@ -1089,6 +1103,46 @@ private:
             mesh, modelMatrices, instanceCount, material != nullptr ? *material : defaultMaterial);
     }
 
+    // Shell-fur draws: the [renderer] fur_enabled switch gates the whole
+    // path (a disabled fur draws nothing, so applications can A/B the cost
+    // with one config change), and layerCount is clamped to
+    // fur_max_layers - the hard worst-case bound that keeps a buggy LOD
+    // policy from turning one fur surface into an unbounded overdraw
+    // spike. Everything else passes through to the backend unchanged: the
+    // layer loop IS the compositing order, so no sorting or batching may
+    // reorder it.
+    void drawFurImpl(RendererHandle renderer, MeshHandle mesh, const float *modelMatrix, const MeshMaterial *material,
+        const FurLayerParams *params)
+    {
+        RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr || modelMatrix == nullptr || mesh == invalidMesh
+            || !furEnabled_)
+        {
+            return;
+        }
+        FurLayerParams clamped = params != nullptr ? *params : FurLayerParams{};
+        clamped.layerCount     = std::clamp(clamped.layerCount, 0u, furMaximumLayers_);
+        const MeshMaterial defaultMaterial;
+        record->backendInstance->drawFur(
+            mesh, modelMatrix, material != nullptr ? *material : defaultMaterial, clamped);
+    }
+
+    void drawFurInstancesImpl(RendererHandle renderer, MeshHandle mesh, const float *modelMatrices,
+        std::uint32_t instanceCount, const MeshMaterial *material, const FurLayerParams *params)
+    {
+        RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr || modelMatrices == nullptr || instanceCount == 0
+            || mesh == invalidMesh || !furEnabled_)
+        {
+            return;
+        }
+        FurLayerParams clamped = params != nullptr ? *params : FurLayerParams{};
+        clamped.layerCount     = std::clamp(clamped.layerCount, 0u, furMaximumLayers_);
+        const MeshMaterial defaultMaterial;
+        record->backendInstance->drawFurInstances(
+            mesh, modelMatrices, instanceCount, material != nullptr ? *material : defaultMaterial, clamped);
+    }
+
     void drawOverlayImpl(RendererHandle renderer, const OverlayDrawData *data)
     {
         RendererRecord *record = recordFor(renderer);
@@ -1552,6 +1606,24 @@ private:
         { static_cast<const RenderModule *>(self)->frameStatisticsImpl(renderer, outStatistics); };
         renderCapability_.waitsForPresentation = [](void *self, RendererHandle renderer)
         { return static_cast<const RenderModule *>(self)->waitsForPresentationImpl(renderer); };
+        renderCapability_.drawFur = [](void *self,
+                                        RendererHandle renderer,
+                                        MeshHandle mesh,
+                                        const float *modelMatrix,
+                                        const MeshMaterial *material,
+                                        const FurLayerParams *params)
+        { static_cast<RenderModule *>(self)->drawFurImpl(renderer, mesh, modelMatrix, material, params); };
+        renderCapability_.drawFurInstances = [](void *self,
+                                                RendererHandle renderer,
+                                                MeshHandle mesh,
+                                                const float *modelMatrices,
+                                                std::uint32_t instanceCount,
+                                                const MeshMaterial *material,
+                                                const FurLayerParams *params)
+        {
+            static_cast<RenderModule *>(self)->drawFurInstancesImpl(
+                renderer, mesh, modelMatrices, instanceCount, material, params);
+        };
 
         vulkanCapability_.infoStrings = [](void *self, RendererHandle renderer, RendererInfoStrings *outInfo)
         { return static_cast<RenderModule *>(self)->vulkanInfoStringsImpl(renderer, outInfo); };
@@ -1613,6 +1685,8 @@ private:
     bool                 backFaceCulling_                   = true;
     bool                 giIndirectLighting_                = true; // [renderer] gi_indirect_lighting
     bool                 lodEnabled_                        = true;
+    bool                 furEnabled_                        = true;
+    std::uint32_t        furMaximumLayers_                  = 16;
     bool                 gpuTimestampsEnabled_              = true;
     bool                 drawSortEnabled_                   = false;
     std::uint32_t        drawSortMinimumCommands_           = 2;

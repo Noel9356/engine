@@ -96,6 +96,10 @@ public:
     void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) override;
     void drawMeshInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
         const MeshMaterial &material) override;
+    void drawFur(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material,
+        const FurLayerParams &params) override;
+    void drawFurInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
+        const MeshMaterial &material, const FurLayerParams &params) override;
     void drawOverlay(const OverlayDrawData &data) override;
     void endFrame() override;
 
@@ -162,6 +166,17 @@ private:
     bool ensureOverlayBuffers(std::uint32_t frameIndex, VkDeviceSize vertexBytes, VkDeviceSize indexBytes);
     void destroyOverlayBuffers() noexcept;
 
+    // Frustum-culls and streams the instance matrices into this frame slot's
+    // ring buffer. The mesh's bounding-sphere data rides along as values (the
+    // VulkanMesh record is private to VulkanResources). Returns the visible
+    // count and the ring offset the run was written at; *outOverflow reports
+    // matrices that did not fit (or failed to flush) so the caller can fall
+    // back to per-instance draws. Shared by drawMeshInstances and
+    // drawFurInstances.
+    std::uint32_t streamInstanceMatrices(bool boundsValid, float boundsRadius, const float *boundsCenter,
+        std::uint32_t indexCount, const float *modelMatrices, std::uint32_t instanceCount, VkDeviceSize *outOffset,
+        bool *outOverflow);
+
     // Per-frame instance-matrix streams (see drawMeshInstances); halves the
     // requested capacity and retries when allocation fails.
     bool createInstanceBuffers();
@@ -210,8 +225,21 @@ private:
     bool frameActive_ = false; // true between a successful beginFrame and endFrame; draw calls check it
 
     // Bind-state caches so repeated draws skip redundant vkCmd* calls.
+    // lastBoundPipeline_ tracks which of the backend's two graphics pipelines
+    // is current (mesh vs fur): the fur path binds the alpha-blended fur
+    // pipeline and every mesh draw binds the mesh pipeline back, pushing its
+    // constants again (the two layouts have different push constant sizes,
+    // so a pipeline switch invalidates the push cache).
+    enum class BoundPipeline : std::uint8_t
+    {
+        Mesh,
+        Fur
+    };
     bool            hasLastPushConstants_ = false;
     PushConstants   lastPushConstants_{};
+    FurPushConstants lastFurPushConstants_{};
+    bool            hasLastFurPushConstants_    = false;
+    BoundPipeline   lastBoundPipeline_          = BoundPipeline::Mesh;
     MeshHandle      lastBoundMesh_              = invalidMesh;
     VkDescriptorSet lastBoundMaterialSet_       = VK_NULL_HANDLE;
     VkDeviceSize    lastBoundInstanceOffset_    = 0;

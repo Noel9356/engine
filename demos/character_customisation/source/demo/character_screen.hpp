@@ -11,16 +11,15 @@
 
 #include "character_content.hpp"
 #include "character_stage.hpp"
+#include "fur_rendering.hpp"
 
 #include <engine/camera/capabilities.hpp>
 #include <engine/character/capabilities.hpp>
+#include <engine/fur/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/ui/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
 
-#include <glm/glm.hpp>
-
-#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -34,12 +33,13 @@ class CharacterScreen
 public:
     // Prepares the UI context, stage geometry, content, and the default
     // assembly. assetRoot points at the demo assets directory (fonts,
-    // previews).
+    // previews). furCapability is optional (nullptr = shell fur disabled;
+    // the demo keeps its legacy vertex-tint fur).
     bool create(const engine::window::WindowCapability &windowCapability, engine::window::WindowHandle windowHandle,
         const engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle rendererHandle,
         const engine::camera::CameraCapability &cameraCapability, engine::camera::CameraHandle cameraHandle,
         const engine::ui::UiCapability &uiCapability, engine::character::CharacterCapability &characterCapability,
-        const std::string &assetRoot);
+        const std::string &assetRoot, const engine::fur::FurCapability *furCapability = nullptr);
 
     void destroy();
 
@@ -57,6 +57,18 @@ public:
     // report to stdout. Returns true when every executable check passed.
     bool runSelfTest();
 
+    // Fur self-test (--fur-test): strand-texture determinism (two
+    // generations must be byte-identical), monotonic LOD layer counts
+    // across the angular-size ladder, and one fur shell-stack draw. Prints
+    // a PASS/FAIL report; false on any failure.
+    bool runFurSelfTest();
+
+    // Fur rendering access for the CLI flags (--fur-*).
+    [[nodiscard]] FurRendering &furRendering()
+    {
+        return fur_;
+    }
+
     // Camera framing override for automated captures (--camera-yaw /
     // --camera-pitch / --orbit-distance): yaw is measured around the
     // character with 0 looking from +Z (the character's front).
@@ -65,7 +77,8 @@ public:
     // Hides the studio panel (the --hide-panel capture mode); the viewport
     // keeps rendering so screenshots show the character alone.
     void setPanelVisible(bool visible);
-    void setPanelTab(int tab); // opens the studio panel on the given tab
+    void setHudVisible(bool visible);
+    void setPanelTab(int tab);            // opens the studio panel on the given tab
     void setUserCameraFraming(bool user); // CLI --orbit-distance/--camera-target-y survive updates
 
     // Applies a named configuration (the --character-drive presets used by
@@ -74,12 +87,23 @@ public:
     // on the default configuration. Returns false when a module call failed.
     bool applyDrivePreset(const std::string &name);
 
+    // Prints every instance's part id, local bounds, and world bounds plus the
+    // assembly's world box (--dump-instance-boxes): the numeric ground truth
+    // behind the camera fit, for capture QA without guessing from pixels.
+    void dumpInstanceBoxes();
+
     // Renders one standalone preview frame per registered part into
     // previewDirectory (PPM files named <partId>.ppm); exportPpm writes one
-    // surface export. Used by --part-previews to produce the panel
-    // thumbnails.
-    bool renderPartPreviews(const std::string &previewDirectory,
-        const std::function<bool(const std::string &)> &exportPpm);
+    // surface export. Used by --part-previews for the capture-side sample
+    // sheets (the panel itself uses the runtime thumbnails below).
+    bool renderPartPreviews(
+        const std::string &previewDirectory, const std::function<bool(const std::string &)> &exportPpm);
+
+    // Runtime preview thumbnails: renders every part once at a small viewport
+    // during startup, reads the frame back (headless surface lock or the
+    // Vulkan frame export through the caller's PPM exporter), and uploads it
+    // as a small texture - no pre-generated image files ship with the demo.
+    bool generatePreviewTextures(const std::function<bool(const std::string &)> &exportPpm);
 
     [[nodiscard]] bool valid() const
     {
@@ -93,20 +117,24 @@ private:
 
     // Assembly helpers.
     engine::character::InstanceId instanceByName(const std::string &name) const;
-    std::string                    partIdOfInstance(const std::string &name) const;
-    bool                           rebuildAssembly(); // (re)create the assembly for the active body plan
-    bool                           setPlan(int plan); // 0 humanoid, 1 taur, 2 quadruped
-    bool                           setQuadSpecies(int species); // index into the generated species table
-    bool                           setHeadPart(const std::string &partId); // swap the head variant live
-    bool                           setEarParts(const std::string &leftPartId); // ear style pair
-    bool                           setWings(bool present);    // one wing pair on the withers/shoulders
-    bool                           setTail(bool present);     // on the humanoid tailbone or the taur socket
-    bool                           setTailPart(const std::string &partId); // swap the tail variant live
-    bool                           setOutfit(bool clothed);   // swap bare/ranger torso+arms+legs variants
-    bool                           setClothingPiece(const char *instanceName, bool present);
-    bool                           headHasEarSockets() const;
-    void                           applyParameterHeights(); // keeps the feet/hooves near the ground plane
-    void                           resetToDefault();
+    std::string                   partIdOfInstance(const std::string &name) const;
+    bool                          rebuildAssembly();           // (re)create the assembly for the active body plan
+    bool                          setPlan(int plan);           // 0 humanoid, 1 taur, 2 quadruped
+    bool                          setQuadSpecies(int species); // index into the generated species table
+    bool                          setHeadPart(const std::string &partId);     // swap the head variant live
+    bool                          setNeckPart(const std::string &partId);     // neck variant (follows the head)
+    bool                          setEarParts(const std::string &leftPartId); // ear style pair
+    bool                          setWings(bool present);                     // one wing pair on the withers/shoulders
+    bool                          setTail(bool present);                  // on the humanoid tailbone or the taur socket
+    bool                          setTailPart(const std::string &partId); // swap the tail variant live
+    [[nodiscard]] std::string     tailPartForPlan(const std::string &partId) const; // tail <-> tail_taur mapping
+    bool                          setOutfit(bool clothed); // swap bare/ranger torso+arms+legs variants
+    bool                          setClothingPiece(const char *instanceName, bool present);
+    bool                          headHasEarSockets() const;
+    void                          applyParameterHeights(); // keeps the feet/hooves near the ground plane
+    void                          applyDefaultLook();      // the startup/reset anthro look
+    void                          fitCameraToAssembly();   // frame the whole character after structural changes
+    void                          resetToDefault();
 
     // Evaluation + rendering.
     // evaluateCharacter re-derives transforms; full validation runs only when
@@ -116,21 +144,21 @@ private:
     void drawCharacter();
 
     // Panel.
-    void drawPanel(double deltaSeconds);
-    void drawStatsOverlay();
-    void submitOverlay();
-    void cacheParameterDefinitions();
+    void                                          drawPanel(double deltaSeconds);
+    void                                          drawStatsOverlay();
+    void                                          submitOverlay();
+    void                                          cacheParameterDefinitions();
     const engine::character::ParameterDefinition *parameterDefinition(const char *parameterId) const;
-    void refreshDeformations(); // morphs + markings after parameter changes
+    void                                          refreshDeformations(); // morphs + markings after parameter changes
 
-    // Panel tabs (Character Studio: Plan / Body / Parts / Motion / File).
-    void drawPlanTab();
+    // Panel tabs (Character Studio: Species / Body / Parts / Motion / File).
+    void drawSpeciesTab();
     void drawBodyTab();
     void drawPartsTab();
     void drawMotionTab();
     void drawFileTab();
-    void uiOptionRow(const char *const *options, int optionCount, const char *idSuffix,
-        int activeIndex, float width, const std::function<void(int)> &onPick);
+    void uiOptionRow(const char *const *options, int optionCount, const char *idSuffix, int activeIndex, float width,
+        const std::function<void(int)> &onPick);
     bool uiParameterSlider(const char *parameterId);
     bool uiPartSelector(const std::vector<std::string> &partIds, const std::string &activePartId,
         const std::function<void(const std::string &)> &onPick);
@@ -158,6 +186,11 @@ private:
 
     engine::character::CharacterHandle characterHandle_ = engine::character::invalidCharacter;
 
+    // Shell-fur assets (strand textures per preset) + per-frame LOD draws.
+    FurRendering fur_;
+    // Camera eye captured each frame; drawCharacter feeds it to the fur LOD.
+    float        lastCameraEye_[3] = {0.0f, 0.0f, 0.0f};
+
     // Static studio backdrop is an independent renderer resource owner.
     CharacterStage stage_;
 
@@ -168,10 +201,10 @@ private:
     double lastCursorX_     = 0.0;
     double lastCursorY_     = 0.0;
     // Middle-mouse grab scrolling (the panel scroll convention).
-    bool   middleScrolling_  = false;
-    double middleLastX_      = 0.0;
-    double middleLastY_      = 0.0;
-    bool   haveLastCursor_   = false;
+    bool   middleScrolling_ = false;
+    double middleLastX_     = 0.0;
+    double middleLastY_     = 0.0;
+    bool   haveLastCursor_  = false;
     // Character animation parameters (application-side drivers).
     float  tailSwaySpeed_           = 1.0f;
     bool   animateTail_             = true;
@@ -184,27 +217,29 @@ private:
     std::vector<engine::renderer::OverlayDrawCommand> overlayCommands_;
 
     // UI state.
-    std::string statusMessage_       = "Welcome - drag to orbit, edit the panel";
-    float       statusSeconds_       = 0.0f;
-    float       framesPerSecond_     = 0.0f;
-    std::string activeHeadPart_      = "head_human";
-    std::string activeEarPart_       = "";      // ear style (left part id)
-    std::string activeTailPart_      = "tail_fox";
-    int         activePlan_          = 0;       // body.plan index
-    int         quadSpecies_         = 0;       // species index (generated tables)
-    bool        wingsPresent_        = false;   // exactly one pair
-    bool        tailPresent_         = false;
-    bool        clothed_             = true;    // outfit variant toggle
-    bool        beltPresent_         = true;
-    bool        bracersPresent_      = true;
-    bool        pauldronsPresent_    = true;
-    bool        hoodPresent_         = false;
-    bool        panelFirstPlacement_ = true;
-    bool        panelVisible_        = true;
-    bool        userCameraFraming_   = false;   // explicit CLI framing active
-    int         activePanelTab_      = 0;       // panel tab index
+    std::string                                     statusMessage_       = "Welcome - drag to orbit, edit the panel";
+    float                                           statusSeconds_       = 0.0f;
+    float                                           framesPerSecond_     = 0.0f;
+    std::string                                     activeHeadPart_      = "head_human";
+    std::string                                     activeNeckPart_      = "neck_human";
+    std::string                                     activeEarPart_       = ""; // ear style (left part id)
+    std::string                                     activeTailPart_      = "tail_fox";
+    int                                             activePlan_          = 0;     // body.plan index
+    int                                             quadSpecies_         = 0;     // species index (generated tables)
+    bool                                            wingsPresent_        = false; // exactly one pair
+    bool                                            tailPresent_         = false;
+    bool                                            clothed_             = true; // outfit variant toggle
+    bool                                            beltPresent_         = true;
+    bool                                            bracersPresent_      = true;
+    bool                                            pauldronsPresent_    = true;
+    bool                                            hoodPresent_         = false;
+    bool                                            panelFirstPlacement_ = true;
+    bool                                            panelVisible_        = true;
+    bool                                            hideHud_             = false; // --hide-hud capture mode
+    bool                                            userCameraFraming_   = false; // explicit CLI framing active
+    int                                             activePanelTab_      = 0;     // panel tab index
     std::vector<engine::character::ValidationIssue> issues_;
-    bool        created_ = false;
+    bool                                            created_ = false;
 
     // Cached parameter registry (slider ranges for the panel).
     std::vector<engine::character::ParameterDefinition> parameterDefinitions_;

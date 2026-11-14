@@ -49,6 +49,35 @@ namespace engine
 namespace renderer
 {
 
+namespace
+{
+// One shell-fur displaced vertex: the exact CPU mirror of the displacement
+// section in shaders/fur.vert (parity contract, like pbrShade <-> mesh.frag).
+// layerRatio = layer / layerCount in 0..1; the per-vertex jitter hash breaks
+// up the concentric shell layering; gravity droops the tip toward world -Y,
+// quadratically in the strand height, AFTER the model transform.
+struct FurDisplacedVertex
+{
+    glm::vec4 clip;
+    glm::vec3 worldPosition;
+};
+
+inline FurDisplacedVertex furDisplaceVertex(const glm::vec3 &position, const glm::vec3 &normal,
+    const glm::mat4 &model, const glm::mat4 &viewProjectionWorld, float layerRatio, float furHeight, float gravity)
+{
+    const float jitter = glm::fract(
+        glm::sin(glm::dot(position, glm::vec3(12.9898f, 78.233f, 37.719f))) * 43758.5453f);
+    const float height    = furHeight * layerRatio * (0.7f + 0.6f * jitter);
+    const glm::vec3 displaced = position + normal * height;
+    glm::vec4 world        = model * glm::vec4(displaced, 1.0f);
+    world.y -= gravity * height * height;
+    FurDisplacedVertex result;
+    result.clip          = viewProjectionWorld * world;
+    result.worldPosition = glm::vec3(world);
+    return result;
+}
+} // namespace
+
 // CPU texture sampler: wrap or clamp UVs, then nearest or bilinear filter
 // against the requested mip level (level 0 = the base image). mipData holds
 // only the generated (downsampled) levels - level 0 reads pixelsRGB, level
@@ -117,6 +146,57 @@ glm::vec3 HeadlessTexture::sample(float u, float v, std::uint32_t mipLevel) cons
     return glm::vec3(p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11,
         p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11,
         p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11);
+}
+
+// Alpha-channel sample over the RGBA8 upload copy: same wrap/clamp, same
+// nearest/bilinear filtering as sample() (mip level 0). The fur strand field
+// lives in the fur texture's alpha channel (see shaders/fur.frag), so the
+// headless fur path samples this instead of the RGB mip chain.
+float HeadlessTexture::sampleAlpha(float u, float v) const
+{
+    if (width == 0 || height == 0 || pixels.size() < static_cast<std::size_t>(width) * height * 4)
+        return 1.0f;
+    if (width == 1 && height == 1)
+        return static_cast<float>(pixels[3]) / 255.0f;
+    if (address == TextureAddress::Repeat)
+    {
+        u -= std::floor(u);
+        v -= std::floor(v);
+    }
+    else
+    {
+        u = std::clamp(u, 0.0f, 1.0f);
+        v = std::clamp(v, 0.0f, 1.0f);
+    }
+    const float texelX = u * static_cast<float>(width) - 0.5f;
+    const float texelY = v * static_cast<float>(height) - 0.5f;
+    const auto  addrCoord = [&](std::int32_t cc, std::uint32_t e) -> std::uint32_t
+    {
+        const std::int32_t lim = static_cast<std::int32_t>(e);
+        if (address == TextureAddress::Repeat)
+        {
+            const std::int32_t w = cc % lim;
+            return static_cast<std::uint32_t>(w < 0 ? w + lim : w);
+        }
+        return static_cast<std::uint32_t>(std::clamp(cc, 0, lim - 1));
+    };
+    const auto alphaAt = [&](std::uint32_t x, std::uint32_t y) -> float
+    { return static_cast<float>(pixels[(static_cast<std::size_t>(y) * width + x) * 4 + 3]) / 255.0f; };
+    if (filter == TextureFilter::Nearest)
+    {
+        const auto x = addrCoord(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), width);
+        const auto y = addrCoord(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), height);
+        return alphaAt(x, y);
+    }
+    const auto          x0i = static_cast<std::int32_t>(std::floor(texelX));
+    const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
+    const float         fx  = texelX - static_cast<float>(x0i);
+    const float         fy  = texelY - static_cast<float>(y0i);
+    const std::uint32_t x0 = addrCoord(x0i, width), x1 = addrCoord(x0i + 1, width);
+    const std::uint32_t y0 = addrCoord(y0i, height), y1 = addrCoord(y0i + 1, height);
+    const float a00 = alphaAt(x0, y0), a10 = alphaAt(x1, y0), a01 = alphaAt(x0, y1), a11 = alphaAt(x1, y1);
+    const float omx = 1.0f - fx, omy = 1.0f - fy;
+    return a00 * omx * omy + a10 * fx * omy + a01 * omx * fy + a11 * fx * fy;
 }
 
 // Precomputes shading inputs: radiance = color * intensity, inverse-squared
@@ -787,6 +867,73 @@ void HeadlessBackend::drawMeshInstances(
     }
 }
 
+// Shell-fur stack on the CPU rasterizer: one rasterization pass per shell
+// layer, each with displaced vertices, the strand-crop alpha, and alpha
+// blending (no depth write). Mirrors the Vulkan fur pipeline exactly - same
+// furShade/furAlpha formulas, same displacement, same blend space - so both
+// backends produce the same image (the parity contract in mesh.frag's header
+// comment, extended by fur.frag and backends.md).
+//
+// Sequential rasterization only: the shell stack is fill-rate-bound and the
+// band/tile splits parallelize per-draw pixel work, not the layer loop; fur
+// draws reuse the transform cache per layer (each layer stamps a fresh
+// generation), which is where the CPU cost actually amortizes.
+void HeadlessBackend::drawFur(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material,
+    const FurLayerParams &params)
+{
+    const auto found = meshes.find(mesh);
+    if (found == meshes.end() || modelMatrix == nullptr || framebufferWidth == 0 || framebufferHeight == 0)
+    {
+        return;
+    }
+    const HeadlessMesh &meshData = found->second;
+
+    // Same hard layer bound as the Vulkan backend: a corrupted params must
+    // not turn one call into a pathological loop.
+    const std::uint32_t layerCount = std::clamp(params.layerCount, 0u, 64u);
+    if (layerCount == 0)
+    {
+        return;
+    }
+
+    const std::size_t triCount = meshData.indices.size() / 3;
+    statistics_.trianglesSubmitted += static_cast<std::uint64_t>(triCount) * layerCount;
+
+    for (std::uint32_t layer = 1; layer <= layerCount; ++layer)
+    {
+        RasterSetup setup;
+        if (!prepareRasterization(meshData,
+                modelMatrix,
+                material,
+                meshData.indices.data(),
+                meshData.indices.size(),
+                setup,
+                nullptr,
+                &params,
+                static_cast<float>(layer)))
+        {
+            return;
+        }
+        rasterizeTriangles(meshData, setup, 0, setup.triangleCount, false, nullptr);
+        statistics_.trianglesRasterized += setup.triangleCount;
+    }
+}
+
+// Fur across several instances is repeated drawFur calls (same convention as
+// drawMeshInstances on this backend).
+void HeadlessBackend::drawFurInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
+    const MeshMaterial &material, const FurLayerParams &params)
+{
+    if (modelMatrices == nullptr)
+    {
+        return;
+    }
+    for (std::uint32_t index = 0; index < instanceCount; ++index)
+    {
+        drawFur(mesh, modelMatrices + static_cast<std::size_t>(index) * 16u, material, params);
+    }
+}
+
 // Software overlay rasterizer: maps display pixels to framebuffer pixels,
 // scissors each command's clip rectangle, then rasterizes indexed triangles
 // with barycentric coverage, texture sampling, vertex colors, and "over"
@@ -987,7 +1134,7 @@ const HeadlessTexture *HeadlessBackend::mapFor(TextureHandle handle, const Headl
 // across the edge) used to flip the sign and cull nearly every front face.
 bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float *modelMatrix,
     const MeshMaterial &material, const std::uint32_t *activeIndices, std::size_t activeIndexCount,
-    RasterSetup &outSetup, const DrawBounds *precomputedBounds)
+    RasterSetup &outSetup, const DrawBounds *precomputedBounds, const FurLayerParams *furParams, float furLayer)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
@@ -1000,8 +1147,20 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.indexData         = activeIndices;
     outSetup.model             = glm::make_mat4(modelMatrix);
     outSetup.viewProjection    = viewProjection_ * outSetup.model;
+    outSetup.viewProjectionWorld = viewProjection_;
     outSetup.modelNormalMatrix = material.unlit ? glm::mat3(1.0f) : glm::mat3(outSetup.model);
     outSetup.unlit             = material.unlit;
+    // Shell-fur state: the transform below displaces along the object-space
+    // normals once per layer; a fur draw stamps a fresh transform generation
+    // so the cache (reused across triangles within the layer) never carries
+    // a previous layer's displaced positions.
+    outSetup.fur               = furParams != nullptr;
+    outSetup.furLayerRatio     = outSetup.fur ? glm::clamp(furLayer / glm::max(float(furParams->layerCount), 1.0f), 0.0f, 1.0f) : 0.0f;
+    outSetup.furLayerIndex     = outSetup.fur ? furLayer : 0.0f;
+    outSetup.furHeight         = outSetup.fur ? furParams->furHeight : 0.0f;
+    outSetup.furGravity        = outSetup.fur ? furParams->gravityStrength : 0.0f;
+    outSetup.furDensityBoost   = outSetup.fur ? furParams->densityBoost : 6.0f;
+    outSetup.furOuterFade      = outSetup.fur ? furParams->outerLayerFade : 1.0f;
 
     // World-space bounds sphere, computed at most once per draw. drawMesh
     // already builds one for its LOD pick and passes it in; otherwise it is
@@ -1093,10 +1252,29 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
                     {
                         continue;
                     }
-                    const glm::vec4    localPos(posData[v * 3], posData[v * 3 + 1], posData[v * 3 + 2], 1.0f);
+                    const glm::vec3 localPos3(posData[v * 3], posData[v * 3 + 1], posData[v * 3 + 2]);
                     TransformedVertex &out = transformedVertices_[v];
-                    out.clip               = viewProjection * localPos;
-                    out.worldPosition      = glm::vec3(model * localPos);
+                    if (outSetup.fur)
+                    {
+                        // Shell-fur displacement (fur.vert mirror): outward
+                        // along the object-space normal, gravity droop in
+                        // world space, clip from the RAW view-projection.
+                        const FurDisplacedVertex displaced = furDisplaceVertex(localPos3,
+                            glm::make_vec3(nrmData + v * 3),
+                            outSetup.model,
+                            outSetup.viewProjectionWorld,
+                            outSetup.furLayerRatio,
+                            outSetup.furHeight,
+                            outSetup.furGravity);
+                        out.clip          = displaced.clip;
+                        out.worldPosition = displaced.worldPosition;
+                    }
+                    else
+                    {
+                        const glm::vec4 localPos(localPos3, 1.0f);
+                        out.clip          = viewProjection * localPos;
+                        out.worldPosition = glm::vec3(model * localPos);
+                    }
                     if (!unlit)
                     {
                         const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + v * 3);
@@ -1339,10 +1517,28 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
             }
             else
             {
-                const glm::vec4 localPosition(
-                    posData[vertexIndex * 3], posData[vertexIndex * 3 + 1], posData[vertexIndex * 3 + 2], 1.0f);
-                corners[corner].clip          = viewProjection * localPosition;
-                corners[corner].worldPosition = glm::vec3(model * localPosition);
+                const glm::vec3 localPosition3(
+                    posData[vertexIndex * 3], posData[vertexIndex * 3 + 1], posData[vertexIndex * 3 + 2]);
+                if (setup.fur)
+                {
+                    // Shell-fur displacement (fur.vert mirror), same as the
+                    // transform-cache path above.
+                    const FurDisplacedVertex displaced = furDisplaceVertex(localPosition3,
+                        glm::make_vec3(nrmData + vertexIndex * 3),
+                        model,
+                        setup.viewProjectionWorld,
+                        setup.furLayerRatio,
+                        setup.furHeight,
+                        setup.furGravity);
+                    corners[corner].clip          = displaced.clip;
+                    corners[corner].worldPosition = displaced.worldPosition;
+                }
+                else
+                {
+                    const glm::vec4 localPosition(localPosition3, 1.0f);
+                    corners[corner].clip          = viewProjection * localPosition;
+                    corners[corner].worldPosition = glm::vec3(model * localPosition);
+                }
                 if (!unlit)
                 {
                     const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + vertexIndex * 3);
@@ -1559,6 +1755,35 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             baseColor *= baseColorMap->sample(interpolatedUv.x, interpolatedUv.y);
                         }
 
+                        // Shell-fur strand crop (fur.frag mirror): the layer
+                        // alpha first - a fully transparent texel skips the
+                        // shading exactly like the shader's discard. field =
+                        // the fur texture's alpha (strand height); the neutral
+                        // stand-in reports 1 (a fur-less field stays opaque).
+                        float furPixelAlpha = 1.0f;
+                        if (setup.fur)
+                        {
+                            // Jittered strand field (furStrandField <->
+                            // fur.frag furFieldJitter): the per-layer hash
+                            // breaks the shell-band artifact up into noise.
+                            const float strandField = hasBaseColorMap
+                                ? furStrandField(baseColorMap->sampleAlpha(interpolatedUv.x, interpolatedUv.y),
+                                    interpolatedUv,
+                                    setup.furLayerIndex)
+                                : 1.0f;
+                            furPixelAlpha = furAlpha(strandField,
+                                setup.furLayerRatio,
+                                setup.furDensityBoost,
+                                setup.furOuterFade);
+                            if (furPixelAlpha <= 0.0039f)
+                            {
+                                weightA += weightADx;
+                                weightB += weightBDx;
+                                pixelDepth += depthADx;
+                                continue;
+                            }
+                        }
+
                         glm::vec3 shaded = baseColor;
                         if (!unlit)
                         {
@@ -1570,6 +1795,29 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                                                  + correctedC * clipped[cornerC].worldNormal;
                             const glm::vec3 geometryNormal       = glm::normalize(interpolatedNormal);
 
+                            if (setup.fur)
+                            {
+                                // Shell-fur shading (furShade <-> fur.frag):
+                                // half-Lambert diffuse + Kajiya-Kay specular
+                                // against the strand tangent (= the shell
+                                // normal), hemispheric ambient, direct lights.
+                                // No normal map, no occlusion map, no lumen_gi
+                                // probe walk - same perf contract as fur.frag.
+                                const float strandShade = glm::mix(0.60f, 1.05f, setup.furLayerRatio);
+                                shaded = furShade(geometryNormal,
+                                    interpolatedPosition,
+                                    cameraPosition_,
+                                    lightDirection_,
+                                    sunRadiance_,
+                                    ambientSky_,
+                                    ambientGround_,
+                                    baseColor,
+                                    strandShade,
+                                    directLights_.data(),
+                                    static_cast<std::uint32_t>(directLights_.size()));
+                            }
+                            else
+                            {
                             // Without a normal map the surface normal IS the
                             // interpolated geometry normal: skip the TBN
                             // construction and its per-pixel normalize (the
@@ -1619,6 +1867,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 directLights_.data(),
                                 static_cast<std::uint32_t>(directLights_.size()),
                                 probeGrid_.valid() ? &probeGrid_ : nullptr);
+                            }
                         }
 
                         if (hasEmissive)
@@ -1638,6 +1887,26 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         // for the GPU-side switch).
                         shaded = toneMapColor(shaded, environment_.exposure, environment_.toneMapping);
                         shaded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+
+                        if (setup.fur)
+                        {
+                            // Shell-fur commit: alpha blend AFTER tone map +
+                            // gamma encode - the same space the fur pipeline's
+                            // fixed-function blending operates in on the UNORM
+                            // target - and NO depth write (transparent layers
+                            // must not occlude each other or later geometry).
+                            std::uint8_t *pixel  = colorBuffer + pixelIndex * 4;
+                            const float   oneMinus = 1.0f - furPixelAlpha;
+                            pixel[0] = toByte(shaded.x * furPixelAlpha + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                            pixel[1] = toByte(shaded.y * furPixelAlpha + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                            pixel[2] = toByte(shaded.z * furPixelAlpha + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                            pixel[3] = 255;
+                            rasterized = true;
+                            weightA += weightADx;
+                            weightB += weightBDx;
+                            pixelDepth += depthADx;
+                            continue;
+                        }
 
                         if (useAtomicDepth)
                         {

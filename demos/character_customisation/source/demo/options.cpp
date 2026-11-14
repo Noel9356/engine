@@ -27,6 +27,7 @@ const char *optionsUsage() noexcept
            "  --camera-pitch <deg>     Character screen orbit elevation (default 10).\n"
            "  --orbit-distance <m>     Character screen orbit radius (default 2.6).\n"
            "  --hide-panel             Draw the character viewport without the studio panel.\n"
+           "  --hide-hud               Also drop the stats/hints overlay (clean captures).\n"
            "  --view character|benchmark|sun\n"
            "                           Select the screen (default: character).\n"
            "  --character-test         Run the character assembly test operations, then exit.\n"
@@ -36,7 +37,14 @@ const char *optionsUsage() noexcept
            "                           bull, alpaca, horse, stag, taur_<species>, winged, tall, broad,\n"
            "                           longmuzzle, marked, longtail, bigtaur, compact, noappend).\n"
            "  --part-previews <dir>    Render one standalone preview frame per part (PPM) and exit.\n"
-           "  --panel-tab <0-4>        Open the studio panel on this tab (Plan/Body/Parts/Motion/File).\n";
+           "  --dump-instance-boxes    Print every part's local + world bounds, then the world box.\n"
+           "  --panel-tab <0-4>        Open the studio panel on this tab (Plan/Body/Parts/Motion/File).\n"
+           "  --fur-test               Run the shell-fur self-test (texture determinism, LOD ladder, one\n"
+           "                           fur draw), then exit.\n"
+           "  --fur-off                Render the character without shell fur (A/B the cost).\n"
+           "  --fur-preset <name>      Fur look: plush, shaggy or velvety (default: plush).\n"
+           "  --fur-layers <n>         Pin the shell layer count (1..64); 0 = the LOD evaluator decides.\n"
+           "  --fur-length <scale>     Global strand-length multiplier (default 1.0).\n";
 }
 
 // Strict flag parser: every recognized flag consumes the next token as its
@@ -51,9 +59,11 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         if (argument != "--screenshot" && argument != "--screenshot-frame" && argument != "--quit-after"
             && argument != "--camera" && argument != "--camera-yaw" && argument != "--camera-pitch"
             && argument != "--orbit-distance" && argument != "--camera-target-y" && argument != "--hide-panel"
-            && argument != "--view" && argument != "--character-test" && argument != "--character-lab"
-            && argument != "--character-drive" && argument != "--part-previews"
-            && argument != "--panel-tab")
+            && argument != "--hide-hud" && argument != "--view" && argument != "--character-test"
+            && argument != "--character-lab" && argument != "--dump-instance-boxes" && argument != "--character-drive"
+            && argument != "--part-previews" && argument != "--panel-tab" && argument != "--fur-test"
+            && argument != "--fur-off" && argument != "--fur-preset" && argument != "--fur-layers"
+            && argument != "--fur-length")
         {
             outError = "unknown application argument '" + argument + "'";
             return false;
@@ -63,9 +73,71 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
             parsedOptions.characterTest = true;
             continue;
         }
+        if (argument == "--fur-test")
+        {
+            parsedOptions.furTest = true;
+            continue;
+        }
+        if (argument == "--fur-off")
+        {
+            parsedOptions.furDisabled = true;
+            continue;
+        }
+        if (argument == "--fur-preset")
+        {
+            if (index + 1 >= arguments.size() || arguments[index + 1].starts_with("--"))
+            {
+                outError = "missing value for --fur-preset";
+                return false;
+            }
+            parsedOptions.furPreset = arguments[++index];
+            continue;
+        }
+        if (argument == "--fur-layers")
+        {
+            if (index + 1 >= arguments.size() || arguments[index + 1].starts_with("--"))
+            {
+                outError = "missing value for --fur-layers";
+                return false;
+            }
+            const std::string    &layerValue = arguments[++index];
+            char                 *end        = nullptr;
+            const unsigned long long parsed  = std::strtoull(layerValue.c_str(), &end, 10);
+            if (end == layerValue.c_str() || *end != '\0' || parsed > 64)
+            {
+                outError = "--fur-layers expects a value in 0..64";
+                return false;
+            }
+            parsedOptions.furLayers = static_cast<std::uint32_t>(parsed);
+            continue;
+        }
+        if (argument == "--fur-length")
+        {
+            if (index + 1 >= arguments.size() || arguments[index + 1].starts_with("--"))
+            {
+                outError = "missing value for --fur-length";
+                return false;
+            }
+            const std::string &lengthValue = arguments[++index];
+            char              *end         = nullptr;
+            const double       parsed      = std::strtod(lengthValue.c_str(), &end);
+            if (end == lengthValue.c_str() || *end != '\0' || !std::isfinite(parsed) || parsed <= 0.0
+                || parsed > 8.0)
+            {
+                outError = "--fur-length expects a value in (0..8]";
+                return false;
+            }
+            parsedOptions.furLength = static_cast<float>(parsed);
+            continue;
+        }
         if (argument == "--character-lab")
         {
             parsedOptions.characterLab = true;
+            continue;
+        }
+        if (argument == "--dump-instance-boxes")
+        {
+            parsedOptions.dumpInstanceBoxes = true;
             continue;
         }
         if (argument == "--part-previews")
@@ -81,6 +153,11 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         if (argument == "--hide-panel")
         {
             parsedOptions.hidePanel = true;
+            continue;
+        }
+        if (argument == "--hide-hud")
+        {
+            parsedOptions.hideHud = true;
             continue;
         }
         if (index + 1 >= arguments.size() || arguments[index + 1].starts_with("--"))
@@ -118,20 +195,78 @@ bool parseOptions(const std::vector<std::string> &arguments, Options &outOptions
         }
         else if (argument == "--character-drive")
         {
-            static const char *const allowedPresets[] = {"human", "dragonhead", "furryfox", "furrywolf",
-                "bare", "taur", "quadruped", "fox", "shiba", "husky", "wolf", "donkey", "cow", "deer",
-                "bull", "alpaca", "horse", "stag", "winged", "tall", "broad", "longmuzzle", "marked",
-                "longtail", "bigtaur", "compact", "noappend",
-                "taur_fox", "taur_shibainu", "taur_husky", "taur_wolf", "taur_donkey",
-                "taur_cow", "taur_deer", "taur_bull", "taur_alpaca", "taur_horse", "taur_stag"};
-            const bool allowed = std::find(std::begin(allowedPresets), std::end(allowedPresets), value)
-                              != std::end(allowedPresets);
+            static const char *const allowedPresets[]
+                = {"human",
+                    "dragonhead",
+                    "furryfox",
+                    "furrywolf",
+                    "bare",
+                    "taur",
+                    "quadruped",
+                    "fox",
+                    "shiba",
+                    "husky",
+                    "wolf",
+                    "donkey",
+                    "cow",
+                    "deer",
+                    "bull",
+                    "alpaca",
+                    "horse",
+                    "stag",
+                    "trex",
+                    "raptor",
+                    "triceratops",
+                    "stegosaurus",
+                    "apatosaurus",
+                    "parasaurolophus",
+                    "rat",
+                    "shark",
+                    "dolphin",
+                    "shibainu",
+                    "winged",
+                    "tall",
+                    "broad",
+                    "longmuzzle",
+                    "marked",
+                    "longtail",
+                    "bigtaur",
+                    "compact",
+                    "noappend",
+                    "cat",
+                    "jackal",
+                    "furrybody",
+                    "taur_fox",
+                    "taur_shibainu",
+                    "taur_husky",
+                    "taur_wolf",
+                    "taur_donkey",
+                    "taur_cow",
+                    "taur_deer",
+                    "taur_bull",
+                    "taur_alpaca",
+                    "taur_horse",
+                    "taur_stag",
+                    "taur_trex",
+                    "taur_raptor",
+                    "taur_triceratops",
+                    "taur_stegosaurus",
+                    "taur_apatosaurus",
+                    "taur_parasaurolophus",
+                    "taur_rat",
+                    "taur_shark",
+                    "taur_dolphin",
+                    "taur_shiba"};
+            const bool allowed
+                = std::find(std::begin(allowedPresets), std::end(allowedPresets), value) != std::end(allowedPresets);
             if (!allowed)
             {
                 outError = "invalid character drive preset '" + value
-                         + "'; expected human, dragonhead, furryfox, furrywolf, bare, taur, quadruped, fox,"
-                           " shiba, husky, wolf, donkey, cow, deer, bull, alpaca, horse, stag, taur_<species>,"
-                           " winged, tall, broad, longmuzzle, marked, longtail, bigtaur, compact, or noappend";
+                         + "'; expected human, dragonhead, furryfox, furrywolf, bare, taur, quadruped, a"
+                           " species name (fox, shiba, husky, wolf, donkey, cow, deer, bull, alpaca, horse,"
+                           " stag, trex, raptor, triceratops, stegosaurus, apatosaurus, parasaurolophus,"
+                           " rat, shark, dolphin), taur_<species>, cat, jackal, furrybody, winged, tall,"
+                           " broad, longmuzzle, marked, longtail, bigtaur, compact, or noappend";
                 return false;
             }
             parsedOptions.characterDrive = value;

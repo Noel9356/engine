@@ -65,6 +65,16 @@ public:
     virtual void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) = 0;
     virtual void drawMeshInstances(
         MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount, const MeshMaterial &material) = 0;
+
+    // Shell-fur draws (see FurLayerParams in capabilities.hpp): layerCount
+    // alpha-blended shell layers over the opaque base surface. Both backends
+    // implement them; the headless rasterizer mirrors the fur pipeline's
+    // shading exactly (render_shared.hpp furShade <-> shaders/fur.frag).
+    virtual void drawFur(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material,
+        const FurLayerParams &params) = 0;
+    virtual void drawFurInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
+        const MeshMaterial &material, const FurLayerParams &params) = 0;
+
     virtual void drawOverlay(const OverlayDrawData &data)                                                       = 0;
     virtual void endFrame()                                                                                     = 0;
 

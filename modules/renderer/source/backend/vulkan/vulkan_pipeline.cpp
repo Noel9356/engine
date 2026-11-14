@@ -11,6 +11,8 @@
 #include "vulkan_pipeline.hpp"
 #include "vulkan_device.hpp"
 
+#include "fur_frag_gen.hpp"
+#include "fur_vert_gen.hpp"
 #include "mesh_frag_gen.hpp"
 #include "mesh_vert_gen.hpp"
 #include "ui_frag_gen.hpp"
@@ -197,13 +199,16 @@ std::size_t savePipelineCache(
 // for load/store overlap) -> descriptor layouts -> pipeline layout (2 sets +
 // 112-byte push constants) -> shader modules from the generated SPIR-V ->
 // graphics pipeline (the SRGB_OUTPUT specialization constant is wired here:
-// constant_id 6 gets srgbOutput_) -> overlay pipeline. The pipeline cache is
-// seeded from disk when a previous run saved one.
+// constant_id 6 gets srgbOutput_) -> fur pipeline -> overlay pipeline. The
+// pipeline cache is seeded from disk when a previous run saved one.
 bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorFormat, VkFormat depthFormat)
 {
     const VkDevice vulkanDevice = device.device();
 
     char resultScratch[64];
+
+    renderTargetColorFormat_ = colorFormat;
+    renderTargetDepthFormat_ = depthFormat;
 
     {
         const VkAttachmentDescription colorAttachment{
@@ -644,13 +649,17 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             return false;
         }
     }
+    if (!buildFurPipeline(vulkanDevice, resultScratch, sizeof(resultScratch)))
+    {
+        return false;
+    }
     if (!buildOverlayPipeline(vulkanDevice, resultScratch, sizeof(resultScratch)))
     {
         return false;
     }
 
     // One-time bring-up diagnostic (never on the frame path): whether the
-    // disk pipeline cache contributed anything and how long the two
+    // disk pipeline cache contributed anything and how long the three
     // graphics pipelines took to create. Cold builds and slow creates here
     // are exactly the first-use stall the P99 protocol looks for; a warm
     // cache should show near-zero times.
@@ -660,9 +669,260 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pipelineBuildStart_)
                   .count();
         std::fprintf(stderr,
-            "renderer module: pipeline cache %s; mesh/overlay pipelines built in %.1f ms\n",
+            "renderer module: pipeline cache %s; mesh/fur/overlay pipelines built in %.1f ms\n",
             diskCacheBytesLoaded_ != 0 ? "seeded from disk" : "cold (no usable disk cache)",
             buildMilliseconds);
+    }
+    return true;
+}
+
+// Shell-fur pipeline: same render pass / descriptor layouts / vertex input as
+// the mesh pipeline, but the fur_*_gen.hpp shaders, a 128-byte push constant
+// range, alpha blending (src-alpha / one-minus-src-alpha), depth TEST on with
+// depth WRITE off, and back-face culling like the mesh pipeline. The shell
+// layers are nested outward from the base surface: drawing them in layer
+// order (innermost first) composites back-to-front along every view ray that
+// touches an outward-facing shell, and the base surface's depth rejects the
+// far-side shells.
+bool VulkanPipeline::buildFurPipeline(VkDevice device, char *resultScratch, std::size_t resultScratchCapacity)
+{
+    const VkPushConstantRange pushRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(FurPushConstants),
+    };
+    const VkDescriptorSetLayout      setLayouts[2] = {frameSetLayout_, materialSetLayout_};
+    const VkPipelineLayoutCreateInfo layoutInfo{
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext                  = nullptr,
+        .flags                  = 0,
+        .setLayoutCount         = 2,
+        .pSetLayouts            = setLayouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pushRange,
+    };
+    VkResult result = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &furPipelineLayout_);
+    if (result != VK_SUCCESS)
+    {
+        std::fprintf(stderr,
+            "renderer module: fur pipeline layout creation failed (%s)\n",
+            resultName(result, resultScratch, resultScratchCapacity));
+        return false;
+    }
+
+    VkShaderModule                 vertexModule   = VK_NULL_HANDLE;
+    VkShaderModule                 fragmentModule = VK_NULL_HANDLE;
+    const VkShaderModuleCreateInfo vertexInfo{
+        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext    = nullptr,
+        .flags    = 0,
+        .codeSize = sizeof(furVertexSpirv),
+        .pCode    = furVertexSpirv,
+    };
+    const VkShaderModuleCreateInfo fragmentInfo{
+        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext    = nullptr,
+        .flags    = 0,
+        .codeSize = sizeof(furFragmentSpirv),
+        .pCode    = furFragmentSpirv,
+    };
+    result = vkCreateShaderModule(device, &vertexInfo, nullptr, &vertexModule);
+    if (result == VK_SUCCESS)
+        result = vkCreateShaderModule(device, &fragmentInfo, nullptr, &fragmentModule);
+    if (result != VK_SUCCESS)
+    {
+        if (vertexModule != VK_NULL_HANDLE)
+            vkDestroyShaderModule(device, vertexModule, nullptr);
+        std::fprintf(stderr,
+            "renderer module: fur shader module creation failed (%s)\n",
+            resultName(result, resultScratch, resultScratchCapacity));
+        return false;
+    }
+
+    // Same specialization contract as the mesh pipeline: MAX_LIGHTS
+    // (constant_id 0) and SRGB_OUTPUT (constant_id 6) on the fragment stage.
+    static const std::uint32_t            specData[2]    = {32u, srgbOutput_ ? 1u : 0u};
+    static const VkSpecializationMapEntry specEntries[2] = {
+        {0, 0, sizeof(std::uint32_t)},
+        {6, sizeof(std::uint32_t), sizeof(std::uint32_t)},
+    };
+    const VkSpecializationInfo specInfo{
+        .mapEntryCount = 2,
+        .pMapEntries   = specEntries,
+        .dataSize      = sizeof(specData),
+        .pData         = specData,
+    };
+
+    const VkPipelineShaderStageCreateInfo stages[2]
+        = {{.sType                  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+               .pNext               = nullptr,
+               .flags               = 0,
+               .stage               = VK_SHADER_STAGE_VERTEX_BIT,
+               .module              = vertexModule,
+               .pName               = "main",
+               .pSpecializationInfo = nullptr},
+            {.sType                  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext               = nullptr,
+                .flags               = 0,
+                .stage               = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module              = fragmentModule,
+                .pName               = "main",
+                .pSpecializationInfo = &specInfo}};
+
+    // Identical vertex input to the mesh pipeline (same vertex ABI, same
+    // per-instance mat4 binding): fur shells draw the same meshes.
+    const VkVertexInputBindingDescription vertexBindings[2]
+        = {{.binding = 0, .stride = meshVertexFloatCount * sizeof(float), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX},
+            {.binding = 1, .stride = sizeof(float) * 16u, .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE}};
+
+    const VkVertexInputAttributeDescription vertexAttributes[8]
+        = {{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 12},
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 24},
+            {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 36},
+            {.location = 4, .binding = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0},
+            {.location = 5, .binding = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16},
+            {.location = 6, .binding = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 32},
+            {.location = 7, .binding = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 48}};
+    const VkPipelineVertexInputStateCreateInfo vertexInput{
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext                           = nullptr,
+        .flags                           = 0,
+        .vertexBindingDescriptionCount   = 2,
+        .pVertexBindingDescriptions      = vertexBindings,
+        .vertexAttributeDescriptionCount = 8,
+        .pVertexAttributeDescriptions    = vertexAttributes,
+    };
+    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext                  = nullptr,
+        .flags                  = 0,
+        .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE,
+    };
+    const VkPipelineViewportStateCreateInfo viewportState{
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .pNext         = nullptr,
+        .flags         = 0,
+        .viewportCount = 1,
+        .pViewports    = nullptr,
+        .scissorCount  = 1,
+        .pScissors     = nullptr,
+    };
+    const VkPipelineRasterizationStateCreateInfo rasterization{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .pNext                   = nullptr,
+        .flags                   = 0,
+        .depthClampEnable        = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode             = VK_POLYGON_MODE_FILL,
+        .cullMode                = cullBackFaces_ ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,
+        .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable         = VK_FALSE,
+        .depthBiasConstantFactor = 0.0f,
+        .depthBiasClamp          = 0.0f,
+        .depthBiasSlopeFactor    = 0.0f,
+        .lineWidth               = 1.0f,
+    };
+    const VkPipelineMultisampleStateCreateInfo multisample{
+        .sType                 = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .pNext                 = nullptr,
+        .flags                 = 0,
+        .rasterizationSamples  = sampleCount_,
+        .sampleShadingEnable   = VK_FALSE,
+        .minSampleShading      = 0.0f,
+        .pSampleMask           = nullptr,
+        .alphaToCoverageEnable = VK_FALSE,
+        .alphaToOneEnable      = VK_FALSE,
+    };
+    // Depth test on (shell layers behind the opaque base surface must be
+    // rejected), depth write OFF (transparent layers must not occlude each
+    // other or the geometry drawn after them).
+    const VkPipelineDepthStencilStateCreateInfo depthStencil{
+        .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .pNext                 = nullptr,
+        .flags                 = 0,
+        .depthTestEnable       = VK_TRUE,
+        .depthWriteEnable      = VK_FALSE,
+        .depthCompareOp        = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable     = VK_FALSE,
+        .front                 = {},
+        .back                  = {},
+        .minDepthBounds        = 0.0f,
+        .maxDepthBounds        = 1.0f,
+    };
+    // Standard non-premultiplied alpha blending, matching the headless
+    // rasterizer's fur write path (blend AFTER tone map + gamma encode, the
+    // same space fixed-function blending operates in on the UNORM target).
+    const VkPipelineColorBlendAttachmentState blendAttachment{
+        .blendEnable         = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp        = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp        = VK_BLEND_OP_ADD,
+        .colorWriteMask
+        = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendStateCreateInfo colorBlend{
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .pNext           = nullptr,
+        .flags           = 0,
+        .logicOpEnable   = VK_FALSE,
+        .logicOp         = VK_LOGIC_OP_COPY,
+        .attachmentCount = 1,
+        .pAttachments    = &blendAttachment,
+        .blendConstants  = {0.0f, 0.0f, 0.0f, 0.0f},
+    };
+    const VkDynamicState                   dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    const VkPipelineDynamicStateCreateInfo dynamicState{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .pNext             = nullptr,
+        .flags             = 0,
+        .dynamicStateCount = 2,
+        .pDynamicStates    = dynamicStates,
+    };
+    const VkPipelineRenderingCreateInfo renderingInfo{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .pNext                   = nullptr,
+        .viewMask                = 0,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &renderTargetColorFormat_,
+        .depthAttachmentFormat   = renderTargetDepthFormat_,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
+    const VkGraphicsPipelineCreateInfo pipelineInfo{
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = dynamicRenderingEnabled_ ? &renderingInfo : nullptr,
+        .flags               = 0,
+        .stageCount          = 2,
+        .pStages             = stages,
+        .pVertexInputState   = &vertexInput,
+        .pInputAssemblyState = &inputAssembly,
+        .pTessellationState  = nullptr,
+        .pViewportState      = &viewportState,
+        .pRasterizationState = &rasterization,
+        .pMultisampleState   = &multisample,
+        .pDepthStencilState  = &depthStencil,
+        .pColorBlendState    = &colorBlend,
+        .pDynamicState       = &dynamicState,
+        .layout              = furPipelineLayout_,
+        .renderPass          = dynamicRenderingEnabled_ ? VK_NULL_HANDLE : renderPass_,
+        .subpass             = 0,
+        .basePipelineHandle  = VK_NULL_HANDLE,
+        .basePipelineIndex   = 0,
+    };
+    result = vkCreateGraphicsPipelines(device, pipelineCache_, 1, &pipelineInfo, nullptr, &furPipeline_);
+    vkDestroyShaderModule(device, vertexModule, nullptr);
+    vkDestroyShaderModule(device, fragmentModule, nullptr);
+    if (result != VK_SUCCESS)
+    {
+        std::fprintf(stderr,
+            "renderer module: fur graphics pipeline creation failed (%s)\n",
+            resultName(result, resultScratch, resultScratchCapacity));
+        return false;
     }
     return true;
 }
@@ -901,6 +1161,16 @@ void VulkanPipeline::destroy(VkDevice device)
     {
         vkDestroyPipelineLayout(device, overlayPipelineLayout_, nullptr);
         overlayPipelineLayout_ = VK_NULL_HANDLE;
+    }
+    if (furPipeline_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, furPipeline_, nullptr);
+        furPipeline_ = VK_NULL_HANDLE;
+    }
+    if (furPipelineLayout_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipelineLayout(device, furPipelineLayout_, nullptr);
+        furPipelineLayout_ = VK_NULL_HANDLE;
     }
     if (pipeline_ != VK_NULL_HANDLE)
     {

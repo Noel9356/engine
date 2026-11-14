@@ -865,6 +865,8 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     lastBoundMaterialSet_       = VK_NULL_HANDLE;
     lastBoundInstanceOffset_    = 0;
     hasLastBoundInstanceBuffer_ = false;
+    hasLastFurPushConstants_    = false;
+    lastFurPushConstants_       = FurPushConstants{};
 
     std::uint32_t width  = viewportWidth_ != 0 ? viewportWidth_ : swapchain_->extent().width;
     std::uint32_t height = viewportHeight_ != 0 ? viewportHeight_ : swapchain_->extent().height;
@@ -970,6 +972,7 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
         vkCmdBeginRenderPass(command, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
     }
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline());
+    lastBoundPipeline_ = BoundPipeline::Mesh;
 
     const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
     const VkRect2D   scissor{{0, 0}, {width, height}};
@@ -999,6 +1002,19 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
         return;
     }
 
+    VkCommandBuffer command = frames_->commandBuffer();
+    if (lastBoundPipeline_ != BoundPipeline::Mesh)
+    {
+        // A fur draw switched to the blended pipeline; bind the mesh
+        // pipeline back. Push constants must be pushed again: the fur path
+        // wrote 128 bytes through its own layout, and relying on the stale
+        // first-112-bytes equality across layout switches is not worth the
+        // branch savings.
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline());
+        lastBoundPipeline_      = BoundPipeline::Mesh;
+        hasLastPushConstants_   = false;
+    }
+
     if (frustumCullingEnabled_ && cameraInitialized_ && vulkanMesh->boundsValid && vulkanMesh->indexCount >= 12)
     {
         // Sphere-vs-plane cull: reject when the model-transformed bounding
@@ -1023,8 +1039,6 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
             }
         }
     }
-
-    VkCommandBuffer command = frames_->commandBuffer();
 
     PushConstants push; // .model is the object matrix; material factors fill the rest
     std::memcpy(push.model, modelMatrix, sizeof(push.model));
@@ -1083,30 +1097,22 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
     statistics_.trianglesRasterized += vulkanMesh->indexCount / 3;
 }
 
-// Streams the instance matrices into this frame slot's host-visible ring
-// buffer (frustum-culled and finite-checked first), then issues one indexed
-// draw for the whole run with the instance buffer bound at the run's offset.
-// Matrices that overflow the stream capacity fall back to per-instance
-// drawMesh calls (streamOverflow path re-walks the list, skipping the ones
-// already drawn).
-void VulkanBackend::drawMeshInstances(
-    MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount, const MeshMaterial &material)
+// Shared by drawMeshInstances/drawFurInstances: frustum-culls, finite-checks
+// and streams the instance matrices into this frame slot's host-visible ring
+// buffer, then flushes the written range. Returns the visible count; the run
+// starts at *outOffset. *outOverflow reports matrices that did not fit the
+// ring (or a failed flush - the cursor is rolled back in that case) so the
+// caller can fall back to per-instance draws for the leftovers.
+std::uint32_t VulkanBackend::streamInstanceMatrices(bool boundsValid, float boundsRadius, const float *boundsCenter,
+    std::uint32_t indexCount, const float *modelMatrices, std::uint32_t instanceCount, VkDeviceSize *outOffset,
+    bool *outOverflow)
 {
-    if (!frameActive_ || modelMatrices == nullptr || instanceCount == 0)
-    {
-        return;
-    }
-    const auto *vulkanMesh = resources_->meshFor(mesh);
-    if (vulkanMesh == nullptr || frames_->currentFrame() >= instanceBuffers_.size())
-    {
-        return;
-    }
-
     InstanceBuffer        &instanceBuffer      = instanceBuffers_[frames_->currentFrame()];
     constexpr VkDeviceSize matrixSize          = sizeof(float) * 16u;
     const VkDeviceSize     firstInstanceOffset = instanceBuffer.cursor;
-    std::uint32_t          visibleCount        = 0;
-    bool                   streamOverflow      = false;
+    *outOffset                            = firstInstanceOffset;
+    *outOverflow                          = false;
+    std::uint32_t          visibleCount   = 0;
 
     const auto isFiniteMatrix = [](const float *matrix)
     {
@@ -1119,22 +1125,21 @@ void VulkanBackend::drawMeshInstances(
         }
         return true;
     };
-    const auto isVisible = [this, vulkanMesh](const float *matrixData)
+    const auto isVisible = [this, boundsValid, boundsRadius, boundsCenter, indexCount](const float *matrixData)
     {
-        if (!frustumCullingEnabled_ || !cameraInitialized_ || !vulkanMesh->boundsValid || vulkanMesh->indexCount < 12)
+        if (!frustumCullingEnabled_ || !cameraInitialized_ || !boundsValid || indexCount < 12)
         {
             return true;
         }
         const glm::mat4 model = glm::make_mat4(matrixData);
-        const glm::vec3 localCenter(
-            vulkanMesh->boundsCenter[0], vulkanMesh->boundsCenter[1], vulkanMesh->boundsCenter[2]);
+        const glm::vec3 localCenter(boundsCenter[0], boundsCenter[1], boundsCenter[2]);
         const glm::vec4 worldCenter = model * glm::vec4(localCenter, 1.0f);
         const glm::vec3 basisX      = glm::vec3(model[0]);
         const glm::vec3 basisY      = glm::vec3(model[1]);
         const glm::vec3 basisZ      = glm::vec3(model[2]);
         const float     worldScale
             = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
-        const float worldRadius = vulkanMesh->boundsRadius * worldScale;
+        const float worldRadius = boundsRadius * worldScale;
         for (const glm::vec4 &plane : frustumPlanes_)
         {
             const float signedDistance = glm::dot(plane, worldCenter);
@@ -1156,7 +1161,7 @@ void VulkanBackend::drawMeshInstances(
         if (instanceBuffer.cursor > instanceBuffer.capacity
             || matrixSize > instanceBuffer.capacity - instanceBuffer.cursor)
         {
-            streamOverflow = true;
+            *outOverflow = true;
             continue;
         }
         std::memcpy(static_cast<std::byte *>(instanceBuffer.mapping) + instanceBuffer.cursor,
@@ -1174,75 +1179,148 @@ void VulkanBackend::drawMeshInstances(
             std::fprintf(stderr, "renderer module: could not flush the instance stream; falling back to single draws\n");
             instanceBuffer.cursor = firstInstanceOffset;
             visibleCount          = 0;
-            streamOverflow        = true;
+            *outOverflow          = true;
         }
-        else
-        {
-            VkCommandBuffer command = frames_->commandBuffer();
-            PushConstants   push;
-            push.model[0]             = 1.0f;
-            push.model[5]             = 1.0f;
-            push.model[10]            = 1.0f;
-            push.model[15]            = 1.0f; // instance model is identity; real matrices come from the stream
-            push.baseColorFactor[0]   = material.baseColor[0];
-            push.baseColorFactor[1]   = material.baseColor[1];
-            push.baseColorFactor[2]   = material.baseColor[2];
-            push.baseColorFactor[3]   = 1.0f;
-            push.metallicRoughness[0] = material.metallicFactor;
-            push.metallicRoughness[1] = material.roughnessFactor;
-            push.metallicRoughness[2] = material.normalScale;
-            push.metallicRoughness[3] = material.occlusionStrength;
-            push.emissive[0]          = material.emissiveColor[0];
-            push.emissive[1]          = material.emissiveColor[1];
-            push.emissive[2]          = material.emissiveColor[2];
-            push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
-            if (!hasLastPushConstants_ || std::memcmp(&push, &lastPushConstants_, sizeof(PushConstants)) != 0)
-            {
-                vkCmdPushConstants(command,
-                    pipeline_->pipelineLayout(),
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(PushConstants),
-                    &push);
-                lastPushConstants_    = push;
-                hasLastPushConstants_ = true;
-            }
+    }
+    return visibleCount;
+}
 
-            const VkDescriptorSet materialSet = resources_->materialSet(material);
-            if (materialSet != lastBoundMaterialSet_)
-            {
-                vkCmdBindDescriptorSets(command,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipeline_->pipelineLayout(),
-                    1,
-                    1,
-                    &materialSet,
-                    0,
-                    nullptr);
-                lastBoundMaterialSet_ = materialSet;
-            }
-            if (mesh != lastBoundMesh_)
-            {
-                const VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(command, 0, 1, &vulkanMesh->vertexBuffer, &offset);
-                vkCmdBindIndexBuffer(command, vulkanMesh->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                lastBoundMesh_ = mesh;
-            }
-            if (!hasLastBoundInstanceBuffer_ || lastBoundInstanceOffset_ != firstInstanceOffset)
-            {
-                vkCmdBindVertexBuffers(command, 1, 1, &instanceBuffer.buffer, &firstInstanceOffset);
-                lastBoundInstanceOffset_    = firstInstanceOffset;
-                hasLastBoundInstanceBuffer_ = true;
-            }
-            vkCmdDrawIndexed(command, vulkanMesh->indexCount, visibleCount, 0, 0, 0);
-            const std::uint64_t triangles = static_cast<std::uint64_t>(vulkanMesh->indexCount / 3) * visibleCount;
-            statistics_.trianglesSubmitted += triangles;
-            statistics_.trianglesRasterized += triangles;
+// Streams the instance matrices into this frame slot's host-visible ring
+// buffer (frustum-culled and finite-checked first), then issues one indexed
+// draw for the whole run with the instance buffer bound at the run's offset.
+// Matrices that overflow the stream capacity fall back to per-instance
+// drawMesh calls (streamOverflow path re-walks the list, skipping the ones
+// already drawn).
+void VulkanBackend::drawMeshInstances(
+    MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount, const MeshMaterial &material)
+{
+    if (!frameActive_ || modelMatrices == nullptr || instanceCount == 0)
+    {
+        return;
+    }
+    const auto *vulkanMesh = resources_->meshFor(mesh);
+    if (vulkanMesh == nullptr || frames_->currentFrame() >= instanceBuffers_.size())
+    {
+        return;
+    }
+
+    VkDeviceSize  firstInstanceOffset = 0;
+    bool          streamOverflow      = false;
+    std::uint32_t visibleCount        = streamInstanceMatrices(vulkanMesh->boundsValid,
+        vulkanMesh->boundsRadius,
+        vulkanMesh->boundsCenter,
+        vulkanMesh->indexCount,
+        modelMatrices,
+        instanceCount,
+        &firstInstanceOffset,
+        &streamOverflow);
+
+    InstanceBuffer &instanceBuffer = instanceBuffers_[frames_->currentFrame()];
+
+    if (visibleCount != 0)
+    {
+        VkCommandBuffer command = frames_->commandBuffer();
+        PushConstants   push;
+        push.model[0]             = 1.0f;
+        push.model[5]             = 1.0f;
+        push.model[10]            = 1.0f;
+        push.model[15]            = 1.0f; // instance model is identity; real matrices come from the stream
+        push.baseColorFactor[0]   = material.baseColor[0];
+        push.baseColorFactor[1]   = material.baseColor[1];
+        push.baseColorFactor[2]   = material.baseColor[2];
+        push.baseColorFactor[3]   = 1.0f;
+        push.metallicRoughness[0] = material.metallicFactor;
+        push.metallicRoughness[1] = material.roughnessFactor;
+        push.metallicRoughness[2] = material.normalScale;
+        push.metallicRoughness[3] = material.occlusionStrength;
+        push.emissive[0]          = material.emissiveColor[0];
+        push.emissive[1]          = material.emissiveColor[1];
+        push.emissive[2]          = material.emissiveColor[2];
+        push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
+        if (!hasLastPushConstants_ || std::memcmp(&push, &lastPushConstants_, sizeof(PushConstants)) != 0)
+        {
+            vkCmdPushConstants(command,
+                pipeline_->pipelineLayout(),
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(PushConstants),
+                &push);
+            lastPushConstants_    = push;
+            hasLastPushConstants_ = true;
         }
+
+        const VkDescriptorSet materialSet = resources_->materialSet(material);
+        if (materialSet != lastBoundMaterialSet_)
+        {
+            vkCmdBindDescriptorSets(command,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline_->pipelineLayout(),
+                1,
+                1,
+                &materialSet,
+                0,
+                nullptr);
+            lastBoundMaterialSet_ = materialSet;
+        }
+        if (mesh != lastBoundMesh_)
+        {
+            const VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(command, 0, 1, &vulkanMesh->vertexBuffer, &offset);
+            vkCmdBindIndexBuffer(command, vulkanMesh->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            lastBoundMesh_ = mesh;
+        }
+        if (!hasLastBoundInstanceBuffer_ || lastBoundInstanceOffset_ != firstInstanceOffset)
+        {
+            vkCmdBindVertexBuffers(command, 1, 1, &instanceBuffer.buffer, &firstInstanceOffset);
+            lastBoundInstanceOffset_    = firstInstanceOffset;
+            hasLastBoundInstanceBuffer_ = true;
+        }
+        vkCmdDrawIndexed(command, vulkanMesh->indexCount, visibleCount, 0, 0, 0);
+        const std::uint64_t triangles = static_cast<std::uint64_t>(vulkanMesh->indexCount / 3) * visibleCount;
+        statistics_.trianglesSubmitted += triangles;
+        statistics_.trianglesRasterized += triangles;
     }
 
     if (streamOverflow)
     {
+        const auto isFiniteMatrix = [](const float *matrix)
+        {
+            for (std::size_t component = 0; component < 16; ++component)
+            {
+                if (!std::isfinite(matrix[component]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const auto isVisible = [this, vulkanMesh](const float *matrixData)
+        {
+            if (!frustumCullingEnabled_ || !cameraInitialized_ || !vulkanMesh->boundsValid
+                || vulkanMesh->indexCount < 12)
+            {
+                return true;
+            }
+            const glm::mat4 model = glm::make_mat4(matrixData);
+            const glm::vec3 localCenter(
+                vulkanMesh->boundsCenter[0], vulkanMesh->boundsCenter[1], vulkanMesh->boundsCenter[2]);
+            const glm::vec4 worldCenter = model * glm::vec4(localCenter, 1.0f);
+            const glm::vec3 basisX      = glm::vec3(model[0]);
+            const glm::vec3 basisY      = glm::vec3(model[1]);
+            const glm::vec3 basisZ      = glm::vec3(model[2]);
+            const float     worldScale
+                = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+            const float worldRadius = vulkanMesh->boundsRadius * worldScale;
+            for (const glm::vec4 &plane : frustumPlanes_)
+            {
+                const float signedDistance = glm::dot(plane, worldCenter);
+                if (std::isfinite(signedDistance) && signedDistance < -worldRadius)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
         std::uint32_t skipped = 0;
         for (std::uint32_t index = 0; index < instanceCount; ++index)
         {
@@ -1257,6 +1335,305 @@ void VulkanBackend::drawMeshInstances(
                 continue;
             }
             drawMesh(mesh, matrixData, material);
+        }
+    }
+}
+
+// One fur layer stack (shell texturing): the mesh redrawn layerCount times
+// with per-layer displacement push constants, alpha-blended over the opaque
+// base surface. Layers go out in ascending order (innermost first): that IS
+// back-to-front compositing for nested outward-facing shells, and the base
+// surface's depth rejects the far-side shells. No draw sorting, no batching
+// happens here by design - the submission order is the compositing order.
+void VulkanBackend::drawFur(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material,
+    const FurLayerParams &params)
+{
+    if (!frameActive_ || modelMatrix == nullptr)
+    {
+        return;
+    }
+    const auto *vulkanMesh = resources_->meshFor(mesh);
+    if (vulkanMesh == nullptr || vulkanMesh->indexCount == 0)
+    {
+        return;
+    }
+
+    // Draw at most 64 layers regardless of the caller's request: a corrupted
+    // FurLayerParams must not turn one draw call into a pathological loop.
+    const std::uint32_t layerCount = std::clamp(params.layerCount, 0u, 64u);
+    if (layerCount == 0)
+    {
+        return;
+    }
+
+    if (frustumCullingEnabled_ && cameraInitialized_ && vulkanMesh->boundsValid && vulkanMesh->indexCount >= 12)
+    {
+        // Same sphere-vs-plane cull as drawMesh, with the fur height added to
+        // the radius so displaced shells are not culled while their base
+        // surface is visible.
+        const glm::mat4 model = glm::make_mat4(modelMatrix);
+        const glm::vec3 localCenter(
+            vulkanMesh->boundsCenter[0], vulkanMesh->boundsCenter[1], vulkanMesh->boundsCenter[2]);
+        const glm::vec4 worldCenter = model * glm::vec4(localCenter, 1.0f);
+        const glm::vec3 basisX      = glm::vec3(model[0]);
+        const glm::vec3 basisY      = glm::vec3(model[1]);
+        const glm::vec3 basisZ      = glm::vec3(model[2]);
+        const float     worldScale
+            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+        const float worldRadius = (vulkanMesh->boundsRadius + std::max(params.furHeight, 0.0f)) * worldScale;
+        for (const glm::vec4 &plane : frustumPlanes_)
+        {
+            const float signedDistance = glm::dot(plane, worldCenter);
+            if (std::isfinite(signedDistance) && signedDistance < -worldRadius)
+            {
+                return;
+            }
+        }
+    }
+
+    VkCommandBuffer command = frames_->commandBuffer();
+    if (lastBoundPipeline_ != BoundPipeline::Fur)
+    {
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->furPipeline());
+        lastBoundPipeline_    = BoundPipeline::Fur;
+        hasLastPushConstants_ = false; // different push layout; re-push on the next mesh draw
+    }
+
+    FurPushConstants push;
+    std::memcpy(push.model, modelMatrix, sizeof(push.model));
+    push.baseColorFactor[0]   = material.baseColor[0];
+    push.baseColorFactor[1]   = material.baseColor[1];
+    push.baseColorFactor[2]   = material.baseColor[2];
+    push.baseColorFactor[3]   = 1.0f;
+    // Fur reinterprets the material's metallic/roughness factors as its own
+    // density/fade knobs (see FurPushConstants and fur.frag).
+    push.metallicRoughness[0] = material.metallicFactor;
+    push.metallicRoughness[1] = material.roughnessFactor;
+    push.metallicRoughness[2] = std::max(params.densityBoost, 0.0f);
+    push.metallicRoughness[3] = 1.0f; // overwritten per layer below
+    push.emissive[0]          = material.emissiveColor[0];
+    push.emissive[1]          = material.emissiveColor[1];
+    push.emissive[2]          = material.emissiveColor[2];
+    push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
+    push.fur[1]               = static_cast<float>(layerCount);
+    push.fur[2]               = params.furHeight;
+    push.fur[3]               = params.gravityStrength;
+
+    const VkDescriptorSet materialSet = resources_->materialSet(material);
+    if (materialSet != lastBoundMaterialSet_)
+    {
+        vkCmdBindDescriptorSets(
+            command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->furPipelineLayout(), 1, 1, &materialSet, 0, nullptr);
+        lastBoundMaterialSet_ = materialSet;
+    }
+    if (mesh != lastBoundMesh_)
+    {
+        const VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(command, 0, 1, &vulkanMesh->vertexBuffer, &offset);
+        vkCmdBindIndexBuffer(command, vulkanMesh->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        lastBoundMesh_ = mesh;
+    }
+    if (!hasLastBoundInstanceBuffer_ || lastBoundInstanceOffset_ != 0)
+    {
+        const InstanceBuffer &instanceBuffer = instanceBuffers_[frames_->currentFrame()];
+        const VkDeviceSize    offset         = 0;
+        vkCmdBindVertexBuffers(command, 1, 1, &instanceBuffer.buffer, &offset);
+        lastBoundInstanceOffset_    = 0;
+        hasLastBoundInstanceBuffer_ = true;
+    }
+
+    for (std::uint32_t layer = 1; layer <= layerCount; ++layer)
+    {
+        push.fur[1]               = static_cast<float>(layerCount);
+        push.fur[0]               = static_cast<float>(layer);
+        push.metallicRoughness[3] = layer == layerCount ? std::clamp(params.outerLayerFade, 0.0f, 1.0f) : 1.0f;
+        if (!hasLastFurPushConstants_ || std::memcmp(&push, &lastFurPushConstants_, sizeof(FurPushConstants)) != 0)
+        {
+            vkCmdPushConstants(command,
+                pipeline_->furPipelineLayout(),
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(FurPushConstants),
+                &push);
+            lastFurPushConstants_ = push;
+        }
+        vkCmdDrawIndexed(command, vulkanMesh->indexCount, 1, 0, 0, 0);
+        const std::uint64_t triangles = vulkanMesh->indexCount / 3;
+        statistics_.trianglesSubmitted += triangles;
+        statistics_.trianglesRasterized += triangles;
+    }
+}
+
+// Fur layer stack across several instances: the instance matrices stream once
+// (frustum-culled like drawMeshInstances), then each layer issues one
+// instanced draw over the streamed run. Instances that overflow the stream
+// fall back to per-instance drawFur calls.
+void VulkanBackend::drawFurInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
+    const MeshMaterial &material, const FurLayerParams &params)
+{
+    if (!frameActive_ || modelMatrices == nullptr || instanceCount == 0)
+    {
+        return;
+    }
+    const auto *vulkanMesh = resources_->meshFor(mesh);
+    if (vulkanMesh == nullptr || vulkanMesh->indexCount == 0 || frames_->currentFrame() >= instanceBuffers_.size())
+    {
+        return;
+    }
+
+    const std::uint32_t layerCount = std::clamp(params.layerCount, 0u, 64u);
+    if (layerCount == 0)
+    {
+        return;
+    }
+
+    VkDeviceSize  firstInstanceOffset = 0;
+    bool          streamOverflow      = false;
+    std::uint32_t visibleCount        = streamInstanceMatrices(vulkanMesh->boundsValid,
+        vulkanMesh->boundsRadius,
+        vulkanMesh->boundsCenter,
+        vulkanMesh->indexCount,
+        modelMatrices,
+        instanceCount,
+        &firstInstanceOffset,
+        &streamOverflow);
+
+    if (visibleCount != 0)
+    {
+        VkCommandBuffer command = frames_->commandBuffer();
+        if (lastBoundPipeline_ != BoundPipeline::Fur)
+        {
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->furPipeline());
+            lastBoundPipeline_    = BoundPipeline::Fur;
+            hasLastPushConstants_ = false;
+        }
+
+        FurPushConstants push;
+        push.model[0]             = 1.0f;
+        push.model[5]             = 1.0f;
+        push.model[10]            = 1.0f;
+        push.model[15]            = 1.0f; // instance model is identity; real matrices come from the stream
+        push.baseColorFactor[0]   = material.baseColor[0];
+        push.baseColorFactor[1]   = material.baseColor[1];
+        push.baseColorFactor[2]   = material.baseColor[2];
+        push.baseColorFactor[3]   = 1.0f;
+        push.metallicRoughness[0] = material.metallicFactor;
+        push.metallicRoughness[1] = material.roughnessFactor;
+        push.metallicRoughness[2] = std::max(params.densityBoost, 0.0f);
+        push.metallicRoughness[3] = 1.0f;
+        push.emissive[0]          = material.emissiveColor[0];
+        push.emissive[1]          = material.emissiveColor[1];
+        push.emissive[2]          = material.emissiveColor[2];
+        push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
+        push.fur[1]               = static_cast<float>(layerCount);
+        push.fur[2]               = params.furHeight;
+        push.fur[3]               = params.gravityStrength;
+
+        const VkDescriptorSet materialSet = resources_->materialSet(material);
+        if (materialSet != lastBoundMaterialSet_)
+        {
+            vkCmdBindDescriptorSets(command,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline_->furPipelineLayout(),
+                1,
+                1,
+                &materialSet,
+                0,
+                nullptr);
+            lastBoundMaterialSet_ = materialSet;
+        }
+        if (mesh != lastBoundMesh_)
+        {
+            const VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(command, 0, 1, &vulkanMesh->vertexBuffer, &offset);
+            vkCmdBindIndexBuffer(command, vulkanMesh->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            lastBoundMesh_ = mesh;
+        }
+        if (!hasLastBoundInstanceBuffer_ || lastBoundInstanceOffset_ != firstInstanceOffset)
+        {
+            const InstanceBuffer &instanceBuffer = instanceBuffers_[frames_->currentFrame()];
+            vkCmdBindVertexBuffers(command, 1, 1, &instanceBuffer.buffer, &firstInstanceOffset);
+            lastBoundInstanceOffset_    = firstInstanceOffset;
+            hasLastBoundInstanceBuffer_ = true;
+        }
+        for (std::uint32_t layer = 1; layer <= layerCount; ++layer)
+        {
+            push.fur[0]               = static_cast<float>(layer);
+            push.metallicRoughness[3] = layer == layerCount ? std::clamp(params.outerLayerFade, 0.0f, 1.0f) : 1.0f;
+            if (!hasLastFurPushConstants_ || std::memcmp(&push, &lastFurPushConstants_, sizeof(FurPushConstants)) != 0)
+            {
+                vkCmdPushConstants(command,
+                    pipeline_->furPipelineLayout(),
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(FurPushConstants),
+                    &push);
+                lastFurPushConstants_ = push;
+            }
+            vkCmdDrawIndexed(command, vulkanMesh->indexCount, visibleCount, 0, 0, 0);
+            const std::uint64_t triangles
+                = static_cast<std::uint64_t>(vulkanMesh->indexCount / 3) * visibleCount;
+            statistics_.trianglesSubmitted += triangles;
+            statistics_.trianglesRasterized += triangles;
+        }
+    }
+
+    if (streamOverflow)
+    {
+        // Overflowed instances fall back to per-instance fur stacks, skipping
+        // the ones already drawn from the stream (same re-walk as
+        // drawMeshInstances: invisible instances are neither streamed nor
+        // drawn, so they must not consume a skip slot).
+        const auto isVisible = [this, vulkanMesh](const float *matrixData)
+        {
+            if (!frustumCullingEnabled_ || !cameraInitialized_ || !vulkanMesh->boundsValid
+                || vulkanMesh->indexCount < 12)
+            {
+                return true;
+            }
+            const glm::mat4 model = glm::make_mat4(matrixData);
+            const glm::vec3 localCenter(
+                vulkanMesh->boundsCenter[0], vulkanMesh->boundsCenter[1], vulkanMesh->boundsCenter[2]);
+            const glm::vec4 worldCenter = model * glm::vec4(localCenter, 1.0f);
+            const glm::vec3 basisX      = glm::vec3(model[0]);
+            const glm::vec3 basisY      = glm::vec3(model[1]);
+            const glm::vec3 basisZ      = glm::vec3(model[2]);
+            const float     worldScale
+                = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+            const float worldRadius = vulkanMesh->boundsRadius * worldScale;
+            for (const glm::vec4 &plane : frustumPlanes_)
+            {
+                const float signedDistance = glm::dot(plane, worldCenter);
+                if (std::isfinite(signedDistance) && signedDistance < -worldRadius)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        std::uint32_t skipped = 0;
+        for (std::uint32_t index = 0; index < instanceCount; ++index)
+        {
+            const float *matrixData = modelMatrices + static_cast<std::size_t>(index) * 16u;
+            bool         finite     = true;
+            for (std::size_t component = 0; component < 16; ++component)
+            {
+                if (!std::isfinite(matrixData[component]))
+                {
+                    finite = false;
+                    break;
+                }
+            }
+            if (!finite || !isVisible(matrixData))
+            {
+                continue;
+            }
+            if (skipped < visibleCount)
+            {
+                ++skipped;
+                continue;
+            }
+            drawFur(mesh, matrixData, material, params);
         }
     }
 }

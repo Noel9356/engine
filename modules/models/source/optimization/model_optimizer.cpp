@@ -115,7 +115,9 @@ void optimizePart(ModelPart &part, const ModelRecord &record, const ModelOptimiz
             // meshopt_simplify never grows the buffer; allocate the source size
             // and shrink to the returned count.
             std::vector<std::uint32_t> simplified(part.indices.size());
-            const unsigned int         flags = options.simplifyLockBorder ? meshopt_SimplifyLockBorder : 0u;
+            const unsigned int flags = options.simplifyLockBorder
+                                     ? static_cast<unsigned int>(meshopt_SimplifyLockBorder)
+                                     : 0u;
             float                      resultError = 0.0f;
             const std::size_t          simplifiedCount
                 = meshopt_simplify(simplified.data(),

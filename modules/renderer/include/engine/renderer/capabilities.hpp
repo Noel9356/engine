@@ -29,8 +29,13 @@ namespace renderer
 // (probe-grid indirect lighting replacing the hemispheric ambient when the
 // module publishes a valid snapshot) and reads the new [renderer]
 // gi_indirect_lighting key; ABI-checked consumers recompile against this
-// header so both sides agree on the integration contract.
-inline constexpr std::uint32_t renderCapabilityAbi = 12u;
+// header so both sides agree on the integration contract. 12 -> 13 adds the
+// shell-fur draw path: FurLayerParams + drawFur/drawFurInstances appended at
+// the end of RenderCapability (existing field offsets unchanged), the
+// [renderer] fur_enabled / fur_max_layers keys, and the alpha-blended fur
+// pipeline in both backends. Fur draws are transparent layers: submit them
+// AFTER the fur surface's opaque base mesh so the depth anchor exists.
+inline constexpr std::uint32_t renderCapabilityAbi = 13u;
 
 // Renderer, mesh, and texture handles are module-assigned ids starting at 1;
 // handles are never reused and 0 always means "none".
@@ -177,6 +182,33 @@ struct RenderDrawCommand
     const MeshMaterial *material    = nullptr;
 };
 
+// Shell-fur draw parameters (shell texturing, Lengyel et al. 2001). One
+// drawFur call renders `layerCount` shell layers: the mesh redrawn
+// layerCount times, each layer's vertices displaced along their normals by
+// (layer / layerCount) * furHeight and alpha-blended over the opaque base
+// surface, which must be drawn first (it is the depth anchor). The fur
+// texture rides the material's baseColorTexture slot: its RGB shades the
+// strands and its ALPHA is the per-texel strand height field (1 at a strand
+// root, 0 at its tip).
+//
+// layerCount is clamped by the renderer's [renderer] fur_max_layers
+// (a 0 clamped result draws nothing). furHeight is in object/model units
+// (the same units as the mesh positions). gravityStrength sags strand tips
+// toward world -Y, quadratically in the strand height (0 = off).
+// densityBoost (>= 0) sharpens the per-texel strand alpha edges: 1 = soft
+// wide wisps, ~8 = thin crisp strands. outerLayerFade (0..1) is the alpha
+// multiplier of the OUTERMOST drawn layer - the screen-size LOD fade that
+// dissolves strand tips instead of clipping them when the layer budget
+// drops (see the fur module's LOD evaluator).
+struct FurLayerParams
+{
+    std::uint32_t layerCount     = 8;
+    float         furHeight      = 0.035f;
+    float         gravityStrength = 0.0f;
+    float         densityBoost   = 6.0f;
+    float         outerLayerFade = 1.0f;
+};
+
 // Per-frame state passed to beginFrame(); nullptr falls back to the
 // configured [renderer] clear_color.
 struct FrameParameters
@@ -293,6 +325,24 @@ struct RenderCapability
     // loaders ignore it; a loader must still null-check it before calling,
     // since a module built before this field leaves it null.
     bool (*waitsForPresentation)(void *self, RendererHandle renderer);
+
+    // Shell-fur draws (ABI 13). Both must sit between beginFrame/endFrame
+    // and are submitted in call order WITHOUT draw sorting or instanced
+    // batching: the shell layers are alpha-blended back-to-front in layer
+    // order over the opaque base surface, so their submission order IS the
+    // compositing order. Fur draws are additionally skipped entirely when
+    // [renderer] fur_enabled is false. drawFur renders one fur layer stack
+    // for a single instance; drawFurInstances renders one layer stack per
+    // instance matrix (one instanced draw per layer). material may be null
+    // (the default material - a fur-less white field, useful only for
+    // smoke tests); params may be null (the FurLayerParams defaults).
+    // Appended at the end of the struct: null-check before calling, since a
+    // module built before ABI 13 leaves them null.
+    void (*drawFur)(void *self, RendererHandle renderer, MeshHandle mesh, const float *modelMatrix,
+        const MeshMaterial *material, const FurLayerParams *params);
+
+    void (*drawFurInstances)(void *self, RendererHandle renderer, MeshHandle mesh, const float *modelMatrices,
+        std::uint32_t instanceCount, const MeshMaterial *material, const FurLayerParams *params);
 };
 
 // The "renderer.vulkan" secondary capability: Vulkan-specific introspection and

@@ -1,0 +1,21 @@
+[fur]
+# Preset returned by presetParameters for FurPreset::Plush-style default
+# lookups; "plush" | "shaggy" | "velvety".
+default_preset    = "plush"
+# Default strand texture edge length in pixels (16..2048) when a consumer
+# does not pin one in its FurTextureRequest.
+texture_size      = 256
+# Hard shell-layer budget ceiling applied by the LOD evaluator itself; the
+# renderer additionally clamps with [renderer] fur_max_layers.
+max_layers        = 16
+# Shell layer counts per LOD band (most detailed first: 5 bands).
+lod_layer_counts  = [14, 10, 6, 3, 1]
+# Angular-size band edges (worldRadius / distance), descending; band 5
+# catches everything below the smallest threshold.
+lod_screen_sizes  = [0.32, 0.16, 0.08, 0.03]
+# Fraction of each band over which the outermost layer's alpha dissolves
+# before the next band's layer-count drop (0..1].
+lod_fade_fraction = 0.35
+# Strand-height multiplier per band: long stray strands at 3 shell layers
+# read as sparse spikes, so distance shrinks the coat too.
+lod_height_scales = [1.0, 1.0, 0.9, 0.8, 0.7]

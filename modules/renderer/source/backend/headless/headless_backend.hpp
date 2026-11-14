@@ -171,6 +171,10 @@ public:
     void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) override;
     void drawMeshInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
         const MeshMaterial &material) override;
+    void drawFur(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material,
+        const FurLayerParams &params) override;
+    void drawFurInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
+        const MeshMaterial &material, const FurLayerParams &params) override;
     void drawOverlay(const OverlayDrawData &data) override;
     void endFrame() override;
 
@@ -258,6 +262,22 @@ private:
         bool                   useTransformCache       = false;
         std::uint32_t          transformGeneration     = 0;
         std::size_t            vertexCount             = 0;
+        // Shell-fur draws: when fur is true, vertices are displaced along
+        // their object-space normals by (layer/layerCount) * furHeight before
+        // the model transform, strand tips droop toward world -Y by
+        // gravity * height^2, and the pixel path alpha-blends the strand
+        // crop instead of writing depth (mirroring shaders/fur.vert /
+        // fur.frag). viewProjectionWorld is the RAW view-projection (the
+        // model multiplied out) because the gravity offset happens in world
+        // space, after the model transform.
+        bool                   fur                     = false;
+        float                  furLayerRatio           = 0.0f;
+        float                  furLayerIndex           = 0.0f;
+        float                  furHeight               = 0.0f;
+        float                  furGravity              = 0.0f;
+        float                  furDensityBoost         = 6.0f;
+        float                  furOuterFade            = 1.0f;
+        glm::mat4              viewProjectionWorld     = glm::mat4(1.0f);
         // World-space bounds sphere (valid only while the mesh's local bounds
         // are valid), shared by the frustum pass and the winding vote.
         glm::vec3              boundsWorldCenter       = glm::vec3(0.0f);
@@ -300,10 +320,15 @@ private:
     // Computes the draw's matrices, culls against the frustum, transforms
     // vertices (through the cache when it pays off), and probes winding to
     // decide whether back-face culling is safe. Returns false when the draw
-    // is fully culled or the framebuffer is gone.
+    // is fully culled or the framebuffer is gone. furParams != nullptr marks
+    // a shell-fur draw: furLayer (1..layerCount) is the shell layer this call
+    // rasterizes - the transform runs once per layer, so fur draws stamp a
+    // fresh transform generation per call and reuse the cache within one
+    // layer's triangles.
     bool prepareRasterization(const HeadlessMesh &mesh, const float *modelMatrix, const MeshMaterial &material,
         const std::uint32_t *activeIndices, std::size_t activeIndexCount, RasterSetup &outSetup,
-        const DrawBounds *precomputedBounds = nullptr);
+        const DrawBounds *precomputedBounds = nullptr, const FurLayerParams *furParams = nullptr,
+        float furLayer = 0.0f);
 
     // ---- tile-parallel path (opt-in) ----
     // Shared geometry pipeline: transform/clip/project one draw triangle

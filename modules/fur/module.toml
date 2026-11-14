@@ -1,0 +1,13 @@
+config_keys           = [
+    "fur.default_preset",
+    "fur.lod_fade_fraction",
+    "fur.lod_height_scales",
+    "fur.lod_layer_counts",
+    "fur.lod_screen_sizes",
+    "fur.max_layers",
+    "fur.texture_size",
+]
+name                  = "fur"
+provides              = ["fur"]
+requires              = []
+version               = "0.1.0"

@@ -189,6 +189,8 @@ engine_module_compile_shaders(
     engine
     renderer
     SHADERS
+    fur.frag
+    fur.vert
     mesh.vert
     mesh.frag
 )

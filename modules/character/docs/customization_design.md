@@ -2,7 +2,82 @@
 
 This document records the industry research behind the character customisation module's revisions, the authoring contract that follows from it, and how the demo content implements that contract. Read `overview.md` first for the module's data model; this document explains the deformation and junction decisions on top of it.
 
-## 0f. Eleventh revision: the taur plan, unified part interfaces, clothing variants, previews (current)
+## 0i. Fourteenth revision: anatomical segmentation, welded rings, the neck part (current)
+
+Revision 14 rebuilds the body plans around an explicit vertebra-level segmentation with shared-polyline welds: every junction is now a real mesh seam (both sides carry the identical boundary ring) instead of a buried overlap.
+
+### Research findings applied
+
+- **Vertebral segmentation (anatomy references for anthro builds):** the biped body decomposes into head, neck, arm, thoracic-lumbar segment, sacrum-coccyx segment, and legs. The taur plan replaces the sacrum-coccyx segment and the legs with the lower body (measured from the animal's thoracic to sacral region) and connects the upper body's lumbar end to the lower body's thoracic end; the tail always roots at the coccyx - the biped's sacrum-coccyx segment or the taur lower body's own rump socket.
+- **Welded junction rings (modular character pipelines):** a slice at the L3/L4 plane splits the shipped human torso into the two segments carrying the same cut polyline, and both bind the same body scales so the seam stays closed at every slider value. The head's bottom ring (the atlas cut) welds to the neck part's top ring the same way; the taur lower body grows a junction graft that sweeps the animal's own neck cross-sections from the withers ring to the human waist ring, sharing both end polylines.
+- **Neck as a part (fursona builder neck sliders):** the neck spans the collar socket to the atlas ring as its own swappable part (one lofted human neck plus twenty species necks whose intermediate rings ride the head ring's smoothed angular profile), straightened onto the collar's vertical axis so the skull sits over the shoulders. Neck length scales the column (the head rides the top socket); thickness and head-size ride baked morphs with both end rings pinned, so the welds hold at every value.
+
+### Pipeline changes
+
+- `scripts/extract_species_parts.py` splits the human torso at the waist plane (`split_human_torso`, the shared ring recorded in `waist_ring.json` for recovery runs), builds the neck lofts (`angular_profile` bins and smooths jagged pack rings; the head's own ring is radially and planarity clamped, written back into the head so both weld sides carry the cleaned polyline), and sweeps the taur graft along a bezier spine with a waist-relative radius cap (wide-skull species such as the triceratops would otherwise flare into a sombrero) and a stump-ring snap (the body's cut rim gathers onto its own smoothed profile).
+- The head pipeline replaces the old sleeve/neck_cut trim with an inflection scan along the smoothed radial profile: the skull keeps everything above the first sustained radial rise, the tube below feeds the neck part; the horse skull that the old ear-rim clamp trimmed away is whole again.
+- The demo registers thoracic-lumbar and sacrum-coccyx segments (each with its own rig), the neck parts (a `head.mount` socket at the measured atlas height), and new `neck.length` / `neck.thickness` parameters; the profiles chain pelvis -> chest -> neck -> head on the biped and body -> chest -> neck -> head on the taur.
+- The fur coat converts to a change-time vertex-colour repaint in one pass with the morphs (the old separate colour pass silently re-uploaded the unmorphed rest mesh and reverted the morphs): a scalar luminance shade preserves the authored modelling, a dorsal-to-ventral gradient replaces the flat tint that read as painted latex, and the taur graft's upper band repaints with the coat so no skin ring shows at the weld. The animal grafts keep their authored colours; the mean-colour divide is gone.
+- The taur upper assembly (chest, neck, head, ears, arms, garments, wings) binds the lower-body scale uniformly so the graft weld rides the size slider; leaving the taur plan resets the scale. The biped's neck and head bind the body width and muscle mass so a broad frame keeps a proportional neck.
+- The Lua lab exercise referenced a profile id that never existed (`plan_humanoid` instead of `humanoid_biped`) and had failed silently since it was merged; it now creates the registered profile.
+
+### Verification
+
+- Build: zero warnings; `--character-test`: 22 checks pass (the head/ear/neck follow check now asserts the neck instance and part id per species).
+- The frame matrix (61 presets), seven part-preview sheets (160 parts, the necks and the torso segments included), the five panel tabs, and the junction close-ups re-captured and reviewed.
+- Numeric weld checks: the waist seam (thoracic vs pelvis) measures zero distance, the taur graft's top ring matches the human waist profile, and the head-to-neck atlas ring matches exactly at default scale and tracks `head.size` through the baked morph.
+
+## 0h. Thirteenth revision: anthro-mounted heads, junction anchoring, capture framing
+
+Revision 13 tightens the physical junctions and the presentation layer: every graft measures against the surfaces it must meet, and every capture frames the assembly it actually shows.
+
+### Research findings applied
+
+- **Anthro head scale (avatar-maker proportion studies):** species heads ride the humanoid collar socket, so every skull scales to one canonical height whatever the animal's natural size - a fox head reads at human-head scale on a biped chest while the quadruped plan still ships the whole, natural-size animal. The skull floor seats a set distance above the socket so the collar reads as a short neck, and short-necked species (the canids, the dinosaurs with stub necks, the fish) carry a small tapered throat tube below the origin that roots into the collar hole; long-necked species keep their own tube. The horizontal fish heads bury deeper - the merfolk skull emerges from the shoulders instead of overhanging them.
+- **Taur junction anchoring (taur reference sheets' graft placement):** the chest mounts at the measured stump ring as before, and the taur tail anchors against the rump itself - the root ring rides below the local body crest and behind the rear cut, and the mount axis pitches with the rump's slope so the first tail section hugs it. Long-tailed dinosaurs root well inside the rear bound. The fish lower body seats the chest on the tube's back at its widest band with the dorsal fin excluded by a cross-section-width histogram, and the fluke root rides the peduncle.
+- **Presentation framing (screenshot composition guides):** the auto-fit measures the assembly's real world-space box in view space, targets the box centre (a long-tailed taur centres behind its torso), lets the orbit floor follow the silhouette (a rat needs a sub-metre orbit), and insets the fit to the panel-free region when the studio panel shares the frame. A soft radial-gradient contact-shadow disc grounds the silhouette under the world-box footprint. Part previews target each part's own bounds centre through the square thumbnail viewport. The panel gains a studio style pass (thicker amber slider grabs, rounded frames, a visible scrollbar) and the stats overlay splits into short lines that never reach the panel.
+
+### Pipeline changes
+
+- Every boundary ring that survives stitch removal is ellipse-snapped when measurably ragged (the fit lives in the ring's own Newell plane, and the snap weight follows the residual), so fan caps over cut rings stay smooth.
+- Long "stitch" triangles - the packs weld lip, ear-lining, and tail-tuft contact points into single vertices, bridging unrelated surface regions - drop before the caps close (heads and ears at a conservative factor that keeps organic long triangles, tails at a firmer one that clears the tuft hubs).
+- The taur normalisation band widens (a shiba grows, a horse barely shrinks) and the canonical mount height rises; the taur tail variants bind the lower-body scale at a reduced thickness factor so a threefold canid's bush reads as a tail.
+- The torso tail socket pitches the appendage back-and-slightly-up so a bushy tail flows clear of the rump; the wing sockets move outboard so the roots clear the neck.
+- The biped's hanging arms gain a slight outward roll (the taur's add a backward pitch) so the hands clear the thighs and the front legs.
+
+### Verification
+
+- Build: zero warnings (cmake Ninja Release, GLFW off, headless CPU rasterizer).
+- `--character-test`: 22 checks pass; `--dump-instance-boxes` prints every instance's local and world bounds plus the assembly's world box as numeric framing and mounting ground truth.
+- The frame matrix (61 presets), the five part-preview sheets (137 parts), the five panel tabs, and the junction close-ups are re-captured from the current build and reviewed; the junction audit covers the head/collar, wing root, taur chest, taur tail root, biped tail root, and the fish waist and peduncle junctions.
+
+## 0g. Twelfth revision: the re-extracted roster, taur normalisation, runtime previews
+
+Revision 12 rebuilt the whole asset pipeline as `scripts/extract_species_parts.py` and re-extracted every animal part from freshly downloaded CC0 Quaternius packs, grew the roster to twenty species, and moved the part previews from shipped PNG files to engine-rendered runtime textures.
+
+### Research findings applied
+
+- **Scalie and aquatic coverage (furry-fandom species surveys):** the roster beyond the classic canid and farm families needs reptiles and fish - the Ultimate Dinosaurs pack (tyrannosaur, raptor, triceratops, stegosaurus, apatosaur, parasaurolophus), the Easy Enemies rat, and the Fish pack's shark and dolphin all join as full species (heads, tails, whole bodies, and taur lower bodies). The shark-taur and dolphin-taur read as the merfolk lower body.
+- **Taur size normalisation (the e621 taur tag wikis' mixed-size grafts):** every lower body's stump ring is normalised by one rigid uniform scale toward a canonical mount height, clamped to a comparable size band, so the humanoid chest grafts at a consistent junction height without turning a small species into a giant. The fish bodies keep their natural scale (their horizontal build is the merfolk read).
+- **Taur tail tracking:** a second, identically-normalised tail variant per species rides the taur plan and binds the lower-body scale parameter, so the tail and the lower body scale together at every slider value.
+- **Runtime thumbnails (thumbnail-card pickers, no shipped art):** the panel renders every part once at startup into a small viewport, reads the frame back (headless surface lock or the Vulkan frame export), and uploads it as a texture. The species picker shows each species' rendered head; no pre-generated preview images ship.
+
+### Pipeline changes
+
+- Rest-pose evaluation now uses the mesh node's own world transform (the bind pose is the authored geometry); the earlier skin-blend evaluation sat in joint-local space and distorted the parts.
+- The partition is hybrid: ear sheets cut on summed skin weights with the animal-midline rule (their weight regions interleave across the skull), tails take the union of the weight-dominant and joint-proximity assignment (a thin tail's base is often nearer the hip anchor, which hands it to the body - the doubled-tail artifact), and everything else partitions by proximity to the rig's bind anchors. Fish heads cut on a cross-section plane (their Face joints sit at the snout tip).
+- Boundary loops walk edges (not vertices) so pinched loops still close; every cut ring gets a short Laplacian straightening pass that both sides of a cut apply identically; caps close every remaining opening; the winding follows the source normals; and crease-aware smooth normals (crease 80 degrees - the low-poly sources are organic) replace the faceted look of the old double-sided exports.
+- The heads keep the animal's alert rest orientation (the packs stand level-eyed) with the neck ring at the origin: muzzle forward, ears up. The muzzle-length and eye-spacing morphs are baked on the final mesh of every species head, so the species looks (Cat, Jackal) are parameter settings on any canid head.
+- The wing connection pitches the pair into a dihedral arch behind the shoulders (the source wing sweeps forward over them), and the torso tailbone and wing sockets sit just inside the measured back surface so the appendage roots bury.
+- The torso tailbone/wing socket correction and the wing side fix land in the generated metrics header (the source wing geometry sweeps toward -X, so it is the right-side wing and the loader mirrors the left).
+
+### Verification
+
+- Build: zero warnings (cmake Ninja Release, GLFW off, headless CPU rasterizer).
+- `--character-test`: 22 checks covering head/ear/tail variants (including the taur-scaled tail swaps), the outfit toggle, per-piece clothing, every taur and quadruped species graft across the twenty species, the taur tail socket, parameter extremes including the lower-body scale, recipe round-trip, and the animation drivers; all pass.
+- The frame matrix (59 presets), the part-preview sheets, and the junction close-ups are re-captured from the current build and reviewed; the junction audit covers the head/collar, wing root, taur chest, and tail root junctions for the canid, farm, dinosaur, and fish families.
+
+## 0f. Eleventh revision: the taur plan, unified part interfaces, clothing variants, previews
 
 Revision 11 reorganises the demo's content around the furry-fandom vocabulary and the parts-with-previews UI pattern, and re-runs the whole asset pipeline against freshly downloaded sources so every interface is measured from the same models.
 
