@@ -18,9 +18,11 @@ add_library(
     source/params.cpp
     source/fbm.cpp
     source/climate.cpp
+    source/atmosphere.cpp
     source/density.cpp
     source/meshing.cpp
     source/octree.cpp
+    source/walker.cpp
     source/planet.cpp
 )
 target_link_libraries(

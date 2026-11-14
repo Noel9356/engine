@@ -75,6 +75,7 @@ void setHorizonCulling(PlanetGenerationParams &params, double value) { params.ho
 void setBoundingFactor(PlanetGenerationParams &params, double value) { params.boundingFactor = value; }
 void setMaxConcurrentBuilds(PlanetGenerationParams &params, double value) { params.maxConcurrentBuilds = static_cast<std::uint32_t>(value); }
 void setMaxNewBuildsPerUpdate(PlanetGenerationParams &params, double value) { params.maxNewBuildsPerUpdate = static_cast<std::uint32_t>(value); }
+void setMaxLivePlanets(PlanetGenerationParams &params, double value) { params.maxLivePlanets = static_cast<std::uint32_t>(value); }
 void setChunkEvictionUpdates(PlanetGenerationParams &params, double value) { params.chunkEvictionUpdates = static_cast<std::uint32_t>(value); }
 void setChunkCacheCapacity(PlanetGenerationParams &params, double value) { params.chunkCacheCapacity = static_cast<std::uint32_t>(value); }
 void setContinentAmplitude(PlanetGenerationParams &params, double value) { params.continentAmplitudeMeters = value; }
@@ -132,6 +133,7 @@ void setCoastalMoistureBand(PlanetGenerationParams &params, double value) { para
 void setMoistureLatitudeBands(PlanetGenerationParams &params, double value) { params.moistureLatitudeBands = value != 0.0; }
 void setColorVariation(PlanetGenerationParams &params, double value) { params.colorVariation = value; }
 void setColorVariationWavelength(PlanetGenerationParams &params, double value) { params.colorVariationWavelengthMeters = value; }
+void setColorVariationGroundWavelength(PlanetGenerationParams &params, double value) { params.colorVariationGroundWavelengthMeters = value; }
 void setSnowLine(PlanetGenerationParams &params, double value) { params.snowLineMeters = value; }
 void setBeachWidth(PlanetGenerationParams &params, double value) { params.beachWidthMeters = value; }
 void setRockSlopeThreshold(PlanetGenerationParams &params, double value) { params.rockSlopeThreshold = value; }
@@ -145,6 +147,19 @@ void setSeaIceTemperature(PlanetGenerationParams &params, double value) { params
 void setSeaIceTransition(PlanetGenerationParams &params, double value) { params.seaIceTransition = value; }
 void setWaterWaveAmplitude(PlanetGenerationParams &params, double value) { params.waterWaveAmplitude = value; }
 void setWaterWaveWavelength(PlanetGenerationParams &params, double value) { params.waterWaveWavelengthMeters = value; }
+void setSurfaceGravity(PlanetGenerationParams &params, double value) { params.surfaceGravityMetersPerSecond2 = value; }
+void setWalkSpeed(PlanetGenerationParams &params, double value) { params.walkSpeedMetersPerSecond = value; }
+void setWalkSprintMultiplier(PlanetGenerationParams &params, double value) { params.walkSprintMultiplier = value; }
+void setJumpSpeed(PlanetGenerationParams &params, double value) { params.jumpSpeedMetersPerSecond = value; }
+void setEyeHeight(PlanetGenerationParams &params, double value) { params.eyeHeightMeters = value; }
+void setWalkGroundSnap(PlanetGenerationParams &params, double value) { params.walkGroundSnapMeters = value; }
+void setWalkMaxStepUp(PlanetGenerationParams &params, double value) { params.walkMaxStepUpMeters = value; }
+void setWalkMaxClimbGrade(PlanetGenerationParams &params, double value) { params.walkMaxClimbGrade = value; }
+void setSwimEnabled(PlanetGenerationParams &params, double value) { params.swimEnabled = value != 0.0; }
+void setSwimSpeed(PlanetGenerationParams &params, double value) { params.swimSpeedMetersPerSecond = value; }
+void setSwimWadeDepth(PlanetGenerationParams &params, double value) { params.swimWadeDepthMeters = value; }
+void setAtmosphereEnabled(PlanetGenerationParams &params, double value) { params.atmosphereEnabled = value != 0.0; }
+void setAtmosphereHeight(PlanetGenerationParams &params, double value) { params.atmosphereHeightMeters = value; }
 
 constexpr SettingRow kSettingRows[] = {
     {"seed",                      SettingKind::Integer, setSeed},
@@ -159,6 +174,7 @@ constexpr SettingRow kSettingRows[] = {
     {"bounding_factor",           SettingKind::Floating, setBoundingFactor},
     {"max_concurrent_builds",     SettingKind::Integer, setMaxConcurrentBuilds},
     {"max_new_builds_per_update", SettingKind::Integer, setMaxNewBuildsPerUpdate},
+    {"max_live_planets",          SettingKind::Integer, setMaxLivePlanets},
     {"chunk_eviction_updates",    SettingKind::Integer, setChunkEvictionUpdates},
     {"chunk_cache_capacity",      SettingKind::Integer, setChunkCacheCapacity},
     {"continent_amplitude_meters",    SettingKind::Floating, setContinentAmplitude},
@@ -216,6 +232,7 @@ constexpr SettingRow kSettingRows[] = {
     {"moisture_latitude_bands",       SettingKind::Boolean,  setMoistureLatitudeBands},
     {"color_variation",               SettingKind::Floating, setColorVariation},
     {"color_variation_wavelength_meters", SettingKind::Floating, setColorVariationWavelength},
+    {"color_variation_ground_wavelength_meters", SettingKind::Floating, setColorVariationGroundWavelength},
     {"snow_line_meters",              SettingKind::Floating, setSnowLine},
     {"beach_width_meters",            SettingKind::Floating, setBeachWidth},
     {"rock_slope_threshold",          SettingKind::Floating, setRockSlopeThreshold},
@@ -229,6 +246,19 @@ constexpr SettingRow kSettingRows[] = {
     {"sea_ice_transition",            SettingKind::Floating, setSeaIceTransition},
     {"water_wave_amplitude",          SettingKind::Floating, setWaterWaveAmplitude},
     {"water_wave_wavelength_meters",  SettingKind::Floating, setWaterWaveWavelength},
+    {"surface_gravity_mps2",          SettingKind::Floating, setSurfaceGravity},
+    {"walk_speed_mps",                SettingKind::Floating, setWalkSpeed},
+    {"walk_sprint_multiplier",        SettingKind::Floating, setWalkSprintMultiplier},
+    {"jump_speed_mps",                SettingKind::Floating, setJumpSpeed},
+    {"eye_height_meters",             SettingKind::Floating, setEyeHeight},
+    {"walk_ground_snap_meters",       SettingKind::Floating, setWalkGroundSnap},
+    {"walk_max_step_up_meters",       SettingKind::Floating, setWalkMaxStepUp},
+    {"walk_max_climb_grade",          SettingKind::Floating, setWalkMaxClimbGrade},
+    {"swim_enabled",                  SettingKind::Boolean,  setSwimEnabled},
+    {"swim_speed_mps",                SettingKind::Floating, setSwimSpeed},
+    {"swim_wade_depth_meters",        SettingKind::Floating, setSwimWadeDepth},
+    {"atmosphere_enabled",            SettingKind::Boolean,  setAtmosphereEnabled},
+    {"atmosphere_height_meters",      SettingKind::Floating, setAtmosphereHeight},
 };
 
 // Reads the module's [planet] configuration section into one params struct.
@@ -270,6 +300,18 @@ PlanetGenerationParams paramsFromConfiguration(ParticipantContext &context)
         params.axis[1] = array[1];
         params.axis[2] = array[2];
     }
+    if (const auto zenith = context.configurationFloatingArrayInSection("planet", "atmosphere_zenith_color"); zenith.size() == 3)
+    {
+        params.atmosphereZenithColor[0] = static_cast<float>(zenith[0]);
+        params.atmosphereZenithColor[1] = static_cast<float>(zenith[1]);
+        params.atmosphereZenithColor[2] = static_cast<float>(zenith[2]);
+    }
+    if (const auto horizon = context.configurationFloatingArrayInSection("planet", "atmosphere_horizon_color"); horizon.size() == 3)
+    {
+        params.atmosphereHorizonColor[0] = static_cast<float>(horizon[0]);
+        params.atmosphereHorizonColor[1] = static_cast<float>(horizon[1]);
+        params.atmosphereHorizonColor[2] = static_cast<float>(horizon[2]);
+    }
     if (const auto palette = context.configurationFloatingArrayInSection("planet", "biome_palette"); !palette.empty())
     {
         const std::size_t count = std::min(palette.size(), static_cast<std::size_t>(biomeCount) * 3u);
@@ -300,7 +342,7 @@ PlanetGenerationParams paramsFromConfiguration(ParticipantContext &context)
     return params;
 }
 
-Vec3 worldDirectionToPlanetLocal(const PlanetGenerationParams &params, const double *vector)
+Vec3 worldPointToPlanetLocal(const PlanetGenerationParams &params, const double *vector)
 {
     return Vec3{vector[0] - params.centerMeters[0], vector[1] - params.centerMeters[1], vector[2] - params.centerMeters[2]};
 }
@@ -389,8 +431,19 @@ public:
             return invalidPlanet;
         }
 
-        auto           instance  = std::make_unique<Planet>(params);
-        const PlanetHandle handle = nextHandle_++;
+        // Each live planet owns a worker pool; the configured cap bounds how
+        // many pools one module instance can stack.
+        {
+            std::lock_guard<std::mutex> lock(planetsMutex_);
+            if (planets_.size() >= params.maxLivePlanets)
+            {
+                setError(error, PlanetError::CapacityReached);
+                return invalidPlanet;
+            }
+        }
+
+        auto               instance = std::make_unique<Planet>(params);
+        const PlanetHandle handle   = nextHandle_++;
         {
             std::lock_guard<std::mutex> lock(planetsMutex_);
             planets_.emplace(handle, std::move(instance));
@@ -437,7 +490,7 @@ private:
             {
                 return;
             }
-            const Vec3 eyeLocal = worldDirectionToPlanetLocal(planet->params(), eyeWorld);
+            const Vec3 eyeLocal = worldPointToPlanetLocal(planet->params(), eyeWorld);
             planet->update(eyeLocal);
         };
         capability_.visibleChunkCapacity = [](void *self, PlanetHandle handle) -> std::uint32_t

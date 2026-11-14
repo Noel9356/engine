@@ -725,8 +725,16 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     };
 
     // ---- sample the padded grids -------------------------------------------------
-    std::vector<double> densities(gridSize);
-    std::vector<double> waters;
+    // The grids live in per-thread scratch: a build fully overwrites every
+    // element before any read (the loops below cover all gridSize indices),
+    // so reuse cannot leak state between builds, and the worker pool stops
+    // paying an allocation per chunk for a constant-size buffer.
+    thread_local std::vector<double> densitiesScratch;
+    thread_local std::vector<double> watersScratch;
+    std::vector<double> &densities = densitiesScratch;
+    densities.resize(gridSize);
+    std::vector<double> &waters = watersScratch;
+    waters.clear();
     if (nodeTouchesSea)
     {
         waters.resize(gridSize);
@@ -1291,12 +1299,23 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     }
 
     // ---- hash (determinism self-tests + change detection) -----------------------------
+    // The combined hash covers all four buffers (the self-test identity);
+    // the per-pass hashes let consumers detect a rebuilt terrain or water
+    // patch independently (a chunk key can outlive one rebuild).
     std::uint64_t hash = 0xCBF29CE484222325ull;
     hash = fnv1a64(mesh.terrainVertices.data(), mesh.terrainVertices.size() * sizeof(PlanetVertex), hash);
     hash = fnv1a64(mesh.terrainIndices.data(), mesh.terrainIndices.size() * sizeof(std::uint32_t), hash);
     hash = fnv1a64(mesh.waterVertices.data(), mesh.waterVertices.size() * sizeof(PlanetVertex), hash);
     hash = fnv1a64(mesh.waterIndices.data(), mesh.waterIndices.size() * sizeof(std::uint32_t), hash);
     mesh.hash = hash;
+
+    std::uint64_t terrainHash = 0xCBF29CE484222325ull;
+    terrainHash = fnv1a64(mesh.terrainVertices.data(), mesh.terrainVertices.size() * sizeof(PlanetVertex), terrainHash);
+    mesh.terrainHash = fnv1a64(mesh.terrainIndices.data(), mesh.terrainIndices.size() * sizeof(std::uint32_t), terrainHash);
+
+    std::uint64_t waterHash = 0xCBF29CE484222325ull;
+    waterHash = fnv1a64(mesh.waterVertices.data(), mesh.waterVertices.size() * sizeof(PlanetVertex), waterHash);
+    mesh.waterHash = fnv1a64(mesh.waterIndices.data(), mesh.waterIndices.size() * sizeof(std::uint32_t), waterHash);
     return mesh;
 }
 

@@ -7,14 +7,19 @@
 //
 // Views (deterministic camera placement from the planet's own sampling):
 //   --view globe    whole planet from space: continents, oceans, ice caps.
+//   --view orbit    mid-altitude sweep over the limbs and ranges.
 //   --view coast    standing on a beach looking along the shoreline.
 //   --view cliffs   terraced mountain country with overhanging cliff faces.
 //   --view surface  rolling green hills under the sun.
+//   --view walk     first person on the terrain: the planet module's
+//                   SurfaceWalker carries the camera (WASD + mouse + Space +
+//                   Shift in a window; --orbit auto-walks deterministically).
 //
 // Useful flags: --seed N / --radius M override the planet description,
-// --frames N renders exactly N frames (deterministic), --screenshot exports
-// the rendered frame as PPM, --self-test verifies chunk generation is
-// deterministic and independent of chunk build order, --stats-every prints
+// --frames N renders exactly N frames (deterministic; --warmup W prepends W
+// build-only frames), --screenshot exports the rendered frame as PPM,
+// --self-test verifies chunk generation is deterministic and independent of
+// chunk build order and audits the walk controller, --stats-every prints
 // planet statistics cadence, --caves enables the cave worm carving.
 
 #include <engine/application/application.hpp>
@@ -34,6 +39,7 @@
 #include "demo/planet_frame_timing.hpp"
 #include "demo/planet_camera_input.hpp"
 #include "demo/planet_chunk_renderer.hpp"
+#include "demo/planet_walk_controller.hpp"
 #include "engine/application/application_host.hpp"
 #include "engine/application/command_line.hpp"
 #include "engine/kernel/engine_kernel.hpp"
@@ -51,7 +57,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -91,6 +99,14 @@ int main(int argc, char **argv)
 
     engine::ApplicationHostOptions hostOptions
         = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "camera", "pbr", "planet"});
+    if (options.caves)
+    {
+        // The demo stages the toggle as a configuration override so the
+        // planet module reads it during construct (the capability creates
+        // planets from the configured template; there is no per-planet
+        // post-creation knob for the cave field).
+        hostOptions.configurationOverrides.push_back("planet.caves_enabled=true");
+    }
     engine::ApplicationHost host;
     std::string             startupReport;
     if (commandLine.validateOnly)
@@ -145,11 +161,6 @@ int main(int argc, char **argv)
     }
     planet::PlanetGenerationParams params{};
     planetCapability->copyGenerationParams(planetCapability->self, planetHandle, &params);
-    if (options.caves)
-    {
-        std::cout << "demo_planet: --caves currently only toggles through configuration "
-                     "(--set planet.caves_enabled=true); continuing without caves\n";
-    }
     std::cout << "demo_planet: planet seed " << params.seed << ", radius " << params.radiusMeters << " m, octree depth "
               << params.derivedMaxDepth << ", leaf voxel " << params.derivedVoxelMeters << " m\n";
 
@@ -166,11 +177,71 @@ int main(int argc, char **argv)
     // ---- camera placement per view ----------------------------------------------------
     const glm::dvec3 planetCenter(params.centerMeters[0], params.centerMeters[1], params.centerMeters[2]);
     const double     planetRadius = params.radiusMeters;
+    const bool       walkView     = options.viewName == "walk";
 
     glm::dvec3 eye      = planetCenter + glm::dvec3(0.0, 0.0, planetRadius * 3.0);
     glm::dvec3 target   = planetCenter;
     double     nearZ    = planetRadius * 0.01;
     double     farZ     = planetRadius * 12.0;
+
+    // The walk controller owns the density-field walk surface; it is only
+    // built for the walk view (one extra seed schedule, no worker threads).
+    std::unique_ptr<PlanetWalkController> walkController;
+
+    // Sun direction for the view pickers (ground views prefer lit slopes).
+    const planet::Vec3 sunDirection = environment.sun.enabled
+        ? planet::Vec3{static_cast<double>(environment.sun.direction[0]),
+            static_cast<double>(environment.sun.direction[1]),
+            static_cast<double>(environment.sun.direction[2])}
+        : planet::Vec3{0.0, 0.0, 0.0};
+
+    // Terrain windows shared by the surface view placements (they pin the
+    // biome/climate range a view's spot may sit in).
+    const auto elevationWindow = [](double low, double high)
+    {
+        return [low, high](double elevation, engine::planet::Biome, double, const planet::PlanetGenerationParams &)
+        { return elevation >= low && elevation <= high; };
+    };
+    // Warm-land windows: the biome check alone is not enough - the biome
+    // colors BLEND into snow below the climate snow line (and toward the
+    // freeze line), so a spot the enum calls "taiga" can still render
+    // half-white. Require strictly warm air and a spot clearly below the
+    // blended snow band so showcase views land on green/sandy terrain.
+    const auto warmLandWindow = [](double low, double high)
+    {
+        return [low, high](double elevation, engine::planet::Biome biome, double temperature01,
+            const planet::PlanetGenerationParams &params)
+        {
+            if (elevation < low || elevation > high)
+            {
+                return false;
+            }
+            if (biome == planet::Biome::Snow || biome == planet::Biome::Tundra || temperature01 <= 0.45)
+            {
+                return false;
+            }
+            const double snowLine = params.snowLineMeters * (0.25 + 0.75 * temperature01);
+            const double snowBand = params.snowLineMeters * params.elevationBlendFraction;
+            return elevation < snowLine - snowBand;
+        };
+    };
+    const auto warmGreenLandWindow = [warmLandWindow](double low, double high)
+    {
+        auto warm = warmLandWindow(low, high);
+        return [warm](double elevation, engine::planet::Biome biome, double temperature01,
+            const planet::PlanetGenerationParams &params)
+        {
+            // TropicalRainforest is excluded: its canopy palette is the
+            // darkest row (linear albedo ~0.09-0.13) and a front-lit
+            // frame over it still photographs as a murky near-black
+            // sheet under the demo's linear exposure.
+            const bool green = biome == planet::Biome::Grassland
+                || biome == planet::Biome::TemperateForest || biome == planet::Biome::SeasonalForest
+                || biome == planet::Biome::TemperateRainforest
+                || biome == planet::Biome::Taiga;
+            return warm(elevation, biome, temperature01, params) && green;
+        };
+    };
 
     if (options.viewName == "globe")
     {
@@ -187,48 +258,51 @@ int main(int argc, char **argv)
         eye                        = planetCenter + direction * planetRadius * 1.6;
         target                     = planetCenter;
     }
+    else if (walkView)
+    {
+        // First-person walk: spawn on green inland terrain (the same warm
+        // green window the surface view uses - it guarantees walkable,
+        // non-snowy, non-desert country), then let the walker stand on the
+        // terrain top at 1.7 m eye height. The probe height keeps the
+        // viewpoint's sight caps calibrated while the walker itself decides
+        // the exact standing height from the field.
+        Viewpoint viewpoint;
+        bool found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(2.0, 200.0), ProbePolicy::Inland,
+            60.0, sunDirection, viewpoint);
+        if (!found)
+        {
+            found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 800.0), ProbePolicy::Inland,
+                60.0, sunDirection, viewpoint);
+        }
+        if (!found)
+        {
+            std::cerr << "demo_planet: no usable walk spawn found for view 'walk'\n";
+            planetCapability->destroyPlanet(planetCapability->self, planetHandle);
+            host.stop();
+            return 1;
+        }
+        walkController = std::make_unique<PlanetWalkController>(params, planetCenter);
+        walkController->spawn(viewpoint.direction);
+        walkController->setAutoWalk(options.orbit);
+        eye    = walkController->eye();
+        target = walkController->target();
+        // Walking sees metres, not kilometres: a 0.1 m near plane keeps the
+        // ground under the feet from clipping while the far plane still
+        // reaches the horizon.
+        nearZ = 0.1;
+        farZ  = planetRadius * 2.0;
+        std::cout << "demo_planet: walk spawn - eye (" << eye.x << ", " << eye.y << ", " << eye.z << ") radius "
+                  << glm::length(eye - planetCenter) << "\n";
+    }
     else
     {
         // Surface views: find a deterministic spot matching the view's
         // terrain predicate, stand eyeHeight above the ground, look along the
         // horizon toward the view's focus.
         Viewpoint viewpoint;
-        const auto elevationWindow = [](double low, double high)
-        {
-            return [low, high](double elevation, engine::planet::Biome, double, const planet::PlanetGenerationParams &)
-            { return elevation >= low && elevation <= high; };
-        };
-        // Warm-land windows: the biome check alone is not enough - the biome
-        // colors BLEND into snow below the climate snow line (and toward the
-        // freeze line), so a spot the enum calls "taiga" can still render
-        // half-white. Require strictly warm air and a spot clearly below the
-        // blended snow band so showcase views land on green/sandy terrain.
-        const auto warmLandWindow = [](double low, double high)
-        {
-            return [low, high](double elevation, engine::planet::Biome biome, double temperature01,
-                const planet::PlanetGenerationParams &params)
-            {
-                if (elevation < low || elevation > high)
-                {
-                    return false;
-                }
-                if (biome == planet::Biome::Snow || biome == planet::Biome::Tundra || temperature01 <= 0.45)
-                {
-                    return false;
-                }
-                const double snowLine = params.snowLineMeters * (0.25 + 0.75 * temperature01);
-                const double snowBand = params.snowLineMeters * params.elevationBlendFraction;
-                return elevation < snowLine - snowBand;
-            };
-        };
         bool found = false;
         // View placement: biome-aware, climate-aware and sightline-checked so
         // the view shows landscape rather than the nearest slope wall.
-        const planet::Vec3 sunDirection = environment.sun.enabled
-            ? planet::Vec3{static_cast<double>(environment.sun.direction[0]),
-                static_cast<double>(environment.sun.direction[1]),
-                static_cast<double>(environment.sun.direction[2])}
-            : planet::Vec3{0.0, 0.0, 0.0};
 
         if (options.viewName == "coast")
         {
@@ -256,23 +330,6 @@ int main(int argc, char **argv)
             // as washed-out empty country), above the coastal-flatten band
             // (its planed-off terrain photographs as an empty sheet) and
             // below the snow blend.
-            const auto warmGreenLandWindow = [warmLandWindow](double low, double high)
-            {
-                auto warm = warmLandWindow(low, high);
-                return [warm](double elevation, engine::planet::Biome biome, double temperature01,
-                    const planet::PlanetGenerationParams &params)
-                {
-                    // TropicalRainforest is excluded: its canopy palette is the
-                    // darkest row (linear albedo ~0.09-0.13) and a front-lit
-                    // frame over it still photographs as a murky near-black
-                    // sheet under the demo's linear exposure.
-                    const bool green = biome == planet::Biome::Grassland
-                        || biome == planet::Biome::TemperateForest || biome == planet::Biome::SeasonalForest
-                        || biome == planet::Biome::TemperateRainforest
-                        || biome == planet::Biome::Taiga;
-                    return warm(elevation, biome, temperature01, params) && green;
-                };
-            };
             found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(60.0, 200.0), ProbePolicy::Inland, 140.0,
                 sunDirection, viewpoint);
         }
@@ -394,8 +451,8 @@ int main(int argc, char **argv)
     const bool windowedBackend = windowBackendName != std::string("headless");
     if (windowedBackend)
     {
-        std::cout << "demo_planet: controls - mouse looks, WASD moves, Space/Ctrl up/down, Shift sprints,\n"
-                     "      arrows look, Left Alt toggles the cursor, Escape quits\n";
+        std::cout << "demo_planet: controls - mouse looks, WASD moves, Space jumps (walk) or rises, Ctrl descends,\n"
+                     "      Shift sprints, arrows look, Left Alt toggles the cursor, Escape quits\n";
         if (options.orbit)
         {
             std::cout << "demo_planet: --orbit drives the camera automatically; disable it for manual movement\n";
@@ -423,7 +480,9 @@ int main(int argc, char **argv)
     }
 
     // Camera movement scales with the view: close terrain uses walking/flying
-    // speeds, while globe/orbit views need larger world-unit steps.
+    // speeds, while globe/orbit views need larger world-unit steps. The walk
+    // view leaves the speed untouched - the walker owns movement, the camera
+    // only carries the pose.
     const float cameraMoveSpeed = macroView
         ? std::clamp(static_cast<float>(planetRadius * (options.viewName == "globe" ? 0.05 : 0.025)), 250.0f, 50000.0f)
         : std::clamp(static_cast<float>(planetRadius * 0.001), 12.0f, 300.0f);
@@ -443,7 +502,7 @@ int main(int argc, char **argv)
         cameraParameters.up[1]        = static_cast<float>(initialCameraUp.y);
         cameraParameters.up[2]        = static_cast<float>(initialCameraUp.z);
         cameraParameters.hasUp        = true;
-        cameraParameters.fovYDegrees  = macroView ? 42.0f : 65.0f;
+        cameraParameters.fovYDegrees  = walkView ? 70.0f : (macroView ? 42.0f : 65.0f);
         cameraParameters.nearZ        = static_cast<float>(nearZ);
         cameraParameters.farZ         = static_cast<float>(farZ);
         cameraParameters.moveSpeed    = cameraMoveSpeed;
@@ -462,12 +521,20 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    cameraCapability.setControlMode(cameraCapability.self, cameraHandle, camera::CameraControlMode::Fly);
+    cameraCapability.setControlMode(cameraCapability.self, cameraHandle,
+        walkView ? camera::CameraControlMode::Fixed : camera::CameraControlMode::Fly);
     PlanetCameraInput cameraInput(windowCapability, windowHandle, windowedBackend, !options.orbit);
 
     // ---- run mode -------------------------------------------------------------------
     const bool          runUntilClosed = options.frames == 0 && windowedBackend;
     const std::uint64_t totalFrames    = options.frames != 0 ? options.frames : 90;
+    // Warmup frames stream chunk builds without rendering; they EXTEND the
+    // run (frames are always rendered exactly as requested - warmup no longer
+    // consumes the render budget). Warmup is a BUDGET, not an exact count:
+    // once the visible set is fully built (and the pool is idle) the remaining
+    // warmup frames are dropped, so a warmup value just needs to be large
+    // enough for the view's chunk population on the current machine.
+    std::uint64_t warmupRemaining = options.warmupFrames;
     const double        frameDelta     = 1.0 / 30.0;
     if (options.screenshotFrame == 0)
     {
@@ -481,6 +548,7 @@ int main(int argc, char **argv)
     // application loop; this keeps planet streaming and camera control from
     // accumulating in one demo-level coordinator.
     PlanetChunkRenderer chunkRenderer(*planetCapability, planetHandle, renderCapability, rendererHandle, params);
+    chunkRenderer.ensureSkyDome();
 
     // ---- frame loop -------------------------------------------------------------------
     std::uint64_t framesRendered = 0;
@@ -504,7 +572,11 @@ int main(int argc, char **argv)
                   << " left to vsync - presentation is already pacing the frame loop\n";
     }
 
-    for (std::uint64_t frameIndex = 0; runUntilClosed || frameIndex < totalFrames; ++frameIndex)
+    // Warmup frames precede the rendered run; both are bounded by their own
+    // counter (warmup ends early on a fully built visible set), so the loop
+    // runs until the warmup budget is spent AND every requested frame is
+    // rendered - or until the window closes in interactive mode.
+    for (std::uint64_t frameIndex = 0; runUntilClosed || warmupRemaining > 0 || framesRendered < totalFrames; ++frameIndex)
     {
         frameTiming.beginFrame();
         windowCapability.pollEvents(windowCapability.self);
@@ -556,7 +628,25 @@ int main(int argc, char **argv)
         const double deltaSeconds     = options.frames != 0 ? frameDelta : wallDeltaSeconds;
 
         camera::CameraInputState cameraSample{};
-        if (options.orbit)
+        if (walkView)
+        {
+            // The walk controller consumes the input sample and hands the
+            // camera its pose; the camera itself runs in Fixed mode and
+            // never integrates movement on its own.
+            const bool interactive = !options.orbit;
+            cameraSample = interactive ? cameraInput.sample() : camera::CameraInputState{};
+            walkController->update(cameraSample, interactive, deltaSeconds);
+            eye    = walkController->eye();
+            target = walkController->target();
+            const glm::dvec3 walkUp = walkController->up();
+            const float poseEye[3] = {static_cast<float>(eye.x), static_cast<float>(eye.y), static_cast<float>(eye.z)};
+            const float poseTarget[3] = {
+                static_cast<float>(target.x), static_cast<float>(target.y), static_cast<float>(target.z)};
+            const float poseUp[3] = {
+                static_cast<float>(walkUp.x), static_cast<float>(walkUp.y), static_cast<float>(walkUp.z)};
+            cameraCapability.setLookAt(cameraCapability.self, cameraHandle, poseEye, poseTarget, poseUp);
+        }
+        else if (options.orbit)
         {
             // Deterministic automatic orbit mode remains available for captures
             // and headless runs; normal windowed runs use live keyboard/mouse input.
@@ -614,18 +704,57 @@ int main(int argc, char **argv)
         // visible set already complete (no black-hole screenshots).
         const double eyeWorld[3] = {viewState.position[0], viewState.position[1], viewState.position[2]};
         planetCapability->updatePlanet(planetCapability->self, planetHandle, eyeWorld);
-        const bool warming = frameIndex < static_cast<std::uint64_t>(options.warmupFrames);
-        if (warming)
+        if (warmupRemaining > 0)
         {
+            // Warmup frames exist to give the build pool wall-clock time.
+            // With pacing disabled (max_fps 0, the headless default) they
+            // would otherwise spin through the budget in microseconds - a
+            // static view's update is a handful of fast-path checks - and
+            // the pool would never see the machine. Warmup applies its own
+            // floor interval in that case, and ends early once the visible
+            // set is fully built (the streaming pool is idle), so a large
+            // warmup budget costs nothing on an already-complete view.
+            planet::PlanetStatistics warmStats{};
+            if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &warmStats)
+                && warmStats.chunksVisible > 0 && warmStats.chunksBuilding == 0
+                && warmStats.chunksReady >= warmStats.chunksVisible)
+            {
+                warmupRemaining = 0;
+            }
+            else
+            {
+                --warmupRemaining;
+            }
+            (void)framePacer.pace(&host.kernel().profiler());
+            if (effectiveTargetHz <= 0.0)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            }
             continue;
         }
         frameTiming.markUpdateDone();
         chunkRenderer.updateVisibleChunks();
+
+        // Sky backdrop: the dome follows the eye (placed, oriented and
+        // scaled for this frame's pose) and reports the horizon-haze clear
+        // color; space views keep a black clear color and no dome.
+        const glm::dvec3 localUp = walkView && walkController ? walkController->up()
+            : glm::normalize(eye - planetCenter);
+        float skyClearColor[3] = {0.0f, 0.0f, 0.0f};
+        chunkRenderer.updateSkyDome(eye - planetCenter, localUp,
+            glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z), environment.sun.enabled, nearZ, farZ,
+            skyClearColor);
+        renderer::FrameParameters frameParameters{};
+        frameParameters.clearColor[0] = skyClearColor[0];
+        frameParameters.clearColor[1] = skyClearColor[1];
+        frameParameters.clearColor[2] = skyClearColor[2];
+        frameParameters.clearColor[3] = 1.0f;
+
         chunkRenderer.rebuildDrawCommands();
         const auto &drawCommands = chunkRenderer.drawCommands();
         frameTiming.markUploadDone();
 
-        renderCapability.beginFrame(renderCapability.self, rendererHandle, nullptr);
+        renderCapability.beginFrame(renderCapability.self, rendererHandle, &frameParameters);
         renderCapability.drawMeshes(renderCapability.self, rendererHandle, drawCommands.data(),
             static_cast<std::uint32_t>(drawCommands.size()));
         renderCapability.endFrame(renderCapability.self, rendererHandle);
@@ -652,7 +781,12 @@ int main(int argc, char **argv)
             }
         }
 
-        if (!screenshotTaken && !options.screenshotPath.empty() && frameIndex == options.screenshotFrame)
+        // Screenshot frames count RENDERED frames (warmup excluded, 0-based),
+        // so the default last-frame index lands on the last rendered frame at
+        // any warmup depth. framesRendered is already the COUNT of rendered
+        // frames here; rendered frame i has completed when it equals i + 1.
+        if (!screenshotTaken && !options.screenshotPath.empty()
+            && framesRendered == options.screenshotFrame + 1)
         {
             auto *headlessWindowCapability = context.tryAcquireCapability<window::HeadlessWindowCapability>();
             if (headlessWindowCapability != nullptr && windowBackendName == std::string("headless"))

@@ -1,7 +1,7 @@
 // Public capability surface of the planet module.
 //
 // Declares the POD types and function-pointer table consumers receive through
-// ParticipantContext::acquireCapability for the "planet" capability (ABI 1):
+// ParticipantContext::acquireCapability for the "planet" capability (ABI 2):
 // creating deterministic procedural planets, streaming their LOD chunk meshes
 // as renderer-ready vertex/index views, sampling surface elevation and
 // climate, and hashing chunks for determinism self-tests.
@@ -25,7 +25,9 @@ namespace planet
 struct PlanetChunkView;
 
 // ABI version of this capability struct; consumers must match it.
-inline constexpr std::uint32_t planetCapabilityAbi = 1u;
+// ABI history: 2 added meshHash to PlanetChunkView (rebuilt boundary meshes
+// are detected by content instead of by chunk key); 1 was the initial table.
+inline constexpr std::uint32_t planetCapabilityAbi = 2u;
 
 using PlanetHandle        = std::uint32_t;
 inline constexpr PlanetHandle invalidPlanet = 0;

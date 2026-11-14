@@ -84,6 +84,11 @@ struct PlanetGenerationParams
     double        boundingFactor     = 1.4;  // root cube half-size = radius * this
     std::uint32_t maxConcurrentBuilds = 16;  // in-flight async chunk mesh builds
     std::uint32_t maxNewBuildsPerUpdate = 48;  // build requests issued per update() call
+    // Upper bound on simultaneously live planets for one module instance
+    // (each planet owns a worker pool; the cap keeps a runaway consumer from
+    // stacking unbounded thread counts). createPlanet reports
+    // CapacityReached beyond it.
+    std::uint32_t maxLivePlanets = 16;
 
     // ---- relief shaping (meters unless noted) ---------------------------------
     double continentAmplitudeMeters = 560.0;  // ± height of the continent base field
@@ -204,6 +209,7 @@ struct PlanetGenerationParams
     bool   moistureLatitudeBands = true;    // ITCZ wet belt + subtropical dry belts
     double colorVariation = 0.14;           // per-point albedo jitter (0 = flat palette)
     double colorVariationWavelengthMeters = 260.0; // feature size of the albedo jitter field
+    double colorVariationGroundWavelengthMeters = 6.0; // metre-scale mottle for ground-level views
     double snowLineMeters = 1600.0;          // sea-level snow line (drops as climate cools);
                                             // only the highest massifs are glaciated, polar
                                             // caps come from latitude alone
@@ -237,6 +243,32 @@ struct PlanetGenerationParams
         // rock (cliff faces)
         0.280f, 0.250f, 0.210f,
     };
+
+    // ---- surface walking (kinematic controller; see walker.hpp) ----------------
+    // Everything a point-feet character needs to cross the terrain: planet-
+    // centric gravity, walk/sprint/swim speeds, the jump impulse, the camera
+    // eye offset, and the collision windows (how far the feet stick to the
+    // ground going downhill and how high a ledge they can step onto).
+    double surfaceGravityMetersPerSecond2 = 9.81; // constant pull toward the center
+    double walkSpeedMetersPerSecond       = 4.5;  // ground movement speed
+    double walkSprintMultiplier           = 2.6;  // sprint speed = walk speed * this
+    double jumpSpeedMetersPerSecond       = 5.0;  // upward impulse; 0 disables jumping
+    double eyeHeightMeters                = 1.7;  // camera height above the feet
+    double walkGroundSnapMeters           = 0.9;  // drop the feet follow without falling
+    double walkMaxStepUpMeters            = 0.55; // highest ledge walked straight onto
+    double walkMaxClimbGrade              = 3.5;  // rise/run above this blocks (tan; ~74 deg)
+    bool   swimEnabled                    = true; // float at the sea surface over deep water
+    double swimSpeedMetersPerSecond       = 2.6;  // movement speed while swimming
+    double swimWadeDepthMeters            = 1.2;  // water shallower than this stays walkable
+
+    // ---- atmosphere (sky backdrop; see atmosphere.hpp) --------------------------
+    // The sky a camera inside the air sees: a zenith-to-horizon gradient
+    // (linear RGB colors, like the water colors) that fades out toward space
+    // over atmosphere_height_meters. Consumers multiply the sun tint on top.
+    bool  atmosphereEnabled       = true;
+    double atmosphereHeightMeters = 20000.0; // sky fades to space over this altitude
+    float atmosphereZenithColor[3]  = {0.055f, 0.155f, 0.480f};
+    float atmosphereHorizonColor[3] = {0.420f, 0.580f, 0.820f};
 
     // ---- water -----------------------------------------------------------------
     bool  waterEnabled        = true;

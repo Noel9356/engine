@@ -21,6 +21,12 @@ namespace
 constexpr FbmParams kFixedFbm{2, 2.0, 0.5};
 constexpr FbmParams kMassFbm{3, 2.0, 0.5};
 
+// Bisection stops once the surface bracket is tighter than this (sub-
+// millimeter at any supported radius) - further halvings cannot move the
+// reported crossing measurably, and the saved evaluations add up across the
+// scans the viewpoint picker and the walker issue per frame.
+constexpr double kSurfaceBisectResolutionMeters = 1.0e-3;
+
 } // namespace
 
 DensityField::DensityField(const PlanetGenerationParams &params)
@@ -334,6 +340,10 @@ double DensityField::surfaceRadius(const Vec3 &unitDirection) const
     }
     for (std::uint32_t iteration = 0; iteration < kBisectSteps; ++iteration)
     {
+        if (aboveRadius - belowRadius <= kSurfaceBisectResolutionMeters)
+        {
+            break;
+        }
         const double midRadius = 0.5 * (belowRadius + aboveRadius);
         const Vec3   midPoint{unitDirection.x * midRadius, unitDirection.y * midRadius, unitDirection.z * midRadius};
         if (densityAt(midPoint) > 0.0)

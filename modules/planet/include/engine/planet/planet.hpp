@@ -39,6 +39,7 @@ namespace planet
 {
 
 // Borrowed view of one drawable chunk mesh (valid until the next update()).
+// Fields are append-only across ABI revisions (see capabilities.hpp).
 struct PlanetChunkView
 {
     ChunkKey             key          = 0;
@@ -48,6 +49,11 @@ struct PlanetChunkView
     const std::uint32_t *indices      = nullptr;
     std::uint32_t        indexCount   = 0;
     bool                 isWater      = false;
+    // Content version of the mesh (FNV-1a over the vertex/index buffers),
+    // added in ABI 2. A chunk whose geometry was rebuilt (e.g. after a
+    // conforming-mask change) keeps its key but changes its hash, so
+    // consumers can detect the rebuild and refresh their uploaded copies.
+    std::uint64_t        meshHash     = 0;
 };
 
 class Planet final
@@ -127,6 +133,17 @@ private:
     std::vector<ConformMask> visibleMasks_;
     std::vector<ChunkCoord>  previousVisible_;
     VisibleLeafSet           visibleLeafSet_;
+
+    // Scratch for the nearest-first request pass of update() (kept at member
+    // scope so streaming frames do not reallocate the missing-chunk buffer).
+    struct MissingChunk
+    {
+        ChunkCoord  coord;
+        ConformMask conformMask;
+        double      distanceSquared = 0.0;
+        double      apparentSize    = 0.0; // chunk width / distance (screen-size priority)
+    };
+    std::vector<MissingChunk> missingScratch_;
 
     // Ready cache: chunk key -> built mesh. Node-based, so mesh storage stays put while the table grows; capacity is
     // reserved up front so streaming never rehashes.

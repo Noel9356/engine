@@ -25,7 +25,8 @@ The shipped defaults describe the showcase planet: radius 60 km, Earth-like reli
 | `horizon_culling` | `true` | Skip nodes fully inside the shadow cone of the guaranteed-solid inner shell ball. |
 | `bounding_factor` | `1.4` | Root cube half-size = `radius * factor`. Range [1.05, 4]. |
 | `max_concurrent_builds` | `16` | Chunk mesh builds in flight at once (the pool runs wide open; ground views select thousands of chunks). |
-| `max_new_builds_per_update` | `48` | Build requests issued per `updatePlanet` call. |
+| `max_new_builds_per_update` | `48` | Build requests issued per `updatePlanet` call. Requests are ordered by apparent size (chunk width over distance, the same quantity the LOD rule is built on), so the widest-on-screen unresolved chunks build first. |
+| `max_live_planets` | `16` | How many planets one module instance may keep alive at once (each owns a worker pool). `createPlanet` reports `CapacityReached` beyond the cap. |
 | `chunk_eviction_updates` | `240` | Updates a hidden mesh stays cached before eviction. |
 | `chunk_cache_capacity` | `16384` | Hard cap on cached chunk meshes (oldest evicted first). Must exceed the whole visible set on the deepest ground views (~9000 chunks at radius 60000) or ready meshes evict and rebuild in a churn loop. |
 
@@ -112,7 +113,8 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `coastal_moisture_band_meters` | `400.0` | Elevation over which the coastal moisture boost fades out. |
 | `moisture_latitude_bands` | `true` | ITCZ wet belt + subtropical dry belts + temperate wet belt. |
 | `color_variation` | `0.14` | Per-point albedo jitter (0 = flat palette). Each color channel is weighted differently, so the variation reads as subtle hue mottling (warm/cool patches) instead of pure luminance banding. |
-| `color_variation_wavelength_meters` | `260.0` | Feature size of the albedo jitter field. |
+| `color_variation_wavelength_meters` | `260.0` | Feature size of the albedo jitter field. The field carries three scales: the configured wavelength mottles biome sheets at globe scale, an octave at an eighth of it covers the mid-range, and an octave at `color_variation_ground_wavelength_meters` keeps ground-level views from reading as one unbroken color. |
+| `color_variation_ground_wavelength_meters` | `6.0` | Metre-scale mottle octave of the albedo jitter field; the surface texture a walking camera sees. Clamped to at most `color_variation_wavelength_meters`. |
 | `snow_line_meters` | `1600.0` | Sea-level snow line; drops as the local climate cools. Only true peaks are glaciated; polar caps come from latitude alone. |
 | `beach_width_meters` | `2.0` | Shoreline band above sea level. Kept narrow: on flattened coastal plains a wide band paints every drainage dip as sand. |
 | `rock_slope_threshold` | `0.62` | Slope (1 - dot(normal, radial)) where bare rock takes over (about 32 degrees). Low enough for genuine cliff faces to show rock, high enough that aliased ridge crests stay snow-covered instead of speckling with rock dots. |
@@ -122,11 +124,40 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `elevation_blend_fraction` | `0.12` | Snow-line and water-band color blends as a fraction of the band width. |
 | `biome_palette` | 16 rows | Linear RGB rows in `Biome` enum order (deep ocean .. rock); the ocean-floor rows sit deliberately darker than the water surface colors. Entries may be omitted from the end. |
 
+## Surface walking
+
+A kinematic, point-feet character controller lives in the module (`SurfaceWalker`, see `walker.hpp`): gravity pulls toward the planet center, movement lives in the tangent plane, and terrain collision queries the same pure density field the mesher samples (a march-and-bisect along the local radial direction), so overhang ledges and cave floors are walkable without any collision proxy geometry. A full physics module is not needed for this: the field answers the ground queries directly, and the controller stays deterministic (fixed inputs walk one exact path, which the demo's `--self-test` asserts).
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `surface_gravity_mps2` | `9.81` | Constant pull toward the planet center, meters/second². |
+| `walk_speed_mps` | `4.5` | Ground movement speed. |
+| `walk_sprint_multiplier` | `2.6` | Sprint speed = walk speed × this. |
+| `jump_speed_mps` | `5.0` | Upward impulse when jumping; 0 disables jumping. |
+| `eye_height_meters` | `1.7` | Camera height above the feet (the walker reports an eye position). |
+| `walk_ground_snap_meters` | `0.9` | Deepest drop the feet follow without becoming a fall; walking off a bigger drop goes airborne. |
+| `walk_max_step_up_meters` | `0.55` | Highest ledge the character walks straight onto; taller walls block and the movement slides along them. |
+| `walk_max_climb_grade` | `3.5` | Rise/run above which a slope is unclimbable (a tangent value; 3.5 ≈ 74 degrees). |
+| `swim_enabled` | `true` | Float at the sea surface over water deeper than the wade band. |
+| `swim_speed_mps` | `2.6` | Movement speed while swimming. |
+| `swim_wade_depth_meters` | `1.2` | Water shallower than this stays walkable (the terrain floor carries the feet). |
+
+## Sky backdrop
+
+The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon gradient keyed to the view direction's elevation above the local horizon, an altitude weight that fades the whole sky to space over `atmosphere_height_meters`, and a sun-elevation tint (neutral through the day, warm gold through the low-sun band, deep blue at night). All functions are pure and thread-safe, and the colors are linear RGB like the water colors, so a consumer can paint a sky dome, a frame clear color, or both - the demo draws a gradient sphere around the walking eye and hands the horizon color to the renderer as the clear color, which turns the space background black above the atmosphere and a shaded sky inside it.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `atmosphere_enabled` | `true` | Master switch; `false` leaves the sky entirely to the consumer. |
+| `atmosphere_height_meters` | `20000.0` | Eye altitude over which the sky fades to black (space). The sky is at full strength below 15% of this height. |
+| `atmosphere_zenith_color` | `[0.055, 0.155, 0.480]` | Linear RGB at the zenith. |
+| `atmosphere_horizon_color` | `[0.420, 0.580, 0.820]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
+
 ## Usage notes
 
 - **Scaling a planet.** Raise `radius_meters` and scale the wavelengths you want to keep proportional (continents, mountains, regional, climate fields, snow line); close-range amplitudes stay metric (a 650 m mountain is a 650 m mountain on any planet). The domain warp amplitude is ANGULAR - its metric effect grows with R (0.18 bends ~10 km coastlines at 60 km radius). The derived octree depth grows automatically until voxels reach `target_voxel_meters` (or the depth cap); `validate()`'s lower voxel clamp is `radius / 131072`.
 - **Performance knobs.** Visible chunk count scales roughly with `1 / target_voxel_meters^2` near the camera and with `lod_angular_voxel_radians` overall. `leaf_grid_n` trades chunk granularity against per-chunk cost. `max_concurrent_builds` / `max_new_builds_per_update` pace streaming (builds run on the module's dedicated worker pool, one thread per permitted concurrent build); caves cost two extra noise fields per sample. Terrain layers whose mask is zero for a sample (mountains over the ocean, detail fields under water) are skipped, so coastal and ocean geometry is cheaper than mountainous terrain at the same depth.
-- **Chunk boundaries and seams.** Same-depth chunks weld bit-identically (one global lattice); across depth changes the octree keeps a 2:1 balance and the fine side CONFORMS its boundary-plane samples to the coarse lattice's interpolant on segments whose far cell is a rendered coarse leaf, then EXTENDS its surface one cell layer past those faces - the fine and coarse surfaces interpenetrate along the whole transition, so no viewing ray can slip between them. Conform masks are recomputed whenever the visible set changes; chunks whose stored mesh was built under a different mask rebuild automatically (the stale mesh keeps rendering until the rebuild lands).
-- **Surface normals.** Vertex normals average the gradient of the (up to) four cells adjacent to the edge, in canonical min-corner form - a pure function of the edge's global position, so shared boundary vertices stay bit-identical across chunks. The average removes the per-cell normal steps that used to speckle steep creases with dark facets.
+- **Chunk boundaries and seams.** Same-depth chunks weld bit-identically (one global lattice); across depth changes the octree keeps a 2:1 balance and the fine side CONFORMS its boundary-plane samples to the coarse lattice's interpolant on segments whose far cell is a rendered coarse leaf, then EXTENDS its surface one cell layer past those faces - the fine and coarse surfaces interpenetrate along the whole transition, so no viewing ray can slip between them. Conform masks are recomputed whenever the visible set changes; chunks whose stored mesh was built under a different mask rebuild automatically (the stale mesh keeps rendering until the rebuild lands, and each chunk view carries a content hash so consumers refresh their uploaded copies when the rebuild arrives).
+- **Surface normals.** Vertex normals average the gradient of the (up to) four cells adjacent to the edge, in canonical min-corner form - a pure function of the edge's global position, so shared boundary vertices stay bit-identical across chunks, and steep creases shade smoothly across their faces.
 - **Water patches.** Water depth tint and foam sample `densityAt` directly (one pure field), so the tint is continuous across chunk and LOD boundaries; cells fully buried under terrain are skipped, which removes grazing-angle slivers where the sea sphere grazes the surface. The surface freezes where `sea_ice_temperature` is reached (see the oceans table) and the wave-slope field roughens the normals at close range; both follow the same pure-field rules, so ice edges and glint texture stay continuous across chunks.
 - **Surface artefacts checklist.** Pale stains on green terrain: raise `biome_blend_width`/`slope_blend_width`. Dotted dark lines along ridges: raise `rock_slope_threshold`. Shredded cliff faces: lower `strata_warp`, raise `strata_band_meters`, lower `overhang_amplitude_meters`. Sub-sea pond webs near coasts: raise `coastal_flatten_meters`. Spiky silhouettes at any scale: raise `lod_band_limit_factor` (and keep the finest detail octave at 2.5+ voxels).

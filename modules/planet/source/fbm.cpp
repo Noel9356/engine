@@ -11,6 +11,7 @@ namespace engine
 {
 namespace planet
 {
+
 FbmStreamSeeds makeFbmSeeds(std::int64_t baseSeed, std::uint32_t octaves)
 {
     octaves = std::min(octaves, maxFbmOctaves);

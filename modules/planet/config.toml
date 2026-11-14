@@ -152,6 +152,36 @@ water_color_ice         = [0.80, 0.86, 0.90]
 water_wave_amplitude          = 0.12
 water_wave_wavelength_meters  = 8.0
 
+# surface walking (kinematic controller; see walker.hpp): planet-centric
+# gravity with the movement/collision windows a point-feet character needs.
+# Speeds are meters/second, gravity meters/second^2; the collision windows
+# are meters (or rise/run for the climb grade, a tangent value).
+surface_gravity_mps2    = 9.81
+walk_speed_mps          = 4.5
+walk_sprint_multiplier  = 2.6
+jump_speed_mps          = 5.0
+eye_height_meters       = 1.7
+walk_ground_snap_meters = 0.9
+walk_max_step_up_meters = 0.55
+walk_max_climb_grade    = 3.5
+swim_enabled            = true
+swim_speed_mps          = 2.6
+swim_wade_depth_meters  = 1.2
+
+# how many planets one module instance may keep alive at once (each owns a
+# chunk-build worker pool). createPlanet reports CapacityReached beyond it.
+max_live_planets        = 16
+
+# sky backdrop (see atmosphere.hpp): the gradient a camera inside the air
+# sees, from the horizon color up to the zenith color (linear RGB, like the
+# water colors), fading out to space over atmosphere_height_meters of eye
+# altitude. Consumers tint it by the sun's elevation (sunset gold, night
+# blue). atmosphere_enabled = false leaves the sky to the consumer.
+atmosphere_enabled         = true
+atmosphere_height_meters   = 20000.0
+atmosphere_zenith_color    = [0.055, 0.155, 0.480]
+atmosphere_horizon_color   = [0.420, 0.580, 0.820]
+
 # climate
 equator_temperature        = 1.0
 pole_temperature           = 0.02
@@ -174,6 +204,9 @@ color_variation            = 0.14
 # feature size of the albedo jitter field (the mottling that keeps large
 # biomes from reading as flat plastic sheets).
 color_variation_wavelength_meters = 260.0
+# metre-scale mottle octave on the same field: ground-level views (a walking
+# camera sees metres) keep surface texture instead of one unbroken color.
+color_variation_ground_wavelength_meters = 6.0
 snow_line_meters           = 1600.0
 beach_width_meters         = 2.0
 rock_slope_threshold       = 0.62

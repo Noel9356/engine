@@ -79,6 +79,7 @@ bool PlanetGenerationParams::validate(std::string &error)
     boundingFactor    = clampRange(boundingFactor, 1.05, 4.0);
     maxConcurrentBuilds  = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxConcurrentBuilds), 1.0, 64.0));
     maxNewBuildsPerUpdate = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxNewBuildsPerUpdate), 1.0, 256.0));
+    maxLivePlanets        = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxLivePlanets), 1.0, 4096.0));
     chunkEvictionUpdates  = static_cast<std::uint32_t>(clampRange(static_cast<double>(chunkEvictionUpdates), 2.0, 100000.0));
     chunkCacheCapacity    = static_cast<std::uint32_t>(clampRange(static_cast<double>(chunkCacheCapacity), 16.0, 65536.0));
 
@@ -159,6 +160,7 @@ bool PlanetGenerationParams::validate(std::string &error)
     coastalMoistureBandMeters   = clampRange(coastalMoistureBandMeters, 1.0, radiusMeters);
     colorVariation       = clampRange(colorVariation, 0.0, 1.0);
     colorVariationWavelengthMeters = clampRange(colorVariationWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
+    colorVariationGroundWavelengthMeters = clampRange(colorVariationGroundWavelengthMeters, radiusMeters / 16384.0, colorVariationWavelengthMeters);
     snowLineMeters       = clampRange(snowLineMeters, 0.0, 0.5 * radiusMeters);
     beachWidthMeters     = clampRange(beachWidthMeters, 0.0, 0.05 * radiusMeters);
     rockSlopeThreshold   = clampRange(rockSlopeThreshold, 0.05, 1.0);
@@ -170,6 +172,26 @@ bool PlanetGenerationParams::validate(std::string &error)
     for (std::size_t index = 0; index < biomeCount * 3; ++index)
     {
         biomePalette[index] = std::clamp(biomePalette[index], 0.0f, 1.0f);
+    }
+
+    // ---- surface walking -------------------------------------------------------
+    surfaceGravityMetersPerSecond2 = clampRange(surfaceGravityMetersPerSecond2, 0.05, 100.0);
+    walkSpeedMetersPerSecond       = clampRange(walkSpeedMetersPerSecond, 0.1, 1000.0);
+    walkSprintMultiplier           = clampRange(walkSprintMultiplier, 1.0, 20.0);
+    jumpSpeedMetersPerSecond       = clampRange(jumpSpeedMetersPerSecond, 0.0, 100.0);
+    eyeHeightMeters                = clampRange(eyeHeightMeters, 0.1, 100.0);
+    walkGroundSnapMeters           = clampRange(walkGroundSnapMeters, 0.0, 1000.0);
+    walkMaxStepUpMeters            = clampRange(walkMaxStepUpMeters, 0.0, 100.0);
+    walkMaxClimbGrade              = clampRange(walkMaxClimbGrade, 0.1, 100.0);
+    swimSpeedMetersPerSecond       = clampRange(swimSpeedMetersPerSecond, 0.1, 1000.0);
+    swimWadeDepthMeters            = clampRange(swimWadeDepthMeters, 0.0, 1000.0);
+
+    // ---- atmosphere -------------------------------------------------------------
+    atmosphereHeightMeters = clampRange(atmosphereHeightMeters, radiusMeters / 1024.0, radiusMeters / 2.0);
+    for (std::size_t channel = 0; channel < 3; ++channel)
+    {
+        atmosphereZenithColor[channel]  = std::clamp(atmosphereZenithColor[channel], 0.0f, 1.0f);
+        atmosphereHorizonColor[channel] = std::clamp(atmosphereHorizonColor[channel], 0.0f, 1.0f);
     }
 
     // ---- water --------------------------------------------------------------------

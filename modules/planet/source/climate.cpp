@@ -74,6 +74,8 @@ ClimateSampler::ClimateSampler(const PlanetGenerationParams &params)
     seedTemperatureOctaves_  = makeFbmSeeds(seedTemperature_, 3);
     seedMoistureOctaves_     = makeFbmSeeds(seedMoisture_, 4);
     seedJitterOctaves_       = makeFbmSeeds(streamSeed(seedMoisture_, 0xB10B), 2);
+    seedDetailJitterOctaves_ = makeFbmSeeds(streamSeed(seedMoisture_, 0xB10C), 2);
+    seedGroundJitterOctaves_ = makeFbmSeeds(streamSeed(seedMoisture_, 0xB10D), 2);
     for (std::uint32_t octave = 0; octave < 3; ++octave)
     {
         seedMoistureWarpOctaves_[octave] = streamSeed(seedMoistureWarp_, octave);
@@ -345,13 +347,21 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     blendColors(color, rockRow, rockW, color);
 
     // Albedo: jittered by a per-point variation field so large biomes do not
-    // read as flat plastic sheets. The jitter is a pure function of direction
-    // (order independent) and weights each channel differently, so the
-    // variation reads as subtle hue mottling (warm/cool patches) instead of
-    // pure luminance banding.
-    const double variation
-        = params_.colorVariation * fbm(seedJitterOctaves_, direction * params_.radiusMeters, params_.colorVariationWavelengthMeters,
-              FbmParams{2, 2.0, 0.5});
+    // read as flat plastic sheets. The field carries THREE scales - the base
+    // wavelength mottles biome sheets at globe scale, an octave at an eighth
+    // of that wavelength covers the mid-range, and an octave at the ground
+    // wavelength keeps ground-level views (a walking camera sees metres)
+    // from reading as one unbroken color. Each scale is a pure function of
+    // direction (order independent), and the channel weighting turns them
+    // into subtle hue mottling (warm/cool patches) instead of pure luminance
+    // banding.
+    const Vec3 surfacePosition = direction * params_.radiusMeters;
+    const double baseWavelength = std::max(1.0, params_.colorVariationWavelengthMeters);
+    const double groundWavelength = std::max(1.0, params_.colorVariationGroundWavelengthMeters);
+    const double variation = params_.colorVariation
+        * (0.52 * fbm(seedJitterOctaves_, surfacePosition, baseWavelength, FbmParams{2, 2.0, 0.5})
+            + 0.22 * fbm(seedDetailJitterOctaves_, surfacePosition, baseWavelength / 8.0, FbmParams{2, 2.0, 0.5})
+            + 0.26 * fbm(seedGroundJitterOctaves_, surfacePosition, groundWavelength, FbmParams{2, 2.0, 0.5}));
     constexpr double kChannelWeights[3] = {1.0, 0.85, 0.70};
     for (std::size_t channel = 0; channel < 3; ++channel)
     {

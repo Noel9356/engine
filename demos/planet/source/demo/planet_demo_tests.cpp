@@ -1,7 +1,10 @@
 #include "planet_demo_support.hpp"
 
+#include <engine/planet/walker.hpp>
+
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -13,6 +16,142 @@ namespace demo::planet_demo
 namespace planet = engine::planet;
 namespace renderer = engine::renderer;
 using namespace engine;
+
+namespace
+{
+
+// Walk-simulation audit on a dedicated small planet: the walker teleports
+// onto the terrain top, walks a fixed sequence of intents at fixed time
+// steps, and the path must respect the field - never buried, never lost,
+// and actually moving. Fixed inputs produce one exact path, so the checks
+// are deterministic.
+std::string walkerSelfTestReport()
+{
+    planet::PlanetGenerationParams params;
+    params.seed         = 909090ull;
+    params.radiusMeters = 3000.0;
+    std::string         error;
+    std::string         report;
+    if (!params.validate(error))
+    {
+        return "self-test: walker params rejected: " + error + "\n";
+    }
+
+    planet::DensityField  field(params);
+    planet::SurfaceWalker walker(params, field);
+
+    const planet::Vec3 spawnDirection{0.30, 0.72, 0.63};
+    walker.placeOnSurface(spawnDirection);
+
+    // Heading: a horizon tangent through the spawn point (deterministic).
+    const planet::Vec3 up = spawnDirection;
+    planet::Vec3       heading = planet::cross(up, planet::Vec3{0.0, 1.0, 0.0});
+    if (planet::length(heading) < 0.5)
+    {
+        heading = planet::cross(up, planet::Vec3{1.0, 0.0, 0.0});
+    }
+    heading = heading * (1.0 / planet::length(heading));
+
+    planet::WalkIntent intent;
+    intent.forward = 1.0;
+    intent.heading = heading;
+
+    constexpr double kDeltaSeconds = 1.0 / 30.0;
+    constexpr std::uint32_t kSteps = 300;
+    bool buried = false;
+    bool lost   = false;
+    bool finite = true;
+    double maxBurial = 0.0;
+    const planet::Vec3 start = walker.state().positionMeters;
+    for (std::uint32_t step = 0; step < kSteps; ++step)
+    {
+        walker.update(kDeltaSeconds, intent);
+        const planet::WalkState &state = walker.state();
+        const planet::Vec3 &position = state.positionMeters;
+        if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
+        {
+            finite = false;
+            break;
+        }
+        const double burial = field.densityAt(position);
+        maxBurial = std::max(maxBurial, burial);
+        if (burial > 0.5)
+        {
+            buried = true;
+        }
+        if (state.grounded && std::abs(state.groundRadius - planet::length(position)) > 2.0)
+        {
+            lost = true;
+        }
+    }
+    const planet::Vec3 end = walker.state().positionMeters;
+    const double startLength = planet::length(start);
+    const double endLength   = planet::length(end);
+    const double arc = std::acos(std::clamp(planet::dot(start * (1.0 / startLength), end * (1.0 / endLength)), -1.0, 1.0))
+        * params.radiusMeters;
+
+    // Jump: leaves the ground, then lands again inside the window.
+    planet::WalkIntent jumpIntent;
+    jumpIntent.heading = heading;
+    walker.update(kDeltaSeconds, jumpIntent); // stand still first
+    const bool wasGrounded = walker.state().grounded;
+    jumpIntent.jump = true;
+    walker.update(kDeltaSeconds, jumpIntent);
+    const bool leftGround = !walker.state().grounded;
+    bool landed = false;
+    for (std::uint32_t step = 0; step < 120 && !landed; ++step)
+    {
+        walker.update(kDeltaSeconds, jumpIntent);
+        landed = walker.state().grounded;
+    }
+
+    bool pass = finite && !buried && !lost && wasGrounded && leftGround && landed && arc > 10.0;
+    if (!finite)
+    {
+        report += "self-test: walker produced a non-finite position\n";
+    }
+    if (buried)
+    {
+        char line[96];
+        std::snprintf(line, sizeof(line), "self-test: walker buried %.3f m into the terrain\n", maxBurial);
+        report += line;
+    }
+    if (lost)
+    {
+        report += "self-test: walker ground reference drifted from its feet\n";
+    }
+    if (!wasGrounded)
+    {
+        report += "self-test: walker never grounded after placeOnSurface\n";
+    }
+    if (!leftGround)
+    {
+        report += "self-test: walker jump never left the ground\n";
+    }
+    if (!landed)
+    {
+        report += "self-test: walker jump never landed\n";
+    }
+    if (arc <= 10.0)
+    {
+        char line[96];
+        std::snprintf(line, sizeof(line), "self-test: walker moved only %.2f m in %.1f s\n", arc, kSteps * kDeltaSeconds);
+        report += line;
+    }
+    if (pass)
+    {
+        char line[128];
+        std::snprintf(line, sizeof(line), "self-test: walker PASS - %.1f m walked, jump cycle clean\n", arc);
+        report += line;
+    }
+    else
+    {
+        report = "self-test: walker FAILED\n" + report;
+    }
+    return report;
+}
+
+} // namespace
 
 SelfTestResult runSelfTest(planet::PlanetCapability &capability, void *capabilitySelf, const PlanetDemoOptions &options)
 {
@@ -175,6 +314,16 @@ SelfTestResult runSelfTest(planet::PlanetCapability &capability, void *capabilit
             result.pass = false;
             result.report += "self-test: mask-check params rejected: " + maskError + "\n";
         }
+    }
+
+    // Walk-controller audit (see walkerSelfTestReport above).
+    {
+        const std::string walkerReport = walkerSelfTestReport();
+        if (walkerReport.find("FAILED") != std::string::npos)
+        {
+            result.pass = false;
+        }
+        result.report += walkerReport;
     }
 
     // Orientation audit: on a convex sample region the majority of terrain

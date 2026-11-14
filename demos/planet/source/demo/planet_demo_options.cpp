@@ -8,7 +8,7 @@ namespace demo::planet_demo
 const char *planetOptionsUsage() noexcept
 {
     return "planet demo options:\n"
-           "  --view globe|orbit|coast|cliffs|surface  View to render (default globe).\n"
+           "  --view globe|orbit|coast|cliffs|surface|walk  View to render (default globe).\n"
            "  --seed <n>                Planet seed override (0 keeps config).\n"
            "  --radius <meters>         Planet radius override (0 keeps config).\n"
            "  --frames <n>              Render exactly n frames, then exit.\n"
@@ -17,13 +17,18 @@ const char *planetOptionsUsage() noexcept
            "  --frame-times <file.csv>  Export per-frame timings as CSV (a percentile summary\n"
            "                            of the rendered frames is always printed).\n"
            "  --stats-every <n>         Print planet statistics every n frames.\n"
+           "  --warmup <n>              Build-only frames before the rendered run (they extend it).\n"
+           "                            Warmup is a budget: it ends early once the visible set is\n"
+           "                            fully built, so a value just needs to cover the view's\n"
+           "                            chunk population on the current machine.\n"
            "  --orbit                   Sweep the camera (globe: around the planet;\n"
-           "                            surface views: a short circle at the pose).\n"
+           "                            surface views: a short circle at the pose;\n"
+           "                            walk: a deterministic forward walk).\n"
            "  --caves                   Enable the cave worm carving field.\n"
            "  --self-test               Run determinism/order-independence checks\n"
            "                            and exit (exit code 0 = pass).\n"
-           "Windowed controls: mouse look, WASD move, Space/Ctrl up/down, Shift sprint,\n"
-           "                  arrows look, Left Alt toggles cursor capture.\n"
+           "Windowed controls: mouse look, WASD move, Space jump (walk) or up, Ctrl down,\n"
+           "                  Shift sprint, arrows look, Left Alt toggles cursor capture.\n"
            "--orbit uses the automated camera path instead of manual input.\n";
 }
 
@@ -36,9 +41,10 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
         if (argument == "--view" && hasValue)
         {
             const std::string &value = arguments[++index];
-            if (value != "globe" && value != "orbit" && value != "coast" && value != "cliffs" && value != "surface")
+            if (value != "globe" && value != "orbit" && value != "coast" && value != "cliffs" && value != "surface"
+                && value != "walk")
             {
-                outError = "invalid view '" + value + "'; expected globe|orbit|coast|cliffs|surface";
+                outError = "invalid view '" + value + "'; expected globe|orbit|coast|cliffs|surface|walk";
                 return false;
             }
             options.viewName = value;

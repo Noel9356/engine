@@ -142,7 +142,9 @@ struct ChunkMesh
     std::vector<std::uint32_t>  terrainIndices;
     std::vector<PlanetVertex>   waterVertices;
     std::vector<std::uint32_t>  waterIndices;
-    std::uint64_t               hash = 0; // FNV-1a over all buffers (self-tests)
+    std::uint64_t               hash = 0;        // FNV-1a over all buffers (self-tests)
+    std::uint64_t               terrainHash = 0; // FNV-1a over the terrain buffers only
+    std::uint64_t               waterHash = 0;   // FNV-1a over the water buffers only
     std::uint64_t               triangleCount = 0;
 };
 

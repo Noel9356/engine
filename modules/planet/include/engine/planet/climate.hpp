@@ -58,10 +58,14 @@ private:
 
     // Per-octave noise seeds, derived once per sampler from the base seeds
     // (hashCombine64(baseSeed, octave) is sample-independent). The moisture
-    // warp table holds the three single-octave warp stream seeds.
+    // warp table holds the three single-octave warp stream seeds; the albedo
+    // jitter carries one stream at the configured wavelength, one at an
+    // eighth of it and one at the ground wavelength (see ClimateSampler::sample).
     FbmStreamSeeds seedTemperatureOctaves_{};
     FbmStreamSeeds seedMoistureOctaves_{};
     FbmStreamSeeds seedJitterOctaves_{};
+    FbmStreamSeeds seedDetailJitterOctaves_{};
+    FbmStreamSeeds seedGroundJitterOctaves_{};
     std::array<std::int64_t, 3> seedMoistureWarpOctaves_{};
 };
 

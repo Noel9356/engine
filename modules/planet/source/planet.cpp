@@ -88,11 +88,13 @@ void Planet::update(const Vec3 &eyeLocal)
     //    and the per-node stamping are skipped entirely - a static camera
     //    (or a warming-up streamer that renders nothing) costs an update
     //    only what streaming actually delivered.
+    bool selectionChanged = false;
     if (!hasSelectionEye_ || !sameEye(eyeLocal, selectionEye_))
     {
         octree_.selectVisible(eyeLocal, lastVisible_);
         selectionEye_    = eyeLocal;
         hasSelectionEye_ = true;
+        selectionChanged = true;
 
         // 2b. Conforming masks. A chunk's mask is a pure function of the sorted visible list and its coordinate (each
         // face segment conforms when the depth-(depth-1) cell beyond it is itself a rendered leaf - see octree.hpp), so
@@ -109,57 +111,126 @@ void Planet::update(const Vec3 &eyeLocal)
 
     const std::vector<ChunkCoord> &visible = lastVisible_;
 
-    // 3. One pass over the visible set: stamp ready meshes (eviction age + statistics) and request missing or
-    //    mask-stale meshes while the build queue has room.
+    // The visible-set pass stamps cache entries for eviction, refreshes the
+    // statistics and issues new build requests. It only has work when one of
+    // those inputs moved: a delivered build (the cache changed), a new
+    // selection (visibility and masks changed), or the eviction cadence (the
+    // stamps must stay fresh so eviction never ages a visible chunk out).
+    const bool evictionDue = updateCount_ % kEvictionScanInterval == 0;
+    const bool visiblePassNeeded = selectionChanged || delivered > 0 || evictionDue;
+
     std::uint32_t inflightBuilds = 0;
     {
         std::lock_guard<std::mutex> lock(inflightMutex_);
         inflightBuilds = static_cast<std::uint32_t>(inflightBuild_.size());
     }
-    const bool    mayRequest   = inflightBuilds < params_.maxConcurrentBuilds;
-    bool          requestFull  = !mayRequest;
-    std::uint32_t newRequests  = 0;
-    std::uint64_t triangles    = 0;
-    std::uint64_t vertexCount  = 0;
-    std::uint32_t readyVisible = 0;
-    std::uint32_t depthUsed    = 0;
-    for (std::size_t index = 0; index < visible.size(); ++index)
+    const bool mayRequest = inflightBuilds < params_.maxConcurrentBuilds;
+
+    // Missing (or mask-stale) visible chunks with their eye distances: the
+    // request budget is spent in order of APPARENT SIZE (chunk width over
+    // distance, descending), which is the same quantity the LOD refinement
+    // rule is built on. A coarse ring at range and a fine chunk right under
+    // a walking camera then compete on equal, screen-based terms: globe
+    // views still fill their disk coarse-first (wide chunks subtend more),
+    // while a walking eye gets the chunks it is standing on before anything
+    // else. The coordinate tuple breaks distance ties, keeping the request
+    // order a pure function of (eye, visible set).
+    std::vector<MissingChunk> &missing = missingScratch_;
+    if (visiblePassNeeded)
     {
-        const ChunkCoord &coord = visible[index];
-        const ChunkKey    key   = makeChunkKey(coord.depth, coord.x, coord.y, coord.z);
-        const auto        readyIt = readyMeshes_.find(key);
-        if (readyIt != readyMeshes_.end())
+        missing.clear();
+
+        std::uint32_t readyVisible = 0;
+        std::uint64_t triangles    = 0;
+        std::uint64_t vertexCount  = 0;
+        std::uint32_t depthUsed    = 0;
+        bool          requestFull  = !mayRequest;
+        for (std::size_t index = 0; index < visible.size(); ++index)
         {
-            ++readyVisible;
-            readyIt->second.lastSelectedUpdate = updateCount_;
-            triangles += readyIt->second.mesh.triangleCount;
-            vertexCount += readyIt->second.mesh.terrainVertices.size() + readyIt->second.mesh.waterVertices.size();
-            if (readyIt->second.conformMask == visibleMasks_[index])
+            const ChunkCoord &coord = visible[index];
+            const ChunkKey    key   = makeChunkKey(coord.depth, coord.x, coord.y, coord.z);
+            const auto        readyIt = readyMeshes_.find(key);
+            if (readyIt != readyMeshes_.end())
+            {
+                ++readyVisible;
+                readyIt->second.lastSelectedUpdate = updateCount_;
+                triangles += readyIt->second.mesh.triangleCount;
+                vertexCount += readyIt->second.mesh.terrainVertices.size() + readyIt->second.mesh.waterVertices.size();
+                if (readyIt->second.conformMask == visibleMasks_[index])
+                {
+                    depthUsed = std::max(depthUsed, coord.depth);
+                    continue;
+                }
+            }
+            depthUsed = std::max(depthUsed, coord.depth);
+            if (requestFull)
             {
                 continue;
             }
+            bool alreadyInflight = false;
+            {
+                std::lock_guard<std::mutex> lock(inflightMutex_);
+                alreadyInflight = inflightBuild_.find(key) != inflightBuild_.end();
+            }
+            if (alreadyInflight)
+            {
+                continue;
+            }
+            const Vec3 center = chunkCenterMeters(params_, coord);
+            const double dx = center.x - eyeLocal.x;
+            const double dy = center.y - eyeLocal.y;
+            const double dz = center.z - eyeLocal.z;
+            const double distanceSquared = dx * dx + dy * dy + dz * dz;
+            const double chunkWidth = chunkSizeMeters(params_, coord.depth);
+            missing.push_back(MissingChunk{coord, visibleMasks_[index], distanceSquared,
+                chunkWidth / std::max(std::sqrt(distanceSquared), 1.0e-6)});
         }
-        depthUsed = std::max(depthUsed, coord.depth);
-        if (requestFull)
+
+        // Requests within this update's budget, apparent-size first (see the
+        // note above the pass).
+        if (!missing.empty())
         {
-            continue;
+            std::sort(missing.begin(), missing.end(), [](const MissingChunk &a, const MissingChunk &b)
+            {
+                if (a.apparentSize != b.apparentSize)
+                {
+                    return a.apparentSize > b.apparentSize;
+                }
+                if (a.coord.depth != b.coord.depth)
+                {
+                    return a.coord.depth < b.coord.depth;
+                }
+                if (a.coord.x != b.coord.x)
+                {
+                    return a.coord.x < b.coord.x;
+                }
+                if (a.coord.y != b.coord.y)
+                {
+                    return a.coord.y < b.coord.y;
+                }
+                return a.coord.z < b.coord.z;
+            });
+            std::uint32_t newRequests = 0;
+            for (const MissingChunk &entry : missing)
+            {
+                if (newRequests >= params_.maxNewBuildsPerUpdate
+                    || inflightBuilds + newRequests >= params_.maxConcurrentBuilds)
+                {
+                    break;
+                }
+                requestBuild(entry.coord, entry.conformMask);
+                ++newRequests;
+            }
+            inflightBuilds += newRequests;
         }
-        bool alreadyInflight = false;
-        {
-            std::lock_guard<std::mutex> lock(inflightMutex_);
-            alreadyInflight = inflightBuild_.find(key) != inflightBuild_.end();
-        }
-        if (alreadyInflight)
-        {
-            continue;
-        }
-        if (newRequests >= params_.maxNewBuildsPerUpdate || inflightBuilds + newRequests >= params_.maxConcurrentBuilds)
-        {
-            requestFull = true;
-            continue;
-        }
-        requestBuild(coord, visibleMasks_[index]);
-        ++newRequests;
+
+        statistics_.chunksVisible    = static_cast<std::uint32_t>(visible.size());
+        statistics_.chunksReady      = readyVisible;
+        statistics_.chunksBuilding   = inflightBuilds;
+        statistics_.chunksReadyTotal = static_cast<std::uint32_t>(readyMeshes_.size());
+        statistics_.triangleCount    = triangles;
+        statistics_.verticesTotal    = vertexCount;
+        statistics_.octreeDepthUsed  = depthUsed;
     }
 
     // 3b. Starvation fallback. The dedicated pool threads compete with the host's render workers for cores; on a
@@ -180,19 +251,13 @@ void Planet::update(const Vec3 &eyeLocal)
     }
 
     // 4. Eviction scans the whole cache; ready meshes only age out over hundreds of updates, so a coarse cadence
-    //    bounds the same set while keeping the scan off most frames.
-    if (updateCount_ % kEvictionScanInterval == 0)
+    //    bounds the same set while keeping the scan off most frames. The visible pass above runs on the same cadence,
+    //    so eviction never sees a visible chunk older than one scan interval.
+    if (evictionDue)
     {
         evictStaleMeshes();
     }
 
-    statistics_.chunksVisible    = static_cast<std::uint32_t>(visible.size());
-    statistics_.chunksReady      = readyVisible;
-    statistics_.chunksBuilding   = inflightBuilds + newRequests;
-    statistics_.chunksReadyTotal = static_cast<std::uint32_t>(readyMeshes_.size());
-    statistics_.triangleCount    = triangles;
-    statistics_.verticesTotal    = vertexCount;
-    statistics_.octreeDepthUsed  = depthUsed;
     statistics_.lastUpdateMilliseconds
         = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - updateStart).count();
 }
@@ -253,6 +318,7 @@ std::uint32_t Planet::copyVisibleChunks(PlanetChunkView *output, std::uint32_t c
             output[copied].indices       = built.mesh.terrainIndices.data();
             output[copied].indexCount    = static_cast<std::uint32_t>(built.mesh.terrainIndices.size());
             output[copied].isWater       = false;
+            output[copied].meshHash      = built.mesh.terrainHash;
             ++copied;
         }
         if (!built.waterEmpty)
@@ -268,6 +334,7 @@ std::uint32_t Planet::copyVisibleChunks(PlanetChunkView *output, std::uint32_t c
             output[copied].indices       = built.mesh.waterIndices.data();
             output[copied].indexCount    = static_cast<std::uint32_t>(built.mesh.waterIndices.size());
             output[copied].isWater       = true;
+            output[copied].meshHash      = built.mesh.waterHash;
             ++copied;
         }
     }
