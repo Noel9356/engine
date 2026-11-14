@@ -24,6 +24,8 @@ using engine::ui::UiDrawData;
 using engine::ui::UiError;
 using engine::ui::UiFrameDescription;
 using engine::ui::UiKey;
+using engine::ui::UiTableFlags;
+using engine::ui::UiTableRowFlags;
 using engine::ui::UiWindowFlags;
 using engine::window::Key;
 using engine::window::MouseButton;

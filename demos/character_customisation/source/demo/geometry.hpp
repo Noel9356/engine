@@ -55,6 +55,13 @@ void appendTransformedMesh(MeshData &destination, const MeshData &source, const 
 
 [[nodiscard]] MeshData makeTorusMesh(float majorRadius, float minorRadius, std::uint32_t majorSegments,
     std::uint32_t minorSegments, const glm::vec3 &color);
+// makeDiscMesh: flat disc on the XZ plane (all normals +Y) with a radial
+// vertex-colour falloff from the floor's own base colour at the rim toward
+// the darkened centre tone (a scalar multiple of it) - drawn with the
+// floor's lit material the rim shades exactly like the tiles and only the
+// core darkens (the contact shadow).
+[[nodiscard]] MeshData makeDiscMesh(
+    float radius, std::uint32_t segments, const glm::vec3 &floorColor, float centerTone);
 
 } // namespace demo
 

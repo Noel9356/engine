@@ -11,14 +11,14 @@
 
 #include "character_content.hpp"
 #include "character_stage.hpp"
-#include "fur_rendering.hpp"
 
 #include <engine/camera/capabilities.hpp>
 #include <engine/character/capabilities.hpp>
-#include <engine/fur/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/ui/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
+
+#include <glm/glm.hpp>
 
 #include <cstdint>
 #include <functional>
@@ -33,13 +33,12 @@ class CharacterScreen
 public:
     // Prepares the UI context, stage geometry, content, and the default
     // assembly. assetRoot points at the demo assets directory (fonts,
-    // previews). furCapability is optional (nullptr = shell fur disabled;
-    // the demo keeps its legacy vertex-tint fur).
+    // previews).
     bool create(const engine::window::WindowCapability &windowCapability, engine::window::WindowHandle windowHandle,
         const engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle rendererHandle,
         const engine::camera::CameraCapability &cameraCapability, engine::camera::CameraHandle cameraHandle,
         const engine::ui::UiCapability &uiCapability, engine::character::CharacterCapability &characterCapability,
-        const std::string &assetRoot, const engine::fur::FurCapability *furCapability = nullptr);
+        const std::string &assetRoot);
 
     void destroy();
 
@@ -56,18 +55,6 @@ public:
     // toggles, parameter extremes, recipe round-trip). Prints a PASS/FAIL
     // report to stdout. Returns true when every executable check passed.
     bool runSelfTest();
-
-    // Fur self-test (--fur-test): strand-texture determinism (two
-    // generations must be byte-identical), monotonic LOD layer counts
-    // across the angular-size ladder, and one fur shell-stack draw. Prints
-    // a PASS/FAIL report; false on any failure.
-    bool runFurSelfTest();
-
-    // Fur rendering access for the CLI flags (--fur-*).
-    [[nodiscard]] FurRendering &furRendering()
-    {
-        return fur_;
-    }
 
     // Camera framing override for automated captures (--camera-yaw /
     // --camera-pitch / --orbit-distance): yaw is measured around the
@@ -129,17 +116,23 @@ private:
     bool                          setTailPart(const std::string &partId); // swap the tail variant live
     [[nodiscard]] std::string     tailPartForPlan(const std::string &partId) const; // tail <-> tail_taur mapping
     bool                          setOutfit(bool clothed); // swap bare/ranger torso+arms+legs variants
+    bool                          setLimbPart(const char *instanceName, const std::string &partId); // arm/leg variant
     bool                          setClothingPiece(const char *instanceName, bool present);
     bool                          headHasEarSockets() const;
+    bool                          speciesHasBodyForPlan(int species) const; // taur/quad capability filter
     void                          applyParameterHeights(); // keeps the feet/hooves near the ground plane
     void                          applyDefaultLook();      // the startup/reset anthro look
     void                          fitCameraToAssembly();   // frame the whole character after structural changes
+    void                          randomiseCharacter();    // a random species/parts/coat combination
     void                          resetToDefault();
 
     // Evaluation + rendering.
     // evaluateCharacter re-derives transforms; full validation runs only when
     // requested (structure/parameter changes), never per animation frame.
     bool evaluateCharacter(bool validate = false);
+    // The assembly's world-space bounds through the live instance
+    // transforms (grounding + camera framing ground truth).
+    bool computeAssemblyWorldBounds(glm::vec3 &outMin, glm::vec3 &outMax) const;
     void updateAnimationDrivers(double deltaSeconds, double elapsedSeconds);
     void drawCharacter();
 
@@ -150,6 +143,7 @@ private:
     void                                          cacheParameterDefinitions();
     const engine::character::ParameterDefinition *parameterDefinition(const char *parameterId) const;
     void                                          refreshDeformations(); // morphs + markings after parameter changes
+    void                                          gatherDeformationInputs(DeformationInputs &inputs) const;
 
     // Panel tabs (Character Studio: Species / Body / Parts / Motion / File).
     void drawSpeciesTab();
@@ -157,11 +151,22 @@ private:
     void drawPartsTab();
     void drawMotionTab();
     void drawFileTab();
+    // One preview thumbnail card (image + label, selected ring); used by
+    // every picker grid. Returns true when the pick happened.
+    bool uiPartCard(const std::string &partId, const std::string &label, bool selected, float cellWidth,
+        const std::function<void()> &onPick);
+    // A grid of part cards for one slot's variants.
+    void uiPartCardGrid(const std::vector<std::string> &partIds, const std::string &activePartId,
+        const std::function<void(const std::string &)> &onPick, int columns = 3);
+    // A category chip row (returns the picked index, or the current one).
+    int  uiCategoryChips(const std::vector<const char *> &labels, int activeIndex);
     void uiOptionRow(const char *const *options, int optionCount, const char *idSuffix, int activeIndex, float width,
         const std::function<void(int)> &onPick);
     bool uiParameterSlider(const char *parameterId);
     bool uiPartSelector(const std::vector<std::string> &partIds, const std::string &activePartId,
         const std::function<void(const std::string &)> &onPick);
+    bool uiPreviewTextureCard(const char *key, const char *label, bool selected, float size,
+        const std::function<void()> &onPick);
 
     // UI helpers (thin wrappers around the capability).
     void uiText(const char *text) const;
@@ -185,11 +190,6 @@ private:
     CharacterContent                          content_;
 
     engine::character::CharacterHandle characterHandle_ = engine::character::invalidCharacter;
-
-    // Shell-fur assets (strand textures per preset) + per-frame LOD draws.
-    FurRendering fur_;
-    // Camera eye captured each frame; drawCharacter feeds it to the fur LOD.
-    float        lastCameraEye_[3] = {0.0f, 0.0f, 0.0f};
 
     // Static studio backdrop is an independent renderer resource owner.
     CharacterStage stage_;
@@ -224,8 +224,11 @@ private:
     std::string                                     activeNeckPart_      = "neck_human";
     std::string                                     activeEarPart_       = ""; // ear style (left part id)
     std::string                                     activeTailPart_      = "tail_fox";
+    std::string                                     activeArmPart_       = "arm_ranger_left";
+    std::string                                     activeLegPart_       = "leg_ranger_left";
     int                                             activePlan_          = 0;     // body.plan index
     int                                             quadSpecies_         = 0;     // species index (generated tables)
+    int                                             partsCategory_       = 0;     // Parts tab chip index
     bool                                            wingsPresent_        = false; // exactly one pair
     bool                                            tailPresent_         = false;
     bool                                            clothed_             = true; // outfit variant toggle
@@ -238,6 +241,8 @@ private:
     bool                                            hideHud_             = false; // --hide-hud capture mode
     bool                                            userCameraFraming_   = false; // explicit CLI framing active
     int                                             activePanelTab_      = 0;     // panel tab index
+    float                                           wingFlapSpeed_       = 1.0f;
+    bool                                            breathe_             = true; // idle neck sway driver
     std::vector<engine::character::ValidationIssue> issues_;
     bool                                            created_ = false;
 

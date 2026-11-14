@@ -4,7 +4,6 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -123,8 +122,135 @@ bool CharacterScreen::uiPartSelector(const std::vector<std::string> &partIds, co
     return picked;
 }
 
-// One labelled slider row driven by the cached parameter registry. Returns
-// true when the value changed (the caller then applies plan-specific fixes).
+// One preview-thumbnail card: the image on top, the label under it, a wide
+// invisible selectable behind both so the whole card clicks, and a selected
+// ring via the header-coloured label. Returns true when the pick happened.
+bool CharacterScreen::uiPartCard(const std::string &partId, const std::string &label, bool selected, float cellWidth,
+    const std::function<void()> &onPick)
+{
+    // The classic thumbnail card: the preview fills the cell's width, the
+    // label sits on its own line underneath (a full-width selectable row, so
+    // the whole card is the click target and the table keeps every row
+    // aligned).
+    const engine::renderer::TextureHandle preview = content_.previewTextureForPart(partId);
+    const bool                             hasPreview = preview != engine::renderer::invalidTexture;
+    const float                            image = cellWidth - 14.0f;
+    bool                                   picked = false;
+    if (hasPreview)
+    {
+        ui_->image(ui_->self,
+            uiContext_,
+            static_cast<engine::ui::UiTextureHandle>(preview),
+            image,
+            image,
+            0.0f,
+            0.0f,
+            1.0f,
+            1.0f);
+    }
+    char text[96];
+    std::snprintf(text, sizeof(text), "%s##card_%s", label.c_str(), partId.c_str());
+    bool selectedFlag = selected;
+    if (ui_->selectable(ui_->self, uiContext_, text, &selectedFlag, 0.0f, 0.0f))
+    {
+        onPick();
+        picked = true;
+    }
+    if (ui_->isItemHovered(ui_->self, uiContext_))
+    {
+        ui_->setTooltip(ui_->self, uiContext_, label.c_str());
+    }
+    return picked;
+}
+
+// A grid of part cards for one slot's variants (columns per row, the label
+// from each part's render info).
+void CharacterScreen::uiPartCardGrid(const std::vector<std::string> &partIds, const std::string &activePartId,
+    const std::function<void(const std::string &)> &onPick, int columns)
+{
+    if (partIds.empty())
+    {
+        uiTextColored(0.62f, 0.66f, 0.72f, "Nothing available on this plan.");
+        return;
+    }
+    // A real table grid: every card sits in its own cell, so the rows stay
+    // aligned whatever the label lengths and the thumbnails share one size.
+    const float cell = 138.0f;
+    if (!ui_->beginTable(ui_->self,
+            uiContext_,
+            "cards",
+            static_cast<std::uint32_t>(columns),
+            static_cast<UiTableFlags>(0),
+            0.0f,
+            0.0f,
+            cell))
+    {
+        return;
+    }
+    int index = 0;
+    for (const std::string &partId : partIds)
+    {
+        const PartRenderInfo *info = content_.renderInfoForPart(partId);
+        if (info == nullptr)
+        {
+            continue;
+        }
+        if (index % columns == 0)
+        {
+            ui_->tableNextRow(ui_->self, uiContext_, static_cast<UiTableRowFlags>(0), 0.0f);
+        }
+        ui_->tableNextColumn(ui_->self, uiContext_);
+        // The category is already the heading/chip above the grid: the card
+        // labels drop their slot suffix so they fit the cell in one line.
+        std::string name = info->displayName;
+        for (const char *suffix : {" Head", " Ears", " Neck", " Tail", " Leg", " Paw Arm", " (taur)"})
+        {
+            const std::size_t at = name.rfind(suffix);
+            if (at != std::string::npos && at + std::strlen(suffix) == name.size())
+            {
+                name.erase(at);
+                break;
+            }
+        }
+        uiPartCard(partId, name, partId == activePartId, cell, [&, partId]()
+            {
+                onPick(partId);
+            });
+        ++index;
+    }
+    ui_->endTable(ui_->self, uiContext_);
+}
+
+// A chip row: one small button per category, the active one highlighted with
+// the selection prefix. Returns the (possibly new) active index.
+int CharacterScreen::uiCategoryChips(const std::vector<const char *> &labels, int activeIndex)
+{
+    // Radio chips: the filled dot marks the active category (a plain button
+    // row left the selected chip indistinguishable).
+    int         picked = activeIndex;
+    std::int32_t value  = activeIndex;
+    for (int index = 0; index < static_cast<int>(labels.size()); ++index)
+    {
+        char label[64];
+        std::snprintf(label, sizeof(label), "%s##chip%d", labels[index], index);
+        ui_->radioButton(ui_->self, uiContext_, label, &value, index);
+        if (index == static_cast<int>(labels.size()) - 1)
+        {
+            ui_->spacing(ui_->self, uiContext_);
+        }
+        else
+        {
+            ui_->sameLine(ui_->self, uiContext_);
+        }
+    }
+    picked = value;
+    return picked;
+}
+
+// One labelled slider row driven by the cached parameter registry. The value
+// readout draws beside the track (not inside it, where it collided with the
+// grab), and hovering shows the range tooltip. Returns true when the value
+// changed (the caller then applies plan-specific fixes).
 bool CharacterScreen::uiParameterSlider(const char *parameterId)
 {
     const ParameterDefinition *definition = parameterDefinition(parameterId);
@@ -135,14 +261,69 @@ bool CharacterScreen::uiParameterSlider(const char *parameterId)
     float value = definition->defaultV != 0.0f ? definition->defaultV : 1.0f;
     character_->getParameter(character_->self, characterHandle_, parameterId, &value);
     const float before = value;
-    if (uiSlider(definition->displayName, &value, definition->minimum, definition->maximum)
+    // The value rides IN the label (ImGui reserves the label's width, so the
+    // track shrinks to fit and nothing clips at the window's right edge);
+    // " " hides the in-track readout that collided with the grab.
+    char label[128];
+    std::snprintf(label,
+        sizeof(label),
+        "%s  %.2f##%s",
+        definition->displayName,
+        static_cast<double>(value),
+        parameterId);
+    if (ui_->sliderFloat(ui_->self, uiContext_, label, &value, definition->minimum, definition->maximum, " ")
         && std::fabs(value - before) > 1.0e-6f)
     {
         CharacterError error = CharacterError::None;
         character_->setParameter(character_->self, characterHandle_, parameterId, value, &error);
-        return true;
     }
-    return false;
+    if (ui_->isItemHovered(ui_->self, uiContext_))
+    {
+        char tooltip[128];
+        std::snprintf(tooltip, sizeof(tooltip), "%s: %.2f (range %.2f .. %.2f)",
+            definition->displayName,
+            static_cast<double>(value),
+            static_cast<double>(definition->minimum),
+            static_cast<double>(definition->maximum));
+        ui_->setTooltip(ui_->self, uiContext_, tooltip);
+    }
+    return std::fabs(value - before) > 1.0e-6f;
+}
+
+// One synthetic preview-texture card (the coat swatches and marking modes
+// rendered by the engine at startup). Returns true when the pick happened.
+bool CharacterScreen::uiPreviewTextureCard(const char *key, const char *label, bool selected, float size,
+    const std::function<void()> &onPick)
+{
+    const engine::renderer::TextureHandle preview = content_.previewTextureForPart(key);
+    if (preview == engine::renderer::invalidTexture)
+    {
+        return false;
+    }
+    ui_->image(ui_->self,
+        uiContext_,
+        static_cast<engine::ui::UiTextureHandle>(preview),
+        size,
+        size,
+        0.0f,
+        0.0f,
+        1.0f,
+        1.0f);
+    const bool hovered = ui_->isItemHovered(ui_->self, uiContext_);
+    char text[96];
+    std::snprintf(text, sizeof(text), "%s##pv_%s", label, key);
+    bool selectedFlag = selected;
+    bool picked       = false;
+    if (ui_->selectable(ui_->self, uiContext_, text, &selectedFlag, 0.0f, 0.0f))
+    {
+        onPick();
+        picked = true;
+    }
+    if (hovered || ui_->isItemHovered(ui_->self, uiContext_))
+    {
+        ui_->setTooltip(ui_->self, uiContext_, label);
+    }
+    return picked;
 }
 
 void CharacterScreen::drawPanel(double deltaSeconds)
@@ -163,8 +344,8 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         std::uint32_t width  = 0;
         std::uint32_t height = 0;
         window_->getSize(window_->self, windowHandle_, &width, &height);
-        ui_->setNextWindowPosition(ui_->self, uiContext_, static_cast<float>(width) - 428.0f, 16.0f, 0.0f, 0.0f);
-        ui_->setNextWindowSize(ui_->self, uiContext_, 408.0f, std::max(static_cast<float>(height) - 32.0f, 420.0f));
+        ui_->setNextWindowPosition(ui_->self, uiContext_, static_cast<float>(width) - 492.0f, 16.0f, 0.0f, 0.0f);
+        ui_->setNextWindowSize(ui_->self, uiContext_, 472.0f, std::max(static_cast<float>(height) - 32.0f, 420.0f));
         panelFirstPlacement_ = false;
     }
 
@@ -226,10 +407,6 @@ void CharacterScreen::drawPanel(double deltaSeconds)
             ui_->sameLine(ui_->self, uiContext_);
         }
     }
-    if (tab != activePanelTab_)
-    {
-        activePanelTab_ = static_cast<int>(tab);
-    }
     ui_->separator(ui_->self, uiContext_);
 
     switch (activePanelTab_)
@@ -268,58 +445,64 @@ void CharacterScreen::drawPanel(double deltaSeconds)
 void CharacterScreen::drawSpeciesTab()
 {
     // The fandom flow: pick the species first (every downstream part follows
-    // it by default), then the body plan it wears.
+    // it by default), then the body plan it wears. The species cards show
+    // the rendered heads; head-only species (the rabbit) still drive the
+    // head chain on every plan.
     uiHeading("Species");
-    for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
-        const metrics::SpeciesMetrics &entry  = metrics::kSpecies[species];
-        const std::string              partId = std::string("head_") + entry.id;
-        const PartRenderInfo          *info   = content_.renderInfoForPart(partId);
-        if (info == nullptr)
+        if (!ui_->beginTable(ui_->self,
+            uiContext_,
+            "species_cards",
+            3u,
+            static_cast<UiTableFlags>(0),
+            0.0f,
+            0.0f,
+            138.0f))
         {
-            continue;
+            return;
         }
-        const engine::renderer::TextureHandle preview  = content_.previewTextureForPart(partId);
-        bool                                  selected = species == quadSpecies_;
-        char                                  label[96];
-        std::snprintf(label, sizeof(label), "%s##species_%s", entry.display, entry.id);
-        const bool hasPreview = preview != engine::renderer::invalidTexture;
-        if (hasPreview)
+        int index = 0;
+        for (int species = 0; species < metrics::kSpeciesCount; ++species)
         {
-            ui_->image(ui_->self,
-                uiContext_,
-                static_cast<engine::ui::UiTextureHandle>(preview),
-                56.0f,
-                56.0f,
-                0.0f,
-                0.0f,
-                1.0f,
-                1.0f);
-            ui_->sameLine(ui_->self, uiContext_);
-        }
-        if (ui_->selectable(ui_->self, uiContext_, label, &selected, 0.0f, 0.0f))
-        {
-            if (setQuadSpecies(species))
+            const metrics::SpeciesMetrics &entry   = metrics::kSpecies[species];
+            const std::string              partId  = std::string("head_") + entry.id;
+            const bool                     hasBody = activePlan_ == 0 || speciesHasBodyForPlan(species);
+            const std::string              label   = hasBody ? entry.display : std::string(entry.display) + " *";
+            if (index % 3 == 0)
             {
-                // A species pick also grafts its look on the current plan.
-                setHeadPart(std::string("head_") + entry.id);
-                if (entry.hasEarSockets)
-                {
-                    setEarParts(std::string("ear_") + entry.id + "_left");
-                }
-                if (activePlan_ != 2)
-                {
-                    setTailPart(std::string("tail_") + entry.id);
-                    setTail(true);
-                }
-                setStatusMessage(std::string("Species: ") + entry.display);
+                ui_->tableNextRow(ui_->self, uiContext_, static_cast<UiTableRowFlags>(0), 0.0f);
             }
-            else
-            {
-                setStatusMessage("Species swap rejected");
-            }
+            ui_->tableNextColumn(ui_->self, uiContext_);
+            uiPartCard(partId,
+                label,
+                species == quadSpecies_,
+                138.0f,
+                [&, species, entry]()
+                {
+                    if (setQuadSpecies(species))
+                    {
+                        setHeadPart(std::string("head_") + entry.id);
+                        if (entry.hasEarSockets)
+                        {
+                            setEarParts(std::string("ear_") + entry.id + "_left");
+                        }
+                        if (entry.hasTail && activePlan_ != 2)
+                        {
+                            setTailPart(std::string("tail_") + entry.id);
+                            setTail(true);
+                        }
+                        setStatusMessage(std::string("Species: ") + entry.display);
+                    }
+                    else
+                    {
+                        setStatusMessage("Species swap rejected");
+                    }
+                });
+            ++index;
         }
+        ui_->endTable(ui_->self, uiContext_);
     }
+    uiTextColored(0.62f, 0.66f, 0.72f, "* head-only species keep the current lower body on taur/quadruped plans.");
 
     uiHeading("Body Plan");
     // One radio button per plan; stable ids via the "##plan" suffix. The
@@ -332,7 +515,7 @@ void CharacterScreen::drawSpeciesTab()
         char label[48];
         std::snprintf(label, sizeof(label), "%s##plan%d", kPlanChoices[index], index);
         ui_->radioButton(ui_->self, uiContext_, label, &plan, index);
-        if (index % 2 == 1)
+        if (index % 3 == 2)
         {
             ui_->spacing(ui_->self, uiContext_);
         }
@@ -362,7 +545,7 @@ void CharacterScreen::drawSpeciesTab()
     // combination on any canid head - short muzzle and wide eyes reads as a
     // cat, a long muzzle as a wolf).
     uiHeading("Species Looks");
-    uiTextColored(0.62f, 0.66f, 0.72f, "Muzzle and eye settings on the canid heads:");
+    uiTextColored(0.62f, 0.66f, 0.72f, "Muzzle and eye settings on the base heads:");
     struct Look
     {
         const char *name;
@@ -373,17 +556,19 @@ void CharacterScreen::drawSpeciesTab()
         float       eyes;
     };
     static const Look looks[] = {
-        {"Cat", "head_fox", "ear_fox_left", "tail_fox", 0.78f, 1.14f},
+        {"Cat", "head_shibainu", "ear_shibainu_left", "tail_shibainu", 0.72f, 1.22f},
         {"Fox", "head_fox", "ear_fox_left", "tail_fox", 1.00f, 1.00f},
+        {"Fennec", "head_fox", "ear_fox_left", "tail_fox", 0.85f, 1.26f},
         {"Wolf", "head_wolf", "ear_wolf_left", "tail_wolf", 1.22f, 0.94f},
         {"Jackal", "head_wolf", "ear_wolf_left", "tail_wolf", 1.40f, 1.00f},
+        {"Akita", "head_shibainu", "ear_shibainu_left", "tail_shibainu", 0.92f, 1.04f},
     };
     for (std::size_t index = 0; index < std::size(looks); ++index)
     {
         const Look &look = looks[index];
         char        label[48];
         std::snprintf(label, sizeof(label), "%s##look%zu", look.name, index);
-        if (uiButton(label, 76.0f))
+        if (uiButton(label, 72.0f))
         {
             CharacterError error = CharacterError::None;
             if (activePlan_ == 2)
@@ -397,10 +582,12 @@ void CharacterScreen::drawSpeciesTab()
             setTail(true);
             character_->setParameter(character_->self, characterHandle_, "muzzle.length", look.muzzle, &error);
             character_->setParameter(character_->self, characterHandle_, "eyes.width", look.eyes, &error);
+            character_->setParameter(character_->self, characterHandle_, "fur.coat", 0.0f, &error);
+            character_->setParameter(character_->self, characterHandle_, "body.coat", 1.0f, &error);
             refreshDeformations();
             setStatusMessage(std::string("Look: ") + look.name);
         }
-        if (index % 4 == 3)
+        if (index % 5 == 4)
         {
             ui_->spacing(ui_->self, uiContext_);
         }
@@ -410,11 +597,18 @@ void CharacterScreen::drawSpeciesTab()
         }
     }
 
+    // The dice roll: a random but always-valid character.
+    uiHeading("Surprise Me");
+    if (uiButton("Randomise character##randomise", 160.0f))
+    {
+        randomiseCharacter();
+    }
+
     ui_->spacing(ui_->self, uiContext_);
     uiTextColored(0.62f,
         0.66f,
         0.72f,
-        "Tip: every species grafts on every plan - the Parts tab swaps heads, ears, tails, and wings freely.");
+        "Tip: every species grafts on every plan - the Parts tab swaps heads, ears, limbs, tails, and wings freely.");
 }
 
 // ---- tab: body parameters --------------------------------------------------------
@@ -435,8 +629,8 @@ void CharacterScreen::drawBodyTab()
         }
         uiParameterSlider("body.width");
         uiParameterSlider("body.muscle_mass");
-        // Limb sliders only do work on the humanoid plan (the taur has
-        // no humanoid legs).
+        // Limb sliders act on the arms of every plan and the legs of the
+        // biped (the taur's legs are the animal's own).
         if (uiParameterSlider("limbs.length"))
         {
             applyParameterHeights();
@@ -445,7 +639,7 @@ void CharacterScreen::drawBodyTab()
     }
     if (activePlan_ != 2)
     {
-        uiHeading("Neck");
+        uiHeading("Neck & Head");
         // The neck scales its column (the head rides the top socket); the
         // thickness rides the baked morph with both weld rings pinned.
         if (uiParameterSlider("neck.length"))
@@ -456,7 +650,6 @@ void CharacterScreen::drawBodyTab()
         {
             refreshDeformations();
         }
-        uiHeading("Head");
         uiParameterSlider("head.size");
         // Muzzle and eye spacing are the unified head settings: they deform
         // every species head (the same base head with different settings is
@@ -466,6 +659,7 @@ void CharacterScreen::drawBodyTab()
         {
             refreshDeformations();
         }
+        uiParameterSlider("ears.size");
     }
 
     uiHeading("Size");
@@ -498,16 +692,11 @@ void CharacterScreen::drawBodyTab()
                     character_->self, characterHandle_, "body.coat", static_cast<float>(candidate), &error);
                 refreshDeformations();
             });
-    }
-    if (activePlan_ != 2)
-    {
-        // Skin tone palette (industry pattern: swatches, not a raw color
-        // picker); the value is the tone index, drawCharacter maps it to a
-        // material tint on the skin-tagged parts.
-        float bodyCoat = 0.0f;
-        character_->getParameter(character_->self, characterHandle_, "body.coat", &bodyCoat);
-        if (bodyCoat < 0.5f)
+        if (activePlan_ != 2 && bodyCoat < 0.5f)
         {
+            // Skin tone palette (industry pattern: swatches, not a raw color
+            // picker); the value is the tone index, drawCharacter maps it to a
+            // material tint on the skin-tagged parts.
             uiText("Skin tone:");
             static const char *const toneNames[5] = {"Default", "Fair", "Tan", "Bronze", "Umber"};
             float                    tone         = 0.0f;
@@ -525,54 +714,99 @@ void CharacterScreen::drawBodyTab()
                         character_->self, characterHandle_, "skin.tone", static_cast<float>(candidate), &error);
                 });
         }
-        else
-        {
-            uiTextColored(0.62f, 0.66f, 0.72f, "The fur palette below also coats the bare body.");
-        }
     }
 
-    // Fur coat palette for the downloaded animal grafts (species heads,
-    // ears, tails, and the animal bodies - and the bare body in fur mode).
+    // Fur coat palette: swatch 0 matches the active head's own colours (the
+    // one-pelt read); the rest are the fixed palette. Every swatch is a
+    // runtime-rendered preview of the actual torso repaint, laid out in a
+    // table so every row stays aligned (a sameLine flow staggers when a
+    // label outgrows its neighbours).
     uiHeading("Fur Coat");
     {
-        static const char *const coatNames[6] = {"Natural", "Rust", "Snow", "Charcoal", "Cream", "Silver"};
-        float                    coat         = 0.0f;
+        static const char *const coatNames[8]
+            = {"Match Head", "Natural", "Rust", "Snow", "Charcoal", "Cream", "Silver", "Dusk"};
+        float coat = 0.0f;
         character_->getParameter(character_->self, characterHandle_, "fur.coat", &coat);
-        const int currentCoat = static_cast<int>(coat + 0.5f);
-        uiOptionRow(coatNames,
-            6,
-            "fur",
-            currentCoat,
-            52.0f,
-            [this](int candidate)
+        const int currentCoat = std::clamp(static_cast<int>(coat + 0.5f), 0, 7);
+        if (ui_->beginTable(ui_->self,
+                uiContext_,
+                "coat_swatches",
+                4,
+                static_cast<UiTableFlags>(0),
+                0.0f,
+                0.0f,
+                96.0f))
+        {
+            for (int candidate = 0; candidate < 8; ++candidate)
             {
-                CharacterError error = CharacterError::None;
-                character_->setParameter(
-                    character_->self, characterHandle_, "fur.coat", static_cast<float>(candidate), &error);
-                refreshDeformations();
-            });
+                if (candidate % 4 == 0)
+                {
+                    ui_->tableNextRow(ui_->self, uiContext_, static_cast<UiTableRowFlags>(0), 0.0f);
+                }
+                ui_->tableNextColumn(ui_->self, uiContext_);
+                char key[24];
+                std::snprintf(key, sizeof(key), "coat_%d", candidate);
+                uiPreviewTextureCard(key,
+                    coatNames[candidate],
+                    candidate == currentCoat,
+                    74.0f,
+                    [this, candidate]()
+                    {
+                        CharacterError error = CharacterError::None;
+                        character_->setParameter(
+                            character_->self, characterHandle_, "fur.coat", static_cast<float>(candidate), &error);
+                        refreshDeformations();
+                    });
+            }
+            ui_->endTable(ui_->self, uiContext_);
+        }
+        ui_->spacing(ui_->self, uiContext_);
     }
 
-    // Fur markings: the fandom's socks/gloves, tail-tip, muzzle, and belly
-    // patterns, re-derived on the affected meshes at change time.
+    // Fur markings: the fandom's socks/gloves, tail-tip, muzzle, belly,
+    // stripe, and point patterns - each a runtime-rendered preview of the
+    // torso repaint, re-derived on the affected meshes at change time. The
+    // same table grid as the coat swatches keeps the rows aligned.
     uiHeading("Markings");
     {
-        static const char *const markingNames[4] = {"None", "Socks", "Tipped", "Full"};
+        static const char *const markingNames[6] = {"None", "Socks", "Tipped", "Full", "Stripes", "Points"};
         float                    markings        = 0.0f;
         character_->getParameter(character_->self, characterHandle_, "fur.markings", &markings);
-        const int currentMarking = static_cast<int>(markings + 0.5f);
-        uiOptionRow(markingNames,
-            4,
-            "mark",
-            currentMarking,
-            62.0f,
-            [this](int candidate)
+        const int currentMarking = std::clamp(static_cast<int>(markings + 0.5f), 0, 5);
+        if (ui_->beginTable(ui_->self,
+                uiContext_,
+                "marking_swatches",
+                3,
+                static_cast<UiTableFlags>(0),
+                0.0f,
+                0.0f,
+                96.0f))
+        {
+            for (int candidate = 0; candidate < 6; ++candidate)
             {
-                CharacterError error = CharacterError::None;
-                character_->setParameter(
-                    character_->self, characterHandle_, "fur.markings", static_cast<float>(candidate), &error);
-                refreshDeformations();
-            });
+                if (candidate % 3 == 0)
+                {
+                    ui_->tableNextRow(ui_->self, uiContext_, static_cast<UiTableRowFlags>(0), 0.0f);
+                }
+                ui_->tableNextColumn(ui_->self, uiContext_);
+                char key[28];
+                std::snprintf(key, sizeof(key), "marking_%d", candidate);
+                uiPreviewTextureCard(key,
+                    markingNames[candidate],
+                    candidate == currentMarking,
+                    74.0f,
+                    [this, candidate]()
+                    {
+                        CharacterError error = CharacterError::None;
+                        character_->setParameter(
+                            character_->self, characterHandle_, "fur.markings", static_cast<float>(candidate), &error);
+                        refreshDeformations();
+                    });
+            }
+            ui_->endTable(ui_->self, uiContext_);
+        }
+        ui_->spacing(ui_->self, uiContext_);
+        uiTextColored(0.62f, 0.66f, 0.72f, "Stripes and Points use the species' own accent colour.");
     }
 }
 
@@ -580,39 +814,53 @@ void CharacterScreen::drawBodyTab()
 
 void CharacterScreen::drawPartsTab()
 {
-    // Head styles with preview thumbnails: every registered slot:head part.
-    uiHeading("Head");
-    uiPartSelector(content_.partsInSlot("head"),
-        activeHeadPart_,
-        [this](const std::string &partId)
-        {
-            if (setHeadPart(partId))
-            {
-                const PartRenderInfo *info = content_.renderInfoForPart(partId);
-                setStatusMessage(std::string("Head set to ") + (info ? info->displayName : partId));
-            }
-            else
-            {
-                setStatusMessage("Head replacement rejected");
-            }
-        });
+    // Category chips first: one click switches the grid below instead of a
+    // single endless scroll, so every category sits one click away.
+    static const char *const kCategories[7] = {"Head", "Ears", "Neck", "Tail", "Wings", "Arms", "Legs"};
+    partsCategory_ = uiCategoryChips({kCategories, kCategories + 7}, partsCategory_);
 
-    // Ear styles: separate parts of the head (swap the pair on the head's
-    // ear sockets). Only species heads carry ear sockets.
-    if (headHasEarSockets())
+    switch (partsCategory_)
     {
+    case 0:
+    {
+        // Head styles with preview thumbnails: every registered slot:head part.
+        uiHeading("Head");
+        uiPartCardGrid(content_.partsInSlot("head"),
+            activeHeadPart_,
+            [this](const std::string &partId)
+            {
+                if (setHeadPart(partId))
+                {
+                    const PartRenderInfo *info = content_.renderInfoForPart(partId);
+                    setStatusMessage(std::string("Head set to ") + (info ? info->displayName : partId));
+                }
+                else
+                {
+                    setStatusMessage("Head replacement rejected");
+                }
+            },
+            4);
+        break;
+    }
+    case 1:
+    {
+        // Ear styles: separate parts of the head (swap the pair on the head's
+        // ear sockets). Only species heads carry ear sockets.
         uiHeading("Ears");
-        std::vector<std::string> earParts = content_.partsInSlot("ears");
-        // deduplicate the mirrored halves (left ids only)
+        if (!headHasEarSockets())
+        {
+            uiTextColored(0.62f, 0.66f, 0.72f, "This head carries its own ears (or none).");
+            break;
+        }
         std::vector<std::string> earStyles;
-        for (const std::string &partId : earParts)
+        for (const std::string &partId : content_.partsInSlot("ears"))
         {
             if (partId.size() > 5 && partId.substr(partId.size() - 5) == "_left")
             {
                 earStyles.push_back(partId);
             }
         }
-        uiPartSelector(earStyles,
+        uiPartCardGrid(earStyles,
             activeEarPart_,
             [this](const std::string &partId)
             {
@@ -625,17 +873,24 @@ void CharacterScreen::drawPartsTab()
                 {
                     setStatusMessage("Ear swap rejected");
                 }
-            });
+            },
+            4);
+        uiParameterSlider("ears.size");
+        break;
     }
-
-    // Neck styles: the neck spans the collar socket to the skull-base weld.
-    // It follows the head's species automatically; this list overrides (a
-    // mismatched pair leaves a step at the atlas ring, so the follow is the
-    // recommended path).
-    if (activePlan_ != 2)
+    case 2:
     {
+        // Neck styles: the neck spans the collar socket to the skull-base weld.
+        // It follows the head's species automatically; this grid overrides (a
+        // mismatched pair leaves a step at the atlas ring, so the follow is
+        // the recommended path).
         uiHeading("Neck");
-        uiPartSelector(content_.partsInSlot("neck"),
+        if (activePlan_ == 2)
+        {
+            uiTextColored(0.62f, 0.66f, 0.72f, "The quadruped plan carries its own neck.");
+            break;
+        }
+        uiPartCardGrid(content_.partsInSlot("neck"),
             activeNeckPart_,
             [this](const std::string &partId)
             {
@@ -648,16 +903,22 @@ void CharacterScreen::drawPartsTab()
                 {
                     setStatusMessage("Neck replacement rejected");
                 }
-            });
+            },
+            4);
+        break;
     }
-
-    // Tail: toggle + style thumbnails. On the humanoid plan the tail rides
-    // the sacrum-coccyx segment's tailbone; on the taur plan the lower
-    // body's own tail socket (so the tail option affects the lower body);
-    // the quadruped plan keeps its own tail.
-    if (activePlan_ != 2)
+    case 3:
     {
+        // Tail: toggle + style thumbnails. On the humanoid plan the tail rides
+        // the sacrum-coccyx segment's tailbone; on the taur plan the lower
+        // body's own tail socket (so the tail option affects the lower body);
+        // the quadruped plan keeps its own tail.
         uiHeading("Tail");
+        if (activePlan_ == 2)
+        {
+            uiTextColored(0.62f, 0.66f, 0.72f, "The quadruped plan carries its own tail.");
+            break;
+        }
         bool tail = tailPresent_;
         if (uiCheckbox("Attach tail##tailtoggle", &tail))
         {
@@ -665,27 +926,29 @@ void CharacterScreen::drawPartsTab()
         }
         if (tailPresent_)
         {
-            uiPartSelector(content_.partsInSlot("tail"),
+            uiPartCardGrid(content_.partsInSlot("tail"),
                 activeTailPart_,
                 [this](const std::string &partId)
                 {
                     const PartRenderInfo *info = content_.renderInfoForPart(partId);
                     setStatusMessage(setTailPart(partId) ? std::string("Tail: ") + (info ? info->displayName : partId)
                                                          : "Tail swap rejected");
-                });
+                },
+                4);
             uiParameterSlider("tail.length");
             uiParameterSlider("tail.thickness");
         }
+        break;
     }
-
-    // Wings: exactly one pair (toggle).
-    uiHeading("Wings");
-    if (activePlan_ == 2)
+    case 4:
     {
-        uiTextColored(0.62f, 0.66f, 0.72f, "The quadruped plan has no wing sockets.");
-    }
-    else
-    {
+        // Wings: exactly one pair (toggle).
+        uiHeading("Wings");
+        if (activePlan_ == 2)
+        {
+            uiTextColored(0.62f, 0.66f, 0.72f, "The quadruped plan has no wing sockets.");
+            break;
+        }
         bool wings = wingsPresent_;
         if (uiCheckbox("Attach wing pair##wingtoggle", &wings))
         {
@@ -695,10 +958,62 @@ void CharacterScreen::drawPartsTab()
         {
             uiParameterSlider("wings.span");
         }
+        break;
+    }
+    case 5:
+    {
+        // Arms: the human bare/ranger variants plus every species' paw arm
+        // (the forelegs with their own paws). Species arms carry no bracer
+        // socket, so the bracers come off automatically.
+        uiHeading("Arms");
+        if (activePlan_ == 2)
+        {
+            uiTextColored(0.62f, 0.66f, 0.72f, "The quadruped plan carries its own forelegs.");
+            break;
+        }
+        uiPartCardGrid(content_.partsInSlot("arms"),
+            activeArmPart_,
+            [this](const std::string &partId)
+            {
+                const PartRenderInfo *info = content_.renderInfoForPart(partId);
+                const std::string     right = partId.substr(0, partId.size() - 5) + "_right";
+                const bool            okLeft = setLimbPart("arm_left", partId);
+                const bool            okRight = setLimbPart("arm_right", right);
+                setStatusMessage(okLeft && okRight ? std::string("Arms: ") + (info ? info->displayName : partId)
+                                                   : "Arm swap rejected");
+            },
+            4);
+        break;
+    }
+    default:
+    {
+        // Legs: the human bare/ranger variants plus every species' own hind
+        // leg - digitigrade paws, hooves, and raptor claws on the biped
+        // pelvis (the Parts tab answer to "not every character wears boots").
+        uiHeading("Legs");
+        if (activePlan_ != 0)
+        {
+            uiTextColored(0.62f, 0.66f, 0.72f, "Only the humanoid plan swaps biped legs.");
+            break;
+        }
+        uiPartCardGrid(content_.partsInSlot("legs"),
+            activeLegPart_,
+            [this](const std::string &partId)
+            {
+                const PartRenderInfo *info = content_.renderInfoForPart(partId);
+                const std::string     right = partId.substr(0, partId.size() - 5) + "_right";
+                const bool            okLeft = setLimbPart("leg_left", partId);
+                const bool            okRight = setLimbPart("leg_right", right);
+                setStatusMessage(okLeft && okRight ? std::string("Legs: ") + (info ? info->displayName : partId)
+                                                   : "Leg swap rejected");
+            },
+            4);
+        break;
+    }
     }
 
     // Outfit: the master toggle swaps the bare and ranger variants of the
-    // torso, arms, and legs; the pieces below add or remove overlays.
+    // torso and the human limbs; the pieces below add or remove overlays.
     uiHeading("Outfit");
     bool clothed = clothed_;
     if (uiCheckbox("Wear ranger outfit##outfittoggle", &clothed))
@@ -748,7 +1063,7 @@ void CharacterScreen::drawPartsTab()
 
 void CharacterScreen::drawMotionTab()
 {
-    uiHeading("Motion");
+    uiHeading("Drivers");
     bool tailAnimation = animateTail_;
     if (uiCheckbox("Animate tail##animtail", &tailAnimation))
     {
@@ -756,7 +1071,9 @@ void CharacterScreen::drawMotionTab()
     }
     {
         float sway = tailSwaySpeed_;
-        if (uiSlider("Tail sway speed", &sway, 0.0f, 2.0f))
+        char swayLabel[64];
+        std::snprintf(swayLabel, sizeof(swayLabel), "Tail sway speed  %.2f", static_cast<double>(sway));
+        if (ui_->sliderFloat(ui_->self, uiContext_, swayLabel, &sway, 0.0f, 2.0f, " "))
         {
             tailSwaySpeed_ = sway;
         }
@@ -766,11 +1083,25 @@ void CharacterScreen::drawMotionTab()
     {
         animateWings_ = wingAnimation;
     }
-    ui_->spacing(ui_->self, uiContext_);
-    uiTextColored(0.62f,
-        0.66f,
-        0.72f,
-        "The drivers edit connection offsets each frame; the assembly re-evaluates on top of them.");
+    {
+        float flap = wingFlapSpeed_;
+        char flapLabel[64];
+        std::snprintf(flapLabel, sizeof(flapLabel), "Wing flap speed  %.2f", static_cast<double>(flap));
+        if (ui_->sliderFloat(ui_->self, uiContext_, flapLabel, &flap, 0.0f, 2.0f, " "))
+        {
+            wingFlapSpeed_ = flap;
+        }
+    }
+    bool breathing = breathe_;
+    if (uiCheckbox("Idle breathing##animbreath", &breathing))
+    {
+        breathe_ = breathing;
+    }
+
+    uiHeading("How it works");
+    uiTextColored(0.62f, 0.66f, 0.72f, "The drivers edit connection offsets each frame; the assembly");
+    uiTextColored(0.62f, 0.66f, 0.72f, "re-evaluates on top of them, so the welds never move.");
+    uiTextColored(0.62f, 0.66f, 0.72f, "Breathing adds a subtle neck pitch sway for the idle read.");
 }
 
 // ---- tab: presets, status, validation ----------------------------------------------
@@ -778,7 +1109,7 @@ void CharacterScreen::drawMotionTab()
 void CharacterScreen::drawFileTab()
 {
     uiHeading("Recipes");
-    if (uiButton("Save Recipe##recipe-save", 104.0f))
+    if (uiButton("Save Recipe##recipe-save", 124.0f))
     {
         CharacterError error = CharacterError::None;
         if (character_->saveRecipe(character_->self, characterHandle_, kRecipeFileName, &error))
@@ -791,7 +1122,7 @@ void CharacterScreen::drawFileTab()
         }
     }
     ui_->sameLine(ui_->self, uiContext_);
-    if (uiButton("Load Recipe##recipe-load", 104.0f))
+    if (uiButton("Load Recipe##recipe-load", 124.0f))
     {
         CharacterError error = CharacterError::None;
         if (character_->loadRecipe(character_->self, characterHandle_, kRecipeFileName, &error))
@@ -806,9 +1137,23 @@ void CharacterScreen::drawFileTab()
         }
     }
     ui_->sameLine(ui_->self, uiContext_);
-    if (uiButton("Reset##recipe-reset", 84.0f))
+    // Reset is the destructive action: it styles red and confirms through the
+    // status line (the randomise button on the Species tab is the safe dice).
+    ui_->pushStyleColor(ui_->self, uiContext_, engine::ui::UiColor::Button, 0.55f, 0.22f, 0.20f, 0.90f);
+    ui_->pushStyleColor(ui_->self, uiContext_, engine::ui::UiColor::ButtonHovered, 0.68f, 0.28f, 0.24f, 0.95f);
+    ui_->pushStyleColor(ui_->self, uiContext_, engine::ui::UiColor::ButtonActive, 0.80f, 0.32f, 0.26f, 1.00f);
+    const bool reset = uiButton("Reset##recipe-reset", 92.0f);
+    ui_->popStyleColor(ui_->self, uiContext_, 3);
+    if (reset)
     {
         resetToDefault();
+    }
+    uiTextColored(0.62f, 0.66f, 0.72f, "Recipes store the whole assembly (parts, connections, parameters).");
+
+    uiHeading("Surprise");
+    if (uiButton("Randomise character##file-randomise", 160.0f))
+    {
+        randomiseCharacter();
     }
 
     uiHeading("Status");
@@ -831,6 +1176,11 @@ void CharacterScreen::drawFileTab()
             uiTextColored(0.98f, 0.55f, 0.45f, line);
         }
     }
+
+    uiHeading("About");
+    uiTextColored(0.62f, 0.66f, 0.72f, "Every part is a piece of a downloaded CC0 pack (Quaternius;");
+    uiTextColored(0.62f, 0.66f, 0.72f, "see LICENSE.md in the assets). The thumbnails are rendered by");
+    uiTextColored(0.62f, 0.66f, 0.72f, "the engine at startup - no pre-generated images ship.");
 }
 
 void CharacterScreen::drawStatsOverlay()

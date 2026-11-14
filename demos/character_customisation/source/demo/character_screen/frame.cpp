@@ -150,6 +150,10 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
     glm::vec3           worldMin(std::numeric_limits<float>::max());
     glm::vec3           worldMax(std::numeric_limits<float>::lowest());
     bool                haveExtents = false;
+    float               footprintMinX     = std::numeric_limits<float>::max();
+    float               footprintMaxX     = std::numeric_limits<float>::lowest();
+    float               footprintMinZ     = std::numeric_limits<float>::max();
+    float               footprintMaxZ     = std::numeric_limits<float>::lowest();
     const std::uint32_t count       = character_->instanceCount(character_->self, characterHandle_);
     for (std::uint32_t index = 0; index < count; ++index)
     {
@@ -177,6 +181,8 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
             continue;
         }
         const glm::mat4 world = glm::make_mat4(matrix);
+        glm::vec3       partMin(std::numeric_limits<float>::max());
+        glm::vec3       partMax(std::numeric_limits<float>::lowest());
         for (int corner = 0; corner < 8; ++corner)
         {
             const glm::vec4 local(corner & 1 ? maximum[0] : minimum[0],
@@ -186,7 +192,27 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
             const glm::vec3 cornerWorld(world * local);
             worldMin    = glm::min(worldMin, cornerWorld);
             worldMax    = glm::max(worldMax, cornerWorld);
+            partMin     = glm::min(partMin, cornerWorld);
+            partMax     = glm::max(partMax, cornerWorld);
             haveExtents = true;
+        }
+        // The ground-contact footprint: the VERTICES of parts that reach
+        // within a few centimetres of the assembly's lowest point define
+        // where the shadow disc actually belongs - a leg part's box spans
+        // the thigh far behind the paw, and box centres read the disc a
+        // body-length away from the visible contact.
+        if (partMin.y < worldMin.y + 0.12f)
+        {
+            float partFootprintMin[2] = {0.0f, 0.0f};
+            float partFootprintMax[2] = {0.0f, 0.0f};
+            if (content_.geometryGroundFootprint(
+                    renderInfo->geometryId, world, worldMin.y + 0.10f, partFootprintMin, partFootprintMax))
+            {
+                footprintMinX = glm::min(footprintMinX, partFootprintMin[0]);
+                footprintMaxX = glm::max(footprintMaxX, partFootprintMax[0]);
+                footprintMinZ = glm::min(footprintMinZ, partFootprintMin[1]);
+                footprintMaxZ = glm::max(footprintMaxZ, partFootprintMax[1]);
+            }
         }
     }
 
@@ -273,9 +299,6 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
     std::memcpy(cameraMatrices.view, viewState.view, sizeof(cameraMatrices.view));
     std::memcpy(cameraMatrices.projection, viewState.projection, sizeof(cameraMatrices.projection));
     std::memcpy(cameraMatrices.position, viewState.position, sizeof(cameraMatrices.position));
-    // The fur LOD measures part distance from the camera eye; capture it for
-    // drawCharacter.
-    std::memcpy(lastCameraEye_, viewState.position, sizeof(lastCameraEye_));
     render_->setCamera(render_->self, rendererHandle_, &cameraMatrices);
 
     // Renderer frame was begun by main(): draw the 3D scene first, then the
@@ -283,14 +306,21 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
     // sun draw last so their occluded pixels depth-reject instead of
     // shading (the CPU rasterizer's budget is shaded pixels).
     stage_.drawFloor();
+    const bool haveFootprint = footprintMinX <= footprintMaxX && footprintMinZ <= footprintMaxZ;
     if (haveExtents)
     {
-        // Ground the silhouette: a soft gradient disc under the character's
-        // ground footprint (the horizontal extent of the world box).
-        const glm::vec3 footprint = worldMax - worldMin;
-        const glm::vec3 center    = (worldMin + worldMax) * 0.5f;
-        const float     radius    = std::clamp(0.5f * std::max(footprint.x, footprint.z) + 0.06f, 0.22f, 1.8f);
-        stage_.drawContactShadow(center.x, center.z, radius);
+        // Ground the silhouette: a soft gradient disc under the parts that
+        // actually touch the ground (the feet's own footprint), falling back
+        // to the whole box's horizontal extent when nothing reaches low.
+        glm::vec3 footprint = worldMax - worldMin;
+        glm::vec2 center((worldMin.x + worldMax.x) * 0.5f, (worldMin.z + worldMax.z) * 0.5f);
+        if (haveFootprint)
+        {
+            footprint = glm::vec3(footprintMaxX - footprintMinX, 0.0f, footprintMaxZ - footprintMinZ);
+            center    = glm::vec2((footprintMinX + footprintMaxX) * 0.5f, (footprintMinZ + footprintMaxZ) * 0.5f);
+        }
+        const float radius = std::clamp(0.5f * std::max(footprint.x, footprint.z) + 0.10f, 0.22f, 1.8f);
+        stage_.drawContactShadow(center.x, center.y, radius);
     }
     drawCharacter();
     stage_.drawSkyAndSun();
@@ -353,13 +383,30 @@ void CharacterScreen::updateAnimationDrivers(double deltaSeconds, double elapsed
         {
             continue;
         }
-        const float     flap = animateWings_ ? std::sin(static_cast<float>(elapsedSeconds) * 2.4f) * 0.15f : 0.0f;
+        const float flap = animateWings_ && wingFlapSpeed_ > 0.01f
+                             ? std::sin(static_cast<float>(elapsedSeconds) * 2.4f * wingFlapSpeed_) * 0.15f
+                             : 0.0f;
         const float     authoredRoll     = glm::radians(wingName[4] == 'l' ? -8.0f : 8.0f + glm::degrees(flap));
         const glm::quat roll             = glm::angleAxis(authoredRoll, glm::vec3(0.0f, 0.0f, 1.0f));
         const glm::quat pitch            = glm::angleAxis(glm::radians(-105.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         const glm::quat rotation         = pitch * roll;
         const float     rotationArray[4] = {rotation.x, rotation.y, rotation.z, rotation.w};
         character_->setConnectionOffset(character_->self, characterHandle_, wing, nullptr, rotationArray);
+    }
+
+    // Idle breathing: a subtle pitch sway on the neck's incoming connection
+    // (the chest rises and the head nods a hair) - the cheapest read of a
+    // living character that never touches a weld ring.
+    if (breathe_)
+    {
+        const InstanceId neck = instanceByName("neck");
+        if (neck != engine::character::invalidInstance)
+        {
+            const float breath = std::sin(static_cast<float>(elapsedSeconds) * 1.1f) * 0.012f;
+            const glm::quat rotation = glm::angleAxis(breath, glm::vec3(1.0f, 0.0f, 0.0f));
+            const float rotationArray[4] = {rotation.x, rotation.y, rotation.z, rotation.w};
+            character_->setConnectionOffset(character_->self, characterHandle_, neck, nullptr, rotationArray);
+        }
     }
 }
 

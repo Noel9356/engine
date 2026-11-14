@@ -13,7 +13,6 @@
 #include <engine/camera/capabilities.hpp>
 #include <engine/character/capabilities.hpp>
 #include <engine/file_asset_store/capabilities.hpp>
-#include <engine/fur/capabilities.hpp>
 #include <engine/kernel/executable_directory.hpp>
 #include <engine/models/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
@@ -214,8 +213,7 @@ int main(int argc, char **argv)
     // Modules loaded by the kernel for this demo; pbr, character and
     // render_graph are probed optionally below.
     engine::ApplicationHostOptions hostOptions = engine::makeApplicationHostOptions(
-        commandLine,
-        {"window", "renderer", "render_graph", "fur", "camera", "models", "ui", "character", "script_runtime"});
+        commandLine, {"window", "renderer", "render_graph", "camera", "models", "ui", "character", "script_runtime"});
 
     if (!hostOptions.activePlugins.has_value())
     {
@@ -281,14 +279,6 @@ int main(int argc, char **argv)
     // pbr is optional: without it the demo falls back to its built-in sun and
     // skips the environment block below.
     const pbr::PbrCapability *pbrCapability = appContext->tryAcquireCapability<pbr::PbrCapability>();
-    // fur is optional too: without it the character demo keeps its legacy
-    // vertex-tint fur and skips the shell-fur path entirely.
-    const engine::fur::FurCapability *furCapability = appContext->tryAcquireCapability<engine::fur::FurCapability>();
-    if (furCapability != nullptr
-        && !capabilityAbiMatches("fur", furCapability->abi, engine::fur::furCapabilityAbi))
-    {
-        furCapability = nullptr;
-    }
     // render_graph is optional too: the demo schedules its per-frame CPU work
     // through it when present and falls back to inline updates otherwise.
     auto *frameGraphCapability = appContext->tryAcquireCapability<render_graph::RenderGraphCapability>();
@@ -779,8 +769,7 @@ int main(int argc, char **argv)
             cameraHandle,
             uiCapability,
             *characterCapability,
-            assetRoot.string(),
-            furCapability);
+            assetRoot.string());
         if (!characterScreenReady)
         {
             std::cerr << "demo: the character screen failed to initialise\n";
@@ -797,37 +786,6 @@ int main(int argc, char **argv)
             if (demoOptions.screenshotPath.empty())
             {
                 // Pure test run: leave the loop almost immediately.
-                effectiveQuitAfterSeconds
-                    = effectiveQuitAfterSeconds > 0.0 ? std::min(effectiveQuitAfterSeconds, 0.25) : 0.25;
-            }
-        }
-        // Shell-fur CLI knobs: applied after create (the assets exist by
-        // now) and before the first frame. --fur-off switches the shell
-        // stacks off entirely (A/B the cost); --fur-preset picks the coat;
-        // --fur-layers pins the stack height (0 = LOD); --fur-length scales
-        // strand length.
-        characterScreen.furRendering().setEnabled(!demoOptions.furDisabled);
-        if (!demoOptions.furPreset.empty())
-        {
-            if (demoOptions.furPreset == "plush")
-                characterScreen.furRendering().setPreset(engine::fur::FurPreset::Plush);
-            else if (demoOptions.furPreset == "shaggy")
-                characterScreen.furRendering().setPreset(engine::fur::FurPreset::Shaggy);
-            else if (demoOptions.furPreset == "velvety")
-                characterScreen.furRendering().setPreset(engine::fur::FurPreset::Velvety);
-            else
-            {
-                std::cerr << "demo: unknown --fur-preset '" << demoOptions.furPreset << "' (plush|shaggy|velvety)\n";
-            }
-        }
-        characterScreen.furRendering().setLayerOverride(demoOptions.furLayers);
-        characterScreen.furRendering().setLengthScale(demoOptions.furLength);
-        if (demoOptions.furTest)
-        {
-            const bool furTestPassed = characterScreen.runFurSelfTest();
-            characterTestPassed      = characterTestPassed && furTestPassed;
-            if (demoOptions.screenshotPath.empty())
-            {
                 effectiveQuitAfterSeconds
                     = effectiveQuitAfterSeconds > 0.0 ? std::min(effectiveQuitAfterSeconds, 0.25) : 0.25;
             }

@@ -191,14 +191,49 @@ bool CharacterScreen::setPlan(int plan)
     return rebuilt;
 }
 
+bool CharacterScreen::speciesHasBodyForPlan(int species) const
+{
+    if (species < 0 || species >= metrics::kSpeciesCount)
+    {
+        return false;
+    }
+    const metrics::SpeciesMetrics &entry = metrics::kSpecies[species];
+    return activePlan_ == 1 ? entry.hasTaurBody : entry.hasQuadBody;
+}
+
 bool CharacterScreen::setQuadSpecies(int species)
 {
     if (species < 0 || species >= metrics::kSpeciesCount)
     {
         return true;
     }
-    const std::string bodyId = activePlan_ == 1 ? std::string("quad_taur_") + metrics::kSpecies[species].id
-                                                : std::string("quad_body_") + metrics::kSpecies[species].id;
+    const metrics::SpeciesMetrics &entry = metrics::kSpecies[species];
+    // Head-only species (the rabbit) graft their head, ears, and neck but
+    // keep the current lower body - the body roster is a per-plan capability.
+    if (activePlan_ != 0 && !speciesHasBodyForPlan(species))
+    {
+        if (activePlan_ == 2)
+        {
+            // The whole-animal plan renders the lower body's own embedded
+            // head, so a head-only species has nowhere to graft: the taur
+            // plan expresses the species (head, ears, and neck on the
+            // current lower body) and keeps the species picker honest.
+            setPlan(1);
+        }
+        setHeadPart(std::string("head_") + entry.id);
+        if (entry.hasEarSockets)
+        {
+            setEarParts(std::string("ear_") + entry.id + "_left");
+        }
+        if (entry.hasTail && activePlan_ != 2)
+        {
+            setTailPart(std::string("tail_") + entry.id);
+        }
+        setStatusMessage(std::string(entry.display) + " head (no body on this plan)");
+        return true;
+    }
+    const std::string bodyId = activePlan_ == 1 ? std::string("quad_taur_") + entry.id
+                                                : std::string("quad_body_") + entry.id;
     const InstanceId  body   = instanceByName("body");
     if (body == engine::character::invalidInstance)
     {
@@ -217,12 +252,18 @@ bool CharacterScreen::setQuadSpecies(int species)
     quadSpecies_            = species;
     CharacterError error    = CharacterError::None;
     const bool     replaced = character_->replacePart(character_->self, characterHandle_, body, bodyId.c_str(), &error);
-    // The taur's tail stays with the species: re-point the tail variant to
-    // the matching species tail so the lower body reads as one animal (the
-    // plan mapping swaps in the taur-scaled variant automatically).
+    // The taur's tail stays with the species when the species has one; a
+    // tail-less species (the frog) removes the tail instead.
     if (replaced && activePlan_ == 1)
     {
-        setTailPart(std::string("tail_") + metrics::kSpecies[species].id);
+        if (entry.hasTail)
+        {
+            setTailPart(std::string("tail_") + entry.id);
+        }
+        else
+        {
+            setTail(false);
+        }
     }
     applyParameterHeights();
     evaluateCharacter(true);
@@ -314,6 +355,13 @@ bool CharacterScreen::setEarParts(const std::string &leftPartId)
     activeEarPart_                = leftPartId;
     const std::string rightPartId = leftPartId.substr(0, leftPartId.size() - 5) + "_right";
     CharacterError    error       = CharacterError::None;
+    // Plans without a head instance (the whole-animal quadruped) have no ear
+    // sockets at all: the style stays remembered and attaches on the next
+    // head-bearing rebuild.
+    if (instanceByName("head") == engine::character::invalidInstance)
+    {
+        return true;
+    }
     const std::tuple<const char *, const char *, std::string> sides[2] = {
         {"ear_left", "ear.left", leftPartId},
         {"ear_right", "ear.right", rightPartId},
@@ -520,16 +568,78 @@ bool CharacterScreen::setTailPart(const std::string &partId)
     return swapped;
 }
 
+bool CharacterScreen::setLimbPart(const char *instanceName, const std::string &partId)
+{
+    // Swaps one arm or leg instance's variant (human bare/ranger or a
+    // species limb). The species limbs sink their root ring into the socket
+    // by the measured fraction so the thigh swallows the joint; the human
+    // variants keep the profile's authored offset (identity).
+    const InstanceId instance = instanceByName(instanceName);
+    if (instance == engine::character::invalidInstance)
+    {
+        return false;
+    }
+    CharacterError error = CharacterError::None;
+    if (!character_->replacePart(character_->self, characterHandle_, instance, partId.c_str(), &error))
+    {
+        return false;
+    }
+    // The variant fields hold the canonical _left id (the grid and the
+    // outfit derive the _right sibling from it), whatever side this call
+    // swapped.
+    std::string canonical = partId;
+    if (canonical.size() > 6 && canonical.compare(canonical.size() - 6, 6, "_right") == 0)
+    {
+        canonical = canonical.substr(0, canonical.size() - 6) + "_left";
+    }
+    if (std::strstr(instanceName, "arm") != nullptr)
+    {
+        activeArmPart_ = canonical;
+    }
+    else
+    {
+        activeLegPart_ = canonical;
+    }
+    const float sink   = content_.limbSinkForPart(partId);
+    const float offset[3] = {0.0f, -sink, 0.0f};
+    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    character_->setConnectionOffset(character_->self, characterHandle_, instance, offset, identity);
+    // The species arms carry no bracer socket: the bracers come off (the
+    // garment has nowhere to hang on a paw).
+    if (std::strstr(instanceName, "arm") != nullptr && sink > 0.0f)
+    {
+        if (bracersPresent_)
+        {
+            bracersPresent_ = false;
+            setClothingPiece("bracer_left", false);
+            setClothingPiece("bracer_right", false);
+        }
+    }
+    applyParameterHeights();
+    evaluateCharacter(true);
+    return true;
+}
+
 bool CharacterScreen::setOutfit(bool clothed)
 {
     clothed_                  = clothed;
     CharacterError error      = CharacterError::None;
     const char    *chestId    = clothed ? "torso_thoracic_ranger" : "torso_thoracic_bare";
     const char    *pelvisId   = clothed ? "pelvis_ranger" : "pelvis_bare";
-    const char    *armId      = clothed ? "arm_ranger_left" : "arm_bare_left";
-    const char    *armIdRight = clothed ? "arm_ranger_right" : "arm_bare_right";
-    const char    *legId      = clothed ? "leg_ranger_left" : "leg_bare_left";
-    const char    *legIdRight = clothed ? "leg_ranger_right" : "leg_bare_right";
+    // The outfit drives the human limb variants only; species limbs (paw
+    // arms, digitigrade legs) stay whatever the Parts tab picked.
+    const bool        speciesArms = activeArmPart_.rfind("anthro_", 0) == 0;
+    const bool        speciesLegs = activeLegPart_.rfind("anthro_", 0) == 0;
+    const std::string armRightId  = speciesArms
+                                      ? activeArmPart_.substr(0, activeArmPart_.size() - 5) + "_right"
+                                      : std::string(clothed ? "arm_ranger_right" : "arm_bare_right");
+    const std::string legRightId  = speciesLegs
+                                      ? activeLegPart_.substr(0, activeLegPart_.size() - 5) + "_right"
+                                      : std::string(clothed ? "leg_ranger_right" : "leg_bare_right");
+    const char       *armId       = speciesArms ? activeArmPart_.c_str() : (clothed ? "arm_ranger_left" : "arm_bare_left");
+    const char       *armIdRight  = armRightId.c_str();
+    const char       *legId       = speciesLegs ? activeLegPart_.c_str() : (clothed ? "leg_ranger_left" : "leg_bare_left");
+    const char       *legIdRight  = legRightId.c_str();
     bool           ok         = true;
     const auto     swap       = [&](const char *instanceName, const char *partId)
     {
@@ -540,7 +650,7 @@ bool CharacterScreen::setOutfit(bool clothed)
         }
         const char *currentPartId = nullptr;
         character_->instanceInfo(character_->self, characterHandle_, instance, nullptr, &currentPartId, nullptr);
-        if (currentPartId != nullptr && partId == currentPartId)
+        if (currentPartId != nullptr && std::string(partId) == currentPartId)
         {
             return;
         }
@@ -571,13 +681,19 @@ bool CharacterScreen::setOutfit(bool clothed)
     }
     else if (!beltPresent_ && !bracersPresent_ && !pauldronsPresent_)
     {
-        // first switch back to the outfit: restore the shipped look
+        // first switch back to the outfit: restore the shipped look. The
+        // bracers only ride the human arms' bracer sockets - species paw
+        // arms carry none, so those stay off (the belt and pauldrons ride
+        // the chest and stay).
         beltPresent_      = true;
-        bracersPresent_   = true;
+        bracersPresent_   = !speciesArms;
         pauldronsPresent_ = true;
         setClothingPiece("belt", true);
-        setClothingPiece("bracer_left", true);
-        setClothingPiece("bracer_right", true);
+        if (bracersPresent_)
+        {
+            setClothingPiece("bracer_left", true);
+            setClothingPiece("bracer_right", true);
+        }
         setClothingPiece("pauldron_left", true);
         setClothingPiece("pauldron_right", true);
     }
@@ -669,53 +785,89 @@ bool CharacterScreen::setClothingPiece(const char *instanceName, bool present)
     return connected;
 }
 
+bool CharacterScreen::computeAssemblyWorldBounds(glm::vec3 &outMin, glm::vec3 &outMax) const
+{
+    // The assembly's real world-space box: every instance's part bounds
+    // through its instance transform (the same ground truth the camera fit
+    // uses). Grounding and framing both ride this instead of per-species
+    // measured constants, so every part combination (anthro paws, drooping
+    // tails, hooves) lands on the plane exactly.
+    glm::vec3 boundsMin(std::numeric_limits<float>::max());
+    glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
+    bool       any   = false;
+    const auto count = character_->instanceCount(character_->self, characterHandle_);
+    for (std::uint32_t index = 0; index < count; ++index)
+    {
+        const engine::character::InstanceId id = character_->instanceId(character_->self, characterHandle_, index);
+        const char                         *partId = nullptr;
+        if (!character_->instanceInfo(character_->self, characterHandle_, id, nullptr, &partId, nullptr)
+            || partId == nullptr)
+        {
+            continue;
+        }
+        const PartRenderInfo *renderInfo = content_.renderInfoForPart(partId);
+        float                 localMin[3] = {0.0f, 0.0f, 0.0f};
+        float                 localMax[3] = {0.0f, 0.0f, 0.0f};
+        if (renderInfo == nullptr || !content_.geometryExtents(renderInfo->geometryId, localMin, localMax))
+        {
+            continue;
+        }
+        float matrix[16] = {};
+        if (!character_->instanceTransform(character_->self, characterHandle_, id, matrix))
+        {
+            continue;
+        }
+        const glm::mat4 transform = glm::make_mat4(matrix);
+        for (int corner = 0; corner < 8; ++corner)
+        {
+            const glm::vec4 local(corner & 1 ? localMax[0] : localMin[0],
+                corner & 2 ? localMax[1] : localMin[1],
+                corner & 4 ? localMax[2] : localMin[2],
+                1.0f);
+            const glm::vec3 world = glm::vec3(transform * local);
+            boundsMin             = glm::min(boundsMin, world);
+            boundsMax             = glm::max(boundsMax, world);
+            any                   = true;
+        }
+    }
+    if (any)
+    {
+        outMin = boundsMin;
+        outMax = boundsMax;
+    }
+    return any;
+}
+
 void CharacterScreen::applyParameterHeights()
 {
-    // Keep the feet (or hooves) near the ground plane: limb length scales the
-    // leg mesh about its hip anchor, so the assembly root drops by the scaled
-    // sole offset below the anchor. The taur and quadruped plans ground on
-    // the animal body instead (the measured hooves' lowest point below the
-    // body origin, per species, riding the lower-body scale).
-    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    const int   species     = std::clamp(quadSpecies_, 0, metrics::kSpeciesCount - 1);
-    if (activePlan_ == 1)
+    // Keep the lowest point of the whole assembly on the ground plane: the
+    // root translation is derived from the MEASURED world box after an
+    // evaluation at the identity placement, so every plan grounds exactly -
+    // biped soles and paw pads, taur hooves, quadruped bellies, and any tail
+    // that sweeps below the body line (the box covers it all, whatever parts
+    // the panel combined).
+    const float identity[4]  = {0.0f, 0.0f, 0.0f, 1.0f};
+    const float atOrigin[3] = {0.0f, 0.0f, 0.0f};
+    character_->setAssemblyTransform(character_->self, characterHandle_, atOrigin, identity);
+    character_->evaluate(character_->self, characterHandle_, nullptr);
+    glm::vec3 boundsMin(0.0f);
+    glm::vec3 boundsMax(0.0f);
+    if (computeAssemblyWorldBounds(boundsMin, boundsMax))
     {
-        // The taur grounds on the normalised lower body's own line.
-        float taurScale = 1.0f;
-        character_->getParameter(character_->self, characterHandle_, "taur.scale", &taurScale);
-        const float ground         = metrics::kSpecies[species].groundY * taurScale;
-        const float translation[3] = {0.0f, -ground, 0.0f};
+        const float translation[3] = {0.0f, -boundsMin.y, 0.0f};
         character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
-        return;
+        character_->evaluate(character_->self, characterHandle_, nullptr);
     }
-    if (activePlan_ == 2)
-    {
-        // The quadruped is the whole, natural-scale animal: its own ground
-        // line, still riding the lower-body scale slider.
-        float taurScale = 1.0f;
-        character_->getParameter(character_->self, characterHandle_, "taur.scale", &taurScale);
-        const float ground         = metrics::kSpecies[species].groundQuadY * taurScale;
-        const float translation[3] = {0.0f, -ground, 0.0f};
-        character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
-        return;
-    }
-    const std::string legPart    = partIdOfInstance("leg_left");
-    const float       footY      = content_.legFootYForPart(legPart);
-    float             limbLength = 1.0f;
-    character_->getParameter(character_->self, characterHandle_, "limbs.length", &limbLength);
-    const float legScale = 1.0f + (limbLength - 1.0f);
-    // legFootY is the sole's offset BELOW the hip anchor (negative); the
-    // root rises by its absolute value so the soles touch the ground plane.
-    const float translation[3] = {0.0f, -footY * legScale, 0.0f};
-    character_->setAssemblyTransform(character_->self, characterHandle_, translation, identity);
 }
 
 void CharacterScreen::resetToDefault()
 {
-    activeHeadPart_ = "head_fox";
-    activeNeckPart_ = "neck_fox";
+    activeHeadPart_       = "head_fox";
+    activeNeckPart_       = "neck_fox";
     activeEarPart_.clear();
     activeTailPart_      = "tail_fox";
+    activeArmPart_       = "arm_ranger_left";
+    activeLegPart_       = "leg_ranger_left";
     activePlan_          = 0;
     quadSpecies_         = 0;
     wingsPresent_        = false;
@@ -729,6 +881,7 @@ void CharacterScreen::resetToDefault()
     character_->setParameter(character_->self, characterHandle_, "body.plan", 0.0f, &error);
     character_->setParameter(character_->self, characterHandle_, "muzzle.length", 1.0f, &error);
     character_->setParameter(character_->self, characterHandle_, "eyes.width", 1.0f, &error);
+    character_->setParameter(character_->self, characterHandle_, "ears.size", 1.0f, &error);
     character_->setParameter(character_->self, characterHandle_, "fur.markings", 0.0f, &error);
     character_->setParameter(character_->self, characterHandle_, "fur.coat", 0.0f, &error);
     character_->setParameter(character_->self, characterHandle_, "body.coat", 0.0f, &error);
@@ -739,6 +892,82 @@ void CharacterScreen::resetToDefault()
     applyDefaultLook();
     fitCameraToAssembly();
     setStatusMessage("Character reset to the anthro fox look");
+}
+
+void CharacterScreen::randomiseCharacter()
+{
+    // The dice-roll button: a random species head (with its own ears, neck,
+    // and tail when it has them), a random legged species' limbs, the
+    // match-head coat with random markings, and a sprinkle of the shape
+    // sliders. Everything stays on the current body plan.
+    CharacterError error = CharacterError::None;
+    static const char *shapeParameters[] = {
+        "body.height",
+        "body.width",
+        "body.muscle_mass",
+        "muzzle.length",
+        "eyes.width",
+        "ears.size",
+        "tail.length",
+    };
+    std::vector<int> leggedSpecies;
+    std::vector<int> tailedSpecies;
+    for (int index = 0; index < metrics::kSpeciesCount; ++index)
+    {
+        if (metrics::kSpecies[index].hasLimbs)
+        {
+            leggedSpecies.push_back(index);
+        }
+        if (metrics::kSpecies[index].hasTail)
+        {
+            tailedSpecies.push_back(index);
+        }
+    }
+    const int headSpecies   = std::rand() % metrics::kSpeciesCount;
+    const int limbSpecies   = leggedSpecies.empty() ? -1 : leggedSpecies[std::rand() % leggedSpecies.size()];
+    const int tailSpecies   = tailedSpecies.empty() ? -1 : tailedSpecies[std::rand() % tailedSpecies.size()];
+    const metrics::SpeciesMetrics &head = metrics::kSpecies[headSpecies];
+    setHeadPart(std::string("head_") + head.id);
+    if (head.hasEarSockets)
+    {
+        setEarParts(std::string("ear_") + head.id + "_left");
+    }
+    if (limbSpecies >= 0)
+    {
+        const std::string limbId = metrics::kSpecies[limbSpecies].id;
+        setLimbPart("arm_left", "anthro_arm_" + limbId + "_left");
+        setLimbPart("arm_right", "anthro_arm_" + limbId + "_right");
+        setLimbPart("leg_left", "anthro_leg_" + limbId + "_left");
+        setLimbPart("leg_right", "anthro_leg_" + limbId + "_right");
+    }
+    if (tailSpecies >= 0 && activePlan_ != 2)
+    {
+        setTailPart(std::string("tail_") + metrics::kSpecies[tailSpecies].id);
+        setTail(true);
+    }
+    character_->setParameter(character_->self, characterHandle_, "body.coat", 1.0f, &error);
+    character_->setParameter(
+        character_->self, characterHandle_, "fur.coat", static_cast<float>(std::rand() % 4 == 0 ? 1 + std::rand() % 7 : 0), &error);
+    character_->setParameter(
+        character_->self, characterHandle_, "fur.markings", static_cast<float>(std::rand() % 6), &error);
+    for (const char *parameterId : shapeParameters)
+    {
+        const ParameterDefinition *definition = parameterDefinition(parameterId);
+        if (definition == nullptr)
+        {
+            continue;
+        }
+        const float t           = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+        const float value       = definition->minimum + t * (definition->maximum - definition->minimum);
+        const float keptDefault = std::abs(definition->defaultV - value) < 0.04f;
+        character_->setParameter(
+            character_->self, characterHandle_, parameterId, keptDefault ? definition->defaultV : value, &error);
+    }
+    refreshDeformations();
+    applyParameterHeights();
+    evaluateCharacter(true);
+    fitCameraToAssembly();
+    setStatusMessage(std::string("Randomised around the ") + head.display + " look");
 }
 
 bool CharacterScreen::evaluateCharacter(bool validate)

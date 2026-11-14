@@ -18,8 +18,7 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
     engine::window::WindowHandle windowHandle, const engine::renderer::RenderCapability &renderCapability,
     engine::renderer::RendererHandle rendererHandle, const engine::camera::CameraCapability &cameraCapability,
     engine::camera::CameraHandle cameraHandle, const engine::ui::UiCapability &uiCapability,
-    engine::character::CharacterCapability &characterCapability, const std::string &assetRoot,
-    const engine::fur::FurCapability *furCapability)
+    engine::character::CharacterCapability &characterCapability, const std::string &assetRoot)
 {
     window_         = &windowCapability;
     windowHandle_   = windowHandle;
@@ -33,13 +32,6 @@ bool CharacterScreen::create(const engine::window::WindowCapability &windowCapab
     if (!content_.create(*character_, *render_, rendererHandle_, assetRoot))
     {
         return false;
-    }
-    // Shell-fur assets: one strand texture per preset, uploaded once. A
-    // null furCapability (module absent) leaves the demo on its legacy
-    // vertex-tint fur.
-    if (!fur_.create(*render_, rendererHandle_, furCapability))
-    {
-        std::fprintf(stderr, "demo: shell-fur asset creation failed; continuing without fur shells\n");
     }
     if (!createUiContext(assetRoot))
     {
@@ -106,16 +98,21 @@ void CharacterScreen::setHudVisible(bool visible)
 void CharacterScreen::applyDefaultLook()
 {
     // The studio opens on a complete anthro fox - species head with its ears,
-    // the fox tail, the bare body under the rust fur coat with full markings -
-    // so the customization surface reads as furry from the first frame. The
-    // panel's Reset returns here too.
+    // the fox tail, the bare body under the match-head fur coat (the palette
+    // measured from the fox head's own colours) with full markings - so the
+    // customization surface reads as one continuous pelt from the first
+    // frame. The panel's Reset returns here too.
     CharacterError error = CharacterError::None;
     setOutfit(false);
     setHeadPart("head_fox");
+    setLimbPart("arm_left", "anthro_arm_fox_left");
+    setLimbPart("arm_right", "anthro_arm_fox_right");
+    setLimbPart("leg_left", "anthro_leg_fox_left");
+    setLimbPart("leg_right", "anthro_leg_fox_right");
     setTailPart("tail_fox");
     setTail(true);
     character_->setParameter(character_->self, characterHandle_, "body.coat", 1.0f, &error);
-    character_->setParameter(character_->self, characterHandle_, "fur.coat", 1.0f, &error);
+    character_->setParameter(character_->self, characterHandle_, "fur.coat", 0.0f, &error);
     character_->setParameter(character_->self, characterHandle_, "fur.markings", 3.0f, &error);
     refreshDeformations();
     evaluateCharacter(true);
@@ -178,11 +175,10 @@ const engine::character::ParameterDefinition *CharacterScreen::parameterDefiniti
     return nullptr;
 }
 
-void CharacterScreen::refreshDeformations()
+void CharacterScreen::gatherDeformationInputs(DeformationInputs &inputs) const
 {
-    // Morphs, the fur coat, and the markings re-derive the affected meshes in
-    // one pass whenever their parameters change (change-time work, never per
-    // frame).
+    // The parameter state plus the active head's species id: the match-head
+    // coat mode reads its palette from that species' measured colours.
     float muzzle        = 1.0f;
     float eyes          = 1.0f;
     float neckThickness = 1.0f;
@@ -197,13 +193,28 @@ void CharacterScreen::refreshDeformations()
     character_->getParameter(character_->self, characterHandle_, "fur.markings", &markings);
     character_->getParameter(character_->self, characterHandle_, "fur.coat", &furCoat);
     character_->getParameter(character_->self, characterHandle_, "body.coat", &bodyCoat);
-    content_.applyDeformations(muzzle - 1.0f,
-        eyes - 1.0f,
-        neckThickness - 1.0f,
-        headSize - 1.0f,
-        std::clamp(static_cast<int>(furCoat + 0.5f), 0, 5),
-        std::clamp(static_cast<int>(markings + 0.5f), 0, 3),
-        bodyCoat >= 0.5f);
+    inputs.muzzleWeight        = muzzle - 1.0f;
+    inputs.eyesWidthWeight     = eyes - 1.0f;
+    inputs.neckThicknessWeight = neckThickness - 1.0f;
+    inputs.neckHeadSizeWeight  = headSize - 1.0f;
+    inputs.coatIndex           = std::clamp(static_cast<int>(furCoat + 0.5f), 0, 7);
+    inputs.markingMode         = std::clamp(static_cast<int>(markings + 0.5f), 0, 5);
+    inputs.furryBody           = bodyCoat >= 0.5f;
+    inputs.speciesId.clear();
+    if (activeHeadPart_.rfind("head_", 0) == 0 && activeHeadPart_ != "head_human" && activeHeadPart_ != "head_dragon")
+    {
+        inputs.speciesId = activeHeadPart_.substr(5);
+    }
+}
+
+void CharacterScreen::refreshDeformations()
+{
+    // Morphs, the fur coat, and the markings re-derive the affected meshes in
+    // one pass whenever their parameters change (change-time work, never per
+    // frame).
+    DeformationInputs inputs;
+    gatherDeformationInputs(inputs);
+    content_.applyDeformations(inputs);
 }
 
 void CharacterScreen::destroy()
@@ -212,10 +223,6 @@ void CharacterScreen::destroy()
     {
         character_->destroyAssembly(character_->self, characterHandle_);
         characterHandle_ = engine::character::invalidCharacter;
-    }
-    if (render_ != nullptr)
-    {
-        fur_.destroy(*render_, rendererHandle_);
     }
     stage_.destroy();
     destroyUiContext();

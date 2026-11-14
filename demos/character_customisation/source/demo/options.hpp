@@ -34,11 +34,6 @@ struct Options
     std::string   partPreviewsDirectory;            // --part-previews: render one PPM per part into this directory.
     int           panelTab          = -1;           // --panel-tab: open the studio panel on this tab (captures).
     bool          dumpInstanceBoxes = false;        // --dump-instance-boxes: print per-part world bounds (framing QA).
-    bool          furTest           = false;        // --fur-test: strand-texture determinism + LOD ladder + one fur draw.
-    bool          furDisabled       = false;        // --fur-off: render the character without shell fur (A/B the cost).
-    std::string   furPreset;                        // --fur-preset plush|shaggy|velvety; empty = the module default.
-    std::uint32_t furLayers        = 0;             // --fur-layers N: pin the shell layer count (0 = LOD decides).
-    float         furLength        = 1.0f;          // --fur-length: global strand-length multiplier.
 };
 
 // One-line description of the application flags, appended to --help output.

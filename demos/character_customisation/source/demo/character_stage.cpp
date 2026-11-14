@@ -6,9 +6,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
-#include <algorithm>
 #include <cstdio>
-#include <utility>
 
 namespace demo
 {
@@ -22,8 +20,11 @@ void CharacterStage::create(
 
     // The inward-facing sky dome is authored once and reused across frames;
     // the floor and sun are independent stage resources, not screen state.
-    const MeshData floorGeometry = makeBoxMesh(
-        glm::vec3(0.0f, -0.06f, 0.0f), glm::vec3(6.0f, 0.06f, 6.0f), glm::vec3(0.42f, 0.44f, 0.48f), 4.0f);
+    // The floor's base colour is shared with the contact-shadow disc so the
+    // disc's rim shades exactly like the tiles.
+    static constexpr glm::vec3 kFloorColor(0.42f, 0.44f, 0.48f);
+    const MeshData floorGeometry
+        = makeBoxMesh(glm::vec3(0.0f, -0.06f, 0.0f), glm::vec3(6.0f, 0.06f, 6.0f), kFloorColor, 4.0f);
     MeshData skyGeometry = makeSphereMesh(
         glm::vec3(0.0f), 900.0f, 24, 12, glm::vec3(0.55f, 0.64f, 0.78f), glm::vec3(0.24f, 0.38f, 0.62f));
     for (std::size_t index = 0; index + 2 < skyGeometry.indices.size(); index += 3)
@@ -34,11 +35,12 @@ void CharacterStage::create(
     }
     const MeshData sunGeometry = makeSphereMesh(
         glm::vec3(280.0f, 350.0f, -640.0f), 16.0f, 14, 8, glm::vec3(4.0f, 3.6f, 3.0f), glm::vec3(4.0f, 3.6f, 3.0f));
-    // The contact shadow: a gradient sphere (floor colour at the equator,
-    // dark at the zenith) flattened into a disc at draw time - the vertex
-    // blend becomes the radial falloff.
-    const MeshData contactShadowGeometry
-        = makeSphereMesh(glm::vec3(0.0f), 1.0f, 28, 10, glm::vec3(0.42f, 0.44f, 0.48f), glm::vec3(0.20f, 0.21f, 0.23f));
+    // The contact shadow: a flat disc whose vertex colours fall off from the
+    // floor's own base toward a darkened core. Drawn with the floor's lit
+    // material response, the rim shades exactly like the floor tiles (the
+    // disc dissolves into them) and only the core darkens - the silhouette
+    // reads as grounded.
+    const MeshData contactShadowGeometry = makeDiscMesh(1.0f, 36, kFloorColor, 0.33f);
 
     struct StageUpload
     {
@@ -149,11 +151,14 @@ void CharacterStage::drawSkyAndSun() const
 
 void CharacterStage::drawContactShadow(float centerX, float centerZ, float radius) const
 {
+    // The same lit response the floor draws with (roughness 0.92): the disc
+    // shades exactly like the tiles at its rim and darkens toward its centre
+    // through the vertex falloff.
     static const engine::renderer::MeshMaterial shadowMaterial{
         .baseColor                = {1.0f, 1.0f, 1.0f},
         .baseColorTexture         = engine::renderer::invalidTexture,
         .metallicFactor           = 0.0f,
-        .roughnessFactor          = 1.0f,
+        .roughnessFactor          = 0.92f,
         .metallicRoughnessTexture = engine::renderer::invalidTexture,
         .normalTexture            = engine::renderer::invalidTexture,
         .normalScale              = 1.0f,
@@ -161,19 +166,16 @@ void CharacterStage::drawContactShadow(float centerX, float centerZ, float radiu
         .occlusionStrength        = 1.0f,
         .emissiveColor            = {0.0f, 0.0f, 0.0f},
         .emissiveTexture          = engine::renderer::invalidTexture,
-        .unlit                    = true,
+        .unlit                    = false,
     };
     if (renderer_ == nullptr || contactShadowMesh_ == engine::renderer::invalidMesh || radius <= 0.02f)
     {
         return;
     }
-    // Flatten the gradient sphere into the ground disc: the rim keeps the
-    // floor's own colour so the disc dissolves into the tiles, the centre
-    // darkens. The disc rides a few millimetres above the floor plane so the
-    // depth test resolves it cleanly.
-    const glm::vec3 scale(radius, std::clamp(radius * 0.03f, 0.006f, 0.03f), radius);
-    const glm::mat4 transform
-        = glm::translate(glm::mat4(1.0f), glm::vec3(centerX, 0.004f, centerZ)) * glm::scale(glm::mat4(1.0f), scale);
+    // The disc rides a few millimetres above the floor plane so the depth
+    // test resolves it cleanly.
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(centerX, 0.004f, centerZ))
+                              * glm::scale(glm::mat4(1.0f), glm::vec3(radius, 1.0f, radius));
     renderer_->drawMesh(
         renderer_->self, rendererHandle_, contactShadowMesh_, glm::value_ptr(transform), &shadowMaterial);
 }

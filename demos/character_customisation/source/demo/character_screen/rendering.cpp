@@ -35,13 +35,6 @@ void CharacterScreen::drawCharacter()
     };
     const int           toneIndex = std::clamp(static_cast<int>(skinTone + 0.5f), 0, 4);
     const std::uint32_t count     = character_->instanceCount(character_->self, characterHandle_);
-    // Whole-character world bounds drive the fur LOD: one actor-level
-    // decision per frame, shared by every fur surface (per-part radii
-    // under-drive the screen-size bands - a part is small even when the
-    // character fills the frame).
-    float actorCenter[3] = {0.0f, 0.0f, 0.0f};
-    float actorRadius    = 0.0f;
-    character_->bounds(character_->self, characterHandle_, actorCenter, &actorRadius);
     for (std::uint32_t index = 0; index < count; ++index)
     {
         const InstanceId id     = character_->instanceId(character_->self, characterHandle_, index);
@@ -80,23 +73,6 @@ void CharacterScreen::drawCharacter()
             material.roughnessFactor = 0.92f;
         }
         render_->drawMesh(render_->self, rendererHandle_, mesh, matrix, &material);
-
-        // Shell fur: the animal grafts (species heads, necks, ears, tails,
-        // quadruped bodies) carry a shell-fur stack, and the humanoid body
-        // joins them when the fur coat is on. The base mesh above is the
-        // depth anchor; the alpha-blended shell layers must come after it.
-        // The fur material replaces the part's baseColorTexture with the
-        // preset strand texture while keeping the part's vertex colors and
-        // base color factor as tint - so the coat keeps the repainted
-        // colours underneath.
-        const bool furSurface = isFurPart(partId) || (furryBody && isSkinPart(partId));
-        if (furSurface && fur_.enabled())
-        {
-            float geometryCenter[3] = {0.0f, 0.0f, 0.0f};
-            float geometryRadius    = 0.12f;
-            content_.geometryBounds(renderInfo->geometryId, geometryCenter, &geometryRadius);
-            fur_.drawPartFur(mesh, matrix, material, partId, geometryRadius, actorRadius, lastCameraEye_);
-        }
     }
 }
 

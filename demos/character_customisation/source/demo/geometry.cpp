@@ -317,4 +317,47 @@ MeshData makeTorusMesh(float majorRadius, float minorRadius, std::uint32_t major
     return mesh;
 }
 
+
+MeshData makeDiscMesh(float radius, std::uint32_t segments, const glm::vec3 &floorColor, float centerTone)
+{
+    MeshData mesh;
+    if (radius <= 0.0f || segments < 3)
+    {
+        return mesh;
+    }
+    const std::uint32_t ringCount = 5;
+    // rings from centre (t = 0) to rim (t = 1): the tone rises toward the
+    // rim with an ease that keeps the outer half at the floor's own shading
+    // (the disc dissolves into the tiles) and only the core darkens.
+    for (std::uint32_t ring = 0; ring <= ringCount; ++ring)
+    {
+        const float t    = static_cast<float>(ring) / static_cast<float>(ringCount);
+        const float tone = centerTone + (1.0f - centerTone) * glm::pow(t, 0.45f);
+        const glm::vec3 color = floorColor * tone;
+        for (std::uint32_t segment = 0; segment < segments; ++segment)
+        {
+            const float angle = glm::two_pi<float>() * static_cast<float>(segment) / static_cast<float>(segments);
+            Vertex vertex;
+            vertex.position = glm::vec3(std::cos(angle) * radius * t, 0.0f, std::sin(angle) * radius * t);
+            vertex.normal   = glm::vec3(0.0f, 1.0f, 0.0f);
+            vertex.color    = color;
+            vertex.uv       = glm::vec2(0.0f);
+            mesh.vertices.push_back(vertex);
+        }
+    }
+    for (std::uint32_t ring = 0; ring < ringCount; ++ring)
+    {
+        for (std::uint32_t segment = 0; segment < segments; ++segment)
+        {
+            const std::uint32_t next = (segment + 1) % segments;
+            const std::uint32_t a    = ring * segments + segment;
+            const std::uint32_t b    = ring * segments + next;
+            const std::uint32_t c    = (ring + 1) * segments + segment;
+            const std::uint32_t d    = (ring + 1) * segments + next;
+            mesh.indices.insert(mesh.indices.end(), {a, c, b, b, c, d});
+        }
+    }
+    return mesh;
+}
+
 } // namespace demo

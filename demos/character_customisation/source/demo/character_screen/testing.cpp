@@ -1,11 +1,9 @@
 #include "../character_metrics.gen.hpp"
 #include "../character_screen_internal.hpp"
 
-#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <string>
-#include <utility>
 
 namespace demo
 {
@@ -60,16 +58,21 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     }
     else if (name == "furryfox")
     {
-        // Furry-fandom look: fox head + fox ears + fox tail on the furred
-        // bare body (the coat palette tints the torso and limbs).
+        // Furry-fandom look: fox head + fox ears + fox tail + the species'
+        // own paw limbs on the furred bare body (the match-head coat paints
+        // the whole body in the fox's measured palette).
         if (activePlan_ != 0)
         {
             applied = setPlan(0) && setParameter("body.plan", 0.0f);
         }
         applied = setOutfit(false) && applied;
         applied = setHeadPart("head_fox") && applied;
+        applied = setLimbPart("arm_left", "anthro_arm_fox_left") && applied;
+        applied = setLimbPart("arm_right", "anthro_arm_fox_right") && applied;
+        applied = setLimbPart("leg_left", "anthro_leg_fox_left") && applied;
+        applied = setLimbPart("leg_right", "anthro_leg_fox_right") && applied;
         applied = setTailPart("tail_fox") && applied;
-        applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 1.0f)
+        applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 0.0f)
                && setParameter("fur.markings", 3.0f) && applied;
         setTail(true);
         refreshDeformations();
@@ -82,10 +85,31 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         }
         applied = setOutfit(false) && applied;
         applied = setHeadPart("head_wolf") && applied;
+        applied = setLimbPart("arm_left", "anthro_arm_wolf_left") && applied;
+        applied = setLimbPart("arm_right", "anthro_arm_wolf_right") && applied;
+        applied = setLimbPart("leg_left", "anthro_leg_wolf_left") && applied;
+        applied = setLimbPart("leg_right", "anthro_leg_wolf_right") && applied;
         applied = setTailPart("tail_wolf") && applied;
-        applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 3.0f)
-               && setParameter("fur.markings", 3.0f) && applied;
+        applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 0.0f)
+               && setParameter("fur.markings", 4.0f) && applied;
         setTail(true);
+        refreshDeformations();
+    }
+    else if (name == "anthrolimbs")
+    {
+        // The species limb variants on the biped: digitigrade legs and paw
+        // arms from the chosen species (the trex pair reads loudest).
+        if (activePlan_ != 0)
+        {
+            applied = setPlan(0) && setParameter("body.plan", 0.0f);
+        }
+        applied = setOutfit(false) && applied;
+        applied = setLimbPart("arm_left", "anthro_arm_trex_left") && applied;
+        applied = setLimbPart("arm_right", "anthro_arm_trex_right") && applied;
+        applied = setLimbPart("leg_left", "anthro_leg_trex_left") && applied;
+        applied = setLimbPart("leg_right", "anthro_leg_trex_right") && applied;
+        applied = setHeadPart("head_trex") && applied;
+        applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 0.0f) && applied;
         refreshDeformations();
     }
     else if (name == "bare")
@@ -98,18 +122,42 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     }
     else if (name == "taur")
     {
+        // The taur read continues the current look's species: the default
+        // fox head rides the fox lower body in one pelt.
         applied = setPlan(1) && setParameter("body.plan", 1.0f);
+        applied = setQuadSpecies(quadSpecies_) && applied;
+        applied = setOutfit(false) && applied;
+        applied = setHeadPart(activeHeadPart_) && applied;
+        applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 0.0f) && applied;
         setTail(true);
+        refreshDeformations();
     }
     else if (name == "quadruped")
     {
         applied = setPlan(2) && setParameter("body.plan", 2.0f);
     }
+    else if (name == "rabbit")
+    {
+        // The rabbit ships head-only parts (no whole-animal or taur body),
+        // so the preset reads as the anthro rabbit: biped base, the rabbit
+        // head with its own ear pair and neck, and the match-head coat
+        // painting the body in the rabbit's measured palette.
+        if (activePlan_ != 0)
+        {
+            applied = setPlan(0) && setParameter("body.plan", 0.0f);
+        }
+        applied = setOutfit(false) && applied;
+        applied = setHeadPart("head_rabbit") && applied;
+        applied = setEarParts("ear_rabbit_left") && applied;
+        applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 0.0f) && applied;
+        setTail(false);
+        refreshDeformations();
+    }
     else if (name == "fox" || name == "shiba" || name == "husky" || name == "wolf" || name == "donkey" || name == "cow"
              || name == "deer" || name == "bull" || name == "alpaca" || name == "horse" || name == "stag"
              || name == "trex" || name == "raptor" || name == "triceratops" || name == "stegosaurus"
              || name == "apatosaurus" || name == "parasaurolophus" || name == "rat" || name == "shark"
-             || name == "dolphin")
+             || name == "dolphin" || name == "frog")
     {
         // Quadruped species variant: the WHOLE animal (own head, own tail).
         int speciesIndex = -1;
@@ -168,45 +216,22 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
             std::fprintf(stderr, "demo: unknown taur species '%s'\n", species.c_str());
             applied = false;
         }
+        else if (!metrics::kSpecies[speciesIndex].hasTaurBody)
+        {
+            // Head-only species (the rabbit) have no hindquarters in the
+            // roster: the taur read falls back to the species' own anthro
+            // preset instead of a chimera with whichever lower body was live.
+            return applyDrivePreset(species);
+        }
         else
         {
-            // Fur palette per species (rust canids, charcoal wolves, cream
-            // equines, cold-water blues for the fish).
-            static const std::pair<const char *, float> speciesCoats[] = {
-                {"fox", 1.0f},
-                {"shibainu", 1.0f},
-                {"husky", 5.0f},
-                {"wolf", 3.0f},
-                {"donkey", 4.0f},
-                {"cow", 2.0f},
-                {"deer", 1.0f},
-                {"bull", 3.0f},
-                {"alpaca", 2.0f},
-                {"horse", 1.0f},
-                {"stag", 1.0f},
-                {"trex", 3.0f},
-                {"raptor", 1.0f},
-                {"triceratops", 4.0f},
-                {"stegosaurus", 3.0f},
-                {"apatosaurus", 5.0f},
-                {"parasaurolophus", 1.0f},
-                {"rat", 4.0f},
-                {"shark", 5.0f},
-                {"dolphin", 5.0f},
-            };
-            float coat = 1.0f;
-            for (const auto &[id, value] : speciesCoats)
-            {
-                if (species == id)
-                {
-                    coat = value;
-                    break;
-                }
-            }
+            // The match-head coat (index 0) paints the upper body in the
+            // species' own measured palette, so every taur reads as one
+            // animal from nose to tail.
             applied = setQuadSpecies(speciesIndex) && applied;
             applied = setOutfit(false) && applied;
             applied = setHeadPart(std::string("head_") + species) && applied;
-            applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", coat)
+            applied = setParameter("body.coat", 1.0f) && setParameter("fur.coat", 0.0f)
                    && setParameter("fur.markings", 3.0f) && applied;
             refreshDeformations();
         }
@@ -215,7 +240,7 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     {
         applied = setWings(true) && setTail(true);
     }
-    else if (name == "cat" || name == "jackal")
+    else if (name == "cat" || name == "jackal" || name == "fennec")
     {
         // Unified-head species looks: parameter settings on the canid heads
         // (short muzzle + wide eyes reads as a cat; a long muzzle as a
@@ -224,11 +249,23 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         {
             applied = setPlan(0) && setParameter("body.plan", 0.0f);
         }
-        const char *head   = name == "cat" ? "head_fox" : "head_wolf";
-        const char *ears   = name == "cat" ? "ear_fox_left" : "ear_wolf_left";
-        const char *tail   = name == "cat" ? "tail_fox" : "tail_wolf";
-        const float muzzle = name == "cat" ? 0.78f : 1.40f;
-        const float eyes   = name == "cat" ? 1.14f : 1.00f;
+        // The look settings: the cat reads roundest on the shiba base (short
+        // muzzle, wide eyes, small ears), the fennec on the fox base with
+        // maxed-out ear size, the jackal on the wolf base with a long muzzle.
+        const bool  canine = name == "wolf" || name == "jackal";
+        const char *head   = canine ? "head_wolf" : (name == "cat" ? "head_shibainu" : "head_fox");
+        const char *ears   = canine ? "ear_wolf_left" : (name == "cat" ? "ear_shibainu_left" : "ear_fox_left");
+        const char *tail   = canine ? "tail_wolf" : (name == "cat" ? "tail_shibainu" : "tail_fox");
+        const float muzzle = name == "cat" ? 0.72f : (name == "fennec" ? 0.85f : 1.40f);
+        const float eyes   = name == "cat" ? 1.22f : (name == "fennec" ? 1.26f : 1.00f);
+        if (name == "fennec")
+        {
+            applied = setParameter("ears.size", 1.60f) && applied;
+        }
+        if (name == "cat")
+        {
+            applied = setParameter("ears.size", 0.72f) && applied;
+        }
         applied            = setHeadPart(head) && applied;
         applied            = setEarParts(ears) && applied;
         applied            = setTailPart(tail) && applied;
@@ -252,14 +289,14 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
     else if (name == "tall")
     {
         // Height range ends: every anchor rides the part scale bindings.
-        applied = setParameter("body.height", 1.45f) && setParameter("limbs.length", 1.50f);
+        applied = setParameter("body.height", 1.55f) && setParameter("limbs.length", 1.65f);
         applyParameterHeights();
     }
     else if (name == "broad")
     {
         // Width/mass range ends: shoulders, hips, and arms must stay grafted.
-        applied = setParameter("body.width", 1.60f) && setParameter("body.muscle_mass", 1.70f)
-               && setParameter("limbs.thickness", 1.80f);
+        applied = setParameter("body.width", 1.90f) && setParameter("body.muscle_mass", 1.90f)
+               && setParameter("limbs.thickness", 2.00f);
     }
     else if (name == "longmuzzle")
     {
@@ -269,32 +306,44 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
         }
         applied = setHeadPart("head_wolf") && applied;
         applied = setEarParts("ear_wolf_left") && applied;
-        applied = setParameter("muzzle.length", 1.45f) && setParameter("eyes.width", 1.30f) && applied;
+        applied = setParameter("muzzle.length", 1.55f) && setParameter("eyes.width", 1.35f) && applied;
+        applied = setParameter("ears.size", 1.60f) && applied;
         refreshDeformations();
     }
     else if (name == "marked")
     {
-        applied = setParameter("fur.markings", 3.0f) && setParameter("fur.coat", 1.0f);
+        applied = setParameter("fur.markings", 3.0f) && setParameter("fur.coat", 0.0f)
+               && setParameter("body.coat", 1.0f);
+        refreshDeformations();
+    }
+    else if (name == "striped")
+    {
+        // The tabby stripes (marking mode 4) on the match-head coat.
+        applied = setParameter("fur.markings", 4.0f) && setParameter("fur.coat", 0.0f)
+               && setParameter("body.coat", 1.0f);
         refreshDeformations();
     }
     else if (name == "longtail")
     {
         // Tail length range end on the tailed humanoid.
-        applied = setPlan(0) && setTail(true) && setParameter("tail.length", 2.00f)
-               && setParameter("tail.thickness", 2.00f);
+        applied = setPlan(0) && setTail(true) && setParameter("tail.length", 2.60f)
+               && setParameter("tail.thickness", 2.40f);
     }
     else if (name == "bigtaur")
     {
-        // Lower-body size range end on the taur plan.
-        applied = setPlan(1) && setParameter("taur.scale", 1.80f);
+        // Lower-body size range end on the taur plan, the lower body still
+        // matching the head's species.
+        applied = setPlan(1) && setParameter("body.plan", 1.0f);
+        applied = setQuadSpecies(quadSpecies_) && applied;
+        applied = setParameter("taur.scale", 2.40f) && applied;
         applyParameterHeights();
     }
     else if (name == "compact")
     {
         // Everything small at once: the opposite range end of every parameter.
-        applied = setParameter("body.height", 0.70f) && setParameter("body.width", 0.65f)
-               && setParameter("limbs.length", 0.70f) && setParameter("head.size", 0.70f)
-               && setParameter("tail.length", 0.50f) && setParameter("wings.span", 0.50f);
+        applied = setParameter("body.height", 0.65f) && setParameter("body.width", 0.60f)
+               && setParameter("limbs.length", 0.65f) && setParameter("head.size", 0.65f)
+               && setParameter("tail.length", 0.40f) && setParameter("wings.span", 0.40f);
         applyParameterHeights();
     }
     else if (name == "noappend")
@@ -416,9 +465,40 @@ bool CharacterScreen::runSelfTest()
     check("fox tail attaches",
         setTail(true) && evaluateCharacter(true) && issues_.empty()
             && instanceByName("tail") != engine::character::invalidInstance);
+
+    // 3b. The anthro limb variants: every legged species' hind leg lands on
+    //     the pelvis hip socket and its foreleg on the shoulder socket (the
+    //     ring sinks by the measured fraction; the extremes stay grafted).
+    {
+        bool limbsOk = true;
+        for (int species = 0; species < metrics::kSpeciesCount; ++species)
+        {
+            if (!metrics::kSpecies[species].hasLimbs)
+            {
+                continue;
+            }
+            const std::string id = metrics::kSpecies[species].id;
+            limbsOk = setLimbPart("leg_left", "anthro_leg_" + id + "_left") && limbsOk;
+            limbsOk = setLimbPart("leg_right", "anthro_leg_" + id + "_right") && limbsOk;
+            limbsOk = setLimbPart("arm_left", "anthro_arm_" + id + "_left") && limbsOk;
+            limbsOk = setLimbPart("arm_right", "anthro_arm_" + id + "_right") && limbsOk;
+            limbsOk = evaluateCharacter(true) && issues_.empty() && limbsOk;
+        }
+        check("anthro limb variants graft per species", limbsOk);
+        // the human legs come back for the rest of the suite
+        setLimbPart("leg_left", "leg_bare_left");
+        setLimbPart("leg_right", "leg_bare_right");
+        setLimbPart("arm_left", "arm_bare_left");
+        setLimbPart("arm_right", "arm_bare_right");
+    }
+
     bool tailsOk = true;
     for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
+        if (!metrics::kSpecies[species].hasTail)
+        {
+            continue; // tail-less species (the frog, the rabbit)
+        }
         tailsOk = setTailPart(std::string("tail_") + metrics::kSpecies[species].id) && tailsOk;
     }
     tailsOk = setTailPart("tail_reptile") && tailsOk;
@@ -459,10 +539,16 @@ bool CharacterScreen::runSelfTest()
     for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
         taurSpeciesOk = setQuadSpecies(species) && taurSpeciesOk && evaluateCharacter(true) && issues_.empty();
-        // the tail variant follows the species swap (the tail itself is
-        // currently detached; the attach check below verifies the
-        // plan-mapped instance on the lower-body socket)
-        taurSpeciesOk = activeTailPart_ == std::string("tail_") + metrics::kSpecies[species].id && taurSpeciesOk;
+        // the tail variant follows the species swap when the species has a
+        // tail; the tail-less species (the frog) removes it instead
+        if (metrics::kSpecies[species].hasTail)
+        {
+            taurSpeciesOk = activeTailPart_ == std::string("tail_") + metrics::kSpecies[species].id && taurSpeciesOk;
+        }
+        else
+        {
+            taurSpeciesOk = instanceByName("tail") == engine::character::invalidInstance && taurSpeciesOk;
+        }
     }
     check("taur species graft per species", taurSpeciesOk);
     // the tail option still affects the taur lower body
@@ -493,17 +579,18 @@ bool CharacterScreen::runSelfTest()
     {
         setPlan(1);
         CharacterError rangeError = CharacterError::None;
-        character_->setParameter(character_->self, characterHandle_, "body.height", 1.45f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "body.width", 1.60f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "body.muscle_mass", 1.70f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "head.size", 1.45f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "taur.scale", 1.80f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "muzzle.length", 1.45f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "eyes.width", 1.30f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "tail.length", 2.00f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "tail.thickness", 2.00f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "body.height", 1.55f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "body.width", 1.90f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "body.muscle_mass", 1.90f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "head.size", 1.60f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "taur.scale", 2.40f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "muzzle.length", 1.55f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "eyes.width", 1.35f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "ears.size", 1.60f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "tail.length", 2.60f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "tail.thickness", 2.40f, &rangeError);
         character_->setParameter(character_->self, characterHandle_, "body.coat", 1.0f, &rangeError);
-        character_->setParameter(character_->self, characterHandle_, "fur.markings", 3.0f, &rangeError);
+        character_->setParameter(character_->self, characterHandle_, "fur.markings", 5.0f, &rangeError);
         refreshDeformations();
         applyParameterHeights();
         const bool extremesOk = evaluateCharacter(true) && issues_.empty();
@@ -540,135 +627,6 @@ bool CharacterScreen::runSelfTest()
 
     std::printf("character-test: %u passed / %u failed / %u skipped\n", passed, failed, skipped);
     resetToDefault();
-    return failed == 0;
-}
-
-// ---- the shell-fur self-test ----------------------------------------------------
-//
-// Exercises the fur module capability through the same FurRendering glue the
-// frame path uses: strand-texture generation determinism (two generations of
-// the same request must be byte-identical - the capture matrix relies on
-// it), the LOD ladder's monotonicity across the angular-size range, and one
-// real shell-stack draw through the renderer (validating the fur pipeline
-// end to end on whichever backend is active).
-
-bool CharacterScreen::runFurSelfTest()
-{
-    std::uint32_t passed = 0;
-    std::uint32_t failed = 0;
-    const auto    check  = [&](const char *name, bool ok)
-    {
-        if (ok)
-        {
-            ++passed;
-            std::printf("  PASS  %s\n", name);
-        }
-        else
-        {
-            ++failed;
-            std::printf("  FAIL  %s\n", name);
-        }
-    };
-
-    std::printf("fur-test: shell-fur capability, assets, LOD ladder, and draw\n");
-
-    check("fur assets ready", fur_.enabled());
-    if (!fur_.enabled())
-    {
-        std::printf("fur-test: %u passed / %u failed\n", passed, failed);
-        return failed == 0;
-    }
-
-    // 1. Determinism: the preset parameters themselves are static content,
-    //    but the strand textures are hash-generated; the capture matrix
-    //    relies on byte-identical regeneration, which the fur module's
-    //    integer-hash synthesis guarantees structurally (no floats hashed,
-    //    no time/state input). Assert the shipped presets differ from each
-    //    other so the picker actually changes the look.
-    {
-        const FurRendering::PresetFur *plush   = fur_.presetFur(engine::fur::FurPreset::Plush);
-        const FurRendering::PresetFur *shaggy  = fur_.presetFur(engine::fur::FurPreset::Shaggy);
-        const FurRendering::PresetFur *velvety = fur_.presetFur(engine::fur::FurPreset::Velvety);
-        check("all three preset assets present",
-            plush != nullptr && shaggy != nullptr && velvety != nullptr
-                && plush->texture != engine::renderer::invalidTexture
-                && shaggy->texture != engine::renderer::invalidTexture
-                && velvety->texture != engine::renderer::invalidTexture);
-        check("preset parameters differ",
-            plush != nullptr && shaggy != nullptr && velvety != nullptr
-                && (plush->parameters.strandLength != shaggy->parameters.strandLength
-                    || plush->parameters.density != shaggy->parameters.density)
-                && (plush->parameters.strandLength != velvety->parameters.strandLength
-                    || plush->parameters.density != velvety->parameters.density));
-    }
-
-    // 2. LOD ladder: draw one fur part from a near and a far camera and read
-    //    the glue's recorded decisions - the layer count must drop with
-    //    distance, stay inside the renderer's 16-layer clamp, and the near
-    //    decision must not fade the outer layer.
-    {
-        // Find a fur part instance (the tail or the head; the default
-        // look wears the fox set).
-        std::uint32_t instanceTotal = character_->instanceCount(character_->self, characterHandle_);
-        InstanceId    furInstance   = engine::character::invalidInstance;
-        std::string   furPartId;
-        for (std::uint32_t index = 0; index < instanceTotal; ++index)
-        {
-            const InstanceId   id     = character_->instanceId(character_->self, characterHandle_, index);
-            const char        *partId = nullptr;
-            if (!character_->instanceInfo(character_->self, characterHandle_, id, nullptr, &partId, nullptr))
-            {
-                continue;
-            }
-            if (isFurPart(partId))
-            {
-                furInstance = id;
-                furPartId   = partId;
-                break;
-            }
-        }
-        check("fur part present on the default assembly",
-            furInstance != engine::character::invalidInstance && !furPartId.empty());
-        if (furInstance != engine::character::invalidInstance)
-        {
-            const PartRenderInfo *renderInfo = content_.renderInfoForPart(furPartId);
-            const MeshHandle      mesh = renderInfo != nullptr ? content_.meshForGeometry(renderInfo->geometryId)
-                                                          : engine::renderer::invalidMesh;
-            float matrix[16] = {};
-            const bool haveTransform =
-                character_->instanceTransform(character_->self, characterHandle_, furInstance, matrix);
-            float geometryCenter[3] = {0.0f, 0.0f, 0.0f};
-            float geometryRadius    = 0.12f;
-            if (renderInfo != nullptr)
-            {
-                content_.geometryBounds(renderInfo->geometryId, geometryCenter, &geometryRadius);
-            }
-            check("fur part geometry ready", mesh != engine::renderer::invalidMesh && haveTransform);
-            if (mesh != engine::renderer::invalidMesh && haveTransform && renderInfo != nullptr)
-            {
-                // Near camera: layer count should be the detailed band. The
-                // draws here run outside a frame, so the backends no-op the
-                // pixel work and only the LOD evaluation + capability
-                // plumbing executes (exactly what this test wants).
-                const float nearEye[3] = {matrix[12] + 0.8f, matrix[13] + 0.3f, matrix[14] + 1.0f};
-                fur_.drawPartFur(mesh, matrix, renderInfo->material, furPartId.c_str(), geometryRadius, 0.0f, nearEye);
-                const std::uint32_t nearLayers = fur_.lastDecision().layerCount;
-                // Far camera: layer count should shrink (or hold at the
-                // single-layer floor).
-                const float farEye[3] = {matrix[12] + 60.0f, matrix[13] + 40.0f, matrix[14] + 60.0f};
-                fur_.drawPartFur(mesh, matrix, renderInfo->material, furPartId.c_str(), geometryRadius, 0.0f, farEye);
-                const std::uint32_t farLayers = fur_.lastDecision().layerCount;
-                std::printf("  fur LOD ladder: near=%u layers, far=%u layers\n", nearLayers, farLayers);
-                check("LOD layer count decreases with distance",
-                    nearLayers > farLayers && nearLayers <= 16u && farLayers >= 1u);
-
-                fur_.drawPartFur(mesh, matrix, renderInfo->material, furPartId.c_str(), geometryRadius, 0.0f, nearEye);
-                check("near LOD decision unfaded", fur_.lastDecision().outerLayerFade >= 0.99f);
-            }
-        }
-    }
-
-    std::printf("fur-test: %u passed / %u failed\n", passed, failed);
     return failed == 0;
 }
 

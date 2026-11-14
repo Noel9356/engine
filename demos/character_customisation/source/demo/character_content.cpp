@@ -313,29 +313,32 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     // 2 quadruped); the screen rebuilds the assembly when it changes.
     // body.coat picks the torso/limb finish: 0 skin tones, 1 fur coat (the
     // anthro body read - the bare parts take the fur palette and markings).
-    // The ranges are the junction-safe ends of every slider: parts attach on
-    // rings at their origins, so proportional scaling rides the anchors and
-    // the extremes stay grafted.
+    // fur.coat 0 is the match-head coat (the palette measured from the active
+    // head's own colours); 1..7 are the fixed palette swatches. The ranges
+    // are the junction-safe ends of every slider: parts attach on rings at
+    // their origins, so proportional scaling rides the anchors and the
+    // extremes stay grafted.
     const ParameterDefinition parameters[] = {
         {"body.plan", "Body Plan", 0.0f, 2.0f, 0.0f},
-        {"body.height", "Body Height", 0.70f, 1.45f, 1.0f},
-        {"body.width", "Body Width", 0.65f, 1.60f, 1.0f},
-        {"body.muscle_mass", "Muscle Mass", 0.65f, 1.70f, 1.0f},
+        {"body.height", "Body Height", 0.65f, 1.55f, 1.0f},
+        {"body.width", "Body Width", 0.60f, 1.90f, 1.0f},
+        {"body.muscle_mass", "Muscle Mass", 0.60f, 1.90f, 1.0f},
         {"body.coat", "Body Coat", 0.0f, 1.0f, 0.0f},
-        {"neck.length", "Neck Length", 0.50f, 2.00f, 1.0f},
-        {"neck.thickness", "Neck Thickness", 0.50f, 2.00f, 1.0f},
-        {"head.size", "Head Size", 0.70f, 1.45f, 1.0f},
-        {"muzzle.length", "Muzzle Length", 0.70f, 1.45f, 1.0f},
-        {"eyes.width", "Eye Spacing", 0.80f, 1.30f, 1.0f},
-        {"limbs.length", "Limb Length", 0.70f, 1.50f, 1.0f},
-        {"limbs.thickness", "Limb Thickness", 0.60f, 1.80f, 1.0f},
-        {"wings.span", "Wingspan", 0.50f, 2.00f, 1.0f},
-        {"tail.length", "Tail Length", 0.50f, 2.00f, 1.0f},
-        {"tail.thickness", "Tail Thickness", 0.50f, 2.00f, 1.0f},
-        {"taur.scale", "Lower Body Size", 0.70f, 1.80f, 1.0f},
+        {"neck.length", "Neck Length", 0.45f, 2.40f, 1.0f},
+        {"neck.thickness", "Neck Thickness", 0.50f, 2.20f, 1.0f},
+        {"head.size", "Head Size", 0.65f, 1.60f, 1.0f},
+        {"muzzle.length", "Muzzle Length", 0.60f, 1.55f, 1.0f},
+        {"eyes.width", "Eye Spacing", 0.75f, 1.35f, 1.0f},
+        {"ears.size", "Ear Size", 0.55f, 1.60f, 1.0f},
+        {"limbs.length", "Limb Length", 0.65f, 1.65f, 1.0f},
+        {"limbs.thickness", "Limb Thickness", 0.55f, 2.00f, 1.0f},
+        {"wings.span", "Wingspan", 0.40f, 2.60f, 1.0f},
+        {"tail.length", "Tail Length", 0.40f, 2.60f, 1.0f},
+        {"tail.thickness", "Tail Thickness", 0.40f, 2.40f, 1.0f},
+        {"taur.scale", "Lower Body Size", 0.60f, 2.40f, 1.0f},
         {"skin.tone", "Skin Tone", 0.0f, 4.0f, 0.0f},
-        {"fur.coat", "Fur Coat", 0.0f, 5.0f, 0.0f},
-        {"fur.markings", "Fur Markings", 0.0f, 4.0f, 0.0f},
+        {"fur.coat", "Fur Coat", 0.0f, 7.0f, 0.0f},
+        {"fur.markings", "Fur Markings", 0.0f, 5.0f, 0.0f},
     };
     for (const ParameterDefinition &definition : parameters)
     {
@@ -356,8 +359,11 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         {"rule_leg", "leg.mount", "leg.root", true, 0.40f, 2.20f, nullptr, nullptr},
         {"rule_wing", "wing.mount", "wing.root", true, 0.25f, 3.20f, nullptr, nullptr},
         {"rule_appendage", "appendage.mount", "appendage.root", true, 0.25f, 3.20f, nullptr, nullptr},
-        {"rule_body_mount", "body.mount", "body.root", true, 0.45f, 2.20f, nullptr, nullptr},
-        {"rule_ear", "ear.mount", "ear.root", true, 0.25f, 3.60f, nullptr, nullptr},
+        // The taur chest legitimately widens past the animal body at the
+        // width/mass extremes (the graft's outer band overlaps the chest's
+        // wall), so the body pair's band covers the full slider product.
+        {"rule_body_mount", "body.mount", "body.root", true, 0.40f, 2.60f, nullptr, nullptr},
+        {"rule_ear", "ear.mount", "ear.root", true, 0.22f, 3.60f, nullptr, nullptr},
         {"rule_garment", "garment.mount", "garment.root", true, 0.25f, 3.60f, nullptr, nullptr},
     };
     for (const CompatibilityRuleDefinition &rule : rules)
@@ -481,11 +487,17 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     }
 
     // ---- species rigs (the taur's own sockets, on the normalised body) -----
+    // Head-only species (the rabbit) ship no body parts, so their rigs stay
+    // out of the registry too.
     std::vector<RigJointDefinition> rigJointStorage;
     rigJointStorage.reserve(static_cast<std::size_t>(kSpeciesCount) * 5);
     for (int species = 0; species < kSpeciesCount; ++species)
     {
         const metrics::SpeciesMetrics &entry = kSpecies[species];
+        if (!entry.hasTaurBody)
+        {
+            continue;
+        }
         const std::string              rigId = std::string("quad_") + entry.id + "_core";
         nameStorage.push_back(rigId);
         const std::size_t  firstJoint    = rigJointStorage.size();
@@ -805,6 +817,87 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     addLegPart("leg_bare_right", "Leg (Bare)", legBareTags, 2);
     addLegPart("leg_ranger_right", "Booted Leg (Ranger)", legRangerTags, 2);
 
+    // ---- anthro limb variants (the species' own hind/fore legs) ------------
+    // Every legged species contributes its digitigrade hind leg as a biped
+    // leg part (paw feet, hocked stance) and its foreleg as a paw arm. The
+    // junction ring sits at the part origin; the assembly sinks the root
+    // into the pelvis/shoulder socket by the measured ring radius (the
+    // thigh swallows the socket), so the weld holds at every slider value.
+    for (int species = 0; species < kSpeciesCount; ++species)
+    {
+        const metrics::SpeciesMetrics &entry = kSpecies[species];
+        if (!entry.hasLimbs)
+        {
+            continue;
+        }
+        static const ParameterBinding anthroLegBindings[] = {
+            scaleBinding("limbs.length", ParameterBindingTarget::PartScaleY, 1.0f),
+            scaleBinding("limbs.thickness", ParameterBindingTarget::PartScaleX, 1.0f),
+            scaleBinding("limbs.thickness", ParameterBindingTarget::PartScaleZ, 1.0f),
+        };
+        static const ParameterBinding anthroArmBindings[] = {
+            scaleBinding("limbs.length", ParameterBindingTarget::PartScaleY, 1.0f),
+            scaleBinding("limbs.thickness", ParameterBindingTarget::PartScaleX, 1.0f),
+            scaleBinding("limbs.thickness", ParameterBindingTarget::PartScaleZ, 1.0f),
+            scaleBinding("taur.scale", ParameterBindingTarget::PartScaleX, 1.0f),
+            scaleBinding("taur.scale", ParameterBindingTarget::PartScaleY, 1.0f),
+            scaleBinding("taur.scale", ParameterBindingTarget::PartScaleZ, 1.0f),
+        };
+        static const ConnectorDefinition anthroLegConnectors[] = {
+            {"hip.root", "leg.root", partLocalAnchor(0.0f, 0.0f, 0.0f), nullptr, 1},
+        };
+        static const ConnectorDefinition anthroArmConnectors[] = {
+            {"shoulder.root", "arm.root", partLocalAnchor(0.0f, 0.0f, 0.0f), nullptr, 1},
+        };
+        static const char                  *anthroLimbTags[]  = {"slot:legs"};
+        static const char                  *anthroArmTags[]   = {"slot:arms"};
+        static const MaterialSlotDefinition anthroLimbSlots[] = {{"primary", {1.0f, 1.0f, 1.0f}, 0.82f, 0.0f}};
+        for (const char *side : {"_left", "_right"})
+        {
+            const bool        rightSide = side[1] == 'r';
+            const std::string legId  = std::string("anthro_leg_") + entry.id + side;
+            const std::string armId  = std::string("anthro_arm_") + entry.id + side;
+            const std::string legGeo = std::string("anthro_leg_") + entry.id + (rightSide ? "_right" : "");
+            const std::string armGeo = std::string("anthro_arm_") + entry.id + (rightSide ? "_right" : "");
+            nameStorage.push_back(legId);
+            nameStorage.push_back(std::string(entry.display) + " Leg");
+            nameStorage.push_back(legGeo);
+            nameStorage.push_back(armId);
+            nameStorage.push_back(std::string(entry.display) + " Paw Arm");
+            nameStorage.push_back(armGeo);
+            PartDefinition legPart{};
+            legPart.id                    = nameStorage[nameStorage.size() - 6].c_str();
+            legPart.displayName           = nameStorage[nameStorage.size() - 5].c_str();
+            legPart.geometryId            = nameStorage[nameStorage.size() - 4].c_str();
+            legPart.connectors            = anthroLegConnectors;
+            legPart.connectorCount        = 1;
+            legPart.parameterBindings     = anthroLegBindings;
+            legPart.parameterBindingCount = static_cast<std::uint32_t>(std::size(anthroLegBindings));
+            legPart.materialSlots         = anthroLimbSlots;
+            legPart.materialSlotCount     = 1;
+            legPart.tags                  = anthroLimbTags;
+            legPart.tagCount              = 1;
+            legPart.boundsCenter[0]       = entry.anthroLegBoundsCenter.x;
+            legPart.boundsCenter[1]       = entry.anthroLegBoundsCenter.y;
+            legPart.boundsCenter[2]       = entry.anthroLegBoundsCenter.z;
+            legPart.boundsRadius          = entry.anthroLegBoundsRadius;
+            parts.push_back(legPart);
+            PartDefinition armPart  = legPart;
+            armPart.id              = nameStorage[nameStorage.size() - 3].c_str();
+            armPart.displayName     = nameStorage[nameStorage.size() - 2].c_str();
+            armPart.geometryId      = nameStorage[nameStorage.size() - 1].c_str();
+            armPart.connectors      = anthroArmConnectors;
+            armPart.parameterBindings     = anthroArmBindings;
+            armPart.parameterBindingCount = static_cast<std::uint32_t>(std::size(anthroArmBindings));
+            armPart.tags            = anthroArmTags;
+            armPart.boundsCenter[0] = entry.anthroArmBoundsCenter.x;
+            armPart.boundsCenter[1] = entry.anthroArmBoundsCenter.y;
+            armPart.boundsCenter[2] = entry.anthroArmBoundsCenter.z;
+            armPart.boundsRadius    = entry.anthroArmBoundsRadius;
+            parts.push_back(armPart);
+        }
+    }
+
     // ---- clothing overlays --------------------------------------------------
     const auto addGarmentPart = [&](const char *id, const char *display, float roughness)
     {
@@ -928,8 +1021,10 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
             scaleBinding("head.size", ParameterBindingTarget::PartScaleX, 1.0f),
             scaleBinding("head.size", ParameterBindingTarget::PartScaleY, 1.0f),
             scaleBinding("head.size", ParameterBindingTarget::PartScaleZ, 1.0f),
-            scaleBinding("body.width", ParameterBindingTarget::PartScaleX, 1.0f),
-            scaleBinding("body.width", ParameterBindingTarget::PartScaleZ, 1.0f),
+            // A broad frame keeps a near-own-proportion head: the full width
+            // binding squashed the skull sideways at the slider's top end.
+            scaleBinding("body.width", ParameterBindingTarget::PartScaleX, 0.45f),
+            scaleBinding("body.width", ParameterBindingTarget::PartScaleZ, 0.45f),
             scaleBinding("body.muscle_mass", ParameterBindingTarget::PartScaleX, 0.25f),
             scaleBinding("body.muscle_mass", ParameterBindingTarget::PartScaleZ, 0.25f),
             scaleBinding("taur.scale", ParameterBindingTarget::PartScaleX, 1.0f),
@@ -1000,6 +1095,9 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
             scaleBinding("taur.scale", ParameterBindingTarget::PartScaleX, 1.0f),
             scaleBinding("taur.scale", ParameterBindingTarget::PartScaleY, 1.0f),
             scaleBinding("taur.scale", ParameterBindingTarget::PartScaleZ, 1.0f),
+            scaleBinding("ears.size", ParameterBindingTarget::PartScaleX, 1.0f),
+            scaleBinding("ears.size", ParameterBindingTarget::PartScaleY, 1.0f),
+            scaleBinding("ears.size", ParameterBindingTarget::PartScaleZ, 1.0f),
         };
         static const char                  *earTags[]  = {"slot:ears"};
         static const MaterialSlotDefinition earSlots[] = {{"primary", {1.0f, 1.0f, 1.0f}, 0.75f, 0.0f}};
@@ -1018,7 +1116,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
             part.connectors            = earConnectors;
             part.connectorCount        = 1;
             part.parameterBindings     = earBindings;
-            part.parameterBindingCount = 3;
+            part.parameterBindingCount = static_cast<std::uint32_t>(std::size(earBindings));
             part.materialSlots         = earSlots;
             part.materialSlotCount     = 1;
             part.tags                  = earTags;
@@ -1075,6 +1173,10 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         for (int species = 0; species < kSpeciesCount; ++species)
         {
             const metrics::SpeciesMetrics &entry = kSpecies[species];
+            if (!entry.hasTail)
+            {
+                continue; // tail-less species (the frog, the rabbit)
+            }
             for (const char *suffix : {"", "_taur"})
             {
                 const bool        taurVariant = suffix[0] != '\0';
@@ -1144,6 +1246,10 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     for (int species = 0; species < kSpeciesCount; ++species)
     {
         const metrics::SpeciesMetrics &entry       = kSpecies[species];
+        if (!entry.hasTaurBody)
+        {
+            continue; // head-only species (the rabbit) ship no bodies
+        }
         const std::string              speciesId   = entry.id;
         const std::string              taurName    = std::string("quad_taur_") + speciesId;
         const std::string              bodyName    = std::string("quad_body_") + speciesId;
@@ -1207,7 +1313,10 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         bodyPart.connectorCount  = 2;
         bodyPart.boundsCenter[1] = (entry.groundQuadY + entry.withers.y) * 0.5f;
         bodyPart.boundsRadius    = entry.lengthZ * 0.72f + 0.30f;
-        parts.push_back(bodyPart);
+        if (entry.hasQuadBody)
+        {
+            parts.push_back(bodyPart);
+        }
     }
 
     // ---- geometry (extracted OBJ downloads) --------------------------------
@@ -1233,13 +1342,28 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     };
     for (int species = 0; species < kSpeciesCount; ++species)
     {
-        const std::string id = kSpecies[species].id;
-        objParts.push_back({"quad_taur_" + id, "quad_taur_" + id + ".obj"});
-        objParts.push_back({"quad_body_" + id, "quad_body_" + id + ".obj"});
+        const std::string              id    = kSpecies[species].id;
+        const metrics::SpeciesMetrics &entry = kSpecies[species];
+        if (entry.hasTaurBody)
+        {
+            objParts.push_back({"quad_taur_" + id, "quad_taur_" + id + ".obj"});
+        }
+        if (entry.hasQuadBody)
+        {
+            objParts.push_back({"quad_body_" + id, "quad_body_" + id + ".obj"});
+        }
         objParts.push_back({"head_" + id, "head_" + id + ".obj"});
         objParts.push_back({"neck_" + id, "neck_" + id + ".obj"});
-        objParts.push_back({"tail_" + id, "tail_" + id + ".obj"});
-        objParts.push_back({"tail_" + id + "_taur", "tail_" + id + "_taur.obj"});
+        if (entry.hasTail)
+        {
+            objParts.push_back({"tail_" + id, "tail_" + id + ".obj"});
+            objParts.push_back({"tail_" + id + "_taur", "tail_" + id + "_taur.obj"});
+        }
+        if (entry.hasLimbs)
+        {
+            objParts.push_back({"anthro_leg_" + id, "anthro_leg_" + id + ".obj"});
+            objParts.push_back({"anthro_arm_" + id, "anthro_arm_" + id + ".obj"});
+        }
         if (kSpecies[species].hasEarSockets)
         {
             objParts.push_back({"ear_" + id, "ear_" + id + ".obj"});
@@ -1269,10 +1393,15 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         {
             mirrorAcrossX(("ear_" + id).c_str(), ("ear_" + id + "_right").c_str(), renderer, rendererHandle);
         }
+        if (kSpecies[species].hasLimbs)
+        {
+            mirrorAcrossX(("anthro_leg_" + id).c_str(), ("anthro_leg_" + id + "_right").c_str(), renderer, rendererHandle);
+            mirrorAcrossX(("anthro_arm_" + id).c_str(), ("anthro_arm_" + id + "_right").c_str(), renderer, rendererHandle);
+        }
     }
 
     // Fix up the registered triangle counts from the loaded geometry.
-    PartDefinition resolvedParts[192];
+    PartDefinition resolvedParts[320];
     std::uint32_t  resolvedCount = 0;
     for (PartDefinition &part : parts)
     {
@@ -1368,7 +1497,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         };
         if (!character.registerProfile(character.self, &humanoidProfile, &error))
         {
-            std::fprintf(stderr, "demo: profile registration failed (%u)\n", static_cast<unsigned>(error));
+            std::fprintf(stderr, "demo: profile registration failed for %s (%u)\n", humanoidProfileId, static_cast<unsigned>(error));
             return false;
         }
     }
@@ -1440,7 +1569,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         };
         if (!character.registerProfile(character.self, &taurProfile, &error))
         {
-            std::fprintf(stderr, "demo: profile registration failed (%u)\n", static_cast<unsigned>(error));
+            std::fprintf(stderr, "demo: profile registration failed for %s (%u)\n", taurProfileId, static_cast<unsigned>(error));
             return false;
         }
     }
@@ -1461,7 +1590,7 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
         };
         if (!character.registerProfile(character.self, &quadrupedProfile, &error))
         {
-            std::fprintf(stderr, "demo: profile registration failed (%u)\n", static_cast<unsigned>(error));
+            std::fprintf(stderr, "demo: profile registration failed for %s (%u)\n", quadrupedProfileId, static_cast<unsigned>(error));
             return false;
         }
     }
@@ -1495,13 +1624,30 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     };
     for (int species = 0; species < kSpeciesCount; ++species)
     {
-        const std::string id = kSpecies[species].id;
-        slotTable.push_back({"quad_taur_" + id, "quadruped"});
-        slotTable.push_back({"quad_body_" + id, "quadruped"});
+        const std::string              id    = kSpecies[species].id;
+        const metrics::SpeciesMetrics &entry = kSpecies[species];
+        if (entry.hasTaurBody)
+        {
+            slotTable.push_back({"quad_taur_" + id, "quadruped"});
+        }
+        if (entry.hasQuadBody)
+        {
+            slotTable.push_back({"quad_body_" + id, "quadruped"});
+        }
         slotTable.push_back({"head_" + id, "head"});
         slotTable.push_back({"neck_" + id, "neck"});
-        slotTable.push_back({"tail_" + id, "tail"});
-        slotTable.push_back({"tail_" + id + "_taur", "tail"});
+        if (entry.hasTail)
+        {
+            slotTable.push_back({"tail_" + id, "tail"});
+            slotTable.push_back({"tail_" + id + "_taur", "tail"});
+        }
+        if (entry.hasLimbs)
+        {
+            slotTable.push_back({"anthro_leg_" + id + "_left", "legs"});
+            slotTable.push_back({"anthro_leg_" + id + "_right", "legs"});
+            slotTable.push_back({"anthro_arm_" + id + "_left", "arms"});
+            slotTable.push_back({"anthro_arm_" + id + "_right", "arms"});
+        }
         if (kSpecies[species].hasEarSockets)
         {
             slotTable.push_back({"ear_" + id + "_left", "ears"});
@@ -1562,6 +1708,25 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     legFootY_["leg_bare_right"]   = metrics::kBareLegFootY;
     legFootY_["leg_ranger_left"]  = metrics::kRangerLegFootY;
     legFootY_["leg_ranger_right"] = metrics::kRangerLegFootY;
+    for (int species = 0; species < kSpeciesCount; ++species)
+    {
+        const metrics::SpeciesMetrics &entry = kSpecies[species];
+        if (!entry.hasLimbs)
+        {
+            continue;
+        }
+        legFootY_["anthro_leg_" + std::string(entry.id) + "_left"]  = entry.anthroLegFootY;
+        legFootY_["anthro_leg_" + std::string(entry.id) + "_right"] = entry.anthroLegFootY;
+        // The species limbs sink their root rings into the sockets by a
+        // fraction of the measured ring radius (the thigh swallows the hip,
+        // the foreleg the shoulder) so the junction never shows a lip.
+        const float legSink = entry.anthroLegRootRadius * 0.55f;
+        const float armSink = entry.anthroArmRootRadius * 0.55f;
+        limbSink_["anthro_leg_" + std::string(entry.id) + "_left"]  = legSink;
+        limbSink_["anthro_leg_" + std::string(entry.id) + "_right"] = legSink;
+        limbSink_["anthro_arm_" + std::string(entry.id) + "_left"]  = armSink;
+        limbSink_["anthro_arm_" + std::string(entry.id) + "_right"] = armSink;
+    }
 
     renderCapability_ = renderer;
     rendererHandle_   = rendererHandle;
@@ -1570,221 +1735,352 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
 
 // ---- deformation entry points -----------------------------------------------
 
-void CharacterContent::applyDeformations(float muzzleWeight, float eyesWidthWeight, float neckThicknessWeight,
-    float neckHeadSizeWeight, int coatIndex, int markingMode, bool furryBody)
+namespace
 {
-    // One pass re-derives every change-time-deformed mesh: the baked morphs
-    // first (positions), then the vertex-colour coats and markings, then a
-    // single re-upload per part - the rest pose stays pristine so later
-    // changes re-derive. Doing the morphs and the colours in separate passes
-    // let the colour pass silently re-upload the unmorphed rest mesh and
-    // revert the morphs; one pass keeps them consistent.
-    if (markingMode < 0 || markingMode > 3)
-    {
-        markingMode = 0;
-    }
-    coatIndex = std::clamp(coatIndex, 0, 5);
-    // The coat palette matches the draw-time fur tints (rendering.cpp): the
-    // body coat repaints the skin parts into the chosen fur with a
-    // dorsal-to-ventral gradient so the coat reads as fur rather than the
-    // flat painted-latex of a uniform tint.
-    static const glm::vec3 coatPalette[6] = {
-        {1.00f, 1.00f, 1.00f},
-        {0.94f, 0.62f, 0.42f},
-        {0.98f, 0.98f, 0.96f},
-        {0.42f, 0.40f, 0.44f},
-        {0.93f, 0.86f, 0.72f},
-        {0.70f, 0.76f, 0.86f},
+
+// A deterministic per-position jitter in [-1, 1]: the marking boundaries
+// feather with it so the edges read as fur zones instead of taped decals.
+float furJitter(const glm::vec3 &position)
+{
+    const float a = std::sin(position.x * 61.7f + position.y * 43.3f + position.z * 37.9f);
+    const float b = std::sin(position.x * 17.3f - position.y * 29.7f + position.z * 11.1f);
+    return a * b;
+}
+
+} // namespace
+
+void CharacterContent::resolveCoat(const DeformationInputs &inputs, glm::vec3 &outDorsal, glm::vec3 &outVentral,
+    glm::vec3 &outMarking, glm::vec3 &outAccent) const
+{
+    // The fixed swatches follow the panel's fur.coat picker (index 0 is the
+    // match-head coat, so the swatch array starts at coat 1).
+    static const glm::vec3 kCoatSwatches[7] = {
+        {1.00f, 1.00f, 1.00f}, // Natural
+        {0.94f, 0.62f, 0.42f}, // Rust
+        {0.98f, 0.98f, 0.96f}, // Snow
+        {0.42f, 0.40f, 0.44f}, // Charcoal
+        {0.93f, 0.86f, 0.72f}, // Cream
+        {0.70f, 0.76f, 0.86f}, // Silver
+        {0.82f, 0.64f, 0.74f}, // Dusk
     };
-    static const glm::vec3 markingColor(0.94f, 0.91f, 0.85f);
-    const glm::vec3        coat = coatPalette[coatIndex];
+    if (inputs.coatIndex <= 0)
+    {
+        // Match-head: the palette measured from the active species' head at
+        // extraction time; the human and dragon heads fall back to a neutral
+        // timber-wolf read.
+        glm::vec3 dorsal(0.62f, 0.60f, 0.58f);
+        glm::vec3 ventral(0.93f, 0.91f, 0.88f);
+        glm::vec3 accent(0.30f, 0.29f, 0.28f);
+        for (int index = 0; index < metrics::kSpeciesCount; ++index)
+        {
+            if (inputs.speciesId == metrics::kSpecies[index].id)
+            {
+                dorsal  = metrics::kSpecies[index].coatDorsal;
+                ventral = metrics::kSpecies[index].coatVentral;
+                accent  = metrics::kSpecies[index].coatAccent;
+                break;
+            }
+        }
+        outDorsal  = dorsal;
+        outVentral = ventral;
+        outAccent  = accent;
+        outMarking = glm::clamp(glm::mix(ventral, glm::vec3(1.0f), 0.35f), 0.0f, 1.0f);
+        return;
+    }
+    const glm::vec3 coat = kCoatSwatches[std::clamp(inputs.coatIndex, 1, 7) - 1];
+    outDorsal            = coat * 0.94f;
+    outVentral           = coat * 1.05f + glm::vec3(0.03f);
+    outMarking           = glm::vec3(0.94f, 0.91f, 0.85f);
+    outAccent            = coat * 0.55f;
+}
+
+void CharacterContent::deriveGeometry(const std::string &geometryId, const DeformationInputs &inputs,
+    MeshData &outMesh) const
+{
+    // One geometry's change-time derivation: the baked morphs first
+    // (positions), then the vertex-colour coats and markings - the rest pose
+    // stays pristine so every later change re-derives from scratch.
+    const auto found = geometries_.find(geometryId);
+    if (found == geometries_.end())
+    {
+        return;
+    }
+    const GeometryEntry &entry = found->second;
+    outMesh.vertices           = entry.rest.vertices;
+    outMesh.indices            = entry.rest.indices;
+
+    int markingMode = std::clamp(inputs.markingMode, 0, 5);
+    glm::vec3 coatDorsal(0.5f);
+    glm::vec3 coatVentral(0.9f);
+    glm::vec3 markingColor(0.94f, 0.91f, 0.85f);
+    glm::vec3 accentColor(0.3f);
+    resolveCoat(inputs, coatDorsal, coatVentral, markingColor, accentColor);
+
+    const std::string &id          = geometryId;
+    const bool         isLegBare   = id.rfind("leg_bare", 0) == 0;
+    const bool         isArmBare   = id.rfind("arm_bare", 0) == 0;
+    const bool         isNeckSkin  = id == "neck_human";
+    const bool         isTorsoSkin = id.rfind("torso_thoracic_", 0) == 0 || id.rfind("pelvis_", 0) == 0;
+    const bool         skinPart    = isLegBare || isArmBare || isNeckSkin || isTorsoSkin;
+    const bool         isAnthroLimb = id.rfind("anthro_", 0) == 0;
+    const bool         isTail      = id.rfind("tail_", 0) == 0 && id != "tail_reptile";
+    const bool         isHead      = id.rfind("head_", 0) == 0 && id != "head_human" && id != "head_dragon";
+    const bool         isTaurBody  = id.rfind("quad_taur_", 0) == 0;
+
+    // ---- morphs (positions) ---------------------------------------------
+    for (const PartMorph &morph : entry.morphs)
+    {
+        if (morph.deltas.size() != outMesh.vertices.size())
+        {
+            continue;
+        }
+        float weight = 0.0f;
+        if (morph.name == "muzzle")
+        {
+            weight = inputs.muzzleWeight;
+        }
+        else if (morph.name == "eyes")
+        {
+            weight = inputs.eyesWidthWeight;
+        }
+        else if (morph.name == "thickness")
+        {
+            weight = inputs.neckThicknessWeight;
+        }
+        else if (morph.name == "headSize")
+        {
+            weight = inputs.neckHeadSizeWeight;
+        }
+        if (weight == 0.0f)
+        {
+            continue;
+        }
+        for (std::size_t index = 0; index < outMesh.vertices.size(); ++index)
+        {
+            outMesh.vertices[index].position += morph.deltas[index] * weight;
+        }
+    }
+
+    // ---- colours ----------------------------------------------------------
+    glm::vec3 boundsMin(0.0f);
+    glm::vec3 boundsMax(0.0f);
+    glm::vec3 meanColor(0.0f);
+    if (!outMesh.vertices.empty())
+    {
+        boundsMin = outMesh.vertices.front().position;
+        boundsMax = outMesh.vertices.front().position;
+        for (const Vertex &vertex : outMesh.vertices)
+        {
+            boundsMin = glm::min(boundsMin, vertex.position);
+            boundsMax = glm::max(boundsMax, vertex.position);
+            meanColor += vertex.color;
+        }
+        meanColor /= static_cast<float>(outMesh.vertices.size());
+    }
+    const glm::vec3 span = glm::max(boundsMax - boundsMin, glm::vec3(1.0e-5f));
+
+    // The distal-band helper: the marking colour blends in below a feathered
+    // height band (t = 0 at the sole, 1 at the root).
+    const auto paintDistalBand = [&](float band, const glm::vec3 &color, float strength)
+    {
+        for (Vertex &vertex : outMesh.vertices)
+        {
+            const float t = (vertex.position.y - boundsMin.y) / span.y;
+            const float edge = band + 0.10f * furJitter(vertex.position);
+            if (t < edge + 0.18f)
+            {
+                vertex.color = glm::mix(vertex.color, color, glm::smoothstep(edge + 0.18f, edge - 0.04f, t) * strength);
+            }
+        }
+    };
+
+    if (inputs.furryBody && (skinPart || isAnthroLimb))
+    {
+        // The fur conversion: the authored shading survives as a scalar
+        // luminance multiplier against the part's own mean tone, and the
+        // coat gets a dorsal-to-ventral gradient (the animal parts' own
+        // bellies are lighter - the body coat matches that read). The
+        // match-head coat uses the species' measured dorsal and ventral
+        // tones directly, so the body reads as one pelt with the head.
+        const float meanLum = glm::dot(meanColor, glm::vec3(0.299f, 0.587f, 0.114f));
+        for (Vertex &vertex : outMesh.vertices)
+        {
+            const float lum   = glm::dot(vertex.color, glm::vec3(0.299f, 0.587f, 0.114f));
+            const float shade = glm::clamp(lum / std::max(meanLum, 1.0e-4f), 0.68f, 1.32f);
+            const float front = (vertex.position.z - boundsMin.z) / span.z;
+            const float low   = 1.0f - (vertex.position.y - boundsMin.y) / span.y;
+            const float venter = glm::clamp(
+                glm::smoothstep(0.35f, 0.75f, front) * 0.75f + glm::smoothstep(0.55f, 0.9f, low) * 0.25f, 0.0f, 1.0f);
+            vertex.color = glm::clamp(glm::mix(coatDorsal, coatVentral, venter) * shade, 0.0f, 1.0f);
+        }
+        // Markings on the furry body: the socks and gloves ride the distal
+        // bands, the torso takes the belly band, and the stripe mode bands
+        // the limbs and back with the accent. Every edge feathers with the
+        // position jitter - hard marking cuts read as painted latex, wide
+        // jittered transitions read as fur zones.
+        if (markingMode >= 1 && (isLegBare || isArmBare || isAnthroLimb))
+        {
+            const float band = isArmBare || id.rfind("anthro_arm", 0) == 0 ? 0.16f : 0.30f;
+            if (markingMode == 4 || markingMode == 5)
+            {
+                paintDistalBand(band, accentColor, 1.0f);
+            }
+            else
+            {
+                paintDistalBand(band, markingColor, 1.0f);
+            }
+        }
+        if (markingMode >= 3 && (isTorsoSkin || isAnthroLimb))
+        {
+            // The belly band feathers wide (a narrow band read as a painted
+            // garment edge): the blend starts halfway up the chest and only
+            // the lowest front quarter carries the full marking tone.
+            for (Vertex &vertex : outMesh.vertices)
+            {
+                const float t     = (vertex.position.y - boundsMin.y) / span.y;
+                const float front = (vertex.position.z - boundsMin.z) / span.z;
+                const float wander = 0.08f * furJitter(vertex.position);
+                const float blend = glm::smoothstep(0.72f + wander, 0.28f, t) * glm::smoothstep(0.42f, 0.72f, front);
+                if (blend > 0.0f)
+                {
+                    vertex.color = glm::mix(vertex.color, markingColor, blend * 0.55f);
+                }
+            }
+        }
+        if (markingMode == 4 && (isTorsoSkin || isAnthroLimb))
+        {
+            // stripes: accent bands across the body height, jittered per
+            // position so the rows wander like real tabby striping
+            for (Vertex &vertex : outMesh.vertices)
+            {
+                const float t      = (vertex.position.y - boundsMin.y) / span.y;
+                const float wander = 0.10f * furJitter(vertex.position);
+                const float wave   = std::sin((t + wander) * 26.0f);
+                const float stripe = glm::smoothstep(0.55f, 0.95f, wave);
+                const float back   = isTorsoSkin ? glm::smoothstep(0.35f, 0.75f, t) : 1.0f;
+                vertex.color       = glm::mix(vertex.color, accentColor, stripe * back * 0.85f);
+            }
+        }
+        if (markingMode == 5 && (isTorsoSkin || isAnthroLimb))
+        {
+            // points: the accent rises up from the extremities (the siamese
+            // read) - a wide gradient, not a band
+            for (Vertex &vertex : outMesh.vertices)
+            {
+                const float t = (vertex.position.y - boundsMin.y) / span.y;
+                const float edge = 0.34f + 0.10f * furJitter(vertex.position);
+                vertex.color  = glm::mix(vertex.color, accentColor, glm::smoothstep(edge, edge - 0.22f, t) * 0.9f);
+            }
+        }
+    }
+    else if (isTail && markingMode >= 2)
+    {
+        // tail tip: the quarter farthest from the root (origin); the stripe
+        // mode rings the whole tail, the points mode tips it with the accent
+        const float extent = glm::length(boundsMax - boundsMin);
+        const bool  stripe = markingMode == 4;
+        const bool  point  = markingMode == 5;
+        for (Vertex &vertex : outMesh.vertices)
+        {
+            const float d = glm::length(vertex.position) / std::max(extent, 1.0e-5f);
+            if (stripe)
+            {
+                const float wave   = std::sin(d * 34.0f + 0.35f * furJitter(vertex.position));
+                const float ring   = glm::smoothstep(0.45f, 0.9f, std::abs(wave));
+                const float weight = glm::smoothstep(0.25f, 0.55f, d) * ring;
+                vertex.color       = glm::mix(vertex.color, accentColor, weight * 0.8f);
+            }
+            else if (point)
+            {
+                if (d > 0.55f)
+                {
+                    vertex.color = glm::mix(vertex.color, accentColor, glm::smoothstep(0.55f, 0.82f, d));
+                }
+            }
+            else if (d > 0.55f)
+            {
+                vertex.color = glm::mix(vertex.color, markingColor, glm::smoothstep(0.55f, 0.80f, d));
+            }
+        }
+    }
+    else if (isHead && markingMode >= 2)
+    {
+        // muzzle and lower jaw: the forward lower face (the light blaze for
+        // the tipped kit, the dark mask for the points)
+        const glm::vec3 &faceColor = markingMode == 5 ? accentColor : markingColor;
+        for (Vertex &vertex : outMesh.vertices)
+        {
+            const float z = (vertex.position.z - boundsMin.z) / span.z;
+            const float y = (vertex.position.y - boundsMin.y) / span.y;
+            if (z > 0.55f && y < 0.55f)
+            {
+                const float edge = 0.55f + 0.08f * furJitter(vertex.position);
+                vertex.color     = glm::mix(vertex.color, faceColor, glm::smoothstep(edge, edge + 0.18f, z) * 0.65f);
+            }
+        }
+    }
+    else if (isTaurBody && inputs.furryBody)
+    {
+        // The graft's upper region continues the chest's fur across the
+        // weld: the sweep's rings were baked blending the animal's neck
+        // colours toward the human waist ring's skin tones (correct for
+        // the bare chest), so under the fur coat the whole band within
+        // reach of the waist ring repaints into the coat - otherwise a
+        // skin-coloured ring shows between the furred chest and the
+        // animal's own fur.
+        std::string species = id.substr(std::strlen("quad_taur_"));
+        for (int index = 0; index < metrics::kSpeciesCount; ++index)
+        {
+            if (species != metrics::kSpecies[index].id)
+            {
+                continue;
+            }
+            const glm::vec3 mount   = metrics::kSpecies[index].torsoMount;
+            const float     reach   = metrics::kSpecies[index].graftRingCount > 0 ? 0.06f : 0.0f;
+            const float     meanLum = glm::dot(meanColor, glm::vec3(0.299f, 0.587f, 0.114f));
+            for (Vertex &vertex : outMesh.vertices)
+            {
+                if (glm::distance(vertex.position, mount) > reach)
+                {
+                    continue;
+                }
+                const float     lum    = glm::dot(vertex.color, glm::vec3(0.299f, 0.587f, 0.114f));
+                const float     shade  = glm::clamp(lum / std::max(meanLum, 1.0e-4f), 0.55f, 1.45f);
+                const float     venter = vertex.position.z > mount.z ? 1.0f : 0.0f;
+                const glm::vec3 fur    = glm::mix(coatDorsal, coatVentral, venter);
+                vertex.color           = glm::clamp(fur * shade, 0.0f, 1.0f);
+            }
+            break;
+        }
+    }
+}
+
+void CharacterContent::applyDeformations(const DeformationInputs &inputs)
+{
+    // One pass re-derives every change-time-deformed mesh (morphs, coats,
+    // markings) and re-uploads it once; the rest poses stay pristine so the
+    // next change re-derives from the same source.
     for (auto &[geometryId, entry] : geometries_)
     {
-        const std::string &id          = geometryId;
-        const bool         isLeg       = id.rfind("leg_bare", 0) == 0;
-        const bool         isArm       = id.rfind("arm_bare", 0) == 0;
-        const bool         isNeckSkin  = id == "neck_human";
-        const bool         isTorsoSkin = id.rfind("torso_thoracic_", 0) == 0 || id.rfind("pelvis_", 0) == 0;
-        const bool         skinPart    = isLeg || isArm || isNeckSkin || isTorsoSkin;
-        const bool         isTail      = id.rfind("tail_", 0) == 0 && id != "tail_reptile";
-        const bool         isHead      = id.rfind("head_", 0) == 0 && id != "head_human" && id != "head_dragon";
-        const bool         isTaurBody  = id.rfind("quad_taur_", 0) == 0;
-        if (!skinPart && !isTail && !isHead && !isTaurBody)
+        const bool isLegBare    = geometryId.rfind("leg_bare", 0) == 0;
+        const bool isArmBare    = geometryId.rfind("arm_bare", 0) == 0;
+        const bool isNeckSkin   = geometryId == "neck_human";
+        const bool isTorsoSkin  = geometryId.rfind("torso_thoracic_", 0) == 0 || geometryId.rfind("pelvis_", 0) == 0;
+        const bool isSkin       = isLegBare || isArmBare || isNeckSkin || isTorsoSkin;
+        const bool isAnthroLimb = geometryId.rfind("anthro_", 0) == 0;
+        const bool isTail       = geometryId.rfind("tail_", 0) == 0 && geometryId != "tail_reptile";
+        const bool isHead       = geometryId.rfind("head_", 0) == 0 && geometryId != "head_human"
+                              && geometryId != "head_dragon";
+        const bool isTaurBody   = geometryId.rfind("quad_taur_", 0) == 0;
+        const bool hasMorphs    = !entry.morphs.empty();
+        const bool needsColors  = (inputs.furryBody && (isSkin || isAnthroLimb || isTaurBody)) || isTail || isHead;
+        if (!hasMorphs && !needsColors)
         {
             continue;
         }
 
         MeshData working;
-        working.vertices = entry.rest.vertices;
-        working.indices  = entry.rest.indices;
-
-        // ---- morphs (positions) ---------------------------------------------
-        for (const PartMorph &morph : entry.morphs)
-        {
-            if (morph.deltas.size() != working.vertices.size())
-            {
-                continue;
-            }
-            float weight = 0.0f;
-            if (morph.name == "muzzle")
-            {
-                weight = muzzleWeight;
-            }
-            else if (morph.name == "eyes")
-            {
-                weight = eyesWidthWeight;
-            }
-            else if (morph.name == "thickness")
-            {
-                weight = neckThicknessWeight;
-            }
-            else if (morph.name == "headSize")
-            {
-                weight = neckHeadSizeWeight;
-            }
-            if (weight == 0.0f)
-            {
-                continue;
-            }
-            for (std::size_t index = 0; index < working.vertices.size(); ++index)
-            {
-                working.vertices[index].position += morph.deltas[index] * weight;
-            }
-        }
-
-        // ---- colours ----------------------------------------------------------
-        glm::vec3 boundsMin(0.0f);
-        glm::vec3 boundsMax(0.0f);
-        glm::vec3 meanColor(0.0f);
-        if (!working.vertices.empty())
-        {
-            boundsMin = working.vertices.front().position;
-            boundsMax = working.vertices.front().position;
-            for (const Vertex &vertex : working.vertices)
-            {
-                boundsMin = glm::min(boundsMin, vertex.position);
-                boundsMax = glm::max(boundsMax, vertex.position);
-                meanColor += vertex.color;
-            }
-            meanColor /= static_cast<float>(working.vertices.size());
-        }
-        const glm::vec3 span = glm::max(boundsMax - boundsMin, glm::vec3(1.0e-5f));
-
-        if (skinPart && furryBody)
-        {
-            // The fur conversion: the authored shading survives as a scalar
-            // luminance multiplier against the part's own mean tone, and the
-            // coat gets a dorsal-to-ventral gradient (the animal parts' own
-            // bellies are lighter - the body coat matches that read). The
-            // shade stays scalar: a per-channel multiplier amplified the
-            // warm parts' blue channel until the coat washed out to cream
-            // and the pelvis's baked briefs tinted the fur blue.
-            const float meanLum = glm::dot(meanColor, glm::vec3(0.299f, 0.587f, 0.114f));
-            for (Vertex &vertex : working.vertices)
-            {
-                const float lum    = glm::dot(vertex.color, glm::vec3(0.299f, 0.587f, 0.114f));
-                const float shade  = glm::clamp(lum / std::max(meanLum, 1.0e-4f), 0.55f, 1.45f);
-                const float front  = (vertex.position.z - boundsMin.z) / span.z;
-                const float low    = 1.0f - (vertex.position.y - boundsMin.y) / span.y;
-                const float venter = glm::clamp(
-                    glm::smoothstep(0.35f, 0.75f, front) * 0.75f + glm::smoothstep(0.55f, 0.9f, low) * 0.25f,
-                    0.0f,
-                    1.0f);
-                const glm::vec3 dorsal  = coat * 0.94f;
-                const glm::vec3 ventral = coat * 1.05f + glm::vec3(0.03f);
-                vertex.color            = glm::clamp(glm::mix(dorsal, ventral, venter) * shade, 0.0f, 1.0f);
-            }
-            // markings: the socks and gloves ride the distal bands; the torso
-            // takes the belly band at the fullest marking mode. Every edge is
-            // a wide smoothstep - hard marking cuts read as painted latex,
-            // wide transitions read as fur zones.
-            if ((isLeg || isArm) && markingMode >= 1)
-            {
-                const float band = isArm ? 0.16f : 0.30f;
-                for (Vertex &vertex : working.vertices)
-                {
-                    const float t = (vertex.position.y - boundsMin.y) / span.y;
-                    if (t < band + 0.16f)
-                    {
-                        vertex.color
-                            = glm::mix(vertex.color, markingColor, glm::smoothstep(band + 0.16f, band - 0.02f, t));
-                    }
-                }
-            }
-            else if (isTorsoSkin && markingMode >= 3)
-            {
-                for (Vertex &vertex : working.vertices)
-                {
-                    const float t     = (vertex.position.y - boundsMin.y) / span.y;
-                    const float front = (vertex.position.z - boundsMin.z) / span.z;
-                    const float blend = glm::smoothstep(0.58f, 0.30f, t) * glm::smoothstep(0.48f, 0.78f, front);
-                    if (blend > 0.0f)
-                    {
-                        vertex.color = glm::mix(vertex.color, markingColor, blend * 0.72f);
-                    }
-                }
-            }
-        }
-        else if (isTail && (markingMode == 2 || markingMode == 3))
-        {
-            // tail tip: the quarter farthest from the root (origin)
-            const float extent = glm::length(boundsMax - boundsMin);
-            for (Vertex &vertex : working.vertices)
-            {
-                const float d = glm::length(vertex.position) / std::max(extent, 1.0e-5f);
-                if (d > 0.55f)
-                {
-                    vertex.color = glm::mix(vertex.color, markingColor, glm::smoothstep(0.55f, 0.80f, d));
-                }
-            }
-        }
-        else if (isHead && (markingMode == 2 || markingMode == 3))
-        {
-            // muzzle and lower jaw: the forward lower face
-            for (Vertex &vertex : working.vertices)
-            {
-                const float z = (vertex.position.z - boundsMin.z) / span.z;
-                const float y = (vertex.position.y - boundsMin.y) / span.y;
-                if (z > 0.55f && y < 0.55f)
-                {
-                    vertex.color = glm::mix(vertex.color, markingColor, 0.65f);
-                }
-            }
-        }
-        else if (isTaurBody)
-        {
-            // The graft's upper region continues the chest's fur across the
-            // weld: the sweep's rings were baked blending the animal's neck
-            // colours toward the human waist ring's skin tones (correct for
-            // the bare chest), so under the fur coat the whole band within
-            // reach of the waist ring repaints into the coat - otherwise a
-            // skin-coloured ring shows between the furred chest and the
-            // animal's own fur.
-            std::string species = id.substr(std::strlen("quad_taur_"));
-            for (int index = 0; index < metrics::kSpeciesCount; ++index)
-            {
-                if (species != metrics::kSpecies[index].id)
-                {
-                    continue;
-                }
-                const glm::vec3 mount   = metrics::kSpecies[index].torsoMount;
-                const float     reach   = metrics::kSpecies[index].graftRingCount > 0 ? 0.06f : 0.0f;
-                const float     meanLum = glm::dot(meanColor, glm::vec3(0.299f, 0.587f, 0.114f));
-                for (Vertex &vertex : working.vertices)
-                {
-                    if (glm::distance(vertex.position, mount) > reach)
-                    {
-                        continue;
-                    }
-                    const float     lum    = glm::dot(vertex.color, glm::vec3(0.299f, 0.587f, 0.114f));
-                    const float     shade  = glm::clamp(lum / std::max(meanLum, 1.0e-4f), 0.55f, 1.45f);
-                    const float     venter = vertex.position.z > mount.z ? 1.0f : 0.0f;
-                    const glm::vec3 fur    = glm::mix(coat * 0.94f, coat * 1.05f + glm::vec3(0.03f), venter);
-                    vertex.color           = glm::clamp(fur * shade, 0.0f, 1.0f);
-                }
-                break;
-            }
-        }
+        deriveGeometry(geometryId, inputs, working);
 
         const engine::renderer::MeshDescription description = working.description();
         engine::renderer::RenderError           error       = engine::renderer::RenderError::None;
@@ -1796,6 +2092,19 @@ void CharacterContent::applyDeformations(float muzzleWeight, float eyesWidthWeig
         entry.handle = renderCapability_.createMesh(renderCapability_.self, rendererHandle_, &description, &error);
     }
 }
+
+engine::renderer::MeshHandle CharacterContent::repaintPreviewMesh(
+    const std::string &geometryId, const DeformationInputs &inputs)
+{
+    // A temporary upload of one geometry under preview inputs; the live
+    // meshes stay untouched (the real state never left).
+    MeshData working;
+    deriveGeometry(geometryId, inputs, working);
+    const engine::renderer::MeshDescription description = working.description();
+    engine::renderer::RenderError           error       = engine::renderer::RenderError::None;
+    return renderCapability_.createMesh(renderCapability_.self, rendererHandle_, &description, &error);
+}
+
 
 bool CharacterContent::geometryExtents(const std::string &geometryId, float outMin[3], float outMax[3]) const
 {
@@ -1842,10 +2151,52 @@ bool CharacterContent::geometryBounds(const std::string &geometryId, float outCe
     return true;
 }
 
+bool CharacterContent::geometryGroundFootprint(
+    const std::string &geometryId, const glm::mat4 &world, float groundMaxY, float outMin[2], float outMax[2]) const
+{
+    const auto found = geometries_.find(geometryId);
+    if (found == geometries_.end() || found->second.rest.vertices.empty())
+    {
+        return false;
+    }
+    bool   any    = false;
+    float  minX   = std::numeric_limits<float>::max();
+    float  maxX   = std::numeric_limits<float>::lowest();
+    float  minZ   = std::numeric_limits<float>::max();
+    float  maxZ   = std::numeric_limits<float>::lowest();
+    for (const Vertex &vertex : found->second.rest.vertices)
+    {
+        const glm::vec3 position = glm::vec3(world * glm::vec4(vertex.position, 1.0f));
+        if (position.y > groundMaxY)
+        {
+            continue;
+        }
+        minX = glm::min(minX, position.x);
+        maxX = glm::max(maxX, position.x);
+        minZ = glm::min(minZ, position.z);
+        maxZ = glm::max(maxZ, position.z);
+        any  = true;
+    }
+    if (any)
+    {
+        outMin[0] = minX;
+        outMin[1] = minZ;
+        outMax[0] = maxX;
+        outMax[1] = maxZ;
+    }
+    return any;
+}
+
 float CharacterContent::legFootYForPart(const std::string &partId) const
 {
     const auto found = legFootY_.find(partId);
     return found != legFootY_.end() ? found->second : -0.9752f;
+}
+
+float CharacterContent::limbSinkForPart(const std::string &partId) const
+{
+    const auto found = limbSink_.find(partId);
+    return found != limbSink_.end() ? found->second : 0.0f;
 }
 
 bool CharacterContent::partHasMorph(const std::string &geometryId, const char *morphName) const
@@ -1892,6 +2243,7 @@ void CharacterContent::destroy(engine::character::CharacterCapability &character
     partsBySlot_.clear();
     previewTextures_.clear();
     legFootY_.clear();
+    limbSink_.clear();
 }
 
 engine::renderer::MeshHandle CharacterContent::meshForGeometry(const std::string &geometryId) const
