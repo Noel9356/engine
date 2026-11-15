@@ -35,6 +35,23 @@ void rowOf(const float *row, double out[3])
     }
 }
 
+// Fade for a SHARP SPATIAL BAND (a shoreline strip, a snow-line crossing)
+// whose width sits below the spacing the color is sampled at: when the band
+// is much narrower than the spacing, at most one sample in a strip lands
+// inside it and the blended result aliases into isolated off-color speckle
+// (dark coastal fringes, cloud-like snow patches on a globe view). The
+// weight fades out once the band drops under half the spacing and reaches
+// full strength once it spans 1.5 spacings. spacingMeters <= 0 (raw
+// sampling, no spacing knowledge) keeps full detail.
+double bandBelowSpacingFade(double bandWidthMeters, double spacingMeters)
+{
+    if (spacingMeters <= 0.0)
+    {
+        return 1.0;
+    }
+    return smoothstep(0.5 * spacingMeters, 1.5 * spacingMeters, bandWidthMeters);
+}
+
 // Linear blend of two double RGB arrays into `out` (component-wise, weight in
 // [0, 1]; safe in-place - each channel is computed independently).
 void blendColors(const double *rowA, const double *rowB, double weight, double out[3])
@@ -315,14 +332,24 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     // beach (warm, flat, within the shoreline band) under snow, snow under rock.
     const double sBlend     = params_.slopeBlendWidth;
     const double beachBand  = std::max(1.0, params_.beachWidthMeters * params_.elevationBlendFraction);
-    const double beachW     = (1.0 - smoothstep(params_.beachWidthMeters - beachBand, params_.beachWidthMeters + beachBand, elevation))
+    // Sub-spacing fades: the beach strip and the wet swash rim are sharp
+    // bands a few meters wide, and the altitude snow crossing is one over
+    // the blend width. When a band is much narrower than the color's sample
+    // spacing, keeping it would alias into speckle (dark coastal fringes,
+    // cloud-like snow patches at globe scale); it fades out instead. The
+    // freeze-line snow (a smooth temperature field) is not a narrow band and
+    // stays.
+    const double beachFade = bandBelowSpacingFade(params_.beachWidthMeters + beachBand, lowPassCutoffMeters);
+    const double beachW    = beachFade
+        * (1.0 - smoothstep(params_.beachWidthMeters - beachBand, params_.beachWidthMeters + beachBand, elevation))
         * smoothstep(0.25 - tBlend, 0.25 + tBlend, t)
         * (1.0 - smoothstep(params_.rockSlopeThreshold * 0.5, params_.rockSlopeThreshold, slope01));
     const double snowBand   = std::max(1.0, params_.snowLineMeters * params_.elevationBlendFraction);
     // Snow where the elevation climbs past the climate snow line (weight 0
     // below the band, 1 above it) or where the air passes the freeze line.
     const double snowW      = std::max(
-        smoothstep(snowLine - snowBand, snowLine + snowBand, elevation),
+        bandBelowSpacingFade(2.0 * snowBand, lowPassCutoffMeters)
+            * smoothstep(snowLine - snowBand, snowLine + snowBand, elevation),
         1.0 - smoothstep(0.14 - tBlend, 0.14 + tBlend, t));
     const double rockW      = smoothstep(params_.rockSlopeThreshold - sBlend, params_.rockSlopeThreshold + sBlend, slope01);
 
@@ -336,10 +363,13 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     // saturates (real beaches show a sharp wet rim where the last wave
     // reached); fades over the configured width and never overrides snow or
     // rock. Applied to the beach palette row BEFORE it blends into the base
-    // color, so the rim sits inside the sand band.
+    // color, so the rim sits inside the sand band. The rim fades out with
+    // the beach band below the sample spacing (a wet rim is a sub-meter
+    // feature at coarse spacings, where it would alias into dark speckle).
     if (params_.beachWetDarkening > 0.0 && params_.beachWetWidthMeters > 0.0)
     {
-        const double wetW = 1.0 - smoothstep(0.0, params_.beachWetWidthMeters, elevation);
+        const double wetW = bandBelowSpacingFade(params_.beachWetWidthMeters, lowPassCutoffMeters)
+            * (1.0 - smoothstep(0.0, params_.beachWetWidthMeters, elevation));
         if (wetW > 0.0)
         {
             for (std::size_t channel = 0; channel < 3; ++channel)

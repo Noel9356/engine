@@ -130,7 +130,6 @@ private:
     // visible list changes (a chunk's mask is a pure function of the sorted visible list and its own coordinate, so
     // an unchanged list pins the masks).
     std::vector<ConformMask> visibleMasks_;
-    std::vector<ChunkCoord>  previousVisible_;
     VisibleLeafSet           visibleLeafSet_;
 
     // Scratch for the nearest-first request pass of update() (kept at member
@@ -139,10 +138,13 @@ private:
     {
         ChunkCoord  coord;
         ConformMask conformMask;
-        double      distanceSquared = 0.0;
-        double      apparentSize    = 0.0; // chunk width / distance (screen-size priority)
+        double      apparentSize = 0.0; // chunk width / distance (screen-size priority)
     };
     std::vector<MissingChunk> missingScratch_;
+
+    // Sorted copy of the in-flight key set for one visible pass (see the
+    // update() note): keeps the per-chunk in-flight probe off the mutex.
+    std::vector<ChunkKey> inflightScratch_;
 
     // Ready cache: chunk key -> built mesh. Node-based, so mesh storage stays put while the table grows; capacity is
     // reserved up front so streaming never rehashes.

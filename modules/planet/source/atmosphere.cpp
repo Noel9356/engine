@@ -1,7 +1,9 @@
-// Sky backdrop model implementation; see atmosphere.hpp for the model.
+// Sky backdrop + cloud coverage model implementation; see atmosphere.hpp.
 
 #include <cstddef>
+#include <cstdint>
 #include <engine/planet/atmosphere.hpp>
+#include <engine/planet/noise.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
@@ -11,6 +13,83 @@ namespace engine
 {
 namespace planet
 {
+namespace
+{
+
+// Fixed shape of the cloud field: three smooth octaves carry the banks, a
+// two-octave detail stream breaks them up (amplitude set by
+// cloudDetailStrength) and a very-low-frequency weather field shifts the
+// coverage threshold regionally, so banks organize into large cloudy and
+// clear systems instead of uniform popcorn. The profiles stay constants of
+// the model; coverage, scale and height are the configured knobs.
+constexpr FbmParams kCloudBaseFbm{3, 2.0, 0.55};
+constexpr FbmParams kCloudDetailFbm{2, 2.0, 0.5};
+constexpr FbmParams kCloudWeatherFbm{2, 2.0, 0.5};
+
+// Coverage threshold half-width: how sharply the field crosses into cloud.
+// A narrow band gives crisp, scattered banks; a wide one a soft deck.
+constexpr double kCloudEdgeWidth = 0.08;
+// Amplitude of the regional weather shift on the coverage threshold, and the
+// wavelength multiple of the cloud field it rides at.
+constexpr double kCloudWeatherStrength = 0.45;
+constexpr double kCloudWeatherWavelengthMultiple = 3.2;
+
+constexpr std::uint64_t kCloudSeedTag    = 0xC10D1ULL;
+constexpr std::uint64_t kCloudDetailSeedTag  = 0xC10D2ULL;
+constexpr std::uint64_t kCloudWeatherSeedTag = 0xC10D3ULL;
+
+} // namespace
+
+CloudField::CloudField(const PlanetGenerationParams &params)
+    : params_(params)
+{
+    const std::int64_t baseSeed = static_cast<std::int64_t>(hashCombine64(params.seed, kCloudSeedTag));
+    seedsBase_    = makeFbmSeeds(baseSeed, kCloudBaseFbm.octaves);
+    seedsDetail_  = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudDetailSeedTag)),
+        kCloudDetailFbm.octaves);
+    seedsWeather_ = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudWeatherSeedTag)),
+        kCloudWeatherFbm.octaves);
+}
+
+double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeters) const
+{
+    if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0)
+    {
+        return 0.0;
+    }
+    const Vec3 direction = normalized(unitDirection);
+    if (lengthSquared(direction) < 0.5)
+    {
+        return 0.0; // a (near-)zero direction has no sky position to sample
+    }
+    const Vec3 shellPosition = direction * (params_.radiusMeters + params_.cloudAltitudeMeters);
+
+    // Base banks plus the breakup octave; both fade under the consumer's
+    // band limit like every other noise term of the module.
+    double field = fbm(seedsBase_, shellPosition, params_.cloudWavelengthMeters, kCloudBaseFbm, lowPassCutoffMeters);
+    const double detailFade = params_.cloudDetailStrength * lowPassFade(lowPassCutoffMeters, params_.cloudWavelengthMeters * 0.25);
+    if (detailFade > 0.0)
+    {
+        field += detailFade
+            * fbm(seedsDetail_, shellPosition, params_.cloudWavelengthMeters * 0.25, kCloudDetailFbm, lowPassCutoffMeters);
+    }
+
+    // Threshold into coverage: the crossing band centers on the quantile the
+    // configured coverage implies (fbm output is roughly symmetric around 0),
+    // so raising cloud_coverage_amount grows the banks instead of moving the
+    // whole field. A very-low-frequency weather field shifts the threshold
+    // regionally (positive weather = cloudier), organizing the banks into
+    // large cloudy and clear systems.
+    double crossing = 1.0 - 2.0 * params_.cloudCoverageAmount;
+    const double weatherFade = kCloudWeatherStrength * lowPassFade(lowPassCutoffMeters,
+        params_.cloudWavelengthMeters * kCloudWeatherWavelengthMultiple);
+    if (weatherFade > 0.0)
+    {
+        crossing -= weatherFade * fbm(seedsWeather_, shellPosition,
+            params_.cloudWavelengthMeters * kCloudWeatherWavelengthMultiple, kCloudWeatherFbm, lowPassCutoffMeters);
+    }
+    return smoothstep(crossing - kCloudEdgeWidth, crossing + kCloudEdgeWidth, field);
+}
 
 double atmosphereWeight(const PlanetGenerationParams &params, double eyeAltitudeMeters)
 {

@@ -118,7 +118,6 @@ void Planet::update(const Vec3 &eyeLocal)
         {
             octree_.computeConformMask(lastVisible_[index], visibleLeafSet_, visibleMasks_[index]);
         }
-        previousVisible_ = lastVisible_;
     }
 
     const std::vector<ChunkCoord> &visible = lastVisible_;
@@ -131,10 +130,24 @@ void Planet::update(const Vec3 &eyeLocal)
     const bool evictionDue = updateCount_ % kEvictionScanInterval == 0;
     const bool visiblePassNeeded = selectionChanged || delivered > 0 || evictionDue;
 
+    // One copy of the in-flight key set per visible pass: probing the copy is
+    // a binary search over a plain vector, while probing the live set would
+    // take a mutex per missing chunk (thousands of lock/unlock pairs per
+    // frame on ground views). Workers mutate the live set freely under its
+    // own mutex; a request issued anyway is filtered by requestBuild's own
+    // insertion check, so the copy only has to be an over-approximation.
+    std::vector<ChunkKey> &inflightScratch = inflightScratch_;
     std::uint32_t inflightBuilds = 0;
+    const auto alreadyInflight = [&inflightScratch](ChunkKey key)
+    {
+        return std::binary_search(inflightScratch.begin(), inflightScratch.end(), key);
+    };
+    if (visiblePassNeeded)
     {
         std::lock_guard<std::mutex> lock(inflightMutex_);
-        inflightBuilds = static_cast<std::uint32_t>(inflightBuild_.size());
+        inflightScratch.assign(inflightBuild_.begin(), inflightBuild_.end());
+        std::sort(inflightScratch.begin(), inflightScratch.end());
+        inflightBuilds = static_cast<std::uint32_t>(inflightScratch.size());
     }
     const bool mayRequest = inflightBuilds < params_.maxConcurrentBuilds;
 
@@ -179,12 +192,7 @@ void Planet::update(const Vec3 &eyeLocal)
             {
                 continue;
             }
-            bool alreadyInflight = false;
-            {
-                std::lock_guard<std::mutex> lock(inflightMutex_);
-                alreadyInflight = inflightBuild_.find(key) != inflightBuild_.end();
-            }
-            if (alreadyInflight)
+            if (alreadyInflight(key))
             {
                 continue;
             }
@@ -194,7 +202,7 @@ void Planet::update(const Vec3 &eyeLocal)
             const double dz = center.z - eyeLocal.z;
             const double distanceSquared = dx * dx + dy * dy + dz * dz;
             const double chunkWidth = chunkSizeMeters(params_, coord.depth);
-            missing.push_back(MissingChunk{coord, visibleMasks_[index], distanceSquared,
+            missing.push_back(MissingChunk{coord, visibleMasks_[index],
                 chunkWidth / std::max(std::sqrt(distanceSquared), 1.0e-6)});
         }
 

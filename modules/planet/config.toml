@@ -142,6 +142,10 @@ coastal_flatten_floor       = 0.10
 shallow_water_meters    = 18.0
 deep_water_meters       = 140.0
 water_depth_tint_meters = 70.0
+# Shallow shelf: the surface blends toward the beach-sand tone transmitted
+# by the water's own hue over this depth band, so flats read sandy turquoise
+# (the bottom seen through the sheet). 0 disables.
+water_shore_mix_meters  = 3.0
 water_enabled           = true
 water_color_shallow     = [0.085, 0.320, 0.330]
 water_color_deep        = [0.012, 0.060, 0.130]
@@ -152,8 +156,8 @@ water_roughness         = 0.42
 # noise-modulated so it breaks into wave crests instead of a painted stripe.
 # Strength 0 disables; width is the depth band under the surface that reads
 # as surf (real breaker zones sit in the first few meters of depth).
-water_foam_width_meters = 4.0
-water_foam_strength    = 0.65
+water_foam_width_meters = 0.8
+water_foam_strength    = 0.55
 
 # sea ice: the water surface freezes where the SEA-LEVEL temperature drops
 # below sea_ice_temperature (the same climate field that drives the land's
@@ -170,6 +174,20 @@ water_color_ice         = [0.80, 0.86, 0.90]
 # like every other noise term, so coarse chunks keep a smooth sea.
 water_wave_amplitude          = 0.12
 water_wave_wavelength_meters  = 8.0
+
+# clouds: a pure coverage field on a spherical shell above the datum (see
+# atmosphere.hpp). The demo meshes the shell for its globe and orbit views;
+# consumers can paint the same field anywhere. cloud_coverage is the
+# approximate sky fraction under cloud, cloud_wavelength_meters the feature
+# scale (raise it with radius_meters like the other large-scale layers),
+# cloud_altitude_meters the shell height, and cloud_detail_strength the
+# amplitude of the fine breakup octave (bank edges read as ragged cumulus).
+clouds_enabled               = true
+cloud_coverage               = 0.42
+cloud_wavelength_meters      = 9000.0
+cloud_altitude_meters        = 1200.0
+cloud_detail_strength        = 0.45
+cloud_color                  = [0.96, 0.97, 1.0]
 
 # surface walking (kinematic controller; see walker.hpp): planet-centric
 # gravity with the movement/collision windows a point-feet character needs.

@@ -5,18 +5,22 @@
 // pieces both cases need - a zenith-to-horizon gradient keyed to the view
 // direction's elevation above the local horizon, an altitude weight that
 // fades the whole sky out toward space, and a sun-elevation tint that warms
-// the sky toward sunset and darkens it at night. Everything is a pure
-// function of its inputs (no hidden state, safe from any thread), so a
-// consumer can paint a sky dome, a clear color, or both per frame without
-// any synchronization with the generation pipeline.
+// the sky toward sunset and darkens it at night. A CloudField completes the
+// sky: a band-limited coverage field on a spherical shell above the surface
+// (the [planet] cloud_* keys), from which a consumer paints a cloud layer -
+// the demo meshes the shell for its globe and orbit views.
+// Everything is a pure function of its inputs (no hidden state, safe from any
+// thread), so a consumer can paint a sky dome, a clear color, or both per
+// frame without any synchronization with the generation pipeline.
 //
 // All colors are LINEAR RGB in [0, 1]; consumers feed them straight into the
 // renderer's vertex colors, which apply the shared tone mapping and sRGB
 // encode. The knobs live in PlanetGenerationParams (the [planet] section,
-// atmosphere_* keys), so tuning needs no code changes.
+// atmosphere_* and cloud_* keys), so tuning needs no code changes.
 
 #pragma once
 
+#include <engine/planet/fbm.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
@@ -44,6 +48,36 @@ Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot);
 // multiplier for skyGradientColor(). A disabled sun (see PbrEnvironment)
 // counts as permanently high noon.
 Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled);
+
+// Cloud coverage field: a band-limited noise field sampled on a spherical
+// shell at cloudAltitudeMeters above the datum, thresholded into [0, 1]
+// coverage (0 = clear sky, 1 = dense overcast). The threshold sits so the
+// mean coverage approximates cloudCoverageAmount, cloudDetailStrength mixes
+// in a fine breakup octave so banks read as ragged cumulus fields instead of
+// smooth blotches, and a very-low-frequency weather field shifts the
+// threshold regionally so banks organize into large cloudy and clear
+// systems. Seeds are derived once from the planet seed,
+// like every other stream of the module; sampling is a pure function and
+// thread safe. lowPassCutoffMeters band-limits the field (0 = raw) so a
+// consumer with a coarse sample spacing (a globe-shell vertex grid, a low-
+// resolution sky texture) fades the sub-spacing octaves out instead of
+// aliasing them into speckle.
+class CloudField final
+{
+public:
+    explicit CloudField(const PlanetGenerationParams &params);
+
+    // Coverage in [0, 1] for one unit direction (planet-local). direction
+    // need not be exactly unit length; the sample position is its
+    // normalization scaled onto the cloud shell.
+    double coverage(const Vec3 &unitDirection, double lowPassCutoffMeters = 0.0) const;
+
+private:
+    const PlanetGenerationParams &params_;
+    FbmStreamSeeds seedsBase_{};
+    FbmStreamSeeds seedsDetail_{};
+    FbmStreamSeeds seedsWeather_{};
+};
 
 } // namespace planet
 } // namespace engine

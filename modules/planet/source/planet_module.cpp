@@ -128,6 +128,7 @@ void setCaveCarve(PlanetGenerationParams &params, double value) { params.caveCar
 void setShallowWater(PlanetGenerationParams &params, double value) { params.shallowWaterMeters = value; }
 void setDeepWater(PlanetGenerationParams &params, double value) { params.deepWaterMeters = value; }
 void setWaterDepthTint(PlanetGenerationParams &params, double value) { params.waterDepthTintMeters = value; }
+void setWaterShoreMix(PlanetGenerationParams &params, double value) { params.waterShoreMixMeters = value; }
 void setEquatorTemperature(PlanetGenerationParams &params, double value) { params.equatorTemperature = value; }
 void setPoleTemperature(PlanetGenerationParams &params, double value) { params.poleTemperature = value; }
 void setTemperaturePerturbation(PlanetGenerationParams &params, double value) { params.temperaturePerturbation = value; }
@@ -175,6 +176,11 @@ void setBeachWetWidth(PlanetGenerationParams &params, double value) { params.bea
 void setBeachWetDarkening(PlanetGenerationParams &params, double value) { params.beachWetDarkening = value; }
 void setWaterFoamWidth(PlanetGenerationParams &params, double value) { params.waterFoamWidthMeters = value; }
 void setWaterFoamStrength(PlanetGenerationParams &params, double value) { params.waterFoamStrength = value; }
+void setCloudsEnabled(PlanetGenerationParams &params, double value) { params.cloudsEnabled = value != 0.0; }
+void setCloudCoverage(PlanetGenerationParams &params, double value) { params.cloudCoverageAmount = value; }
+void setCloudWavelength(PlanetGenerationParams &params, double value) { params.cloudWavelengthMeters = value; }
+void setCloudAltitude(PlanetGenerationParams &params, double value) { params.cloudAltitudeMeters = value; }
+void setCloudDetailStrength(PlanetGenerationParams &params, double value) { params.cloudDetailStrength = value; }
 
 constexpr SettingRow kSettingRows[] = {
     {"seed",                      SettingKind::Integer, setSeed},
@@ -238,6 +244,7 @@ constexpr SettingRow kSettingRows[] = {
     {"shallow_water_meters",          SettingKind::Floating, setShallowWater},
     {"deep_water_meters",             SettingKind::Floating, setDeepWater},
     {"water_depth_tint_meters",       SettingKind::Floating, setWaterDepthTint},
+    {"water_shore_mix_meters",        SettingKind::Floating, setWaterShoreMix},
     {"equator_temperature",           SettingKind::Floating, setEquatorTemperature},
     {"pole_temperature",              SettingKind::Floating, setPoleTemperature},
     {"temperature_perturbation",      SettingKind::Floating, setTemperaturePerturbation},
@@ -265,6 +272,11 @@ constexpr SettingRow kSettingRows[] = {
     {"water_roughness",               SettingKind::Floating, setWaterRoughness},
     {"water_foam_width_meters",       SettingKind::Floating, setWaterFoamWidth},
     {"water_foam_strength",           SettingKind::Floating, setWaterFoamStrength},
+    {"clouds_enabled",                SettingKind::Boolean,  setCloudsEnabled},
+    {"cloud_coverage",                SettingKind::Floating, setCloudCoverage},
+    {"cloud_wavelength_meters",       SettingKind::Floating, setCloudWavelength},
+    {"cloud_altitude_meters",         SettingKind::Floating, setCloudAltitude},
+    {"cloud_detail_strength",         SettingKind::Floating, setCloudDetailStrength},
     {"sea_ice_temperature",           SettingKind::Floating, setSeaIceTemperature},
     {"sea_ice_transition",            SettingKind::Floating, setSeaIceTransition},
     {"water_wave_amplitude",          SettingKind::Floating, setWaterWaveAmplitude},
@@ -360,6 +372,12 @@ PlanetGenerationParams paramsFromConfiguration(ParticipantContext &context)
         params.waterColorIce[0] = static_cast<float>(water[0]);
         params.waterColorIce[1] = static_cast<float>(water[1]);
         params.waterColorIce[2] = static_cast<float>(water[2]);
+    }
+    if (const auto clouds = context.configurationFloatingArrayInSection("planet", "cloud_color"); clouds.size() == 3)
+    {
+        params.cloudColor[0] = static_cast<float>(clouds[0]);
+        params.cloudColor[1] = static_cast<float>(clouds[1]);
+        params.cloudColor[2] = static_cast<float>(clouds[2]);
     }
 
     return params;
@@ -635,8 +653,15 @@ private:
             // out-of-range coordinates would hash a lattice the octree can
             // never address, so reject them instead of returning a hash of
             // numerically meaningless geometry. maxSupportedOctreeDepth
-            // itself is addressable (the 4-bit field holds it).
+            // itself is addressable (the 4-bit field holds it), and each
+            // coordinate must index a cell of that depth's lattice (2^depth
+            // cells per axis) - anything beyond lies outside the root cube.
             if (depth > maxSupportedOctreeDepth)
+            {
+                return 0;
+            }
+            const std::uint32_t cellCount = std::uint32_t{1} << depth;
+            if (x >= cellCount || y >= cellCount || z >= cellCount)
             {
                 return 0;
             }

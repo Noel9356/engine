@@ -304,11 +304,16 @@ struct PlanetGenerationParams
     // water_depth_tint_meters is the BLUE channel's saturation depth; red and
     // green saturate at fixed fractions of it.
     double waterDepthTintMeters = 70.0; // depth where the water surface tint saturates (blue channel)
+    // Shallow shelf: the surface blends toward the beach-sand tone
+    // transmitted by the water's own hue over this depth band, so flats read
+    // sandy turquoise (the bottom seen through the sheet) instead of one
+    // pale sheet. 0 disables.
+    double waterShoreMixMeters  = 3.0;
     // Surf: a white breaker band where the water shallows toward the shore,
     // plus a noise modulation so the breaker reads as patchy wave crests
     // instead of a painted stripe.
-    double waterFoamWidthMeters = 4.0;  // depth band under the surface that reads as surf
-    double waterFoamStrength    = 0.65; // 0 = no foam, 1 = solid white surf band
+    double waterFoamWidthMeters = 0.8;  // depth band under the surface that reads as surf
+    double waterFoamStrength    = 0.55; // 0 = no foam, 1 = solid white surf band
     // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
     // below seaIceTemperature (the same climate field that drives the land's
     // freeze line, so ice caps and snowy poles line up with an organic, noisy
@@ -323,6 +328,21 @@ struct PlanetGenerationParams
     // limit like every other noise term, so coarse chunks keep a smooth sea.
     double     waterWaveAmplitude          = 0.12;
     double     waterWaveWavelengthMeters   = 8.0;
+
+    // ---- clouds (coverage field; see atmosphere.hpp) ----------------------------
+    // A pure noise field on a spherical shell above the datum: consumers paint
+    // a cloud layer from it (the demo meshes the shell for globe/orbit views).
+    // Coverage maps the field through a smooth threshold, so
+    // cloud_coverage_amount is the approximate fraction of the sky under
+    // cloud and the edges stay organic. The field is band-limited like every
+    // other noise term, so coverage sampled at a coarse spacing stays free of
+    // sub-spacing speckle.
+    bool  cloudsEnabled       = true;
+    double cloudCoverageAmount    = 0.42;   // approximate sky fraction under cloud (0 = clear)
+    double cloudWavelengthMeters  = 9000.0; // feature scale of the cloud field (scale with the radius)
+    double cloudAltitudeMeters    = 1200.0; // height of the cloud shell above the datum
+    double cloudDetailStrength    = 0.45;   // amplitude of the fine breakup octave relative to the base field
+    float cloudColor[3]          = {0.96f, 0.97f, 1.0f}; // linear RGB of the cloud tops
 
     // ---- derived values (filled by validate(), read-only afterwards) -----------
     double derivedRootHalfMeters   = 0.0; // root cube half-size

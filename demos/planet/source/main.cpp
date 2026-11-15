@@ -569,6 +569,8 @@ int main(int argc, char **argv)
     // accumulating in one demo-level coordinator.
     PlanetChunkRenderer chunkRenderer(*planetCapability, planetHandle, renderCapability, rendererHandle, params);
     chunkRenderer.ensureSkyDome();
+    chunkRenderer.ensureCloudLayer();
+    chunkRenderer.setCloudLayerVisible(macroView);
 
     // ---- frame loop -------------------------------------------------------------------
     std::uint64_t framesRendered = 0;

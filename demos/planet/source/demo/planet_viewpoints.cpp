@@ -552,27 +552,33 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                     failReason = "wall cap";
                     break;
                 }
+                const double sightElevation = sightRadius - params.derivedSeaRadiusMeters;
                 if (policy == ProbePolicy::Coastline)
                 {
-                    if (rise > 2.0)
+                    // Land/water flags key on the probe's ABSOLUTE elevation
+                    // against the sea radius (a rise measured from the spot
+                    // would call every depression beside a mountain spot
+                    // "water" even when it is dry inland land far above the
+                    // sea, and the fallback picks would render hillsides).
+                    if (sightElevation > 2.0)
                     {
                         sawLand = true;
                         // Near-ring land means the shoreline is CLOSE - the
                         // frame will hold actual beach rather than open water
                         // with the coast somewhere behind the camera.
-                        if (ring <= 1 && nearestLandRing > ring)
+                        if (ring <= 2 && nearestLandRing > ring)
                         {
                             nearestLandRing = ring;
                         }
-                        if (ring <= 1)
+                        if (ring <= 2)
                         {
                             sawLandNear = true;
                         }
                     }
-                    else if (rise < -2.0)
+                    else if (sightElevation < -2.0)
                     {
                         sawWater = true;
-                        if (ring <= 1)
+                        if (ring <= 2)
                         {
                             sawWaterNear = true;
                         }
@@ -596,11 +602,11 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         }
         if (policy == ProbePolicy::Coastline && sightClear && !(sawLandNear && sawWaterNear))
         {
-            // The shoreline is farther than 120 m on every fan yaw: from a
+            // The shoreline is farther than 220 m on every fan yaw: from a
             // 120 m eye the near field renders as open ocean even though a
             // coast technically exists in the far fan (the islet trap).
             sightClear = false;
-            failReason = "shoreline beyond 120 m";
+            failReason = "shoreline beyond 220 m";
         }
 
         // Score: probe greenness, zeroed when the view stares into a wall.
@@ -669,9 +675,9 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             // the biggest showcase face instead of any qualifying spot.
             score *= 1.05 + 0.25 * std::min(1.0, bestWallScore / 250.0);
         }
-        if (policy == ProbePolicy::Coastline && nearestLandRing > 1)
+        if (policy == ProbePolicy::Coastline && nearestLandRing > 2)
         {
-            // The shoreline (if any) is beyond 120 m: the frame is mostly
+            // The shoreline (if any) is beyond 220 m: the frame is mostly
             // open water with the coast behind the camera. Keep the spot
             // eligible but let closer-shore candidates win.
             score *= 0.85;

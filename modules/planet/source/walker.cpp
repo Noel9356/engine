@@ -252,10 +252,32 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
     // The sea surface is a floor where the water is deeper than the wade
     // band: the feet ride the waterline, movement slows to the swim speed,
     // and gravity is replaced by the surface clamp. Shallow shelf water
-    // stays walkable - the terrain floor carries the feet.
+    // stays walkable - the terrain floor carries the feet. The float also
+    // requires an OPEN WATER COLUMN between the feet and the waterline: a
+    // march along the local up must read air (or water) at every step.
+    // Cave pockets carved into the sea floor sit below the sea radius with
+    // rock above them, and without the column check the float would carry
+    // the feet straight up through the cave ceiling.
     const double seaRadius = params_.derivedSeaRadiusMeters;
-    const bool   overDeepWater = params_.waterEnabled && params_.swimEnabled
-        && (!haveGround || seaRadius - groundRadius > params_.swimWadeDepthMeters);
+    bool overDeepWater = params_.waterEnabled && params_.swimEnabled
+        && (!haveGround || seaRadius - groundRadius > params_.swimWadeDepthMeters)
+        && radius < seaRadius + kGroundTouchMeters;
+    if (overDeepWater)
+    {
+        // Eight probes resolve a ceiling anywhere in the column: thinner
+        // rock shelves than one step of this march cannot seal a pocket a
+        // walker fits into, and thicker ones always catch a sample.
+        constexpr std::uint32_t kColumnProbes = 8;
+        const double columnRise = seaRadius - radius;
+        for (std::uint32_t probe = 1; probe <= kColumnProbes && overDeepWater; ++probe)
+        {
+            const Vec3 testPoint = feet + up * (columnRise * (static_cast<double>(probe) / static_cast<double>(kColumnProbes)));
+            if (field_.densityAt(testPoint) > 0.0)
+            {
+                overDeepWater = false; // rock overhead: not open water, keep the ground logic
+            }
+        }
+    }
     if (overDeepWater && radius < seaRadius + kGroundTouchMeters)
     {
         state_.positionMeters = feet + up * (seaRadius - radius);

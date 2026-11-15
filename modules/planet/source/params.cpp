@@ -46,8 +46,6 @@ bool PlanetGenerationParams::validate(std::string &error)
             return false;
         }
     }
-    seaLevelOffsetMeters = clampRange(seaLevelOffsetMeters, -0.5 * radiusMeters, 0.5 * radiusMeters);
-
     const double axisLength = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
     if (!std::isfinite(axisLength) || axisLength < 1.0e-6)
     {
@@ -151,6 +149,17 @@ bool PlanetGenerationParams::validate(std::string &error)
     caveWormWavelengthMeters = clampRange(caveWormWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     caveCarveMeters         = clampRange(caveCarveMeters, 0.0, 0.02 * radiusMeters);
 
+    // The aggregate relief band every generation term can reach. The ocean
+    // surface has to stay inside it: the octree's sea-straddle exemption and
+    // the mesher's water-pass placement both assume the sea sphere lies
+    // within the shell band the tree prunes against, so a sea level offset
+    // beyond the relief amplitudes would strand the ocean outside every
+    // candidate node (an invisible ocean).
+    const double shellReliefMeters = continentAmplitudeMeters + regionalAmplitudeMeters + mountainAmplitudeMeters
+        + hillAmplitudeMeters + detailAmplitudeMeters + overhangAmplitudeMeters + strataAmplitudeMeters
+        + caveCarveMeters;
+    seaLevelOffsetMeters = clampRange(seaLevelOffsetMeters, -shellReliefMeters, shellReliefMeters);
+
     // ---- oceans / climate --------------------------------------------------------
     shallowWaterMeters   = clampRange(shallowWaterMeters, 0.0, radiusMeters);
     deepWaterMeters      = clampRange(deepWaterMeters, shallowWaterMeters, radiusMeters);
@@ -210,6 +219,16 @@ bool PlanetGenerationParams::validate(std::string &error)
         waterColorDeep[channel]    = std::clamp(waterColorDeep[channel], 0.0f, 1.0f);
     }
     waterRoughness = std::clamp(waterRoughness, 0.0f, 1.0f);
+
+    // ---- clouds --------------------------------------------------------------------
+    cloudCoverageAmount    = clampRange(cloudCoverageAmount, 0.0, 1.0);
+    cloudWavelengthMeters  = clampRange(cloudWavelengthMeters, radiusMeters / 1024.0, radiusMeters * 4.0);
+    cloudAltitudeMeters    = clampRange(cloudAltitudeMeters, radiusMeters / 8192.0, radiusMeters / 4.0);
+    cloudDetailStrength    = clampRange(cloudDetailStrength, 0.0, 1.0);
+    for (std::size_t channel = 0; channel < 3; ++channel)
+    {
+        cloudColor[channel] = std::clamp(cloudColor[channel], 0.0f, 1.0f);
+    }
     seaIceTemperature = clampRange(seaIceTemperature, 0.0, 1.0);
     seaIceTransition  = clampRange(seaIceTransition, 0.005, 0.5);
     for (std::size_t channel = 0; channel < 3; ++channel)
@@ -217,14 +236,14 @@ bool PlanetGenerationParams::validate(std::string &error)
         waterColorIce[channel] = std::clamp(waterColorIce[channel], 0.0f, 1.0f);
     }
     waterDepthTintMeters        = clampRange(waterDepthTintMeters, 1.0, radiusMeters);
+    waterShoreMixMeters         = clampRange(waterShoreMixMeters, 0.0, radiusMeters);
     waterFoamWidthMeters        = clampRange(waterFoamWidthMeters, 0.0, 0.01 * radiusMeters);
     waterFoamStrength           = clampRange(waterFoamStrength, 0.0, 1.0);
     waterWaveAmplitude        = clampRange(waterWaveAmplitude, 0.0, 1.0);
     waterWaveWavelengthMeters = clampRange(waterWaveWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
 
     // ---- derived values -------------------------------------------------------------
-    const double relief = continentAmplitudeMeters + regionalAmplitudeMeters + mountainAmplitudeMeters + hillAmplitudeMeters
-                        + detailAmplitudeMeters + overhangAmplitudeMeters + strataAmplitudeMeters + caveCarveMeters;
+    const double relief = shellReliefMeters;
     derivedRootHalfMeters = radiusMeters * boundingFactor;
     derivedRootSizeMeters = 2.0 * derivedRootHalfMeters;
 
