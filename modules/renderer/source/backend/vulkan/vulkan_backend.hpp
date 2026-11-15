@@ -224,11 +224,14 @@ private:
     bool frameActive_ = false; // true between a successful beginFrame and endFrame; draw calls check it
 
     // Bind-state caches so repeated draws skip redundant vkCmd* calls.
-    // lastBoundPipeline_ tracks which of the backend's two graphics pipelines
+    // lastBoundPipeline_ tracks which of the backend's graphics pipelines
     // is current (mesh vs fur): the fur path binds the alpha-blended fur
     // pipeline and every mesh draw binds the mesh pipeline back, pushing its
     // constants again (the two layouts have different push constant sizes,
-    // so a pipeline switch invalidates the push cache).
+    // so a pipeline switch invalidates the push cache). Within the mesh
+    // pipeline, lastMeshDepthWrite_ tracks the depth-write variant so
+    // materials toggle between the twins without rebinding when the flag
+    // holds steady.
     enum class BoundPipeline : std::uint8_t
     {
         Mesh,
@@ -239,6 +242,7 @@ private:
     FurPushConstants lastFurPushConstants_{};
     bool            hasLastFurPushConstants_    = false;
     BoundPipeline   lastBoundPipeline_          = BoundPipeline::Mesh;
+    bool            lastMeshDepthWrite_         = true;
     MeshHandle      lastBoundMesh_              = invalidMesh;
     VkDescriptorSet lastBoundMaterialSet_       = VK_NULL_HANDLE;
     VkDeviceSize    lastBoundInstanceOffset_    = 0;

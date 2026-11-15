@@ -90,6 +90,7 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | --- | --- | --- |
 | `shallow_water_meters` | `18.0` | Shoreline band classified as shallow ocean. |
 | `deep_water_meters` | `140.0` | Depth where the ocean counts as deep. |
+| `abyssal_depth_meters` | `3500.0` | Extra depth the sea floor sinks toward as the continent field dips into its basins: the coast keeps a shallow, sunlit continental shelf that slopes into dark abyssal plains, instead of one uniformly shallow flooded plain (the base relief amplitudes alone bottom out around the continent amplitude). The shelf is as wide and smooth as the continent geography itself, and every detail layer stays faded out over the deepened slope. Clamped to 8% of `radius_meters` so the floor stays a surface feature on small bodies. `0` disables. |
 | `water_depth_tint_meters` | `70.0` | Depth over which the water surface tint saturates in the BLUE channel; red and green saturate at fixed fractions of it (0.28x and 0.6x - the physical absorption ordering, red first), so the ramp runs shallow turquoise -> green-teal mid shelf -> navy deep. |
 | `water_enabled` | `true` | Generate water surface patches (marching cubes on the sea sphere). |
 | `water_color_shallow` | `[0.085, 0.320, 0.330]` | Linear RGB at zero depth (the turquoise of sunlit shallow water over sand). |
@@ -100,7 +101,7 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `water_color_ice` | `[0.80, 0.86, 0.90]` | Linear RGB of the frozen water surface. |
 | `water_wave_amplitude` | `0.12` | Radian-scale tilt applied to the water surface normals by a deterministic two-scale noise field (the configured swell plus a half-wavelength chop at a third of the tilt), giving the sea a sun-glint texture with sparkle at close range. The tilt fades out under the LOD band limit like every other noise term, so coarse chunks keep a smooth sea. `0` gives a perfectly smooth surface. |
 | `water_wave_wavelength_meters` | `8.0` | Feature size of the wave-swell field (the chop rides at half of it). |
-| `water_foam_width_meters` | `0.8` | Depth band under the surface that reads as surf - the breaker rim hugging the waterline. The band's falloff is raised to the fourth power, so the bright rim stays at the shore even on ultra-gentle shelves (a plain smoothstep would wash whole shallow lagoons white). |
+| `water_foam_width_meters` | `2.5` | Depth band under the surface that reads as surf - the breaker rim hugging the waterline. The band's falloff is raised to the fourth power, so the bright rim stays at the shore even on ultra-gentle shelves (a plain smoothstep would wash whole shallow lagoons white). |
 | `water_foam_strength` | `0.55` | 0 = no surf, 1 = a solid white breaker band. A noise modulation breaks the band into wave crests so it does not read as paint. |
 | `water_shore_mix_meters` | `3.0` | Depth over which the water surface blends toward the beach-sand tone transmitted by the water's own hue, so very shallow flats read as sandy turquoise (the bottom seen through the sheet) instead of one pale sheet. `0` disables the blend. |
 
@@ -119,14 +120,14 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `coastal_moisture_boost` | `0.18` | Onshore humidity: low land near the sea stays green (without it the shoreline belt paints a beige desert fringe around every landmass). |
 | `coastal_moisture_band_meters` | `400.0` | Elevation over which the coastal moisture boost fades out. |
 | `moisture_latitude_bands` | `true` | ITCZ wet belt + subtropical dry belts + temperate wet belt. |
-| `color_variation` | `0.18` | Per-point albedo jitter (0 = flat palette). Each color channel is weighted differently, so the variation reads as subtle hue mottling (warm/cool patches) instead of pure luminance banding. Octave scales below the chunk's VERTEX spacing fade out (band-limited like the geometric noise), so coarse LOD chunks do not alias the mottle into speckle. |
+| `color_variation` | `0.24` | Per-point albedo jitter (0 = flat palette). Each color channel is weighted differently, so the variation reads as subtle hue mottling (warm/cool patches) instead of pure luminance banding. Octave scales below the chunk's VERTEX spacing fade out (band-limited like the geometric noise), so coarse LOD chunks do not alias the mottle into speckle. |
 | `color_variation_wavelength_meters` | `260.0` | Feature size of the albedo jitter field. The field carries three scales: the configured wavelength mottles biome sheets at globe scale, an octave at an eighth of it covers the mid-range, and an octave at `color_variation_ground_wavelength_meters` keeps ground-level views from reading as one unbroken color. |
-| `color_variation_ground_wavelength_meters` | `6.0` | Metre-scale mottle octave of the albedo jitter field; the surface texture a walking camera sees. Clamped to at most `color_variation_wavelength_meters`. |
-| `snow_line_meters` | `1600.0` | Sea-level snow line; drops as the local climate cools. Only true peaks are glaciated; polar caps come from latitude alone. |
-| `beach_width_meters` | `2.0` | Shoreline band above sea level. Kept narrow: on flattened coastal plains a wide band paints every drainage dip as sand. |
-| `beach_wet_width_meters` | `4.0` | Swash band above the waterline that reads as wet sand (real beaches darken sharply where the last wave reached). 0 disables. |
+| `color_variation_ground_wavelength_meters` | `3.5` | Metre-scale mottle octave of the albedo jitter field; the surface texture a walking camera sees. Clamped to at most `color_variation_wavelength_meters`. |
+| `snow_line_meters` | `2400.0` | Sea-level snow line; drops as the local climate cools. Only true peaks are glaciated; polar caps come from latitude alone. |
+| `beach_width_meters` | `5.0` | Shoreline band above sea level - wide enough to read as sand from a standing eye. |
+| `beach_wet_width_meters` | `6.0` | Swash band above the waterline that reads as wet sand (real beaches darken sharply where the last wave reached). 0 disables. |
 | `beach_wet_darkening` | `0.45` | How dark the wet band gets (0 = dry sand everywhere, 1 = near-black rim). |
-| `rock_slope_threshold` | `0.55` | Slope (1 - dot(normal, radial)) where bare rock takes over (about 56-degree faces). Low enough that genuine cliff risers show rock, high enough that aliased ridge crests stay snow-covered instead of speckling with rock dots. |
+| `rock_slope_threshold` | `0.46` | Slope (1 - dot(normal, radial)) where bare rock takes over. Steep faces scrape soil and grass into bare rock; rolling hills stay green. |
 | `rock_strata_contrast` | `0.30` | Luminance banding of rock faces at the strata band spacing (sediment stripes). 0 disables; keyed to `strata_band_meters`. |
 | `biome_blend_width` | `0.06` | Half-width of the biome color blend on the temperature/moisture axes. Biome colors interpolate between palette rows instead of hard-switching per vertex (hard switches smear into pale stains across triangles). |
 | `slope_blend_width` | `0.08` | Blend half-width around the rock slope threshold. |
@@ -164,7 +165,7 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 
 ## Clouds
 
-The sky model also carries a `CloudField` (`atmosphere.hpp`): a band-limited coverage field sampled on a spherical shell at `cloud_altitude_meters` above the datum, thresholded so `cloud_coverage` is the approximate sky fraction under cloud, with a fine breakup octave (amplitude `cloud_detail_strength`) for ragged cumulus edges and a very-low-frequency weather field that organizes the banks into large cloudy and clear systems. Sampling is a pure function with a per-octave seed schedule derived from the planet seed, and the field is band-limited by the optional low-pass cutoff like every other noise term, so consumers with a coarse sample spacing fade the sub-spacing octaves out instead of aliasing them into speckle. The demo meshes the shell for its globe and orbit views (quads whose corners read clear are skipped, so the layer is geometry with organic cloud-shaped edges); the layer renders only for cameras outside the shell, since a camera between the surface and the shell would see the far side of the sphere through the sky above the horizon.
+The sky model also carries a `CloudField` (`atmosphere.hpp`): a band-limited coverage field sampled on a spherical shell at `cloud_altitude_meters` above the datum, thresholded so `cloud_coverage` is the approximate sky fraction under cloud, with a fine breakup octave (amplitude `cloud_detail_strength`) for ragged cumulus edges, a seed-derived wind frame that stretches the banks along a deterministic flow direction (real weather systems organize into elongated streaks, not round blobs) with a low-frequency swirl bending their shapes, a very-low-frequency weather field that shifts the threshold regionally so banks organize into large cloudy and clear systems, and a latitude-band term keyed to the spin axis that adds the circulation-cell pattern every rotating atmosphere shows (a wet equatorial belt, dry subtropics, stormy mid-latitudes). Sampling is a pure function with a per-octave seed schedule derived from the planet seed, and the field is band-limited by the optional low-pass cutoff like every other noise term, so consumers with a coarse sample spacing fade the sub-spacing octaves out instead of aliasing them into speckle. The demo meshes the shell for its globe and orbit views (quads whose corners read clear are skipped, so the layer is geometry with organic cloud-shaped edges); the layer renders only for cameras outside the shell, since a camera between the surface and the shell would see the far side of the sphere through the sky above the horizon.
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -173,6 +174,9 @@ The sky model also carries a `CloudField` (`atmosphere.hpp`): a band-limited cov
 | `cloud_wavelength_meters` | `9000.0` | Feature scale of the bank field - raise it with `radius_meters` like the other large-scale layers. |
 | `cloud_altitude_meters` | `1200.0` | Height of the cloud shell above the datum. |
 | `cloud_detail_strength` | `0.45` | Amplitude of the fine breakup octave relative to the base field; higher values shred the bank edges into ragged cumulus. |
+| `cloud_edge_softness` | `0.10` | Half-width of the coverage threshold band: narrow values scatter crisp clumps, wide values grow soft decks with veiled edges. |
+| `cloud_weather_strength` | `0.45` | Amplitude of the very-low-frequency regional weather shift (positive weather = cloudier); stronger values organize the banks into larger cloudy and clear systems. |
+| `cloud_latitude_band_strength` | `0.16` | Amplitude of the latitudinal coverage bands (a wet equatorial belt, dry subtropics, stormy mid-latitudes), keyed to the spin axis. `0` gives a latitude-blind field. |
 | `cloud_color` | `[0.96, 0.97, 1.0]` | Linear RGB of the cloud tops. |
 
 ## Usage notes

@@ -54,14 +54,17 @@ Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunE
 // coverage (0 = clear sky, 1 = dense overcast). The threshold sits so the
 // mean coverage approximates cloudCoverageAmount, cloudDetailStrength mixes
 // in a fine breakup octave so banks read as ragged cumulus fields instead of
-// smooth blotches, and a very-low-frequency weather field shifts the
-// threshold regionally so banks organize into large cloudy and clear
-// systems. Seeds are derived once from the planet seed,
-// like every other stream of the module; sampling is a pure function and
-// thread safe. lowPassCutoffMeters band-limits the field (0 = raw) so a
-// consumer with a coarse sample spacing (a globe-shell vertex grid, a low-
-// resolution sky texture) fades the sub-spacing octaves out instead of
-// aliasing them into speckle.
+// smooth blotches, a seed-derived wind frame stretches the banks along a
+// deterministic flow direction (real weather systems organize into elongated
+// streaks, not round blobs) with a low-frequency swirl bending their shapes,
+// and a very-low-frequency weather field shifts the threshold regionally so
+// banks organize into large cloudy and clear systems. cloudEdgeSoftness sets
+// how wide the threshold band is (crisp clumps vs soft decks). Seeds are
+// derived once from the planet seed, like every other stream of the module;
+// sampling is a pure function and thread safe. lowPassCutoffMeters
+// band-limits the field (0 = raw) so a consumer with a coarse sample spacing
+// (a globe-shell vertex grid, a low-resolution sky texture) fades the
+// sub-spacing octaves out instead of aliasing them into speckle.
 class CloudField final
 {
 public:
@@ -77,6 +80,10 @@ private:
     FbmStreamSeeds seedsBase_{};
     FbmStreamSeeds seedsDetail_{};
     FbmStreamSeeds seedsWeather_{};
+    FbmStreamSeeds seedsSwirl_{};
+    Vec3 flowAxis_{};
+    Vec3 flowSide_{};
+    Vec3 spinAxis_{};
 };
 
 } // namespace planet

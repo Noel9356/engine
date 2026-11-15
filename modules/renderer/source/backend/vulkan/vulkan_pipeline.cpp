@@ -416,6 +416,13 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             return false;
         }
     }
+    // The mesh pipeline exists in two depth-write variants: the default
+    // (writes depth, like every opaque pass) and a no-write twin for
+    // backdrop materials whose depthWrite flag is off (depth testing stays
+    // on; the shell must not poison the depth buffer the opaque passes
+    // draw into). Everything else - layout, shaders, culling, blend - is
+    // identical, so one builder lambda stamps both.
+    const auto createMeshPipeline = [&](bool depthWriteEnable, VkPipeline &outPipeline) -> bool
     {
         static const std::uint32_t            specData[2]    = {32u, srgbOutput_ ? 1u : 0u}; // MAX_LIGHTS, SRGB_OUT
         static const VkSpecializationMapEntry specEntries[2] = {
@@ -517,7 +524,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .pNext                 = nullptr,
             .flags                 = 0,
             .depthTestEnable       = VK_TRUE,
-            .depthWriteEnable      = VK_TRUE,
+            .depthWriteEnable      = depthWriteEnable ? VK_TRUE : VK_FALSE,
             .depthCompareOp        = VK_COMPARE_OP_LESS,
             .depthBoundsTestEnable = VK_FALSE,
             .stencilTestEnable     = VK_FALSE,
@@ -638,9 +645,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .basePipelineIndex   = 0,
         };
         const VkResult pipelineResult
-            = vkCreateGraphicsPipelines(vulkanDevice, pipelineCache_, 1, &pipelineInfo, nullptr, &pipeline_);
-        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
-        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
+            = vkCreateGraphicsPipelines(vulkanDevice, pipelineCache_, 1, &pipelineInfo, nullptr, &outPipeline);
         if (pipelineResult != VK_SUCCESS)
         {
             std::fprintf(stderr,
@@ -648,7 +653,22 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
                 resultName(pipelineResult, resultScratch, sizeof(resultScratch)));
             return false;
         }
+        return true;
+    };
+    if (!createMeshPipeline(true, pipeline_))
+    {
+        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
+        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
+        return false;
     }
+    if (!createMeshPipeline(false, pipelineNoDepthWrite_))
+    {
+        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
+        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
+        return false;
+    }
+    vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
+    vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
     if (!buildFurPipeline(vulkanDevice, resultScratch, sizeof(resultScratch)))
     {
         return false;
@@ -1176,6 +1196,11 @@ void VulkanPipeline::destroy(VkDevice device)
     {
         vkDestroyPipeline(device, pipeline_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
+    }
+    if (pipelineNoDepthWrite_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, pipelineNoDepthWrite_, nullptr);
+        pipelineNoDepthWrite_ = VK_NULL_HANDLE;
     }
     if (pipelineLayout_ != VK_NULL_HANDLE)
     {

@@ -105,6 +105,15 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     const double continents = fbm(fbmSeeds_[streamContinents], warpedPosition, params_.continentWavelengthMeters, params_.continentsFbm, lowPassCutoffMeters);
     double       height     = params_.continentAmplitudeMeters * continents;
 
+    // Abyssal deepening: the sea floor sinks from the shoreline into the
+    // basins, carving a real ocean profile - a shallow continental shelf at
+    // the coast, a steep slope, dark abyssal plains offshore. The mask rides
+    // the (band-limited) continent field, so the shelf is as wide and smooth
+    // as the continent geography itself; the deepened floor also keeps every
+    // detail layer faded out below the slope. 0 disables.
+    const double oceanDeepMask = 1.0 - smoothstep(-0.60, -0.02, continents);
+    height -= params_.abyssalDepthMeters * oceanDeepMask;
+
     // Mountains grow where the continent field is strongly positive. A broad
     // "range cluster" field gates the mask a second time so uplift groups
     // into distinct ranges separated by lower foothill country (a uniform
@@ -307,14 +316,21 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     // under the sea floor the term is zero anyway.
     if (params_.cavesEnabled && relief.detailFade > 0.0)
     {
+        // Two worm streams: their iso-surfaces intersect where BOTH are near
+        // zero, so the second evaluation is skipped whenever the first alone
+        // already sits outside the carve band (wormSquared >= threshold^2
+        // needs |wormA| >= threshold).
         const double wormA = fbm(fbmSeeds_[streamCaveA], point, params_.caveWormWavelengthMeters, kFixedFbm, lowPassCutoffMeters);
-        const double wormB = fbm(fbmSeeds_[streamCaveB], point, params_.caveWormWavelengthMeters, kFixedFbm, lowPassCutoffMeters);
-        const double wormSquared = wormA * wormA + wormB * wormB;
-        const double threshold   = params_.caveThreshold;
-        if (wormSquared < threshold * threshold)
+        if (std::abs(wormA) < params_.caveThreshold)
         {
-            d -= params_.caveCarveMeters * (1.0 - std::sqrt(wormSquared) / threshold)
-                * lowPassFade(lowPassCutoffMeters, params_.caveWormWavelengthMeters);
+            const double wormB = fbm(fbmSeeds_[streamCaveB], point, params_.caveWormWavelengthMeters, kFixedFbm, lowPassCutoffMeters);
+            const double wormSquared = wormA * wormA + wormB * wormB;
+            const double threshold   = params_.caveThreshold;
+            if (wormSquared < threshold * threshold)
+            {
+                d -= params_.caveCarveMeters * (1.0 - std::sqrt(wormSquared) / threshold)
+                    * lowPassFade(lowPassCutoffMeters, params_.caveWormWavelengthMeters);
+            }
         }
     }
 

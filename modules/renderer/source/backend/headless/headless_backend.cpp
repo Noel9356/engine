@@ -1152,6 +1152,7 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.viewProjectionWorld = viewProjection_;
     outSetup.modelNormalMatrix = material.unlit ? glm::mat3(1.0f) : glm::mat3(outSetup.model);
     outSetup.unlit             = material.unlit;
+    outSetup.depthWrite        = material.depthWrite;
     // Shell-fur state: the transform below displaces along the object-space
     // normals once per layer; a fur draw stamps a fresh transform generation
     // so the cache (reused across triangles within the layer) never carries
@@ -1461,6 +1462,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
     const glm::mat4  &viewProjection     = setup.viewProjection;
     const glm::mat3  &modelNormalMatrix  = setup.modelNormalMatrix;
     const bool        unlit              = setup.unlit;
+    const bool        writeDepth         = setup.depthWrite;
     const bool        enableBackFaceCull = setup.enableBackFaceCull;
     const float       frontSign          = setup.frontSign;
     const bool        useTransformCache  = setup.useTransformCache;
@@ -1925,7 +1927,10 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
 
                             if (pixelDepth < depthBuffer[pixelIndex])
                             {
-                                depthBuffer[pixelIndex] = pixelDepth;
+                                if (writeDepth)
+                                {
+                                    depthBuffer[pixelIndex] = pixelDepth;
+                                }
                                 std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
                                 pixel[0]                = toByte(shaded.x);
                                 pixel[1]                = toByte(shaded.y);
@@ -1939,7 +1944,10 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         {
                             if (pixelDepth < depthBuffer[pixelIndex])
                             {
-                                depthBuffer[pixelIndex] = pixelDepth;
+                                if (writeDepth)
+                                {
+                                    depthBuffer[pixelIndex] = pixelDepth;
+                                }
                                 std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
                                 pixel[0]                = toByte(shaded.x);
                                 pixel[1]                = toByte(shaded.y);
@@ -2384,6 +2392,7 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     const float inverseWA = record.inverseClipW[0];
     const float inverseWB = record.inverseClipW[1];
     const float inverseWC = record.inverseClipW[2];
+    const bool  writeDepth = setup.depthWrite;
 
     // Same area expression prepareFanTriangles used, on the same stored
     // screen coordinates: bit-identical value, so |area| >= 1e-9 holds here.
@@ -2440,7 +2449,10 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
 
                 if (pixelDepth < depthBuffer[pixelIndex])
                 {
-                    depthBuffer[pixelIndex] = pixelDepth;
+                    if (writeDepth)
+                    {
+                        depthBuffer[pixelIndex] = pixelDepth;
+                    }
                     std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
                     pixel[0]                = toByte(shaded.x);
                     pixel[1]                = toByte(shaded.y);

@@ -20,23 +20,35 @@ namespace
 // two-octave detail stream breaks them up (amplitude set by
 // cloudDetailStrength) and a very-low-frequency weather field shifts the
 // coverage threshold regionally, so banks organize into large cloudy and
-// clear systems instead of uniform popcorn. The profiles stay constants of
-// the model; coverage, scale and height are the configured knobs.
+// clear systems instead of uniform popcorn. The base banks are sampled in a
+// wind-stretched frame: a deterministic flow direction (derived from the
+// seed) compresses the base field along the flow, elongating the banks into
+// the organized streaks real weather systems follow - unwarped, the banks
+// read as round popcorn blobs. A two-octave swirl bends the bank shapes so
+// their edges stay organic. The profiles stay constants of the model;
+// coverage, scale, edge softness and the weather strength are configured.
 constexpr FbmParams kCloudBaseFbm{3, 2.0, 0.55};
 constexpr FbmParams kCloudDetailFbm{2, 2.0, 0.5};
 constexpr FbmParams kCloudWeatherFbm{2, 2.0, 0.5};
+constexpr FbmParams kCloudSwirlFbm{2, 2.0, 0.5};
 
-// Coverage threshold half-width: how sharply the field crosses into cloud.
-// A narrow band gives crisp, scattered banks; a wide one a soft deck.
-constexpr double kCloudEdgeWidth = 0.08;
-// Amplitude of the regional weather shift on the coverage threshold, and the
-// wavelength multiple of the cloud field it rides at.
-constexpr double kCloudWeatherStrength = 0.45;
+// Amplitude of the bank-elongation (1.0 = features stretch to about twice
+// their width along the flow) and of the swirl bend, in units of the cloud
+// wavelength.
+constexpr double kCloudStretchFactor = 0.62;
+constexpr double kCloudSwirlAmplitude = 0.35;
+
+// Amplitude of the regional weather shift's wavelength, as a multiple of the
+// cloud field's own wavelength.
 constexpr double kCloudWeatherWavelengthMultiple = 3.2;
+// Latitude band frequency: ~0.9 wet/dry cycles per hemisphere (equatorial
+// belt, subtropical dry band, mid-latitude storm belt).
+constexpr double kCloudBandFrequency = 5.5;
 
 constexpr std::uint64_t kCloudSeedTag    = 0xC10D1ULL;
 constexpr std::uint64_t kCloudDetailSeedTag  = 0xC10D2ULL;
 constexpr std::uint64_t kCloudWeatherSeedTag = 0xC10D3ULL;
+constexpr std::uint64_t kCloudSwirlSeedTag   = 0xC10D4ULL;
 
 } // namespace
 
@@ -49,6 +61,26 @@ CloudField::CloudField(const PlanetGenerationParams &params)
         kCloudDetailFbm.octaves);
     seedsWeather_ = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudWeatherSeedTag)),
         kCloudWeatherFbm.octaves);
+    seedsSwirl_   = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudSwirlSeedTag)),
+        kCloudSwirlFbm.octaves);
+
+    // Deterministic wind frame: a unit flow direction derived from the cloud
+    // seed. The base field is sampled in a frame whose axis is compressed
+    // along the flow, elongating banks along it; the two transverse axes stay
+    // unscaled. A pure seed function - no state, order independent.
+    const std::uint64_t flowHash = hashCombine64(static_cast<std::uint64_t>(baseSeed), 0xF10Full);
+    const double longitude = static_cast<double>(flowHash & 0xFFFFull) / 65536.0 * 6.283185307179586;
+    const double latitude  = (static_cast<double>((flowHash >> 16) & 0x7FFFull) / 32768.0 - 0.5) * 1.5707963267948966;
+    flowAxis_ = normalized(Vec3{std::cos(latitude) * std::cos(longitude), std::sin(latitude),
+        std::cos(latitude) * std::sin(longitude)});
+    spinAxis_ = normalized(Vec3{params.axis[0], params.axis[1], params.axis[2]});
+    // Transverse frame for the compressed axis.
+    Vec3 tangent = cross(flowAxis_, Vec3{0.0, 1.0, 0.0});
+    if (lengthSquared(tangent) < 1.0e-6)
+    {
+        tangent = cross(flowAxis_, Vec3{1.0, 0.0, 0.0});
+    }
+    flowSide_ = normalized(tangent);
 }
 
 double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeters) const
@@ -62,7 +94,33 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
     {
         return 0.0; // a (near-)zero direction has no sky position to sample
     }
-    const Vec3 shellPosition = direction * (params_.radiusMeters + params_.cloudAltitudeMeters);
+    Vec3 shellPosition = direction * (params_.radiusMeters + params_.cloudAltitudeMeters);
+
+    // Wind stretch: sample the base banks in a frame compressed along the
+    // flow direction, elongating the banks into organized streaks. The
+    // sample position decomposes against the flow frame and recombines with
+    // the flow axis scaled up (a compressed sample axis = stretched
+    // features).
+    {
+        const double alongFlow   = dot(shellPosition, flowAxis_);
+        const double sideFlow    = dot(shellPosition, flowSide_);
+        const Vec3   normalAxis   = cross(flowAxis_, flowSide_);
+        const double normalFlow   = dot(shellPosition, normalAxis);
+        shellPosition = flowAxis_ * (alongFlow / (1.0 - kCloudStretchFactor))
+            + flowSide_ * sideFlow + normalAxis * normalFlow;
+    }
+
+    // Swirl: a low-frequency two-stream bend of the sample position, so the
+    // stretched banks curve instead of running as straight ribbons.
+    const double swirl = kCloudSwirlAmplitude * params_.cloudWavelengthMeters;
+    shellPosition = shellPosition
+        + Vec3{fbm(seedsSwirl_, direction * params_.radiusMeters, params_.cloudWavelengthMeters * 2.0,
+                kCloudSwirlFbm, lowPassCutoffMeters),
+            fbm(seedsSwirl_, direction * (params_.radiusMeters + 4096.0), params_.cloudWavelengthMeters * 2.0,
+                kCloudSwirlFbm, lowPassCutoffMeters),
+            fbm(seedsSwirl_, direction * (params_.radiusMeters + 8192.0), params_.cloudWavelengthMeters * 2.0,
+                kCloudSwirlFbm, lowPassCutoffMeters)}
+            * swirl;
 
     // Base banks plus the breakup octave; both fade under the consumer's
     // band limit like every other noise term of the module.
@@ -79,16 +137,27 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
     // so raising cloud_coverage_amount grows the banks instead of moving the
     // whole field. A very-low-frequency weather field shifts the threshold
     // regionally (positive weather = cloudier), organizing the banks into
-    // large cloudy and clear systems.
+    // large cloudy and clear systems. The band half-width is the configured
+    // edge softness - narrow values scatter crisp clumps, wide ones grow
+    // soft decks.
     double crossing = 1.0 - 2.0 * params_.cloudCoverageAmount;
-    const double weatherFade = kCloudWeatherStrength * lowPassFade(lowPassCutoffMeters,
+    // Latitude bands: a wet belt at the equator, dry subtropics, stormy
+    // mid-latitudes - the circulation-cell pattern every rotating planet
+    // with an atmosphere shows. The band weight follows the spin axis, so
+    // the belts wrap the planet the way the climate's latitude bands do.
+    const double latitude = std::asin(std::clamp(dot(direction, spinAxis_), -1.0, 1.0));
+    crossing -= params_.cloudLatitudeBandStrength
+        * std::cos(latitude * kCloudBandFrequency) * lowPassFade(lowPassCutoffMeters,
+            params_.cloudWavelengthMeters * 2.0);
+    const double weatherFade = params_.cloudWeatherStrength * lowPassFade(lowPassCutoffMeters,
         params_.cloudWavelengthMeters * kCloudWeatherWavelengthMultiple);
     if (weatherFade > 0.0)
     {
         crossing -= weatherFade * fbm(seedsWeather_, shellPosition,
             params_.cloudWavelengthMeters * kCloudWeatherWavelengthMultiple, kCloudWeatherFbm, lowPassCutoffMeters);
     }
-    return smoothstep(crossing - kCloudEdgeWidth, crossing + kCloudEdgeWidth, field);
+    const double edgeHalfWidth = std::max(0.01, params_.cloudEdgeSoftness);
+    return smoothstep(crossing - edgeHalfWidth, crossing + edgeHalfWidth, field);
 }
 
 double atmosphereWeight(const PlanetGenerationParams &params, double eyeAltitudeMeters)

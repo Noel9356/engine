@@ -46,7 +46,42 @@ std::string walkerSelfTestReport()
     planet::DensityField  field(params);
     planet::SurfaceWalker walker(params, field);
 
-    const planet::Vec3 spawnDirection{0.30, 0.72, 0.63};
+    // The walk audit needs dry land. A fixed magic direction would silently
+    // drown when the generation profile changes (the sea floor's abyssal
+    // basins move with every terrain-key change), so the spawn probes a
+    // fixed, deterministic fan of directions for the first one standing
+    // clearly above sea level.
+    const auto surfaceElevation = [&field, &params](const planet::Vec3 &direction)
+    {
+        double lo = params.radiusMeters - params.derivedMaxReliefMeters;
+        double hi = params.radiusMeters + params.derivedMaxReliefMeters;
+        for (int step = 0; step < 48; ++step)
+        {
+            const double mid = 0.5 * (lo + hi);
+            if (field.densityAt(direction * mid) > 0.0)
+            {
+                lo = mid; // inside rock: the surface lies above
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+        return lo - params.radiusMeters - params.seaLevelOffsetMeters;
+    };
+    planet::Vec3 spawnDirection{0.30, 0.72, 0.63};
+    {
+        constexpr double kSpawnMarginMeters = 10.0;
+        bool found = surfaceElevation(spawnDirection) > kSpawnMarginMeters;
+        for (std::uint32_t probe = 0; probe < 32 && !found; ++probe)
+        {
+            const double azimuth = static_cast<double>(probe) * 2.399963229728653; // golden-angle fan
+            const double elevationBand = -0.5 + 0.13 * static_cast<double>(probe % 8);
+            spawnDirection = planet::normalized(planet::Vec3{std::cos(azimuth) * std::cos(elevationBand),
+                std::sin(elevationBand), std::sin(azimuth) * std::cos(elevationBand)});
+            found = surfaceElevation(spawnDirection) > kSpawnMarginMeters;
+        }
+    }
     walker.placeOnSurface(spawnDirection);
 
     // Heading: a horizon tangent through the spawn point (deterministic).

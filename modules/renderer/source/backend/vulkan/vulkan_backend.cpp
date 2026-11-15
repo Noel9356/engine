@@ -972,7 +972,8 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
         vkCmdBeginRenderPass(command, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
     }
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline());
-    lastBoundPipeline_ = BoundPipeline::Mesh;
+    lastBoundPipeline_  = BoundPipeline::Mesh;
+    lastMeshDepthWrite_ = true;
 
     const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
     const VkRect2D   scissor{{0, 0}, {width, height}};
@@ -1003,15 +1004,23 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
     }
 
     VkCommandBuffer command = frames_->commandBuffer();
-    if (lastBoundPipeline_ != BoundPipeline::Mesh)
+    // The mesh pipeline has a depth-write twin for backdrop materials
+    // (depthWrite off): same shaders and layout, depth testing stays on, the
+    // depth buffer is left untouched so the opaque passes drawn later own
+    // the silhouette. Switching variants pushes its constants again, like a
+    // fur switch does.
+    const bool wantDepthWrite = material.depthWrite;
+    if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite)
     {
-        // A fur draw switched to the blended pipeline; bind the mesh
-        // pipeline back. Push constants must be pushed again: the fur path
-        // wrote 128 bytes through its own layout, and relying on the stale
-        // first-112-bytes equality across layout switches is not worth the
-        // branch savings.
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline());
+        // A fur draw (or the other mesh variant) last bound a different
+        // pipeline; bind the variant this material needs. Push constants
+        // must be pushed again: the fur path wrote 128 bytes through its own
+        // layout, and relying on the stale first-112-bytes equality across
+        // layout switches is not worth the branch savings.
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite());
         lastBoundPipeline_      = BoundPipeline::Mesh;
+        lastMeshDepthWrite_     = wantDepthWrite;
         hasLastPushConstants_   = false;
     }
 

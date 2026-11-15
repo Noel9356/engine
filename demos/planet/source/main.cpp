@@ -568,9 +568,17 @@ int main(int argc, char **argv)
     // application loop; this keeps planet streaming and camera control from
     // accumulating in one demo-level coordinator.
     PlanetChunkRenderer chunkRenderer(*planetCapability, planetHandle, renderCapability, rendererHandle, params);
+    // Upload order = mesh handle order: the backdrop layers first (limb
+    // lowest, then dome, sky deck, macro shell), scene chunks after. The
+    // renderer's optional draw sorting is off for this demo (see
+    // config/engine.toml), but submission order stays the layered order
+    // either way.
+    chunkRenderer.ensureAtmosphereShell();
     chunkRenderer.ensureSkyDome();
+    chunkRenderer.ensureSkyCloudLayer(eye - planetCenter);
     chunkRenderer.ensureCloudLayer();
     chunkRenderer.setCloudLayerVisible(macroView);
+    chunkRenderer.setSkyCloudLayerVisible(!macroView);
 
     // ---- frame loop -------------------------------------------------------------------
     std::uint64_t framesRendered = 0;
@@ -750,7 +758,12 @@ int main(int argc, char **argv)
             (void)framePacer.pace(&host.kernel().profiler());
             if (effectiveTargetHz <= 0.0)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+                // One millisecond keeps the loop yield-bound instead of
+                // sleep-bound: the build pool converges on worker throughput,
+                // not on the warmup cadence (4 ms capped a 2-core machine at
+                // ~200 chunk deliveries per second while the pool builds at
+                // its own pace beneath that).
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             continue;
         }
@@ -759,20 +772,26 @@ int main(int argc, char **argv)
 
         // Sky backdrop: the dome follows the eye (placed, oriented and
         // scaled for this frame's pose) and reports the horizon-haze clear
-        // color; space views keep a black clear color and no dome.
+        // color; space views keep a black clear color, no dome, and the
+        // atmosphere limb shell instead.
         const glm::dvec3 localUp = walkView && walkController ? walkController->up()
             : glm::normalize(eye - planetCenter);
+        const glm::dvec3 eyePlanetLocal = eye - planetCenter;
         float skyClearColor[3] = {0.0f, 0.0f, 0.0f};
-        chunkRenderer.updateSkyDome(eye - planetCenter, localUp,
+        chunkRenderer.updateSkyDome(eyePlanetLocal, localUp,
             glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z), environment.sun.enabled, nearZ, farZ,
             skyClearColor);
+        chunkRenderer.updateAtmosphereShell(eyePlanetLocal,
+            glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z), environment.sun.enabled);
         renderer::FrameParameters frameParameters{};
         frameParameters.clearColor[0] = skyClearColor[0];
         frameParameters.clearColor[1] = skyClearColor[1];
         frameParameters.clearColor[2] = skyClearColor[2];
         frameParameters.clearColor[3] = 1.0f;
 
-        chunkRenderer.rebuildDrawCommands();
+        const glm::mat4 viewProjection = glm::make_mat4(viewState.projection) * glm::make_mat4(viewState.view);
+        chunkRenderer.rebuildDrawCommands(viewProjection,
+            glm::length(eyePlanetLocal) - planetRadius);
         const auto &drawCommands = chunkRenderer.drawCommands();
         frameTiming.markUploadDone();
 

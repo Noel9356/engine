@@ -157,12 +157,17 @@ bool PlanetGenerationParams::validate(std::string &error)
     // candidate node (an invisible ocean).
     const double shellReliefMeters = continentAmplitudeMeters + regionalAmplitudeMeters + mountainAmplitudeMeters
         + hillAmplitudeMeters + detailAmplitudeMeters + overhangAmplitudeMeters + strataAmplitudeMeters
-        + caveCarveMeters;
+        + caveCarveMeters + abyssalDepthMeters;
     seaLevelOffsetMeters = clampRange(seaLevelOffsetMeters, -shellReliefMeters, shellReliefMeters);
 
     // ---- oceans / climate --------------------------------------------------------
     shallowWaterMeters   = clampRange(shallowWaterMeters, 0.0, radiusMeters);
     deepWaterMeters      = clampRange(deepWaterMeters, shallowWaterMeters, radiusMeters);
+    // The deepened floor must stay a surface feature: an abyss deeper than a
+    // small fraction of the radius would sink the sea floor past the inner
+    // shell the octree prunes against (and, on tiny planets, through the
+    // core), so the depth scales with the body.
+    abyssalDepthMeters   = clampRange(abyssalDepthMeters, 0.0, 0.08 * radiusMeters);
 
     equatorTemperature = clampRange(equatorTemperature, 0.0, 1.0);
     poleTemperature    = clampRange(poleTemperature, 0.0, equatorTemperature);
@@ -225,6 +230,9 @@ bool PlanetGenerationParams::validate(std::string &error)
     cloudWavelengthMeters  = clampRange(cloudWavelengthMeters, radiusMeters / 1024.0, radiusMeters * 4.0);
     cloudAltitudeMeters    = clampRange(cloudAltitudeMeters, radiusMeters / 8192.0, radiusMeters / 4.0);
     cloudDetailStrength    = clampRange(cloudDetailStrength, 0.0, 1.0);
+    cloudEdgeSoftness      = clampRange(cloudEdgeSoftness, 0.01, 0.6);
+    cloudWeatherStrength   = clampRange(cloudWeatherStrength, 0.0, 1.0);
+    cloudLatitudeBandStrength = clampRange(cloudLatitudeBandStrength, 0.0, 0.5);
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
         cloudColor[channel] = std::clamp(cloudColor[channel], 0.0f, 1.0f);

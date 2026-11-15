@@ -34,6 +34,13 @@ struct MeshMaterial
     TextureHandle emissiveTexture  = invalidTexture;
 
     bool unlit = false;
+
+    // Whether this draw writes to the depth buffer (depth testing always
+    // applies). Backdrop geometry drawn before the scene it surrounds - an
+    // atmosphere shell, a sky dome - renders with depth writes off so the
+    // later opaque passes overwrite it inside the silhouette while the shell
+    // survives around it.
+    bool depthWrite = true;
 };
 
 } // namespace engine::renderer

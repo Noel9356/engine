@@ -106,6 +106,14 @@ public:
     {
         return pipeline_;
     }
+    // Mesh-pipeline twin with depth writes disabled (depth testing stays
+    // on): the variant mesh draws bind when the material's depthWrite flag
+    // is off (atmosphere/sky backdrop shells drawn ahead of the opaque
+    // scene).
+    VkPipeline pipelineNoDepthWrite() const
+    {
+        return pipelineNoDepthWrite_;
+    }
     VkPipelineLayout overlayPipelineLayout() const
     {
         return overlayPipelineLayout_;
@@ -148,11 +156,6 @@ public:
     {
         return dynamicRenderingEnabled_;
     }
-    VkPipeline pipelineForMaterialMask(std::uint32_t) // placeholder: one pipeline for all materials
-    {
-        return pipeline_;
-    }
-
 private:
     VkSampleCountFlagBits sampleCount_             = VK_SAMPLE_COUNT_1_BIT;
     bool                  srgbOutput_              = false;
@@ -166,6 +169,7 @@ private:
     VkDescriptorSetLayout materialSetLayout_     = VK_NULL_HANDLE; // set 1: five combined image samplers
     VkPipelineLayout      pipelineLayout_        = VK_NULL_HANDLE;
     VkPipeline            pipeline_              = VK_NULL_HANDLE;
+    VkPipeline            pipelineNoDepthWrite_  = VK_NULL_HANDLE;
     VkPipelineLayout      furPipelineLayout_     = VK_NULL_HANDLE; // set layouts + 128-byte push constants
     VkPipeline            furPipeline_           = VK_NULL_HANDLE;
     VkPipelineLayout      overlayPipelineLayout_ = VK_NULL_HANDLE; // set 1 layout + 16-byte vertex push constants

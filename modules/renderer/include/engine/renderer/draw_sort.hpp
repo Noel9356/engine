@@ -63,7 +63,13 @@ inline int compareRenderMaterialValues(const MeshMaterial &lhs, const MeshMateri
         return result;
     if ((result = compareInteger(lhs.emissiveTexture, rhs.emissiveTexture)) != 0)
         return result;
-    return compareInteger(lhs.unlit, rhs.unlit);
+    if ((result = compareInteger(lhs.unlit, rhs.unlit)) != 0)
+        return result;
+    // Last: the depth-write flag. Equal materials only batch together when
+    // they also agree on depth writes - the two states bind different
+    // pipeline variants (and, in the rasterizer, different depth-commit
+    // behavior), so a run that mixed them would draw one of the two wrong.
+    return compareInteger(lhs.depthWrite, rhs.depthWrite);
 }
 
 // The material a draw uses when its MeshMaterial* is null (identity PBR).
@@ -118,6 +124,7 @@ inline std::uint64_t renderDrawCommandSortSignature(
             mixFloat(component);
         mix(static_cast<std::uint64_t>(material.emissiveTexture));
         mix(static_cast<std::uint64_t>(material.unlit));
+        mix(static_cast<std::uint64_t>(material.depthWrite));
     }
     return hash;
 }

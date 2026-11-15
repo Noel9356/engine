@@ -207,17 +207,6 @@ void marchCells(const std::vector<double> &field, const std::vector<double> *bur
 
 } // namespace
 
-Vec3 chunkOriginMeters(const PlanetGenerationParams &params, const ChunkCoord &coord)
-{
-    // Deterministic node corner: root minimum + global lattice index * step,
-    // matching the sampling formula in buildChunkMesh.
-    const double step = chunkStepMeters(params, coord.depth);
-    const double half = params.derivedRootHalfMeters;
-    return Vec3{-half + step * static_cast<double>(static_cast<std::int64_t>(coord.x) * static_cast<std::int64_t>(params.leafGridN)),
-        -half + step * static_cast<double>(static_cast<std::int64_t>(coord.y) * static_cast<std::int64_t>(params.leafGridN)),
-        -half + step * static_cast<double>(static_cast<std::int64_t>(coord.z) * static_cast<std::int64_t>(params.leafGridN))};
-}
-
 Vec3 chunkCenterMeters(const PlanetGenerationParams &params, const ChunkCoord &coord)
 {
     // Deterministic node center: the min corner shifted by half the node
@@ -912,8 +901,18 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // red/green saturate at fixed fractions of it. The tint then runs
         // shallow turquoise -> green-teal mid shelf -> navy deep instead of
         // one gray-blue mix; the shallow color keeps the configured hue.
+        //
+        // On coarse chunks the band-limited lattice must still resolve the
+        // tint gradient, or per-vertex saturation paints diamond-shaped
+        // shallows around every island. The band therefore widens with the
+        // chunk's own sample spacing (the same LOD rule every noise term
+        // follows) - with an abyssal ocean profile the widening only spreads
+        // the genuine shelf around landmasses; open water stays deep.
         const double tintDepthBlue = std::max(1.0, params.waterDepthTintMeters);
-        const double tintDepths[3] = {0.28 * tintDepthBlue, 0.6 * tintDepthBlue, tintDepthBlue};
+        const double tintDepth = std::max(tintDepthBlue, ownCutoff * 0.3);
+        const double tintDepths[3] = {0.28 * tintDepth, 0.6 * tintDepth, tintDepth};
+        const double shoreWeight = 1.0 - smoothstep(2.0 * params.waterShoreMixMeters, 4.0 * params.waterShoreMixMeters,
+            ownCutoff);
         // Brightness of the sand-through-water shore blend (the beach row
         // already carries the sand albedo; sunlit flats under a thin sheet
         // read brighter than the raw row).
@@ -922,8 +921,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // Water pass: own cells only, skip cells fully buried under the
         // terrain surface (the terrain grid rides along as buriedField), and
         // auto-orient every triangle against the true radial direction.
-        auto waterMakeVertex = [&](std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
-            std::uint32_t, std::uint32_t, double, const Vec3 &point) -> std::uint32_t
+        auto waterMakeVertex = [&](std::uint32_t aX, std::uint32_t aY, std::uint32_t aZ, std::uint32_t bX,
+            std::uint32_t bY, std::uint32_t bZ, std::uint32_t, double, const Vec3 &point) -> std::uint32_t
         {
             const double radius = std::max(1.0e-9, length(point));
             const Vec3   radial = point * (1.0 / radius);
@@ -936,7 +935,30 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             // neighboring chunks at different depths disagree, painting
             // straight color edges into open water. The exact field is one
             // pure function - every chunk, at any depth, agrees bit-for-bit.
-            const double terrainDepth = std::max(0.0, -field.densityAt(point));
+            //
+            // Open ocean skips that exact evaluation: the tint saturates at
+            // the blue channel's depth (every channel reads the deep color
+            // from there down, and foam and shore blend only live within a
+            // few meters of the shoreline), so a vertex whose whole edge
+            // already sits that deep gets its depth from the chunk's own
+            // lattice - the two endpoint densities the marching-cubes walk
+            // itself interpolated. Band-limited fields cannot rise out of a
+            // deep edge within one cell, so the probe only fires on truly
+            // deep water; anywhere near the shore the exact field takes over
+            // and keeps the bit-exact cross-depth agreement.
+            double terrainDepth = 0.0;
+            {
+                const double densityA = densities[static_cast<std::size_t>(aX) + strideY * aY + strideZ * aZ];
+                const double densityB = densities[static_cast<std::size_t>(bX) + strideY * bY + strideZ * bZ];
+                if (-std::min(densityA, densityB) >= tintDepths[2])
+                {
+                    terrainDepth = tintDepths[2]; // saturated: every tint channel reads the deep color
+                }
+                else
+                {
+                    terrainDepth = std::max(0.0, -field.densityAt(point));
+                }
+            }
 
             // Surf: the breaker band lives in the shallow
             // margin of the configured width, modulated by the
@@ -1053,7 +1075,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 if (shoreBlend)
                 {
                     const double shoreFade
-                        = 1.0 - smoothstep(0.0, params.waterShoreMixMeters, terrainDepth);
+                        = (1.0 - smoothstep(0.0, params.waterShoreMixMeters, terrainDepth)) * shoreWeight;
                     if (shoreFade > 0.0)
                     {
                         // Sand seen through the water: the beach palette row

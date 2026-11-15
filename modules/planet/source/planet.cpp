@@ -507,40 +507,46 @@ std::uint32_t Planet::collectPendingBuilds()
 
 void Planet::evictStaleMeshes()
 {
-    // Bound the cache: meshes not selected for chunkEvictionUpdates updates,
-    // or beyond chunkCacheCapacity entries (oldest first), are released.
-    struct Victim
+    // Bound the cache: meshes not selected for chunkEvictionUpdates updates
+    // age out first, then the oldest survivors keep the cache within
+    // chunkCacheCapacity. A single stamp-ordered pass issues every erase
+    // exactly once: stale stamps are always older than fresh stamps, so the
+    // stale set is a prefix of the sorted list, and the overflow trim only
+    // counts survivors (stale entries were leaving anyway, so counting them
+    // against the trim would push fresh neighbors out of the cache).
+    struct Entry
     {
         ChunkKey      key;
         std::uint64_t stamp;
     };
-    std::vector<Victim> victims;
+    std::vector<Entry> byAge;
+    byAge.reserve(readyMeshes_.size());
     for (const auto &entry : readyMeshes_)
     {
-        const std::uint64_t age = updateCount_ - entry.second.lastSelectedUpdate;
-        if (age > params_.chunkEvictionUpdates)
-        {
-            victims.push_back(Victim{entry.first, entry.second.lastSelectedUpdate});
-        }
+        byAge.push_back(Entry{entry.first, entry.second.lastSelectedUpdate});
     }
-    if (readyMeshes_.size() > params_.chunkCacheCapacity)
+    std::sort(byAge.begin(), byAge.end(), [](const Entry &a, const Entry &b) { return a.stamp < b.stamp; });
+
+    // Erase the stale prefix.
+    std::size_t index       = 0;
+    std::size_t staleErased = 0;
+    for (; index < byAge.size(); ++index)
     {
-        std::vector<Victim> byAge;
-        byAge.reserve(readyMeshes_.size());
-        for (const auto &entry : readyMeshes_)
+        const std::uint64_t age = updateCount_ - byAge[index].stamp;
+        if (age <= params_.chunkEvictionUpdates)
         {
-            byAge.push_back(Victim{entry.first, entry.second.lastSelectedUpdate});
+            break;
         }
-        std::sort(byAge.begin(), byAge.end(), [](const Victim &a, const Victim &b) { return a.stamp < b.stamp; });
-        const std::size_t overflow = readyMeshes_.size() - params_.chunkCacheCapacity;
-        for (std::size_t index = 0; index < overflow && index < byAge.size(); ++index)
-        {
-            victims.push_back(byAge[index]);
-        }
+        readyMeshes_.erase(byAge[index].key);
+        ++staleErased;
     }
-    for (const Victim &victim : victims)
+
+    // Trim the oldest survivors down to capacity.
+    const std::size_t survivors = byAge.size() - staleErased;
+    const std::size_t overflow  = survivors > params_.chunkCacheCapacity ? survivors - params_.chunkCacheCapacity : 0;
+    for (std::size_t extra = 0; extra < overflow && index < byAge.size(); ++extra, ++index)
     {
-        readyMeshes_.erase(victim.key);
+        readyMeshes_.erase(byAge[index].key);
     }
 }
 

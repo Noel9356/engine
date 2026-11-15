@@ -175,9 +175,6 @@ inline double chunkStepMeters(const PlanetGenerationParams &params, std::uint32_
     return std::ldexp(params.derivedRootSizeMeters / static_cast<double>(params.leafGridN), -static_cast<int>(depth));
 }
 
-// Minimum corner of the node's cube in planet-local space.
-Vec3 chunkOriginMeters(const PlanetGenerationParams &params, const ChunkCoord &coord);
-
 // Center of the node's cube in planet-local space - the origin chunk-local
 // vertex offsets are relative to (the facade hands it to consumers as the
 // chunk placement offset).

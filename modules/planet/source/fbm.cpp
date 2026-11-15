@@ -106,6 +106,7 @@ double bandLimitedReliefGradient(const PlanetGenerationParams &params, double lo
     // sample positions by roughly warp_amplitude * radius per unit of its own
     // field, amplifying the composed gradient).
     const double gradient = params.continentAmplitudeMeters / std::max(1.0, params.continentWavelengthMeters)
+        + params.abyssalDepthMeters * (1.0 / 0.58) / std::max(1.0, params.continentWavelengthMeters)
         + params.mountainAmplitudeMeters / std::max(1.0, params.mountainWavelengthMeters)
         + params.mountainAmplitudeMeters / std::max(1.0, params.derivedMountainMassWavelengthMeters)
         + params.mountainAmplitudeMeters / std::max(1.0, params.rangeClusterWavelengthMeters)
@@ -114,13 +115,14 @@ double bandLimitedReliefGradient(const PlanetGenerationParams &params, double lo
         + params.detailAmplitudeMeters / std::max(1.0, params.detailWavelengthMeters);
     const double faded = gradient
         * (lowPassFade(lowPassCutoffMeters, params.continentWavelengthMeters)
+            + lowPassFade(lowPassCutoffMeters, params.continentWavelengthMeters)
             + lowPassFade(lowPassCutoffMeters, params.mountainWavelengthMeters)
             + lowPassFade(lowPassCutoffMeters, params.derivedMountainMassWavelengthMeters)
             + lowPassFade(lowPassCutoffMeters, params.rangeClusterWavelengthMeters)
             + lowPassFade(lowPassCutoffMeters, params.regionalWavelengthMeters)
             + lowPassFade(lowPassCutoffMeters, params.hillWavelengthMeters)
             + lowPassFade(lowPassCutoffMeters, params.detailWavelengthMeters))
-        / 7.0;
+        / 8.0;
     return 3.0 * faded;
 }
 

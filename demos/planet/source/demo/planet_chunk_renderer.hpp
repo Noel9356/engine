@@ -33,7 +33,14 @@ public:
     PlanetChunkRenderer &operator=(const PlanetChunkRenderer &) = delete;
 
     void updateVisibleChunks();
-    void rebuildDrawCommands();
+    // Assembles the frame's draw commands: backdrop shells first (sky dome,
+    // sky cloud deck, space-only atmosphere limb), then the world-anchored
+    // cloud shell, then chunk terrain/water. viewProjection frustum-culls the
+    // chunk draws (the planet's own selection spans the whole visible disk,
+    // including the half behind the camera); eyeAltitudeMeters scales the
+    // water material's roughness (a tight sun glint from orbit, the
+    // configured sea texture close up).
+    void rebuildDrawCommands(const glm::mat4 &viewProjection, double eyeAltitudeMeters);
     void destroy();
 
     // Sky backdrop (see engine/planet/atmosphere.hpp): a static gradient
@@ -66,6 +73,25 @@ public:
     // inside-out quads are not culled), so ground views hide the layer.
     void setCloudLayerVisible(bool visible);
 
+    // Atmosphere limb (space views): a hemisphere around the planet at the
+    // top of the atmosphere, drawn unlit with depth writes off ahead of
+    // everything else. Its vertex gradient runs from the horizon color down
+    // to black at the rim, so the ring between the terrain silhouette and
+    // the shell's own silhouette reads as glowing air instead of a hard
+    // terrain edge on black; the opaque terrain/cloud draws overwrite the
+    // disk interior. Rotated toward the eye per frame, active only when the
+    // eye is outside the atmosphere (the sky dome owns in-air views).
+    void ensureAtmosphereShell();
+    void updateAtmosphereShell(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &sunDirection, bool sunEnabled);
+
+    // Sky cloud deck (ground views): the same contoured coverage mesh as the
+    // world-anchored shell, but built on the unit ball in the sky dome's
+    // frame and drawn unlit ahead of the terrain, so standing cameras see
+    // cloud banks overhead instead of a bare gradient. The dome's per-frame
+    // update rotates, scales and tints it with the sky (see updateSkyDome).
+    void ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal);
+    void setSkyCloudLayerVisible(bool visible);
+
     [[nodiscard]] const std::vector<engine::renderer::RenderDrawCommand> &drawCommands() const noexcept
     {
         return drawCommands_;
@@ -86,6 +112,8 @@ private:
     void destroyChunkMeshes(ChunkMeshHandles &handles);
     void destroySkyDome();
     void destroyCloudLayer();
+    void destroyAtmosphereShell();
+    void destroySkyCloudLayer();
 
     engine::planet::PlanetCapability *planet_ = nullptr;
     engine::planet::PlanetHandle planetHandle_ = engine::planet::invalidPlanet;
@@ -118,6 +146,20 @@ private:
     bool cloudLayerVisible_ = false;
     std::deque<engine::renderer::MeshMaterial> cloudLayerMaterials_;
     std::unique_ptr<engine::planet::CloudField> cloudField_;
+
+    // Atmosphere limb hemisphere (space backdrop; see ensureAtmosphereShell).
+    engine::renderer::MeshHandle atmosphereShell_ = engine::renderer::invalidMesh;
+    glm::mat4 atmosphereShellTransform_{1.0f};
+    bool atmosphereShellActive_ = false;
+    std::deque<engine::renderer::MeshMaterial> atmosphereShellMaterials_;
+
+    // Sky cloud deck (ground backdrop; see ensureSkyCloudLayer): unit-ball
+    // mesh, placed and rotated by the sky dome update every frame.
+    engine::renderer::MeshHandle skyCloudLayer_ = engine::renderer::invalidMesh;
+    glm::mat4 skyCloudTransform_{1.0f};
+    bool skyCloudActive_ = false;
+    bool skyCloudVisible_ = false;
+    std::deque<engine::renderer::MeshMaterial> skyCloudMaterials_;
 };
 
 } // namespace demo::planet_demo

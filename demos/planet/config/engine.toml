@@ -51,6 +51,12 @@ lod_enabled = false
 # clear-color holes wherever the camera looks across rough ground at grazing
 # angles. Disable the cull; the overdraw cost is acceptable for the demo.
 back_face_culling = false
+# Draw-command sorting groups state changes; every planet chunk is its own
+# mesh with a one-material draw, so sorting buys nothing here - and the
+# frame's backdrop ensemble (atmosphere limb, sky dome, cloud decks) is
+# layered by SUBMISSION ORDER ahead of the depth-tested scene. Sorting by
+# mesh handle would scramble that order. Submission order it is.
+draw_sort_mode = "off"
 
 [trust]
 trustModules = ["renderer"]

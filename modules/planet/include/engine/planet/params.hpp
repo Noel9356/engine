@@ -202,6 +202,13 @@ struct PlanetGenerationParams
     // ---- ocean bands (depth thresholds for water color and ocean biomes) -------
     double shallowWaterMeters = 18.0;   // shoreline band above the sea floor
     double deepWaterMeters    = 140.0;  // depth where the ocean counts as "deep"
+    // Abyssal deepening: the sea floor sinks from the shoreline toward this
+    // extra depth as the continent field dips into its basins, carving real
+    // ocean profiles - a shallow, sunlit continental shelf that slopes into
+    // dark abyssal plains - instead of one uniformly shallow shelf (the
+    // base relief amplitudes alone bottom out around the continent
+    // amplitude, which reads as a flooded plain from above). 0 disables.
+    double abyssalDepthMeters = 3500.0;
 
     // ---- climate ---------------------------------------------------------------
     double equatorTemperature = 1.0;   // temperature01 at the equator, sea level
@@ -221,21 +228,27 @@ struct PlanetGenerationParams
     double coastalMoistureBoost = 0.18;     // moisture added right at the shoreline
     double coastalMoistureBandMeters = 400.0; // elevation over which the boost fades out
     bool   moistureLatitudeBands = true;    // ITCZ wet belt + subtropical dry belts
-    double colorVariation = 0.18;           // per-point albedo jitter (0 = flat palette)
+    double colorVariation = 0.24;           // per-point albedo jitter (0 = flat palette)
     double colorVariationWavelengthMeters = 260.0; // feature size of the albedo jitter field
-    double colorVariationGroundWavelengthMeters = 6.0; // metre-scale mottle for ground-level views
-    double snowLineMeters = 1600.0;          // sea-level snow line (drops as climate cools);
+    double colorVariationGroundWavelengthMeters = 3.5; // metre-scale mottle for ground-level views
+    double snowLineMeters = 2400.0;          // sea-level snow line (drops as climate cools);
                                             // only the highest massifs are glaciated, polar
-                                            // caps come from latitude alone
-    double beachWidthMeters = 2.0;          // shoreline band width above sea level (narrow: sand hugs the waterline)
+                                            // caps come from latitude alone. Earth's
+                                            // permanent snow line sits near 4500 m at the
+                                            // equator and ~3000 m in the Alps; against this
+                                            // planet's relief amplitudes the scaled value
+                                            // keeps mid-latitude hills green and snow
+                                            // pinned to high country and polar air.
+    double beachWidthMeters = 5.0;          // shoreline band width above sea level (wide
+                                            // enough to read as sand from a standing eye)
     // Wet-sand band above the waterline: real beaches darken sharply in the
     // swash zone. Two keys keep the band a configuration decision - width and
     // how dark the wet sand reads.
-    double beachWetWidthMeters = 4.0;       // elevation band above sea level that reads wet
+    double beachWetWidthMeters = 6.0;       // elevation band above sea level that reads wet
     double beachWetDarkening   = 0.45;     // 0 = dry sand everywhere, 1 = near-black wet band
-    double rockSlopeThreshold = 0.55;       // slope (1 - up-dot-normal) where rock takes over;
-                                            // high enough that aliased ridge crests stay snowed
-                                            // and terraced risers stay grassed
+    double rockSlopeThreshold = 0.46;       // slope (1 - up-dot-normal) where rock takes over;
+                                            // steep faces scrape soil and grass into bare
+                                            // rock while rolling hills stay green
     double rockStrataContrast = 0.30;       // luminance banding on rock faces, keyed to the
                                             // strata band spacing (sediment layer stripes);
                                             // strong values read as dirt smears at grazing light
@@ -312,7 +325,8 @@ struct PlanetGenerationParams
     // Surf: a white breaker band where the water shallows toward the shore,
     // plus a noise modulation so the breaker reads as patchy wave crests
     // instead of a painted stripe.
-    double waterFoamWidthMeters = 0.8;  // depth band under the surface that reads as surf
+    double waterFoamWidthMeters = 2.5;  // depth band under the surface that reads as surf; wide
+                                        // enough to read as a breaker line from a standing eye
     double waterFoamStrength    = 0.55; // 0 = no foam, 1 = solid white surf band
     // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
     // below seaIceTemperature (the same climate field that drives the land's
@@ -342,6 +356,18 @@ struct PlanetGenerationParams
     double cloudWavelengthMeters  = 9000.0; // feature scale of the cloud field (scale with the radius)
     double cloudAltitudeMeters    = 1200.0; // height of the cloud shell above the datum
     double cloudDetailStrength    = 0.45;   // amplitude of the fine breakup octave relative to the base field
+    // Softness of the cloud edge: the coverage field crosses into cloud over
+    // a band of this half-width. Narrow values scatter crisp cloud clumps;
+    // wide values grow soft decks with veiled edges.
+    double cloudEdgeSoftness = 0.10;
+    // Amplitude of the very-low-frequency weather field that shifts the
+    // coverage threshold regionally (positive weather = cloudier). Stronger
+    // values organize the banks into larger cloudy and clear systems.
+    double cloudWeatherStrength = 0.45;
+    // Amplitude of the latitudinal coverage bands (a wet equatorial belt,
+    // dry subtropics, stormy mid-latitudes), keyed to the spin axis. 0 gives
+    // a latitude-blind field.
+    double cloudLatitudeBandStrength = 0.16;
     float cloudColor[3]          = {0.96f, 0.97f, 1.0f}; // linear RGB of the cloud tops
 
     // ---- derived values (filled by validate(), read-only afterwards) -----------

@@ -259,6 +259,11 @@ private:
         glm::mat4              viewProjection          = glm::mat4(1.0f);
         glm::mat3              modelNormalMatrix       = glm::mat3(1.0f);
         bool                   unlit                   = false;
+        // Depth writes follow the material's depthWrite flag; depth testing
+        // always applies. Backdrop passes (atmosphere shell, sky dome) draw
+        // with writes off so the opaque passes drawn after them own the
+        // silhouette interior.
+        bool                   depthWrite              = true;
         bool                   useTransformCache       = false;
         std::uint32_t          transformGeneration     = 0;
         std::size_t            vertexCount             = 0;

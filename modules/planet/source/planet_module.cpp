@@ -73,6 +73,7 @@ void setSeed(PlanetGenerationParams &params, double value)
 
 void setRadius(PlanetGenerationParams &params, double value) { params.radiusMeters = value; }
 void setSeaLevel(PlanetGenerationParams &params, double value) { params.seaLevelOffsetMeters = value; }
+void setAbyssalDepth(PlanetGenerationParams &params, double value) { params.abyssalDepthMeters = value; }
 void setLeafGridN(PlanetGenerationParams &params, double value) { params.leafGridN = static_cast<std::uint32_t>(value); }
 void setTargetVoxel(PlanetGenerationParams &params, double value) { params.targetVoxelMeters = value; }
 void setMaxDepthLimit(PlanetGenerationParams &params, double value) { params.maxDepthLimit = static_cast<std::uint32_t>(value); }
@@ -181,11 +182,15 @@ void setCloudCoverage(PlanetGenerationParams &params, double value) { params.clo
 void setCloudWavelength(PlanetGenerationParams &params, double value) { params.cloudWavelengthMeters = value; }
 void setCloudAltitude(PlanetGenerationParams &params, double value) { params.cloudAltitudeMeters = value; }
 void setCloudDetailStrength(PlanetGenerationParams &params, double value) { params.cloudDetailStrength = value; }
+void setCloudEdgeSoftness(PlanetGenerationParams &params, double value) { params.cloudEdgeSoftness = value; }
+void setCloudWeatherStrength(PlanetGenerationParams &params, double value) { params.cloudWeatherStrength = value; }
+void setCloudLatitudeBandStrength(PlanetGenerationParams &params, double value) { params.cloudLatitudeBandStrength = value; }
 
 constexpr SettingRow kSettingRows[] = {
     {"seed",                      SettingKind::Integer, setSeed},
     {"radius_meters",             SettingKind::Floating, setRadius},
     {"sea_level_offset_meters",   SettingKind::Floating, setSeaLevel},
+    {"abyssal_depth_meters",      SettingKind::Floating, setAbyssalDepth},
     {"leaf_grid_n",               SettingKind::Integer, setLeafGridN},
     {"target_voxel_meters",       SettingKind::Floating, setTargetVoxel},
     {"max_depth_limit",           SettingKind::Integer, setMaxDepthLimit},
@@ -277,6 +282,9 @@ constexpr SettingRow kSettingRows[] = {
     {"cloud_wavelength_meters",       SettingKind::Floating, setCloudWavelength},
     {"cloud_altitude_meters",         SettingKind::Floating, setCloudAltitude},
     {"cloud_detail_strength",         SettingKind::Floating, setCloudDetailStrength},
+    {"cloud_edge_softness",           SettingKind::Floating, setCloudEdgeSoftness},
+    {"cloud_weather_strength",        SettingKind::Floating, setCloudWeatherStrength},
+    {"cloud_latitude_band_strength",  SettingKind::Floating, setCloudLatitudeBandStrength},
     {"sea_ice_temperature",           SettingKind::Floating, setSeaIceTemperature},
     {"sea_ice_transition",            SettingKind::Floating, setSeaIceTransition},
     {"water_wave_amplitude",          SettingKind::Floating, setWaterWaveAmplitude},
