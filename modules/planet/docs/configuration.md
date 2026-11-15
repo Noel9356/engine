@@ -59,9 +59,13 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `detail_wavelength_meters` | `120.0` | Feature size of the detail layer's base octave. Keep the finest octave (base / 2^(octaves-1)) at 2.5+ voxel sizes or coarse LOD chunks alias it into lumps. |
 | `detail_plains_fraction` | `0.22` | Detail strength kept on flat ground (above ~0.3 boils plains into noise lumps). |
 | `detail_octaves` | `4` | fBm octaves of the detail layer. |
-| `terrace_strength` | `0.60` | 0 = smooth terrain, 1 = full plateaus (mesa country). Terracing is additionally gated to genuinely terraced country (cliff mask) inside the field, so open slopes never corduroy. |
-| `terrace_steps` | `9.0` | Approximate plateau count across the relief range. |
-| `cliff_wavelength_meters` | `1400.0` | Scale of the terrace mask field. |
+| `terrace_strength` | `0.95` | 0 = smooth terrain, 1 = full plateaus (mesa country). Terracing is gated to genuinely steep country (cliff mask) inside the field, so open slopes never corduroy. |
+| `terrace_steps` | `9.0` | Approximate plateau count across the relief range (step height = total relief / steps; 9 steps over the showcase relief makes ~200 m benches). |
+| `terrace_riser_fraction` | `0.15` | Fraction of each terrace step the RISER spans. The riser's grade is the flank slope divided by this fraction, so small values build genuinely cliff-like faces: 0.15 turns a 0.35-grade flank into a ~60-degree rock wall (with strata and overhang ledges riding the same mask); 0.4 smears the step into a long shoulder. Below ~0.1 the riser thins under one voxel. |
+| `cliff_wavelength_meters` | `1400.0` | Scale of the cliff-mask variety modulation (spacing between mask-band variations). |
+| `cliff_steepness_low` | `0.42` | Cliff-mask gate over the terrain's steepness energy: where the mask opens (terracing/strata/overhangs begin). Lower widens terraced country, higher restricts it to the steepest flanks. |
+| `cliff_steepness_high` | `0.70` | Steepness energy where the mask saturates (full-strength terraces, strata and overhangs). Keep at least ~0.2 above `cliff_steepness_low`. |
+| `cliff_sharpness` | `2.6` | Exponent concentrating the hill-flank term of the cliff mask. Higher narrows terraced hill country into tighter bands; the mountain-crest term is unaffected. |
 
 ## True-3D terms (what a heightmap cannot do)
 
@@ -86,16 +90,18 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | --- | --- | --- |
 | `shallow_water_meters` | `18.0` | Shoreline band classified as shallow ocean. |
 | `deep_water_meters` | `140.0` | Depth where the ocean counts as deep. |
-| `water_depth_tint_meters` | `70.0` | Depth over which the water surface tint saturates. |
+| `water_depth_tint_meters` | `70.0` | Depth over which the water surface tint saturates in the BLUE channel; red and green saturate at fixed fractions of it (0.28x and 0.6x - the physical absorption ordering, red first), so the ramp runs shallow turquoise -> green-teal mid shelf -> navy deep. |
 | `water_enabled` | `true` | Generate water surface patches (marching cubes on the sea sphere). |
-| `water_color_shallow` | `[0.060, 0.205, 0.275]` | Linear RGB at zero depth. |
+| `water_color_shallow` | `[0.085, 0.320, 0.330]` | Linear RGB at zero depth (the turquoise of sunlit shallow water over sand). |
 | `water_color_deep` | `[0.012, 0.060, 0.130]` | Linear RGB at full tint depth. |
 | `water_roughness` | `0.42` | Gloss hint handed to the renderer's water material. Low values give mirror-sharp sun glints, which makes the coarse far-water facets band at grazing angles; higher values spread the highlight. |
 | `sea_ice_temperature` | `0.10` | Sea-level temperature below which the water surface freezes. The field is the same climate field that drives the land's freeze line, so polar oceans ice over where the land turns tundra, with an organic, noise-shaped edge. `0` disables sea ice. |
 | `sea_ice_transition` | `0.05` | Temperature range around `sea_ice_temperature` over which the ice color blends in. |
 | `water_color_ice` | `[0.80, 0.86, 0.90]` | Linear RGB of the frozen water surface. |
-| `water_wave_amplitude` | `0.12` | Radian-scale tilt applied to the water surface normals by a deterministic noise field, giving the sea a sun-glint texture at close range. The tilt fades out under the LOD band limit like every other noise term, so coarse chunks keep a smooth sea. `0` gives a perfectly smooth surface. |
-| `water_wave_wavelength_meters` | `8.0` | Feature size of the wave-slope field. |
+| `water_wave_amplitude` | `0.12` | Radian-scale tilt applied to the water surface normals by a deterministic two-scale noise field (the configured swell plus a half-wavelength chop at a third of the tilt), giving the sea a sun-glint texture with sparkle at close range. The tilt fades out under the LOD band limit like every other noise term, so coarse chunks keep a smooth sea. `0` gives a perfectly smooth surface. |
+| `water_wave_wavelength_meters` | `8.0` | Feature size of the wave-swell field (the chop rides at half of it). |
+| `water_foam_width_meters` | `4.0` | Depth band under the surface that reads as surf - the breaker zone hugging the shoreline. |
+| `water_foam_strength` | `0.65` | 0 = no surf, 1 = a solid white breaker band. A noise modulation breaks the band into wave crests so it does not read as paint. |
 
 ## Climate and biomes
 
@@ -112,13 +118,15 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `coastal_moisture_boost` | `0.18` | Onshore humidity: low land near the sea stays green (without it the shoreline belt paints a beige desert fringe around every landmass). |
 | `coastal_moisture_band_meters` | `400.0` | Elevation over which the coastal moisture boost fades out. |
 | `moisture_latitude_bands` | `true` | ITCZ wet belt + subtropical dry belts + temperate wet belt. |
-| `color_variation` | `0.14` | Per-point albedo jitter (0 = flat palette). Each color channel is weighted differently, so the variation reads as subtle hue mottling (warm/cool patches) instead of pure luminance banding. |
+| `color_variation` | `0.18` | Per-point albedo jitter (0 = flat palette). Each color channel is weighted differently, so the variation reads as subtle hue mottling (warm/cool patches) instead of pure luminance banding. Octave scales below the chunk's VERTEX spacing fade out (band-limited like the geometric noise), so coarse LOD chunks do not alias the mottle into speckle. |
 | `color_variation_wavelength_meters` | `260.0` | Feature size of the albedo jitter field. The field carries three scales: the configured wavelength mottles biome sheets at globe scale, an octave at an eighth of it covers the mid-range, and an octave at `color_variation_ground_wavelength_meters` keeps ground-level views from reading as one unbroken color. |
 | `color_variation_ground_wavelength_meters` | `6.0` | Metre-scale mottle octave of the albedo jitter field; the surface texture a walking camera sees. Clamped to at most `color_variation_wavelength_meters`. |
 | `snow_line_meters` | `1600.0` | Sea-level snow line; drops as the local climate cools. Only true peaks are glaciated; polar caps come from latitude alone. |
 | `beach_width_meters` | `2.0` | Shoreline band above sea level. Kept narrow: on flattened coastal plains a wide band paints every drainage dip as sand. |
-| `rock_slope_threshold` | `0.62` | Slope (1 - dot(normal, radial)) where bare rock takes over (about 32 degrees). Low enough for genuine cliff faces to show rock, high enough that aliased ridge crests stay snow-covered instead of speckling with rock dots. |
-| `rock_strata_contrast` | `0.10` | Luminance banding of rock faces at the strata band spacing (sediment stripes). 0 disables; keyed to `strata_band_meters`. |
+| `beach_wet_width_meters` | `4.0` | Swash band above the waterline that reads as wet sand (real beaches darken sharply where the last wave reached). 0 disables. |
+| `beach_wet_darkening` | `0.45` | How dark the wet band gets (0 = dry sand everywhere, 1 = near-black rim). |
+| `rock_slope_threshold` | `0.55` | Slope (1 - dot(normal, radial)) where bare rock takes over (about 56-degree faces). Low enough that genuine cliff risers show rock, high enough that aliased ridge crests stay snow-covered instead of speckling with rock dots. |
+| `rock_strata_contrast` | `0.30` | Luminance banding of rock faces at the strata band spacing (sediment stripes). 0 disables; keyed to `strata_band_meters`. |
 | `biome_blend_width` | `0.06` | Half-width of the biome color blend on the temperature/moisture axes. Biome colors interpolate between palette rows instead of hard-switching per vertex (hard switches smear into pale stains across triangles). |
 | `slope_blend_width` | `0.08` | Blend half-width around the rock slope threshold. |
 | `elevation_blend_fraction` | `0.12` | Snow-line and water-band color blends as a fraction of the band width. |
@@ -150,8 +158,8 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 | --- | --- | --- |
 | `atmosphere_enabled` | `true` | Master switch; `false` leaves the sky entirely to the consumer. |
 | `atmosphere_height_meters` | `20000.0` | Eye altitude over which the sky fades to black (space). The sky is at full strength below 15% of this height. |
-| `atmosphere_zenith_color` | `[0.055, 0.155, 0.480]` | Linear RGB at the zenith. |
-| `atmosphere_horizon_color` | `[0.420, 0.580, 0.820]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
+| `atmosphere_zenith_color` | `[0.040, 0.130, 0.460]` | Linear RGB at the zenith. The defaults are chosen for the renderer's shared tone mapping (which brightens midtones), so the pre-tone-map values sit deeper and more saturated than the sky they finally display. |
+| `atmosphere_horizon_color` | `[0.220, 0.400, 0.780]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
 
 ## Usage notes
 
@@ -159,5 +167,5 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 - **Performance knobs.** Visible chunk count scales roughly with `1 / target_voxel_meters^2` near the camera and with `lod_angular_voxel_radians` overall. `leaf_grid_n` trades chunk granularity against per-chunk cost. `max_concurrent_builds` / `max_new_builds_per_update` pace streaming (builds run on the module's dedicated worker pool, one thread per permitted concurrent build); caves cost two extra noise fields per sample. Terrain layers whose mask is zero for a sample (mountains over the ocean, detail fields under water) are skipped, so coastal and ocean geometry is cheaper than mountainous terrain at the same depth.
 - **Chunk boundaries and seams.** Same-depth chunks weld bit-identically (one global lattice); across depth changes the octree keeps a 2:1 balance and the fine side CONFORMS its boundary-plane samples to the coarse lattice's interpolant on segments whose far cell is a rendered coarse leaf, then EXTENDS its surface one cell layer past those faces - the fine and coarse surfaces interpenetrate along the whole transition, so no viewing ray can slip between them. Conform masks are recomputed whenever the visible set changes; chunks whose stored mesh was built under a different mask rebuild automatically (the stale mesh keeps rendering until the rebuild lands, and each chunk view carries a content hash so consumers refresh their uploaded copies when the rebuild arrives).
 - **Surface normals.** Vertex normals average the gradient of the (up to) four cells adjacent to the edge, in canonical min-corner form - a pure function of the edge's global position, so shared boundary vertices stay bit-identical across chunks, and steep creases shade smoothly across their faces.
-- **Water patches.** Water depth tint and foam sample `densityAt` directly (one pure field), so the tint is continuous across chunk and LOD boundaries; cells fully buried under terrain are skipped, which removes grazing-angle slivers where the sea sphere grazes the surface. The surface freezes where `sea_ice_temperature` is reached (see the oceans table) and the wave-slope field roughens the normals at close range; both follow the same pure-field rules, so ice edges and glint texture stay continuous across chunks.
+- **Water patches.** The water depth tint uses PER-CHANNEL saturation depths (water absorbs red fastest, green next, blue last, so the ramp runs shallow turquoise -> green-teal mid shelf -> navy deep) sampled from `densityAt` directly (one pure field), so the tint is continuous across chunk and LOD boundaries; cells fully buried under terrain are skipped, which removes grazing-angle slivers where the sea sphere grazes the surface. A noise-modulated surf band (`water_foam_width_meters` / `water_foam_strength`) marks the breaker zone along the shoreline, and the wave-slope field carries two scales (the configured swell plus a half-wavelength chop) for close-range glint texture. The surface freezes where `sea_ice_temperature` is reached (see the oceans table); all follow the same pure-field rules, so ice edges and glint texture stay continuous across chunks.
 - **Surface artefacts checklist.** Pale stains on green terrain: raise `biome_blend_width`/`slope_blend_width`. Dotted dark lines along ridges: raise `rock_slope_threshold`. Shredded cliff faces: lower `strata_warp`, raise `strata_band_meters`, lower `overhang_amplitude_meters`. Sub-sea pond webs near coasts: raise `coastal_flatten_meters`. Spiky silhouettes at any scale: raise `lod_band_limit_factor` (and keep the finest detail octave at 2.5+ voxels).

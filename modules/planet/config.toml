@@ -97,9 +97,22 @@ detail_amplitude_meters      = 14.0
 detail_wavelength_meters     = 120.0
 detail_plains_fraction       = 0.22
 detail_octaves               = 4
-terrace_strength             = 0.60
+terrace_strength             = 0.95
 terrace_steps                = 9.0
+# Fraction of each terrace step the riser spans; small values make the
+# genuinely cliff-like faces (grade = flank slope / fraction). 0.4 smears
+# steps into long shoulders; below ~0.1 the riser thins under one voxel.
+terrace_riser_fraction       = 0.15
 cliff_wavelength_meters      = 1400.0
+# Cliff-mask gate over the terrain's own steepness energy. Terracing, strata
+# banding and overhang weighting ride this mask, so the gate decides where
+# mesa country forms: the mask opens where the cliff-noise crest bands
+# (cliff_sharpness concentrates them) or mountain massif flanks carry real
+# slope, keeping plains smooth. Lower cliff_steepness_low widens terraced
+# country; raise cliff_sharpness to tighten it into narrow band country.
+cliff_steepness_low          = 0.42
+cliff_steepness_high         = 0.70
+cliff_sharpness              = 2.6
 
 # true-3D terms (overhangs, strata, caves)
 # overhang_plains_fraction: how much 3D displacement survives on flat ground;
@@ -130,11 +143,17 @@ shallow_water_meters    = 18.0
 deep_water_meters       = 140.0
 water_depth_tint_meters = 70.0
 water_enabled           = true
-water_color_shallow     = [0.060, 0.205, 0.275]
+water_color_shallow     = [0.085, 0.320, 0.330]
 water_color_deep        = [0.012, 0.060, 0.130]
 # gloss of the ocean surface: low = mirror-sharp sun glints (the coarse
 # far-water facets then band at grazing angles), high = matte.
 water_roughness         = 0.42
+# Surf: a white breaker band where the water shallows toward the shore,
+# noise-modulated so it breaks into wave crests instead of a painted stripe.
+# Strength 0 disables; width is the depth band under the surface that reads
+# as surf (real breaker zones sit in the first few meters of depth).
+water_foam_width_meters = 4.0
+water_foam_strength    = 0.65
 
 # sea ice: the water surface freezes where the SEA-LEVEL temperature drops
 # below sea_ice_temperature (the same climate field that drives the land's
@@ -179,8 +198,8 @@ max_live_planets        = 16
 # blue). atmosphere_enabled = false leaves the sky to the consumer.
 atmosphere_enabled         = true
 atmosphere_height_meters   = 20000.0
-atmosphere_zenith_color    = [0.055, 0.155, 0.480]
-atmosphere_horizon_color   = [0.420, 0.580, 0.820]
+atmosphere_zenith_color    = [0.040, 0.130, 0.460]
+atmosphere_horizon_color   = [0.220, 0.400, 0.780]
 
 # climate
 equator_temperature        = 1.0
@@ -200,7 +219,7 @@ moisture_warp_amplitude    = 0.22
 coastal_moisture_boost     = 0.18
 coastal_moisture_band_meters = 400.0
 moisture_latitude_bands    = true
-color_variation            = 0.14
+color_variation            = 0.18
 # feature size of the albedo jitter field (the mottling that keeps large
 # biomes from reading as flat plastic sheets).
 color_variation_wavelength_meters = 260.0
@@ -209,10 +228,15 @@ color_variation_wavelength_meters = 260.0
 color_variation_ground_wavelength_meters = 6.0
 snow_line_meters           = 1600.0
 beach_width_meters         = 2.0
-rock_slope_threshold       = 0.62
+# Swash band: sand right above the waterline reads wet and dark. Width 0
+# disables; the darkening keys how dark the wet sand gets (0.45 = clearly
+# darker but still sand-colored).
+beach_wet_width_meters     = 4.0
+beach_wet_darkening        = 0.45
+rock_slope_threshold       = 0.55
 # luminance banding of rock faces at the strata band spacing (sediment
 # stripes); 0 disables.
-rock_strata_contrast       = 0.10
+rock_strata_contrast       = 0.30
 
 # biome color BLENDING (see docs/configuration.md): biome colors interpolate
 # between palette rows over these widths instead of hard-switching per vertex

@@ -225,6 +225,23 @@ int main(int argc, char **argv)
             return elevation < snowLine - snowBand;
         };
     };
+    // Mountain-foothill window for the cliffs view: terraced mountain
+    // country is cold (the lapse rate takes 0.2-0.8 temperature01 off by
+    // 400-900 m of altitude), so a warm-land window zeroes nearly every
+    // mountain candidate - only tropical ranges survive, and those rarely
+    // carry terraced flanks at showcase scale. Taiga/tundra air is the
+    // honest climate on terraced massifs; the picker's own gates add the
+    // terraced-mountain requirement (it needs the relief sample, which this
+    // predicate signature has not).
+    const auto mountainFoothillWindow = [](double low, double high)
+    {
+        return [low, high](double elevation, engine::planet::Biome biome, double,
+            const planet::PlanetGenerationParams &)
+        {
+            return elevation >= low && elevation <= high
+                && biome != planet::Biome::Snow && biome != planet::Biome::Beach;
+        };
+    };
     const auto warmGreenLandWindow = [warmLandWindow](double low, double high)
     {
         auto warm = warmLandWindow(low, high);
@@ -319,8 +336,9 @@ int main(int argc, char **argv)
             // Below the snow blend, at any elevation where terraced cliff
             // faces and overhangs live (the snow blend rides the climate
             // line, so the window adapts to temperature). Higher country than
-            // the other views: rock faces and strata need real relief.
-            found = pickViewpoint(*planetCapability, planetHandle, warmLandWindow(250.0, 800.0), ProbePolicy::Mountain, 140.0,
+            // the other views: rock faces and strata need real relief. The
+            // picker adds the terraced-country gate (cliff mask at the spot).
+            found = pickViewpoint(*planetCapability, planetHandle, mountainFoothillWindow(150.0, 1200.0), ProbePolicy::Mountain, 140.0,
                 sunDirection, viewpoint);
         }
         else // surface

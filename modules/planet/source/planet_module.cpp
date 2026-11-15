@@ -103,6 +103,7 @@ void setDetailWavelength(PlanetGenerationParams &params, double value) { params.
 void setDetailPlainsFraction(PlanetGenerationParams &params, double value) { params.detailPlainsFraction = value; }
 void setDetailOctaves(PlanetGenerationParams &params, double value) { params.detailFbm.octaves = static_cast<std::uint32_t>(value); }
 void setTerraceStrength(PlanetGenerationParams &params, double value) { params.terraceStrength = value; }
+void setTerraceRiserFraction(PlanetGenerationParams &params, double value) { params.terraceRiserFraction = value; }
 void setTerraceSteps(PlanetGenerationParams &params, double value) { params.terraceSteps = value; }
 void setCliffWavelength(PlanetGenerationParams &params, double value) { params.cliffWavelengthMeters = value; }
 void setOverhangAmplitude(PlanetGenerationParams &params, double value) { params.overhangAmplitudeMeters = value; }
@@ -160,6 +161,13 @@ void setSwimSpeed(PlanetGenerationParams &params, double value) { params.swimSpe
 void setSwimWadeDepth(PlanetGenerationParams &params, double value) { params.swimWadeDepthMeters = value; }
 void setAtmosphereEnabled(PlanetGenerationParams &params, double value) { params.atmosphereEnabled = value != 0.0; }
 void setAtmosphereHeight(PlanetGenerationParams &params, double value) { params.atmosphereHeightMeters = value; }
+void setCliffSteepnessLow(PlanetGenerationParams &params, double value) { params.cliffSteepnessLow = value; }
+void setCliffSteepnessHigh(PlanetGenerationParams &params, double value) { params.cliffSteepnessHigh = value; }
+void setCliffSharpness(PlanetGenerationParams &params, double value) { params.cliffSharpness = value; }
+void setBeachWetWidth(PlanetGenerationParams &params, double value) { params.beachWetWidthMeters = value; }
+void setBeachWetDarkening(PlanetGenerationParams &params, double value) { params.beachWetDarkening = value; }
+void setWaterFoamWidth(PlanetGenerationParams &params, double value) { params.waterFoamWidthMeters = value; }
+void setWaterFoamStrength(PlanetGenerationParams &params, double value) { params.waterFoamStrength = value; }
 
 constexpr SettingRow kSettingRows[] = {
     {"seed",                      SettingKind::Integer, setSeed},
@@ -203,7 +211,11 @@ constexpr SettingRow kSettingRows[] = {
     {"detail_octaves",                SettingKind::Integer,  setDetailOctaves},
     {"terrace_strength",              SettingKind::Floating, setTerraceStrength},
     {"terrace_steps",                 SettingKind::Floating, setTerraceSteps},
+    {"terrace_riser_fraction",        SettingKind::Floating, setTerraceRiserFraction},
     {"cliff_wavelength_meters",       SettingKind::Floating, setCliffWavelength},
+    {"cliff_steepness_low",           SettingKind::Floating, setCliffSteepnessLow},
+    {"cliff_steepness_high",          SettingKind::Floating, setCliffSteepnessHigh},
+    {"cliff_sharpness",               SettingKind::Floating, setCliffSharpness},
     {"overhang_amplitude_meters",     SettingKind::Floating, setOverhangAmplitude},
     {"overhang_wavelength_meters",    SettingKind::Floating, setOverhangWavelength},
     {"overhang_plains_fraction",      SettingKind::Floating, setOverhangPlainsFraction},
@@ -235,6 +247,8 @@ constexpr SettingRow kSettingRows[] = {
     {"color_variation_ground_wavelength_meters", SettingKind::Floating, setColorVariationGroundWavelength},
     {"snow_line_meters",              SettingKind::Floating, setSnowLine},
     {"beach_width_meters",            SettingKind::Floating, setBeachWidth},
+    {"beach_wet_width_meters",        SettingKind::Floating, setBeachWetWidth},
+    {"beach_wet_darkening",           SettingKind::Floating, setBeachWetDarkening},
     {"rock_slope_threshold",          SettingKind::Floating, setRockSlopeThreshold},
     {"rock_strata_contrast",          SettingKind::Floating, setRockStrataContrast},
     {"biome_blend_width",             SettingKind::Floating, setBiomeBlendWidth},
@@ -242,6 +256,8 @@ constexpr SettingRow kSettingRows[] = {
     {"elevation_blend_fraction",      SettingKind::Floating, setElevationBlendFraction},
     {"water_enabled",                 SettingKind::Boolean,  setWaterEnabled},
     {"water_roughness",               SettingKind::Floating, setWaterRoughness},
+    {"water_foam_width_meters",       SettingKind::Floating, setWaterFoamWidth},
+    {"water_foam_strength",           SettingKind::Floating, setWaterFoamStrength},
     {"sea_ice_temperature",           SettingKind::Floating, setSeaIceTemperature},
     {"sea_ice_transition",            SettingKind::Floating, setSeaIceTransition},
     {"water_wave_amplitude",          SettingKind::Floating, setWaterWaveAmplitude},
@@ -432,7 +448,12 @@ public:
         }
 
         // Each live planet owns a worker pool; the configured cap bounds how
-        // many pools one module instance can stack.
+        // many pools one module instance can stack. A cheap pre-check fails
+        // fast under the lock; the decisive check and the insertion share
+        // ONE critical section (and the handle counter lives under the same
+        // lock), so concurrent createPlanet calls can never overshoot the
+        // cap or collide on a handle. The planet itself is constructed
+        // outside the lock (it spins up its worker pool).
         {
             std::lock_guard<std::mutex> lock(planetsMutex_);
             if (planets_.size() >= params.maxLivePlanets)
@@ -441,11 +462,16 @@ public:
                 return invalidPlanet;
             }
         }
-
-        auto               instance = std::make_unique<Planet>(params);
-        const PlanetHandle handle   = nextHandle_++;
+        auto         instance = std::make_unique<Planet>(params);
+        PlanetHandle handle;
         {
             std::lock_guard<std::mutex> lock(planetsMutex_);
+            if (planets_.size() >= params.maxLivePlanets)
+            {
+                setError(error, PlanetError::CapacityReached);
+                return invalidPlanet;
+            }
+            handle = nextHandle_++;
             planets_.emplace(handle, std::move(instance));
         }
         setError(error, PlanetError::None);
@@ -601,8 +627,9 @@ private:
             // The chunk key packs the depth into 4 bits (see types.hpp);
             // out-of-range coordinates would hash a lattice the octree can
             // never address, so reject them instead of returning a hash of
-            // numerically meaningless geometry.
-            if (depth >= maxSupportedOctreeDepth)
+            // numerically meaningless geometry. maxSupportedOctreeDepth
+            // itself is addressable (the 4-bit field holds it).
+            if (depth > maxSupportedOctreeDepth)
             {
                 return 0;
             }

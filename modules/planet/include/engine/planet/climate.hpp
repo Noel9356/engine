@@ -37,7 +37,14 @@ public:
     // planet-local radial direction), radiusMeters is the point's distance
     // from the planet center and slope01 is 0 for ground flush with the
     // gravity gradient and 1 for vertical cliff faces (1 - dot(normal, down)).
-    ClimateSample sample(const Vec3 &direction, double radiusMeters, double slope01) const;
+    // lowPassCutoffMeters optionally band-limits the ALBEDO jitter fields
+    // (like every other noise term of a rendered chunk): below the cutoff the
+    // metre-scale mottle fades out, so coarse LOD chunks stop aliasing
+    // sub-voxel color speckle. The climate fields themselves (temperature,
+    // moisture, biome) are always evaluated in full - they are smooth at
+    // landscape scale and consumers (capability sampling, the water pass)
+    // need their true values.
+    ClimateSample sample(const Vec3 &direction, double radiusMeters, double slope01, double lowPassCutoffMeters = 0.0) const;
 
     // Sea-level temperature/moisture without terrain effects; exposed for
     // debugging and the preview tooling.

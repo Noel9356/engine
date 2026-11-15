@@ -78,8 +78,47 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
 {
     planet::PlanetGenerationParams params{};
     planetCapability.copyGenerationParams(planetCapability.self, planet, &params);
-    const std::vector<planet::Vec3> candidates = goldenSpiralDirections(256);
     const planet::Vec3 spinAxis{params.axis[0], params.axis[1], params.axis[2]};
+
+    // Mountain policy searches a much finer candidate set: terraced massif
+    // flanks cover only a few percent of the globe, and the plain 256-point
+    // spiral can miss them entirely. The coarse relief sample
+    // (sampleRelief - one field evaluation, no surface march) pre-filters
+    // the fine spiral down to candidates that already stand on terraced
+    // mountain country; the full probe/fan machinery then runs on those.
+    std::vector<planet::Vec3> candidates;
+    if (policy == ProbePolicy::Mountain)
+    {
+        const std::vector<planet::Vec3> fine = goldenSpiralDirections(2048);
+        candidates.reserve(96);
+        for (const planet::Vec3 &direction : fine)
+        {
+            if (candidates.size() >= 96)
+            {
+                break;
+            }
+            planet::ReliefSample relief{};
+            const double dirArray[3] = {direction.x, direction.y, direction.z};
+            if (!planetCapability.sampleRelief(planetCapability.self, planet, dirArray, &relief))
+            {
+                continue;
+            }
+            if (relief.cliffFactor < 0.45 || relief.mountainFactor < 0.40)
+            {
+                continue;
+            }
+            const double elevation = params.radiusMeters + relief.heightMeters - params.derivedSeaRadiusMeters;
+            if (elevation < 150.0 || elevation > 1200.0)
+            {
+                continue;
+            }
+            candidates.push_back(direction);
+        }
+    }
+    else
+    {
+        candidates = goldenSpiralDirections(256);
+    }
 
     std::size_t probesTotal = 0;
     bool        haveBest    = false;
@@ -101,6 +140,20 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
 
     for (const planet::Vec3 &direction : candidates)
     {
+        // Day-side gate: the module's atmosphere tints the sky by the sun's
+        // elevation above the spot's local horizon, so a viewpoint on the
+        // planet's night side renders a night sky over terrain the fixed
+        // global sun still lights (the renderer carries no terminator).
+        // Keep candidates where the sun stands at least ~15 deg over their
+        // local horizon; the remaining hemispheres hold plenty of spots.
+        if (sunDirection.x != 0.0 || sunDirection.y != 0.0 || sunDirection.z != 0.0)
+        {
+            const planet::Vec3 sunUnit = planet::normalized(sunDirection);
+            if (planet::dot(sunUnit, direction) < 0.25)
+            {
+                continue;
+            }
+        }
         const double directionArray[3] = {direction.x, direction.y, direction.z};
         double       radius            = 0.0;
         if (!planetCapability.sampleSurfaceRadius(planetCapability.self, planet, directionArray, &radius))
@@ -120,6 +173,27 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         if (!predicate(elevation, biome, temperature01, params))
         {
             continue;
+        }
+
+        // Mountain policy: the SPOT itself must stand on terraced MOUNTAIN
+        // country - the cliff mask rides the terrain's own steepness, so a
+        // high mask puts quantized terrace steps, strata bands and overhang
+        // ledges under and around the camera, and the mountain gate keeps
+        // the relief amplitude that crosses several terrace steps (hill
+        // country spans about one step, which quantization can only flatten
+        // into benches). That gate - not a distant bulk wall - is what makes
+        // the view show cliff country: planet-scale mountain flanks average
+        // ~0.3 m/m of slope, so 35-degree walls at the probe scale are
+        // vanishingly rare and wall-gated picks fell back to meadows.
+        if (policy == ProbePolicy::Mountain)
+        {
+            planet::ReliefSample spotRelief{};
+            const double spotDirArray[3] = {direction.x, direction.y, direction.z};
+            if (!planetCapability.sampleRelief(planetCapability.self, planet, spotDirArray, &spotRelief)
+                || spotRelief.cliffFactor < 0.45 || spotRelief.mountainFactor < 0.40)
+            {
+                continue;
+            }
         }
 
         // Neighborhood check: the rendered frame spans roughly 0.5-1.5 km
@@ -144,6 +218,14 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         std::size_t probes   = 0;
         std::vector<double> probeElevations;
         probeElevations.reserve(24);
+        // Cliff-wall bookkeeping (Mountain policy): the strongest terraced
+        // rise found in ANY compass direction around the spot. The wall is
+        // the showcase of the cliffs view, and searching the full compass
+        // rose (not just the five camera yaws) finds walls the fan would
+        // have missed; the camera then aims at the stored axis.
+        double      bestWallScore = -1.0;
+        planet::Vec3 cliffWallTangent{};
+        bool        hasCliffWall  = false;
         for (std::size_t ring = 0; ring < ringCount; ++ring)
         {
             for (std::size_t compass = 0; compass < 8; ++compass)
@@ -184,19 +266,41 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 }
                 else if (policy == ProbePolicy::Mountain)
                 {
-                    // The cliffs view stands in low-mountain country and
-                    // LOOKS at high country. Low probes (below 500 m) must be
-                    // traversable land - grass, forest and BARE ROCK all
-                    // qualify (cliff faces are rock); snowfields and deserts
-                    // at foothill height would wash the frame. The
-                    // temperature gate stays low because lapse rate cools
-                    // foothill air fast on mountainous planets.
+                    // The cliffs view stands IN terraced mountain country,
+                    // which the lapse rate keeps cold: taiga and tundra air
+                    // is the honest climate there, and the picker's
+                    // snow-blend window (not this gate) keeps white slopes
+                    // out of the frame. Low probes (below 500 m) must be
+                    // traversable land - grass, taiga, tundra and BARE ROCK
+                    // all qualify; only actual snowfields, deserts and
+                    // beaches would wash the frame.
                     probeOk = hopElevation > 500.0
                         || (hopClimate.biome != engine::planet::Biome::Snow
-                            && hopClimate.biome != engine::planet::Biome::Tundra
                             && hopClimate.biome != engine::planet::Biome::Desert
-                            && hopClimate.biome != engine::planet::Biome::Beach
-                            && hopClimate.temperature01 > 0.32);
+                            && hopClimate.biome != engine::planet::Biome::Beach);
+                    // Wall detection rides the same probes: a TERRACED rise
+                    // (the cliff mask at the probe is high, so the flank
+                    // carries terracing/strata) that is TALL (>= 90 m) and
+                    // steep at bulk scale (>= 0.45 m/m - the quantized
+                    // terrace risers supply the near-vertical faces).
+                    const double hopRise  = hopRadius - radius;
+                    const double hopSlope  = hopRise / ringDistances[ring];
+                    if (hopRise >= 90.0 && hopSlope >= 0.45)
+                    {
+                        planet::ReliefSample hopRelief{};
+                        const double hopDirArray[3] = {hopDirection.x, hopDirection.y, hopDirection.z};
+                        if (planetCapability.sampleRelief(planetCapability.self, planet, hopDirArray, &hopRelief)
+                            && hopRelief.cliffFactor >= 0.5)
+                        {
+                            const double wallScore = hopRise * hopRelief.cliffFactor;
+                            if (wallScore > bestWallScore)
+                            {
+                                bestWallScore   = wallScore;
+                                cliffWallTangent = probeAxis;
+                                hasCliffWall    = true;
+                            }
+                        }
+                    }
                 }
                 else
                 {
@@ -292,21 +396,15 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             }
             if (lowestRadius < 1.0e30)
             {
-                // Sum the TANGENTIAL components: seaward/landward are radial
-                // unit vectors, and for a spot on a narrow spit they are
-                // nearly opposite, so their raw sum is radial-dominated and
-                // would aim the camera into the ground. Their tangential
-                // projections point at the water and the land respectively -
-                // but at a 60 km planet the scan rotates the probe by only
-                // 0.3 degrees, so the RAW projections are ~5 milliradians
-                // long and their sum collapses below any sane degeneracy
-                // threshold (the old code then fell back to the raw
-                // near-RADIAL seaward vector as the "tangent", the sight fan
-                // probed the same spot 25 times, and every coastal candidate
-                // was rejected as "level"). Normalize each projection to a
-                // unit tangent first; the diagonal of the two unit tangents
-                // is the along-shore direction. A degenerate (opposite-pair)
-                // sum falls back to the seaward tangent.
+                // Normalize each projection to a unit tangent first; the
+                // diagonal of the two unit tangents is the along-shore
+                // direction. When the pair is near-opposite (a straight
+                // coastline: the seaward and landward probes point against
+                // each other), the along-shore direction is the tangent
+                // PERPENDICULAR to the seaward axis - falling back to the
+                // raw seaward tangent aimed the camera straight out to open
+                // ocean (an all-water "coast" frame with land behind the
+                // camera).
                 const planet::Vec3 radial = direction;
                 planet::Vec3 seawardTangent   = seaward - radial * planet::dot(seaward, radial);
                 planet::Vec3 landwardTangent  = landward - radial * planet::dot(landward, radial);
@@ -322,9 +420,20 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 }
                 planet::Vec3 diagonal = seawardTangent + landwardTangent;
                 const double diagonalLength = planet::length(diagonal);
-                waterwardTangent = diagonalLength > 0.5 ? diagonal * (1.0 / diagonalLength)
-                                      : (seawardTLength > 1.0e-9 ? seawardTangent : planet::Vec3{});
-                hasWaterward     = diagonalLength > 0.5 || seawardTLength > 1.0e-9;
+                planet::Vec3 alongShore = diagonalLength > 0.5 ? diagonal * (1.0 / diagonalLength)
+                    : (seawardTLength > 1.0e-9 ? planet::normalized(planet::cross(radial, seawardTangent))
+                                                : planet::Vec3{});
+                // Landward bias: the along-shore diagonal aims the CENTER of
+                // the frame at the waterline, and on bent shores the land
+                // ends up past the frame edge (the render then reads as open
+                // ocean). Rotating a quarter radian toward the land keeps the
+                // water in frame while guaranteeing real coast in view.
+                if (landwardTLength > 1.0e-9 && planet::length(alongShore) > 1.0e-9)
+                {
+                    alongShore = planet::normalized(alongShore * std::cos(0.25) + landwardTangent * std::sin(0.25));
+                }
+                waterwardTangent = alongShore;
+                hasWaterward     = planet::length(alongShore) > 1.0e-9;
             }
         }
 
@@ -395,9 +504,10 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                                     // under the camera - ring-0 land there
                                     // is invisible at a 15 deg down-aim,
                                     // and the frame renders open ocean)
-        double      bestWallScore   = -1.0;   // cliffs: strongest terraced rise
-        planet::Vec3 cliffWallTangent{};
-        bool        hasCliffWall    = false;
+        // Mountain policy: the compass-rose wall search above already
+        // located the strongest terraced rise; that wall IS the
+        // cliff-ahead signal (the camera aims at it below).
+        cliffAhead = hasCliffWall;
         for (std::size_t ring = 0; ring < kSightRingCount && sightClear; ++ring)
         {
             for (std::size_t yaw = 0; yaw < 5 && sightClear; ++yaw)
@@ -425,7 +535,10 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 // away while the caps stayed at tens of meters). Cliff views
                 // allow taller walls still (the risers are the showcase).
                 static constexpr double flatCapScale[6]   = {0.45, 0.6, 1.2, 2.0, 3.0, 4.0};
-                static constexpr double cliffCapScale[6]  = {0.35, 0.9, 1.6, 2.6, 3.6, 8.0};
+                // Cliff-view caps tolerate whole terrace steps in the near
+                // fan: the quantized risers ARE the showcase, and a step is
+                // ~200 m tall on the showcase planet.
+                static constexpr double cliffCapScale[6]  = {1.5, 2.2, 3.2, 5.0, 7.0, 10.0};
                 static constexpr double slopeTolerance    = 0.45; // meters of ground rise per meter of distance
                 const double capScale = policy == ProbePolicy::Mountain ? cliffCapScale[ring] : flatCapScale[ring];
                 const double cap      = capScale * eyeHeight + slopeTolerance * sightRingDistances[ring];
@@ -461,42 +574,12 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                         }
                     }
                 }
-                if (rise >= 60.0)
+                if (rise >= 60.0 && policy != ProbePolicy::Mountain)
                 {
-                    // Cliff views score higher when the rise ahead is actual
-                    // TERRACED country (cliff mask high), not just any slope.
-                    // The steepest terraced fan direction is stored so the
-                    // camera AIMS at the wall instead of hoping it sits in
-                    // frame (a plain tangent aim on rolling country shows
-                    // hills, not cliffs).
-                    if (policy == ProbePolicy::Mountain)
-                    {
-                        planet::ReliefSample sightRelief{};
-                        const double sightDirArray[3] = {sightDirection.x, sightDirection.y, sightDirection.z};
-                        // A real showcase wall: TERRACED (cliff mask >= 0.5),
-                        // TALL (>= 90 m of rise) and STEEP (>= 0.8 meters of
-                        // rise per meter of ground, ~39 degrees - a 0.5 slope
-                        // is a grassy hillside, not a cliff). Rings 0-1 are
-                        // excluded: a point-blank wall fills the frame with
-                        // rock and shows nothing else.
-                        const bool steepRing = ring >= 2 && rise >= 0.7 * sightRingDistances[ring];
-                        if (planetCapability.sampleRelief(planetCapability.self, planet, sightDirArray, &sightRelief)
-                            && sightRelief.cliffFactor >= 0.5 && rise >= 90.0 && steepRing)
-                        {
-                            cliffAhead = true;
-                            const double wallScore = rise * sightRelief.cliffFactor;
-                            if (wallScore > bestWallScore)
-                            {
-                                bestWallScore = wallScore;
-                                cliffWallTangent = yawedTangent;
-                                hasCliffWall = true;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        cliffAhead = true;
-                    }
+                    // Ground views (not the cliffs view) just prefer some
+                    // relief in the frame; the cliffs wall comes from the
+                    // compass-rose search above.
+                    cliffAhead = true;
                 }
             }
         }
@@ -568,6 +651,10 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         }
         if (policy == ProbePolicy::Mountain && !cliffAhead)
         {
+            // No wall in the compass rose: the spot still sits on terraced
+            // country (the gate above), so keep it eligible with a mild
+            // penalty - a wall ahead is a bonus, not the only way to show
+            // cliffs.
             score *= 0.8;
         }
         if (policy == ProbePolicy::Mountain && hasCliffWall)

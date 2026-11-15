@@ -127,7 +127,11 @@ bool PlanetGenerationParams::validate(std::string &error)
 
     terraceStrength       = clampRange(terraceStrength, 0.0, 1.0);
     terraceSteps          = clampRange(terraceSteps, 1.0, 64.0);
+    terraceRiserFraction = clampRange(terraceRiserFraction, 0.04, 0.5);
     cliffWavelengthMeters = clampRange(cliffWavelengthMeters, radiusMeters / 8192.0, radiusMeters * 4.0);
+    cliffSteepnessHigh    = clampRange(cliffSteepnessHigh, 0.05, 1.0);
+    cliffSteepnessLow     = clampRange(cliffSteepnessLow, 0.01, cliffSteepnessHigh - 0.02);
+    cliffSharpness        = clampRange(cliffSharpness, 0.5, 8.0);
 
     overhangAmplitudeMeters  = clampRange(overhangAmplitudeMeters, 0.0, 0.05 * radiusMeters);
     overhangWavelengthMeters = clampRange(overhangWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
@@ -146,7 +150,6 @@ bool PlanetGenerationParams::validate(std::string &error)
     // ---- oceans / climate --------------------------------------------------------
     shallowWaterMeters   = clampRange(shallowWaterMeters, 0.0, radiusMeters);
     deepWaterMeters      = clampRange(deepWaterMeters, shallowWaterMeters, radiusMeters);
-    waterDepthTintMeters = clampRange(waterDepthTintMeters, 1.0, radiusMeters);
 
     equatorTemperature = clampRange(equatorTemperature, 0.0, 1.0);
     poleTemperature    = clampRange(poleTemperature, 0.0, equatorTemperature);
@@ -163,6 +166,8 @@ bool PlanetGenerationParams::validate(std::string &error)
     colorVariationGroundWavelengthMeters = clampRange(colorVariationGroundWavelengthMeters, radiusMeters / 16384.0, colorVariationWavelengthMeters);
     snowLineMeters       = clampRange(snowLineMeters, 0.0, 0.5 * radiusMeters);
     beachWidthMeters     = clampRange(beachWidthMeters, 0.0, 0.05 * radiusMeters);
+    beachWetWidthMeters  = clampRange(beachWetWidthMeters, 0.0, 0.05 * radiusMeters);
+    beachWetDarkening    = clampRange(beachWetDarkening, 0.0, 0.95);
     rockSlopeThreshold   = clampRange(rockSlopeThreshold, 0.05, 1.0);
     rockStrataContrast   = clampRange(rockStrataContrast, 0.0, 1.0);
     biomeBlendWidth        = clampRange(biomeBlendWidth, 0.005, 0.2);
@@ -207,6 +212,9 @@ bool PlanetGenerationParams::validate(std::string &error)
     {
         waterColorIce[channel] = std::clamp(waterColorIce[channel], 0.0f, 1.0f);
     }
+    waterDepthTintMeters        = clampRange(waterDepthTintMeters, 1.0, radiusMeters);
+    waterFoamWidthMeters        = clampRange(waterFoamWidthMeters, 0.0, 0.01 * radiusMeters);
+    waterFoamStrength           = clampRange(waterFoamStrength, 0.0, 1.0);
     waterWaveAmplitude        = clampRange(waterWaveAmplitude, 0.0, 1.0);
     waterWaveWavelengthMeters = clampRange(waterWaveWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
 

@@ -151,9 +151,25 @@ struct PlanetGenerationParams
                                             // higher values boil plains into noise lumps
     FbmParams detailFbm{4, 2.0, 0.5};
 
-    double terraceStrength  = 0.60;  // 0 = smooth terrain, 1 = full plateaus
+    double terraceStrength  = 0.95;  // 0 = smooth terrain, 1 = full plateaus
     double terraceSteps     = 9.0;   // approximate plateau count across the field
+    // Fraction of each terrace step the RISER spans. The riser's grade is
+    // the flank slope divided by this fraction, so small values build
+    // genuinely cliff-like faces: 0.15 turns a 0.35-grade flank into a
+    // ~60-degree rock riser (with the strata and overhang terms riding the
+    // same cliff mask, the risers read as layered cliff walls, while the
+    // treads stay flat benches). 0.4 smears the step into a long shoulder.
+    double terraceRiserFraction = 0.15;
     double cliffWavelengthMeters = 1400.0; // wavelength of the terrace mask field
+    // Cliff-mask gate over the terrain's own steepness energy (the slope the
+    // composed hill/crest fields carry at the cliff wavelength). Terracing,
+    // strata banding and overhang weighting all ride this mask, so the gate
+    // decides where mesa country forms: at the defaults it opens on genuine
+    // hill flanks and massif slopes, keeping plains smooth.
+    double cliffSteepnessLow  = 0.42; // steepness energy where the cliff mask opens
+    double cliffSteepnessHigh  = 0.70; // steepness energy where the mask saturates
+    double cliffSharpness      = 2.6;  // exponent concentrating the crest bands; higher
+                                       // narrows terraced country into tighter bands
 
     // ---- 3D overhangs (what a heightfield cannot do) ---------------------------
     double overhangAmplitudeMeters   = 38.0;  // 3D noise added to the signed density
@@ -187,7 +203,6 @@ struct PlanetGenerationParams
     // ---- ocean bands (depth thresholds for water color and ocean biomes) -------
     double shallowWaterMeters = 18.0;   // shoreline band above the sea floor
     double deepWaterMeters    = 140.0;  // depth where the ocean counts as "deep"
-    double waterDepthTintMeters = 70.0; // depth over which the water surface tint saturates
 
     // ---- climate ---------------------------------------------------------------
     double equatorTemperature = 1.0;   // temperature01 at the equator, sea level
@@ -207,17 +222,22 @@ struct PlanetGenerationParams
     double coastalMoistureBoost = 0.18;     // moisture added right at the shoreline
     double coastalMoistureBandMeters = 400.0; // elevation over which the boost fades out
     bool   moistureLatitudeBands = true;    // ITCZ wet belt + subtropical dry belts
-    double colorVariation = 0.14;           // per-point albedo jitter (0 = flat palette)
+    double colorVariation = 0.18;           // per-point albedo jitter (0 = flat palette)
     double colorVariationWavelengthMeters = 260.0; // feature size of the albedo jitter field
     double colorVariationGroundWavelengthMeters = 6.0; // metre-scale mottle for ground-level views
     double snowLineMeters = 1600.0;          // sea-level snow line (drops as climate cools);
                                             // only the highest massifs are glaciated, polar
                                             // caps come from latitude alone
     double beachWidthMeters = 2.0;          // shoreline band width above sea level (narrow: sand hugs the waterline)
-    double rockSlopeThreshold = 0.62;       // slope (1 - up-dot-normal) where rock takes over;
+    // Wet-sand band above the waterline: real beaches darken sharply in the
+    // swash zone. Two keys keep the band a configuration decision - width and
+    // how dark the wet sand reads.
+    double beachWetWidthMeters = 4.0;       // elevation band above sea level that reads wet
+    double beachWetDarkening   = 0.45;     // 0 = dry sand everywhere, 1 = near-black wet band
+    double rockSlopeThreshold = 0.55;       // slope (1 - up-dot-normal) where rock takes over;
                                             // high enough that aliased ridge crests stay snowed
                                             // and terraced risers stay grassed
-    double rockStrataContrast = 0.10;       // luminance banding on rock faces, keyed to the
+    double rockStrataContrast = 0.30;       // luminance banding on rock faces, keyed to the
                                             // strata band spacing (sediment layer stripes);
                                             // strong values read as dirt smears at grazing light
 
@@ -265,17 +285,31 @@ struct PlanetGenerationParams
     // The sky a camera inside the air sees: a zenith-to-horizon gradient
     // (linear RGB colors, like the water colors) that fades out toward space
     // over atmosphere_height_meters. Consumers multiply the sun tint on top.
+    // The defaults are chosen for the renderer's shared tone mapping: the
+    // pipeline brightens midtones, so the pre-tone-map values sit deeper and
+    // more saturated than the sky they finally display.
     bool  atmosphereEnabled       = true;
     double atmosphereHeightMeters = 20000.0; // sky fades to space over this altitude
-    float atmosphereZenithColor[3]  = {0.055f, 0.155f, 0.480f};
-    float atmosphereHorizonColor[3] = {0.420f, 0.580f, 0.820f};
+    float atmosphereZenithColor[3]  = {0.040f, 0.130f, 0.460f};
+    float atmosphereHorizonColor[3] = {0.220f, 0.400f, 0.780f};
 
     // ---- water -----------------------------------------------------------------
     bool  waterEnabled        = true;
-    float waterColorShallow[3] = {0.060f, 0.205f, 0.275f};
+    float waterColorShallow[3] = {0.085f, 0.320f, 0.330f};
     float waterColorDeep[3]    = {0.012f, 0.060f, 0.130f};
     float waterRoughness      = 0.42f; // consumer hint (exposed via chunk material); low values make the
                                        // coarse far-water facets band with sharp mirror glints
+    // Depth tint per channel: water absorbs red fastest, green next, blue
+    // last, so the surface tint runs shallow turquoise -> green-teal mid shelf
+    // -> navy deep instead of one gray-blue mix. The configured
+    // water_depth_tint_meters is the BLUE channel's saturation depth; red and
+    // green saturate at fixed fractions of it.
+    double waterDepthTintMeters = 70.0; // depth where the water surface tint saturates (blue channel)
+    // Surf: a white breaker band where the water shallows toward the shore,
+    // plus a noise modulation so the breaker reads as patchy wave crests
+    // instead of a painted stripe.
+    double waterFoamWidthMeters = 4.0;  // depth band under the surface that reads as surf
+    double waterFoamStrength    = 0.65; // 0 = no foam, 1 = solid white surf band
     // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
     // below seaIceTemperature (the same climate field that drives the land's
     // freeze line, so ice caps and snowy poles line up with an organic, noisy

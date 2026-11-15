@@ -84,13 +84,18 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     const Vec3   radialPosition = unitDirection * datumRadius;
 
     // Domain warp: bend the sample position with a low-frequency vector
-    // noise for swirling coastlines and bays.
-    const Vec3 warpDirection = normalized(unitDirection
-        + params_.domainWarpAmplitude
-            * Vec3{fbm(fbmSeeds_[streamWarpX], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
-                fbm(fbmSeeds_[streamWarpY], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
-                fbm(fbmSeeds_[streamWarpZ], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters)});
-    const Vec3 warpedPosition = warpDirection * datumRadius;
+    // noise for swirling coastlines and bays. Skipped entirely when the
+    // amplitude is configured to zero (six noise evaluations per sample).
+    Vec3 warpedPosition = radialPosition;
+    if (params_.domainWarpAmplitude > 0.0)
+    {
+        const Vec3 warpDirection = normalized(unitDirection
+            + params_.domainWarpAmplitude
+                * Vec3{fbm(fbmSeeds_[streamWarpX], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
+                    fbm(fbmSeeds_[streamWarpY], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
+                    fbm(fbmSeeds_[streamWarpZ], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters)});
+        warpedPosition = warpDirection * datumRadius;
+    }
 
     // Continent base: signed low-frequency field; positive rises above the
     // datum (land), negative dips below (ocean basins).
@@ -120,9 +125,10 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // mask lets mountains contribute at all: over the oceans (about two
     // thirds of a typical globe) the crest and mass fields would be pure
     // waste, and they are the two most expensive layers of the field.
+    double ridges = 0.0;
     if (mountainMask > 0.0)
     {
-        const double ridges     = ridgedFbm(fbmSeeds_[streamMountains], warpedPosition, params_.mountainWavelengthMeters, params_.mountainsFbm, lowPassCutoffMeters);
+        ridges = ridgedFbm(fbmSeeds_[streamMountains], warpedPosition, params_.mountainWavelengthMeters, params_.mountainsFbm, lowPassCutoffMeters);
         const double mass       = 0.5 + 0.5 * fbm(fbmSeeds_[streamMountainMass], warpedPosition, params_.derivedMountainMassWavelengthMeters,
                                   kMassFbm, lowPassCutoffMeters);
         const double crest      = std::pow(ridges, params_.mountainSharpness);
@@ -177,15 +183,32 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
 
         coastalTaper = coastalTaperOf(height);
 
-        // Rolling medium-frequency hills everywhere on land.
-        height += params_.hillAmplitudeMeters * detailFade * coastalTaper
-            * fbm(fbmSeeds_[streamHills], radialPosition, params_.hillWavelengthMeters, params_.hillsFbm, lowPassCutoffMeters);
+        // Rolling medium-frequency hills everywhere on land. The field's
+        // VALUE is kept: its flanks (near its zero crossings) are the steep
+        // hill country the cliff mask below reads.
+        const double hillField = fbm(fbmSeeds_[streamHills], radialPosition, params_.hillWavelengthMeters, params_.hillsFbm, lowPassCutoffMeters);
+        height += params_.hillAmplitudeMeters * detailFade * coastalTaper * hillField;
 
-        // Terraced-country mask drives both the terrace quantization below
-        // and the detail/overhang weighting; compute it before the fine
-        // layers.
-        cliffMask = clamp01(0.5
-            + 0.9 * fbm(fbmSeeds_[streamCliffMask], radialPosition, params_.cliffWavelengthMeters, kFixedFbm, lowPassCutoffMeters));
+        // Terraced-country mask, keyed to the terrain's OWN steepness: hill
+        // flanks ride the hill field's zero crossings (where that field
+        // carries its gradient), massif crest lines ride the ridged crest
+        // field, and the cliff-noise stream only MODULATES the bands for
+        // organic variety at cliffWavelengthMeters scale. The mask must sit
+        // on genuinely steep ground because terracing, strata banding and
+        // overhang weighting all follow it: a decorrelated gate scatters
+        // mesas over open ground, where quantization reads as corduroy, not
+        // cliffs. The hill term is capped at half strength: hill country spans
+        // about one terrace step of height, so quantization there can only
+        // flatten (benches without risers) - full-strength steps belong to
+        // massif flanks, whose relief crosses several steps.
+        // cliffSharpness concentrates the hill-flank term; the steepness
+        // gate (cliffSteepnessLow/High) trims how much of the flank country
+        // qualifies.
+        const double hillFlank = std::pow(clamp01(1.0 - std::abs(hillField)), params_.cliffSharpness);
+        const double cliffVariety = 0.82 + 0.18 * fbm(fbmSeeds_[streamCliffMask], radialPosition, params_.cliffWavelengthMeters, kFixedFbm, lowPassCutoffMeters);
+        const double crestRise = mountainMask * (0.40 + 0.60 * ridges);
+        const double cliffEnergy = std::max(0.50 * hillFlank * cliffVariety, crestRise);
+        cliffMask = smoothstep(params_.cliffSteepnessLow, params_.cliffSteepnessHigh, cliffEnergy);
 
         // Fine detail layer: rock ribs, soil ripples, scree - the roughness
         // that keeps close-range views from reading as smooth plastic.
@@ -197,12 +220,17 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
         height += params_.detailAmplitudeMeters * detailFade * coastalTaper * detailMaskLevel
             * fbm(fbmSeeds_[streamDetail], radialPosition, params_.detailWavelengthMeters, params_.detailFbm, lowPassCutoffMeters);
 
-        // Terraces: quantize the height profile inside a noise-masked band,
-        // producing flat plateaus joined by steep cliff steps (mesa country).
+        // Terraces: quantize the height profile inside the steepness-masked
+        // band, producing flat plateaus joined by steep cliff steps (mesa
+        // country). The riser spans terraceRiserFraction of each step - a
+        // narrow riser keeps the step's wall genuinely cliff-like instead of
+        // a long shoulder (the riser grade is the flank slope divided by the
+        // fraction; see params.hpp).
         const double u    = height / terraceStepMeters_;
         const double k    = std::floor(u);
         const double f    = u - k;
-        const double edge = smoothstep(0.30, 0.70, f);
+        const double halfRiser = 0.5 * params_.terraceRiserFraction;
+        const double edge = smoothstep(0.5 - halfRiser, 0.5 + halfRiser, f);
         height            = mix(height, (k + edge) * terraceStepMeters_, params_.terraceStrength * cliffMask * detailFade * coastalTaper);
     }
 

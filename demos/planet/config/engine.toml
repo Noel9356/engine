@@ -23,11 +23,11 @@ worker_count            = 0
 # framebuffer values, so exposure is tuned for linear output: albedo x
 # (ambient + sun x NdotL) should land mid-tones (~0.2-0.4) for land,
 # ~0.9+ only for snow.
-ambient_intensity = 0.40
+ambient_intensity = 0.24
 sun_color         = [1.0, 0.96, 0.88]
-sun_direction     = [0.58, 0.50, 0.35]
+sun_direction     = [0.50, 0.45, 0.74]
 sun_enabled       = true
-sun_intensity     = 1.25
+sun_intensity     = 1.65
 
 [planet]
 # The demo's planet: seed and radius can be overridden per run with --seed /

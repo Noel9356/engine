@@ -138,7 +138,7 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
     return sample;
 }
 
-ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters, double slope01) const
+ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters, double slope01, double lowPassCutoffMeters) const
 {
     ClimateSample sample   = sampleSeaLevel(direction);
     const double  seaRadius = params_.derivedSeaRadiusMeters;
@@ -328,6 +328,24 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     rowOf(paletteRow(Biome::Beach), beachRow);
     rowOf(paletteRow(Biome::Snow), snowRow);
     rowOf(paletteRow(Biome::Rock), rockRow);
+    // Wet sand: the swash band right above the waterline darkens and
+    // saturates (real beaches show a sharp wet rim where the last wave
+    // reached); fades over the configured width and never overrides snow or
+    // rock. Applied to the beach palette row BEFORE it blends into the base
+    // color, so the rim sits inside the sand band.
+    if (params_.beachWetDarkening > 0.0 && params_.beachWetWidthMeters > 0.0)
+    {
+        const double wetW = 1.0 - smoothstep(0.0, params_.beachWetWidthMeters, elevation);
+        if (wetW > 0.0)
+        {
+            for (std::size_t channel = 0; channel < 3; ++channel)
+            {
+                // Darken toward a saturated wet tone: multiply toward zero
+                // but keep a little of the hue (sand darkens, not vanishes).
+                beachRow[channel] *= 1.0 - params_.beachWetDarkening * wetW;
+            }
+        }
+    }
     if (rockW > 0.0 && params_.rockStrataContrast > 0.0)
     {
         // Sediment stripes on rock faces: a luminance band keyed to the strata
@@ -354,14 +372,35 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     // from reading as one unbroken color. Each scale is a pure function of
     // direction (order independent), and the channel weighting turns them
     // into subtle hue mottling (warm/cool patches) instead of pure luminance
-    // banding.
+    // banding. Each scale fades under the optional band-limit cutoff like
+    // every other noise term a rendered chunk samples, so coarse LOD chunks
+    // neither spend the evaluations nor alias sub-voxel mottle as speckle.
     const Vec3 surfacePosition = direction * params_.radiusMeters;
     const double baseWavelength = std::max(1.0, params_.colorVariationWavelengthMeters);
     const double groundWavelength = std::max(1.0, params_.colorVariationGroundWavelengthMeters);
-    const double variation = params_.colorVariation
-        * (0.52 * fbm(seedJitterOctaves_, surfacePosition, baseWavelength, FbmParams{2, 2.0, 0.5})
-            + 0.22 * fbm(seedDetailJitterOctaves_, surfacePosition, baseWavelength / 8.0, FbmParams{2, 2.0, 0.5})
-            + 0.26 * fbm(seedGroundJitterOctaves_, surfacePosition, groundWavelength, FbmParams{2, 2.0, 0.5}));
+    double variation = 0.0;
+    if (params_.colorVariation > 0.0)
+    {
+        const double baseFade = lowPassFade(lowPassCutoffMeters, baseWavelength);
+        const double detailFade = lowPassFade(lowPassCutoffMeters, baseWavelength / 8.0);
+        const double groundFade = lowPassFade(lowPassCutoffMeters, groundWavelength);
+        if (baseFade > 0.0)
+        {
+            variation += 0.52 * baseFade
+                * fbm(seedJitterOctaves_, surfacePosition, baseWavelength, FbmParams{2, 2.0, 0.5});
+        }
+        if (detailFade > 0.0)
+        {
+            variation += 0.22 * detailFade
+                * fbm(seedDetailJitterOctaves_, surfacePosition, baseWavelength / 8.0, FbmParams{2, 2.0, 0.5});
+        }
+        if (groundFade > 0.0)
+        {
+            variation += 0.26 * groundFade
+                * fbm(seedGroundJitterOctaves_, surfacePosition, groundWavelength, FbmParams{2, 2.0, 0.5});
+        }
+        variation *= params_.colorVariation;
+    }
     constexpr double kChannelWeights[3] = {1.0, 0.85, 0.70};
     for (std::size_t channel = 0; channel < 3; ++channel)
     {

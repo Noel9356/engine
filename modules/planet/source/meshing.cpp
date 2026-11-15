@@ -1,11 +1,12 @@
 // Chunk meshing implementation (see meshing.hpp).
 //
-// Marching-cubes tables: the classic 256-entry edge and triangle tables by
-// Paul Bourke (public domain, http://paulbourke.net/geometry/polygonise/),
-// with the standard corner numbering (corner i at x = i&1, y = (i>>1)&1,
-// z = (i>>2)&1).
+// The marching-cubes lookup tables (Bourke, public domain) live in
+// marching_cubes_tables.hpp; the algorithm below consumes them through the
+// detail namespace.
 
 #include <engine/planet/meshing.hpp>
+
+#include "marching_cubes_tables.hpp"
 
 #include <engine/planet/flat_key_map.hpp>
 #include <engine/planet/fbm.hpp>
@@ -24,301 +25,6 @@ namespace planet
 {
 namespace
 {
-
-// Orientation of marching-cubes triangles relative to the density gradient.
-// The Bourke tables produce triangles that face the NEGATIVE gradient (air)
-// for d > 0 = inside with the corner ordering above; the demo's --self-test
-// verifies this constant against the geometry and fails loudly on mismatch.
-constexpr bool kTerrainFlipWinding = true;
-
-constexpr std::uint32_t kEdgeTable[256] = {
-    0x0,   0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
-    0x190, 0x99,  0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
-    0x230, 0x339, 0x33,  0x13a, 0x636, 0x73f, 0x435, 0x53c, 0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
-    0x3a0, 0x2a9, 0x1a3, 0xaa,  0x7a6, 0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
-    0x460, 0x569, 0x663, 0x76a, 0x66,  0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
-    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff,  0x3f5, 0x2fc, 0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
-    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55,  0x15c, 0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
-    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc,  0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
-    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc, 0xcc,  0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
-    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c, 0x15c, 0x55,  0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
-    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc, 0x2fc, 0x3f5, 0xff,  0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
-    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c, 0x36c, 0x265, 0x16f, 0x66,  0x76a, 0x663, 0x569, 0x460,
-    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa,  0x1a3, 0x2a9, 0x3a0,
-    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33,  0x339, 0x230,
-    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99,  0x190,
-    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c, 0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0,
-};
-
-constexpr std::int8_t kTriTable[256][16] = {
-    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1},
-    {3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1},
-    {3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1},
-    {3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1},
-    {9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1},
-    {9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
-    {2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1},
-    {8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1},
-    {9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
-    {4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1},
-    {3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1},
-    {1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1},
-    {4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1},
-    {4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1},
-    {9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
-    {5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1},
-    {2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1},
-    {9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
-    {0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
-    {2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1},
-    {10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1},
-    {4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1},
-    {5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1},
-    {5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1},
-    {9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1},
-    {0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1},
-    {1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1},
-    {10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1},
-    {8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1},
-    {2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1},
-    {7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1},
-    {9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1},
-    {2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1},
-    {11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1},
-    {9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1},
-    {5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1},
-    {11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1},
-    {11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
-    {1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1},
-    {9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1},
-    {5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1},
-    {2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
-    {0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
-    {5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1},
-    {6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1},
-    {3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1},
-    {6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1},
-    {5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1},
-    {1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
-    {10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1},
-    {6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1},
-    {8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1},
-    {7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1},
-    {3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
-    {5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1},
-    {0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1},
-    {9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1},
-    {8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1},
-    {5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1},
-    {0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1},
-    {6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1},
-    {10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1},
-    {10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1},
-    {8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1},
-    {1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1},
-    {3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1},
-    {0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1},
-    {10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1},
-    {3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1},
-    {6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1},
-    {9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1},
-    {8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1},
-    {3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1},
-    {6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1},
-    {0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1},
-    {10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1},
-    {10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1},
-    {2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1},
-    {7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1},
-    {7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1},
-    {2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1},
-    {1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1},
-    {11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1},
-    {8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1},
-    {0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1},
-    {7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
-    {10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
-    {2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
-    {6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1},
-    {7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1},
-    {2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1},
-    {1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1},
-    {10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1},
-    {10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1},
-    {0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1},
-    {7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1},
-    {6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1},
-    {8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1},
-    {9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1},
-    {6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1},
-    {4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1},
-    {10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1},
-    {8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1},
-    {0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1},
-    {1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1},
-    {8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1},
-    {10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1},
-    {4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1},
-    {10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
-    {5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
-    {11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1},
-    {9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
-    {6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1},
-    {7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1},
-    {3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1},
-    {7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1},
-    {9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1},
-    {3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1},
-    {6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1},
-    {9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1},
-    {1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1},
-    {4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1},
-    {7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1},
-    {6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1},
-    {3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1},
-    {0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1},
-    {6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1},
-    {0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1},
-    {11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1},
-    {6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1},
-    {5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1},
-    {9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1},
-    {1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1},
-    {1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1},
-    {10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1},
-    {0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1},
-    {5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1},
-    {10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1},
-    {11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1},
-    {9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1},
-    {7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1},
-    {2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1},
-    {8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1},
-    {9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1},
-    {9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1},
-    {1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1},
-    {9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1},
-    {9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1},
-    {5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1},
-    {0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1},
-    {10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1},
-    {2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1},
-    {0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1},
-    {0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1},
-    {9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1},
-    {5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1},
-    {3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1},
-    {5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1},
-    {8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1},
-    {9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1},
-    {0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1},
-    {1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1},
-    {3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1},
-    {4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1},
-    {9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1},
-    {11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1},
-    {11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1},
-    {2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1},
-    {9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1},
-    {3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1},
-    {1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1},
-    {4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1},
-    {4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1},
-    {0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1},
-    {3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1},
-    {3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1},
-    {0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1},
-    {9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1},
-    {1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
-};
-
-// The 12 cube edges as (cornerA, cornerB), matching the edge bits of the
-// Bourke edge table.
-// The 12 cube edges as (cornerA, cornerB), Bourke ring numbering:
-// corners 0..3 ring the z=0 face, 4..7 ring the z=1 face, edges 8..11 are
-// the verticals. Bit e of the edge table refers to edge e here.
-constexpr std::uint32_t kEdgeCorners[12][2] = {
-    {0, 1}, {1, 2}, {2, 3}, {3, 0}, // bottom ring (z = 0)
-    {4, 5}, {5, 6}, {6, 7}, {7, 4}, // top ring (z = 1)
-    {0, 4}, {1, 5}, {2, 6}, {3, 7}, // verticals
-};
 
 // Bourke corner numbering: 0..3 ring the low face counterclockwise, 4..7 the
 // high face. Bit c of a cell's cube index refers to this corner.
@@ -780,9 +486,14 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     std::vector<std::uint32_t>                       &indices  = mesh.terrainIndices;
     // Edge-vertex dedup over the chunk's own lattice points; the flat map is
     // the project's open-addressing table (single cache line per lookup, no
-    // node allocations) and the keys are chunk-local, so the scratch state is
-    // rebuilt per build and never shared.
-    FlatKeyMap<std::uint32_t> vertexForEdge(4096);
+    // node allocations) and the keys are chunk-local. Like the density grids
+    // the table lives in per-thread scratch: every slot the build touches is
+    // overwritten before any read (findOrInsert seeds new keys), so reuse
+    // cannot leak state between builds, and the worker pool stops paying a
+    // constant-size allocation per chunk.
+    thread_local FlatKeyMap<std::uint32_t> vertexForEdgeScratch(4096);
+    FlatKeyMap<std::uint32_t> &vertexForEdge = vertexForEdgeScratch;
+    vertexForEdge.clear();
 
     // Spherical reference frame of the spin axis (see the UV mapping below).
     // With the default upright axis this reduces to east = +x, north = +z.
@@ -957,7 +668,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                     slotVertex[slot] = 0xFFFFFFFFu;
                 }
 
-                const std::uint32_t edges = kEdgeTable[cubeIndex];
+                const std::uint32_t edges = detail::kEdgeTable[cubeIndex];
                 for (std::uint32_t slot = 0; slot < 12; ++slot)
                 {
                     if ((edges & (1u << slot)) == 0)
@@ -965,8 +676,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                         continue;
                     }
                     std::uint32_t adx, ady, adz, bdx, bdy, bdz;
-                    cornerOffset(kEdgeCorners[slot][0], adx, ady, adz);
-                    cornerOffset(kEdgeCorners[slot][1], bdx, bdy, bdz);
+                    cornerOffset(detail::kEdgeCorners[slot][0], adx, ady, adz);
+                    cornerOffset(detail::kEdgeCorners[slot][1], bdx, bdy, bdz);
                     std::uint32_t aX, aY, aZ, bX, bY, bZ, edgeAxis;
                     canonicalEdge(cx + 1 + adx, cy + 1 + ady, cz + 1 + adz, cx + 1 + bdx, cy + 1 + bdy, cz + 1 + bdz,
                         aX, aY, aZ, bX, bY, bZ, edgeAxis);
@@ -1025,7 +736,13 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                         }
 
                         const double slope01 = std::clamp(1.0 - (nx * unitRadial.x + ny * unitRadial.y + nz * unitRadial.z), 0.0, 1.0);
-                        const ClimateSample climate = field.climate().sample(unitRadial, radius, slope01);
+                        // The albedo jitter band-limits at the VERTEX spacing
+                        // (the resolution the colors are sampled at): octave
+                        // scales below the spacing alias into uncorrelated
+                        // per-vertex speckle, so they fade out on coarse LOD
+                        // chunks exactly like sub-voxel geometry octaves,
+                        // while the climate classification itself stays exact.
+                        const ClimateSample climate = field.climate().sample(unitRadial, radius, slope01, step);
 
                         PlanetVertex vertex{};
                         vertex.position[0] = static_cast<float>(point.x - center.x);
@@ -1055,14 +772,14 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
 
                 for (std::uint32_t triangle = 0; triangle < 5; ++triangle)
                 {
-                    const std::int8_t v0 = kTriTable[cubeIndex][triangle * 3 + 0];
+                    const std::int8_t v0 = detail::kTriTable[cubeIndex][triangle * 3 + 0];
                     if (v0 < 0)
                     {
                         break;
                     }
-                    const std::int8_t v1 = kTriTable[cubeIndex][triangle * 3 + 1];
-                    const std::int8_t v2 = kTriTable[cubeIndex][triangle * 3 + 2];
-                    if (!kTerrainFlipWinding)
+                    const std::int8_t v1 = detail::kTriTable[cubeIndex][triangle * 3 + 1];
+                    const std::int8_t v2 = detail::kTriTable[cubeIndex][triangle * 3 + 2];
+                    if (!detail::kTerrainFlipWinding)
                     {
                         indices.insert(indices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
                             slotVertex[static_cast<std::uint32_t>(v1)], slotVertex[static_cast<std::uint32_t>(v2)]});
@@ -1091,19 +808,46 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     {
         std::vector<PlanetVertex>  &waterVertices = mesh.waterVertices;
         std::vector<std::uint32_t> &waterIndices  = mesh.waterIndices;
-        FlatKeyMap<std::uint32_t>  waterForEdge(1024);
+        // Water edge-dedup lives in per-thread scratch like the terrain table.
+        thread_local FlatKeyMap<std::uint32_t> waterForEdgeScratch(1024);
+        FlatKeyMap<std::uint32_t> &waterForEdge = waterForEdgeScratch;
+        waterForEdge.clear();
 
         // Wave-slope band limit: like every noise term of the module, the
         // wave slope fades out below the chunk's own LOD cutoff, so coarse
         // chunks keep a smooth sea while fine chunks carry the glint
         // texture. The wave seeds derive from the planet seed via the same
-        // schedule as every other stream.
+        // schedule as every other stream. Two scales ride the same seeds -
+        // the configured swell and a half-wavelength chop at a third of the
+        // tilt - so close-range seas carry both long undulation and fine
+        // glitter, and the sun glint breaks up into sparkle instead of one
+        // broad mirror band.
         const std::int64_t seedWaveA = static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A7E51ULL));
         const std::int64_t seedWaveB = static_cast<std::int64_t>(hashCombine64(params.seed, 0x51B0E5ULL));
         const double waveWavelength = std::max(1.0, params.waterWaveWavelengthMeters);
         const double waveFade = lowPassFade(ownCutoff, waveWavelength);
+        const double chopFade = lowPassFade(ownCutoff, 0.5 * waveWavelength);
         const double waveAmplitude = params.waterWaveAmplitude * waveFade;
+        const double chopAmplitude = 0.33 * params.waterWaveAmplitude * chopFade;
         const double waveFrequency = 1.0 / waveWavelength;
+        const double chopFrequency = 2.0 / waveWavelength;
+
+        // Foam noise modulation: a breaker band reads as patchy wave crests
+        // rather than a painted stripe. One extra octave on the wave seeds,
+        // band-limited with the swell it modulates.
+        const std::int64_t seedFoam = static_cast<std::int64_t>(hashCombine64(params.seed, 0xF04A1ULL));
+        const double foamWavelength = std::max(1.0, waveWavelength * 3.0);
+        const double foamFade = lowPassFade(ownCutoff, foamWavelength);
+        const double foamFrequency = 1.0 / foamWavelength;
+
+        // Per-channel depth tint: water absorbs red fastest, green next,
+        // blue last (the physical absorption ordering), so the configured
+        // water_depth_tint_meters is the BLUE channel's saturation depth and
+        // red/green saturate at fixed fractions of it. The tint then runs
+        // shallow turquoise -> green-teal mid shelf -> navy deep instead of
+        // one gray-blue mix; the shallow color keeps the configured hue.
+        const double tintDepthBlue = std::max(1.0, params.waterDepthTintMeters);
+        const double tintDepths[3] = {0.28 * tintDepthBlue, 0.6 * tintDepthBlue, tintDepthBlue};
 
         for (std::uint32_t cz = 0; cz < n; ++cz)
         {
@@ -1143,7 +887,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                         slotVertex[slot] = 0xFFFFFFFFu;
                     }
 
-                    const std::uint32_t edges = kEdgeTable[cubeIndex];
+                    const std::uint32_t edges = detail::kEdgeTable[cubeIndex];
                     for (std::uint32_t slot = 0; slot < 12; ++slot)
                     {
                         if ((edges & (1u << slot)) == 0)
@@ -1151,8 +895,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                             continue;
                         }
                         std::uint32_t adx, ady, adz, bdx, bdy, bdz;
-                        cornerOffset(kEdgeCorners[slot][0], adx, ady, adz);
-                        cornerOffset(kEdgeCorners[slot][1], bdx, bdy, bdz);
+                        cornerOffset(detail::kEdgeCorners[slot][0], adx, ady, adz);
+                        cornerOffset(detail::kEdgeCorners[slot][1], bdx, bdy, bdz);
                         std::uint32_t aX, aY, aZ, bX, bY, bZ, edgeAxis;
                         canonicalEdge(cx + 1 + adx, cy + 1 + ady, cz + 1 + adz, cx + 1 + bdx, cy + 1 + bdy,
                             cz + 1 + bdz, aX, aY, aZ, bX, bY, bZ, edgeAxis);
@@ -1187,8 +931,24 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                             // is one pure function - every chunk, at any
                             // depth, agrees bit-for-bit.
                             const double terrainDepth = std::max(0.0, field.densityAt(point));
-                            const double depthTint    = std::clamp(terrainDepth / std::max(1.0, params.waterDepthTintMeters), 0.0, 1.0);
-                            const double foam         = smoothstep(2.5, 0.0, terrainDepth) * 0.35;
+
+                            // Surf: the breaker band lives in the shallow
+                            // margin of the configured width, modulated by the
+                            // foam noise so the band breaks into wave crests
+                            // (a uniform stripe reads as paint, not surf).
+                            double foam = 0.0;
+                            if (params.waterFoamStrength > 0.0 && params.waterFoamWidthMeters > 0.0)
+                            {
+                                const double foamBand
+                                    = 1.0 - smoothstep(0.0, params.waterFoamWidthMeters, terrainDepth);
+                                if (foamBand > 0.0 && foamFade > 0.0)
+                                {
+                                    const double foamNoise = noise::simplex3ImproveXY(seedFoam,
+                                        point.x * foamFrequency, point.y * foamFrequency, point.z * foamFrequency);
+                                    const double patchy = clamp01(0.75 + 0.25 * foamNoise);
+                                    foam = params.waterFoamStrength * foamBand * patchy;
+                                }
+                            }
 
                             // Sea ice: the water freezes where the sea-level
                             // temperature drops below the configured freeze
@@ -1209,21 +969,37 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                             // Wave slope: two deterministic noise streams tilt
                             // the radial normal along a local tangential
                             // frame, giving the sea surface a sun-glint
-                            // texture at close range. The frame degenerates
-                            // gracefully at the poles (the tangent basis picks
-                            // whichever world axis is least aligned with the
-                            // radial direction).
+                            // texture at close range. The tilt rides TWO
+                            // scales - the configured swell and a
+                            // half-wavelength chop - so the glint breaks
+                            // into sparkle; both fade under the chunk's band
+                            // limit like every other noise term. The frame
+                            // degenerates gracefully at the poles (the
+                            // tangent basis picks whichever world axis is
+                            // least aligned with the radial direction).
                             double nx = radial.x, ny = radial.y, nz = radial.z;
-                            if (waveAmplitude > 0.0)
+                            if (waveAmplitude > 0.0 || chopAmplitude > 0.0)
                             {
                                 Vec3 tangentA = cross(radial, std::abs(radial.y) < 0.9 ? Vec3{0.0, 1.0, 0.0} : Vec3{1.0, 0.0, 0.0});
                                 tangentA = normalized(tangentA);
                                 const Vec3 tangentB = cross(radial, tangentA);
-                                const double slopeA = noise::simplex3ImproveXY(seedWaveA,
-                                    point.x * waveFrequency, point.y * waveFrequency, point.z * waveFrequency);
-                                const double slopeB = noise::simplex3ImproveXY(seedWaveB,
-                                    point.x * waveFrequency, point.y * waveFrequency, point.z * waveFrequency);
-                                const Vec3 waved = radial + (tangentA * slopeA + tangentB * slopeB) * waveAmplitude;
+                                double slopeA = 0.0;
+                                double slopeB = 0.0;
+                                if (waveAmplitude > 0.0)
+                                {
+                                    slopeA = waveAmplitude * noise::simplex3ImproveXY(seedWaveA,
+                                        point.x * waveFrequency, point.y * waveFrequency, point.z * waveFrequency);
+                                    slopeB = waveAmplitude * noise::simplex3ImproveXY(seedWaveB,
+                                        point.x * waveFrequency, point.y * waveFrequency, point.z * waveFrequency);
+                                }
+                                if (chopAmplitude > 0.0)
+                                {
+                                    slopeA += chopAmplitude * noise::simplex3ImproveXY(seedWaveA,
+                                        point.x * chopFrequency, point.y * chopFrequency, point.z * chopFrequency);
+                                    slopeB += chopAmplitude * noise::simplex3ImproveXY(seedWaveB,
+                                        point.x * chopFrequency, point.y * chopFrequency, point.z * chopFrequency);
+                                }
+                                const Vec3 waved = radial + tangentA * slopeA + tangentB * slopeB;
                                 const double wavedLength = length(waved);
                                 if (wavedLength > 1.0e-9)
                                 {
@@ -1244,8 +1020,10 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                             {
                                 const float shallow = params.waterColorShallow[channel];
                                 const float deep    = params.waterColorDeep[channel];
-                                float blended       = shallow + static_cast<float>((deep - shallow) * depthTint);
-                                blended             = static_cast<float>(blended + (0.92 - blended) * foam);
+                                const double channelTint
+                                    = std::clamp(terrainDepth / tintDepths[channel], 0.0, 1.0);
+                                float blended = static_cast<float>(shallow + (deep - shallow) * channelTint);
+                                blended       = static_cast<float>(blended + (0.95 - blended) * foam);
                                 const float icy     = params.waterColorIce[channel];
                                 blended             = static_cast<float>(blended + (icy - blended) * iceWeight);
                                 vertex.color[channel] = blended;
@@ -1260,13 +1038,13 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
 
                     for (std::uint32_t triangle = 0; triangle < 5; ++triangle)
                     {
-                        const std::int8_t v0 = kTriTable[cubeIndex][triangle * 3 + 0];
+                        const std::int8_t v0 = detail::kTriTable[cubeIndex][triangle * 3 + 0];
                         if (v0 < 0)
                         {
                             break;
                         }
-                        const std::int8_t v1 = kTriTable[cubeIndex][triangle * 3 + 1];
-                        const std::int8_t v2 = kTriTable[cubeIndex][triangle * 3 + 2];
+                        const std::int8_t v1 = detail::kTriTable[cubeIndex][triangle * 3 + 1];
+                        const std::int8_t v2 = detail::kTriTable[cubeIndex][triangle * 3 + 2];
                         // The sea surface only ever faces away from the
                         // center: auto-orient each triangle radially.
                         const PlanetVertex &pv0 = waterVertices[slotVertex[static_cast<std::uint32_t>(v0)]];
