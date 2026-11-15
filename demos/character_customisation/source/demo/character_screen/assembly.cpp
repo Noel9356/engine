@@ -252,10 +252,15 @@ bool CharacterScreen::setQuadSpecies(int species)
     quadSpecies_            = species;
     CharacterError error    = CharacterError::None;
     const bool     replaced = character_->replacePart(character_->self, characterHandle_, body, bodyId.c_str(), &error);
-    // The taur's tail stays with the species when the species has one; a
-    // tail-less species (the frog) removes the tail instead.
+    if (!replaced)
+    {
+        std::printf("demo: quad swap to '%s' rejected (%u)\n", bodyId.c_str(), static_cast<unsigned>(error));
+    }
+    // The taur's upper body follows the species: the head (with its ears and
+    // neck) and the tail stay consistent with the lower body.
     if (replaced && activePlan_ == 1)
     {
+        setHeadPart(std::string("head_") + entry.id);
         if (entry.hasTail)
         {
             setTailPart(std::string("tail_") + entry.id);

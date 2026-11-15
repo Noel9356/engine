@@ -18,6 +18,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -156,8 +157,49 @@ bool parsePpm(const std::string &path, ParsedPpm &out)
 
 // The thumbnail occupies one corner of the exported frame (the small
 // viewport lands in a backend-dependent corner); pick the corner that holds
-// the rendered content by comparing each candidate against the clear colour.
-std::uint32_t cornerContentScore(const ParsedPpm &frame, std::uint32_t x0, std::uint32_t y0)
+// the rendered content by comparing each candidate against the frame's own
+// background colour (the most frequent sampled pixel - the clear colour),
+// so no backend palette is baked in.
+struct SampledBackground
+{
+    int r, g, b;
+};
+
+SampledBackground frameBackground(const ParsedPpm &frame)
+{
+    std::map<std::uint32_t, std::uint32_t> tally;
+    const std::uint32_t stepX = std::max<std::uint32_t>(1u, frame.width / 32u);
+    const std::uint32_t stepY = std::max<std::uint32_t>(1u, frame.height / 32u);
+    for (std::uint32_t y = 0; y < frame.height; y += stepY)
+    {
+        for (std::uint32_t x = 0; x < frame.width; x += stepX)
+        {
+            const std::size_t index = (static_cast<std::size_t>(y) * frame.width + x) * 4;
+            const std::uint32_t key = (static_cast<std::uint32_t>(frame.rgba[index]) << 16)
+                | (static_cast<std::uint32_t>(frame.rgba[index + 1]) << 8)
+                | static_cast<std::uint32_t>(frame.rgba[index + 2]);
+            ++tally[key];
+        }
+    }
+    std::uint32_t bestKey = 0;
+    std::uint32_t bestCount = 0;
+    for (const auto &[key, count] : tally)
+    {
+        if (count > bestCount)
+        {
+            bestCount = count;
+            bestKey = key;
+        }
+    }
+    return SampledBackground{
+        static_cast<int>((bestKey >> 16) & 0xFFu),
+        static_cast<int>((bestKey >> 8) & 0xFFu),
+        static_cast<int>(bestKey & 0xFFu),
+    };
+}
+
+std::uint32_t cornerContentScore(const ParsedPpm &frame, std::uint32_t x0, std::uint32_t y0,
+                                 const SampledBackground &background)
 {
     std::uint32_t       score  = 0;
     const std::uint32_t limitX = std::min(kThumbnailPixels, frame.width);
@@ -167,9 +209,9 @@ std::uint32_t cornerContentScore(const ParsedPpm &frame, std::uint32_t x0, std::
         for (std::uint32_t x = 0; x < limitX; x += 4)
         {
             const std::size_t index = (static_cast<std::size_t>(y0 + y) * frame.width + x0 + x) * 4;
-            const int         dr    = std::abs(static_cast<int>(frame.rgba[index]) - 92);
-            const int         dg    = std::abs(static_cast<int>(frame.rgba[index + 1]) - 97);
-            const int         db    = std::abs(static_cast<int>(frame.rgba[index + 2]) - 107);
+            const int         dr    = std::abs(static_cast<int>(frame.rgba[index]) - background.r);
+            const int         dg    = std::abs(static_cast<int>(frame.rgba[index + 1]) - background.g);
+            const int         db    = std::abs(static_cast<int>(frame.rgba[index + 2]) - background.b);
             if (dr + dg + db > 24)
             {
                 ++score;
@@ -236,11 +278,12 @@ bool CharacterScreen::generatePreviewTextures(const std::function<bool(const std
         std::uint32_t       bestScore = 0;
         const std::uint32_t cornerY   = frame.height > kThumbnailPixels ? frame.height - kThumbnailPixels : 0u;
         const std::uint32_t cornerX   = frame.width > kThumbnailPixels ? frame.width - kThumbnailPixels : 0u;
+        const SampledBackground background = frameBackground(frame);
         for (const std::uint32_t y0 : {0u, cornerY})
         {
             for (const std::uint32_t x0 : {0u, cornerX})
             {
-                const std::uint32_t score = cornerContentScore(frame, x0, y0);
+                const std::uint32_t score = cornerContentScore(frame, x0, y0, background);
                 if (score > bestScore)
                 {
                     bestScore = score;

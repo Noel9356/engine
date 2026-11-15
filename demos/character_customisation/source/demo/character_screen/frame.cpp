@@ -240,7 +240,7 @@ void CharacterScreen::frame(double deltaSeconds, double elapsedSeconds)
         std::uint32_t   fitHeight = 0;
         window_->getFramebufferSize(window_->self, windowHandle_, &fitWidth, &fitHeight);
         const float frameWidth  = static_cast<float>(fitWidth);
-        const float usableWidth = std::max(frameWidth - (panelVisible_ ? 430.0f : 0.0f), 0.35f * frameWidth);
+        const float usableWidth = std::max(frameWidth - (panelVisible_ ? kPanelOcclusion : 0.0f), 0.35f * frameWidth);
         engine::camera::ViewState fullView{};
         engine::camera::ViewState usableView{};
         camera_->viewState(camera_->self, cameraHandle_, fitWidth, fitHeight, &fullView);

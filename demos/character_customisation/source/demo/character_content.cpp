@@ -49,8 +49,6 @@ using engine::character::RigJointDefinition;
 using metrics::kSpecies;
 using metrics::kSpeciesCount;
 
-std::vector<glm::vec3> normalsScratch;
-
 // Loads a colored OBJ produced by scripts/extract_species_parts.py: "v x y z
 // r g b" vertices, "vn" normals, indexed "f a//a b//b c//c" faces (the
 // extractor welds by position), and optional "m <name>" morph blocks with one
@@ -68,7 +66,7 @@ bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vect
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> colors;
     std::vector<PartMorph> morphs;
-    normalsScratch.clear();
+    std::vector<glm::vec3> normals;
     std::vector<std::array<unsigned, 6>> faces;
     std::string                          morphName;
     std::vector<glm::vec3>               morphDeltas;
@@ -91,7 +89,7 @@ bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vect
             float x = 0.0f, y = 0.0f, z = 0.0f;
             if (std::sscanf(line + 3, "%f %f %f", &x, &y, &z) == 3)
             {
-                normalsScratch.emplace_back(x, y, z);
+                normals.emplace_back(x, y, z);
             }
         }
         else if (line[0] == 'f' && line[1] == ' ')
@@ -149,9 +147,9 @@ bool loadPartObj(const std::filesystem::path &path, MeshData &outMesh, std::vect
             vertex.position       = positions[index - 1];
             vertex.color          = colors[index - 1];
             const unsigned normal = normalIndex[corner] != 0 ? normalIndex[corner] : index;
-            vertex.normal         = normalsScratch.empty()
+            vertex.normal         = normals.empty()
                                       ? glm::vec3(0.0f, 1.0f, 0.0f)
-                                      : normalsScratch[std::min<std::size_t>(normal - 1, normalsScratch.size() - 1)];
+                                      : normals[std::min<std::size_t>(normal - 1, normals.size() - 1)];
             vertex.uv             = {0.0f, 0.0f};
             outMesh.vertices.push_back(vertex);
         }
@@ -494,9 +492,9 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     for (int species = 0; species < kSpeciesCount; ++species)
     {
         const metrics::SpeciesMetrics &entry = kSpecies[species];
-        if (!entry.hasTaurBody)
+        if (!entry.hasTaurBody && !entry.hasQuadBody)
         {
-            continue;
+            continue; // species without a body (head-only roster entries)
         }
         const std::string              rigId = std::string("quad_") + entry.id + "_core";
         nameStorage.push_back(rigId);
@@ -1246,9 +1244,9 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     for (int species = 0; species < kSpeciesCount; ++species)
     {
         const metrics::SpeciesMetrics &entry       = kSpecies[species];
-        if (!entry.hasTaurBody)
+        if (!entry.hasTaurBody && !entry.hasQuadBody)
         {
-            continue; // head-only species (the rabbit) ship no bodies
+            continue; // species without any body roster entry
         }
         const std::string              speciesId   = entry.id;
         const std::string              taurName    = std::string("quad_taur_") + speciesId;
@@ -1401,32 +1399,31 @@ bool CharacterContent::create(engine::character::CharacterCapability &character,
     }
 
     // Fix up the registered triangle counts from the loaded geometry.
-    PartDefinition resolvedParts[320];
-    std::uint32_t  resolvedCount = 0;
+    std::vector<PartDefinition> resolvedParts;
+    resolvedParts.reserve(parts.size());
     for (PartDefinition &part : parts)
     {
-        resolvedParts[resolvedCount] = part;
-        const auto found             = geometries_.find(resolvedParts[resolvedCount].geometryId);
+        resolvedParts.push_back(part);
+        const auto found = geometries_.find(resolvedParts.back().geometryId);
         if (found != geometries_.end())
         {
-            resolvedParts[resolvedCount].triangleCount = found->second.triangles;
+            resolvedParts.back().triangleCount = found->second.triangles;
         }
-        ++resolvedCount;
     }
-    for (std::uint32_t index = 0; index < resolvedCount; ++index)
+    for (PartDefinition &part : resolvedParts)
     {
-        if (!character.registerPart(character.self, &resolvedParts[index], &error))
+        if (!character.registerPart(character.self, &part, &error))
         {
             std::fprintf(stderr,
                 "demo: part registration failed for '%s' (%u) geom=%s rig=%s conns=%u bind=%u tags=%u slots=%u\n",
-                resolvedParts[index].id,
+                part.id,
                 static_cast<unsigned>(error),
-                resolvedParts[index].geometryId ? resolvedParts[index].geometryId : "(null)",
-                resolvedParts[index].rigId ? resolvedParts[index].rigId : "(null)",
-                resolvedParts[index].connectorCount,
-                resolvedParts[index].parameterBindingCount,
-                resolvedParts[index].tagCount,
-                resolvedParts[index].materialSlotCount);
+                part.geometryId ? part.geometryId : "(null)",
+                part.rigId ? part.rigId : "(null)",
+                part.connectorCount,
+                part.parameterBindingCount,
+                part.tagCount,
+                part.materialSlotCount);
             return false;
         }
     }

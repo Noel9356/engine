@@ -258,8 +258,17 @@ bool CharacterScreen::uiParameterSlider(const char *parameterId)
     {
         return false;
     }
-    float value = definition->defaultV != 0.0f ? definition->defaultV : 1.0f;
-    character_->getParameter(character_->self, characterHandle_, parameterId, &value);
+    // The registry's current value is authoritative; the definition default
+    // only seeds the slider when the handle cannot answer yet.
+    float value = definition->defaultV;
+    if (characterHandle_ != engine::character::invalidCharacter)
+    {
+        character_->getParameter(character_->self, characterHandle_, parameterId, &value);
+    }
+    else
+    {
+        value = definition->defaultV != 0.0f ? definition->defaultV : 1.0f;
+    }
     const float before = value;
     // The value rides IN the label (ImGui reserves the label's width, so the
     // track shrinks to fit and nothing clips at the window's right edge);
@@ -344,8 +353,8 @@ void CharacterScreen::drawPanel(double deltaSeconds)
         std::uint32_t width  = 0;
         std::uint32_t height = 0;
         window_->getSize(window_->self, windowHandle_, &width, &height);
-        ui_->setNextWindowPosition(ui_->self, uiContext_, static_cast<float>(width) - 492.0f, 16.0f, 0.0f, 0.0f);
-        ui_->setNextWindowSize(ui_->self, uiContext_, 472.0f, std::max(static_cast<float>(height) - 32.0f, 420.0f));
+        ui_->setNextWindowPosition(ui_->self, uiContext_, static_cast<float>(width) - kPanelOcclusion, 16.0f, 0.0f, 0.0f);
+        ui_->setNextWindowSize(ui_->self, uiContext_, kPanelWidth, std::max(static_cast<float>(height) - 32.0f, 420.0f));
         panelFirstPlacement_ = false;
     }
 

@@ -120,7 +120,7 @@ function(engine_fetch_dependency name)
 			PROPERTY "_ENGINE_DEPENDENCY_OWNER_${name}"
 		)
 
-		if(NOT)
+		if(NOT registeredRepository STREQUAL repository OR NOT registeredTag STREQUAL tag)
 			message(FATAL_ERROR
 				"engine_fetch_dependency: dependency '${name}' is pinned twice with different revisions:\n"
 				"  ${registeredOwner}: ${registeredRepository} (${registeredTag})\n"

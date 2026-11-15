@@ -137,7 +137,7 @@ end
 
 -- A second character built from scratch on the same registry.
 local custom = character.create(nil)
-local torso_part = character.add_part(custom, "torso_ranger", "torso")
+local torso_part = character.add_part(custom, "torso_thoracic_ranger", "torso")
 local head_part = character.add_part(custom, "head_dragon", "head")
 local connected = character.connect(custom, torso_part, "neck.base", head_part, "head.root")
 character.evaluate(custom)

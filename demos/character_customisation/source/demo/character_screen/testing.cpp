@@ -160,10 +160,12 @@ bool CharacterScreen::applyDrivePreset(const std::string &name)
              || name == "dolphin" || name == "frog")
     {
         // Quadruped species variant: the WHOLE animal (own head, own tail).
+        // "shiba" is the preset alias of the shibainu registry id.
+        const std::string resolved = name == "shiba" ? std::string("shibainu") : name;
         int speciesIndex = -1;
         for (int index = 0; index < metrics::kSpeciesCount; ++index)
         {
-            if (name == metrics::kSpecies[index].id)
+            if (resolved == metrics::kSpecies[index].id)
             {
                 speciesIndex = index;
                 break;
@@ -569,8 +571,22 @@ bool CharacterScreen::runSelfTest()
     bool quadrupedSpeciesOk = true;
     for (int species = 0; species < metrics::kSpeciesCount; ++species)
     {
-        quadrupedSpeciesOk
-            = setQuadSpecies(species) && quadrupedSpeciesOk && evaluateCharacter(true) && issues_.empty();
+        const bool swappedBase = setQuadSpecies(species);
+        const bool evaluated = swappedBase && evaluateCharacter(true);
+        const bool swapped = evaluated && issues_.empty();
+        if (!swapped)
+        {
+            std::printf("character-test: quadruped swap failed at species %s (swap=%d eval=%d issues=%u)\n",
+                metrics::kSpecies[species].id, swappedBase ? 1 : 0,
+                swappedBase ? (evaluated ? 1 : 0) : 0,
+                static_cast<unsigned>(issues_.size()));
+            for (const ValidationIssue &issue : issues_)
+            {
+                std::printf("character-test:   issue code=%u subject=%s message=%s\n",
+                    static_cast<unsigned>(issue.code), issue.subject, issue.message);
+            }
+        }
+        quadrupedSpeciesOk = swapped && quadrupedSpeciesOk;
     }
     check("quadruped species swap", quadrupedSpeciesOk);
 

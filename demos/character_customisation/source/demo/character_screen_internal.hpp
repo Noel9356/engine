@@ -35,6 +35,12 @@ using engine::window::WindowHandle;
 
 namespace screen_detail
 {
+
+// Panel geometry shared by the studio framing (the camera keeps the
+// panel-free band of the window in view) and the panel's own placement.
+inline constexpr float kPanelWidth = 472.0f;
+inline constexpr float kPanelMarginX = 20.0f;   // 16 px top/left margin + 4 px gap
+inline constexpr float kPanelOcclusion = kPanelWidth + kPanelMarginX;
 inline constexpr const char *kRecipeFileName   = "character_recipe.toml";
 inline constexpr const char *kFontRelativePath = "fonts/Inter-Variable.ttf";
 

@@ -2,7 +2,32 @@
 
 This document records the industry research behind the character customisation module's revisions, the authoring contract that follows from it, and how the demo content implements that contract. Read `overview.md` first for the module's data model; this document explains the deformation and junction decisions on top of it.
 
-## 0i. Fourteenth revision: anatomical segmentation, welded rings, the neck part (current)
+## 0j. Fifteenth revision: the species pipeline rebuilt from the downloaded rigs (current)
+
+Revision 15 rebuilds the species half of the content pipeline on top of the downloaded Quaternius rigs (CC0, `assets_dl/`): every species part is now a modification of the skinned animal model, extracted by `scripts/extract_species_parts.py` (restored to the repository; the OBJ headers already referenced it), never authored from scratch.
+
+### Research findings applied
+
+- **Skin-weight partitioning for modular characters:** parts cut from a skinned mesh follow the joint that deforms each vertex. Each species mesh splits on the dominance boundaries of ten regions (head, neck, tail, per-side ears, per-side front and hind legs, body); the clip inserts interpolated vertices on the shared edges, so both sides of every boundary carry the identical polyline and assemblies weld exactly. Straddling triangles split into convex polygons with fan triangulation; three-region corners keep the strongest corner whole.
+- **Bind pose recovery:** the exported inverse-bind matrices, not the node TRS chain, define the pose the mesh is authored in. The pipeline rebuilds the rig rest pose from `M_mesh x IBM^-1` (the skinning identity `G_j x IBM_j = M_mesh` then holds for every joint), which is what makes re-posing and measured landmarks possible on rigs whose bind pose differs from their rest pose.
+- **Anthro digitigrade stance (furry anatomy references):** the hind-leg chain re-poses from the standing quadruped bind into the anthro stance (femur down and slightly forward, tibia sweeping the hock back, metatarsus vertical, paw flat with toes forward); forelegs become paw arms. The stance targets blend 65% with the bind directions so the weight-blended skin at the region seams does not tear, and a plane cut at the pivot drops scapula/blade skin the region picks up. Limbs normalise on their true extent (root ring to farthest vertex, clamped) so the paw scale can never multiply the part.
+- **Neck sweep instead of neck cuts:** the skin-weight regions only own the mane strip on most species, so the neck junction reads the animal's own cross-sections - stations along the collar-to-atlas span take the centroid and radius of the neck bones' skin, and a smooth loft through that curved spine ends exactly on the atlas ring, sealing the head's hole. The curved spine preserves the species' S-shaped neck in the anthro assembly.
+- **Score-guided ear extraction:** a smooth falloff centred on each ear's seed cluster (skin-weight cores, or the nearest skin to the ear chain when the species paints its ears onto the skull) splits a local region per ear; the falloff radius derives from the ear chain length, and a degenerate split keeps the ears in-mesh rather than shipping a hollow head.
+
+### Pipeline changes
+
+- `scripts/extract_species_parts.py` (restored): GLB decode, IBM bind-pose adoption, one midpoint subdivision (colour/weight interpolation), region partitioning with exact-boundary splits, limb re-pose and normalisation, curved neck lofts, score-based ears, tail and quad bodies, the taur junction graft (bezier spine, waist-ring weld, colour gradient from the animal's stump tones to the human waist-ring tones), the muzzle/eyes head morphs and the thickness/headSize neck morphs, measured `extract_report.json`, and the regenerated `character_metrics.gen.hpp` (the same struct layout, brace initialiser forms, comma-separated rows). `--species` extracts one species (cached under `.species_cache/`); the default pass validates every junction.
+- Validation (part of the default run): the head's atlas ring must sit inside the neck's top ring (the seal measured from the report's recorded `atlasSealRadius`), every ear rim must match a head-hole radius, the taur waist ring must invert back onto the human ring through the recorded mount, and no mesh may carry degenerate triangles; write-time cleanup drops zero-area triangles.
+- The demo registers species rigs for every `hasTaurBody || hasQuadBody` species (the rabbit ships a whole-animal quadruped now, so its body needs its own rig) and the quad species swap re-anchors the head, ears, and neck so the taur's upper body follows the lower body's species.
+- Maintenance fixes on the paths the pipeline touches: the Lua lab assembled a part id that never existed (`torso_ranger`), the dependency pin-conflict guard had lost its operands, the OBJ loader shared a file-scope normal scratch across loads, the part-resolution stage used a fixed 320-entry stack array, the studio framing and the panel placement duplicated the panel geometry constants, the `shiba` drive preset silently fell back to the fox, the parameter slider seeded 1.0 over a legitimate 0.0 default, and the preview corner detection hardcoded the CPU rasterizer's clear colour (now derived from the frame's own background).
+
+### Verification
+
+- Build: zero warnings; `--character-test`: 23 checks pass (the quadruped swap now covers all 22 species including the rabbit's own body).
+- The extraction default run reports `all junction rings weld, no degenerate triangles` across the roster; per-species triangle counts land in the head/neck/ear/tail/limb/taur/quad ranges recorded in `extract_report.json`.
+- Captured frames (the anthro fox, the wolf taur, the quadruped, the dragon-headed build) re-reviewed; junction seams hide under the overlap seals and the paws land flat.
+
+## 0i. Fourteenth revision: anatomical segmentation, welded rings, the neck part
 
 Revision 14 rebuilds the body plans around an explicit vertebra-level segmentation with shared-polyline welds: every junction is now a real mesh seam (both sides carry the identical boundary ring) instead of a buried overlap.
 
