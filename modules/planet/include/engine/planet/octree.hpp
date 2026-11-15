@@ -16,8 +16,7 @@
 // is deterministic; per-chunk MESHES are pure functions anyway (see
 // meshing.hpp), which is what makes generation order-independent.
 
-#ifndef ENGINE_PLANET_OCTREE_HPP
-#define ENGINE_PLANET_OCTREE_HPP
+#pragma once
 
 #include <engine/planet/density.hpp>
 #include <engine/planet/flat_key_map.hpp>
@@ -173,4 +172,3 @@ private:
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_OCTREE_HPP

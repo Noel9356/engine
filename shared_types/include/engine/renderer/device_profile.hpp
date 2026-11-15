@@ -3,8 +3,7 @@
 // Populated by the renderer after device creation; limits and feature
 // flags let modules pick quality tiers without touching the graphics API.
 
-#ifndef ENGINE_SHARED_RENDER_DEVICE_PROFILE_HPP
-#define ENGINE_SHARED_RENDER_DEVICE_PROFILE_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -103,4 +102,3 @@ inline QualityPreset resolveQualityPreset(QualityPreset requested, const DeviceP
 
 } // namespace engine::renderer
 
-#endif

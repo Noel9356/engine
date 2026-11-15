@@ -11,8 +11,7 @@
 //
 // Everything here is consumed via ParticipantContext::acquireCapability<T>().
 
-#ifndef ENGINE_FUR_CAPABILITIES_HPP
-#define ENGINE_FUR_CAPABILITIES_HPP
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -121,4 +120,3 @@ struct FurCapability
 } // namespace fur
 } // namespace engine
 
-#endif

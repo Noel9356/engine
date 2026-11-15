@@ -6,12 +6,13 @@
 // units (math_utils.hpp, sampler, event_collector, blending) so this file
 // stays focused on lifecycle and capability dispatch.
 
+#include "blending.hpp"
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/math/quaternion.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 #include <engine/skeletal_animation/capabilities.hpp>
-#include "blending.hpp"
 #include "event_collector.hpp"
 #include "lua_bridge.hpp"
 #include "math_utils.hpp"

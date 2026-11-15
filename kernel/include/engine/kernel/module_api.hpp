@@ -3,8 +3,7 @@
 // A module library exports engineQueryModuleEntryTable returning this
 // table; strings and arrays must stay valid for the library's lifetime.
 
-#ifndef ENGINE_KERNEL_MODULE_API_HPP
-#define ENGINE_KERNEL_MODULE_API_HPP
+#pragma once
 
 #include <engine/kernel/participant_interface.hpp>
 
@@ -53,4 +52,3 @@ struct EngineModuleEntryTable
 // Every module .so must export this symbol with C linkage.
 extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQueryModuleEntryTable();
 
-#endif

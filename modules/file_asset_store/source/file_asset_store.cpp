@@ -31,9 +31,9 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <string>
 #include <system_error>
 #include <unordered_map>

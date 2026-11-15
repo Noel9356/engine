@@ -8,11 +8,13 @@
 // renderer's drawFur with the parameters produced here. The module performs
 // no synchronization of its own.
 
+#include <cmath>
+#include <engine/fur/capabilities.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
-#include <engine/fur/capabilities.hpp>
 
+#include <engine/kernel/event_bus.hpp>
 #include "fur_internal.hpp"
 
 #include <algorithm>

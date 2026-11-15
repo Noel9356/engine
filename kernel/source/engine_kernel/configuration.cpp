@@ -6,12 +6,12 @@
 // and staged overrides; reloadConfiguration re-runs the pipeline after a
 // pre-parse validation, keeping the old configuration on any failure.
 
-#include "engine/kernel/configuration.hpp"
+#include <engine/kernel/configuration.hpp>
 #include <engine/kernel/engine_kernel.hpp>
 
+#include <engine/kernel/participant_interface.hpp>
 #include "engine_kernel_internal.hpp"
 #include "kernel_internals.hpp"
-#include "engine/kernel/participant_interface.hpp"
 
 #include <cstddef>
 #include <filesystem>

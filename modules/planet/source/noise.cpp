@@ -8,6 +8,8 @@
 // path; this port keeps that behavior (it is part of the algorithm's
 // performance profile, and float math is deterministic).
 
+#include <cstddef>
+#include <cstdint>
 #include <engine/planet/noise.hpp>
 
 #include <array>

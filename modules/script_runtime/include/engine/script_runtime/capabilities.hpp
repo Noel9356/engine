@@ -5,8 +5,7 @@
 // native functions) goes through explicit calls so the host stays in control
 // of what a script can reach.
 
-#ifndef ENGINE_SCRIPT_RUNTIME_CAPABILITIES_HPP
-#define ENGINE_SCRIPT_RUNTIME_CAPABILITIES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -171,4 +170,3 @@ inline void unregisterRuntimeInitializer(
 
 } // namespace engine::script_runtime
 
-#endif

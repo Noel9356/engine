@@ -14,11 +14,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <istream>
 #include <limits>
 #include <string>
 #include <utility>
-#include <vector>
 
 namespace engine::models::detail
 {

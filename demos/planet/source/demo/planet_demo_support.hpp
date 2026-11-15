@@ -1,16 +1,18 @@
 // Private option, view-placement, and validation helpers for the planet demo.
-#ifndef ENGINE_DEMO_PLANET_DEMO_SUPPORT_HPP
-#define ENGINE_DEMO_PLANET_DEMO_SUPPORT_HPP
+#pragma once
 
 #include <engine/planet/capabilities.hpp>
+#include <engine/planet/params.hpp>
 #include <engine/planet/planet.hpp>
+#include <engine/planet/types.hpp>
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/mesh.hpp>
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cstdint>
 #include <functional>
-#include <array>
 #include <string>
 #include <vector>
 
@@ -63,4 +65,3 @@ SelfTestResult runSelfTest(engine::planet::PlanetCapability &capability, void *c
 std::array<engine::renderer::VertexAttribute, 4> canonicalAttributes();
 } // namespace demo::planet_demo
 
-#endif

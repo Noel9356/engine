@@ -8,8 +8,7 @@
 // clears touch contacts on every touch-surface device so a host that misses
 // touch-end callbacks cannot leave stuck touches.
 
-#ifndef ENGINE_INPUT_ACTIONS_WINDOW_ADAPTER_HPP
-#define ENGINE_INPUT_ACTIONS_WINDOW_ADAPTER_HPP
+#pragma once
 
 #include "device_state.hpp"
 
@@ -29,4 +28,3 @@ bool feedWindowEvent(DeviceStateRegistry &devices, window::WindowHandle windowHa
 } // namespace internal
 } // namespace engine::input_actions
 
-#endif // ENGINE_INPUT_ACTIONS_WINDOW_ADAPTER_HPP

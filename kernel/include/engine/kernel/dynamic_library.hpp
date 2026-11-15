@@ -3,8 +3,7 @@
 // The kernel holds one instance per loaded participant library so its
 // entry table and code stay resident.
 
-#ifndef ENGINE_KERNEL_DYNAMIC_LIBRARY_HPP
-#define ENGINE_KERNEL_DYNAMIC_LIBRARY_HPP
+#pragma once
 
 #include <filesystem>
 #include <string>
@@ -38,4 +37,3 @@ private:
 
 } // namespace engine
 
-#endif

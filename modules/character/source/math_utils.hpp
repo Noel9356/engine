@@ -4,10 +4,8 @@
 // pass, the evaluation walk, and the recipe serializer. Everything here
 // assumes the module mutex is held by the caller.
 
-#ifndef ENGINE_CHARACTER_MATH_UTILS_HPP
-#define ENGINE_CHARACTER_MATH_UTILS_HPP
+#pragma once
 
-#include "records.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -89,4 +87,3 @@ inline constexpr float kMaximumPartScale = 100.0f;
 } // namespace internal
 } // namespace engine::character
 
-#endif

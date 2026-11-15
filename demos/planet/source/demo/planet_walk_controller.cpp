@@ -1,5 +1,8 @@
 // First-person surface walk controller implementation (see the header).
 
+#include <engine/camera/capabilities.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/walker.hpp>
 #include "planet_walk_controller.hpp"
 
 #include <engine/planet/types.hpp>

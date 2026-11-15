@@ -3,8 +3,7 @@
 // Parses the engine-assigned application arguments (--screenshot, --quit-after,
 // --camera, --view) after the kernel has consumed its own flags.
 
-#ifndef ENGINE_DEMO_OPTIONS_HPP
-#define ENGINE_DEMO_OPTIONS_HPP
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -45,4 +44,3 @@ struct Options
 
 } // namespace demo
 
-#endif

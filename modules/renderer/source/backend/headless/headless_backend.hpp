@@ -5,8 +5,7 @@
 // parallelism. Used when the surface API is not Vulkan or "headless" is
 // configured.
 
-#ifndef ENGINE_RENDERER_MODULE_HEADLESS_BACKEND_HPP
-#define ENGINE_RENDERER_MODULE_HEADLESS_BACKEND_HPP
+#pragma once
 
 // The tile-parallel rasterizer's shared pipeline (prepareFanTriangles /
 // rasterizeFanRecord / shadeTrianglePixel / fanPixelWindow) must inline into
@@ -18,28 +17,29 @@
 #define ENGINE_RASTERIZER_INLINE inline
 #endif
 
-#include "engine/direct_lighting/capabilities.hpp"
-#include "engine/pbr/capabilities.hpp"
-#include "engine/renderer/capabilities.hpp"
-#include "engine/renderer/device_profile.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
 #include "headless_types.hpp"
 #include "render_backend.hpp"
 #include "render_shared.hpp"
 
+#include <engine/direct_lighting/capabilities.hpp>
 #include <engine/kernel/task_scheduler.hpp>
+#include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/device_profile.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
 
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <glm/ext/matrix_float3x3.hpp>
 #include <glm/ext/matrix_float4x4.hpp>
 #include <glm/ext/vector_float3.hpp>
 #include <glm/ext/vector_float4.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/type_ptr.hpp>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -476,4 +476,3 @@ private:
 } // namespace renderer
 } // namespace engine
 
-#endif

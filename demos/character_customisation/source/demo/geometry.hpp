@@ -4,8 +4,7 @@
 // benchmark_scene.cpp uploads through the renderer capability. Vertex layout matches the
 // renderer's fixed interleaved format (position, normal, color, uv).
 
-#ifndef ENGINE_DEMO_GEOMETRY_HPP
-#define ENGINE_DEMO_GEOMETRY_HPP
+#pragma once
 
 #include <engine/renderer/capabilities.hpp>
 
@@ -65,4 +64,3 @@ void appendTransformedMesh(MeshData &destination, const MeshData &source, const 
 
 } // namespace demo
 
-#endif

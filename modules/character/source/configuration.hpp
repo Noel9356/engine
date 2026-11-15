@@ -5,8 +5,7 @@
 // nothing is clamped. Called once per construct() and again whenever a
 // ConfigurationReloadedEvent touches character.* keys.
 
-#ifndef ENGINE_CHARACTER_CONFIGURATION_HPP
-#define ENGINE_CHARACTER_CONFIGURATION_HPP
+#pragma once
 
 #include "records.hpp"
 
@@ -24,4 +23,3 @@ void readBudgets(ParticipantContext &context, Budgets &budgets);
 } // namespace internal
 } // namespace engine::character
 
-#endif

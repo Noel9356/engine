@@ -5,8 +5,7 @@
 // stateCondition (state/error published to waiters). Shared between the
 // cache, loader, and module orchestrator.
 
-#ifndef ENGINE_FILE_ASSET_STORE_ASSET_RECORD_HPP
-#define ENGINE_FILE_ASSET_STORE_ASSET_RECORD_HPP
+#pragma once
 
 #include <engine/file_asset_store/capabilities.hpp>
 
@@ -15,7 +14,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -56,4 +54,3 @@ void setAssetState(AssetRecord &record, AssetState state, AssetError error) noex
 
 } // namespace engine::file_asset_store
 
-#endif

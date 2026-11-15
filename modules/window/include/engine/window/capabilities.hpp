@@ -5,8 +5,7 @@
 // handles), "window.glfw" (raw GLFW access), and "window.headless" (software
 // surface export for tests and CI).
 
-#ifndef ENGINE_WINDOW_CAPABILITIES_HPP
-#define ENGINE_WINDOW_CAPABILITIES_HPP
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -555,4 +554,3 @@ struct HeadlessWindowCapability
 } // namespace window
 } // namespace engine
 
-#endif

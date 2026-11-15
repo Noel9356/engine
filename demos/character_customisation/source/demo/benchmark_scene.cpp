@@ -2,6 +2,12 @@
 #include "benchmark_scene.hpp"
 
 #include "diagnostics.hpp"
+#include <engine/models/capabilities.hpp>
+#include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
+#include <engine/window/capabilities.hpp>
 #include "geometry.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -11,7 +17,6 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
-#include <vector>
 
 namespace demo
 {

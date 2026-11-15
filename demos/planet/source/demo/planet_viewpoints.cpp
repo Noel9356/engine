@@ -1,12 +1,16 @@
+#include <engine/planet/capabilities.hpp>
+#include <engine/planet/density.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 #include "planet_demo_support.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <iostream>
-#include <limits>
 #include <vector>
 
 namespace demo::planet_demo

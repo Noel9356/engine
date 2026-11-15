@@ -2,8 +2,7 @@
 // the deferred-change CommandBuffer classes that ecs.cpp binds into a
 // capability table (and that the world module's facade composes further).
 
-#ifndef ENGINE_ECS_STORAGE_HPP
-#define ENGINE_ECS_STORAGE_HPP
+#pragma once
 
 #include <engine/world/types.hpp>
 
@@ -198,4 +197,3 @@ private:
 
 } // namespace engine::ecs
 
-#endif

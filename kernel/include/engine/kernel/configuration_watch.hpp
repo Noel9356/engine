@@ -4,9 +4,9 @@
 // callback when a live reload changed the watched dotted key. Handles
 // are RAII (released on destruction) and the hub is moveable.
 
-#ifndef ENGINE_KERNEL_CONFIGURATION_WATCH_HPP
-#define ENGINE_KERNEL_CONFIGURATION_WATCH_HPP
+#pragma once
 
+#include <engine/kernel/event_bus.hpp>
 #include <engine/kernel/participant_interface.hpp>
 
 #include <algorithm>
@@ -230,4 +230,3 @@ inline void ConfigurationWatch::release()
 
 } // namespace engine
 
-#endif

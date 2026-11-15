@@ -10,8 +10,13 @@
 #include "character_content.hpp"
 #include "character_metrics.gen.hpp"
 
+#include <engine/character/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
 #include "geometry.hpp"
 
+#include <cstdint>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 

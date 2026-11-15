@@ -5,12 +5,11 @@
 // shape and rebound to the current callback through ExecutionBindings.
 // Concurrent or alternating use falls back to a per-call graph.
 
-#ifndef ENGINE_RENDER_GRAPH_INTERNAL_EXECUTION_HPP
-#define ENGINE_RENDER_GRAPH_INTERNAL_EXECUTION_HPP
+#pragma once
 
+#include <engine/kernel/task_scheduler.hpp>
 #include <engine/render_graph/capabilities.hpp>
 #include <engine/render_graph/compiler.hpp>
-#include <engine/kernel/task_scheduler.hpp>
 
 #include <atomic>
 #include <cstdint>
@@ -80,4 +79,3 @@ private:
 
 } // namespace engine::render_graph::detail
 
-#endif

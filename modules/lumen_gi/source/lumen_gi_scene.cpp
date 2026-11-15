@@ -9,8 +9,11 @@
 // instance carries its captured albedo / normal / depth (and cached lighting)
 // with it; capture runs once per surface change instead of every frame.
 
+#include <engine/lumen_gi/capabilities.hpp>
 #include "lumen_gi_internal.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 
@@ -18,6 +21,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace engine
 {

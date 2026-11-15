@@ -5,16 +5,16 @@
 // capability entry point with one mutex and the registry assumes the caller
 // holds it.
 
-#ifndef ENGINE_INPUT_ACTIONS_DEVICE_STATE_HPP
-#define ENGINE_INPUT_ACTIONS_DEVICE_STATE_HPP
+#pragma once
 
 #include "configuration.hpp"
 #include "internal.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <engine/input_actions/capabilities.hpp>
 
 #include <unordered_map>
-#include <unordered_set>
 
 namespace engine::input_actions
 {
@@ -98,4 +98,3 @@ private:
 } // namespace internal
 } // namespace engine::input_actions
 
-#endif // ENGINE_INPUT_ACTIONS_DEVICE_STATE_HPP

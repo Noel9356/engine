@@ -33,22 +33,26 @@
 // resolved and checked before the assembly is touched, so a rejected recipe
 // leaves the current character untouched.
 
-#include "math_utils.hpp"
 #include "records.hpp"
 #include "registry.hpp"
+
+#include <engine/character/capabilities.hpp>
 
 #include <toml.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <exception>
 #include <fstream>
 #include <limits>
+#include <ostream>
 #include <set>
 #include <sstream>
 #include <string>
-#include <unordered_map>
-#include <vector>
+#include <utility>
 
 namespace engine::character
 {

@@ -4,8 +4,7 @@
 // use it to request files into a bounded, reference-counted byte cache, wait
 // for and copy their contents, and manage cache memory.
 
-#ifndef ENGINE_FILE_ASSET_STORE_CAPABILITIES_HPP
-#define ENGINE_FILE_ASSET_STORE_CAPABILITIES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -135,4 +134,3 @@ struct FileAssetStoreCapability
 
 } // namespace engine::file_asset_store
 
-#endif

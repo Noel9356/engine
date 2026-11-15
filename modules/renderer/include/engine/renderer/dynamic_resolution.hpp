@@ -3,10 +3,10 @@
 // timing samples fed in once per frame by the caller (typically the
 // FrameStatistics reported by the renderer capability).
 
-#ifndef ENGINE_RENDERER_DYNAMIC_RESOLUTION_HPP
-#define ENGINE_RENDERER_DYNAMIC_RESOLUTION_HPP
+#pragma once
 
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/device_profile.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -323,4 +323,3 @@ private:
 
 } // namespace engine::renderer
 
-#endif

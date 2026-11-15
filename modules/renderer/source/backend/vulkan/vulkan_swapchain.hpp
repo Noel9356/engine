@@ -4,11 +4,10 @@
 // out-of-date detection/recreation, and the readback buffer used for PPM
 // exports. Compiled only under ENGINE_RENDERER_BACKEND_VULKAN.
 
-#ifndef ENGINE_RENDERER_MODULE_VULKAN_SWAPCHAIN_HPP
-#define ENGINE_RENDERER_MODULE_VULKAN_SWAPCHAIN_HPP
+#pragma once
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
-#include "engine/renderer/capabilities.hpp"
+#include <engine/renderer/capabilities.hpp>
 #include "vulkan_device.hpp"
 
 #include <cstdint>
@@ -267,4 +266,3 @@ private:
 
 #endif
 
-#endif

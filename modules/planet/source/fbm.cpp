@@ -1,6 +1,9 @@
 // Shared fBm machinery implementation (see fbm.hpp).
 
+#include <cstdint>
 #include <engine/planet/fbm.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 
 #include <engine/planet/noise.hpp>
 

@@ -1,6 +1,9 @@
 #include "../character_metrics.gen.hpp"
 #include "../character_screen_internal.hpp"
+#include "../character_screen.hpp"
+#include <engine/character/capabilities.hpp>
 
+#include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <string>

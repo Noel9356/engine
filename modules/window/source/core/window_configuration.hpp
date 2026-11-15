@@ -3,15 +3,13 @@
 // [window] section into it. Kept separate from the module class so the
 // validation rules stay testable on their own.
 
-#ifndef ENGINE_WINDOW_MODULE_CONFIGURATION_HPP
-#define ENGINE_WINDOW_MODULE_CONFIGURATION_HPP
+#pragma once
 
 #include <engine/kernel/participant_interface.hpp>
 
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace engine
 {
@@ -84,4 +82,3 @@ bool touchesWindowConfiguration(const ConfigurationReloadedEvent &event);
 } // namespace window
 } // namespace engine
 
-#endif

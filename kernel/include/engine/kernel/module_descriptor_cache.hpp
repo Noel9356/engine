@@ -4,8 +4,7 @@
 // cache stores descriptors extracted from libraries the user already
 // approved for scanning, keyed by path and validated by size/mtime.
 
-#ifndef ENGINE_KERNEL_MODULE_DESCRIPTOR_CACHE_HPP
-#define ENGINE_KERNEL_MODULE_DESCRIPTOR_CACHE_HPP
+#pragma once
 
 #include <engine/kernel/module_descriptor.hpp>
 
@@ -75,4 +74,3 @@ private:
 
 } // namespace engine
 
-#endif

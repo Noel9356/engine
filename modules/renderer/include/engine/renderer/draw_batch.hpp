@@ -4,10 +4,11 @@
 // material) runs plus a packed column-major instance-matrix stream, and can
 // refresh the matrices of just the commands that changed between frames.
 
-#ifndef ENGINE_RENDERER_DRAW_BATCH_HPP
-#define ENGINE_RENDERER_DRAW_BATCH_HPP
+#pragma once
 
+#include <engine/renderer/capabilities.hpp>
 #include <engine/renderer/draw_sort.hpp>
+#include <engine/renderer/material.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -15,6 +16,7 @@
 #include <functional>
 #include <limits>
 #include <span>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -294,4 +296,3 @@ static_assert(std::is_standard_layout_v<IndexedIndirectCommand>);
 
 } // namespace engine::renderer
 
-#endif

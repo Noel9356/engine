@@ -18,9 +18,10 @@
 // thread evaluates it or in what chunk order, which is what makes chunk
 // generation order-independent.
 
-#ifndef ENGINE_PLANET_DENSITY_HPP
-#define ENGINE_PLANET_DENSITY_HPP
+#pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <engine/planet/climate.hpp>
 #include <engine/planet/fbm.hpp>
 #include <engine/planet/params.hpp>
@@ -128,4 +129,3 @@ private:
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_DENSITY_HPP

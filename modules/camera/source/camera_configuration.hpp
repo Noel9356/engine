@@ -5,8 +5,7 @@
 // configuration provides. loadCameraDefaults re-reads the section, so the
 // same path serves construct() and configuration hot-reload.
 
-#ifndef ENGINE_CAMERA_CONFIGURATION_HPP
-#define ENGINE_CAMERA_CONFIGURATION_HPP
+#pragma once
 
 #include <engine/camera/capabilities.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -62,4 +61,3 @@ void loadCameraDefaults(ParticipantContext &context, CameraDefaults &defaults);
 } // namespace camera
 } // namespace engine
 
-#endif

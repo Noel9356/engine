@@ -3,11 +3,10 @@
 // 11-float interleaved vertex (position, normal, color, uv) and arbitrary
 // pixel layouts into tightly packed top-left RGBA8.
 
-#ifndef ENGINE_RENDERER_MODULE_DATA_HPP
-#define ENGINE_RENDERER_MODULE_DATA_HPP
+#pragma once
 
-#include "engine/renderer/mesh.hpp"
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/mesh.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -55,4 +54,3 @@ bool prepareTextureData(const TextureDescription &source, PreparedTextureData &p
 } // namespace renderer
 } // namespace engine
 
-#endif

@@ -1,8 +1,7 @@
 // Minimal FIPS 180-4 SHA-256 used for trust bindings and descriptor
 // caches.
 
-#ifndef ENGINE_KERNEL_SHA256_HPP
-#define ENGINE_KERNEL_SHA256_HPP
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -51,4 +50,3 @@ bool sha256HexDigestsEqual(const std::string &left, const std::string &right);
 
 } // namespace engine
 
-#endif

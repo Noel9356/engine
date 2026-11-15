@@ -5,11 +5,9 @@
 // take the relevant budget (maximumJoints) as a parameter to avoid coupling
 // to the module state.
 
-#ifndef ENGINE_SKELETAL_ANIMATION_BLENDING_HPP
-#define ENGINE_SKELETAL_ANIMATION_BLENDING_HPP
+#pragma once
 
 #include <engine/skeletal_animation/capabilities.hpp>
-#include "math_utils.hpp"
 #include "records.hpp"
 
 #include <cstdint>
@@ -60,4 +58,3 @@ bool computeSkinningMatricesInternal(const SkeletonRecord &skeleton, const Joint
 
 } // namespace engine::skeletal_animation
 
-#endif

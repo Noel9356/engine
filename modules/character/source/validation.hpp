@@ -7,11 +7,12 @@
 // and parameter ranges. Issues are capped so a pathological assembly cannot
 // grow the report without bound.
 
-#ifndef ENGINE_CHARACTER_VALIDATION_HPP
-#define ENGINE_CHARACTER_VALIDATION_HPP
+#pragma once
 
+#include <engine/character/capabilities.hpp>
 #include "records.hpp"
 
+#include <cstddef>
 #include <vector>
 
 namespace engine::character
@@ -29,4 +30,3 @@ void collectIssues(const Registry &registry, const CharacterRecord &record, std:
 } // namespace internal
 } // namespace engine::character
 
-#endif

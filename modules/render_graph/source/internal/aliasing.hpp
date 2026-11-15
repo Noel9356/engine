@@ -6,8 +6,7 @@
 // module class so the allocator is independently testable and the module
 // stays a thin capability binding.
 
-#ifndef ENGINE_RENDER_GRAPH_INTERNAL_ALIASING_HPP
-#define ENGINE_RENDER_GRAPH_INTERNAL_ALIASING_HPP
+#pragma once
 
 #include <engine/render_graph/capabilities.hpp>
 #include <engine/render_graph/compiler.hpp>
@@ -52,4 +51,3 @@ bool allocateTransientSlots(const RenderGraphPlan &plan, const RenderGraphResour
 
 } // namespace engine::render_graph::detail
 
-#endif

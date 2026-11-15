@@ -1,12 +1,19 @@
 // Octree LOD selection (see octree.hpp).
 
+#include <cstddef>
+#include <cstdint>
+#include <engine/planet/density.hpp>
+#include <engine/planet/meshing.hpp>
 #include <engine/planet/octree.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 
 #include <engine/planet/fbm.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <vector>
 
 namespace engine
 {

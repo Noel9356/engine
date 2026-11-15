@@ -7,11 +7,11 @@
 // request. The cache does not perform file I/O itself; the module
 // orchestrates reserve → load → commit through the cache's budget hooks.
 
-#ifndef ENGINE_FILE_ASSET_STORE_ASSET_CACHE_HPP
-#define ENGINE_FILE_ASSET_STORE_ASSET_CACHE_HPP
+#pragma once
 
 #include "asset_config.hpp"
 #include "asset_record.hpp"
+#include <cstddef>
 #include <engine/file_asset_store/capabilities.hpp>
 #include <engine/file_asset_store/catalog.hpp>
 #include <engine/kernel/profiling.hpp>
@@ -130,4 +130,3 @@ private:
 
 } // namespace engine::file_asset_store
 
-#endif

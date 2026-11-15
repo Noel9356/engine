@@ -8,12 +8,11 @@
 // degenerate geometry, and derives the aggregate bounds (maximum relief,
 // octree depth, shell band) the octree culling relies on.
 
-#ifndef ENGINE_PLANET_PARAMS_HPP
-#define ENGINE_PLANET_PARAMS_HPP
+#pragma once
 
+#include <cstdint>
 #include <engine/planet/types.hpp>
 
-#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -359,4 +358,3 @@ static_assert(sizeof(PlanetVertex) == 44, "planet vertices must match the render
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_PARAMS_HPP

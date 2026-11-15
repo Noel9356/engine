@@ -18,8 +18,7 @@
 // cache stable indices (parameter/rig/joint/connector) instead of repeating
 // hash lookups during evaluation.
 
-#ifndef ENGINE_CHARACTER_RECORDS_HPP
-#define ENGINE_CHARACTER_RECORDS_HPP
+#pragma once
 
 #include <engine/character/capabilities.hpp>
 
@@ -28,6 +27,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -399,4 +399,3 @@ bool loadRecipeFromFile(const Registry &registry, const Budgets &budgets, Charac
 } // namespace internal
 } // namespace engine::character
 
-#endif

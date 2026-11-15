@@ -16,21 +16,22 @@
 #include <engine/renderer/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
 
-#include "engine/kernel/event_bus.hpp"
-#include "engine/kernel/profiling.hpp"
-#include "engine/renderer/device_profile.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
+#include <engine/kernel/event_bus.hpp>
+#include <engine/kernel/profiling.hpp>
+#include <engine/renderer/device_profile.hpp>
 #include <engine/renderer/draw_sort.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
 
+#include <engine/util/hardware_info.hpp>
 #include "headless_backend.hpp"
 #include "render_backend.hpp"
 #include "render_data.hpp"
 #include "render_shared.hpp"
+#include <span>
+#include <utility>
 #include "vulkan_backend.hpp"
 #include "vulkan_gpu_probe.hpp"
-#include <engine/util/hardware_info.hpp>
-#include <utility>
 
 // Pulls in stb_image once for createTextureFromFile; no other file in the
 // module decodes images.
@@ -43,7 +44,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
-#include <memory>
 #include <new>
 #include <optional>
 #include <string>

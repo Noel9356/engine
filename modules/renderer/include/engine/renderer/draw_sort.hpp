@@ -4,10 +4,10 @@
 // total) so equal materials sort adjacently and drawMeshes can batch runs of
 // same mesh + same material commands into instanced draws.
 
-#ifndef ENGINE_RENDERER_DRAW_SORT_HPP
-#define ENGINE_RENDERER_DRAW_SORT_HPP
+#pragma once
 
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -184,4 +184,3 @@ inline void sortRenderDrawCommandPermutation(std::span<const RenderDrawCommand> 
 
 } // namespace engine::renderer
 
-#endif

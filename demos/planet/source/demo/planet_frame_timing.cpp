@@ -1,10 +1,14 @@
 #include "planet_frame_timing.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <ratio>
 #include <sstream>
+#include <string>
+#include <vector>
 
 namespace demo::planet_demo
 {

@@ -15,8 +15,7 @@
 // encode. The knobs live in PlanetGenerationParams (the [planet] section,
 // atmosphere_* keys), so tuning needs no code changes.
 
-#ifndef ENGINE_PLANET_ATMOSPHERE_HPP
-#define ENGINE_PLANET_ATMOSPHERE_HPP
+#pragma once
 
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
@@ -49,4 +48,3 @@ Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunE
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_ATMOSPHERE_HPP

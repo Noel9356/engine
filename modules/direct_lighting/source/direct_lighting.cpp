@@ -9,6 +9,7 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/renderer/device_profile.hpp>
 
 #include <algorithm>
 #include <atomic>

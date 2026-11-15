@@ -1,5 +1,4 @@
-#ifndef ENGINE_INPUT_ACTIONS_LUA_BRIDGE_HPP
-#define ENGINE_INPUT_ACTIONS_LUA_BRIDGE_HPP
+#pragma once
 
 #include <engine/input_actions/capabilities.hpp>
 #include <engine/script_runtime/capabilities.hpp>
@@ -21,4 +20,3 @@ bool initializeInputActionsLuaRuntime(
 
 } // namespace engine::input_actions
 
-#endif

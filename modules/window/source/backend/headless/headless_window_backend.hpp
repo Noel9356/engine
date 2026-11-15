@@ -2,8 +2,7 @@
 // OS window and no real input. Used as the fallback when GLFW is unavailable
 // and for tests/CI (surface pixel access and PPM export).
 
-#ifndef ENGINE_WINDOW_MODULE_HEADLESS_BACKEND_HPP
-#define ENGINE_WINDOW_MODULE_HEADLESS_BACKEND_HPP
+#pragma once
 
 #include "window_backend.hpp"
 
@@ -117,4 +116,3 @@ private:
 } // namespace window
 } // namespace engine
 
-#endif

@@ -7,8 +7,7 @@
 // inputs change. Mutating entry points validate their inputs and leave the
 // record untouched when the input is unusable.
 
-#ifndef ENGINE_CAMERA_RECORD_HPP
-#define ENGINE_CAMERA_RECORD_HPP
+#pragma once
 
 #include "camera_configuration.hpp"
 #include "camera_orientation.hpp"
@@ -162,4 +161,3 @@ private:
 } // namespace camera
 } // namespace engine
 
-#endif

@@ -1,6 +1,9 @@
 // Terrain density field implementation (see density.hpp).
 
+#include <cstdint>
 #include <engine/planet/density.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 
 #include <engine/planet/fbm.hpp>
 #include <engine/planet/noise.hpp>

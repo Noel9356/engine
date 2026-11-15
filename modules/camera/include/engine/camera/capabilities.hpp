@@ -5,8 +5,7 @@
 // handle-based cameras with fixed, orbit, and fly control modes that produce
 // view/projection matrices for a caller-supplied viewport size.
 
-#ifndef ENGINE_CAMERA_CAPABILITIES_HPP
-#define ENGINE_CAMERA_CAPABILITIES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -226,4 +225,3 @@ struct CameraCapability
 } // namespace camera
 } // namespace engine
 
-#endif

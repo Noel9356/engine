@@ -14,8 +14,7 @@
 // only such a device reports gpuPresent == false and the auto policy picks
 // the headless rasterizer.
 
-#ifndef ENGINE_RENDERER_VULKAN_GPU_PROBE_HPP
-#define ENGINE_RENDERER_VULKAN_GPU_PROBE_HPP
+#pragma once
 
 #include <engine/renderer/device_profile.hpp>
 
@@ -58,4 +57,3 @@ const GpuProbeResult &probeHostGpu();
 
 } // namespace engine::renderer
 
-#endif // ENGINE_RENDERER_VULKAN_GPU_PROBE_HPP

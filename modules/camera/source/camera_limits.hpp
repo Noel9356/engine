@@ -4,8 +4,7 @@
 // keys, creation parameters, per-camera setters, and projection clamping - so
 // the ranges cannot drift apart between those paths.
 
-#ifndef ENGINE_CAMERA_LIMITS_HPP
-#define ENGINE_CAMERA_LIMITS_HPP
+#pragma once
 
 #include <cmath>
 
@@ -64,4 +63,3 @@ inline bool adoptPositiveFinite(float value, float maximum, float &destination) 
 } // namespace camera
 } // namespace engine
 
-#endif

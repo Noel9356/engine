@@ -3,8 +3,7 @@
 // versioned binary save/load format. Built on its own slot storage, not on
 // the ecs layer.
 
-#ifndef ENGINE_ENTITY_WORLD_CAPABILITIES_HPP
-#define ENGINE_ENTITY_WORLD_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/world/types.hpp>
 
@@ -109,4 +108,3 @@ struct EntityWorldCapability
 
 } // namespace engine::entity_world
 
-#endif

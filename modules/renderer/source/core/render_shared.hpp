@@ -2,8 +2,7 @@
 // environment, the CPU shading model (kept numerically identical to the
 // Vulkan fragment shader), tone mapping, and small error/PPM utilities.
 
-#ifndef ENGINE_RENDERER_SHARED_HPP
-#define ENGINE_RENDERER_SHARED_HPP
+#pragma once
 
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
@@ -22,7 +21,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 namespace engine
 {
@@ -624,4 +622,3 @@ inline bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t he
 } // namespace renderer
 } // namespace engine
 
-#endif

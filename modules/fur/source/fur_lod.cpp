@@ -10,10 +10,13 @@
 // each band so the reduced layer count of the next band dissolves the
 // strand tips smoothly instead of clipping them with a visible pop.
 
+#include <engine/fur/capabilities.hpp>
 #include "fur_internal.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 
 namespace engine
 {

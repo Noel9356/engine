@@ -5,8 +5,8 @@
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
 
-#include "vulkan_frames.hpp"
 #include "vulkan_device.hpp"
+#include "vulkan_frames.hpp"
 
 #include <array>
 #include <cstdint>

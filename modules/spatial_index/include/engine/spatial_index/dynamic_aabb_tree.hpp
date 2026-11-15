@@ -5,10 +5,10 @@
 // rotations. Handles are generation-tagged so stale handles fail safely.
 // Header-only; not internally synchronized.
 
-#ifndef ENGINE_SPATIAL_INDEX_DYNAMIC_AABB_TREE_HPP
-#define ENGINE_SPATIAL_INDEX_DYNAMIC_AABB_TREE_HPP
+#pragma once
 
 #include <engine/spatial_index/aabb.hpp>
+#include <engine/spatial_index/types.hpp>
 
 #include <algorithm>
 #include <array>
@@ -897,4 +897,3 @@ private:
 
 } // namespace engine::spatial
 
-#endif

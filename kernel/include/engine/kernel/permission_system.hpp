@@ -4,8 +4,7 @@
 // what the participant declared. Configuration denials always win, then
 // blanket-trusted participants, then the declared permission set.
 
-#ifndef ENGINE_KERNEL_PERMISSION_SYSTEM_HPP
-#define ENGINE_KERNEL_PERMISSION_SYSTEM_HPP
+#pragma once
 
 #include <string>
 #include <unordered_map>
@@ -130,4 +129,3 @@ private:
 
 } // namespace engine
 
-#endif

@@ -6,12 +6,10 @@
 // cross product. Yaw is the angle around up measured from the forward basis,
 // pitch the elevation, so a changed up vector never corrupts the pose.
 
-#ifndef ENGINE_CAMERA_ORIENTATION_HPP
-#define ENGINE_CAMERA_ORIENTATION_HPP
+#pragma once
 
 #include <glm/glm.hpp>
 
-#include <algorithm>
 #include <cmath>
 
 namespace engine
@@ -102,4 +100,3 @@ inline glm::vec3 rightDirectionFromYaw(float yawDegrees, const OrientationBasis 
 } // namespace camera
 } // namespace engine
 
-#endif

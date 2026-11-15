@@ -13,11 +13,18 @@
 // in Unreal Engine 5", SIGGRAPH 2022 Advances course; "Lumen Technical
 // Details", Epic Games documentation) scaled to a CPU implementation.
 
-#include <engine/lumen_gi/capabilities.hpp>
+#include <atomic>
+#include <cstdint>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/lumen_gi/capabilities.hpp>
 
+#include <engine/direct_lighting/capabilities.hpp>
+#include <engine/kernel/event_bus.hpp>
+#include <engine/kernel/task_scheduler.hpp>
+#include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/device_profile.hpp>
 #include "lumen_gi_internal.hpp"
 
 #include <glm/geometric.hpp>
@@ -28,8 +35,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace engine
 {

@@ -4,8 +4,7 @@
 // table the kernel hands to consumers that require the "models" capability.
 // Function pointers take the capability's own `self` as their first argument.
 
-#ifndef ENGINE_MODELS_CAPABILITIES_HPP
-#define ENGINE_MODELS_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/models/material.hpp>
 #include <engine/renderer/mesh.hpp>
@@ -150,4 +149,3 @@ struct ModelsCapability
 } // namespace models
 } // namespace engine
 
-#endif

@@ -3,8 +3,7 @@
 // The helpers preserve the caller's row stride and can adapt RGBA row order
 // and red/blue channel order without depending on a renderer or window API.
 
-#ifndef ENGINE_UTIL_PPM_HPP
-#define ENGINE_UTIL_PPM_HPP
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -97,4 +96,3 @@ inline bool writePpmRgba(const char *filePath, std::uint32_t width, std::uint32_
 
 } // namespace engine::util
 
-#endif

@@ -5,8 +5,7 @@
 // mapEngineKey by engine key. Keys absent from the table translate to
 // Key::Unknown / GLFW_KEY_UNKNOWN.
 
-#ifndef ENGINE_WINDOW_MODULE_GLFW_KEY_MAP_HPP
-#define ENGINE_WINDOW_MODULE_GLFW_KEY_MAP_HPP
+#pragma once
 
 #if defined(ENGINE_WINDOW_BACKEND_GLFW)
 
@@ -139,4 +138,3 @@ inline int mapEngineKey(Key key)
 
 #endif
 
-#endif

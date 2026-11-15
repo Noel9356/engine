@@ -6,8 +6,7 @@
 // usually once per frame on the main thread. Optional per-channel latency
 // statistics feed the diagnostics report.
 
-#ifndef ENGINE_KERNEL_EVENT_BUS_HPP
-#define ENGINE_KERNEL_EVENT_BUS_HPP
+#pragma once
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <typeindex>
 #include <unordered_map>
 #include <utility>
@@ -1015,4 +1015,3 @@ private:
 
 } // namespace engine
 
-#endif

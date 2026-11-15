@@ -1,8 +1,7 @@
 // Per-frame timing capture for the planet demo: records how long each rendered frame spends in planet streaming,
 // chunk upload, and draw submission, then reports percentile statistics and an optional CSV export so frame-time
 // tails can be analysed without an external profiler.
-#ifndef ENGINE_DEMO_PLANET_FRAME_TIMING_HPP
-#define ENGINE_DEMO_PLANET_FRAME_TIMING_HPP
+#pragma once
 
 #include <chrono>
 #include <string>
@@ -49,4 +48,3 @@ private:
 
 } // namespace demo::planet_demo
 
-#endif

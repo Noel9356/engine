@@ -2,10 +2,10 @@
 // with chunked columns, cached queries, and deferred command buffers. Types
 // live in engine/ecs/storage.hpp; this header binds them into the C ABI.
 
-#ifndef ENGINE_ECS_CAPABILITIES_HPP
-#define ENGINE_ECS_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/ecs/storage.hpp>
+#include <engine/world/types.hpp>
 
 #include <cstdint>
 
@@ -73,4 +73,3 @@ struct EcsCapability
 
 } // namespace engine::ecs
 
-#endif

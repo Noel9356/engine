@@ -6,8 +6,7 @@
 // frame periods (covering event pumping, simulation, render submission,
 // present and pacing) so the summary reflects the true cadence.
 
-#ifndef ENGINE_DEMO_FRAME_STATS_HPP
-#define ENGINE_DEMO_FRAME_STATS_HPP
+#pragma once
 
 #include <algorithm>
 #include <array>
@@ -158,4 +157,3 @@ private:
 
 } // namespace demo
 
-#endif

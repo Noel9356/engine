@@ -1,6 +1,8 @@
 #include "gi_demo_support.hpp"
 
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 namespace demo::lumen_gi
 {

@@ -3,12 +3,10 @@
 // Each reader type-checks one key and produces a precise error message
 // naming the manifest and the key on failure.
 
-#ifndef ENGINE_KERNEL_MANIFEST_TOML_READERS_HPP
-#define ENGINE_KERNEL_MANIFEST_TOML_READERS_HPP
+#pragma once
 
 #include <toml.hpp>
 
-#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -118,4 +116,3 @@ inline bool readStringArray(const toml::table &table, const std::string &key, st
 
 } // namespace engine
 
-#endif

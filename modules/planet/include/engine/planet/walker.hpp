@@ -22,14 +22,12 @@
 // The walk parameters come from PlanetGenerationParams (the [planet]
 // configuration section, walker_* keys), so tuning needs no code changes.
 
-#ifndef ENGINE_PLANET_WALKER_HPP
-#define ENGINE_PLANET_WALKER_HPP
+#pragma once
 
 #include <engine/planet/density.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
-#include <cstdint>
 
 namespace engine
 {
@@ -111,4 +109,3 @@ private:
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_WALKER_HPP

@@ -8,6 +8,8 @@
 // usage problems (wrong argument count or type, missing result capacity) by
 // returning false; capability failures are reported through the results.
 
+#include <engine/audio/capabilities.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 #include "lua_bridge.hpp"
 
 #include <engine/script_runtime/native_values.hpp>

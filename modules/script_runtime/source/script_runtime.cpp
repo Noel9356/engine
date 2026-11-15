@@ -12,6 +12,7 @@
 // capability binding, the plugin host, and the engine event forwarding.
 
 #include <engine/kernel/engine_kernel.hpp>
+#include <engine/kernel/event_bus.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -21,18 +22,24 @@
 #include "lua_sandbox.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <climits>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #if defined(ENGINE_SCRIPT_RUNTIME_BACKEND_LUA)

@@ -7,8 +7,7 @@
 // math, pixel-rect -> tile-range mapping, and the two-pass count/scatter
 // binning walk. No Vulkan, no backend types - a pure policy header.
 
-#ifndef ENGINE_RENDERER_MODULE_TILE_BINS_HPP
-#define ENGINE_RENDERER_MODULE_TILE_BINS_HPP
+#pragma once
 
 #include <algorithm>
 #include <cstddef>
@@ -223,4 +222,3 @@ bool binRecordTileRanges(std::size_t recordCount, const RangeFn &ranges, const T
 } // namespace renderer
 } // namespace engine
 
-#endif

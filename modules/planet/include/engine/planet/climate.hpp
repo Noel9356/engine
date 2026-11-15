@@ -14,9 +14,9 @@
 // streams from the planet seed, so sampling is a pure function of position and
 // safe to call from any thread in any order.
 
-#ifndef ENGINE_PLANET_CLIMATE_HPP
-#define ENGINE_PLANET_CLIMATE_HPP
+#pragma once
 
+#include <cstdint>
 #include <engine/planet/fbm.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
@@ -79,4 +79,3 @@ private:
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_CLIMATE_HPP

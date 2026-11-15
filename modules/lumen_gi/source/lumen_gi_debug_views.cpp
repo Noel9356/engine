@@ -8,14 +8,19 @@
 // path tracer shares the environment snapshot but traces real paths so
 // images can be compared numerically.
 
+#include <engine/kernel/task_scheduler.hpp>
+#include <engine/lumen_gi/capabilities.hpp>
+#include <engine/pbr/capabilities.hpp>
 #include "lumen_gi_internal.hpp"
 
+#include <cstdint>
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 namespace engine

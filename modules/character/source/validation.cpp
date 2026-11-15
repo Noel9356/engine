@@ -1,15 +1,16 @@
 // Validation pass - see validation.hpp.
 
-#include "validation.hpp"
-
-#include "math_utils.hpp"
 #include "registry.hpp"
+#include "validation.hpp"
 
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>

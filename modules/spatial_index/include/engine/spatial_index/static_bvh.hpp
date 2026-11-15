@@ -4,10 +4,10 @@
 // times. Bounds of existing items can be refreshed in bulk (refit) or
 // incrementally (refitItems) without changing the tree structure. Header-only.
 
-#ifndef ENGINE_SPATIAL_INDEX_STATIC_BVH_HPP
-#define ENGINE_SPATIAL_INDEX_STATIC_BVH_HPP
+#pragma once
 
 #include <engine/spatial_index/aabb.hpp>
+#include <engine/spatial_index/types.hpp>
 
 #include <algorithm>
 #include <array>
@@ -652,4 +652,3 @@ private:
 
 } // namespace engine::spatial
 
-#endif

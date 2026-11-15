@@ -4,13 +4,12 @@
 // asked, loads a native plugin's .so and creates its instance through the
 // entry table.
 
-#ifndef ENGINE_KERNEL_PLUGIN_DISCOVERY_HPP
-#define ENGINE_KERNEL_PLUGIN_DISCOVERY_HPP
+#pragma once
 
 #include <engine/kernel/dynamic_library.hpp>
+#include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/plugin_api.hpp>
 #include <engine/kernel/plugin_manifest.hpp>
-#include <engine/kernel/participant_interface.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -60,4 +59,3 @@ bool loadNativePluginEntry(const DiscoveredPluginPackage &package, NativePluginL
 
 } // namespace engine
 
-#endif

@@ -1,6 +1,9 @@
 // Sky backdrop model implementation; see atmosphere.hpp for the model.
 
+#include <cstddef>
 #include <engine/planet/atmosphere.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 
 #include <algorithm>
 

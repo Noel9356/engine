@@ -1,5 +1,8 @@
 #include "device_state.hpp"
+#include <engine/input_actions/capabilities.hpp>
+#include "internal.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <utility>

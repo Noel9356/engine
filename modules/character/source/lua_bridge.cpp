@@ -31,12 +31,15 @@
 //   character.save(handle, path) / character.load(handle, path) -> bool
 //   character.last_error()                  -> message_or_nil
 
+#include <engine/character/capabilities.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 #include "lua_bridge.hpp"
 
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>

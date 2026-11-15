@@ -5,10 +5,10 @@
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
 
-#include "vulkan_swapchain.hpp"
-#include "engine/renderer/capabilities.hpp"
+#include <engine/renderer/capabilities.hpp>
 #include "render_shared.hpp"
 #include "vulkan_device.hpp"
+#include "vulkan_swapchain.hpp"
 
 #include <algorithm>
 #include <cstddef>

@@ -2,15 +2,14 @@
 // relative path resolution, permission derivation and the module-defaults
 // directory scan shared by the lifecycle and configuration phases.
 
-#ifndef ENGINE_KERNEL_ENGINE_KERNEL_INTERNAL_HPP
-#define ENGINE_KERNEL_ENGINE_KERNEL_INTERNAL_HPP
+#pragma once
 
-#include "engine/kernel/participant_manifest.hpp"
 #include <engine/kernel/configuration.hpp>
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/executable_directory.hpp>
-#include <engine/kernel/plugin_manifest.hpp>
+#include <engine/kernel/participant_manifest.hpp>
 #include <engine/kernel/permission_system.hpp>
+#include <engine/kernel/plugin_manifest.hpp>
 
 #include <algorithm>
 #include <filesystem>
@@ -105,4 +104,3 @@ inline ParticipantManifest manifestFromPluginManifest(const PluginManifest &plug
 
 } // namespace engine::detail
 
-#endif

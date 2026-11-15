@@ -8,10 +8,15 @@
 // buffers and the commit step publishes them afterwards, so the indirect and
 // probe tasks of one frame only ever read the committed cache.
 
+#include <engine/kernel/task_scheduler.hpp>
 #include "lumen_gi_internal.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace engine
 {

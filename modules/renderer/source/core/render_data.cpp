@@ -6,9 +6,9 @@
 // tightly packed top-left RGBA8. Both validate aggressively so backends can
 // trust what they receive.
 
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/mesh.hpp>
 #include "render_data.hpp"
-#include "engine/renderer/capabilities.hpp"
-#include "engine/renderer/mesh.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -3,8 +3,7 @@
 // GPU-facing PBR subset: base color, metallic-roughness, normal, occlusion
 // and emissive textures by TextureHandle plus their scalar factors.
 
-#ifndef ENGINE_SHARED_RENDER_MATERIAL_HPP
-#define ENGINE_SHARED_RENDER_MATERIAL_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -39,4 +38,3 @@ struct MeshMaterial
 
 } // namespace engine::renderer
 
-#endif

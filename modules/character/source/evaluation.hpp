@@ -16,8 +16,7 @@
 // passed or was disabled; unresolvable topology fails the walk instead of
 // activating an invalid assembly.
 
-#ifndef ENGINE_CHARACTER_EVALUATION_HPP
-#define ENGINE_CHARACTER_EVALUATION_HPP
+#pragma once
 
 #include "records.hpp"
 
@@ -49,4 +48,3 @@ void updateBoundsAndStatistics(const Registry &registry, CharacterRecord &record
 } // namespace internal
 } // namespace engine::character
 
-#endif

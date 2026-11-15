@@ -4,8 +4,7 @@
 // hemisphere, exposure, tone mapping) and legacy-model-material to PBR
 // conversion. Consumers bind it via ParticipantContext::acquireCapability<>.
 
-#ifndef ENGINE_PBR_CAPABILITIES_HPP
-#define ENGINE_PBR_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/models/material.hpp>
 #include <engine/renderer/material.hpp>
@@ -137,4 +136,3 @@ struct PbrCapability
 } // namespace pbr
 } // namespace engine
 
-#endif

@@ -1,7 +1,15 @@
 #include "planet_chunk_renderer.hpp"
 
+#include <engine/planet/capabilities.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/planet.hpp>
+#include <engine/planet/types.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
 #include "planet_demo_support.hpp"
 
+#include <cstdint>
 #include <engine/planet/atmosphere.hpp>
 
 #include <glm/gtc/matrix_transform.hpp>

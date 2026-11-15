@@ -1,8 +1,8 @@
 // Evaluation stages - see evaluation.hpp.
 
 #include "evaluation.hpp"
-
 #include "math_utils.hpp"
+#include "records.hpp"
 #include "registry.hpp"
 
 #include <glm/glm.hpp>
@@ -10,6 +10,8 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <utility>
 #include <vector>
 

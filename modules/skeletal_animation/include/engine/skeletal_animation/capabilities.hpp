@@ -5,8 +5,7 @@
 // it via ParticipantContext::acquireCapability<SkeletalAnimationCapability>().
 // Handles are never reused; 0 means "none".
 
-#ifndef ENGINE_SKELETAL_ANIMATION_CAPABILITIES_HPP
-#define ENGINE_SKELETAL_ANIMATION_CAPABILITIES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -257,4 +256,3 @@ struct SkeletalAnimationCapability
 
 } // namespace engine::skeletal_animation
 
-#endif

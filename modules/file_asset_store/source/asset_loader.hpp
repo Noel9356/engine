@@ -6,16 +6,15 @@
 // The loader never touches the cache's budget counters; the module
 // orchestrates reserve → load → commit through the cache's budget hooks.
 
-#ifndef ENGINE_FILE_ASSET_STORE_ASSET_LOADER_HPP
-#define ENGINE_FILE_ASSET_STORE_ASSET_LOADER_HPP
+#pragma once
 
 #include "asset_config.hpp"
-#include "asset_record.hpp"
 #include <engine/file_asset_store/capabilities.hpp>
 
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace engine::file_asset_store
@@ -52,4 +51,3 @@ private:
 
 } // namespace engine::file_asset_store
 
-#endif

@@ -5,16 +5,15 @@
 // and small accessors.
 
 #include "capability_provider_index.hpp"
-#include "engine_kernel_internal.hpp"
-#include "trust_gate.hpp"
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include "engine_kernel_internal.hpp"
+#include "trust_gate.hpp"
 
 #include <filesystem>
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace engine

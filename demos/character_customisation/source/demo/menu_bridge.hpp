@@ -1,7 +1,7 @@
-#ifndef DEMO_MENU_BRIDGE_HPP
-#define DEMO_MENU_BRIDGE_HPP
+#pragma once
 
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
 #include <engine/script_runtime/capabilities.hpp>
 #include <engine/ui/capabilities.hpp>
 
@@ -63,4 +63,3 @@ private:
 
 } // namespace demo
 
-#endif

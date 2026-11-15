@@ -11,16 +11,13 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <limits>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace engine::models::detail

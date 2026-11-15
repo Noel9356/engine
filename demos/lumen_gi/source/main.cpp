@@ -37,10 +37,10 @@
 #include <engine/window/capabilities.hpp>
 
 #include "demo/gi_demo_support.hpp"
-#include "engine/application/application_host.hpp"
-#include "engine/application/command_line.hpp"
-#include "engine/kernel/engine_kernel.hpp"
-#include "engine/kernel/participant_interface.hpp"
+#include <engine/application/application_host.hpp>
+#include <engine/application/command_line.hpp>
+#include <engine/kernel/engine_kernel.hpp>
+#include <engine/kernel/participant_interface.hpp>
 
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
@@ -49,7 +49,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>

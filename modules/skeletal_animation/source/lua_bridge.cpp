@@ -1,12 +1,17 @@
+#include <engine/script_runtime/capabilities.hpp>
+#include <engine/skeletal_animation/capabilities.hpp>
 #include "lua_bridge.hpp"
 
+#include <cstddef>
 #include <engine/script_runtime/native_values.hpp>
 
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace engine::skeletal_animation
 {

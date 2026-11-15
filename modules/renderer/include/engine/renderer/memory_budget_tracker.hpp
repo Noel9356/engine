@@ -14,8 +14,7 @@
 // Sampling cadence is the caller's concern; the Vulkan device context feeds
 // this from its periodic vmaGetHeapBudgets() refresh.
 
-#ifndef ENGINE_RENDERER_MEMORY_BUDGET_TRACKER_HPP
-#define ENGINE_RENDERER_MEMORY_BUDGET_TRACKER_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -188,4 +187,3 @@ private:
 } // namespace renderer
 } // namespace engine
 
-#endif

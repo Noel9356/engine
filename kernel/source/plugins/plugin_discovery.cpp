@@ -4,14 +4,14 @@
 // sidecars); loadNativePluginEntry dlopens a native plugin's library, checks its
 // ABI and returns the entry table plus instance for the kernel.
 
-#include "engine/kernel/dynamic_library.hpp"
+#include <engine/kernel/dynamic_library.hpp>
 
 #include <algorithm>
 #include <engine/kernel/configuration.hpp>
+#include <engine/kernel/participant_manifest.hpp>
 #include <engine/kernel/plugin_api.hpp>
 #include <engine/kernel/plugin_discovery.hpp>
 #include <engine/kernel/plugin_manifest.hpp>
-#include <engine/kernel/participant_manifest.hpp>
 #include <filesystem>
 #include <memory>
 #include <set>

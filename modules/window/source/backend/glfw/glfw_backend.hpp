@@ -1,12 +1,12 @@
 // GLFW-backed window backend, compiled only when ENGINE_WINDOW_BACKEND_GLFW
 // is defined (otherwise the header compiles empty).
 
-#ifndef ENGINE_WINDOW_MODULE_GLFW_BACKEND_HPP
-#define ENGINE_WINDOW_MODULE_GLFW_BACKEND_HPP
+#pragma once
 
 #include "window_backend.hpp"
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 #if defined(ENGINE_WINDOW_BACKEND_GLFW)
@@ -98,4 +98,3 @@ private:
 
 #endif
 
-#endif

@@ -1,6 +1,5 @@
 // User-configurable camera keyboard mapping for the character demo.
-#ifndef ENGINE_DEMO_CAMERA_BINDINGS_HPP
-#define ENGINE_DEMO_CAMERA_BINDINGS_HPP
+#pragma once
 
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/window/capabilities.hpp>
@@ -31,4 +30,3 @@ const char *windowKeyName(engine::window::Key key) noexcept;
 DemoCameraKeyBindings loadCameraKeyBindings(engine::ParticipantContext &context);
 } // namespace demo
 
-#endif

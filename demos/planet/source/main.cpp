@@ -26,24 +26,26 @@
 #include <engine/application/frame_pacer.hpp>
 #include <engine/camera/capabilities.hpp>
 #include <engine/kernel/executable_directory.hpp>
+#include <engine/pbr/capabilities.hpp>
 #include <engine/planet/capabilities.hpp>
 #include <engine/planet/meshing.hpp>
 #include <engine/planet/planet.hpp>
-#include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/renderer/material.hpp>
 #include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
 
-#include "demo/planet_demo_support.hpp"
-#include "demo/planet_frame_timing.hpp"
 #include "demo/planet_camera_input.hpp"
 #include "demo/planet_chunk_renderer.hpp"
+#include "demo/planet_demo_support.hpp"
+#include "demo/planet_frame_timing.hpp"
 #include "demo/planet_walk_controller.hpp"
-#include "engine/application/application_host.hpp"
-#include "engine/application/command_line.hpp"
-#include "engine/kernel/engine_kernel.hpp"
-#include "engine/kernel/participant_interface.hpp"
+#include <engine/application/application_host.hpp>
+#include <engine/application/command_line.hpp>
+#include <engine/kernel/engine_kernel.hpp>
+#include <engine/kernel/participant_interface.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -52,10 +54,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <functional>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>

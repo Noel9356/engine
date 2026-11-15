@@ -1,12 +1,16 @@
 // Implementation of the [window] configuration parsing; see the header for
 // the struct and the reader contract.
 
+#include <engine/kernel/participant_interface.hpp>
 #include "window_configuration.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <optional>
+#include <string>
 
 namespace engine
 {

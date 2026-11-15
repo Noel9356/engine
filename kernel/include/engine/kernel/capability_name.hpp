@@ -1,8 +1,7 @@
 // Capability name helpers: dotted names distinguish implementation-bound
 // capabilities from capability families.
 
-#ifndef ENGINE_KERNEL_CAPABILITY_NAME_HPP
-#define ENGINE_KERNEL_CAPABILITY_NAME_HPP
+#pragma once
 
 #include <cstddef>
 #include <string>
@@ -51,4 +50,3 @@ inline bool capabilityRequirementSatisfiedBy(const std::string &requirement, con
 
 } // namespace engine
 
-#endif

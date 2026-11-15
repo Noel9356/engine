@@ -13,8 +13,7 @@
 // independent of scheduling. Borrowed pointers from copyVisibleChunks stay
 // valid until the NEXT update() call (eviction may free their meshes).
 
-#ifndef ENGINE_PLANET_PLANET_HPP
-#define ENGINE_PLANET_PLANET_HPP
+#pragma once
 
 #include <engine/planet/climate.hpp>
 #include <engine/planet/density.hpp>
@@ -23,14 +22,14 @@
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
-#include <chrono>
-#include <cstdint>
-#include <unordered_map>
-#include <thread>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <mutex>
+#include <thread>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace engine
@@ -187,4 +186,3 @@ private:
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_PLANET_HPP

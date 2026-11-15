@@ -5,21 +5,20 @@
 // sha256 trust gate, and owns the event bus, task scheduler and
 // main-thread queue that every participant receives.
 
-#ifndef ENGINE_KERNEL_ENGINE_KERNEL_HPP
-#define ENGINE_KERNEL_ENGINE_KERNEL_HPP
+#pragma once
 
 #include <engine/kernel/configuration.hpp>
 #include <engine/kernel/dependency_resolver.hpp>
 #include <engine/kernel/dynamic_library.hpp>
 #include <engine/kernel/event_bus.hpp>
-#include <engine/kernel/plugin_api.hpp>
-#include <engine/kernel/plugin_discovery.hpp>
 #include <engine/kernel/main_thread_task_queue.hpp>
 #include <engine/kernel/module_descriptor.hpp>
 #include <engine/kernel/module_descriptor_cache.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/kernel/permission_system.hpp>
+#include <engine/kernel/plugin_api.hpp>
+#include <engine/kernel/plugin_discovery.hpp>
 #include <engine/kernel/profiling.hpp>
 #include <engine/kernel/task_scheduler.hpp>
 
@@ -363,4 +362,3 @@ private:
 
 } // namespace engine
 
-#endif

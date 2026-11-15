@@ -1,8 +1,11 @@
+#include <engine/camera/capabilities.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 #include "lua_bridge.hpp"
 
 #include <engine/script_runtime/native_values.hpp>
 
 #include <cstdint>
+#include <mutex>
 #include <string_view>
 
 namespace engine::camera

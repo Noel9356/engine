@@ -1,6 +1,13 @@
 #include "../character_metrics.gen.hpp"
 #include "../character_screen_internal.hpp"
+#include "../character_screen.hpp"
+#include <engine/character/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/ui/capabilities.hpp>
 
+#include <cmath>
+#include <cstdint>
 #include <glm/glm.hpp>
 
 #include <algorithm>
@@ -9,7 +16,6 @@
 #include <functional>
 #include <limits>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace demo

@@ -4,13 +4,12 @@
 // (startup) and decideScanConsent (module scanning) enforce the [trust]
 // configuration with the consent handler as fallback.
 
-#ifndef ENGINE_KERNEL_TRUST_GATE_HPP
-#define ENGINE_KERNEL_TRUST_GATE_HPP
+#pragma once
 
 #include <engine/kernel/configuration.hpp>
 #include <engine/kernel/engine_kernel.hpp>
-#include <engine/kernel/plugin_manifest.hpp>
 #include <engine/kernel/module_descriptor.hpp>
+#include <engine/kernel/plugin_manifest.hpp>
 #include <engine/kernel/sha256.hpp>
 
 #include <cstddef>
@@ -68,4 +67,3 @@ private:
 
 } // namespace engine
 
-#endif

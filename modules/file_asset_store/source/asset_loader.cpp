@@ -2,6 +2,7 @@
 
 #include "asset_loader.hpp"
 
+#include <engine/file_asset_store/capabilities.hpp>
 #include <engine/kernel/sha256.hpp>
 
 #include <algorithm>
@@ -10,14 +11,18 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <limits>
+#include <new>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #if defined(__linux__)
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -56,8 +61,10 @@ std::pair<std::uint64_t, AssetError> AssetLoader::stat(const std::filesystem::pa
 std::vector<std::uint8_t> AssetLoader::read(
     const std::filesystem::path &path, std::uint64_t expectedSize, AssetError *error) const
 {
+#if defined(__linux__)
     const bool readaheadHint = config_ != nullptr && config_->readaheadHint;
     const bool dropAfterRead = config_ != nullptr && config_->dropAfterRead;
+#endif
 
     std::vector<std::uint8_t> loaded;
     try

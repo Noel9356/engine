@@ -3,12 +3,11 @@
 // Maps capability error codes and device classes to human-readable names and
 // provides the capability ABI sanity check used during demo startup.
 
-#ifndef ENGINE_DEMO_DIAGNOSTICS_HPP
-#define ENGINE_DEMO_DIAGNOSTICS_HPP
+#pragma once
 
 #include <engine/camera/capabilities.hpp>
-#include <engine/renderer/capabilities.hpp>
 #include <engine/render_graph/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
 
 #include <cstdint>
@@ -29,4 +28,3 @@ namespace demo
 
 } // namespace demo
 
-#endif

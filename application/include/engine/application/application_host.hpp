@@ -4,11 +4,10 @@
 // ApplicationHostOptions mirrors the kernel's staged setters; validate()
 // runs on a throwaway kernel and never touches the host's own one.
 
-#ifndef ENGINE_APPLICATION_APPLICATION_HOST_HPP
-#define ENGINE_APPLICATION_APPLICATION_HOST_HPP
+#pragma once
 
-#include "engine/kernel/participant_interface.hpp"
 #include <engine/kernel/engine_kernel.hpp>
+#include <engine/kernel/participant_interface.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -71,4 +70,3 @@ private:
 
 } // namespace engine
 
-#endif

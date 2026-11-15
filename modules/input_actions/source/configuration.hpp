@@ -5,13 +5,12 @@
 // loadInputActionsConfiguration applies each key only when present, finite,
 // and inside the documented range; otherwise the default remains in effect.
 
-#ifndef ENGINE_INPUT_ACTIONS_CONFIGURATION_HPP
-#define ENGINE_INPUT_ACTIONS_CONFIGURATION_HPP
+#pragma once
 
+#include <cmath>
 #include <engine/kernel/participant_interface.hpp>
 
 #include <cstddef>
-#include <limits>
 
 namespace engine::input_actions
 {
@@ -67,4 +66,3 @@ inline InputActionsConfiguration loadInputActionsConfiguration(ParticipantContex
 } // namespace internal
 } // namespace engine::input_actions
 
-#endif // ENGINE_INPUT_ACTIONS_CONFIGURATION_HPP

@@ -41,9 +41,10 @@
 //   ... memcpy into blockBase + span.offset ... flush(span.flushOffset,
 //   span.flushSize) ... submit; on fence completion: pool.release(span).
 
-#ifndef ENGINE_RENDERER_MODULE_STAGING_POOL_HPP
-#define ENGINE_RENDERER_MODULE_STAGING_POOL_HPP
+#pragma once
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -413,4 +414,3 @@ private:
 } // namespace renderer
 } // namespace engine
 
-#endif

@@ -6,8 +6,7 @@
 // (provenance), which keys are known (unknown-key warnings) and offers
 // typed readers for sections and dotted paths.
 
-#ifndef ENGINE_KERNEL_CONFIGURATION_HPP
-#define ENGINE_KERNEL_CONFIGURATION_HPP
+#pragma once
 
 #include <engine/kernel/dependency_resolver.hpp>
 
@@ -271,4 +270,3 @@ private:
 
 } // namespace engine
 
-#endif

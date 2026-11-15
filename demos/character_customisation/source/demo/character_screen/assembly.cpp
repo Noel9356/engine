@@ -1,6 +1,11 @@
 #include "../character_metrics.gen.hpp"
 #include "../character_screen_internal.hpp"
+#include "../character_content.hpp"
+#include "../character_screen.hpp"
+#include <engine/character/capabilities.hpp>
 
+#include <cstdint>
+#include <cstdlib>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -8,7 +13,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <limits>
 #include <string>
 #include <tuple>
 

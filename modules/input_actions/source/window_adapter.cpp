@@ -1,3 +1,6 @@
+#include "device_state.hpp"
+#include <engine/input_actions/capabilities.hpp>
+#include <engine/window/capabilities.hpp>
 #include "window_adapter.hpp"
 
 #include <algorithm>

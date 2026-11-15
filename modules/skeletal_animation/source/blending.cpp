@@ -1,9 +1,13 @@
 // Blending implementation; see blending.hpp for the contract.
 
 #include "blending.hpp"
+#include <engine/skeletal_animation/capabilities.hpp>
+#include "math_utils.hpp"
+#include "records.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 

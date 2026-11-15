@@ -6,8 +6,13 @@
 // its PlanetDescription overrides over the configured defaults), and streams
 // visible chunk meshes to consumers as borrowed views.
 
+#include <cstddef>
 #include <engine/planet/capabilities.hpp>
+#include <engine/planet/density.hpp>
+#include <engine/planet/meshing.hpp>
+#include <engine/planet/params.hpp>
 #include <engine/planet/planet.hpp>
+#include <engine/planet/types.hpp>
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -17,8 +22,10 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace engine

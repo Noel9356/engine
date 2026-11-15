@@ -5,8 +5,7 @@
 // Priority aging prevents starvation; TaskGroup provides fork/join with
 // exception propagation and TaskGraph runs acyclic dependency DAGs.
 
-#ifndef ENGINE_KERNEL_TASK_SCHEDULER_HPP
-#define ENGINE_KERNEL_TASK_SCHEDULER_HPP
+#pragma once
 
 #include <engine/kernel/profiling.hpp>
 
@@ -23,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -1155,4 +1155,3 @@ private:
 
 } // namespace engine
 
-#endif

@@ -4,18 +4,17 @@
 // CMakeLists.txt when Vulkan headers/loader were found); without it the
 // backend is compiled out and renderer.cpp never constructs one.
 
-#ifndef ENGINE_RENDERER_MODULE_VULKAN_BACKEND_HPP
-#define ENGINE_RENDERER_MODULE_VULKAN_BACKEND_HPP
+#pragma once
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
 
-#include "engine/direct_lighting/capabilities.hpp"
-#include "engine/pbr/capabilities.hpp"
-#include "engine/renderer/capabilities.hpp"
-#include "engine/renderer/device_profile.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
-#include "engine/window/capabilities.hpp"
+#include <engine/direct_lighting/capabilities.hpp>
+#include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/device_profile.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
+#include <engine/window/capabilities.hpp>
 #include "render_backend.hpp"
 #include "render_shared.hpp"
 
@@ -327,4 +326,3 @@ private:
 
 #endif
 
-#endif

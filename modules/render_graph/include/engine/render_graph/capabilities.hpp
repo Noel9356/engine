@@ -5,10 +5,10 @@
 // for render graphs described as plain structs. Consumers bind it via
 // ParticipantContext::acquireCapability<RenderGraphCapability>().
 
-#ifndef ENGINE_RENDER_GRAPH_CAPABILITIES_HPP
-#define ENGINE_RENDER_GRAPH_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/device_profile.hpp>
 
 #include <cstdint>
 
@@ -142,4 +142,3 @@ struct RenderGraphCapability
 } // namespace render_graph
 } // namespace engine
 
-#endif

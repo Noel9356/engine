@@ -3,8 +3,7 @@
 // fence. Also owns the GPU timestamp query pool backing the reported
 // gpuFrameMilliseconds. Main thread only.
 
-#ifndef ENGINE_RENDERER_MODULE_VULKAN_FRAMES_HPP
-#define ENGINE_RENDERER_MODULE_VULKAN_FRAMES_HPP
+#pragma once
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
 #include <chrono>
@@ -138,4 +137,3 @@ private:
 
 #endif
 
-#endif

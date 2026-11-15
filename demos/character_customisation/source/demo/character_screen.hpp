@@ -6,11 +6,11 @@
 // editing body parameters, toggling the outfit, checking validation
 // results, and saving/loading assembly recipes.
 
-#ifndef ENGINE_DEMO_CHARACTER_SCREEN_HPP
-#define ENGINE_DEMO_CHARACTER_SCREEN_HPP
+#pragma once
 
 #include "character_content.hpp"
 #include "character_stage.hpp"
+#include <engine/renderer/material.hpp>
 
 #include <engine/camera/capabilities.hpp>
 #include <engine/character/capabilities.hpp>
@@ -252,4 +252,3 @@ private:
 
 } // namespace demo
 
-#endif // ENGINE_DEMO_CHARACTER_SCREEN_HPP

@@ -1,5 +1,4 @@
-#ifndef ENGINE_DEMO_CHARACTER_METRICS_GEN_HPP
-#define ENGINE_DEMO_CHARACTER_METRICS_GEN_HPP
+#pragma once
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 namespace demo
@@ -130,4 +129,3 @@ inline const SpeciesMetrics kSpecies[22] = {
 inline constexpr int kSpeciesCount = 22;
 } // namespace metrics
 } // namespace demo
-#endif // ENGINE_DEMO_CHARACTER_METRICS_GEN_HPP

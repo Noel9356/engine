@@ -1,11 +1,23 @@
 // Planet: the planet module's generation facade (see planet.hpp).
 
+#include <chrono>
+#include <cstdint>
+#include <engine/planet/density.hpp>
+#include <engine/planet/meshing.hpp>
+#include <engine/planet/octree.hpp>
+#include <engine/planet/params.hpp>
 #include <engine/planet/planet.hpp>
+#include <engine/planet/types.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <mutex>
+#include <ratio>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace engine
 {

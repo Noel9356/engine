@@ -1,8 +1,7 @@
 // Bump-arena and fixed-size pool allocators for frame/hot-path
 // allocations.
 
-#ifndef ENGINE_KERNEL_MEMORY_HPP
-#define ENGINE_KERNEL_MEMORY_HPP
+#pragma once
 
 #include <algorithm>
 #include <cstddef>
@@ -304,4 +303,3 @@ private:
 
 } // namespace engine
 
-#endif

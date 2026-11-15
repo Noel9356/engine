@@ -4,24 +4,22 @@
 // code, a deterministic bundle for script packages); evaluate() and
 // decideScanConsent enforce [trust] bindings or ask the consent handler.
 
-#include "trust_gate.hpp"
-#include "engine/kernel/configuration.hpp"
-#include "engine/kernel/engine_kernel.hpp"
-#include "engine/kernel/module_descriptor.hpp"
-#include "engine/kernel/permission_system.hpp"
-#include "engine/kernel/sha256.hpp"
+#include <engine/kernel/configuration.hpp>
+#include <engine/kernel/engine_kernel.hpp>
+#include <engine/kernel/permission_system.hpp>
+#include <engine/kernel/sha256.hpp>
 #include "kernel_internals.hpp"
+#include "trust_gate.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <engine/kernel/participant_manifest.hpp>
 #include <engine/kernel/plugin_discovery.hpp>
 #include <engine/kernel/plugin_manifest.hpp>
-#include <engine/kernel/participant_manifest.hpp>
 #include <filesystem>
 #include <fstream>
 #include <ios>
-#include <iterator>
 #include <string>
 #include <system_error>
 #include <utility>

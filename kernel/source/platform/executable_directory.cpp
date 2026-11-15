@@ -17,6 +17,8 @@
 #include <mach-o/dyld.h>
 #else
 #include <limits.h>
+#include <linux/limits.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 

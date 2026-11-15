@@ -4,10 +4,10 @@
 // setters; validate() runs a throwaway kernel without native code;
 // start()/stop() own the real kernel plus the application context.
 
-#include "engine/kernel/engine_kernel.hpp"
-#include "engine/kernel/participant_interface.hpp"
 #include <engine/application/application_host.hpp>
+#include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/executable_directory.hpp>
+#include <engine/kernel/participant_interface.hpp>
 
 #include <exception>
 #include <filesystem>

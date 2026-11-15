@@ -1,8 +1,11 @@
 // Private helpers shared by CharacterScreen implementation units.
-#ifndef ENGINE_DEMO_CHARACTER_SCREEN_INTERNAL_HPP
-#define ENGINE_DEMO_CHARACTER_SCREEN_INTERNAL_HPP
+#pragma once
 
-#include "character_screen.hpp"
+#include <engine/character/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/ui/capabilities.hpp>
+#include <engine/window/capabilities.hpp>
 
 #include <cmath>
 #include <cstdint>
@@ -176,4 +179,3 @@ inline void setRollRotation(float *outQuaternion4, float angleRadians)
 } // namespace screen_detail
 } // namespace demo
 
-#endif

@@ -10,6 +10,9 @@
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/models/capabilities.hpp>
 
+#include <engine/kernel/event_bus.hpp>
+#include <engine/models/material.hpp>
+#include <engine/renderer/mesh.hpp>
 #include "model_import_internal.hpp"
 
 #include <algorithm>
@@ -21,13 +24,11 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
-#include <optional>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace engine

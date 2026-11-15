@@ -5,24 +5,23 @@
 // mutex, and binds the C capability vtable. Internal types live in
 // source/internal.hpp and the cooperating pieces each have their own header.
 
-#include <engine/input_actions/capabilities.hpp>
 #include "configuration.hpp"
 #include "context_registry.hpp"
 #include "device_state.hpp"
-#include "frame_evaluator.hpp"
-#include "internal.hpp"
-#include "lua_bridge.hpp"
-#include "window_adapter.hpp"
+#include <engine/input_actions/capabilities.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/script_runtime/capabilities.hpp>
+#include <engine/window/capabilities.hpp>
+#include "frame_evaluator.hpp"
+#include "lua_bridge.hpp"
+#include "window_adapter.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <utility>
 
 namespace engine::input_actions
 {

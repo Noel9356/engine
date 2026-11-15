@@ -13,8 +13,8 @@
 #include <errhandlingapi.h>
 #include <libloaderapi.h>
 #include <minwindef.h>
-#include <winnt.h>
 #include <windows.h>
+#include <winnt.h>
 #else
 #include <dlfcn.h>
 #endif

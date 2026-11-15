@@ -4,8 +4,7 @@
 // ParticipantContext::acquireCapability for the "audio" capability (ABI 3).
 // The implementation lives in source/audio.cpp (miniaudio backend).
 
-#ifndef ENGINE_AUDIO_CAPABILITIES_HPP
-#define ENGINE_AUDIO_CAPABILITIES_HPP
+#pragma once
 
 #include <cstdint>
 #include <limits>
@@ -294,4 +293,3 @@ struct AudioCapability
 } // namespace audio
 } // namespace engine
 
-#endif

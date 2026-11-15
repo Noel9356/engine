@@ -6,13 +6,13 @@
 // the global-path helpers. Everything here is internal to the module and
 // must not be included from outside the script_runtime source directory.
 
-#ifndef ENGINE_SCRIPT_RUNTIME_LUA_SANDBOX_HPP
-#define ENGINE_SCRIPT_RUNTIME_LUA_SANDBOX_HPP
+#pragma once
 
 #include <engine/script_runtime/capabilities.hpp>
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -171,4 +171,3 @@ void openLibraries(lua_State *state, std::uint32_t libraries) noexcept;
 
 } // namespace engine::script_runtime::sandbox
 
-#endif // ENGINE_SCRIPT_RUNTIME_LUA_SANDBOX_HPP

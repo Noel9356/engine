@@ -10,8 +10,6 @@
 #include <cstddef>
 #include <limits>
 #include <new>
-#include <string>
-#include <vector>
 
 namespace engine
 {

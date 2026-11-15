@@ -8,8 +8,11 @@
 
 #include "camera_configuration.hpp"
 #include "camera_limits.hpp"
+#include <engine/camera/capabilities.hpp>
+#include <engine/kernel/participant_interface.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <optional>
 #include <string>

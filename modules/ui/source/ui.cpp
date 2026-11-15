@@ -14,6 +14,7 @@
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/ui/capabilities.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>

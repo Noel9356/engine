@@ -1,8 +1,11 @@
+#include <engine/input_actions/capabilities.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 #include "lua_bridge.hpp"
 
 #include <engine/script_runtime/native_values.hpp>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>

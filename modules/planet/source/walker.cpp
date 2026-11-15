@@ -1,5 +1,9 @@
 // Kinematic surface walking implementation (see walker.hpp).
 
+#include <cstdint>
+#include <engine/planet/density.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 #include <engine/planet/walker.hpp>
 
 #include <algorithm>

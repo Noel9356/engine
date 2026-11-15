@@ -5,8 +5,7 @@
 // vector rotation, and quaternion composition so this header stays small and
 // consistent with the rest of the engine.
 
-#ifndef ENGINE_SKELETAL_ANIMATION_MATH_UTILS_HPP
-#define ENGINE_SKELETAL_ANIMATION_MATH_UTILS_HPP
+#pragma once
 
 #include <engine/math/quaternion.hpp>
 #include <engine/skeletal_animation/capabilities.hpp>
@@ -14,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace engine::skeletal_animation
 {
@@ -284,4 +284,3 @@ inline void interpolateKeyframes(const AnimationKeyframe &left, const AnimationK
 
 } // namespace engine::skeletal_animation
 
-#endif

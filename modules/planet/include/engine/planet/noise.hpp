@@ -12,8 +12,7 @@
 // Only the 2D and 3D evaluators the planet core needs are ported (the 4D
 // variants and the alternative orientations are omitted).
 
-#ifndef ENGINE_PLANET_NOISE_HPP
-#define ENGINE_PLANET_NOISE_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -40,4 +39,3 @@ double simplex3ImproveXY(std::int64_t seed, double x, double y, double z);
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_NOISE_HPP

@@ -5,16 +5,15 @@
 // backend (headless_backend.hpp) and the Vulkan backend (vulkan_backend.hpp)
 // are the two implementations. Calls arrive on the main thread only.
 
-#ifndef ENGINE_RENDERER_BACKEND_HPP
-#define ENGINE_RENDERER_BACKEND_HPP
+#pragma once
 
-#include "engine/renderer/device_profile.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/kernel/profiling.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/device_profile.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
 
 #include <cstdint>
@@ -117,4 +116,3 @@ protected:
 } // namespace renderer
 } // namespace engine
 
-#endif

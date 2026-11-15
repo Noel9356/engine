@@ -1,3 +1,4 @@
+#include <engine/lumen_gi/capabilities.hpp>
 #include "gi_demo_support.hpp"
 
 #include <algorithm>

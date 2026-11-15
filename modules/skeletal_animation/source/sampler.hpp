@@ -7,11 +7,9 @@
 // `extractRootMotion` reuses the shared quaternion-vector rotation helper
 // from engine::math rather than open-coding the rotation formula.
 
-#ifndef ENGINE_SKELETAL_ANIMATION_SAMPLER_HPP
-#define ENGINE_SKELETAL_ANIMATION_SAMPLER_HPP
+#pragma once
 
 #include <engine/skeletal_animation/capabilities.hpp>
-#include "math_utils.hpp"
 #include "records.hpp"
 
 #include <cstdint>
@@ -48,4 +46,3 @@ bool extractRootMotionInternal(const ClipRecord &clip, const SkeletonRecord &ske
 
 } // namespace engine::skeletal_animation
 
-#endif

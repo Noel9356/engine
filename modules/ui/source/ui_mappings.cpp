@@ -7,6 +7,8 @@
 
 #include "ui_backend.hpp"
 
+#include <cstdint>
+
 #if defined(ENGINE_UI_BACKEND_IMGUI)
 
 namespace engine

@@ -6,8 +6,7 @@
 // as renderer-ready vertex/index views, sampling surface elevation and
 // climate, and hashing chunks for determinism self-tests.
 
-#ifndef ENGINE_PLANET_CAPABILITIES_HPP
-#define ENGINE_PLANET_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/planet/density.hpp>
 #include <engine/planet/params.hpp>
@@ -104,4 +103,3 @@ struct PlanetCapability
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_CAPABILITIES_HPP

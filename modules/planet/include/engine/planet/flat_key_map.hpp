@@ -8,14 +8,12 @@
 // table and by eraseIf(); callers must not hold them across such calls. Capacity is reserved up front so steady-state
 // streaming never rehashes.
 
-#ifndef ENGINE_PLANET_FLAT_KEY_MAP_HPP
-#define ENGINE_PLANET_FLAT_KEY_MAP_HPP
+#pragma once
 
 #include <engine/planet/types.hpp>
 
 #include <bit>
 #include <cstddef>
-#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -216,4 +214,3 @@ private:
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_FLAT_KEY_MAP_HPP

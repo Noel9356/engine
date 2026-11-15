@@ -4,12 +4,16 @@
 // marching_cubes_tables.hpp; the algorithm below consumes them through the
 // detail namespace.
 
+#include <cstdint>
 #include <engine/planet/meshing.hpp>
 
+#include <engine/planet/density.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 #include "marching_cubes_tables.hpp"
 
-#include <engine/planet/flat_key_map.hpp>
 #include <engine/planet/fbm.hpp>
+#include <engine/planet/flat_key_map.hpp>
 #include <engine/planet/noise.hpp>
 
 #include <algorithm>

@@ -3,8 +3,8 @@
 // pace() sleeps until the next frame deadline (sleep then a short yield
 // spin) and reports wait/overshoot; a target of 0 disables pacing.
 
-#include "engine/kernel/profiling.hpp"
 #include <engine/application/frame_pacer.hpp>
+#include <engine/kernel/profiling.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -14,6 +14,7 @@
 #include <thread>
 
 #if defined(__linux__)
+#include <linux/prctl.h>
 #include <sys/prctl.h>
 #endif
 

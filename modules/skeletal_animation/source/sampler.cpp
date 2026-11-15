@@ -1,11 +1,16 @@
 // Sampling helpers implementation; see sampler.hpp for the contract.
 
+#include <engine/skeletal_animation/capabilities.hpp>
+#include "math_utils.hpp"
+#include "records.hpp"
 #include "sampler.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <new>
+#include <vector>
 
 namespace engine::skeletal_animation
 {

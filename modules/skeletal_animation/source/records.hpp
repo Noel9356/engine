@@ -4,15 +4,13 @@
 // maps. They are kept in a dedicated header so the algorithm helpers (sampling,
 // event collection, blending) can reference them without re-declaring them.
 
-#ifndef ENGINE_SKELETAL_ANIMATION_RECORDS_HPP
-#define ENGINE_SKELETAL_ANIMATION_RECORDS_HPP
+#pragma once
 
 #include <engine/skeletal_animation/capabilities.hpp>
 #include "math_utils.hpp"
 
 #include <cstdint>
 #include <deque>
-#include <limits>
 #include <string>
 #include <vector>
 
@@ -71,4 +69,3 @@ struct PlayerRecord
 
 } // namespace engine::skeletal_animation
 
-#endif

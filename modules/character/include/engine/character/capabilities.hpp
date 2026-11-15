@@ -16,8 +16,7 @@
 // as transform-level parameter bindings, exactly the subset this engine can
 // render.
 
-#ifndef ENGINE_CHARACTER_CAPABILITIES_HPP
-#define ENGINE_CHARACTER_CAPABILITIES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -446,4 +445,3 @@ struct CharacterCapability
 
 } // namespace engine::character
 
-#endif

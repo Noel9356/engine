@@ -1,3 +1,10 @@
+#include <engine/planet/capabilities.hpp>
+#include <engine/planet/density.hpp>
+#include <engine/planet/meshing.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/planet.hpp>
+#include <engine/planet/types.hpp>
+#include <engine/renderer/mesh.hpp>
 #include "planet_demo_support.hpp"
 
 #include <engine/planet/walker.hpp>
@@ -7,7 +14,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <iostream>
 #include <string>
 #include <vector>
 

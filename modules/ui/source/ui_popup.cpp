@@ -7,6 +7,8 @@
 
 #include "ui_backend.hpp"
 
+#include <cstdint>
+
 namespace engine
 {
 namespace ui

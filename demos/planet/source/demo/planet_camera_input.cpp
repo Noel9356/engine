@@ -1,3 +1,5 @@
+#include <engine/camera/capabilities.hpp>
+#include <engine/window/capabilities.hpp>
 #include "planet_camera_input.hpp"
 
 #include <algorithm>

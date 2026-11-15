@@ -6,13 +6,14 @@
 // lambdas so the loop-boundary edge cases (markers at 0 and duration, multi-
 // loop advances) are easy to read.
 
-#ifndef ENGINE_SKELETAL_ANIMATION_EVENT_COLLECTOR_HPP
-#define ENGINE_SKELETAL_ANIMATION_EVENT_COLLECTOR_HPP
+#pragma once
 
+#include <algorithm>
 #include <engine/skeletal_animation/capabilities.hpp>
 #include "records.hpp"
 
 #include <cstdint>
+#include <limits>
 
 namespace engine::skeletal_animation
 {
@@ -48,4 +49,3 @@ void collectPlayerEvents(PlayerRecord &player, AnimationClipHandle clipHandle, c
 
 } // namespace engine::skeletal_animation
 
-#endif

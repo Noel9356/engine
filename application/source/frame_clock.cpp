@@ -4,10 +4,10 @@
 // protection) and converts the clamped delta into fixed steps via an
 // accumulator; the leftover fraction feeds the interpolation alpha.
 
-#include "engine/kernel/engine_kernel.hpp"
-#include "engine/kernel/profiling.hpp"
 #include <engine/application/frame_clock.hpp>
+#include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/participant_interface.hpp>
+#include <engine/kernel/profiling.hpp>
 
 #include <algorithm>
 #include <chrono>

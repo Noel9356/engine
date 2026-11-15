@@ -3,8 +3,7 @@
 // Engine options are separated from application arguments; the result
 // converts to ApplicationHostOptions via makeApplicationHostOptions.
 
-#ifndef ENGINE_APPLICATION_COMMAND_LINE_HPP
-#define ENGINE_APPLICATION_COMMAND_LINE_HPP
+#pragma once
 
 #include <engine/application/application_host.hpp>
 
@@ -42,4 +41,3 @@ std::string applicationCommandLineUsage(const std::string &executableName);
 
 } // namespace engine
 
-#endif

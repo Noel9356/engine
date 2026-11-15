@@ -2,8 +2,7 @@
 // EntityHandle packs slot + 1 in the low 32 bits and a generation counter in
 // the high 32 bits, so stale handles are detected after entity reuse.
 
-#ifndef ENGINE_WORLD_TYPES_HPP
-#define ENGINE_WORLD_TYPES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -17,4 +16,3 @@ inline constexpr EntityHandle invalidEntity = 0;
 
 } // namespace engine::world
 
-#endif

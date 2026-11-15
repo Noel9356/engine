@@ -731,14 +731,14 @@ void GlfwWindowBackend::pollGamepads()
             {
                 queueGamepadEvent(WindowEvent{.kind = WindowEventKind::GamepadDisconnected,
                     .gamepadId = static_cast<std::uint32_t>(joystick)});
-                previous = {};
+                previous = GamepadSnapshot{};
             }
             continue;
         }
 
         if (!previous.connected)
         {
-            previous = {};
+            previous = GamepadSnapshot{};
             previous.connected = true;
             queueGamepadEvent(WindowEvent{.kind = WindowEventKind::GamepadConnected,
                 .gamepadId = static_cast<std::uint32_t>(joystick)});

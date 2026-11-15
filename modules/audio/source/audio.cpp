@@ -8,13 +8,14 @@
 // engine registry lives in source/engine_registry.*. Without the backend
 // every entry fails with AudioError::BackendUnavailable.
 
-#include <engine/audio/capabilities.hpp>
 #include "audio_backend.hpp"
-#include "lua_bridge.hpp"
+#include <engine/audio/capabilities.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/script_runtime/capabilities.hpp>
 #include <engine/util/hardware_info.hpp>
+#include "lua_bridge.hpp"
 
 #include <cmath>
 #include <cstdint>

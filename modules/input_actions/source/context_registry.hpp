@@ -5,12 +5,11 @@
 // holds it. Handles are dense std::uint32_t ids starting at 1; the constants
 // invalidInputContext / invalidInputAction (0) are never handed out.
 
-#ifndef ENGINE_INPUT_ACTIONS_CONTEXT_REGISTRY_HPP
-#define ENGINE_INPUT_ACTIONS_CONTEXT_REGISTRY_HPP
+#pragma once
 
 #include "configuration.hpp"
-#include "internal.hpp"
 
+#include <cstdint>
 #include <engine/input_actions/capabilities.hpp>
 
 #include <memory>
@@ -126,4 +125,3 @@ private:
 } // namespace internal
 } // namespace engine::input_actions
 
-#endif // ENGINE_INPUT_ACTIONS_CONTEXT_REGISTRY_HPP

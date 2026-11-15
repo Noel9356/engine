@@ -3,8 +3,7 @@
 // Describes interleaved vertex data (attribute table + stride) and index
 // data without depending on any renderer API.
 
-#ifndef ENGINE_RENDERER_MESH_HPP
-#define ENGINE_RENDERER_MESH_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -64,4 +63,3 @@ struct MeshDescription
 
 } // namespace engine::renderer
 
-#endif

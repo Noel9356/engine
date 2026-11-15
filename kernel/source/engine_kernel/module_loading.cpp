@@ -5,24 +5,23 @@
 // with neither need trust-gate approval to be scanned (that executes
 // code). Also loads native plugin libraries and resolves script hosts.
 
-#include "engine_kernel_internal.hpp"
-#include "kernel_internals.hpp"
-#include "trust_gate.hpp"
-#include "engine/kernel/dependency_resolver.hpp"
-#include "engine/kernel/dynamic_library.hpp"
-#include "engine/kernel/module_descriptor.hpp"
-#include "engine/kernel/permission_system.hpp"
-#include "engine/kernel/sha256.hpp"
 #include <engine/kernel/capability_name.hpp>
+#include <engine/kernel/dependency_resolver.hpp>
+#include <engine/kernel/dynamic_library.hpp>
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/executable_directory.hpp>
-#include <engine/kernel/plugin_api.hpp>
-#include <engine/kernel/plugin_discovery.hpp>
-#include <engine/kernel/plugin_manifest.hpp>
 #include <engine/kernel/module_api.hpp>
+#include <engine/kernel/module_descriptor.hpp>
 #include <engine/kernel/module_descriptor_cache.hpp>
 #include <engine/kernel/module_manifest.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/kernel/permission_system.hpp>
+#include <engine/kernel/plugin_api.hpp>
+#include <engine/kernel/plugin_discovery.hpp>
+#include <engine/kernel/plugin_manifest.hpp>
+#include "engine_kernel_internal.hpp"
+#include "kernel_internals.hpp"
+#include "trust_gate.hpp"
 
 #include <algorithm>
 #include <cstddef>

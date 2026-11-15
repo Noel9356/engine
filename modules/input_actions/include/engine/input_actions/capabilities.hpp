@@ -4,8 +4,7 @@
 // define virtual input actions (buttons/axes), bind them to device controls,
 // feed raw device events, and read per-frame action state.
 
-#ifndef ENGINE_INPUT_ACTIONS_CAPABILITIES_HPP
-#define ENGINE_INPUT_ACTIONS_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/window/capabilities.hpp>
 
@@ -218,4 +217,3 @@ struct InputActionsCapability
 
 } // namespace engine::input_actions
 
-#endif

@@ -8,6 +8,7 @@
 
 #include "manifest_toml_readers.hpp"
 
+#include <system_error>
 #include <toml.hpp>
 
 #include <algorithm>

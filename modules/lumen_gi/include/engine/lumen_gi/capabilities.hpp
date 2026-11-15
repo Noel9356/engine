@@ -8,8 +8,7 @@
 // screen-space final gather), a probe-grid snapshot copy API for renderers,
 // device-based profile resolution, statistics, and debug-view PPM exports.
 
-#ifndef ENGINE_LUMEN_GI_CAPABILITIES_HPP
-#define ENGINE_LUMEN_GI_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/renderer/device_profile.hpp>
 
@@ -249,4 +248,3 @@ inline void evaluateProbeIrradiance(const GiProbe &probe, const float normal[3],
 } // namespace lumen_gi
 } // namespace engine
 
-#endif

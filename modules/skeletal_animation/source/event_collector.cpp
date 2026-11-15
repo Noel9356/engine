@@ -1,8 +1,11 @@
 // Event collection implementation; see event_collector.hpp for the contract.
 
+#include <engine/skeletal_animation/capabilities.hpp>
 #include "event_collector.hpp"
+#include "records.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <new>
 

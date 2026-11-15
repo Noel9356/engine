@@ -4,11 +4,12 @@
 // (moving objects) and merges their query results into one hit list tagged by
 // SceneMobility. Header-only.
 
-#ifndef ENGINE_SPATIAL_INDEX_SCENE_SPATIAL_INDEX_HPP
-#define ENGINE_SPATIAL_INDEX_SCENE_SPATIAL_INDEX_HPP
+#pragma once
 
+#include <engine/spatial_index/aabb.hpp>
 #include <engine/spatial_index/dynamic_aabb_tree.hpp>
 #include <engine/spatial_index/static_bvh.hpp>
+#include <engine/spatial_index/types.hpp>
 
 #include <array>
 #include <cstddef>
@@ -268,4 +269,3 @@ private:
 
 } // namespace engine::spatial
 
-#endif

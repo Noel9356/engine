@@ -10,18 +10,15 @@
 // HeadlessTexture keeps the RGBA8 upload copy plus a float RGB mip chain
 // (box-filtered, halved each level) read by the sampler.
 
-#ifndef ENGINE_RENDERER_MODULE_HEADLESS_TYPES_HPP
-#define ENGINE_RENDERER_MODULE_HEADLESS_TYPES_HPP
+#pragma once
 
-#include "engine/renderer/capabilities.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
+#include <engine/renderer/capabilities.hpp>
 
-#include <glm/ext/vector_float3.hpp>
-#include <glm/geometric.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <glm/ext/vector_float3.hpp>
+#include <glm/geometric.hpp>
 #include <vector>
 
 namespace engine
@@ -125,4 +122,3 @@ inline HeadlessTexture flatNormalTexture()
 } // namespace renderer
 } // namespace engine
 
-#endif

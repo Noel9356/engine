@@ -5,9 +5,11 @@
 // ConfigurationReloadedEvent), and binds the "pbr" capability entries. The
 // module performs no synchronization of its own.
 
+#include <engine/kernel/event_bus.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/models/material.hpp>
 #include <engine/pbr/capabilities.hpp>
 
 #include <algorithm>

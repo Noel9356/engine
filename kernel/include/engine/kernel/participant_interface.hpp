@@ -6,8 +6,7 @@
 // PluginInterface are the entry points implemented by modules and
 // native plugins.
 
-#ifndef ENGINE_KERNEL_PARTICIPANT_INTERFACE_HPP
-#define ENGINE_KERNEL_PARTICIPANT_INTERFACE_HPP
+#pragma once
 
 #include <engine/kernel/event_bus.hpp>
 #include <engine/kernel/main_thread_task_queue.hpp>
@@ -354,4 +353,3 @@ public:
 
 } // namespace engine
 
-#endif

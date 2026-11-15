@@ -6,9 +6,9 @@
 // preview thumbnail table, and the change-time deformation entry points
 // (morph weights and fur markings re-shade a part and re-upload it).
 
-#ifndef ENGINE_DEMO_CHARACTER_CONTENT_HPP
-#define ENGINE_DEMO_CHARACTER_CONTENT_HPP
+#pragma once
 
+#include <engine/renderer/material.hpp>
 #include "geometry.hpp"
 
 #include <engine/character/capabilities.hpp>
@@ -150,4 +150,3 @@ private:
 
 } // namespace demo
 
-#endif // ENGINE_DEMO_CHARACTER_CONTENT_HPP

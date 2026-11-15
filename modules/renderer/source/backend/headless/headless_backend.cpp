@@ -7,21 +7,16 @@
 // blitted into the window module's locked surface pixels.
 
 #include "headless_backend.hpp"
-#include "tile_bins.hpp"
-#include "engine/direct_lighting/capabilities.hpp"
-#include "engine/kernel/task_scheduler.hpp"
-#include "engine/renderer/capabilities.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
-#include "engine/window/capabilities.hpp"
 #include "render_shared.hpp"
+#include "tile_bins.hpp"
 
-#include <algorithm>
-#include <atomic>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
+#include <engine/direct_lighting/capabilities.hpp>
+#include <engine/kernel/task_scheduler.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
+#include <engine/window/capabilities.hpp>
+
 #include <glm/common.hpp>
 #include <glm/exponential.hpp>
 #include <glm/ext/matrix_float3x3.hpp>
@@ -31,6 +26,13 @@
 #include <glm/ext/vector_float4.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/type_ptr.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <thread>

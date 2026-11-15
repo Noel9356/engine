@@ -3,10 +3,14 @@
 // shell band, sea radius) the rest of the module relies on. See params.hpp
 // for the meaning of each field.
 
+#include <cstddef>
+#include <cstdint>
 #include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace engine
 {

@@ -5,6 +5,7 @@
 // own .so and exports createEmbeddedModule() instead of the entry table.
 
 #include <engine/ecs/capabilities.hpp>
+#include <engine/ecs/storage.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>

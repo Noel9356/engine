@@ -1,7 +1,10 @@
 // Configuration reading - see configuration.hpp.
 
 #include "configuration.hpp"
+#include <engine/kernel/participant_interface.hpp>
+#include "records.hpp"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace engine::character

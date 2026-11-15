@@ -1,6 +1,9 @@
 #include "planet_demo_support.hpp"
 
+#include <cstdint>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 namespace demo::planet_demo
 {

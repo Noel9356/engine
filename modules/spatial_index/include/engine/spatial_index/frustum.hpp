@@ -3,8 +3,7 @@
 // Converts a column-major OpenGL clip-space view-projection matrix into six
 // inward-facing world-space planes (normalized when their normal is nonzero).
 
-#ifndef ENGINE_SPATIAL_INDEX_FRUSTUM_HPP
-#define ENGINE_SPATIAL_INDEX_FRUSTUM_HPP
+#pragma once
 
 #include <engine/spatial_index/types.hpp>
 
@@ -81,4 +80,3 @@ namespace engine::spatial
 
 } // namespace engine::spatial
 
-#endif

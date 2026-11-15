@@ -14,14 +14,18 @@
 // only with debug.continuous_gather - instead of costing CPU on every
 // evaluate().
 
+#include <engine/kernel/task_scheduler.hpp>
 #include "lumen_gi_internal.hpp"
 
+#include <atomic>
+#include <cstdint>
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace engine

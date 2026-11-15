@@ -5,8 +5,7 @@
 // input_actions modules. Values crossing the boundary are the four primitive
 // script types; handles travel as numbers.
 
-#ifndef ENGINE_CHARACTER_LUA_BRIDGE_HPP
-#define ENGINE_CHARACTER_LUA_BRIDGE_HPP
+#pragma once
 
 #include <engine/character/capabilities.hpp>
 #include <engine/script_runtime/capabilities.hpp>
@@ -35,4 +34,3 @@ bool initializeCharacterLuaRuntime(void *userData, script_runtime::ScriptRuntime
 
 } // namespace engine::character
 
-#endif

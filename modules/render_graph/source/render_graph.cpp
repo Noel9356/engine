@@ -13,6 +13,7 @@
 // This file wires those pieces to the kernel module interface and the
 // capability function-pointer table.
 
+#include <cstddef>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -21,6 +22,7 @@
 #include <engine/render_graph/capabilities.hpp>
 #include <engine/render_graph/compiler.hpp>
 
+#include <engine/renderer/device_profile.hpp>
 #include "internal/aliasing.hpp"
 #include "internal/execution.hpp"
 #include "internal/plan_cache.hpp"
@@ -29,7 +31,6 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <utility>
 
 namespace engine
 {

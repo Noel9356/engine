@@ -1,8 +1,7 @@
 // Kernel-internal formatting helpers: participant kind nouns and the
 // "name (version, sha256)" suffix used in trust advisories.
 
-#ifndef ENGINE_KERNEL_KERNEL_INTERNALS_HPP
-#define ENGINE_KERNEL_KERNEL_INTERNALS_HPP
+#pragma once
 
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -51,4 +50,3 @@ inline std::string advisoryIdentitySuffix(const ParticipantTrustAdvisory &adviso
 
 } // namespace engine
 
-#endif

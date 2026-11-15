@@ -3,8 +3,7 @@
 // Asset-pipeline-style material (Phong legacy fields plus PBR/extension
 // factors) exchanged between asset import and mesh conversion.
 
-#ifndef ENGINE_SHARED_MODELS_MATERIAL_HPP
-#define ENGINE_SHARED_MODELS_MATERIAL_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -124,4 +123,3 @@ struct ModelMaterialTextureOptions
 
 } // namespace engine::models
 
-#endif

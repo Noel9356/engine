@@ -1,8 +1,7 @@
 // Renderer-owned studio backdrop for the character customisation screen.
 // Keeping floor/sky/sun resources and draw policy here prevents the screen
 // controller from also owning static stage geometry.
-#ifndef ENGINE_DEMO_CHARACTER_STAGE_HPP
-#define ENGINE_DEMO_CHARACTER_STAGE_HPP
+#pragma once
 
 #include <engine/renderer/capabilities.hpp>
 
@@ -34,4 +33,3 @@ private:
 
 } // namespace demo
 
-#endif

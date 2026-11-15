@@ -6,8 +6,7 @@
 // in one internal header so both meshing passes share the single copy and
 // meshing.cpp stays about the algorithm rather than the constant blocks.
 
-#ifndef ENGINE_PLANET_MARCHING_CUBES_TABLES_HPP
-#define ENGINE_PLANET_MARCHING_CUBES_TABLES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -319,4 +318,3 @@ inline constexpr std::int8_t kTriTable[256][16] = {
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_MARCHING_CUBES_TABLES_HPP

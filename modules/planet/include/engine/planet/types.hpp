@@ -6,8 +6,7 @@
 // stable hashing for seeds, chunk identity, statistics, and the borrowed
 // chunk-mesh views the module hands to consumers.
 
-#ifndef ENGINE_PLANET_TYPES_HPP
-#define ENGINE_PLANET_TYPES_HPP
+#pragma once
 
 #include <algorithm>
 #include <cmath>
@@ -228,4 +227,3 @@ struct PlanetStatistics
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_TYPES_HPP

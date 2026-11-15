@@ -1,9 +1,12 @@
 // Transient resource aliasing allocator implementation.
 
+#include <engine/render_graph/capabilities.hpp>
+#include <engine/render_graph/compiler.hpp>
 #include "internal/aliasing.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <unordered_map>
 #include <vector>

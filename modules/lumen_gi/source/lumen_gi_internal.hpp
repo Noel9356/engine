@@ -19,21 +19,22 @@
 // space, so dynamic transforms never rebuild a surface BVH); shading at every
 // hit goes through the card surface cache exactly like Lumen's card lookup.
 
-#ifndef ENGINE_LUMEN_GI_INTERNAL_HPP
-#define ENGINE_LUMEN_GI_INTERNAL_HPP
+#pragma once
 
+#include <cstddef>
+#include <engine/direct_lighting/capabilities.hpp>
 #include <engine/kernel/task_scheduler.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
-#include <engine/direct_lighting/capabilities.hpp>
 
-#include <glm/geometric.hpp>
+#include <exception>
 #include <glm/ext/matrix_float3x3.hpp>
 #include <glm/ext/matrix_float4x4.hpp>
 #include <glm/ext/vector_float3.hpp>
+#include <glm/geometric.hpp>
 #include <glm/glm.hpp>
-#include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
 #include <array>
@@ -41,10 +42,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <mutex>
-#include <string>
-#include <vector>
 
 namespace engine
 {
@@ -759,4 +757,3 @@ bool worldCacheIrradiance(
 } // namespace lumen_gi
 } // namespace engine
 
-#endif

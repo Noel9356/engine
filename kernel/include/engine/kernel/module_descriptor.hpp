@@ -2,8 +2,7 @@
 // sourced from module.toml sidecars, the descriptor cache or the entry
 // table.
 
-#ifndef ENGINE_KERNEL_MODULE_DESCRIPTOR_HPP
-#define ENGINE_KERNEL_MODULE_DESCRIPTOR_HPP
+#pragma once
 
 #include <engine/kernel/dynamic_library.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -76,4 +75,3 @@ struct UndescribedModuleLibrary
 
 } // namespace engine
 
-#endif

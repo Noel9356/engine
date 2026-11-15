@@ -29,9 +29,9 @@
 // cell and delivered as a ConformMask, so meshes remain pure functions of
 // (params, coord, mask).
 
-#ifndef ENGINE_PLANET_MESHING_HPP
-#define ENGINE_PLANET_MESHING_HPP
+#pragma once
 
+#include <cmath>
 #include <engine/planet/density.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
@@ -186,4 +186,3 @@ Vec3 chunkCenterMeters(const PlanetGenerationParams &params, const ChunkCoord &c
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_MESHING_HPP

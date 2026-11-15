@@ -5,8 +5,7 @@
 // frame. Recurring tasks reschedule by their interval, either skipping
 // missed ticks or catching up one per tick (RecurringTaskPolicy).
 
-#ifndef ENGINE_KERNEL_MAIN_THREAD_TASK_QUEUE_HPP
-#define ENGINE_KERNEL_MAIN_THREAD_TASK_QUEUE_HPP
+#pragma once
 
 #include <algorithm>
 #include <chrono>
@@ -464,4 +463,3 @@ inline void ScheduledTask::cancel()
 
 } // namespace engine
 
-#endif

@@ -6,8 +6,7 @@
 // into a construction order, reporting diagnostics for unknown or
 // ambiguous capabilities and for cycles.
 
-#ifndef ENGINE_KERNEL_DEPENDENCY_RESOLVER_HPP
-#define ENGINE_KERNEL_DEPENDENCY_RESOLVER_HPP
+#pragma once
 
 #include <engine/kernel/participant_manifest.hpp>
 
@@ -83,4 +82,3 @@ private:
 
 } // namespace engine
 
-#endif

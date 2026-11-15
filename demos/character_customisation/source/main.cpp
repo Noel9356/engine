@@ -30,15 +30,14 @@
 #include "demo/frame_stats.hpp"
 #include "demo/menu_bridge.hpp"
 #include "demo/options.hpp"
-#include "engine/application/application_host.hpp"
-#include "engine/application/command_line.hpp"
-#include "engine/application/frame_clock.hpp"
-#include "engine/kernel/engine_kernel.hpp"
-#include "engine/kernel/participant_interface.hpp"
-#include "engine/kernel/profiling.hpp"
-#include "engine/renderer/device_profile.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
+#include <engine/application/application_host.hpp>
+#include <engine/application/command_line.hpp>
+#include <engine/application/frame_clock.hpp>
+#include <engine/kernel/engine_kernel.hpp>
+#include <engine/kernel/participant_interface.hpp>
+#include <engine/kernel/profiling.hpp>
+#include <engine/renderer/device_profile.hpp>
+#include <engine/renderer/material.hpp>
 
 #include <glm/ext/matrix_float3x3.hpp>
 #include <glm/ext/matrix_float4x4.hpp>
@@ -63,12 +62,9 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
-#include <limits>
-#include <span>
-#include <stdexcept>
+#include <optional>
 #include <string>
 #include <thread>
-#include <utility>
 #include <vector>
 
 namespace

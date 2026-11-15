@@ -4,6 +4,11 @@
 // log something readable; nothing here owns state.
 
 #include "diagnostics.hpp"
+#include <engine/camera/capabilities.hpp>
+#include <engine/render_graph/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/device_profile.hpp>
+#include <engine/window/capabilities.hpp>
 
 #include <cstdint>
 #include <iostream>

@@ -1,5 +1,4 @@
-#ifndef ENGINE_CAMERA_LUA_BRIDGE_HPP
-#define ENGINE_CAMERA_LUA_BRIDGE_HPP
+#pragma once
 
 #include <engine/camera/capabilities.hpp>
 #include <engine/script_runtime/capabilities.hpp>
@@ -20,4 +19,3 @@ bool initializeCameraLuaRuntime(void *userData, script_runtime::ScriptRuntimeHan
 
 } // namespace engine::camera
 
-#endif

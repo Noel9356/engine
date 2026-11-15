@@ -4,8 +4,7 @@
 // the C ABI in plugin_api.hpp) or type = "script" (entry names a
 // script file hosted by the module providing host_capability).
 
-#ifndef ENGINE_KERNEL_PLUGIN_MANIFEST_HPP
-#define ENGINE_KERNEL_PLUGIN_MANIFEST_HPP
+#pragma once
 
 #include <engine/kernel/plugin_api.hpp>
 
@@ -83,4 +82,3 @@ public:
 
 } // namespace engine
 
-#endif

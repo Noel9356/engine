@@ -13,10 +13,12 @@
 // set + seed - the demo's capture-matrix regression relies on byte-identical
 // output across runs.
 
+#include <engine/fur/capabilities.hpp>
 #include "fur_internal.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 namespace engine

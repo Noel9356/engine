@@ -4,14 +4,14 @@
 // helper that derives event bus channel names from C++ type names; the
 // referenced services (bus, permissions, schedulers) do the real work.
 
-#include "engine/kernel/event_bus.hpp"
-#include "engine/kernel/main_thread_task_queue.hpp"
-#include "engine/kernel/profiling.hpp"
-#include "engine/kernel/task_scheduler.hpp"
 #include <engine/kernel/configuration.hpp>
+#include <engine/kernel/event_bus.hpp>
+#include <engine/kernel/main_thread_task_queue.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/kernel/permission_system.hpp>
+#include <engine/kernel/profiling.hpp>
+#include <engine/kernel/task_scheduler.hpp>
 
 #include <charconv>
 #include <cstddef>

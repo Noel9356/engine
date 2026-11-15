@@ -3,8 +3,7 @@
 // pace() blocks until the next deadline (sleep then a short spin) and
 // reports how long it waited and by how much it overshot.
 
-#ifndef ENGINE_APPLICATION_FRAME_PACER_HPP
-#define ENGINE_APPLICATION_FRAME_PACER_HPP
+#pragma once
 
 #include <engine/kernel/profiling.hpp>
 
@@ -61,4 +60,3 @@ private:
 
 } // namespace engine
 
-#endif

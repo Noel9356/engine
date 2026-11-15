@@ -5,8 +5,7 @@
 // lifetimes for the aliasing allocator. Pure computation over the input
 // arrays; no engine state involved.
 
-#ifndef ENGINE_RENDER_GRAPH_COMPILER_HPP
-#define ENGINE_RENDER_GRAPH_COMPILER_HPP
+#pragma once
 
 #include <engine/render_graph/capabilities.hpp>
 
@@ -36,4 +35,3 @@ bool buildRenderGraphPlan(const RenderGraphPassDescription *passes, std::uint32_
 
 } // namespace engine::render_graph
 
-#endif

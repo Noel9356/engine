@@ -3,8 +3,7 @@
 // Keeps cursor capture, keyboard sampling and mouse-delta bookkeeping out of
 // the demo's application loop. Camera creation, pose selection and rendering
 // remain owned by their respective systems.
-#ifndef ENGINE_DEMO_PLANET_CAMERA_INPUT_HPP
-#define ENGINE_DEMO_PLANET_CAMERA_INPUT_HPP
+#pragma once
 
 #include <engine/camera/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
@@ -44,4 +43,3 @@ private:
 
 } // namespace demo::planet_demo
 
-#endif

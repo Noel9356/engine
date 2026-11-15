@@ -14,6 +14,8 @@
 
 #include "lumen_gi_internal.hpp"
 
+#include <atomic>
+#include <cstddef>
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 

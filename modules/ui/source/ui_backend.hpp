@@ -7,8 +7,7 @@
 // implementations forward to. Compiled into every ui_* TU; backend-dependent
 // code is guarded by ENGINE_UI_BACKEND_IMGUI.
 
-#ifndef ENGINE_UI_BACKEND_HPP
-#define ENGINE_UI_BACKEND_HPP
+#pragma once
 
 #include <engine/ui/capabilities.hpp>
 
@@ -340,4 +339,3 @@ UiMouseCursor mouseCursor(UiModuleState &state, UiContextHandle handle);
 } // namespace ui
 } // namespace engine
 
-#endif

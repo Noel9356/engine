@@ -4,6 +4,7 @@
 // generation-checked handle translation in both directions.
 
 #include <engine/ecs/capabilities.hpp>
+#include <engine/ecs/storage.hpp>
 #include <engine/entity_world/capabilities.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>

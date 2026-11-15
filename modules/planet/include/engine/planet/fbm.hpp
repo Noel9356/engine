@@ -8,8 +8,7 @@
 // planet seed), the band-limit fade used by the LOD system, and the plain and
 // ridged fBm evaluators. All functions are pure and thread safe.
 
-#ifndef ENGINE_PLANET_FBM_HPP
-#define ENGINE_PLANET_FBM_HPP
+#pragma once
 
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
@@ -70,4 +69,3 @@ double bandLimitedBoundedTerms(const PlanetGenerationParams &params, double lowP
 } // namespace planet
 } // namespace engine
 
-#endif // ENGINE_PLANET_FBM_HPP

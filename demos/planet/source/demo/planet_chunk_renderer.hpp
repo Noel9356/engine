@@ -1,20 +1,19 @@
 // Renderer-side cache for the planet module's currently visible chunk meshes.
 // The planet module owns CPU chunk data; this class owns only GPU mesh handles
 // and the stable per-draw material/transform storage used by the renderer.
-#ifndef ENGINE_DEMO_PLANET_CHUNK_RENDERER_HPP
-#define ENGINE_DEMO_PLANET_CHUNK_RENDERER_HPP
+#pragma once
 
 #include <engine/planet/capabilities.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
 
 #include <glm/glm.hpp>
 
 #include <cstdint>
 #include <deque>
 #include <map>
-#include <utility>
 #include <vector>
 
 namespace demo::planet_demo
@@ -96,4 +95,3 @@ private:
 
 } // namespace demo::planet_demo
 
-#endif

@@ -10,8 +10,7 @@
 // from a mean or a maximum. record() stays wait-free: one bucket fetch_add
 // per sample, no locks, no allocation.
 
-#ifndef ENGINE_KERNEL_PROFILING_HPP
-#define ENGINE_KERNEL_PROFILING_HPP
+#pragma once
 
 #include <algorithm>
 #include <array>
@@ -402,4 +401,3 @@ private:
 
 } // namespace engine
 
-#endif

@@ -4,8 +4,7 @@
 // management, an input event sink, an immediate-mode widget set, and draw data
 // a renderer can consume without knowing anything about ImGui.
 
-#ifndef ENGINE_UI_CAPABILITIES_HPP
-#define ENGINE_UI_CAPABILITIES_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -866,4 +865,3 @@ struct UiCapability
 } // namespace ui
 } // namespace engine
 
-#endif

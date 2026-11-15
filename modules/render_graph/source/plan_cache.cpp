@@ -1,11 +1,14 @@
 // Compiled-plan LRU cache implementation.
 
+#include <engine/render_graph/capabilities.hpp>
+#include <engine/render_graph/compiler.hpp>
 #include "internal/plan_cache.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 

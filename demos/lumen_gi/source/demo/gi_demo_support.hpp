@@ -1,6 +1,5 @@
 // Private data and helper API for the Lumen GI sample application.
-#ifndef ENGINE_DEMO_GI_DEMO_SUPPORT_HPP
-#define ENGINE_DEMO_GI_DEMO_SUPPORT_HPP
+#pragma once
 
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
@@ -8,9 +7,9 @@
 #include <engine/renderer/mesh.hpp>
 
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <string>
 #include <vector>
-#include <glm/glm.hpp>
 
 namespace demo::lumen_gi
 {
@@ -52,4 +51,3 @@ std::vector<SceneMesh> buildInteriorScene();
 std::vector<SceneMesh> buildOutdoorScene();
 } // namespace demo::lumen_gi
 
-#endif

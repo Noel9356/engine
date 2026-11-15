@@ -5,9 +5,9 @@
 // ParticipantContext configuration reads and passes it by const reference
 // to the cache and loader.
 
-#ifndef ENGINE_FILE_ASSET_STORE_ASSET_CONFIG_HPP
-#define ENGINE_FILE_ASSET_STORE_ASSET_CONFIG_HPP
+#pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 
@@ -79,4 +79,3 @@ struct AssetStoreConfig
 
 } // namespace engine::file_asset_store
 
-#endif

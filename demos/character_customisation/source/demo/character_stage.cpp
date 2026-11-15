@@ -1,5 +1,8 @@
 #include "character_stage.hpp"
 
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
 #include "geometry.hpp"
 
 #include <glm/glm.hpp>

@@ -4,8 +4,7 @@
 // (no trust decision needed); its descriptor must match what the library's
 // entry table reports.
 
-#ifndef ENGINE_KERNEL_MODULE_MANIFEST_HPP
-#define ENGINE_KERNEL_MODULE_MANIFEST_HPP
+#pragma once
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/module_descriptor.hpp>
@@ -41,4 +40,3 @@ public:
 
 } // namespace engine
 
-#endif

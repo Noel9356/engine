@@ -5,12 +5,13 @@
 // walk intents and producing the camera pose each frame. In auto mode it
 // walks a deterministic path (fixed forward intent, gentle constant turn) so
 // headless captures exercise the same code as interactive play.
-#ifndef ENGINE_DEMO_PLANET_WALK_CONTROLLER_HPP
-#define ENGINE_DEMO_PLANET_WALK_CONTROLLER_HPP
+#pragma once
 
 #include <engine/camera/capabilities.hpp>
 #include <engine/planet/capabilities.hpp>
 #include <engine/planet/density.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 #include <engine/planet/walker.hpp>
 
 #include <glm/glm.hpp>
@@ -73,4 +74,3 @@ private:
 
 } // namespace demo::planet_demo
 
-#endif

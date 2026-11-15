@@ -1,8 +1,9 @@
 // Internals shared between the fur module's translation units.
 
-#ifndef ENGINE_FUR_INTERNAL_HPP
-#define ENGINE_FUR_INTERNAL_HPP
+#pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <engine/fur/capabilities.hpp>
 
 namespace engine
@@ -43,4 +44,3 @@ FurLodDecision evaluateFurLodDecision(const LodBands &bands, float angularSize);
 } // namespace fur
 } // namespace engine
 
-#endif

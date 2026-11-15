@@ -2,9 +2,13 @@
 
 #include "registry.hpp"
 
+#include <engine/character/capabilities.hpp>
 #include "math_utils.hpp"
+#include "records.hpp"
 
-#include <optional>
+#include <cstddef>
+#include <cstdint>
+#include <string>
 
 namespace engine::character
 {

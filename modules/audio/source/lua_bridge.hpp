@@ -1,5 +1,4 @@
-#ifndef ENGINE_AUDIO_LUA_BRIDGE_HPP
-#define ENGINE_AUDIO_LUA_BRIDGE_HPP
+#pragma once
 
 #include <engine/audio/capabilities.hpp>
 #include <engine/script_runtime/capabilities.hpp>
@@ -17,4 +16,3 @@ bool initializeAudioLuaRuntime(void *userData, script_runtime::ScriptRuntimeHand
 
 } // namespace engine::audio
 
-#endif

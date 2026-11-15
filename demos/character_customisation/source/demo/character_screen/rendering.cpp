@@ -1,5 +1,9 @@
 #include "../character_screen_internal.hpp"
+#include "../character_content.hpp"
+#include "../character_screen.hpp"
+#include <engine/renderer/capabilities.hpp>
 
+#include <cstdint>
 #include <glm/glm.hpp>
 
 #include <algorithm>

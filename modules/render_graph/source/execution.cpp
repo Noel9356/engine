@@ -1,11 +1,14 @@
 // Cached TaskGraph execution implementation.
 
+#include <engine/kernel/task_scheduler.hpp>
+#include <engine/render_graph/capabilities.hpp>
+#include <engine/render_graph/compiler.hpp>
 #include "internal/execution.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <utility>
 #include <vector>
 
 namespace engine::render_graph::detail

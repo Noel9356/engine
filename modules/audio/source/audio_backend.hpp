@@ -6,8 +6,7 @@
 // Only compiled when the miniaudio backend is enabled; consumers include it
 // unconditionally and guard their backend-specific code the same way.
 
-#ifndef ENGINE_AUDIO_BACKEND_HPP
-#define ENGINE_AUDIO_BACKEND_HPP
+#pragma once
 
 #include <engine/audio/capabilities.hpp>
 
@@ -365,5 +364,4 @@ struct LockedBus
 } // namespace audio
 } // namespace engine
 
-#endif
 #endif

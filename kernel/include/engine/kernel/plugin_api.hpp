@@ -4,8 +4,7 @@
 // uses createPlugin/destroyPlugin so instance lifetime stays inside the plugin
 // library.
 
-#ifndef ENGINE_KERNEL_PLUGIN_API_HPP
-#define ENGINE_KERNEL_PLUGIN_API_HPP
+#pragma once
 
 #include <engine/kernel/participant_interface.hpp>
 
@@ -36,4 +35,3 @@ extern "C"
     };
 }
 
-#endif

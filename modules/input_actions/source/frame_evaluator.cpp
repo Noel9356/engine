@@ -1,8 +1,12 @@
+#include "context_registry.hpp"
+#include "device_state.hpp"
+#include <engine/input_actions/capabilities.hpp>
 #include "frame_evaluator.hpp"
+#include "internal.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
+#include <cstddef>
 
 namespace engine::input_actions
 {

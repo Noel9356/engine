@@ -4,13 +4,12 @@
 // generated SPIR-V headers (mesh_*_gen.hpp, fur_*_gen.hpp, ui_*_gen.hpp).
 // Compiled only under ENGINE_RENDERER_BACKEND_VULKAN.
 
-#ifndef ENGINE_RENDERER_MODULE_VULKAN_PIPELINE_HPP
-#define ENGINE_RENDERER_MODULE_VULKAN_PIPELINE_HPP
+#pragma once
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <chrono>
 #include <string>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -191,4 +190,3 @@ private:
 
 #endif
 
-#endif

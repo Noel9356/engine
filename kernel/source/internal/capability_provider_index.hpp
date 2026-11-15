@@ -4,8 +4,7 @@
 // capability X" with exact and family (dotted) matches, enforcing the
 // module/plugin visibility rule. Classification results cache once frozen.
 
-#ifndef ENGINE_KERNEL_CAPABILITY_PROVIDER_INDEX_HPP
-#define ENGINE_KERNEL_CAPABILITY_PROVIDER_INDEX_HPP
+#pragma once
 
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -142,4 +141,3 @@ private:
 
 } // namespace engine
 
-#endif

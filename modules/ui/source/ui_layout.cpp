@@ -9,7 +9,6 @@
 #include "ui_backend.hpp"
 
 #include <cmath>
-#include <cstdint>
 
 namespace engine
 {

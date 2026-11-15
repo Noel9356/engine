@@ -1,6 +1,14 @@
 #include "../character_screen_internal.hpp"
-#include "../geometry.hpp"
+#include "../character_content.hpp"
+#include "../character_screen.hpp"
+#include <engine/camera/capabilities.hpp>
+#include <engine/character/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/ui/capabilities.hpp>
+#include <engine/window/capabilities.hpp>
 
+#include <cstdint>
 #include <glm/glm.hpp>
 
 #include <algorithm>

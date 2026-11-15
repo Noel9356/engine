@@ -1,10 +1,10 @@
 // Benchmark environment, imported model, and object-grid resource ownership.
-#ifndef ENGINE_DEMO_BENCHMARK_SCENE_HPP
-#define ENGINE_DEMO_BENCHMARK_SCENE_HPP
+#pragma once
 
 #include <engine/models/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
 #include <engine/window/capabilities.hpp>
 
 #include <glm/glm.hpp>
@@ -59,4 +59,3 @@ void destroyBenchmarkScene(BenchmarkScene &scene, engine::renderer::RenderCapabi
     engine::renderer::RendererHandle rendererHandle);
 } // namespace demo
 
-#endif

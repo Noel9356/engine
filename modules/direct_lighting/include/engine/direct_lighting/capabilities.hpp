@@ -6,8 +6,7 @@
 // a priority-sorted snapshot copy API for renderers, and a device-based
 // profile resolver.
 
-#ifndef ENGINE_DIRECT_LIGHTING_CAPABILITIES_HPP
-#define ENGINE_DIRECT_LIGHTING_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/renderer/device_profile.hpp>
 
@@ -108,4 +107,3 @@ struct DirectLightingCapability
 } // namespace direct_lighting
 } // namespace engine
 
-#endif

@@ -3,14 +3,14 @@
 // bookkeeping, and the abstract WindowBackend that the GLFW and headless
 // implementations fulfill.
 
-#ifndef ENGINE_WINDOW_MODULE_BACKEND_HPP
-#define ENGINE_WINDOW_MODULE_BACKEND_HPP
+#pragma once
 
+#include <cstdint>
 #include <engine/window/capabilities.hpp>
 
 #include <algorithm>
-#include <cstddef>
 #include <cmath>
+#include <cstddef>
 #include <deque>
 #include <limits>
 #include <string>
@@ -593,4 +593,3 @@ public:
 } // namespace window
 } // namespace engine
 
-#endif

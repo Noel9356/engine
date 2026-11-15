@@ -1,6 +1,10 @@
 // Climate and biome classification (see climate.hpp).
 
+#include <cstddef>
+#include <cstdint>
 #include <engine/planet/climate.hpp>
+#include <engine/planet/params.hpp>
+#include <engine/planet/types.hpp>
 
 #include <engine/planet/fbm.hpp>
 #include <engine/planet/noise.hpp>

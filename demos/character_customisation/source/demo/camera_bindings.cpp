@@ -1,6 +1,9 @@
 #include "camera_bindings.hpp"
+#include <engine/kernel/participant_interface.hpp>
+#include <engine/window/capabilities.hpp>
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <utility>

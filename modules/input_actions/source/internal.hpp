@@ -16,21 +16,13 @@
 // input_actions.cpp wires these into the ModuleInterface implementation,
 // serializes entry points with one mutex, and binds the C capability vtable.
 
-#ifndef ENGINE_INPUT_ACTIONS_INTERNAL_HPP
-#define ENGINE_INPUT_ACTIONS_INTERNAL_HPP
+#pragma once
 
 #include <engine/input_actions/capabilities.hpp>
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <vector>
 
 namespace engine::input_actions
 {
@@ -97,4 +89,3 @@ constexpr bool isTouchControl(InputControlKind control) noexcept
 } // namespace internal
 } // namespace engine::input_actions
 
-#endif // ENGINE_INPUT_ACTIONS_INTERNAL_HPP

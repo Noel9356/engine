@@ -10,8 +10,7 @@
 // These are *coarse* system queries on purpose: they describe the machine,
 // not the current load. Modules must not poll them per frame.
 
-#ifndef ENGINE_SHARED_UTIL_HARDWARE_INFO_HPP
-#define ENGINE_SHARED_UTIL_HARDWARE_INFO_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -63,4 +62,3 @@ inline std::uint64_t physicalMemoryBytes() noexcept
 
 } // namespace engine::util
 
-#endif // ENGINE_SHARED_UTIL_HARDWARE_INFO_HPP

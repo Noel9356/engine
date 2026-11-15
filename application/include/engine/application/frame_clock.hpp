@@ -3,8 +3,7 @@
 // advance() turns wall-clock time into a FrameTiming: a clamped variable
 // delta, the number of fixed steps to run and the interpolation alpha.
 
-#ifndef ENGINE_APPLICATION_FRAME_CLOCK_HPP
-#define ENGINE_APPLICATION_FRAME_CLOCK_HPP
+#pragma once
 
 #include <engine/kernel/engine_kernel.hpp>
 
@@ -74,4 +73,3 @@ private:
 
 } // namespace engine
 
-#endif

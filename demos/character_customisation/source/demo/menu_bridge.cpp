@@ -1,7 +1,12 @@
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/script_runtime/capabilities.hpp>
+#include <engine/ui/capabilities.hpp>
 #include "menu_bridge.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace demo

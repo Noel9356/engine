@@ -5,11 +5,6 @@
 #include <engine/kernel/capability_name.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 
-#include <cstddef>
-#include <stdexcept>
-#include <string>
-#include <utility>
-#include <vector>
 
 namespace engine
 {

@@ -7,9 +7,10 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
-#include <engine/window/capabilities.hpp>
 #include <engine/util/ppm.hpp>
+#include <engine/window/capabilities.hpp>
 
+#include <engine/kernel/event_bus.hpp>
 #include "window_configuration.hpp"
 
 #if defined(ENGINE_WINDOW_BACKEND_GLFW)
@@ -24,11 +25,8 @@
 #include <cstdio>
 #include <limits>
 #include <map>
-#include <memory>
 #include <new>
 #include <string>
-#include <utility>
-#include <vector>
 
 namespace engine
 {

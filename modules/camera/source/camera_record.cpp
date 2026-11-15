@@ -1,9 +1,12 @@
 // CameraRecord implementation: creation from parameters, pose and projection
 // mutation, per-frame integration, and the lazily rebuilt matrix caches.
 
-#include "camera_record.hpp"
+#include "camera_configuration.hpp"
 #include "camera_limits.hpp"
+#include "camera_record.hpp"
+#include <engine/camera/capabilities.hpp>
 
+#include <cstdint>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 

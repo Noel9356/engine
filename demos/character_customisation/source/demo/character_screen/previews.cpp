@@ -11,14 +11,20 @@
 // capture-side sample sheets (--part-previews).
 
 #include "../character_screen_internal.hpp"
+#include "../character_content.hpp"
+#include "../character_screen.hpp"
+#include <engine/camera/capabilities.hpp>
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/window/capabilities.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <functional>
-#include <map>
 #include <string>
 #include <vector>
 

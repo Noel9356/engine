@@ -3,8 +3,7 @@
 // Handles, hit records, and query counters used by the static BVH, the dynamic
 // AABB tree, and the combined scene index. Header-only, no dependencies.
 
-#ifndef ENGINE_SPATIAL_INDEX_TYPES_HPP
-#define ENGINE_SPATIAL_INDEX_TYPES_HPP
+#pragma once
 
 #include <array>
 #include <cmath>
@@ -113,4 +112,3 @@ struct DynamicTreeStatistics
 
 } // namespace engine::spatial
 
-#endif

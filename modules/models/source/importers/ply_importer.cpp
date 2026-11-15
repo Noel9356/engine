@@ -7,7 +7,6 @@
 #include "model_import_internal.hpp"
 
 #include <algorithm>
-#include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -15,7 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
-#include <istream>
+#include <ios>
 #include <limits>
 #include <sstream>
 #include <string>

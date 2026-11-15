@@ -4,9 +4,9 @@
 // rely on. Coordinates are floats; all operations are noexcept and branch-free
 // of allocation.
 
-#ifndef ENGINE_SPATIAL_INDEX_AABB_HPP
-#define ENGINE_SPATIAL_INDEX_AABB_HPP
+#pragma once
 
+#include <cstdint>
 #include <engine/spatial_index/types.hpp>
 
 #include <algorithm>
@@ -260,4 +260,3 @@ private:
 
 } // namespace engine::spatial
 
-#endif

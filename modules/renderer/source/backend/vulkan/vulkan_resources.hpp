@@ -3,15 +3,14 @@
 // samplers, and a cache of material descriptor sets keyed by the five bound
 // texture handles. Compiled only under ENGINE_RENDERER_BACKEND_VULKAN.
 
-#ifndef ENGINE_RENDERER_MODULE_VULKAN_RESOURCES_HPP
-#define ENGINE_RENDERER_MODULE_VULKAN_RESOURCES_HPP
+#pragma once
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
 
+#include <engine/renderer/capabilities.hpp>
+#include <engine/renderer/material.hpp>
+#include <engine/renderer/mesh.hpp>
 #include "render_shared.hpp"
-#include "engine/renderer/capabilities.hpp"
-#include "engine/renderer/material.hpp"
-#include "engine/renderer/mesh.hpp"
 
 #include <array>
 #include <cstddef>
@@ -228,4 +227,3 @@ private:
 
 #endif
 
-#endif

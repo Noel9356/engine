@@ -1,13 +1,21 @@
 // AssetCache implementation: see asset_cache.hpp for the contract.
 
 #include "asset_cache.hpp"
+#include "asset_config.hpp"
+#include "asset_record.hpp"
+#include <engine/file_asset_store/capabilities.hpp>
+#include <engine/file_asset_store/catalog.hpp>
+#include <engine/kernel/profiling.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <system_error>
 #include <unordered_map>

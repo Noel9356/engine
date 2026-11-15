@@ -1,8 +1,7 @@
 // Participant identity and requirements shared by modules, plugins and the
 // application.
 
-#ifndef ENGINE_KERNEL_PARTICIPANT_MANIFEST_HPP
-#define ENGINE_KERNEL_PARTICIPANT_MANIFEST_HPP
+#pragma once
 
 #include <string>
 #include <vector>
@@ -41,4 +40,3 @@ struct ParticipantManifest
 
 } // namespace engine
 
-#endif

@@ -4,8 +4,7 @@
 // boundary and initialize result slots consistently. They do not allocate and
 // keep ScriptValue strings borrowed for the duration of the native call.
 
-#ifndef ENGINE_SCRIPT_RUNTIME_NATIVE_VALUES_HPP
-#define ENGINE_SCRIPT_RUNTIME_NATIVE_VALUES_HPP
+#pragma once
 
 #include <engine/script_runtime/capabilities.hpp>
 
@@ -156,4 +155,3 @@ inline void resultString(ScriptValue *results, std::uint32_t index, const char *
 
 } // namespace engine::script_runtime::native
 
-#endif // ENGINE_SCRIPT_RUNTIME_NATIVE_VALUES_HPP

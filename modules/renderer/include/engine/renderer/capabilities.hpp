@@ -6,8 +6,7 @@
 // structs at the bottom of this file. Everything here is consumed via
 // ParticipantContext::acquireCapability<T>().
 
-#ifndef ENGINE_RENDERER_CAPABILITIES_HPP
-#define ENGINE_RENDERER_CAPABILITIES_HPP
+#pragma once
 
 #include <engine/renderer/device_profile.hpp>
 #include <engine/renderer/material.hpp>
@@ -394,4 +393,3 @@ struct HeadlessRenderCapability
 } // namespace renderer
 } // namespace engine
 
-#endif

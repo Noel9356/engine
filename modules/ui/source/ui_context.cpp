@@ -11,7 +11,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <memory>
+#include <thread>
+#include <utility>
 
 namespace engine
 {

@@ -4,6 +4,7 @@
 // Engine-independent implementation of compiler.hpp (no kernel includes);
 // the analysis is pure computation over the caller's arrays.
 
+#include <engine/render_graph/capabilities.hpp>
 #include <engine/render_graph/compiler.hpp>
 
 #include <algorithm>

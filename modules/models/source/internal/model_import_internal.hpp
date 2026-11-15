@@ -4,10 +4,11 @@
 // using these building blocks: option-derived transforms, normal generation and
 // index utilities. models.cpp drives the importers and owns the finished records.
 
-#ifndef ENGINE_MODELS_MODEL_IMPORT_INTERNAL_HPP
-#define ENGINE_MODELS_MODEL_IMPORT_INTERNAL_HPP
+#pragma once
 
 #include <engine/models/capabilities.hpp>
+#include <engine/models/material.hpp>
+#include <engine/renderer/mesh.hpp>
 
 #include <algorithm>
 #include <array>
@@ -403,4 +404,3 @@ void optimizeModelRecord(ModelRecord &record, const ModelOptimizationOptions &op
 
 } // namespace engine::models::detail
 
-#endif

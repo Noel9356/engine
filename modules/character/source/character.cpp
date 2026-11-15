@@ -31,6 +31,9 @@
 #include "registry.hpp"
 #include "validation.hpp"
 
+#include <engine/character/capabilities.hpp>
+#include <engine/kernel/event_bus.hpp>
+
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -44,11 +47,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
-#include <new>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace engine::character
 {

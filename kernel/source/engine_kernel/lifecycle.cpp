@@ -7,11 +7,11 @@
 #include "capability_provider_index.hpp"
 #include "kernel_internals.hpp"
 
-#include "engine/kernel/dependency_resolver.hpp"
-#include "engine/kernel/task_scheduler.hpp"
+#include <engine/kernel/dependency_resolver.hpp>
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/kernel/task_scheduler.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -19,7 +19,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>

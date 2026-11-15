@@ -5,8 +5,7 @@
 // that fills an object store from a source tree. All functions report
 // failure by returning false with a message in `error`.
 
-#ifndef ENGINE_FILE_ASSET_STORE_CATALOG_HPP
-#define ENGINE_FILE_ASSET_STORE_CATALOG_HPP
+#pragma once
 
 #include <cstdint>
 #include <filesystem>
@@ -59,4 +58,3 @@ bool cookAssetDirectory(const std::filesystem::path &sourceDirectory, const std:
 
 } // namespace engine::file_asset_store
 
-#endif

@@ -7,14 +7,15 @@
 // registration order - matching the linear-scan precedence (exact pair
 // first, then first wildcard match) without the O(rules) walk.
 
-#ifndef ENGINE_CHARACTER_REGISTRY_HPP
-#define ENGINE_CHARACTER_REGISTRY_HPP
+#pragma once
 
 #include "records.hpp"
 
 #include <engine/character/capabilities.hpp>
 
+#include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace engine::character
 {
@@ -60,4 +61,3 @@ bool resolvePartReferences(const Registry &registry, PartRecord &part, Character
 } // namespace internal
 } // namespace engine::character
 
-#endif

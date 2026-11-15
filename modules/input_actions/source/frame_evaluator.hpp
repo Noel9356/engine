@@ -6,14 +6,15 @@
 // reads device state + context state through references supplied by the
 // module. Not thread-safe; the module serializes calls.
 
-#ifndef ENGINE_INPUT_ACTIONS_FRAME_EVALUATOR_HPP
-#define ENGINE_INPUT_ACTIONS_FRAME_EVALUATOR_HPP
+#pragma once
 
 #include "configuration.hpp"
 #include "context_registry.hpp"
 #include "device_state.hpp"
 #include "internal.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <engine/input_actions/capabilities.hpp>
 
 #include <unordered_set>
@@ -61,4 +62,3 @@ private:
 } // namespace internal
 } // namespace engine::input_actions
 
-#endif // ENGINE_INPUT_ACTIONS_FRAME_EVALUATOR_HPP

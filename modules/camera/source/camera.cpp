@@ -6,22 +6,25 @@
 // bridge registration. Pose math, per-record state, and matrix caching live
 // in camera_record; configuration loading lives in camera_configuration.
 
-#include <engine/camera/capabilities.hpp>
 #include "camera_configuration.hpp"
 #include "camera_record.hpp"
-#include "lua_bridge.hpp"
+#include <engine/camera/capabilities.hpp>
+#include <engine/kernel/event_bus.hpp>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/script_runtime/capabilities.hpp>
+#include "lua_bridge.hpp"
 
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <new>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace engine
 {

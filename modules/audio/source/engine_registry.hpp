@@ -5,15 +5,17 @@
 // per-engine state and locking stay on the records themselves. Only compiled
 // when the miniaudio backend is enabled.
 
-#ifndef ENGINE_AUDIO_ENGINE_REGISTRY_HPP
-#define ENGINE_AUDIO_ENGINE_REGISTRY_HPP
+#pragma once
 
 #include "audio_backend.hpp"
 
-#if defined(ENGINE_AUDIO_BACKEND_MINIAUDIO)
-
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+
+#if defined(ENGINE_AUDIO_BACKEND_MINIAUDIO)
 
 namespace engine
 {
@@ -98,5 +100,4 @@ private:
 } // namespace audio
 } // namespace engine
 
-#endif
 #endif

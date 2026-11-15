@@ -6,14 +6,19 @@
 // script_runtime.cpp only orchestrates: it owns the runtime map and forwards
 // to these helpers.
 
+#include <engine/script_runtime/capabilities.hpp>
+
 #include "lua_sandbox.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <random>

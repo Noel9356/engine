@@ -1,5 +1,4 @@
-#ifndef ENGINE_SKELETAL_ANIMATION_LUA_BRIDGE_HPP
-#define ENGINE_SKELETAL_ANIMATION_LUA_BRIDGE_HPP
+#pragma once
 
 #include <engine/script_runtime/capabilities.hpp>
 #include <engine/skeletal_animation/capabilities.hpp>
@@ -63,4 +62,3 @@ void shutdownSkeletalAnimationLuaBridge(SkeletalAnimationLuaBridgeContext &conte
 
 } // namespace engine::skeletal_animation
 
-#endif

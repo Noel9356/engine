@@ -4,8 +4,7 @@
 // functions are dependency-free and operate on caller-owned four/three-float
 // arrays so capability-facing data structures remain unchanged.
 
-#ifndef ENGINE_SHARED_MATH_QUATERNION_HPP
-#define ENGINE_SHARED_MATH_QUATERNION_HPP
+#pragma once
 
 #include <cmath>
 
@@ -68,4 +67,3 @@ inline void rotateVector(const float quaternion[4], const float value[3], float 
 
 } // namespace engine::math
 
-#endif // ENGINE_SHARED_MATH_QUATERNION_HPP
