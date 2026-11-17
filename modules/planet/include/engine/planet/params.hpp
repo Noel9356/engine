@@ -230,7 +230,9 @@ struct PlanetGenerationParams
     bool   moistureLatitudeBands = true;    // ITCZ wet belt + subtropical dry belts
     double colorVariation = 0.24;           // per-point albedo jitter (0 = flat palette)
     double colorVariationWavelengthMeters = 260.0; // feature size of the albedo jitter field
-    double colorVariationGroundWavelengthMeters = 3.5; // metre-scale mottle for ground-level views
+    double colorVariationGroundWavelengthMeters = 11.0; // near-field mottle for ground-level views;
+                                                        // keep above ~2x the finest voxel or the LOD
+                                                        // band limit fades it out entirely
     double snowLineMeters = 2400.0;          // sea-level snow line (drops as climate cools);
                                             // only the highest massifs are glaciated, polar
                                             // caps come from latitude alone. Earth's
@@ -327,7 +329,7 @@ struct PlanetGenerationParams
     // instead of a painted stripe.
     double waterFoamWidthMeters = 2.5;  // depth band under the surface that reads as surf; wide
                                         // enough to read as a breaker line from a standing eye
-    double waterFoamStrength    = 0.55; // 0 = no foam, 1 = solid white surf band
+    double waterFoamStrength    = 0.70; // 0 = no foam, 1 = solid white surf band
     // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
     // below seaIceTemperature (the same climate field that drives the land's
     // freeze line, so ice caps and snowy poles line up with an organic, noisy
@@ -335,12 +337,14 @@ struct PlanetGenerationParams
     // seaIceTransition of temperature around the threshold.
     double seaIceTemperature  = 0.10;
     double seaIceTransition   = 0.05;
-    float waterColorIce[3]    = {0.80f, 0.86f, 0.90f};
+    // Sea ice reads slightly blue against the warm-white cloud tops, so the
+    // polar caps stay distinguishable from the weather layer at globe scale.
+    float waterColorIce[3]    = {0.78f, 0.85f, 0.94f};
     // Wave slope: deterministic noise tilts the water surface normals around
     // the radial direction, giving the sea sun-glint texture at close range.
     // The amplitude is a radian-scale tilt; it fades out under the LOD band
     // limit like every other noise term, so coarse chunks keep a smooth sea.
-    double     waterWaveAmplitude          = 0.12;
+    double     waterWaveAmplitude          = 0.16;
     double     waterWaveWavelengthMeters   = 8.0;
 
     // ---- clouds (coverage field; see atmosphere.hpp) ----------------------------
@@ -368,7 +372,35 @@ struct PlanetGenerationParams
     // dry subtropics, stormy mid-latitudes), keyed to the spin axis. 0 gives
     // a latitude-blind field.
     double cloudLatitudeBandStrength = 0.16;
-    float cloudColor[3]          = {0.96f, 0.97f, 1.0f}; // linear RGB of the cloud tops
+    // Warm white, so the cloud layer reads against the bluer sea ice at
+    // globe scale (both are bright; the hue carries the distinction).
+    float cloudColor[3]          = {0.985f, 0.975f, 0.955f}; // linear RGB of the cloud tops
+    // Cloud shadows on the ground: the terrain and water albedo darkens
+    // under the same coverage field the cloud layer renders from, sampled
+    // along the SUN RAY through the surface point (the cloud bank that
+    // actually blocks this point's sunlight sits up-sun at the shell
+    // altitude), so the shadows fall AWAY from their banks the way real
+    // cloud shadows do and stay consistent with the cloud layer from orbit
+    // and from the ground. 0 disables.
+    double cloudShadowStrength   = 0.45;
+    // Direction (unit, world space) of the sunlight that casts the cloud
+    // shadows - the one lighting the scene the consumer renders (the demo
+    // pairs it with its [pbr] sun_direction). The default matches the
+    // demo's shipped sun; a sun below the local horizon turns the shadows
+    // off for that point (night side).
+    double cloudShadowSunDirection[3] = {0.50, 0.45, 0.74};
+
+    // ---- stars (space backdrop; see atmosphere.hpp) ------------------------------
+    // A seed-derived star field for the space behind the planet: consumers
+    // sample the pure direction-space function when they paint their space
+    // backdrop (the demo meshes a star dome for its globe and orbit views
+    // and fades it out with the atmosphere weight). Like every other field
+    // of the module it takes the consumer's sample spacing and band-limits
+    // stars below it, so coarse backdrops keep the bright stars instead of
+    // aliasing the faint ones into speckle.
+    bool   starsEnabled    = true;
+    double starsDensity    = 0.5;  // star spacing: 0 sparse, 1 dense skies
+    double starsBrightness = 1.0;  // luminance multiplier of the whole field
 
     // ---- derived values (filled by validate(), read-only afterwards) -----------
     double derivedRootHalfMeters   = 0.0; // root cube half-size

@@ -62,6 +62,10 @@ private:
     std::int64_t seedTemperature_;
     std::int64_t seedMoisture_;
     std::int64_t seedMoistureWarp_;
+    // Rock-face sediment stripes: shares its tag with the density field's
+    // strata stream, so the color stripes and the geometric strata bands
+    // correlate (the stripe's phase warp uses the same seed and scale).
+    std::int64_t seedRockStripes_;
 
     // Per-octave noise seeds, derived once per sampler from the base seeds
     // (hashCombine64(baseSeed, octave) is sample-independent). The moisture

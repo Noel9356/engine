@@ -35,6 +35,7 @@ constexpr double kSurfaceBisectResolutionMeters = 1.0e-3;
 DensityField::DensityField(const PlanetGenerationParams &params)
     : params_(params)
     , climate_(params)
+    , clouds_(params)
     , seedContinents_(static_cast<std::int64_t>(hashCombine64(params.seed, 0xC0718E51ULL)))
     , seedWarp_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A27F0ULL)))
     , seedMountains_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x40E1D5ULL)))
@@ -272,18 +273,20 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     // fraction survives on plains (a large plains fraction boils the whole
     // surface into lumps), it pushes the iso-surface sideways as well as up:
     // the term that makes overhangs, ledges and cave mouths possible.
-    // Evaluated only where its mask survives the band limit.
+    // The band-limit fade is tested BEFORE the noise evaluation: on chunks
+    // whose cutoff sits at or above the overhang wavelength the term is
+    // exactly zero, and the noise call is pure waste.
     const double overhangMask = clamp01(params_.overhangPlainsFraction
         + (1.0 - params_.overhangPlainsFraction) * (0.8 * relief.mountainFactor + 0.6 * relief.cliffFactor))
         * relief.detailFade * relief.coastalTaper;
-    if (overhangMask > 0.0)
+    const double overhangFade = lowPassFade(lowPassCutoffMeters, params_.overhangWavelengthMeters);
+    if (overhangMask > 0.0 && overhangFade > 0.0)
     {
         d += noise::simplex3ImproveXY(seedOverhang_,
                  point.x / params_.overhangWavelengthMeters,
                  point.y / params_.overhangWavelengthMeters,
                  point.z / params_.overhangWavelengthMeters)
-            * params_.overhangAmplitudeMeters * overhangMask
-            * lowPassFade(lowPassCutoffMeters, params_.overhangWavelengthMeters);
+            * params_.overhangAmplitudeMeters * overhangMask * overhangFade;
     }
 
     // Rock strata: sedimentary banding that follows the body's shell, bent by
@@ -293,19 +296,30 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     // whole hillsides into lit/shadow corduroy under grazing sun. The warp
     // strength must stay small: a strong phase warp folds the sinusoid around
     // noise extrema and the cliff face dissolves into nested ripple rings.
+    // The band-limit fade gates the evaluation like the overhang above.
     if (relief.detailFade > 0.0 && relief.coastalTaper > 0.0)
     {
+        const double strataFade = lowPassFade(lowPassCutoffMeters, params_.strataBandMeters);
         const double strataGate  = smoothstep(0.45, 0.85, relief.cliffFactor);
-        if (strataGate > 0.0)
+        if (strataGate > 0.0 && strataFade > 0.0)
         {
-            const double bandPhase   = radius / std::max(1.0, params_.strataBandMeters);
-            const double bandWarp    = noise::simplex3ImproveXY(seedStrata_,
-                                  point.x / std::max(1.0, params_.strataBandMeters),
-                                  point.y / std::max(1.0, params_.strataBandMeters),
-                                  point.z / std::max(1.0, params_.strataBandMeters));
-            d += params_.strataAmplitudeMeters * std::sin(6.283185307179586 * bandPhase + params_.strataWarp * bandWarp)
-                * strataGate * relief.detailFade * relief.coastalTaper
-                * lowPassFade(lowPassCutoffMeters, params_.strataBandMeters);
+            const double bandWidth = std::max(1.0, params_.strataBandMeters);
+            const double bandPhase = radius / bandWidth;
+            // Two warps bend the bands: a spatial warp at the band scale
+            // (strataWarp, keeping the bands from being perfect rings) and a
+            // low-frequency THICKNESS warp that stretches and squeezes the
+            // band spacing the way real sedimentary beds vary - a constant
+            // period reads as a brick wall. The thickness warp shares its
+            // seed and scale with the climate sampler's rock stripes, so the
+            // color bands track these geometric ridges.
+            const double bandWarp = noise::simplex3ImproveXY(seedStrata_,
+                point.x / bandWidth, point.y / bandWidth, point.z / bandWidth);
+            const double thicknessWarp = noise::simplex3ImproveXY(seedStrata_,
+                point.x / (bandWidth * 5.0), point.y / (bandWidth * 5.0), point.z / (bandWidth * 5.0));
+            d += params_.strataAmplitudeMeters
+                * std::sin(6.283185307179586 * bandPhase + params_.strataWarp * bandWarp
+                    + params_.strataWarp * 2.6 * thicknessWarp)
+                * strataGate * relief.detailFade * relief.coastalTaper * strataFade;
         }
     }
 
@@ -403,6 +417,33 @@ double DensityField::surfaceRadius(const Vec3 &unitDirection) const
         }
     }
     return 0.5 * (belowRadius + aboveRadius);
+}
+
+double DensityField::cloudShadow(const Vec3 &unitDirection, double lowPassCutoffMeters) const
+{
+    if (params_.cloudShadowStrength <= 0.0 || !params_.cloudsEnabled)
+    {
+        return 0.0;
+    }
+    // The bank that blocks THIS point's sunlight sits up-sun along the ray
+    // through the point: from the surface, the ray toward the sun climbs to
+    // the cloud shell over t = shellHeight / (sun . up). Sampling the
+    // coverage field THERE makes each shadow fall away from its bank (the
+    // way real cloud shadows do at anything but noon) instead of hiding
+    // directly beneath the cloud that casts it. Night points (sun at or
+    // below the local horizon) get no direct sun to block; the shift is
+    // clamped so a grazing sun cannot fling the sample across the planet.
+    const Vec3 sun{params_.cloudShadowSunDirection[0], params_.cloudShadowSunDirection[1],
+        params_.cloudShadowSunDirection[2]};
+    const double sunUp = dot(sun, unitDirection);
+    if (sunUp <= 0.02)
+    {
+        return 0.0;
+    }
+    const double shellHeight = std::max(1.0, params_.cloudAltitudeMeters);
+    const double rise = std::min(shellHeight / sunUp, 8.0 * shellHeight);
+    const Vec3 samplePoint = unitDirection * params_.radiusMeters + sun * rise;
+    return params_.cloudShadowStrength * clouds_.coverage(normalized(samplePoint), lowPassCutoffMeters);
 }
 
 } // namespace planet

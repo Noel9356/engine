@@ -804,9 +804,16 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         vertex.normal[0]   = static_cast<float>(nx);
         vertex.normal[1]   = static_cast<float>(ny);
         vertex.normal[2]   = static_cast<float>(nz);
-        vertex.color[0]    = climate.color[0];
-        vertex.color[1]    = climate.color[1];
-        vertex.color[2]    = climate.color[2];
+        // Cloud shadows: the same coverage field the cloud layer renders
+        // from, sampled at the vertex's radial direction and band-limited at
+        // the chunk's own spacing, darkens the albedo. The banks overhead
+        // and their shadows then agree from orbit and from the ground, and
+        // the shadow follows the LOD band limit like every other field
+        // (coarse chunks get smooth shade, not speckle).
+        const double cloudShade = 1.0 - field.cloudShadow(unitRadial, step);
+        vertex.color[0]    = climate.color[0] * static_cast<float>(cloudShade);
+        vertex.color[1]    = climate.color[1] * static_cast<float>(cloudShade);
+        vertex.color[2]    = climate.color[2] * static_cast<float>(cloudShade);
         // Spherical mapping around the SPIN AXIS, not the world Y axis:
         // climate latitude already follows the axis, and the two disagree
         // when the axis is tilted. With the default upright axis the frame
@@ -917,6 +924,21 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // already carries the sand albedo; sunlit flats under a thin sheet
         // read brighter than the raw row).
         constexpr float kShoreSandBrightness = 1.35f;
+        // Shore blend constants (per chunk, not per vertex): whether the
+        // blend runs at all and the beach-sand tone transmitted by the
+        // water's own hue - the shallow color's channel balance scaled so
+        // its brightest channel reads 1.
+        const bool shoreBlend = params.waterShoreMixMeters > 0.0;
+        float sandHue[3] = {1.0f, 1.0f, 1.0f};
+        if (shoreBlend)
+        {
+            const float brightest = std::max({params.waterColorShallow[0], params.waterColorShallow[1],
+                params.waterColorShallow[2], 1.0e-4f});
+            for (std::uint32_t channel = 0; channel < 3; ++channel)
+            {
+                sandHue[channel] = params.waterColorShallow[channel] / brightest;
+            }
+        }
 
         // Water pass: own cells only, skip cells fully buried under the
         // terrain surface (the terrain grid rides along as buriedField), and
@@ -1049,22 +1071,11 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             vertex.normal[0]   = static_cast<float>(nx);
             vertex.normal[1]   = static_cast<float>(ny);
             vertex.normal[2]   = static_cast<float>(nz);
-            // Shore blend: water this shallow shows the bottom through it.
-            // The blend target is the beach-sand tone transmitted by the
-            // water's own hue (the shallow color's channel balance), so the
-            // surface runs sandy turquoise at the waterline instead of
-            // reading as a flat pale sheet. 0 disables.
-            float sandHue[3] = {1.0f, 1.0f, 1.0f};
-            bool shoreBlend = params.waterShoreMixMeters > 0.0;
-            if (shoreBlend)
-            {
-                const float brightest = std::max({params.waterColorShallow[0], params.waterColorShallow[1],
-                    params.waterColorShallow[2], 1.0e-4f});
-                for (std::uint32_t channel = 0; channel < 3; ++channel)
-                {
-                    sandHue[channel] = params.waterColorShallow[channel] / brightest;
-                }
-            }
+            // Cloud shadows ride the water sheet too: the same coverage
+            // field keyed to the vertex's radial direction, so a bank's
+            // shadow darkens the sea surface beneath it exactly like the
+            // terrain beside it.
+            const double cloudShade = 1.0 - field.cloudShadow(radial, step);
             for (std::uint32_t channel = 0; channel < 3; ++channel)
             {
                 const float shallow = params.waterColorShallow[channel];
@@ -1090,7 +1101,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 blended       = static_cast<float>(blended + (0.95 - blended) * foam);
                 const float icy     = params.waterColorIce[channel];
                 blended             = static_cast<float>(blended + (icy - blended) * iceWeight);
-                vertex.color[channel] = blended;
+                vertex.color[channel] = blended * static_cast<float>(cloudShade);
             }
             vertex.uv[0] = 0.0f;
             vertex.uv[1] = 0.0f;

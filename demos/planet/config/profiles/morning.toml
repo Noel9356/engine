@@ -2,8 +2,14 @@
 # lower, cooler sun (long shadows along the cliffs). Usage:
 #   demo_planet --profile config/profiles/morning.toml
 # (the demo's CMake config dir is copied into the runtime layout)
+#
+# The [planet] sun below must match the [pbr] one: the planet module's cloud
+# shadows are cast by this direction.
 
 [pbr]
 sun_color     = [1.0, 0.90, 0.78]
 sun_direction = [0.72, 0.28, 0.36]
 sun_intensity = 3.6
+
+[planet]
+cloud_shadow_sun_direction = [0.72, 0.28, 0.36]

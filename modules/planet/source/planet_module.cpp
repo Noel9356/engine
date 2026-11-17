@@ -185,6 +185,10 @@ void setCloudDetailStrength(PlanetGenerationParams &params, double value) { para
 void setCloudEdgeSoftness(PlanetGenerationParams &params, double value) { params.cloudEdgeSoftness = value; }
 void setCloudWeatherStrength(PlanetGenerationParams &params, double value) { params.cloudWeatherStrength = value; }
 void setCloudLatitudeBandStrength(PlanetGenerationParams &params, double value) { params.cloudLatitudeBandStrength = value; }
+void setCloudShadowStrength(PlanetGenerationParams &params, double value) { params.cloudShadowStrength = value; }
+void setStarsEnabled(PlanetGenerationParams &params, double value) { params.starsEnabled = value != 0.0; }
+void setStarsDensity(PlanetGenerationParams &params, double value) { params.starsDensity = value; }
+void setStarsBrightness(PlanetGenerationParams &params, double value) { params.starsBrightness = value; }
 
 constexpr SettingRow kSettingRows[] = {
     {"seed",                      SettingKind::Integer, setSeed},
@@ -285,6 +289,10 @@ constexpr SettingRow kSettingRows[] = {
     {"cloud_edge_softness",           SettingKind::Floating, setCloudEdgeSoftness},
     {"cloud_weather_strength",        SettingKind::Floating, setCloudWeatherStrength},
     {"cloud_latitude_band_strength",  SettingKind::Floating, setCloudLatitudeBandStrength},
+    {"cloud_shadow_strength",         SettingKind::Floating, setCloudShadowStrength},
+    {"stars_enabled",                 SettingKind::Boolean,  setStarsEnabled},
+    {"stars_density",                 SettingKind::Floating, setStarsDensity},
+    {"stars_brightness",              SettingKind::Floating, setStarsBrightness},
     {"sea_ice_temperature",           SettingKind::Floating, setSeaIceTemperature},
     {"sea_ice_transition",            SettingKind::Floating, setSeaIceTransition},
     {"water_wave_amplitude",          SettingKind::Floating, setWaterWaveAmplitude},
@@ -386,6 +394,13 @@ PlanetGenerationParams paramsFromConfiguration(ParticipantContext &context)
         params.cloudColor[0] = static_cast<float>(clouds[0]);
         params.cloudColor[1] = static_cast<float>(clouds[1]);
         params.cloudColor[2] = static_cast<float>(clouds[2]);
+    }
+    if (const auto shadowSun = context.configurationFloatingArrayInSection("planet", "cloud_shadow_sun_direction");
+        shadowSun.size() == 3)
+    {
+        params.cloudShadowSunDirection[0] = shadowSun[0];
+        params.cloudShadowSunDirection[1] = shadowSun[1];
+        params.cloudShadowSunDirection[2] = shadowSun[2];
     }
 
     return params;

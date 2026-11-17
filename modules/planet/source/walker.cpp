@@ -278,7 +278,7 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
             }
         }
     }
-    if (overDeepWater && radius < seaRadius + kGroundTouchMeters)
+    if (overDeepWater)
     {
         state_.positionMeters = feet + up * (seaRadius - radius);
         state_.up             = Vec3{up.x, up.y, up.z};

@@ -49,6 +49,33 @@ Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot);
 // counts as permanently high noon.
 Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled);
 
+// Star field for the space backdrop: a seed-derived, direction-space
+// distribution of point lights (black + stars) a consumer paints behind the
+// planet when the atmosphere weight has faded (the demo meshes a star dome
+// for its globe and orbit views). The field is a pure function of the
+// direction: the unit sphere is quantized onto a 3D lattice whose cell size
+// follows stars_density, each cell hashes (seed + cell) into at most one
+// star with a jittered position, a power-law brightness (most stars dim, a
+// few bright) and a color temperature (red through white through blue), and
+// the sample reads a smooth radial falloff around the star. Small stars are
+// band-limited away below the consumer's sample spacing like every other
+// field of the module (sampleSpacingRadians <= 0 keeps everything), with the
+// surviving stars brightened so the field's energy survives a coarse
+// sampling. Returns LINEAR RGB in [0, 1].
+Vec3 starFieldColor(const PlanetGenerationParams &params, const Vec3 &unitDirection, double sampleSpacingRadians);
+
+// Visitor for one star of the field: direction (unit), linear RGB color in
+// [0, 1] (already carrying brightness) and the raw brightness in [0, 1].
+// Returning false stops the sweep.
+using StarVisitor = bool (*)(const Vec3 &direction, const Vec3 &color, double brightness, void *context);
+
+// Sweeps every star of the field once (the same distribution
+// starFieldColor samples): the natural enumeration for consumers that build
+// star GEOMETRY - one small disc per star - instead of sampling a painted
+// backdrop. The sweep covers the full direction sphere; visitors that only
+// need a hemisphere can early-out by returning false (the sweep stops).
+void forEachStar(const PlanetGenerationParams &params, StarVisitor visitor, void *context);
+
 // Cloud coverage field: a band-limited noise field sampled on a spherical
 // shell at cloudAltitudeMeters above the datum, thresholded into [0, 1]
 // coverage (0 = clear sky, 1 = dense overcast). The threshold sits so the

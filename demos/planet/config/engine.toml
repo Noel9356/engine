@@ -23,6 +23,8 @@ worker_count            = 0
 # framebuffer values, so exposure is tuned for linear output: albedo x
 # (ambient + sun x NdotL) should land mid-tones (~0.2-0.4) for land,
 # ~0.9+ only for snow.
+# NOTE: the [planet] cloud_shadow_sun_direction below must carry the SAME
+# direction - the planet module's cloud shadows are cast by this sun.
 ambient_intensity = 0.24
 sun_color         = [1.0, 0.96, 0.88]
 sun_direction     = [0.50, 0.45, 0.74]
@@ -38,6 +40,9 @@ sun_intensity     = 1.65
 # with the demo's --warmup N (render-free build frames).
 seed                   = 1337
 radius_meters          = 60000.0
+# Cloud shadows are cast by the [pbr] sun above; keep the two directions
+# identical or the shadows disagree with the banks that should cast them.
+cloud_shadow_sun_direction = [0.50, 0.45, 0.74]
 
 [renderer]
 backend     = "headless"

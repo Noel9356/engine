@@ -52,10 +52,17 @@ struct CoverageShellSpec
     // tint applies to both the cloud and the sky colors, so the blend tracks
     // the dome behind it.
     bool hazeEdgeBlend = false;
+    // Half-width of the haze edge blend above the coverage floor: wider
+    // values stretch the thinning fringe (soft decks), narrow ones keep the
+    // contour crisp (puffy cumulus against the sky).
+    double hazeEdgeWidth = 0.45;
     // Frame applied to each unit direction before coverage sampling: the sky
     // deck is built in the sky dome's initial frame (its +Y on the spawn
     // up), the macro shell samples directions directly (identity).
     glm::dmat3 frame{1.0};
+    // Optional sun direction (world space) for the baked directional shading
+    // above; null leaves the deck's shading flat.
+    const planet::Vec3 *sunDirection = nullptr;
 };
 
 // Builds the contoured shell mesh: coverage is sampled on the lat-long grid,
@@ -99,14 +106,26 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             vertex.normal[2] = static_cast<float>(shellDirection.z);
             // Coverage shades the cloud color: dense banks at full albedo,
             // thin edges dimmer (a soft read for the geometry edges at shell
-            // resolution).
+            // resolution). A directional term models the sun's shading of the
+            // deck when the caller provides one (the sun expressed in the
+            // shell's own frame, dotted against the shell-local vertex
+            // direction): banks facing the sun read bright, the anti-sun
+            // side cools off - without it an unlit deck reads as flat paper
+            // cutouts.
             const float shade = 0.88f + 0.12f * coverage;
-            glm::dvec3 color(params.cloudColor[0] * shade, params.cloudColor[1] * shade, params.cloudColor[2] * shade);
+            const float sunFacing = spec.sunDirection != nullptr
+                ? static_cast<float>(0.66 + 0.34 * planet::clamp01(0.5 + 0.5
+                    * planet::dot(planet::Vec3{shellDirection.x, shellDirection.y, shellDirection.z},
+                        *spec.sunDirection)))
+                : 1.0f;
+            glm::dvec3 color(params.cloudColor[0] * shade * sunFacing,
+                params.cloudColor[1] * shade * sunFacing,
+                params.cloudColor[2] * shade * sunFacing);
             if (spec.hazeEdgeBlend)
             {
                 const planet::Vec3 sky = planet::skyGradientColor(params, sinLatitude);
                 const double blend = planet::smoothstep(spec.coverageFloor,
-                    std::min(1.0, spec.coverageFloor + 0.25), static_cast<double>(coverage));
+                    std::min(1.0, spec.coverageFloor + spec.hazeEdgeWidth), static_cast<double>(coverage));
                 color = glm::mix(glm::dvec3(sky.x, sky.y, sky.z), color, blend);
             }
             vertex.color[0] = static_cast<float>(color.x);
@@ -258,6 +277,71 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
         }
     }
     return !indices.empty();
+}
+
+// Builds a radial disc mesh on the unit ball around +Z: a triangle fan of
+// `bands` rings whose vertex colors fall from the bright core to zero at the
+// rim. The material's per-frame baseColor tints the whole disc (the sun
+// tint); the vertex colors carry the core-to-halo falloff.
+void buildSunDiscMesh(std::vector<planet::PlanetVertex> &vertices, std::vector<std::uint32_t> &indices,
+    std::uint32_t segments, std::uint32_t bands)
+{
+    vertices.reserve(1u + segments * bands);
+    indices.reserve(segments * bands * 6u);
+    // Ring radii and brightness: the core (inner ~55%) stays at full
+    // brightness, the halo falls smoothly to zero at the rim.
+    const auto ringBrightness = [bands](std::uint32_t band)
+    {
+        const double t = static_cast<double>(band) / static_cast<double>(bands);
+        return std::pow(1.0 - t, 1.7);
+    };
+    auto pushVertex = [&vertices](const glm::dvec2 &direction, double radius, double brightness)
+    {
+        planet::PlanetVertex vertex{};
+        vertex.position[0] = static_cast<float>(direction.x * radius);
+        vertex.position[1] = static_cast<float>(direction.y * radius);
+        vertex.position[2] = 0.0f;
+        vertex.normal[0]   = 0.0f;
+        vertex.normal[1]   = 0.0f;
+        vertex.normal[2]   = 1.0f;
+        vertex.color[0]    = static_cast<float>(brightness);
+        vertex.color[1]    = static_cast<float>(brightness);
+        vertex.color[2]    = static_cast<float>(brightness);
+        vertices.push_back(vertex);
+        return static_cast<std::uint32_t>(vertices.size() - 1u);
+    };
+    const std::uint32_t center = pushVertex(glm::dvec2{0.0, 0.0}, 0.0, 1.0);
+    std::uint32_t previousRingStart = center;
+    bool previousIsCenter = true;
+    for (std::uint32_t band = 1; band <= bands; ++band)
+    {
+        const double radius = static_cast<double>(band) / static_cast<double>(bands);
+        const double brightness = ringBrightness(band);
+        std::uint32_t ringStart = 0;
+        for (std::uint32_t segment = 0; segment < segments; ++segment)
+        {
+            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(segments);
+            const std::uint32_t current
+                = pushVertex(glm::dvec2{std::cos(azimuth), std::sin(azimuth)}, radius, brightness);
+            if (segment == 0)
+            {
+                ringStart = current;
+            }
+            const std::uint32_t next = segment + 1u == segments ? ringStart : current + 1u;
+            if (previousIsCenter)
+            {
+                indices.insert(indices.end(), {center, current, next});
+            }
+            else
+            {
+                const std::uint32_t previous = previousRingStart + segment;
+                const std::uint32_t previousNext = segment + 1u == segments ? previousRingStart : previous + 1u;
+                indices.insert(indices.end(), {previous, current, next, previous, next, previousNext});
+            }
+        }
+        previousRingStart = ringStart;
+        previousIsCenter  = false;
+    }
 }
 
 // Uploads a built shell mesh as a canonical renderer mesh.
@@ -448,15 +532,27 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, d
     // Backdrop order: every shell reaches the depth buffer before the scene
     // geometry and each later layer overwrites the previous one it sits in
     // front of.
-    //   1. atmosphere limb (space views): unlit, depth writes off; the ring
+    //   1. star dome (space views): unlit, depth writes off; the star field
+    //      behind everything.
+    //   2. atmosphere limb (space views): unlit, depth writes off; the ring
     //      outside the terrain silhouette survives as glowing air.
-    //   2. sky dome: fills the sky pixels the terrain does not reach (or,
+    //   3. sky dome: fills the sky pixels the terrain does not reach (or,
     //      where chunks are still streaming in, a haze color instead of a
     //      hole to the clear color).
-    //   3. sky cloud deck (ground views): coverage-contoured banks overhead,
+    //   4. sun disc: the bright disc with its halo, ahead of the clouds so
+    //      banks occlude it.
+    //   5. sky cloud deck (ground views): coverage-contoured banks overhead,
     //      tinted with the dome.
-    //   4. world-anchored cloud shell (macro views): lit geometry between
+    //   6. world-anchored cloud shell (macro views): lit geometry between
     //      the terrain and the dome's far rim.
+    if (starDomeActive_ && starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = starDome_;
+        command.modelMatrix = glm::value_ptr(starDomeTransform_);
+        command.material = &starDomeMaterials_.front();
+        drawCommands_.push_back(command);
+    }
     if (atmosphereShellActive_ && atmosphereShell_ != renderer::invalidMesh && !atmosphereShellMaterials_.empty())
     {
         renderer::RenderDrawCommand command{};
@@ -471,6 +567,14 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, d
         command.mesh = skyDome_;
         command.modelMatrix = glm::value_ptr(skyDomeTransform_);
         command.material = &skyDomeMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    if (sunDiscActive_ && sunDisc_ != renderer::invalidMesh && !sunDiscMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = sunDisc_;
+        command.modelMatrix = glm::value_ptr(sunDiscTransform_);
+        command.material = &sunDiscMaterials_.front();
         drawCommands_.push_back(command);
     }
     if (skyCloudActive_ && skyCloudVisible_ && skyCloudLayer_ != renderer::invalidMesh && !skyCloudMaterials_.empty())
@@ -501,15 +605,15 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, d
 
     // Water roughness by eye altitude: the per-vertex wave noise fades with
     // the LOD band limit, so from above the sea is a sheet of flat coarse
-    // facets and the sun's specular term turns each facet into a separate
+    // facets and a tight specular term turns each facet into a separate
     // sharp glint - a field of sparkles around the sun point. The material
-    // therefore spreads toward matte as the eye climbs the atmosphere column
-    // (fully spread by twice the atmosphere height, so a mid-orbit camera is
-    // already past the facet-glint band); close-range views keep the
-    // configured sea texture.
+    // therefore widens toward a broad sheen as the eye climbs the atmosphere
+    // column (settling just past half-rough by twice the atmosphere height),
+    // keeping one smooth sun glint on the water instead of per-facet
+    // sparkles; close-range views keep the configured sea texture.
     const double orbitBlend = planet::smoothstep(params_.atmosphereHeightMeters, 2.0 * params_.atmosphereHeightMeters,
         eyeAltitudeMeters);
-    const float waterRoughness = static_cast<float>(params_.waterRoughness + (0.85f - params_.waterRoughness) * orbitBlend);
+    const float waterRoughness = static_cast<float>(params_.waterRoughness + (0.58f - params_.waterRoughness) * orbitBlend);
 
     const glm::dvec3 planetCenter(params_.centerMeters[0], params_.centerMeters[1], params_.centerMeters[2]);
     for (const auto &entry : uploadedMeshes_)
@@ -682,6 +786,13 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // it), fading to black at the rim - the ring between the terrain
     // silhouette and the shell's own silhouette then reads as glowing air
     // instead of a hard terrain edge on black.
+    //
+    // The gradient also runs around the AZIMUTH: the shell's local +X points
+    // at the sun each frame (see updateAtmosphereShell), so azimuth 0 is the
+    // sunward limb and azimuth 180 the night limb. The day side glows, the
+    // night side keeps a faint blue airglow - a lit ring on one side of the
+    // planet and a dark one on the other reads as a real sunlit atmosphere
+    // (the uniform ring read as a painted halo).
     constexpr std::uint32_t kSegments = 96;
     constexpr std::uint32_t kBands = 48;
     // Fade band in the angle from the pole. The shell is scaled per frame to
@@ -694,6 +805,9 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // starts fading at 30 degrees and lands on black at 85.
     constexpr double kLimbFadeStartRadians = 0.5235987755982988; // 30 deg
     constexpr double kLimbFadeEndRadians = 1.4835298641951802;   // 85 deg
+    // Day/night azimuth falloff: full glow toward the sun, a faint airglow
+    // residue on the night side.
+    constexpr double kLimbNightFloor = 0.05;
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -714,13 +828,15 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
         {
             const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(kSegments);
             const glm::dvec3 direction(std::cos(azimuth) * cosLatitude, sinLatitude, std::sin(azimuth) * cosLatitude);
+            const double day = planet::mix(kLimbNightFloor, 1.0,
+                planet::smoothstep(-0.85, 0.45, std::cos(azimuth)));
             planet::PlanetVertex vertex{};
             vertex.position[0] = static_cast<float>(direction.x);
             vertex.position[1] = static_cast<float>(direction.y);
             vertex.position[2] = static_cast<float>(direction.z);
-            vertex.color[0] = static_cast<float>(limbColor.x * fade);
-            vertex.color[1] = static_cast<float>(limbColor.y * fade);
-            vertex.color[2] = static_cast<float>(limbColor.z * fade);
+            vertex.color[0] = static_cast<float>(limbColor.x * fade * day);
+            vertex.color[1] = static_cast<float>(limbColor.y * fade * day);
+            vertex.color[2] = static_cast<float>(limbColor.z * fade * day);
             vertices.push_back(vertex);
         }
     }
@@ -776,11 +892,22 @@ void PlanetChunkRenderer::updateAtmosphereShell(const glm::dvec3 &eyePlanetLocal
     // above the surface, clamped to 2-8% of the radius so the band hugs the
     // horizon the way atmospheric density does instead of inflating with a
     // deep showcase atmosphere. Translate to the planet's world center.
+    // The shell's local +X lands on the SUNWARD tangent: the built-in
+    // azimuthal day gradient (see ensureAtmosphereShell) then glows on the
+    // sun side of the ring and fades on the night side. When the sun is
+    // disabled or sits along the eye direction, any tangent works (the
+    // tint below takes over).
     const glm::dvec3 eyeDirection = glm::normalize(eyePlanetLocal);
-    glm::dvec3 tangent = glm::cross(eyeDirection, glm::dvec3(0.0, 0.0, 1.0));
+    glm::dvec3 tangent = glm::length(sunDirection) > 1.0e-9 && sunEnabled
+        ? glm::normalize(sunDirection) - eyeDirection * glm::dot(glm::normalize(sunDirection), eyeDirection)
+        : glm::dvec3(0.0);
     if (glm::length(tangent) < 1.0e-6)
     {
-        tangent = glm::cross(eyeDirection, glm::dvec3(1.0, 0.0, 0.0));
+        tangent = glm::cross(eyeDirection, glm::dvec3(0.0, 0.0, 1.0));
+        if (glm::length(tangent) < 1.0e-6)
+        {
+            tangent = glm::cross(eyeDirection, glm::dvec3(1.0, 0.0, 0.0));
+        }
     }
     tangent = glm::normalize(tangent);
     const glm::dvec3 third = glm::cross(tangent, eyeDirection);
@@ -795,6 +922,9 @@ void PlanetChunkRenderer::updateAtmosphereShell(const glm::dvec3 &eyePlanetLocal
 
     // The limb glows where the sun hits the visible side: tint the shell
     // with the same sun sky tint the dome uses (the night limb fades out).
+    // The azimuthal gradient baked into the mesh carries the day/night
+    // asymmetry around the ring; this tint tracks the sun's elevation at
+    // the sub-eye point.
     const double sunUp = sunEnabled && glm::length(sunDirection) > 1.0e-9
         ? glm::dot(glm::normalize(sunDirection), eyeDirection)
         : 1.0;
@@ -805,7 +935,229 @@ void PlanetChunkRenderer::updateAtmosphereShell(const glm::dvec3 &eyePlanetLocal
     material.baseColor[2] = static_cast<float>(tint.z);
 }
 
-void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal)
+void PlanetChunkRenderer::ensureStarDome()
+{
+    if (!params_.starsEnabled || renderer_ == nullptr || rendererHandle_ == renderer::invalidRenderer
+        || starDome_ != renderer::invalidMesh)
+    {
+        return;
+    }
+
+    // One small disc per star (see forEachStar): stars as GEOMETRY instead
+    // of a field sampled on a fixed dome lattice. A sampled dome either
+    // wastes a huge mesh on empty sky or turns every star into a bilinear
+    // smear across a couple of quads (quad-shaped blobs); the per-star discs
+    // stay round at any resolution and cost one tiny fan each. Disc radius
+    // scales with the square root of the star's brightness (bright stars
+    // read as slightly larger points, the way bright stars do through an
+    // exposure); the whole field stays a few thousand discs.
+    struct StarDiscContext
+    {
+        std::vector<planet::PlanetVertex> *vertices;
+        std::vector<std::uint32_t> *indices;
+        std::size_t count = 0;
+    };
+    std::vector<planet::PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    StarDiscContext context{&vertices, &indices};
+    constexpr std::uint32_t kDiscSegments = 6;
+    constexpr double kDiscRadiusRadiansMin = 0.0018; // ~0.1 degrees: a point at any capture scale
+    constexpr double kDiscRadiusRadiansMax = 0.0055; // ~0.3 degrees: the brightest stars
+    const auto visitor = [](const planet::Vec3 &direction, const planet::Vec3 &color, double brightness, void *raw)
+    {
+        auto *ctx       = static_cast<StarDiscContext *>(raw);
+        const double radius = kDiscRadiusRadiansMin
+            + (kDiscRadiusRadiansMax - kDiscRadiusRadiansMin) * planet::clamp01(std::sqrt(brightness));
+        // Tangent basis at the star direction (any perpendicular pair).
+        planet::Vec3 tangent = planet::cross(direction, std::abs(direction.y) < 0.9
+                ? planet::Vec3{0.0, 1.0, 0.0}
+                : planet::Vec3{1.0, 0.0, 0.0});
+        tangent             = planet::normalized(tangent);
+        const planet::Vec3 bitangent = planet::cross(direction, tangent);
+        const std::uint32_t centerSlot = static_cast<std::uint32_t>(ctx->vertices->size());
+        {
+            planet::PlanetVertex vertex{};
+            vertex.position[0] = static_cast<float>(direction.x);
+            vertex.position[1] = static_cast<float>(direction.y);
+            vertex.position[2] = static_cast<float>(direction.z);
+            vertex.normal[0]   = static_cast<float>(direction.x);
+            vertex.normal[1]   = static_cast<float>(direction.y);
+            vertex.normal[2]   = static_cast<float>(direction.z);
+            vertex.color[0]    = color.x;
+            vertex.color[1]    = color.y;
+            vertex.color[2]    = color.z;
+            ctx->vertices->push_back(vertex);
+        }
+        std::uint32_t firstRim = 0;
+        for (std::uint32_t segment = 0; segment < kDiscSegments; ++segment)
+        {
+            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(kDiscSegments);
+            const planet::Vec3 offset = tangent * (std::cos(azimuth) * radius) + bitangent * (std::sin(azimuth) * radius);
+            planet::PlanetVertex vertex{};
+            vertex.position[0] = static_cast<float>(direction.x + offset.x);
+            vertex.position[1] = static_cast<float>(direction.y + offset.y);
+            vertex.position[2] = static_cast<float>(direction.z + offset.z);
+            vertex.normal[0]   = static_cast<float>(direction.x);
+            vertex.normal[1]   = static_cast<float>(direction.y);
+            vertex.normal[2]   = static_cast<float>(direction.z);
+            vertex.color[0]    = color.x;
+            vertex.color[1]    = color.y;
+            vertex.color[2]    = color.z;
+            ctx->vertices->push_back(vertex);
+            if (segment == 0)
+            {
+                firstRim = centerSlot + 1u;
+            }
+        }
+        for (std::uint32_t segment = 0; segment < kDiscSegments; ++segment)
+        {
+            const std::uint32_t current = firstRim + segment;
+            const std::uint32_t next    = firstRim + (segment + 1u) % kDiscSegments;
+            ctx->indices->insert(ctx->indices->end(), {centerSlot, current, next});
+        }
+        ++ctx->count;
+        return true;
+    };
+    planet::forEachStar(params_, visitor, &context);
+    if (indices.empty())
+    {
+        return; // stars disabled by density/brightness: no dome
+    }
+
+    starDome_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
+    if (starDome_ == renderer::invalidMesh)
+    {
+        return;
+    }
+    renderer::MeshMaterial &material = starDomeMaterials_.emplace_back();
+    material.unlit = true;
+    // Backdrop: drawn before everything else, depth writes off (the opaque
+    // terrain, cloud shell and limb overwrite it where they cover it).
+    material.depthWrite = false;
+}
+
+void PlanetChunkRenderer::updateStarDome(const glm::dvec3 &eyePlanetLocal, double farZ)
+{
+    starDomeActive_ = starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty();
+    if (!starDomeActive_)
+    {
+        return;
+    }
+    // The stars live behind the atmosphere: once the eye is inside the air,
+    // the sky dome owns every sky pixel (and would draw over the stars
+    // anyway - hiding the dome keeps the draw cost off ground frames).
+    const double eyeAltitude = glm::length(eyePlanetLocal) - params_.radiusMeters;
+    if (planet::atmosphereWeight(params_, eyeAltitude) > 0.0)
+    {
+        starDomeActive_ = false;
+        return;
+    }
+
+    // A sphere around the eye, large enough to enclose the whole planet
+    // (stars sit behind it from every space view) and well inside the far
+    // plane. Half the far plane is the largest safe radius for the deepest
+    // macro view (eye at 3.1 radii on the showcase).
+    const double domeRadius = 0.5 * std::max(1.0, farZ);
+    const glm::vec3 worldEye(static_cast<float>(params_.centerMeters[0] + eyePlanetLocal.x),
+        static_cast<float>(params_.centerMeters[1] + eyePlanetLocal.y),
+        static_cast<float>(params_.centerMeters[2] + eyePlanetLocal.z));
+    starDomeTransform_ = glm::translate(glm::mat4(1.0f), worldEye)
+        * glm::scale(glm::mat4(1.0f), glm::vec3(static_cast<float>(domeRadius)));
+}
+
+void PlanetChunkRenderer::ensureSunDisc()
+{
+    if (renderer_ == nullptr || rendererHandle_ == renderer::invalidRenderer || sunDisc_ != renderer::invalidMesh)
+    {
+        return;
+    }
+
+    // Radial disc with a soft halo (see buildSunDiscMesh). In air the halo
+    // spans ~1.7 degrees (aerial glow around the disc); in space it tightens
+    // to ~0.6 degrees (the sun is a hard point with a tight glare - a wide
+    // halo reads as a giant blob on space views). The core itself stays near
+    // the sun's true ~0.5 degree diameter either way.
+    constexpr std::uint32_t kSegments = 48;
+    constexpr std::uint32_t kBands = 4;
+    sunDiscAngularRadiusRadians_ = 0.030; // in-air halo; space views shrink it below
+
+    std::vector<planet::PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    buildSunDiscMesh(vertices, indices, kSegments, kBands);
+
+    sunDisc_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
+    if (sunDisc_ == renderer::invalidMesh)
+    {
+        return;
+    }
+    renderer::MeshMaterial &material = sunDiscMaterials_.emplace_back();
+    material.unlit = true;
+    material.depthWrite = false; // backdrop layer; clouds and terrain overwrite it
+}
+
+void PlanetChunkRenderer::updateSunDisc(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &up,
+    const glm::dvec3 &sunDirection, const float sunColor[3], bool sunEnabled, double farZ)
+{
+    sunDiscActive_ = sunDisc_ != renderer::invalidMesh && !sunDiscMaterials_.empty();
+    if (!sunDiscActive_)
+    {
+        return;
+    }
+    if (!sunEnabled || glm::length(sunDirection) < 1.0e-9)
+    {
+        sunDiscActive_ = false;
+        return;
+    }
+
+    // The sun is a backdrop at infinity: a disc placed along the sun
+    // direction at the backdrop distance (just inside the sky dome's radius,
+    // or half the far plane for space views where no dome is active),
+    // oriented facing the eye.
+    const glm::dvec3 sun = glm::normalize(sunDirection);
+    const glm::dvec3 upNormalized = glm::length(up) > 1.0e-9 ? glm::normalize(up) : glm::dvec3(0.0, 1.0, 0.0);
+    const double eyeAltitude = glm::length(eyePlanetLocal) - params_.radiusMeters;
+    const bool inAir = planet::atmosphereWeight(params_, eyeAltitude) > 0.0;
+    const double reliefTop = std::max(0.0, params_.derivedMaxReliefMeters);
+    const double sightCeiling = std::max(1.0, eyeAltitude + reliefTop);
+    const double horizonDistance = std::sqrt(std::max(0.0, sightCeiling * (2.0 * params_.radiusMeters + sightCeiling)));
+    const double backdropRadius = inAir
+        ? glm::clamp(1.25 * horizonDistance, 1.0e3, 0.45 * std::max(1.0, farZ))
+        : 0.45 * std::max(1.0, farZ);
+
+    const glm::vec3 worldEye(static_cast<float>(params_.centerMeters[0] + eyePlanetLocal.x),
+        static_cast<float>(params_.centerMeters[1] + eyePlanetLocal.y),
+        static_cast<float>(params_.centerMeters[2] + eyePlanetLocal.z));
+    const glm::vec3 worldSunDirection(static_cast<float>(sun.x), static_cast<float>(sun.y), static_cast<float>(sun.z));
+    const glm::vec3 place = worldEye + worldSunDirection * static_cast<float>(backdropRadius);
+    // Orient the disc's +Z (its face) back at the eye: a basis whose third
+    // axis is the negated sun direction.
+    glm::vec3 right = glm::cross(worldSunDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+    if (glm::length(right) < 1.0e-5f)
+    {
+        right = glm::cross(worldSunDirection, glm::vec3(1.0f, 0.0f, 0.0f));
+    }
+    right = glm::normalize(right);
+    const glm::vec3 down = glm::cross(right, worldSunDirection);
+    const glm::mat3 rotation(glm::mat3(right, down, -worldSunDirection));
+    const double haloRadiusRadians = inAir ? sunDiscAngularRadiusRadians_ : 0.011;
+    const float discRadius = static_cast<float>(backdropRadius * std::tan(haloRadiusRadians));
+    sunDiscTransform_ = glm::translate(glm::mat4(1.0f), place) * glm::mat4(rotation)
+        * glm::scale(glm::mat4(1.0f), glm::vec3(discRadius));
+
+    // Tint: the sun's own color lifted well above 1 so the core saturates to
+    // white through the shared tone mapping, times the atmosphere model's
+    // sun tint (gold at low elevation, dark at night). Space views keep the
+    // disc tight and bright; the in-air halo spreads the same energy.
+    const double sunUp = glm::dot(sun, upNormalized);
+    const planet::Vec3 tint = planet::sunSkyTint(params_, sunUp, sunEnabled);
+    renderer::MeshMaterial &material = sunDiscMaterials_.front();
+    const float discBrightness = inAir ? 5.0f : 8.0f;
+    material.baseColor[0] = static_cast<float>(sunColor[0] * tint.x) * discBrightness;
+    material.baseColor[1] = static_cast<float>(sunColor[1] * tint.y) * discBrightness;
+    material.baseColor[2] = static_cast<float>(sunColor[2] * tint.z) * discBrightness;
+}
+
+void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &sunDirection)
 {
     if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0 || renderer_ == nullptr
         || rendererHandle_ == renderer::invalidRenderer || skyCloudLayer_ != renderer::invalidMesh)
@@ -822,9 +1174,9 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal)
     // directions (from the planet center, which for a standing eye differs
     // from the eye-local sky direction by well under the field's feature
     // size).
-    constexpr std::uint32_t kSegments = 128;
-    constexpr std::uint32_t kBands = 64;
-    constexpr double kCoverageFloor = 0.42;
+    constexpr std::uint32_t kSegments = 192;
+    constexpr std::uint32_t kBands = 96;
+    constexpr double kCoverageFloor = 0.38;
     constexpr double kHorizonGuardRadians = 0.05235987755982988; // 3 deg above the horizon
 
     if (cloudField_ == nullptr)
@@ -847,6 +1199,13 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal)
 
     const double frameRadius = std::max(1.0, params_.radiusMeters);
     const double vertexSpacing = glm::two_pi<double>() * frameRadius / static_cast<double>(kSegments);
+    // The sun direction for the baked bank shading: the deck's frame maps
+    // the world sun into dome-local coordinates (the same frame the coverage
+    // sampling uses below, so shading and coverage follow one geometry).
+    const glm::dvec3 sunLocal = glm::length(sunDirection) > 1.0e-9
+        ? glm::inverse(glm::dmat3(tangent, upNormalized, third)) * glm::normalize(sunDirection)
+        : glm::dvec3(0.0);
+    const planet::Vec3 deckSun{sunLocal.x, sunLocal.y, sunLocal.z};
 
     CoverageShellSpec spec;
     spec.segments = kSegments;
@@ -858,7 +1217,9 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal)
     spec.coverageFloor = kCoverageFloor;
     spec.minQuadLatitudeRadians = kHorizonGuardRadians;
     spec.hazeEdgeBlend = true;
+    spec.hazeEdgeWidth = 0.45;
     spec.frame = glm::dmat3(tangent, upNormalized, third);
+    spec.sunDirection = glm::length(sunLocal) > 1.0e-9 ? &deckSun : nullptr;
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -920,12 +1281,38 @@ void PlanetChunkRenderer::destroy()
     destroyCloudLayer();
     destroyAtmosphereShell();
     destroySkyCloudLayer();
+    destroyStarDome();
+    destroySunDisc();
     cloudField_.reset();
     drawCommands_.clear();
     planet_ = nullptr;
     planetHandle_ = planet::invalidPlanet;
     renderer_ = nullptr;
     rendererHandle_ = renderer::invalidRenderer;
+}
+
+void PlanetChunkRenderer::destroyStarDome()
+{
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && starDome_ != renderer::invalidMesh)
+    {
+        renderer_->destroyMesh(renderer_->self, rendererHandle_, starDome_);
+    }
+    starDome_ = renderer::invalidMesh;
+    starDomeMaterials_.clear();
+    starDomeActive_ = false;
+}
+
+void PlanetChunkRenderer::destroySunDisc()
+{
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && sunDisc_ != renderer::invalidMesh)
+    {
+        renderer_->destroyMesh(renderer_->self, rendererHandle_, sunDisc_);
+    }
+    sunDisc_ = renderer::invalidMesh;
+    sunDiscMaterials_.clear();
+    sunDiscActive_ = false;
 }
 
 void PlanetChunkRenderer::ensureSkyDome()

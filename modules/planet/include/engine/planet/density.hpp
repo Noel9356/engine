@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <engine/planet/atmosphere.hpp>
 #include <engine/planet/climate.hpp>
 #include <engine/planet/fbm.hpp>
 #include <engine/planet/params.hpp>
@@ -77,6 +78,22 @@ public:
         return climate_;
     }
 
+    // Cloud shadow factor in [0, 1] for one surface point: how much of the
+    // sunlight the cloud layer blocks there. The coverage field is sampled
+    // at the point's radial direction (the overhead-bank approximation), so
+    // the shadows agree with the cloud layer a consumer paints from the
+    // same field - from orbit the banks and their shadows line up, from the
+    // ground the deck overhead matches the shade on the terrain.
+    // lowPassCutoffMeters band-limits the coverage like every other field
+    // (coarse LOD chunks get smooth shadows instead of speckle). Returns 0
+    // when cloud shadows are disabled.
+    double cloudShadow(const Vec3 &unitDirection, double lowPassCutoffMeters) const;
+
+    const CloudField &clouds() const
+    {
+        return clouds_;
+    }
+
 private:
     // Radial relief with an optional low-pass cutoff (the raw path is
     // reliefImpl(direction, 0)).
@@ -104,6 +121,7 @@ private:
 
     const PlanetGenerationParams &params_;
     ClimateSampler                climate_;
+    CloudField                    clouds_;
 
     // Per-field noise streams (derived once from the planet seed).
     std::int64_t seedContinents_;

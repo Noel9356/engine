@@ -163,8 +163,36 @@ int main(int argc, char **argv)
     }
     planet::PlanetGenerationParams params{};
     planetCapability->copyGenerationParams(planetCapability->self, planetHandle, &params);
+
+    // Sun direction for the whole demo: the view pickers (ground views
+    // prefer lit slopes), the backdrop layers and the cloud-shadow check
+    // below all key off the pbr sun.
+    const planet::Vec3 sunDirection = environment.sun.enabled
+        ? planet::Vec3{static_cast<double>(environment.sun.direction[0]),
+            static_cast<double>(environment.sun.direction[1]),
+            static_cast<double>(environment.sun.direction[2])}
+        : planet::Vec3{0.0, 0.0, 0.0};
+
     std::cout << "demo_planet: planet seed " << params.seed << ", radius " << params.radiusMeters << " m, octree depth "
               << params.derivedMaxDepth << ", leaf voxel " << params.derivedVoxelMeters << " m\n";
+
+    // Cloud-shadow sun consistency: the planet module casts cloud shadows
+    // from its configured direction; the scene is LIT by the pbr sun. When
+    // the two disagree the shadows fall from the wrong side - visible as
+    // banks whose shade slides the wrong way. Both are configuration, so
+    // the check is a startup warning instead of a hard failure.
+    if (environment.sun.enabled && params.cloudShadowStrength > 0.0 && params.cloudsEnabled)
+    {
+        const planet::Vec3 shadowSun{params.cloudShadowSunDirection[0], params.cloudShadowSunDirection[1],
+            params.cloudShadowSunDirection[2]};
+        const planet::Vec3 litSun = planet::normalized(sunDirection);
+        const double     agreement = planet::dot(shadowSun, litSun);
+        if (agreement < 0.98)
+        {
+            std::cout << "demo_planet: warning - [planet] cloud_shadow_sun_direction disagrees with the [pbr] "
+                         "sun_direction (cosine " << agreement << "); cloud shadows will not match the lighting\n";
+        }
+    }
 
     // ---- self-test short-circuit ----------------------------------------------------
     if (options.selfTest)
@@ -189,13 +217,6 @@ int main(int argc, char **argv)
     // The walk controller owns the density-field walk surface; it is only
     // built for the walk view (one extra seed schedule, no worker threads).
     std::unique_ptr<PlanetWalkController> walkController;
-
-    // Sun direction for the view pickers (ground views prefer lit slopes).
-    const planet::Vec3 sunDirection = environment.sun.enabled
-        ? planet::Vec3{static_cast<double>(environment.sun.direction[0]),
-            static_cast<double>(environment.sun.direction[1]),
-            static_cast<double>(environment.sun.direction[2])}
-        : planet::Vec3{0.0, 0.0, 0.0};
 
     // Terrain windows shared by the surface view placements (they pin the
     // biome/climate range a view's spot may sit in).
@@ -264,17 +285,43 @@ int main(int argc, char **argv)
 
     if (options.viewName == "globe")
     {
-        const glm::dvec3 direction = glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
+        // The eye sits ~72 degrees OFF the sun: the terminator crosses the
+        // disc, relief reads through cast shadows, and the atmosphere limb
+        // glows on one side - a view straight down the sun direction lights
+        // every slope equally and the planet photographs flat. The eye stays
+        // lifted above the equator so the north polar cap and its sea ice
+        // stay in frame.
+        const glm::dvec3 sun = environment.sun.enabled
+            ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
+            : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
+        glm::dvec3       side = glm::cross(sun, glm::dvec3(0.0, 1.0, 0.0));
+        if (glm::length(side) < 1.0e-6)
+        {
+            side = glm::cross(sun, glm::dvec3(1.0, 0.0, 0.0));
+        }
+        side            = glm::normalize(side);
+        const glm::dvec3 direction = glm::normalize(sun * 0.30 + side * 0.72 + glm::dvec3(0.0, 0.35, 0.0));
         eye                        = planetCenter + direction * planetRadius * 3.1;
         target                     = planetCenter;
     }
     else if (options.viewName == "orbit")
     {
-        // Mid-altitude view: the planet fills the frame, continents and
-        // mountain ranges are readable - the scale between the globe and the
-        // surface where range structure (or its absence) shows most clearly.
-        const glm::dvec3 direction = glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
-        eye                        = planetCenter + direction * planetRadius * 1.6;
+        // Mid-altitude view: the planet fills most of the frame while the
+        // limb and its atmosphere ring stay visible - the scale between the
+        // globe and the surface where range structure (or its absence) shows
+        // most clearly. The eye sits ~63 degrees off the sun so the ranges
+        // model through shading and the terminator touches the limb.
+        const glm::dvec3 sun = environment.sun.enabled
+            ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
+            : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
+        glm::dvec3       side = glm::cross(sun, glm::dvec3(0.0, 1.0, 0.0));
+        if (glm::length(side) < 1.0e-6)
+        {
+            side = glm::cross(sun, glm::dvec3(1.0, 0.0, 0.0));
+        }
+        side            = glm::normalize(side);
+        const glm::dvec3 direction = glm::normalize(sun * 0.45 + side * 0.80 + glm::dvec3(0.0, 0.30, 0.0));
+        eye                        = planetCenter + direction * planetRadius * 2.2;
         target                     = planetCenter;
     }
     else if (walkView)
@@ -522,7 +569,8 @@ int main(int argc, char **argv)
         cameraParameters.up[1]        = static_cast<float>(initialCameraUp.y);
         cameraParameters.up[2]        = static_cast<float>(initialCameraUp.z);
         cameraParameters.hasUp        = true;
-        cameraParameters.fovYDegrees  = walkView ? 70.0f : (macroView ? 42.0f : 65.0f);
+        cameraParameters.fovYDegrees  = walkView ? 70.0f
+            : (macroView ? (options.viewName == "orbit" ? 55.0f : 42.0f) : 65.0f);
         cameraParameters.nearZ        = static_cast<float>(nearZ);
         cameraParameters.farZ         = static_cast<float>(farZ);
         cameraParameters.moveSpeed    = cameraMoveSpeed;
@@ -563,6 +611,11 @@ int main(int argc, char **argv)
 
     std::cout << "demo_planet: view '" << options.viewName << "', " << totalFrames << " frames ("
               << options.warmupFrames << " warmup)\n";
+    // Warmup exhaustion warning flag: a budget that runs out before the
+    // visible set is complete means the first rendered frames (and any
+    // screenshot) still contain streaming gaps - the operator should know
+    // the capture is early rather than trust it blindly.
+    bool warmupExhausted = false;
 
     // GPU chunk residency and draw-command storage are isolated from the
     // application loop; this keeps planet streaming and camera control from
@@ -575,8 +628,11 @@ int main(int argc, char **argv)
     // either way.
     chunkRenderer.ensureAtmosphereShell();
     chunkRenderer.ensureSkyDome();
-    chunkRenderer.ensureSkyCloudLayer(eye - planetCenter);
+    chunkRenderer.ensureSkyCloudLayer(eye - planetCenter,
+        environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
     chunkRenderer.ensureCloudLayer();
+    chunkRenderer.ensureStarDome();
+    chunkRenderer.ensureSunDisc();
     chunkRenderer.setCloudLayerVisible(macroView);
     chunkRenderer.setSkyCloudLayerVisible(!macroView);
 
@@ -754,6 +810,10 @@ int main(int argc, char **argv)
             else
             {
                 --warmupRemaining;
+                if (warmupRemaining == 0)
+                {
+                    warmupExhausted = true;
+                }
             }
             (void)framePacer.pace(&host.kernel().profiler());
             if (effectiveTargetHz <= 0.0)
@@ -783,6 +843,10 @@ int main(int argc, char **argv)
             skyClearColor);
         chunkRenderer.updateAtmosphereShell(eyePlanetLocal,
             glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z), environment.sun.enabled);
+        chunkRenderer.updateStarDome(eyePlanetLocal, farZ);
+        chunkRenderer.updateSunDisc(eyePlanetLocal, localUp,
+            glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z), environment.sun.color,
+            environment.sun.enabled, farZ);
         renderer::FrameParameters frameParameters{};
         frameParameters.clearColor[0] = skyClearColor[0];
         frameParameters.clearColor[1] = skyClearColor[1];
@@ -884,6 +948,16 @@ int main(int argc, char **argv)
     renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
     windowCapability.destroyWindow(windowCapability.self, windowHandle);
     host.stop();
+    if (warmupExhausted)
+    {
+        planet::PlanetStatistics finalStats{};
+        if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &finalStats))
+        {
+            std::cout << "demo_planet: warning - the warmup budget ran out with " << finalStats.chunksReady << "/"
+                      << finalStats.chunksVisible << " visible chunks ready; rendered frames and the screenshot"
+                      << " may show streaming gaps (raise --warmup for a complete capture)\n";
+        }
+    }
     std::cout << "demo_planet: stopped cleanly after " << framesRendered << " frames\n";
     return 0;
 }

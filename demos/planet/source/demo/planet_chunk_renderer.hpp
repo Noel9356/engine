@@ -89,8 +89,25 @@ public:
     // frame and drawn unlit ahead of the terrain, so standing cameras see
     // cloud banks overhead instead of a bare gradient. The dome's per-frame
     // update rotates, scales and tints it with the sky (see updateSkyDome).
-    void ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal);
+    void ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &sunDirection);
     void setSkyCloudLayerVisible(bool visible);
+
+    // Star dome (space views): a dense unit sphere whose vertex colors sample
+    // the module's star field (see atmosphere.hpp starFieldColor), drawn
+    // unlit with depth writes off behind everything else. Active only when
+    // the atmosphere weight has faded (the sky dome owns in-air views and
+    // covers it completely); the per-frame transform follows the eye.
+    void ensureStarDome();
+    void updateStarDome(const glm::dvec3 &eyePlanetLocal, double farZ);
+
+    // Sun disc (backdrop): a bright disc with a soft halo placed along the
+    // sun direction at the backdrop distance, tinted by the atmosphere
+    // model's sun tint (gold at low sun, dark at night) and the configured
+    // sun color. Drawn after the sky dome and star dome but before the cloud
+    // deck, so banks occlude the sun; depth writes off like every backdrop.
+    void ensureSunDisc();
+    void updateSunDisc(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &up, const glm::dvec3 &sunDirection,
+        const float sunColor[3], bool sunEnabled, double farZ);
 
     [[nodiscard]] const std::vector<engine::renderer::RenderDrawCommand> &drawCommands() const noexcept
     {
@@ -114,6 +131,8 @@ private:
     void destroyCloudLayer();
     void destroyAtmosphereShell();
     void destroySkyCloudLayer();
+    void destroyStarDome();
+    void destroySunDisc();
 
     engine::planet::PlanetCapability *planet_ = nullptr;
     engine::planet::PlanetHandle planetHandle_ = engine::planet::invalidPlanet;
@@ -160,6 +179,23 @@ private:
     bool skyCloudActive_ = false;
     bool skyCloudVisible_ = false;
     std::deque<engine::renderer::MeshMaterial> skyCloudMaterials_;
+
+    // Star dome (space backdrop; see ensureStarDome).
+    engine::renderer::MeshHandle starDome_ = engine::renderer::invalidMesh;
+    glm::mat4 starDomeTransform_{1.0f};
+    bool starDomeActive_ = false;
+    std::deque<engine::renderer::MeshMaterial> starDomeMaterials_;
+
+    // Sun disc (backdrop): a small bright disc with a soft halo, placed
+    // along the sun direction at the backdrop distance and tinted by the
+    // atmosphere model's sun tint (gold at low sun, neutral at noon, dark at
+    // night). Drawn after the sky dome (and star dome) but before the cloud
+    // deck, so banks occlude the sun.
+    engine::renderer::MeshHandle sunDisc_ = engine::renderer::invalidMesh;
+    glm::mat4 sunDiscTransform_{1.0f};
+    bool sunDiscActive_ = false;
+    std::deque<engine::renderer::MeshMaterial> sunDiscMaterials_;
+    double sunDiscAngularRadiusRadians_ = 0.0;
 };
 
 } // namespace demo::planet_demo

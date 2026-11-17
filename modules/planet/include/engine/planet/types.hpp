@@ -218,7 +218,7 @@ struct PlanetStatistics
     std::uint32_t chunksReady      = 0;  // visible nodes with a finished mesh
     std::uint32_t chunksBuilding   = 0;  // queued or in-flight mesh builds
     std::uint32_t chunksReadyTotal = 0;  // every cached mesh (including hidden LOD rings)
-    std::uint64_t triangleCount    = 0;  // triangles across ready chunks (terrain only)
+    std::uint64_t triangleCount    = 0;  // triangles across ready chunks (terrain + water)
     std::uint64_t verticesTotal    = 0;
     double        lastUpdateMilliseconds = 0.0; // cost of the last update() call
     std::uint32_t octreeDepthUsed  = 0;

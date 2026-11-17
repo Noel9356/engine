@@ -89,6 +89,7 @@ ClimateSampler::ClimateSampler(const PlanetGenerationParams &params)
     , seedTemperature_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x51A7E0)))
     , seedMoisture_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x40157)))
     , seedMoistureWarp_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A9E51)))
+    , seedRockStripes_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x572A7A)))
 {
     const auto streamSeed = [](std::int64_t base, std::uint64_t tag)
     { return static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(base), tag)); };
@@ -386,8 +387,18 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
         // band spacing (the same spacing that folds the geometric strata
         // terms), so cliff walls read as layered sediment instead of flat
         // gray sheets. The band phase follows the body's shell like the
-        // geometric strata do.
-        const double strataPhase = 6.283185307179586 * (radiusMeters / std::max(1.0, params_.strataBandMeters));
+        // geometric strata do, and a low-frequency phase warp varies the
+        // band THICKNESS the way real sedimentary beds vary (a perfectly
+        // periodic band reads as a brick wall); the warp shares its seed and
+        // scale with the geometric term's thickness warp, so the color
+        // stripes track the geometric ridges.
+        const double bandWidth = std::max(1.0, params_.strataBandMeters);
+        const Vec3   stripePosition = direction * params_.radiusMeters;
+        const double thicknessWarp = noise::simplex3ImproveXY(seedRockStripes_,
+            stripePosition.x / (bandWidth * 5.0), stripePosition.y / (bandWidth * 5.0),
+            stripePosition.z / (bandWidth * 5.0));
+        const double strataPhase = 6.283185307179586 * (radiusMeters / bandWidth)
+            + params_.strataWarp * 2.6 * thicknessWarp;
         const double stripe = 1.0 + params_.rockStrataContrast * std::sin(strataPhase);
         for (std::size_t channel = 0; channel < 3; ++channel)
         {

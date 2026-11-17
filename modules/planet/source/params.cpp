@@ -149,6 +149,18 @@ bool PlanetGenerationParams::validate(std::string &error)
     caveWormWavelengthMeters = clampRange(caveWormWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     caveCarveMeters         = clampRange(caveCarveMeters, 0.0, 0.02 * radiusMeters);
 
+    // ---- oceans / climate --------------------------------------------------------
+    shallowWaterMeters   = clampRange(shallowWaterMeters, 0.0, radiusMeters);
+    deepWaterMeters      = clampRange(deepWaterMeters, shallowWaterMeters, radiusMeters);
+    // The deepened floor must stay a surface feature: an abyss deeper than a
+    // small fraction of the radius would sink the sea floor past the inner
+    // shell the octree prunes against (and, on tiny planets, through the
+    // core), so the depth scales with the body. Clamped BEFORE the shell
+    // relief aggregation below reads it - the aggregation feeds the octree's
+    // pruning band and the surface scans, which must never see a value the
+    // clamp would reject.
+    abyssalDepthMeters   = clampRange(abyssalDepthMeters, 0.0, 0.08 * radiusMeters);
+
     // The aggregate relief band every generation term can reach. The ocean
     // surface has to stay inside it: the octree's sea-straddle exemption and
     // the mesher's water-pass placement both assume the sea sphere lies
@@ -159,15 +171,6 @@ bool PlanetGenerationParams::validate(std::string &error)
         + hillAmplitudeMeters + detailAmplitudeMeters + overhangAmplitudeMeters + strataAmplitudeMeters
         + caveCarveMeters + abyssalDepthMeters;
     seaLevelOffsetMeters = clampRange(seaLevelOffsetMeters, -shellReliefMeters, shellReliefMeters);
-
-    // ---- oceans / climate --------------------------------------------------------
-    shallowWaterMeters   = clampRange(shallowWaterMeters, 0.0, radiusMeters);
-    deepWaterMeters      = clampRange(deepWaterMeters, shallowWaterMeters, radiusMeters);
-    // The deepened floor must stay a surface feature: an abyss deeper than a
-    // small fraction of the radius would sink the sea floor past the inner
-    // shell the octree prunes against (and, on tiny planets, through the
-    // core), so the depth scales with the body.
-    abyssalDepthMeters   = clampRange(abyssalDepthMeters, 0.0, 0.08 * radiusMeters);
 
     equatorTemperature = clampRange(equatorTemperature, 0.0, 1.0);
     poleTemperature    = clampRange(poleTemperature, 0.0, equatorTemperature);
@@ -237,6 +240,26 @@ bool PlanetGenerationParams::validate(std::string &error)
     {
         cloudColor[channel] = std::clamp(cloudColor[channel], 0.0f, 1.0f);
     }
+    cloudShadowStrength = clampRange(cloudShadowStrength, 0.0, 1.0);
+    {
+        const double sunLength = std::sqrt(cloudShadowSunDirection[0] * cloudShadowSunDirection[0]
+            + cloudShadowSunDirection[1] * cloudShadowSunDirection[1]
+            + cloudShadowSunDirection[2] * cloudShadowSunDirection[2]);
+        if (!std::isfinite(sunLength) || sunLength < 1.0e-6)
+        {
+            cloudShadowSunDirection[0] = 0.0;
+            cloudShadowSunDirection[1] = 1.0;
+            cloudShadowSunDirection[2] = 0.0;
+        }
+        else
+        {
+            cloudShadowSunDirection[0] /= sunLength;
+            cloudShadowSunDirection[1] /= sunLength;
+            cloudShadowSunDirection[2] /= sunLength;
+        }
+    }
+    starsDensity    = clampRange(starsDensity, 0.0, 1.0);
+    starsBrightness = clampRange(starsBrightness, 0.0, 4.0);
     seaIceTemperature = clampRange(seaIceTemperature, 0.0, 1.0);
     seaIceTransition  = clampRange(seaIceTransition, 0.005, 0.5);
     for (std::size_t channel = 0; channel < 3; ++channel)

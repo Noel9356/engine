@@ -162,7 +162,7 @@ water_roughness         = 0.42
 # Strength 0 disables; width is the depth band under the surface that reads
 # as surf (real breaker zones sit in the first few meters of depth).
 water_foam_width_meters = 2.5
-water_foam_strength    = 0.55
+water_foam_strength    = 0.70
 
 # sea ice: the water surface freezes where the SEA-LEVEL temperature drops
 # below sea_ice_temperature (the same climate field that drives the land's
@@ -171,13 +171,15 @@ water_foam_strength    = 0.55
 # color in over that much temperature around the threshold.
 sea_ice_temperature     = 0.10
 sea_ice_transition      = 0.05
-water_color_ice         = [0.80, 0.86, 0.90]
+# Sea ice reads slightly BLUE against the warm white of the cloud tops, so
+# polar caps stay distinguishable from the weather layer at globe scale.
+water_color_ice         = [0.78, 0.85, 0.94]
 
 # wave slope: deterministic noise tilts the water surface normals around the
 # radial direction, giving the sea sun-glint texture at close range. The
 # amplitude is a radian-scale tilt and fades out under the LOD band limit
 # like every other noise term, so coarse chunks keep a smooth sea.
-water_wave_amplitude          = 0.12
+water_wave_amplitude          = 0.16
 water_wave_wavelength_meters  = 8.0
 
 # clouds: a pure coverage field on a spherical shell above the datum (see
@@ -202,7 +204,27 @@ cloud_detail_strength        = 0.45
 cloud_edge_softness          = 0.10
 cloud_weather_strength       = 0.45
 cloud_latitude_band_strength = 0.16
-cloud_color                  = [0.96, 0.97, 1.0]
+cloud_color                  = [0.985, 0.975, 0.955]
+# cloud_shadow_strength darkens the terrain and water albedo under the same
+# coverage field the cloud layer renders from, sampled along the sun ray
+# through each point (see cloud_shadow_sun_direction), so the shadows fall
+# away from their banks and agree with the cloud layer from orbit and from
+# the ground. 0 disables.
+cloud_shadow_strength        = 0.45
+# The sunlight direction that casts the cloud shadows - pair it with the
+# [pbr] sun_direction lighting the scene (the demo's configuration ships
+# them together). Night-side points get no shadow (no direct sun to block).
+cloud_shadow_sun_direction   = [0.50, 0.45, 0.74]
+
+# stars: a seed-derived star field for the space backdrop (see
+# atmosphere.hpp starFieldColor). Consumers sample the pure direction-space
+# function when they paint the space behind the planet; the demo meshes a
+# star dome for its globe and orbit views and fades it with the atmosphere
+# weight. stars_density tunes the star spacing (0 sparse, 1 dense skies),
+# stars_brightness the luminance of the whole field.
+stars_enabled     = true
+stars_density     = 0.5
+stars_brightness  = 1.0
 
 # surface walking (kinematic controller; see walker.hpp): planet-centric
 # gravity with the movement/collision windows a point-feet character needs.
@@ -256,9 +278,11 @@ color_variation            = 0.24
 # feature size of the albedo jitter field (the mottling that keeps large
 # biomes from reading as flat plastic sheets).
 color_variation_wavelength_meters = 260.0
-# metre-scale mottle octave on the same field: ground-level views (a walking
-# camera sees metres) keep surface texture instead of one unbroken color.
-color_variation_ground_wavelength_meters = 3.5
+# near-field mottle octave on the same field: ground-level views keep
+# surface texture instead of one unbroken color. Keep the wavelength above
+# twice the finest voxel (the LOD band limit fades octaves below it - at the
+# showcase's 2.6 m voxels an 11 m mottle renders at full strength).
+color_variation_ground_wavelength_meters = 11.0
 # Sea-level snow line (drops as climate cools; only the highest massifs are
 # glaciated, polar caps come from latitude alone).
 snow_line_meters           = 2400.0
