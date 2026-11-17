@@ -30,12 +30,14 @@ config_keys           = [
     "lumen_gi.probes.hysteresis",
     "lumen_gi.probes.level1_spacing_factor",
     "lumen_gi.probes.rays_per_update",
+    "lumen_gi.probes.relocation_margin",
     "lumen_gi.probes.spacing_m",
     "lumen_gi.probes.updates_per_frame",
     "lumen_gi.quality",
     "lumen_gi.scene.max_surfaces",
     "lumen_gi.scene.max_triangles_per_surface",
     "lumen_gi.skip_unchanged_frames",
+    "lumen_gi.trace.bias_m",
     "lumen_gi.trace.max_distance_m",
 ]
 name                  = "lumen_gi"

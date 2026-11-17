@@ -162,7 +162,7 @@ water_roughness         = 0.42
 # Strength 0 disables; width is the depth band under the surface that reads
 # as surf (real breaker zones sit in the first few meters of depth).
 water_foam_width_meters = 2.5
-water_foam_strength    = 0.70
+water_foam_strength    = 0.85
 
 # sea ice: the water surface freezes where the SEA-LEVEL temperature drops
 # below sea_ice_temperature (the same climate field that drives the land's

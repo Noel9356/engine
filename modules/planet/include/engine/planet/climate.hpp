@@ -41,9 +41,12 @@ public:
     // (like every other noise term of a rendered chunk): below the cutoff the
     // metre-scale mottle fades out, so coarse LOD chunks stop aliasing
     // sub-voxel color speckle. The climate fields themselves (temperature,
-    // moisture, biome) are always evaluated in full - they are smooth at
-    // landscape scale and consumers (capability sampling, the water pass)
-    // need their true values.
+    // moisture, biome) of AIR samples are always evaluated in full - they are
+    // smooth at landscape scale and consumers (capability sampling, the
+    // water pass) need their true values. Underwater samples classify and
+    // color by depth alone; their temperature/moisture fields carry the
+    // latitude gradient without the perturbation noise (the sea floor has no
+    // weather).
     ClimateSample sample(const Vec3 &direction, double radiusMeters, double slope01, double lowPassCutoffMeters = 0.0) const;
 
     // Sea-level temperature/moisture without terrain effects; exposed for

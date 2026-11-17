@@ -49,6 +49,27 @@ Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot);
 // counts as permanently high noon.
 Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled);
 
+// Aerial perspective for one sight line: the sun-tinted haze the air adds
+// between the eye and a distant point, so terrain fades toward the horizon
+// color instead of staying uniformly saturated to the far distance. The
+// weight grows with the sight line's length through the air (an exponential
+// absorption profile whose scale rides the configured atmosphere height) and
+// fades to zero as the eye climbs out of the atmosphere (space views keep
+// the limb shell as their depth cue); the color is the horizon band of the
+// sky gradient tinted by the same sun tint the consumer applies to the sky,
+// so distant ground melts into exactly the color the sky shows behind it.
+// Consumers without per-pixel fog can apply it as a multiplicative tint:
+// mix(1, color / meanShadedTerrainRadiance, weight) - dark surfaces lift
+// toward the haze, bright ones (snow) keep poking through it.
+struct AerialPerspective
+{
+    Vec3    color;
+    double  weight;
+};
+
+AerialPerspective aerialPerspective(const PlanetGenerationParams &params, const Vec3 &eyePlanetLocal,
+    const Vec3 &targetPlanetLocal, const Vec3 &sunTint);
+
 // Star field for the space backdrop: a seed-derived, direction-space
 // distribution of point lights (black + stars) a consumer paints behind the
 // planet when the atmosphere weight has faded (the demo meshes a star dome

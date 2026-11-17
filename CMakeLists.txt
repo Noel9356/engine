@@ -875,8 +875,21 @@ endif()
 include(engine_add_application)
 
 # Standalone samples. Each demo owns its assets, configuration, and executable.
+# A checkout may ship only a subset of the demos, so every entry is guarded the
+# same way the plugin directories are: an absent demo is skipped with a status
+# line, keeping any subset of the demos buildable.
 if(ENGINE_BUILD_DEMO)
-    add_subdirectory(demos/character_customisation)
-    add_subdirectory(demos/lumen_gi)
-    add_subdirectory(demos/planet)
+    foreach(engineDemoDirectory
+            IN
+            ITEMS
+            character_customisation
+            lumen_gi
+            planet
+    )
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/demos/${engineDemoDirectory}/CMakeLists.txt")
+            add_subdirectory("demos/${engineDemoDirectory}")
+        else()
+            message(STATUS "engine: demo '${engineDemoDirectory}' is not present in this checkout; skipping")
+        endif()
+    endforeach()
 endif()

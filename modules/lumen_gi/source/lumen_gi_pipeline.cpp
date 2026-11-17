@@ -231,17 +231,24 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                 }
             }
             // Then continue the round-robin refresh with the remaining budget.
+            // The walk is anchored at the cursor captured BEFORE the loop:
+            // mutating level.updateCursor inside the step loop turns the
+            // visitation into a stride-2 walk that skips half of the slots
+            // (every second probe would never be re-traced).
+            const std::uint32_t roundRobinStart = level.updateCursor;
+            std::uint32_t       lastVisited     = roundRobinStart;
             for (std::uint32_t step = 0; step < total && count < probeBudget; ++step)
             {
-                const std::uint32_t slot = (level.updateCursor + step) % total;
+                const std::uint32_t slot = (roundRobinStart + step) % total;
                 if (taken[slot] == 0u)
                 {
                     taken[slot] = 1u;
                     probeItems.push_back(GiProbeItem{levelIndex, slot});
                     ++count;
+                    lastVisited = slot;
                 }
-                level.updateCursor = (slot + 1) % total;
             }
+            level.updateCursor = (lastVisited + 1u) % total;
         }
 
         // ---- run ------------------------------------------------------------

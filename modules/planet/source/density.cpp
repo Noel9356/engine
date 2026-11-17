@@ -316,7 +316,13 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
                 point.x / bandWidth, point.y / bandWidth, point.z / bandWidth);
             const double thicknessWarp = noise::simplex3ImproveXY(seedStrata_,
                 point.x / (bandWidth * 5.0), point.y / (bandWidth * 5.0), point.z / (bandWidth * 5.0));
-            d += params_.strataAmplitudeMeters
+            // Bedding strength: real cliff faces alternate between strongly
+            // banded and almost featureless rock; the thickness-warp field
+            // (already evaluated) gates the band amplitude across each face
+            // so the stripes come and go between outcrops instead of painting
+            // every cliff with the same contrast.
+            const double bedding = 0.30 + 0.70 * smoothstep(-0.55, 0.55, thicknessWarp);
+            d += params_.strataAmplitudeMeters * bedding
                 * std::sin(6.283185307179586 * bandPhase + params_.strataWarp * bandWarp
                     + params_.strataWarp * 2.6 * thicknessWarp)
                 * strataGate * relief.detailFade * relief.coastalTaper * strataFade;
@@ -357,13 +363,53 @@ double DensityField::surfaceRadius(const Vec3 &unitDirection) const
     // the first solid-to-air bracket holds the surface a camera or probe
     // would hit first (overhangs and caves may create further crossings
     // above it that this function deliberately ignores).
-    const double band   = params_.derivedMaxReliefMeters * 2.0 + params_.overhangAmplitudeMeters * 2.0 + params_.caveCarveMeters;
-    const double lowRadius  = std::max(1.0, params_.radiusMeters - band);
-    const double highRadius = params_.radiusMeters + band;
+    //
+    // The march bracket comes from the terrain's own height profile: along a
+    // radial ray the heightfield part of the density is EXACTLY linear
+    // (radius + height(direction) - r), so every zero crossing of the
+    // composed field must sit within the 3D terms' total amplitude of the
+    // heightfield surface - a bracket of a couple of hundred meters instead
+    // of the whole relief band. The wide band remains as the fallback for
+    // degenerate parameters where the profile guess fails to bracket.
+    const double band3d = params_.overhangAmplitudeMeters + params_.strataAmplitudeMeters
+        + (params_.cavesEnabled ? params_.caveCarveMeters : 0.0);
+    const double wideBand = params_.derivedMaxReliefMeters * 2.0 + params_.overhangAmplitudeMeters * 2.0
+        + params_.caveCarveMeters;
+    const double wideLowRadius = std::max(1.0, params_.radiusMeters - wideBand);
+    const double wideHighRadius = params_.radiusMeters + wideBand;
 
-    if (densityAt(Vec3{unitDirection.x * lowRadius, unitDirection.y * lowRadius, unitDirection.z * lowRadius}) < 0.0)
+    double lowRadius = wideLowRadius;
+    double highRadius = wideHighRadius;
+    double lowDensity = 0.0;
+    const ReliefSample profile = reliefImpl(unitDirection, 0.0);
+    if (std::isfinite(profile.heightMeters))
     {
-        // No solid below the band on this ray (degenerate parameters); give
+        const double guessLow = params_.radiusMeters + profile.heightMeters - band3d - 1.0;
+        const double guessHigh = params_.radiusMeters + profile.heightMeters + band3d + 1.0;
+        if (guessLow > 1.0)
+        {
+            const Vec3 guessLowPoint{unitDirection.x * guessLow, unitDirection.y * guessLow, unitDirection.z * guessLow};
+            lowDensity = densityAt(guessLowPoint);
+            if (lowDensity > 0.0)
+            {
+                const Vec3 guessHighPoint{
+                    unitDirection.x * guessHigh, unitDirection.y * guessHigh, unitDirection.z * guessHigh};
+                if (densityAt(guessHighPoint) <= 0.0)
+                {
+                    lowRadius = guessLow;
+                    highRadius = guessHigh;
+                }
+            }
+        }
+    }
+    if (lowRadius == wideLowRadius)
+    {
+        lowDensity = densityAt(Vec3{unitDirection.x * lowRadius, unitDirection.y * lowRadius, unitDirection.z * lowRadius});
+    }
+
+    if (lowDensity < 0.0)
+    {
+        // No solid below the bracket on this ray (degenerate parameters); give
         // the datum so callers still get a usable answer.
         return params_.radiusMeters;
     }

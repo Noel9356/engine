@@ -54,9 +54,11 @@ enum class GiError : std::uint32_t
 
 // Scene surface registered into the GI world. Geometry is borrowed for the
 // duration of the create/update call and copied into the module; positions
-// are required as float xyz triplets plus per-attribute byte strides (0
-// excludes the attribute; missing normals are generated from triangle
-// geometry). transform is a column-major 4x4 model matrix. emissiveColor and
+// are required as float xyz triplets plus per-attribute byte strides. A
+// stride of 0 excludes an optional attribute (missing normals are then
+// generated from triangle geometry, missing colors default to white); for
+// the required positions it instead reads as tightly packed triplets.
+// transform is a column-major 4x4 model matrix. emissiveColor and
 // emissiveIntensity combine into the surface's emission; albedoColor tints
 // vertex colors (white when colors are absent).
 struct GiSurfaceDescription

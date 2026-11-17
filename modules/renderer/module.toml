@@ -30,13 +30,15 @@ config_keys           = [
     "renderer.parallel_triangle_threshold",
     "renderer.pipeline_cache_mb",
     "renderer.pixels_per_lock_group",
+    "renderer.reflection_indirect_specular",
     "renderer.present_mode",
     "renderer.texture_mipmaps",
     "renderer.validation",
     "renderer.vsync",
 ]
 name                  = "renderer"
-optional_capabilities = ["window.vulkan", "pbr", "direct_lighting", "lumen_gi"]
+optional_capabilities = ["window.vulkan", "pbr", "direct_lighting", "lumen_gi",
+    "lumen_reflection"]
 provides              = ["renderer", "renderer.vulkan", "renderer.headless"]
 requires              = ["window"]
 version               = "0.1.0"

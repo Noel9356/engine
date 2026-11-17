@@ -894,13 +894,10 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         const double waveFrequency = 1.0 / waveWavelength;
         const double chopFrequency = 2.0 / waveWavelength;
 
-        // Foam noise modulation: a breaker band reads as patchy wave crests
-        // rather than a painted stripe. One extra octave on the wave seeds,
-        // band-limited with the swell it modulates.
+        // Foam seed: the breaker ranks key to the swell's own scale (see the
+        // surf block below), whose wavelength stretches with the chunk's
+        // sample spacing so coarse chunks keep a smooth line.
         const std::int64_t seedFoam = static_cast<std::int64_t>(hashCombine64(params.seed, 0xF04A1ULL));
-        const double foamWavelength = std::max(1.0, waveWavelength * 3.0);
-        const double foamFade = lowPassFade(ownCutoff, foamWavelength);
-        const double foamFrequency = 1.0 / foamWavelength;
 
         // Per-channel depth tint: water absorbs red fastest, green next,
         // blue last (the physical absorption ordering), so the configured
@@ -944,7 +941,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // terrain surface (the terrain grid rides along as buriedField), and
         // auto-orient every triangle against the true radial direction.
         auto waterMakeVertex = [&](std::uint32_t aX, std::uint32_t aY, std::uint32_t aZ, std::uint32_t bX,
-            std::uint32_t bY, std::uint32_t bZ, std::uint32_t, double, const Vec3 &point) -> std::uint32_t
+            std::uint32_t bY, std::uint32_t bZ, std::uint32_t edgeAxis, double, const Vec3 &point) -> std::uint32_t
         {
             const double radius = std::max(1.0e-9, length(point));
             const Vec3   radial = point * (1.0 / radius);
@@ -982,26 +979,80 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 }
             }
 
-            // Surf: the breaker band lives in the shallow
-            // margin of the configured width, modulated by the
-            // foam noise so the band breaks into wave crests
-            // (a uniform stripe reads as paint, not surf). The
-            // band's falloff is raised to the 4th power: real
-            // breakers hug the waterline, and a plain smoothstep
-            // over a shallow shelf would wash the whole lagoon
+            // Surf: the breaker band lives in the shallow margin of the
+            // configured width. Real surf reads as LINES: waves refract
+            // until their crests run parallel to the beach, then break in
+            // ranks. The shore frame comes from the terrain density
+            // gradient at the sea-surface point, read straight from the
+            // density lattice the water pass already carries (central
+            // differences around the edge's canonical corner - no extra
+            // field evaluations): its tangential component points landward,
+            // so the negation is offshore, and the crest noise advances
+            // offshore while holding along the beach - elongated breaker
+            // ranks following the coastline instead of isotropic
+            // cotton-wool patches. Between ranks a base wash keeps the band
+            // from reading as empty water. The crest wavelength stretches
+            // with the chunk's sample spacing so coarse chunks keep a
+            // smooth line instead of aliasing the ranks. The band's falloff
+            // is cubed: real breakers hug the waterline, and a plain
+            // smoothstep over a shallow shelf would wash the whole lagoon
             // white.
             double foam = 0.0;
             if (params.waterFoamStrength > 0.0 && params.waterFoamWidthMeters > 0.0)
             {
                 const double depthBand
                     = 1.0 - smoothstep(0.0, params.waterFoamWidthMeters, terrainDepth);
-                const double foamBand = depthBand * depthBand * depthBand * depthBand;
-                if (foamBand > 0.0 && foamFade > 0.0)
+                const double foamBand = depthBand * depthBand * depthBand;
+                if (foamBand > 0.0)
                 {
-                    const double foamNoise = noise::simplex3ImproveXY(seedFoam,
-                        point.x * foamFrequency, point.y * foamFrequency, point.z * foamFrequency);
-                    const double patchy = clamp01(0.70 + 0.30 * foamNoise);
-                    foam = params.waterFoamStrength * foamBand * patchy;
+                    double crestModulation = 0.30;
+                    {
+                        // Tangential density gradient from the lattice: the
+                        // vertex sits on a lattice edge, so two of its
+                        // coordinates are exact grid lines and the central
+                        // differences around the canonical corner read the
+                        // grid directly (both neighbors always lie inside the
+                        // padded grid for own-cell edges).
+                        double gradient[3] = {0.0, 0.0, 0.0};
+                        if (edgeAxis == 0u)
+                        {
+                            gradient[1] = densities[static_cast<std::size_t>(aX) + strideY * (aY + 1u) + strideZ * aZ]
+                                - densities[static_cast<std::size_t>(aX) + strideY * (aY - 1u) + strideZ * aZ];
+                            gradient[2] = densities[static_cast<std::size_t>(aX) + strideY * aY + strideZ * (aZ + 1u)]
+                                - densities[static_cast<std::size_t>(aX) + strideY * aY + strideZ * (aZ - 1u)];
+                        }
+                        else if (edgeAxis == 1u)
+                        {
+                            gradient[0] = densities[static_cast<std::size_t>(aX + 1u) + strideY * aY + strideZ * aZ]
+                                - densities[static_cast<std::size_t>(aX - 1u) + strideY * aY + strideZ * aZ];
+                            gradient[2] = densities[static_cast<std::size_t>(aX) + strideY * aY + strideZ * (aZ + 1u)]
+                                - densities[static_cast<std::size_t>(aX) + strideY * aY + strideZ * (aZ - 1u)];
+                        }
+                        else
+                        {
+                            gradient[0] = densities[static_cast<std::size_t>(aX + 1u) + strideY * aY + strideZ * aZ]
+                                - densities[static_cast<std::size_t>(aX - 1u) + strideY * aY + strideZ * aZ];
+                            gradient[1] = densities[static_cast<std::size_t>(aX) + strideY * (aY + 1u) + strideZ * aZ]
+                                - densities[static_cast<std::size_t>(aX) + strideY * (aY - 1u) + strideZ * aZ];
+                        }
+                        const Vec3 landwardTangential = Vec3{gradient[0], gradient[1], gradient[2]}
+                            - radial * (gradient[0] * radial.x + gradient[1] * radial.y + gradient[2] * radial.z);
+                        const double landwardLength = length(landwardTangential);
+                        if (landwardLength > 1.0e-9)
+                        {
+                            const Vec3 offshore = landwardTangential * (-1.0 / landwardLength);
+                            const Vec3 alongShore = cross(radial, offshore);
+                            const double crestWavelength = std::max(0.5 * waveWavelength, 2.0 * step);
+                            const double crestPhase = dot(point, offshore) / crestWavelength
+                                + 0.25 * dot(point, alongShore) / (6.0 * crestWavelength);
+                            const double crestNoise = noise::simplex3ImproveXY(seedFoam,
+                                crestPhase, dot(point, radial) / (24.0 * crestWavelength), 0.0);
+                            const double crest = 0.5 + 0.5 * crestNoise;
+                            const double ranks = smoothstep(0.30, 0.75, crest);
+                            crestModulation = 0.35 + 0.65 * ranks;
+                        }
+                    }
+                    foam = params.waterFoamStrength * foamBand * crestModulation;
                 }
             }
 
@@ -1098,7 +1149,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                             * smoothstep(0.0, params.waterShoreMixMeters, terrainDepth));
                     }
                 }
-                blended       = static_cast<float>(blended + (0.95 - blended) * foam);
+                blended       = static_cast<float>(blended + (1.0f - blended) * foam);
                 const float icy     = params.waterColorIce[channel];
                 blended             = static_cast<float>(blended + (icy - blended) * iceWeight);
                 vertex.color[channel] = blended * static_cast<float>(cloudShade);

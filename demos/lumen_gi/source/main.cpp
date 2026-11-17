@@ -1,10 +1,12 @@
 // main.cpp - the lumen_gi test application.
 //
-// A standalone harness for validating dynamic global illumination end to
-// end: it builds small deterministic scenes, registers every mesh BOTH into
-// the renderer (draw geometry) and into the lumen_gi module (GI surfaces),
-// evaluates one GI frame per rendered frame, and exports screenshots of the
-// composed image through the renderer's probe-grid indirect-lighting hook.
+// A standalone harness for validating dynamic global illumination and
+// reflections end to end: it builds small deterministic scenes, registers
+// every mesh into the renderer (draw geometry), the lumen_gi module (GI
+// surfaces), and the lumen_reflection module (reflection surfaces with their
+// PBR specular parameters), evaluates one GI and one reflection frame per
+// rendered frame, and exports screenshots of the composed image through the
+// renderer's probe-grid indirect-lighting and reflection-field hooks.
 //
 // Views:
 //   --view interior  Cornell-style dark room: white walls, red/green side
@@ -23,7 +25,10 @@
 // the wall-clock --quit-after), --screenshot/--screenshot-frame export the
 // rendered frame, --export-debug additionally writes the lumen_gi module's
 // own debug views (final image, GI only, surface cache, probes, reference
-// path trace) next to the screenshot for A/B validation.
+// path trace) and the lumen_reflection module's views (composite,
+// reflections only, resolve mask, reference) next to the screenshot for A/B
+// validation, and --no-reflections disables the reflection module for the
+// pre-hook image.
 
 #include <engine/application/application.hpp>
 #include <engine/application/frame_pacer.hpp>
@@ -55,6 +60,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -95,7 +101,8 @@ int main(int argc, char **argv)
     // drives the view, pbr supplies the sun/ambient environment, lumen_gi
     // runs the GI pipeline.
     engine::ApplicationHostOptions hostOptions
-        = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "camera", "pbr", "lumen_gi"});
+        = engine::makeApplicationHostOptions(commandLine,
+        {"window", "renderer", "camera", "pbr", "lumen_gi", "lumen_reflection"});
     engine::ApplicationHost host;
     std::string             startupReport;
     if (commandLine.validateOnly)
@@ -128,6 +135,32 @@ int main(int argc, char **argv)
                      "is pointless without it\n";
         host.stop();
         return 1;
+    }
+    auto *reflectionCapability = context.tryAcquireCapability<lumen_reflection::LumenReflectionCapability>();
+    if (options.reflections
+        && (reflectionCapability == nullptr
+            || reflectionCapability->abi != lumen_reflection::lumenReflectionCapabilityAbi))
+    {
+        std::cerr << "demo_lumen_gi: the lumen_reflection capability is unavailable or its ABI differs; "
+                     "run with --no-reflections or enable the module\n";
+        host.stop();
+        return 1;
+    }
+    // The demo always runs the reflection module alongside lumen_gi unless
+    // --no-reflections opts out of the A/B. The renderer-side composite has
+    // its own gate; surface it loudly instead of rendering silently without
+    // the field the module just traced.
+    if (options.reflections)
+    {
+        const std::optional<bool> rendererReflectionGate
+            = context.configurationBooleanInSection("renderer", "reflection_indirect_specular");
+        if (rendererReflectionGate.has_value() && !rendererReflectionGate.value())
+        {
+            std::cerr << "demo_lumen_gi: warning - renderer.reflection_indirect_specular is disabled; the "
+                         "renderer will not composite the lumen_reflection field this run\n";
+        }
+        std::cout << "demo_lumen_gi: reflections enabled - lumen_reflection module registered and evaluated "
+                     "every frame (--no-reflections disables it for A/B)\n";
     }
     const pbr::PbrCapability *pbrCapability = context.tryAcquireCapability<pbr::PbrCapability>();
     pbr::PbrEnvironment      environment{};
@@ -299,6 +332,42 @@ int main(int argc, char **argv)
             {
                 std::cerr << "demo_lumen_gi: GI surface registration failed (error "
                           << static_cast<std::uint32_t>(giError) << ")\n";
+            }
+        }
+
+        if (options.reflections && reflectionCapability->createSurface != nullptr)
+        {
+            lumen_reflection::ReflectionSurfaceDescription reflectionSurface{};
+            reflectionSurface.positions           = &mesh.vertices.front().position.x;
+            reflectionSurface.positionStrideBytes = vertexStride;
+            reflectionSurface.normals             = &mesh.vertices.front().normal.x;
+            reflectionSurface.normalStrideBytes   = vertexStride;
+            reflectionSurface.colors              = &mesh.vertices.front().color.x;
+            reflectionSurface.colorStrideBytes    = vertexStride;
+            reflectionSurface.indices             = mesh.indices.data();
+            reflectionSurface.vertexCount          = static_cast<std::uint32_t>(mesh.vertices.size());
+            reflectionSurface.indexCount          = static_cast<std::uint32_t>(mesh.indices.size());
+            for (std::uint32_t axis = 0; axis < 3; ++axis)
+            {
+                // The reflection module combines its surface albedo with the
+                // vertex colors exactly like the renderer's base color, and
+                // uses it as the specular F0 tint for metallic surfaces - so
+                // the PBR base color (not the GI diffuse albedo) is the right
+                // source here.
+                reflectionSurface.albedoColor[axis]   = mesh.material.baseColor[axis];
+                reflectionSurface.emissiveColor[axis] = mesh.giEmissive[axis];
+            }
+            reflectionSurface.emissiveIntensity = mesh.giEmissiveIntensity;
+            reflectionSurface.roughness         = mesh.rfRoughness;
+            reflectionSurface.metallic          = mesh.rfMetallic;
+            reflectionSurface.flagBits          = mesh.giFlagBits;
+            lumen_reflection::ReflectionError reflectionError = lumen_reflection::ReflectionError::None;
+            mesh.reflectionSurface = reflectionCapability->createSurface(
+                reflectionCapability->self, &reflectionSurface, &reflectionError);
+            if (mesh.reflectionSurface == lumen_reflection::invalidReflectionSurface)
+            {
+                std::cerr << "demo_lumen_gi: reflection surface registration failed (error "
+                          << static_cast<std::uint32_t>(reflectionError) << ")\n";
             }
         }
 
@@ -505,6 +574,24 @@ int main(int argc, char **argv)
             break;
         }
 
+        // The reflection camera tracks the render camera (the field is sized
+        // from the viewport the renderer composites onto).
+        if (options.reflections && reflectionCapability->setView != nullptr)
+        {
+            reflectionCapability->setView(reflectionCapability->self, viewProjection, cameraPosition,
+                framebufferWidth, framebufferHeight);
+        }
+        if (options.reflections && reflectionCapability->evaluate != nullptr)
+        {
+            lumen_reflection::ReflectionError reflectionError = lumen_reflection::ReflectionError::None;
+            if (!reflectionCapability->evaluate(reflectionCapability->self, frameDeltaSeconds, &reflectionError))
+            {
+                std::cerr << "demo_lumen_gi: lumen_reflection evaluate failed (error "
+                          << static_cast<std::uint32_t>(reflectionError) << ")\n";
+                break;
+            }
+        }
+
         renderCapability.beginFrame(renderCapability.self, rendererHandle, nullptr);
         renderCapability.drawMeshes(
             renderCapability.self, rendererHandle, drawCommands.data(), static_cast<std::uint32_t>(drawCommands.size()));
@@ -521,6 +608,21 @@ int main(int argc, char **argv)
                           << ", cards " << statistics.cards << ", probes traced " << statistics.probeTracesThisFrame
                           << ", gather rays " << statistics.gatherRaysThisFrame << ", evaluate "
                           << statistics.lastEvaluateMilliseconds << " ms\n";
+                if (options.reflections && reflectionCapability->statistics != nullptr)
+                {
+                    lumen_reflection::ReflectionStatistics reflectionStatistics{};
+                    if (reflectionCapability->statistics(reflectionCapability->self, &reflectionStatistics)
+                        && reflectionStatistics.pixelsTracedThisFrame != 0)
+                    {
+                        std::cout << "demo_lumen_gi: reflection field " << reflectionStatistics.fieldWidth
+                                  << "x" << reflectionStatistics.fieldHeight << " | rays "
+                                  << reflectionStatistics.raysTracedThisFrame << " (screen "
+                                  << reflectionStatistics.screenTraceHitsThisFrame << ", scene "
+                                  << reflectionStatistics.sceneTraceHitsThisFrame << "), cache lookups "
+                                  << reflectionStatistics.raysReusedCacheThisFrame << ", evaluate "
+                                  << reflectionStatistics.lastEvaluateMilliseconds << " ms\n";
+                    }
+                }
             }
         }
 
@@ -585,6 +687,30 @@ int main(int argc, char **argv)
                                   << static_cast<std::uint32_t>(exportGiError) << ")\n";
                     }
                 }
+                if (options.reflections && reflectionCapability->debugExport != nullptr)
+                {
+                    const lumen_reflection::ReflectionDebugView reflectionViews[]
+                        = {lumen_reflection::ReflectionDebugView::Composite,
+                            lumen_reflection::ReflectionDebugView::ReflectionsOnly,
+                            lumen_reflection::ReflectionDebugView::ResolveMask,
+                            lumen_reflection::ReflectionDebugView::Reference};
+                    const char *reflectionViewNames[]
+                        = {"reflcomposite", "reflonly", "reflresolve", "reflreference"};
+                    for (std::uint32_t viewIndex = 0; viewIndex < 4; ++viewIndex)
+                    {
+                        const std::string path
+                            = options.exportDebugPrefix + "_" + reflectionViewNames[viewIndex] + ".ppm";
+                        lumen_reflection::ReflectionError exportReflectionError
+                            = lumen_reflection::ReflectionError::None;
+                        if (!reflectionCapability->debugExport(
+                                reflectionCapability->self, reflectionViews[viewIndex], path.c_str(),
+                                &exportReflectionError))
+                        {
+                            std::cerr << "demo_lumen_gi: reflection debug view export failed ("
+                                      << static_cast<std::uint32_t>(exportReflectionError) << ")\n";
+                        }
+                    }
+                }
             }
         }
         (void)framePacer.pace(&host.kernel().profiler());
@@ -611,6 +737,11 @@ int main(int argc, char **argv)
         if (mesh.giSurface != lumen_gi::invalidGiSurface && giCapability->destroySurface != nullptr)
         {
             giCapability->destroySurface(giCapability->self, mesh.giSurface);
+        }
+        if (mesh.reflectionSurface != lumen_reflection::invalidReflectionSurface
+            && reflectionCapability != nullptr && reflectionCapability->destroySurface != nullptr)
+        {
+            reflectionCapability->destroySurface(reflectionCapability->self, mesh.reflectionSurface);
         }
     }
     renderCapability.destroyRenderer(renderCapability.self, rendererHandle);

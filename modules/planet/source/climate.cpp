@@ -162,22 +162,38 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
 
 ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters, double slope01, double lowPassCutoffMeters) const
 {
-    ClimateSample sample   = sampleSeaLevel(direction);
     const double  seaRadius = params_.derivedSeaRadiusMeters;
     const double  elevation = radiusMeters - seaRadius;
 
-    // Altitude lapse rate cools the air above sea level (warms below it,
-    // mildly - ocean basins stay temperate).
-    sample.temperature01 = clamp01(sample.temperature01 - elevation / std::max(1.0, params_.temperatureLapseMeters));
-
-    // Coastal humidity: onshore winds keep low land near the sea humid, so
-    // the flat tapered shoreline belt stays green instead of painting a beige
-    // desert fringe around every landmass. Fades out over the band width.
-    if (params_.coastalMoistureBoost > 0.0)
+    // Underwater samples (the sea floor and the water surface below the
+    // wave band) classify and color by DEPTH alone: the temperature and
+    // moisture fields only shape the sample through the air above the
+    // waterline, so the expensive sea-level climate evaluation is skipped
+    // and the returned fields carry the latitude gradient without the
+    // perturbation noise. Air samples (elevation >= 0) keep the full field.
+    ClimateSample sample;
+    if (elevation < 0.0)
     {
-        const double band = std::max(1.0, params_.coastalMoistureBandMeters);
-        sample.moisture01 = clamp01(sample.moisture01
-            + params_.coastalMoistureBoost * (1.0 - smoothstep(0.0, band, elevation)));
+        const double absSinLatitude = clamp01(std::abs(dot(direction, Vec3{params_.axis[0], params_.axis[1], params_.axis[2]})));
+        sample.temperature01 = clamp01(params_.equatorTemperature
+            + (params_.poleTemperature - params_.equatorTemperature) * absSinLatitude);
+        sample.moisture01 = 1.0;
+    }
+    else
+    {
+        sample = sampleSeaLevel(direction);
+        // Altitude lapse rate cools the air above sea level.
+        sample.temperature01 = clamp01(sample.temperature01 - elevation / std::max(1.0, params_.temperatureLapseMeters));
+
+        // Coastal humidity: onshore winds keep low land near the sea humid, so
+        // the flat tapered shoreline belt stays green instead of painting a beige
+        // desert fringe around every landmass. Fades out over the band width.
+        if (params_.coastalMoistureBoost > 0.0)
+        {
+            const double band = std::max(1.0, params_.coastalMoistureBandMeters);
+            sample.moisture01 = clamp01(sample.moisture01
+                + params_.coastalMoistureBoost * (1.0 - smoothstep(0.0, band, elevation)));
+        }
     }
 
     const auto paletteRow = [this](Biome biome) -> const float *
@@ -391,7 +407,10 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
         // band THICKNESS the way real sedimentary beds vary (a perfectly
         // periodic band reads as a brick wall); the warp shares its seed and
         // scale with the geometric term's thickness warp, so the color
-        // stripes track the geometric ridges.
+        // stripes track the geometric ridges. The same field gates the
+        // stripe AMPLITUDE (bedding strength): outcrops alternate between
+        // strongly banded and almost plain rock the way the geometric beds
+        // do.
         const double bandWidth = std::max(1.0, params_.strataBandMeters);
         const Vec3   stripePosition = direction * params_.radiusMeters;
         const double thicknessWarp = noise::simplex3ImproveXY(seedRockStripes_,
@@ -399,7 +418,8 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
             stripePosition.z / (bandWidth * 5.0));
         const double strataPhase = 6.283185307179586 * (radiusMeters / bandWidth)
             + params_.strataWarp * 2.6 * thicknessWarp;
-        const double stripe = 1.0 + params_.rockStrataContrast * std::sin(strataPhase);
+        const double bedding = 0.30 + 0.70 * smoothstep(-0.55, 0.55, thicknessWarp);
+        const double stripe = 1.0 + params_.rockStrataContrast * bedding * std::sin(strataPhase);
         for (std::size_t channel = 0; channel < 3; ++channel)
         {
             rockRow[channel] = std::clamp(rockRow[channel] * stripe, 0.0, 1.0);

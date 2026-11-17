@@ -29,6 +29,7 @@ instance_batch_min_count             = 2
 instance_batching = true
 instance_stream_mb                   = 4
 max_pending_uploads                  = 16
+msaa_samples                   = 4
 memory_budget_update_interval_frames = 120
 texture_mipmaps                      = false
 validation                           = false

@@ -90,6 +90,10 @@ public:
     void setEnvironment(const pbr::PbrEnvironment &environment) override;
     void setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count) override;
     void setProbeGrid(const GiProbeGrid &grid) override;
+    // The lumen_reflection field composite runs in the software rasterizer
+    // (see docs/backends.md); this side keeps the interface complete and the
+    // snapshot counts zero so renderer.cpp's version polling stays uniform.
+    void setReflectionField(const ReflectionField &field) override;
 
     void beginFrame(const FrameParameters &frame) override;
     void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) override;

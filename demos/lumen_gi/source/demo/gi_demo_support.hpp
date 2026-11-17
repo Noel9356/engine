@@ -2,6 +2,7 @@
 #pragma once
 
 #include <engine/lumen_gi/capabilities.hpp>
+#include <engine/lumen_reflection/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/renderer/material.hpp>
 #include <engine/renderer/mesh.hpp>
@@ -22,6 +23,11 @@ struct GiDemoOptions
     std::string   exportDebugPrefix;
     std::uint32_t statsEveryFrames = 30;
     bool          orbit            = false;
+    // --no-reflections: skip the lumen_reflection module (no surfaces
+    // registered, no evaluate) so the same scene renders without the
+    // indirect specular term for A/B comparison. The module itself stays
+    // loaded and its absence is silent.
+    bool          reflections      = true;
 };
 
 struct SceneVertex
@@ -38,11 +44,17 @@ struct SceneMesh
     std::vector<std::uint32_t> indices;
     engine::renderer::MeshHandle rendererMesh = engine::renderer::invalidMesh;
     engine::lumen_gi::GiSurfaceHandle giSurface = engine::lumen_gi::invalidGiSurface;
+    engine::lumen_reflection::ReflectionSurfaceHandle reflectionSurface
+        = engine::lumen_reflection::invalidReflectionSurface;
     engine::renderer::MeshMaterial material{};
     float giAlbedo[3] = {1.0f, 1.0f, 1.0f};
     float giEmissive[3] = {0.0f, 0.0f, 0.0f};
     float giEmissiveIntensity = 1.0f;
     std::uint32_t giFlagBits = 0;
+    // PBR specular parameters the lumen_reflection module traces with (the
+    // renderer material carries the same values).
+    float rfRoughness = 1.0f;
+    float rfMetallic  = 0.0f;
 };
 
 const char *giOptionsUsage() noexcept;

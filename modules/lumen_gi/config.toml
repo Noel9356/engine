@@ -36,21 +36,27 @@ texels_per_frame            = 262144
 [lumen_gi.lighting]
 direct_texels_per_frame     = 65536
 indirect_texels_per_frame   = 65536
-# Stratified cosine rays per refreshed texel; the temporal history below
-# accumulates them across updates (4 x ~5 updates = ~20 effective rays).
-indirect_rays_per_texel     = 4
+# Stratified cosine rays per refreshed texel; the rotating strata and the
+# temporal history below accumulate the samples across updates (1 ray x ~10
+# refreshes, filtered by the blend weight), so the gather pays one trace per
+# refreshed texel while the cache still converges to the smoothed radiance.
+indirect_rays_per_texel     = 1
 sun_shadows                 = true
 point_light_shadows         = false
 # Lumen's "Lumen Scene Lighting Update Speed"; scales how fast the cached
 # lighting is re-evaluated relative to the budgets above.
 update_speed                = 1.0
 # Weight of the cached history when a texel is refreshed (0 = replace with the
-# fresh gather, 0.99 = almost never change). The first update of a texel always
-# takes the fresh sample whole.
-indirect_temporal_blend     = 0.8
+# fresh gather, 0.99 = almost never change). The first update of a texel
+# always takes the fresh sample whole. Raised alongside the one-ray gather so
+# the sparser fresh samples are smoothed by the accumulation.
+indirect_temporal_blend     = 0.85
 
 [lumen_gi.trace]
 max_distance_m              = 50.0
+# Surface offset for shadow, gather, and probe rays; one bias behind every
+# trace site so the acne/leak trade-off is a single tuning decision.
+bias_m                      = 0.02
 
 [lumen_gi.probes]
 spacing_m                   = 2.0
@@ -62,6 +68,11 @@ updates_per_frame           = 64
 rays_per_update             = 256
 # Fraction of the previous radiance kept when a texel is re-traced.
 hysteresis                  = 0.2
+# Near-surface clearance a relocated probe keeps off the geometry it was
+# pushed away from, as a fraction of the level spacing. Also the margin added
+# when a boundary probe steps off a surface plane. The exported lattice stays
+# regular regardless.
+relocation_margin           = 0.05
 level1_spacing_factor       = 4.0
 
 [lumen_gi.gather]
@@ -69,7 +80,7 @@ level1_spacing_factor       = 4.0
 # 1/screen_scale of the internal resolution, a few rays each, 2 m short rays
 # falling back to the world radiance cache.
 screen_scale                = 8
-rays_per_probe              = 16
+rays_per_probe              = 32
 importance_sampling         = true
 screen_ray_distance_m       = 2.0
 temporal_blend              = 0.85

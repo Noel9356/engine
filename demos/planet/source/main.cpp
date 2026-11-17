@@ -204,6 +204,15 @@ int main(int argc, char **argv)
         return test.pass ? 0 : 1;
     }
 
+    // ---- benchmark short-circuit -----------------------------------------------------
+    if (options.benchmark)
+    {
+        const int benchStatus = runBenchmark(params);
+        planetCapability->destroyPlanet(planetCapability->self, planetHandle);
+        host.stop();
+        return benchStatus;
+    }
+
     // ---- camera placement per view ----------------------------------------------------
     const glm::dvec3 planetCenter(params.centerMeters[0], params.centerMeters[1], params.centerMeters[2]);
     const double     planetRadius = params.radiusMeters;
@@ -853,9 +862,17 @@ int main(int argc, char **argv)
         frameParameters.clearColor[2] = skyClearColor[2];
         frameParameters.clearColor[3] = 1.0f;
 
+        // The sun tint the sky dome carries this frame (same formula the
+        // dome update uses) feeds the per-chunk aerial perspective.
+        const double sunUpForSky = environment.sun.enabled
+                && planet::length(sunDirection) > 1.0e-9
+            ? planet::dot(sunDirection * (1.0 / planet::length(sunDirection)),
+                planet::Vec3{localUp.x, localUp.y, localUp.z})
+            : 1.0;
+        const planet::Vec3 sunTint = planet::sunSkyTint(params, sunUpForSky, environment.sun.enabled);
+
         const glm::mat4 viewProjection = glm::make_mat4(viewState.projection) * glm::make_mat4(viewState.view);
-        chunkRenderer.rebuildDrawCommands(viewProjection,
-            glm::length(eyePlanetLocal) - planetRadius);
+        chunkRenderer.rebuildDrawCommands(viewProjection, eyePlanetLocal, sunTint);
         const auto &drawCommands = chunkRenderer.drawCommands();
         frameTiming.markUploadDone();
 
@@ -937,27 +954,27 @@ int main(int argc, char **argv)
         }
     }
     chunkRenderer.destroy();
+    // Final statistics must be read while the planet (and its module) still
+    // exist: host.stop() below destroys the module, and any capability call
+    // after that would dereference freed memory.
     planet::PlanetStatistics finalStatistics{};
     if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &finalStatistics))
     {
         std::cout << "demo_planet: totals - chunks cached " << finalStatistics.chunksReadyTotal << ", triangles "
                   << finalStatistics.triangleCount << ", vertices " << finalStatistics.verticesTotal << "\n";
+        if (warmupExhausted)
+        {
+            std::cout << "demo_planet: warning - the warmup budget ran out with " << finalStatistics.chunksReady
+                      << "/" << finalStatistics.chunksVisible
+                      << " visible chunks ready; rendered frames and the screenshot"
+                      << " may show streaming gaps (raise --warmup for a complete capture)\n";
+        }
     }
     planetCapability->destroyPlanet(planetCapability->self, planetHandle);
     cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
     renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
     windowCapability.destroyWindow(windowCapability.self, windowHandle);
     host.stop();
-    if (warmupExhausted)
-    {
-        planet::PlanetStatistics finalStats{};
-        if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &finalStats))
-        {
-            std::cout << "demo_planet: warning - the warmup budget ran out with " << finalStats.chunksReady << "/"
-                      << finalStats.chunksVisible << " visible chunks ready; rendered frames and the screenshot"
-                      << " may show streaming gaps (raise --warmup for a complete capture)\n";
-        }
-    }
     std::cout << "demo_planet: stopped cleanly after " << framesRendered << " frames\n";
     return 0;
 }

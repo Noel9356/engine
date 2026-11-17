@@ -28,6 +28,7 @@ namespace engine
 namespace lumen_gi
 {
 
+
 // ---- ray helpers -----------------------------------------------------------
 
 bool rayTriangle(const GiRay &ray, const GiPackedTriangle &triangle, float &outT, glm::vec3 &outBarycentric)
@@ -98,15 +99,17 @@ constexpr std::uint32_t traversalStackSize = 96;
 
 // Traversal of one surface's local-space BVH. AnyHit stops at the first
 // accepted hit (shadows); otherwise ray.tMax shrinks to the closest hit.
+// The caller passes the ray's precomputed inverse direction: rays against an
+// identity-transform surface reuse the top-level inverse, so only
+// transformed surfaces pay the three divisions again.
 template <bool AnyHit>
-bool traverseSurface(
-    const GiSurfaceGeometry &geometry, GiRay &ray, std::uint32_t &outTriangle, glm::vec3 &outBarycentric)
+bool traverseSurface(const GiSurfaceGeometry &geometry, GiRay &ray, const glm::vec3 &inverseDirection,
+    std::uint32_t &outTriangle, glm::vec3 &outBarycentric)
 {
     if (geometry.bvh.empty())
     {
         return false;
     }
-    const glm::vec3 inverseDirection = safeInverseDirection(ray.direction);
     float           entry            = 0.0f;
     if (!slabTest(ray.origin, inverseDirection, geometry.boundsMin, geometry.boundsMax, ray.tMax, entry))
     {
@@ -181,6 +184,38 @@ struct SurfaceHit
     glm::vec3     barycentric{0.0f};
 };
 
+// Barycentric position, smooth normal, and raw geometric normal of a triangle
+// hit in the surface's local space, shared by the full and the lean trace
+// front-ends so the two can never drift apart.
+struct LocalShading
+{
+    glm::vec3 position{0.0f};
+    glm::vec3 normal{0.0f, 1.0f, 0.0f}; // normalized smooth normal
+    glm::vec3 geometric{0.0f};           // raw cross product, unnormalized
+    float     geometricLength = 0.0f;
+};
+
+LocalShading localShadingAt(const GiSurfaceGeometry &geometry, std::uint32_t triangleIndex, const glm::vec3 &b)
+{
+    LocalShading      shading;
+    const std::uint32_t i0 = geometry.indices[triangleIndex * 3 + 0];
+    const std::uint32_t i1 = geometry.indices[triangleIndex * 3 + 1];
+    const std::uint32_t i2 = geometry.indices[triangleIndex * 3 + 2];
+    shading.position = geometry.positions[i0] * b.x + geometry.positions[i1] * b.y + geometry.positions[i2] * b.z;
+
+    // Smooth normal from the triangle's vertex normals.
+    glm::vec3 smooth = geometry.normals[i0] * b.x + geometry.normals[i1] * b.y + geometry.normals[i2] * b.z;
+    shading.geometric       = glm::cross(
+        geometry.positions[i1] - geometry.positions[i0], geometry.positions[i2] - geometry.positions[i0]);
+    shading.geometricLength = glm::length(shading.geometric);
+    const float smoothLength = glm::length(smooth);
+    shading.normal = smoothLength > 1.0e-8f
+        ? smooth / smoothLength
+        : (shading.geometricLength > 1.0e-12f ? shading.geometric / shading.geometricLength
+                                             : glm::vec3(0.0f, 1.0f, 0.0f));
+    return shading;
+}
+
 // Traces one world ray through the top-level BVH and the surface BVHs.
 template <bool AnyHit>
 SurfaceHit traceSurfaces(const GiPipelineState &state, const GiRay &worldRay, std::uint32_t excludedSurface)
@@ -225,18 +260,38 @@ SurfaceHit traceSurfaces(const GiPipelineState &state, const GiRay &worldRay, st
                     continue;
                 }
                 // Transform the ray into the surface's local space; local t
-                // values scale by the local direction length.
-                const glm::vec3 localOrigin = glm::vec3(surface.inverseTransform * glm::vec4(worldRay.origin, 1.0f));
-                const glm::vec3 localDirection = glm::mat3(surface.inverseTransform) * worldRay.direction;
-                const float     directionLength = glm::length(localDirection);
-                if (directionLength < 1.0e-8f)
+                // values scale by the local direction length. The cached
+                // inverse pieces replace the per-ray mat3 view of the mat4 and
+                // the full 4x4 by-w=1 point product (same arithmetic), and an
+                // identity transform skips both: a world-space ray is already
+                // a valid local ray with direction length exactly one, so the
+                // top-level inverse direction is reused by the BVH traversal.
+                glm::vec3 localOrigin;
+                glm::vec3 localDirection;
+                float     directionLength = 1.0f;
+                if (surface.localIsWorld)
                 {
-                    continue;
+                    localOrigin    = worldRay.origin;
+                    localDirection = worldRay.direction;
                 }
-                GiRay         localRay{localOrigin, localDirection / directionLength, bestT * directionLength};
+                else
+                {
+                    localOrigin    = surface.inverseLinear * worldRay.origin + surface.inverseTranslation;
+                    localDirection = surface.inverseLinear * worldRay.direction;
+                    directionLength = glm::length(localDirection);
+                    if (directionLength < 1.0e-8f)
+                    {
+                        continue;
+                    }
+                }
+                GiRay localRay{localOrigin,
+                    surface.localIsWorld ? localDirection : localDirection / directionLength,
+                    bestT * directionLength};
                 std::uint32_t triangle = 0;
                 glm::vec3     barycentric{};
-                if (traverseSurface<AnyHit>(surface.geometry, localRay, triangle, barycentric))
+                if (traverseSurface<AnyHit>(surface.geometry, localRay,
+                        surface.localIsWorld ? inverseDirection : safeInverseDirection(localRay.direction), triangle,
+                        barycentric))
                 {
                     result.hit          = true;
                     result.surfaceIndex = surfaceIndex;
@@ -299,36 +354,17 @@ GiHit traceScene(const GiPipelineState &state, const GiRay &ray)
     {
         return result;
     }
-    const GiSurface         &surface  = state.surfaces[surfaceHit.surfaceIndex];
-    const GiSurfaceGeometry &geometry = surface.geometry;
-    const std::uint32_t      i0       = geometry.indices[surfaceHit.triangleIndex * 3 + 0];
-    const std::uint32_t      i1       = geometry.indices[surfaceHit.triangleIndex * 3 + 1];
-    const std::uint32_t      i2       = geometry.indices[surfaceHit.triangleIndex * 3 + 2];
-    const glm::vec3         &b        = surfaceHit.barycentric;
+    const GiSurface   &surface  = state.surfaces[surfaceHit.surfaceIndex];
+    const LocalShading shading  = localShadingAt(surface.geometry, surfaceHit.triangleIndex, surfaceHit.barycentric);
     result.position      = ray.origin + ray.direction * surfaceHit.t;
-    result.localPosition = geometry.positions[i0] * b.x + geometry.positions[i1] * b.y + geometry.positions[i2] * b.z;
-
-    // Smooth normal from the triangle's vertex normals.
-    glm::vec3 localNormal = geometry.normals[i0] * b.x + geometry.normals[i1] * b.y + geometry.normals[i2] * b.z;
-    const glm::vec3 localGeometric = glm::cross(
-        geometry.positions[i1] - geometry.positions[i0], geometry.positions[i2] - geometry.positions[i0]);
-    const float localNormalLength    = glm::length(localNormal);
-    const float localGeometricLength = glm::length(localGeometric);
-    if (localNormalLength > 1.0e-8f)
-    {
-        localNormal /= localNormalLength;
-    }
-    else
-    {
-        localNormal = localGeometricLength > 1.0e-12f ? localGeometric / localGeometricLength : glm::vec3(0.0f, 1.0f, 0.0f);
-    }
-    result.localNormal = localNormal;
-    result.normal      = glm::normalize(surface.normalMatrix * localNormal);
+    result.localPosition = shading.position;
+    result.localNormal   = shading.normal;
+    result.normal        = glm::normalize(surface.normalMatrix * shading.normal);
 
     glm::vec3 geometricNormal = result.normal;
-    if (localGeometricLength > 1.0e-12f)
+    if (shading.geometricLength > 1.0e-12f)
     {
-        geometricNormal = glm::normalize(surface.normalMatrix * (localGeometric / localGeometricLength));
+        geometricNormal = glm::normalize(surface.normalMatrix * (shading.geometric / shading.geometricLength));
     }
     // Backface = the ray hits the back of the surface (both normals agree).
     // The geometric normal handed back always faces the ray, so consumers can
@@ -339,6 +375,41 @@ GiHit traceScene(const GiPipelineState &state, const GiRay &ray)
         geometricNormal = -geometricNormal;
     }
     result.geometricNormal = geometricNormal;
+    return result;
+}
+
+// Lean variant of traceScene for the per-frame GI rays (see GiShadingHit):
+// identical closest-hit selection and identical local position / normal
+// interpolation, but the world-space normal chain is skipped and the
+// backface classification runs on the same dots taken in LOCAL space.
+//
+// The sign of a world-space dot(normalMatrix * n, d) equals the sign of the
+// local dot(n, inverseLinear * d): with normalMatrix = (L^-1)^T and
+// inverseLinear = L^-1, dot((L^-1)^T n, d) = n . (L^-1 d) exactly, and
+// normalizing the world normal never changes the sign of the dot. The
+// degenerate-geometric fallback (use the smooth normal) mirrors traceScene,
+// and card capture applies the same local-space rule.
+GiShadingHit traceSceneShading(const GiPipelineState &state, const GiRay &ray)
+{
+    const SurfaceHit surfaceHit = traceSurfaces<false>(state, ray, noSurface);
+    GiShadingHit     result;
+    result.hit          = surfaceHit.hit;
+    result.surfaceIndex = surfaceHit.surfaceIndex;
+    result.t            = surfaceHit.t;
+    if (!surfaceHit.hit)
+    {
+        result.t = 0.0f;
+        return result;
+    }
+    const GiSurface   &surface  = state.surfaces[surfaceHit.surfaceIndex];
+    const LocalShading shading  = localShadingAt(surface.geometry, surfaceHit.triangleIndex, surfaceHit.barycentric);
+    result.localPosition = shading.position;
+    result.localNormal   = shading.normal;
+
+    const glm::vec3 localRayDirection
+        = surface.localIsWorld ? ray.direction : surface.inverseLinear * ray.direction;
+    result.backface = glm::dot(shading.normal, localRayDirection) > 0.0f
+        && (shading.geometricLength <= 1.0e-12f || glm::dot(shading.geometric, localRayDirection) > 0.0f);
     return result;
 }
 
@@ -379,8 +450,12 @@ void buildSurfaceGeometry(GiSurfaceGeometry &geometry, const GiSurfaceDescriptio
     const std::size_t positionStride = description.positionStrideBytes != 0
                                          ? description.positionStrideBytes / sizeof(float)
                                          : 3;
-    const bool hasNormals = description.normals != nullptr;
-    const bool hasColors  = description.colors != nullptr;
+    // Stride 0 excludes the attribute (the documented contract): normals are
+    // then generated from the triangle geometry and colors default to white.
+    // Positions are required, so a zero position stride reads as tightly packed
+    // float triplets instead.
+    const bool hasNormals = description.normals != nullptr && description.normalStrideBytes != 0;
+    const bool hasColors  = description.colors != nullptr && description.colorStrideBytes != 0;
     if (hasNormals && description.normalStrideBytes % sizeof(float) != 0)
     {
         fail(GiError::InvalidDescription);
@@ -749,7 +824,21 @@ void updateSurfaceTransform(GiSurface &surface, const glm::mat4 &transform)
     surface.inverseTransform = glm::inverse(transform);
     surface.linear           = glm::mat3(transform);
     surface.normalMatrix     = glm::inverseTranspose(surface.linear);
-    surface.axisScale        = glm::vec3(glm::length(surface.linear[0]), glm::length(surface.linear[1]),
+    // Cached transform pieces for the per-ray / per-texel hot paths: the
+    // translation columns and the upper 3x3 of the inverse. A point through
+    // inverseLinear + inverseTranslation performs the same three dot products
+    // the 4x4-by-w=1 product performs, so results are identical while the
+    // hot loops stop re-deriving a mat3 from the mat4 on every use.
+    surface.translation         = glm::vec3(transform[3]);
+    surface.inverseLinear      = glm::mat3(surface.inverseTransform);
+    surface.inverseTranslation = glm::vec3(surface.inverseTransform[3]);
+    // Exact-identity transform: local space coincides with world space, so
+    // per-ray local transforms collapse to copies (a world-space ray is
+    // already a valid local ray) and the local direction length is exactly
+    // one. Static geometry registered in world space - the common case - then
+    // pays neither the two mat3 products nor the length / division per ray.
+    surface.localIsWorld = transform == glm::mat4(1.0f);
+    surface.axisScale    = glm::vec3(glm::length(surface.linear[0]), glm::length(surface.linear[1]),
         glm::length(surface.linear[2]));
     updateSurfaceWorldBounds(surface);
     // The cards are local-space, so a moved surface keeps its captured data;
@@ -1116,7 +1205,6 @@ void buildProbeLevels(GiPipelineState &state)
             static_cast<std::size_t>(probeGridDimension) * probeGridDimension * probeGridDimension, GiProbeLevel::Probe{});
         level.updateCursor = 0;
         level.originCell   = glm::ivec3(0);
-        level.anchor       = glm::vec3(0.0f);
         for (GiProbeLevel::Probe &probe : level.probes)
         {
             probe.radiance.assign(state.probeDirections.size(), glm::vec3(0.0f));
@@ -1141,7 +1229,6 @@ void snapProbeLevels(GiPipelineState &state, const glm::vec3 &cameraPosition)
         const std::int32_t half = dim / 2;
         const glm::ivec3   origin = glm::ivec3(glm::floor(cameraPosition / level.spacing)) - glm::ivec3(half);
         level.originCell = origin;
-        level.anchor     = glm::vec3(origin) * level.spacing;
         for (std::int32_t z = 0; z < dim; ++z)
         {
             for (std::int32_t y = 0; y < dim; ++y)
@@ -1158,6 +1245,7 @@ void snapProbeLevels(GiPipelineState &state, const glm::vec3 &cameraPosition)
                         // repopulate it.
                         probe.cell       = cell;
                         probe.position   = glm::vec3(cell) * level.spacing;
+                        probe.offset     = glm::vec3(0.0f);
                         probe.validity   = 0.0f;
                         probe.fresh      = true;
                         probe.enclosed   = false;
@@ -1268,6 +1356,9 @@ void captureCardTexels(const GiSurface &surface, GiCard &card, std::uint32_t tex
     const glm::vec3     inward        = -card.axisW;
     const float         rayLength     = card.depth + 2.0f * card.nearBias;
     const float         restart       = std::max(card.nearBias, 1.0e-5f);
+    // Every capture ray shares the ortho direction, so its inverse (the BVH
+    // slab input) is computed once per card instead of once per ray.
+    const glm::vec3     inverseInward = safeInverseDirection(inward);
     for (std::uint32_t texel = texelBegin; texel < texelEnd && texel < plane; ++texel)
     {
         const std::uint32_t x = texel % texelWidth;
@@ -1288,7 +1379,7 @@ void captureCardTexels(const GiSurface &surface, GiCard &card, std::uint32_t tex
             }
             std::uint32_t triangle = 0;
             glm::vec3     barycentric{};
-            if (!traverseSurface<false>(geometry, ray, triangle, barycentric))
+            if (!traverseSurface<false>(geometry, ray, inverseInward, triangle, barycentric))
             {
                 break;
             }

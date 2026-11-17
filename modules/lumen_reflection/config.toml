@@ -1,0 +1,68 @@
+# Default values for the [lumen_reflection] configuration section. Every key
+# is documented in docs/configuration.md; the budgets follow Lumen's
+# published reflection settings scaled for CPU evaluation.
+
+[lumen_reflection]
+enabled = true
+# Static-frame skip: with the camera, scene, and environment unchanged and
+# the temporal history converged, evaluate() returns early and the exported
+# field version stops changing (renderers polling it skip their per-frame
+# upload too). Set false to always re-trace.
+skip_unchanged_frames = true
+# Quality preset (Auto 0, Low 1, Medium 2, High 3, Ultra 4) scales the
+# resolution and ray budget; explicit keys below still cap the result.
+quality = 3
+# Reflection field resolution: 1/screen_scale of the viewport in each axis
+# (Lumen's reflection tracing runs below full resolution - a quarter ray per
+# pixel at its High tier - and the spatial/temporal filters reconstruct the
+# full-resolution response).
+screen_scale                = 4
+# Stochastic rays per field pixel per frame; the temporal accumulation is the
+# effective sample multiplier (a converged frame is hundreds of samples).
+rays_per_pixel              = 1
+# Short screen-trace distance: screen traces resolve only what the depth
+# buffer covers within this radius, then hand off to the scene trace.
+screen_ray_distance_m       = 2.0
+
+[lumen_reflection.scene]
+max_surfaces                = 256
+max_triangles_per_surface   = 200000
+
+[lumen_reflection.roughness]
+# Dedicated reflection rays are traced for roughness below ray_band_max
+# (Lumen's 0.3 dedicated band); between ray_band_max and max_trace the
+# response is resampled from the lumen_gi world radiance cache instead of
+# tracing rays (Lumen's radiance-cache reuse band); above max_trace no
+# specular environment term is evaluated (Lumen's Max Roughness To Trace).
+ray_band_max                = 0.3
+max_trace                   = 0.4
+
+[lumen_reflection.trace]
+max_distance_m              = 50.0
+# Surface offset for reflection rays; same acne/leak knob as lumen_gi's
+# trace.bias_m.
+bias_m                      = 0.02
+
+[lumen_reflection.temporal]
+# Weight of the previous frame's reprojected response when the history is
+# valid (0 = replace every frame, 0.95 = long accumulation).
+strength                    = 0.9
+# Neighborhood clamp width in standard deviations; the history is clamped to
+# mean +/- sigma * value of the current 3x3 neighborhood before blending so a
+# changed scene cannot ghost through.
+neighborhood_clamp_sigma    = 1.0
+
+[lumen_reflection.filter]
+# Physically based spatial reuse radius in pixels (BRDF-weighted averaging
+# over screen-space neighbors, Lumen's spatial reuse pass).
+spatial_reuse_radius       = 1
+# Variance-driven bilateral filter, Lumen's last-ditch pass: runs only where
+# the spatial reuse left high variance, at double strength on disoccluded
+# pixels, with tone-mapped weights so fireflies are crushed only here.
+bilateral                  = true
+bilateral_radius           = 2
+
+[lumen_reflection.debug]
+# Brute-force reference rays per texel for the Reference debug view (views
+# render at the field resolution the renderer composites).
+reference_samples           = 16

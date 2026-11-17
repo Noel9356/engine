@@ -10,6 +10,7 @@ engine_add_application(
     camera
     pbr
     lumen_gi
+    lumen_reflection
     LIBRARIES
     engine_dep_glm
     CONFIG_DIRECTORY

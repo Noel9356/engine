@@ -324,7 +324,8 @@ void rasterizeViewGBuffer(GiPipelineState &state, TaskScheduler *scheduler)
 // cache (level 0, then the coarser level 1), then the skylight.
 glm::vec3 gatherRayRadiance(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &direction)
 {
-    const GiHit hit = traceScene(state, GiRay{position, direction, std::max(state.settings.screenRayDistance, 0.05f)});
+    const float shortDistance = std::max(state.settings.screenRayDistance, 0.05f);
+    const GiShadingHit hit = traceSceneShading(state, GiRay{position, direction, shortDistance});
     if (!hit.hit)
     {
         glm::vec3 value(0.0f);
@@ -336,9 +337,8 @@ glm::vec3 gatherRayRadiance(const GiPipelineState &state, const glm::vec3 &posit
         // No usable cache here (outside both levels, or every surrounding
         // probe invalid): continue the ray through the scene instead of
         // dropping its energy, then fall back to the skylight.
-        const float shortDistance = std::max(state.settings.screenRayDistance, 0.05f);
-        const GiHit far = traceScene(state, GiRay{position + direction * shortDistance, direction,
-            std::max(state.settings.maxTraceDistance - shortDistance, 0.0f)});
+        const GiShadingHit far = traceSceneShading(
+            state, GiRay{position + direction * shortDistance, direction, std::max(state.settings.maxTraceDistance - shortDistance, 0.0f)});
         if (!far.hit)
         {
             return state.environment.skyRadiance(direction);
@@ -466,7 +466,7 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
                             direction = glm::normalize(direction - normal * (2.0f * facing - 0.05f));
                         }
                         ++raysDone;
-                        const glm::vec3 value = gatherRayRadiance(state, position + normal * 0.02f, direction);
+                        const glm::vec3 value = gatherRayRadiance(state, position + normal * state.settings.traceBias, direction);
                         glm::vec3 &target = radiance[octahedralTexelIndex(direction, 8)];
                         // An untouched texel takes the fresh sample whole;
                         // touched ones blend (accumulation without first-frame bias).
@@ -602,7 +602,10 @@ void resolvePixelIrradiance(GiPipelineState &state, TaskScheduler *scheduler)
     if (state.settings.gatherSpatialFilter > 0)
     {
         std::vector<glm::vec3> filtered(pixelCount, glm::vec3(0.0f));
-        const std::int32_t radius = static_cast<std::int32_t>(std::min(state.settings.gatherSpatialFilter / 2u, 2u));
+        // The bilateral filter radius is the configured value verbatim
+        // (gather.spatial_filter, 0 = off), bounded so the pass stays cheap.
+        const std::int32_t radius
+            = static_cast<std::int32_t>(std::min(state.settings.gatherSpatialFilter, 4u));
         parallelRange(scheduler, height, 4,
             [&](std::size_t rowBegin, std::size_t rowEnd)
             {

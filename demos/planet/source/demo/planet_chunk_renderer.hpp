@@ -37,10 +37,15 @@ public:
     // sky cloud deck, space-only atmosphere limb), then the world-anchored
     // cloud shell, then chunk terrain/water. viewProjection frustum-culls the
     // chunk draws (the planet's own selection spans the whole visible disk,
-    // including the half behind the camera); eyeAltitudeMeters scales the
-    // water material's roughness (a tight sun glint from orbit, the
-    // configured sea texture close up).
-    void rebuildDrawCommands(const glm::mat4 &viewProjection, double eyeAltitudeMeters);
+    // including the half behind the camera); eyePlanetLocal drives the
+    // per-chunk aerial perspective (distant terrain fades toward the horizon
+    // haze through the material's base color and emissive terms - the
+    // renderer's shading is albedo * light, so the fade composes exact fog:
+    // baseColor scales the terrain down by (1 - w) and the emissive term
+    // adds hazeColor * w). sunTint is the same tint the sky dome carries
+    // this frame.
+    void rebuildDrawCommands(const glm::mat4 &viewProjection, const glm::dvec3 &eyePlanetLocal,
+        const engine::planet::Vec3 &sunTint);
     void destroy();
 
     // Sky backdrop (see engine/planet/atmosphere.hpp): a static gradient

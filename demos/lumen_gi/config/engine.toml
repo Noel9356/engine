@@ -31,9 +31,9 @@ backend = "headless"
 clear_color = [0.02, 0.02, 0.03, 1.0]
 
 [trust]
-# The renderer acquires five capabilities now that it consumes the optional
-# lumen_gi probe grid, which the trust gate flags as "broad"; first-party
-# modules are trusted by name.
+# The renderer acquires six capabilities now that it consumes the optional
+# lumen_gi probe grid and the lumen_reflection field, which the trust gate
+# flags as "broad"; first-party modules are trusted by name.
 trustModules = ["renderer"]
 
 [window]

@@ -248,13 +248,14 @@ private:
         settings.indirectTexelsPerFrame   = static_cast<std::uint64_t>(
             integer("lighting.indirect_texels_per_frame", 65536, 1024, 16777216));
         settings.indirectRaysPerTexel     = static_cast<std::uint32_t>(
-            integer("lighting.indirect_rays_per_texel", 4, 1, 64));
+            integer("lighting.indirect_rays_per_texel", 1, 1, 64));
         settings.sunShadows               = boolean("lighting.sun_shadows", true);
         settings.pointLightShadows        = boolean("lighting.point_light_shadows", false);
         settings.lightingUpdateSpeed      = static_cast<float>(floating("lighting.update_speed", 1.0, 0.05, 16.0));
         settings.indirectTemporalBlend =
-            static_cast<float>(floating("lighting.indirect_temporal_blend", 0.8, 0.0, 0.99));
+            static_cast<float>(floating("lighting.indirect_temporal_blend", 0.85, 0.0, 0.99));
         settings.maxTraceDistance         = static_cast<float>(floating("trace.max_distance_m", 50.0, 1.0, 2000.0));
+        settings.traceBias                = static_cast<float>(floating("trace.bias_m", 0.02, 0.001, 0.5));
         settings.probeSpacing             = static_cast<float>(floating("probes.spacing_m", 2.0, 0.25, 32.0));
         settings.probeDirectionResolution = static_cast<std::uint32_t>(
             integer("probes.direction_resolution", 32, 4, 64));
@@ -263,12 +264,14 @@ private:
         settings.probeRaysPerUpdate       = static_cast<std::uint32_t>(
             integer("probes.rays_per_update", 256, 1, 4096));
         settings.probeHysteresis          = static_cast<float>(floating("probes.hysteresis", 0.2, 0.0, 0.99));
+        settings.probeRelocationMargin    = static_cast<float>(
+            floating("probes.relocation_margin", 0.05, 0.005, 0.25));
         settings.probeLevel1SpacingFactor =
             static_cast<float>(floating("probes.level1_spacing_factor", 4.0, 2.0, 16.0));
         settings.screenRayDistance =
             static_cast<float>(floating("gather.screen_ray_distance_m", 2.0, 0.05, 64.0));
         settings.gatherScreenScale        = static_cast<std::uint32_t>(integer("gather.screen_scale", 8, 1, 64));
-        settings.gatherRaysPerProbe       = static_cast<std::uint32_t>(integer("gather.rays_per_probe", 16, 1, 256));
+        settings.gatherRaysPerProbe       = static_cast<std::uint32_t>(integer("gather.rays_per_probe", 32, 1, 256));
         settings.gatherImportanceSampling = boolean("gather.importance_sampling", true);
         settings.gatherTemporalBlend      = static_cast<float>(floating("gather.temporal_blend", 0.85, 0.0, 0.99));
         settings.gatherSpatialFilter      = static_cast<std::uint32_t>(integer("gather.spatial_filter", 3, 0, 9));

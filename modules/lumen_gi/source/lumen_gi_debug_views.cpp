@@ -256,7 +256,7 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                             // Indirect: cosine-sampled bounce.
                             throughput *= hitAlbedo;
                             direction = glm::normalize(makeBasis(hit.normal) * cosineHemisphere(randomFloat(seed), randomFloat(seed)));
-                            origin    = hit.position + hit.normal * 0.02f;
+                            origin    = hit.position + hit.normal * constState.settings.traceBias;
                         }
                         sum += pathRadiance;
                     }

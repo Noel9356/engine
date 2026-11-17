@@ -80,10 +80,12 @@ public:
 
     // Cloud shadow factor in [0, 1] for one surface point: how much of the
     // sunlight the cloud layer blocks there. The coverage field is sampled
-    // at the point's radial direction (the overhead-bank approximation), so
-    // the shadows agree with the cloud layer a consumer paints from the
-    // same field - from orbit the banks and their shadows line up, from the
-    // ground the deck overhead matches the shade on the terrain.
+    // along the SUN RAY through the point (the bank that actually blocks
+    // this point's sunlight sits up-sun at the shell altitude), so shadows
+    // fall away from their banks the way real cloud shadows do - from orbit
+    // the banks and their displaced shadows read as a pair, from the ground
+    // the deck up-sun matches the shade on the terrain. Night points (the
+    // sun at or below the local horizon) return 0 - no direct sun to block.
     // lowPassCutoffMeters band-limits the coverage like every other field
     // (coarse LOD chunks get smooth shadows instead of speckle). Returns 0
     // when cloud shadows are disabled.

@@ -19,17 +19,19 @@ worker_count            = 0
 # Fixed sun for terrain shading; warm afternoon light at ~40 degrees
 # elevation. A high noon sun flattens relief (everything lights the same);
 # the lower elevation models hills and cliffs with real cast shading while
-# still keeping land mid-tone. The headless renderer exports LINEAR
-# framebuffer values, so exposure is tuned for linear output: albedo x
-# (ambient + sun x NdotL) should land mid-tones (~0.2-0.4) for land,
-# ~0.9+ only for snow.
+# still keeping land mid-tone. The sun dominates the ambient by ~50:1 so the
+# terminator reads from space and backlit slopes go properly dark - with a
+# fat ambient the night side of the globe photographs as dusk and terrain
+# flattens into clay. The headless renderer exports LINEAR framebuffer
+# values, so exposure is tuned for linear output: albedo x (ambient + sun x
+# NdotL) should land mid-tones (~0.2-0.4) for land, ~0.9+ only for snow.
 # NOTE: the [planet] cloud_shadow_sun_direction below must carry the SAME
 # direction - the planet module's cloud shadows are cast by this sun.
-ambient_intensity = 0.24
+ambient_intensity = 0.06
 sun_color         = [1.0, 0.96, 0.88]
 sun_direction     = [0.50, 0.45, 0.74]
 sun_enabled       = true
-sun_intensity     = 1.65
+sun_intensity     = 3.2
 
 [planet]
 # The demo's planet: seed and radius can be overridden per run with --seed /

@@ -285,6 +285,24 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
     {
         return;
     }
+    // Supersampled framebuffer: the rasterizers already size everything from
+    // framebufferWidth/Height, so scaling here turns every shaded pixel into a
+    // sample and endFrame's resolve is the only presentation-side change.
+    const std::uint32_t sampleScaleX = sampleScaleX_;
+    const std::uint32_t sampleScaleY = sampleScaleY_;
+    const std::uint64_t bufferWidth64  = static_cast<std::uint64_t>(width) * sampleScaleX;
+    const std::uint64_t bufferHeight64 = static_cast<std::uint64_t>(height) * sampleScaleY;
+    if (bufferWidth64 > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())
+        || bufferHeight64 > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
+    {
+        framebufferWidth = framebufferHeight = 0;
+        color.clear();
+        depth.clear();
+        pixelLocks.clear();
+        return;
+    }
+    width  = static_cast<std::uint32_t>(bufferWidth64);
+    height = static_cast<std::uint32_t>(bufferHeight64);
     if (framebufferWidth != width || framebufferHeight != height)
     {
         if (width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())
@@ -355,8 +373,12 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
 }
 
 // Presents: copies the CPU raster into the window surface's locked pixel
-// buffer. Matching full-surface strides (the common case) move the frame in
-// one memcpy; mismatching strides fall back to a row-by-row copy.
+// buffer. With supersampling active, each output pixel is the average of its
+// sample block - the software counterpart of the Vulkan backend's
+// DONT_CARE-store + RESOLVE_MODE_AVERAGE multisample resolve (averaging the
+// encoded UNORM samples, matching the space the fur path blends in).
+// Matching full-surface strides (the common case) move the frame in one
+// memcpy; mismatching strides fall back to a row-by-row copy.
 void HeadlessBackend::endFrame()
 {
     window::SurfacePixels pixels;
@@ -366,18 +388,62 @@ void HeadlessBackend::endFrame()
     }
     const std::uint32_t rows    = std::min(framebufferHeight, pixels.height);
     const std::uint32_t columns = std::min(framebufferWidth, pixels.width);
-    if (rows == framebufferHeight && columns == framebufferWidth
-        && pixels.strideBytes == static_cast<std::size_t>(framebufferWidth) * 4u)
+    if (sampleScaleX_ == 1u && sampleScaleY_ == 1u)
     {
-        std::memcpy(pixels.rgba, color.data(), static_cast<std::size_t>(rows) * pixels.strideBytes);
+        if (rows == framebufferHeight && columns == framebufferWidth
+            && pixels.strideBytes == static_cast<std::size_t>(framebufferWidth) * 4u)
+        {
+            std::memcpy(pixels.rgba, color.data(), static_cast<std::size_t>(rows) * pixels.strideBytes);
+        }
+        else
+        {
+            for (std::uint32_t y = 0; y < rows; ++y)
+            {
+                std::memcpy(pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes,
+                    color.data() + static_cast<std::size_t>(y) * framebufferWidth * 4,
+                    static_cast<std::size_t>(columns) * 4);
+            }
+        }
     }
     else
     {
-        for (std::uint32_t y = 0; y < rows; ++y)
+        // Resolve: framebufferWidth/Height are sample-space; each output pixel
+        // averages its sampleScaleX x sampleScaleY block of encoded samples.
+        const std::uint32_t outputRows    = std::min(framebufferHeight / sampleScaleY_, pixels.height);
+        const std::uint32_t outputColumns = std::min(framebufferWidth / sampleScaleX_, pixels.width);
+        for (std::uint32_t y = 0; y < outputRows; ++y)
         {
-            std::memcpy(pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes,
-                color.data() + static_cast<std::size_t>(y) * framebufferWidth * 4,
-                static_cast<std::size_t>(columns) * 4);
+            std::uint8_t *destination
+                = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+            for (std::uint32_t x = 0; x < outputColumns; ++x)
+            {
+                std::uint32_t accumulated[4] = {0, 0, 0, 0};
+                const std::uint8_t *sampleBase
+                    = color.data()
+                    + (static_cast<std::size_t>(y) * sampleScaleY_ * framebufferWidth
+                       + static_cast<std::size_t>(x) * sampleScaleX_)
+                        * 4;
+                for (std::uint32_t sampleY = 0; sampleY < sampleScaleY_; ++sampleY)
+                {
+                    const std::uint8_t *sampleRow
+                        = sampleBase + static_cast<std::size_t>(sampleY) * framebufferWidth * 4;
+                    for (std::uint32_t sampleX = 0; sampleX < sampleScaleX_; ++sampleX)
+                    {
+                        const std::uint8_t *sample = sampleRow + static_cast<std::size_t>(sampleX) * 4;
+                        accumulated[0] += sample[0];
+                        accumulated[1] += sample[1];
+                        accumulated[2] += sample[2];
+                        accumulated[3] += sample[3];
+                    }
+                }
+                const std::uint32_t sampleCount = sampleScaleX_ * sampleScaleY_;
+                const std::uint32_t half        = sampleCount / 2u;
+                destination[0] = static_cast<std::uint8_t>((accumulated[0] + half) / sampleCount);
+                destination[1] = static_cast<std::uint8_t>((accumulated[1] + half) / sampleCount);
+                destination[2] = static_cast<std::uint8_t>((accumulated[2] + half) / sampleCount);
+                destination[3] = static_cast<std::uint8_t>((accumulated[3] + half) / sampleCount);
+                destination    += 4;
+            }
         }
     }
     window_->unlockSurfacePixels(window_->self, surface_);
@@ -949,8 +1015,11 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
         return;
     }
 
-    const float scaleX  = data.framebufferScale[0];
-    const float scaleY  = data.framebufferScale[1];
+    // The overlay's display-to-framebuffer scale lands in surface pixels; the
+    // supersampled framebuffer adds its sample factors on top, so UI quads
+    // cover the same screen area and the resolve keeps them crisp.
+    const float scaleX  = data.framebufferScale[0] * static_cast<float>(sampleScaleX_);
+    const float scaleY  = data.framebufferScale[1] * static_cast<float>(sampleScaleY_);
     const auto  channel = [](std::uint32_t colorValue, unsigned shift)
     { return static_cast<float>((colorValue >> shift) & 0xffu) / 255.0f; };
     const auto edge = [](float ax, float ay, float bx, float by, float px, float py)
@@ -1871,6 +1940,16 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 directLights_.data(),
                                 static_cast<std::uint32_t>(directLights_.size()),
                                 probeGrid_.valid() ? &probeGrid_ : nullptr);
+                            // Indirect specular (lumen_reflection field hook):
+                            // the field texel this pixel projects into carries
+                            // the expected GGX-lobe response of its material,
+                            // so the add is the whole composite (linear space,
+                            // before tone mapping - see shadeTrianglePixel's
+                            // twin of this block).
+                            if (reflectionField_.valid())
+                            {
+                                shaded += sampleReflectionField(reflectionField_, interpolatedPosition);
+                            }
                             }
                         }
 
@@ -2322,6 +2401,15 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             lights,
             lightCount,
             probeGrid_.valid() ? &probeGrid_ : nullptr);
+
+        // Indirect specular (lumen_reflection field hook): the field texel
+        // this pixel projects into carries the expected GGX-lobe response of
+        // its material, so the add is the whole composite. Linear space, per
+        // the module's estimator contract; tone mapping happens below.
+        if (reflectionField_.valid())
+        {
+            shaded += sampleReflectionField(reflectionField_, interpolatedPosition);
+        }
     }
 
     if (hasEmissive)

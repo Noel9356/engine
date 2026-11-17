@@ -1,3 +1,8 @@
+# Default values for the [renderer] configuration section; every key is
+# documented in docs/configuration.md. Anti-aliasing is on by default: the
+# Vulkan backend resolves a multisample target and the headless rasterizer
+# supersamples (integer grid) with an averaging resolve.
+
 [renderer]
 anisotropy_level                     = 1.0
 auto_config                          = false
@@ -11,6 +16,10 @@ frustum_culling                      = true
 fur_enabled                          = true
 fur_max_layers                       = 16
 gi_indirect_lighting                 = true
+# Consume the optional lumen_reflection capability's screen-space field and
+# add its indirect specular radiance to the shaded pixels (see the module's
+# overview); false, or the module being absent, keeps the pre-hook specular.
+reflection_indirect_specular         = true
 gpu_timestamps_enabled               = false
 headless_band_split_min_screen_fraction = 0.125
 headless_band_split_triangles        = 4096
@@ -25,8 +34,10 @@ max_frames_in_flight                 = 3
 max_material_sets_per_renderer       = 256
 max_pending_uploads                  = 64
 max_textures_per_renderer            = 256
+# Anti-aliasing sample count: 4 = 2x2 (Vulkan multisample resolve, headless
+# supersampling); 2 = the cheap tier (headless 2x1), 1 = off.
+msaa_samples                         = 4
 memory_budget_update_interval_frames = 120
-msaa_samples                         = 1
 parallel_triangle_threshold          = 4096
 pipeline_cache_mb                    = 64
 pixels_per_lock_group                = 16

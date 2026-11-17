@@ -33,27 +33,29 @@ Every key of the `[lumen_gi]` configuration section, in TOML path form. All keys
 | `capture.texels_per_frame` | 4096-16777216 | `262144` | Card capture budget (Lumen's fixed 512x512 per-frame capture budget). Capture is incremental and runs only for cards that are not captured yet (new or changed surfaces), nearest to the camera first; a static scene captures once. |
 | `lighting.direct_texels_per_frame` | 1024-16777216 | `65536` | Direct-lighting evaluation budget (Lumen: 1024x1024), in layered card texels. Each card has a rotating cursor, so every texel is refreshed once per cycle even for cards larger than the budget; untouched texels keep their cached radiance. |
 | `lighting.indirect_texels_per_frame` | 1024-16777216 | `65536` | Indirect gather budget (Lumen: 512x512), same cursor scheme. Each update propagates one more bounce through the feedback loop. |
-| `lighting.indirect_rays_per_texel` | 1-64 | `4` | Stratified cosine rays per refreshed texel (previously tied to `gather.rays_per_probe`); accumulated across updates by the history below. |
+| `lighting.indirect_rays_per_texel` | 1-64 | `1` | Stratified cosine rays per refreshed texel (previously tied to `gather.rays_per_probe`). One ray per update keeps the per-pass cost at one trace per refreshed texel; the rotating strata and the history below accumulate the samples across updates, so a texel converges on the same expected radiance with the noise filtered by the temporal blend instead of by ray count. |
 | `lighting.sun_shadows` | bool | `true` | Shadow rays for the sun's direct lighting; off makes card lighting cheaper but indirect shadows disappear. |
 | `lighting.point_light_shadows` | bool | `false` | Shadow rays for point/spot (and directional) direct lights in card lighting, the final-image view and the reference. Off by default like the renderer's light loop. |
 | `lighting.update_speed` | 0.05-16 | `1.0` | Scales how fast the cached lighting refreshes relative to the budgets (Lumen's "Lumen Scene Lighting Update Speed"); multiplies `lighting.direct_texels_per_frame` and `lighting.indirect_texels_per_frame` (on top of `quality`). |
-| `lighting.indirect_temporal_blend` | 0-1 | `0.8` | Weight of the cached history when a texel is refreshed: 0 replaces it with the fresh gather (noisy), values near 1 almost never change it. The first update of a texel takes the fresh sample whole (history ramp-up), then the weight settles at this value. |
+| `lighting.indirect_temporal_blend` | 0-1 | `0.85` | Weight of the cached history when a texel is refreshed: 0 replaces it with the fresh gather (noisy), values near 1 almost never change it. The first update of a texel takes the fresh sample whole (history ramp-up), then the weight settles at this value. Raised together with the one-ray-per-refresh gather so the sparser fresh samples are smoothed by the accumulation instead of showing as noise. |
 
 ## Tracing
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
 | `trace.max_distance_m` | 1-2000 | `50.0` | Maximum ray distance for shadow, gather, and probe rays (Lumen's "Max Trace Distance"; too-small values leak light into large enclosed areas). |
+| `trace.bias_m` | 0.001-0.5 | `0.02` | Surface offset for shadow, gather, and probe rays. One bias behind every trace site: sun shadow rays scale it by the grazing factor, direct-light and card-gather rays offset along the normal, screen-gather rays along the ray direction, and world-probe rays along each ray's own direction (so a probe sitting exactly on a surface plane does not self-intersect it). |
 
 ## World-space radiance cache
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
-| `probes.spacing_m` | 0.25-32 | `2.0` | Level-0 probe lattice spacing; level 1 uses `spacing x level1_spacing_factor`. Each level is a camera-centered 9x9x9 clip box. |
+| `probes.spacing_m` | 0.25-32 | `2.0` | Level-0 probe lattice spacing; level 1 uses `spacing x level1_spacing_factor`. Each level is a camera-centered 9x9x9 clip box. Probes whose lattice cell lands on or inside geometry relocate their trace origin off the surface (DDGI rules, per-axis clamp at half the spacing); the exported lattice stays regular. |
 | `probes.direction_resolution` | 4-64 | `32` | Octahedral radiance map resolution per world probe (Lumen uses 32x32 for world probes). Exported through `GiProbeHeader`. |
 | `probes.updates_per_frame` | 1-1458 | `64` | Probes re-traced per frame per level (round-robin; Lumen amortizes probe updates the same way); probes that scrolled into the clip box are updated first. |
 | `probes.rays_per_update` | 1-4096 | `256` | Rays traced per probe update. The direction map is refreshed in rotating strata (`direction_resolution^2 / rays_per_update` updates per full refresh); a probe without data traces every direction once. |
 | `probes.hysteresis` | 0-0.99 | `0.2` | Fraction of the previous radiance kept when a probe texel is re-traced. Higher values are more stable but adapt slower to light changes. |
+| `probes.relocation_margin` | 0.005-0.25 | `0.05` | Near-surface clearance a relocated probe keeps off the geometry it was pushed away from, as a fraction of the level spacing. A boundary probe steps off a surface plane by its slab thickness plus this margin, and the clear-space relax rule holds probes at exactly this distance off a face, so they never drift back across it. Lower values hug thin geometry more tightly (for probe counts that must resolve small-scale detail); higher values trade proximity for stability. |
 | `probes.level1_spacing_factor` | 2-16 | `4.0` | Coarser level's spacing multiplier (level 1 covers that many times the extent). Both levels scroll with the camera: crossing a lattice cell recycles only the plane of probes that enters the box. |
 
 ## Screen-space final gather (debug view)
@@ -63,7 +65,7 @@ The gather only feeds the debug views (the renderer consumes the world probe gri
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
 | `gather.screen_scale` | 1-64 | `8` | Screen probes sit on a jittered grid at 1/screen_scale of the internal resolution per axis (Lumen's Screen Space Radiance Cache downsampling). |
-| `gather.rays_per_probe` | 1-256 | `16` | Rays traced per screen probe per frame, stratified over the probe's 8x8 octahedral map (Lumen's screen probe resolution); the map persists and temporally accumulates. |
+| `gather.rays_per_probe` | 1-256 | `32` | Rays traced per screen probe per frame, stratified over the probe's 8x8 octahedral map (Lumen's screen probe resolution); the map persists and temporally accumulates. |
 | `gather.importance_sampling` | bool | `true` | Half the rays are importance-selected by the probe's previous radiance (Lumen's Screen Space Radiance Cache reuse), the rest stay cosine-stratified. |
 | `gather.screen_ray_distance_m` | 0.05-64 | `2.0` | Screen probe ray length; misses resolve from the world cache (level 0, then level 1), then the skylight - Lumen's integration rule. |
 | `gather.temporal_blend` | 0-0.99 | `0.85` | Full-resolution temporal accumulation against the reprojection of the previous frame (Lumen's Final Gather Lighting Update Speed analog). |

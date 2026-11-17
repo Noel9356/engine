@@ -55,6 +55,14 @@ struct HeadlessBackendOptions
     bool        frustumCullingEnabled     = true;
     bool        backFaceCullingEnabled    = true;
 
+    // Anti-aliasing: the renderer.msaa_samples request (1..8). The headless
+    // path maps it onto an integer supersampling grid - the smallest grid of
+    // {1x1, 2x1, 2x2, 4x2} holding at least the requested count (1->1, 2->2,
+    // 3/4->4, 5..8->8 samples per pixel) - rasterizes that many pixels per
+    // output pixel and averages each block at presentation, the software
+    // counterpart of the Vulkan backend's multisample resolve.
+    std::uint32_t msaaSamples             = 1;
+
     bool           lodEnabled                = true;
     // Tile-based parallel rasterization (renderer.headless_tile_parallel,
     // default OFF). Bins triangles into 64x64 screen tiles with exclusive
@@ -102,6 +110,27 @@ public:
           bandSplitMinimumScreenFraction_(options.bandSplitMinimumScreenFraction),
           lodMinTriangles_(options.lodMinTriangles)
     {
+        // Supersampling grid from the requested sample count (see
+        // HeadlessBackendOptions::msaaSamples); sampleScaleX_/Y_ stay 1 when
+        // the request is out of range, leaving the unfiltered path.
+        const std::uint32_t samples = options.msaaSamples >= 1u && options.msaaSamples <= 8u
+            ? options.msaaSamples
+            : 1u;
+        if (samples >= 5u)
+        {
+            sampleScaleX_ = 4u;
+            sampleScaleY_ = 2u;
+        }
+        else if (samples >= 3u)
+        {
+            sampleScaleX_ = 2u;
+            sampleScaleY_ = 2u;
+        }
+        else if (samples == 2u)
+        {
+            sampleScaleX_ = 2u;
+            sampleScaleY_ = 1u;
+        }
         directLights_.reserve(direct_lighting::maxDirectLights);
     }
 
@@ -155,6 +184,25 @@ public:
         copied.probes     = probeGridProbes_.empty() ? nullptr : probeGridProbes_.data();
         buildProbeLevels(copied);
         probeGrid_ = copied;
+    }
+
+    // Copies the borrowed lumen_reflection field; the rasterizer's pixel
+    // path then adds the indirect specular radiance (bilinear field sample
+    // through the field's own camera) to every shaded opaque pixel after the
+    // PBR pass and before tone mapping. An empty snapshot keeps the legacy
+    // specular-only shading.
+    void setReflectionField(const ReflectionField &field) override
+    {
+        reflectionField_      = ReflectionField{};
+        reflectionRadiance_.clear();
+        if (field.valid())
+        {
+            const std::size_t texelCount
+                = static_cast<std::size_t>(field.header.width) * field.header.height;
+            reflectionRadiance_.assign(field.radiance, field.radiance + texelCount * 3);
+            reflectionField_.header = field.header;
+            reflectionField_.radiance = reflectionRadiance_.data();
+        }
     }
 
     void setEnvironment(const pbr::PbrEnvironment &environment) override
@@ -433,15 +481,28 @@ private:
     GiProbeGrid                     probeGrid_{};
     std::vector<lumen_gi::GiProbe> probeGridProbes_;
 
+    // lumen_reflection field hook: owned radiance copy plus the borrowed view
+    // the pixel path samples. Kept valid between frames; setReflectionField
+    // replaces it wholesale.
+    std::vector<float>                 reflectionRadiance_;
+    ReflectionField                    reflectionField_{};
+
     std::uint32_t viewportWidth  = 0;
     std::uint32_t viewportHeight = 0;
 
     // CPU framebuffer: RGBA8 color, float depth (1 = far), and one lock byte
-    // per pixelsPerLockGroup_ pixels for parallel depth updates.
+    // per pixelsPerLockGroup_ pixels for parallel depth updates. The buffers
+    // carry the supersampled resolution (framebuffer = viewport scaled by
+    // sampleScaleX_/Y_); endFrame averages each block down to the surface.
     std::vector<std::uint8_t> color;
     std::vector<float>        depth;
     std::uint32_t             framebufferWidth  = 0;
     std::uint32_t             framebufferHeight = 0;
+
+    // Supersampling factors per output pixel (see HeadlessBackendOptions::
+    // msaaSamples); 1/1 reproduces the legacy pixel-for-pixel presentation.
+    std::uint32_t sampleScaleX_ = 1;
+    std::uint32_t sampleScaleY_ = 1;
 
     std::vector<std::uint8_t> pixelLocks;
 

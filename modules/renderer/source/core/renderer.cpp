@@ -12,6 +12,7 @@
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
+#include <engine/lumen_reflection/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
@@ -93,6 +94,11 @@ struct RendererRecord
     bool                                  probeGridInitialized    = false;
     std::vector<lumen_gi::GiProbe>        probeScratch{};
     lumen_gi::GiProbeHeader               probeHeader{};
+    // lumen_reflection field snapshot, same version pattern.
+    std::uint64_t                         reflectionFieldVersion  = 0;
+    bool                                  reflectionFieldInitialized = false;
+    std::vector<float>                    reflectionScratch{};
+    lumen_reflection::ReflectionFieldHeader reflectionHeader{};
     std::chrono::steady_clock::time_point frameStart{};
     bool                                  frameTimingActive = false;
 
@@ -141,6 +147,7 @@ public:
         pbr_            = context.tryAcquireCapability<pbr::PbrCapability>();
         directLighting_ = context.tryAcquireCapability<direct_lighting::DirectLightingCapability>();
         lumenGi_        = context.tryAcquireCapability<lumen_gi::LumenGiCapability>();
+        lumenReflection_ = context.tryAcquireCapability<lumen_reflection::LumenReflectionCapability>();
         context_        = &context;
         profiler_       = &context.profiler();
         readConfiguration();
@@ -257,6 +264,7 @@ private:
         pipelineCacheMaximumBytes_        = 64u * 1024u * 1024u;
         memoryBudgetUpdateIntervalFrames_ = 120;
         giIndirectLighting_               = true;
+        reflectionIndirectSpecular_       = true;
         configuredClearColor_                    = {0.0f, 0.0f, 0.0f, 1.0f};
         headlessTransformCacheBudgetBytes_       = 32u * 1024u * 1024u;
         frustumCulling_                          = true;
@@ -424,6 +432,8 @@ private:
         lodEnabled_      = context.configurationBooleanInSection("renderer", "lod_enabled").value_or(true);
         giIndirectLighting_
             = context.configurationBooleanInSection("renderer", "gi_indirect_lighting").value_or(true);
+        reflectionIndirectSpecular_
+            = context.configurationBooleanInSection("renderer", "reflection_indirect_specular").value_or(true);
         furEnabled_ = context.configurationBooleanInSection("renderer", "fur_enabled").value_or(true);
         if (const auto furMaximumLayers = context.configurationIntegerInSection("renderer", "fur_max_layers");
             furMaximumLayers.has_value())
@@ -503,10 +513,11 @@ private:
             instanceStreamMegabytes_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*instanceStreamMb, 1, 64));
         }
 
-        // MSAA sample count: 1 (the default) keeps the legacy render-pass path
-        // byte-for-byte; > 1 selects the capability-checked dynamic-rendering
-        // resolve path (falling back to 1 with a logged note when the device,
-        // or the picked formats, do not support it).
+        // MSAA sample count: > 1 selects the capability-checked
+        // dynamic-rendering resolve path on Vulkan (falling back to 1 with a
+        // logged note when the device, or the picked formats, do not support
+        // it) and the matching integer supersampling grid on the headless
+        // rasterizer. Anti-aliasing ships enabled by default.
         if (const auto msaa = context.configurationIntegerInSection("renderer", "msaa_samples"); msaa.has_value())
         {
             if (*msaa < 1 || *msaa > 8)
@@ -639,10 +650,10 @@ private:
         instanceStreamMegabytes_                 = bigVram ? 8u : 4u;
         textureMipmapsEnabled_                   = true;
 
-        // Quality knobs scale with the accelerator: MSAA only where the
-        // memory bandwidth is there, anisotropy capped by the device limit
-        // at sampler creation.
-        msaaSamples_        = bigVram ? 4u : 1u;
+        // Quality knobs scale with the accelerator: MSAA everywhere (the
+        // 4-sample tier where the memory bandwidth is there, 2 otherwise),
+        // anisotropy capped by the device limit at sampler creation.
+        msaaSamples_        = bigVram ? 4u : 2u;
         anisotropyLevel_    = gpu.samplerAnisotropyAvailable ? (discrete ? 8.0f : 4.0f) : 1.0f;
 
         // Headless rasterizer threading scales with the CPU shape: tile
@@ -701,7 +712,7 @@ private:
             .version              = "0.1.0",
             .providedCapabilities = {"renderer", "renderer.vulkan", "renderer.headless"},
             .requiredCapabilities = {"window"},
-            .optionalCapabilities = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi"}};
+            .optionalCapabilities = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi", "lumen_reflection"}};
     }
 
     RendererRecord *recordFor(RendererHandle renderer)
@@ -823,6 +834,7 @@ private:
             headlessOptions.lodEnabled                = lodEnabled_;
             headlessOptions.tileParallelEnabled       = headlessTileParallel_;
             headlessOptions.taskScheduler             = context_ != nullptr ? &context_->taskScheduler() : nullptr;
+            headlessOptions.msaaSamples                = msaaSamples_;
 
             headlessOptions.parallelTriangleThreshold  = parallelTriangleThreshold_;
             headlessOptions.pixelsPerLockGroup         = pixelsPerLockGroup_;
@@ -1001,6 +1013,44 @@ private:
         {
             record->backendInstance->setProbeGrid(GiProbeGrid{});
             record->probeGridInitialized = true;
+        }
+        // The lumen_reflection field follows the same version pattern: a
+        // null/zero-capacity copyField reports the current version, and only
+        // a changed version pays for the snapshot copy. When the module is
+        // absent or the hook is disabled by configuration, the backend keeps
+        // whatever it had (an empty field at creation) and shading stays at
+        // the pre-hook specular. The snapshot may lag the latest evaluate()
+        // by one frame, like the probe grid above.
+        if (reflectionIndirectSpecular_ && lumenReflection_ != nullptr && lumenReflection_->copyField != nullptr)
+        {
+            std::uint64_t version = 0;
+            lumen_reflection::ReflectionFieldHeader header{};
+            lumenReflection_->copyField(lumenReflection_->self, nullptr, 0, &header, &version);
+            if (!record->reflectionFieldInitialized || record->reflectionFieldVersion != version
+                || record->reflectionHeader.width != header.width || record->reflectionHeader.height != header.height)
+            {
+                const std::size_t texelCount = static_cast<std::size_t>(header.width) * header.height;
+                record->reflectionScratch.resize(texelCount * 3);
+                if (texelCount != 0)
+                {
+                    lumenReflection_->copyField(lumenReflection_->self,
+                        record->reflectionScratch.data(),
+                        static_cast<std::uint32_t>(texelCount),
+                        &record->reflectionHeader,
+                        &version);
+                }
+                ReflectionField field;
+                field.header  = record->reflectionHeader;
+                field.radiance = record->reflectionScratch.data();
+                record->backendInstance->setReflectionField(field);
+                record->reflectionFieldVersion     = version;
+                record->reflectionFieldInitialized = true;
+            }
+        }
+        else if (!record->reflectionFieldInitialized)
+        {
+            record->backendInstance->setReflectionField(ReflectionField{});
+            record->reflectionFieldInitialized = true;
         }
         record->frameStart        = std::chrono::steady_clock::now();
         record->frameTimingActive = true;
@@ -1684,6 +1734,8 @@ private:
     bool                 frustumCulling_                    = true;
     bool                 backFaceCulling_                   = true;
     bool                 giIndirectLighting_                = true; // [renderer] gi_indirect_lighting
+    lumen_reflection::LumenReflectionCapability *lumenReflection_ = nullptr; // borrowed from lumen_reflection
+    bool                 reflectionIndirectSpecular_        = true; // [renderer] reflection_indirect_specular
     bool                 lodEnabled_                        = true;
     bool                 furEnabled_                        = true;
     std::uint32_t        furMaximumLayers_                  = 16;
@@ -1695,7 +1747,7 @@ private:
     std::uint32_t        instanceStreamMegabytes_           = 4;
     bool                 textureMipmapsEnabled_             = false;
     float                anisotropyLevel_                   = 1.0f;
-    std::uint32_t        msaaSamples_                       = 1u;
+    std::uint32_t        msaaSamples_                       = 4u;
     bool                 srgbOutput_                        = false;
 
     // Headless rasterizer tuning, held as members so readConfiguration (with
@@ -1732,7 +1784,8 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
 {
     static const char *const providedCapabilities[] = {"renderer", "renderer.vulkan", "renderer.headless"};
     static const char *const requiredCapabilities[] = {"window"};
-    static const char *const optionalCapabilities[] = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi"};
+    static const char *const optionalCapabilities[]
+        = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi", "lumen_reflection"};
 
     static const engine::EngineModuleEntryTable entry = {
         .abiVersion              = engine::engineModuleAbiVersion,
@@ -1744,7 +1797,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
         .requiredCapabilities    = requiredCapabilities,
         .requiredCapabilityCount = 1,
         .optionalCapabilities    = optionalCapabilities,
-        .optionalCapabilityCount = 4,
+        .optionalCapabilityCount = 5,
         .declaredPermissions     = nullptr,
         .declaredPermissionCount = 0,
     };

@@ -329,7 +329,7 @@ struct PlanetGenerationParams
     // instead of a painted stripe.
     double waterFoamWidthMeters = 2.5;  // depth band under the surface that reads as surf; wide
                                         // enough to read as a breaker line from a standing eye
-    double waterFoamStrength    = 0.70; // 0 = no foam, 1 = solid white surf band
+    double waterFoamStrength    = 0.85; // 0 = no foam, 1 = solid white surf band
     // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
     // below seaIceTemperature (the same climate field that drives the land's
     // freeze line, so ice caps and snowy poles line up with an organic, noisy

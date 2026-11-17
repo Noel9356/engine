@@ -653,7 +653,6 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
             leaves.push_back(coord);
         }
     }
-
     // ---- phase 2: 2:1 balancing -------------------------------------------------
     //
     // Without balancing, the distance-refinement rule can place rendered
@@ -662,12 +661,20 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
     // steps, which reads as seams at the LOD ring. The fixpoint forces splits
     // along the coarse chain until every pair of adjacent rendered leaves
     // differs by at most one depth level.
+    //
+    // A force-split only ever makes material FINER: previously balanced
+    // leaves keep their balance (their neighborhoods only improved), so the
+    // only violations a later pass can find involve the leaves the previous
+    // pass CREATED. Each pass therefore walks only the range appended since
+    // the previous one - pass 0 covers the whole descent, later passes the
+    // force-split children.
     constexpr std::uint32_t kMaxBalancePasses = 12;
+    std::size_t             checkBegin = 0;
     for (std::uint32_t pass = 0; pass < kMaxBalancePasses; ++pass)
     {
         bool changed = false;
         const std::size_t passLeafCount = leaves.size();
-        for (std::size_t index = 0; index < passLeafCount; ++index)
+        for (std::size_t index = checkBegin; index < passLeafCount; ++index)
         {
             const ChunkCoord leaf = leaves[index];
             if (leaf.depth == 0)
@@ -727,8 +734,9 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
         {
             break;
         }
+        // Next pass: only the leaves this pass appended (see the phase note).
+        checkBegin = passLeafCount;
     }
-
     // ---- phase 3: emit ----------------------------------------------------------
     //
     // Only nodes that still render (balancing may have split some) in

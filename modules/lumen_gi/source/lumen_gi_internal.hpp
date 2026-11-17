@@ -162,21 +162,29 @@ struct GiSettings
     std::uint64_t captureTexelsPerFrame      = 262144;
     std::uint64_t directTexelsPerFrame       = 65536;
     std::uint64_t indirectTexelsPerFrame     = 65536;
-    std::uint32_t indirectRaysPerTexel       = 4;
+    std::uint32_t indirectRaysPerTexel       = 1;
     bool          sunShadows                 = true;
     bool          pointLightShadows          = false;
     float         lightingUpdateSpeed        = 1.0f;
-    float         indirectTemporalBlend      = 0.8f;
+    float         indirectTemporalBlend      = 0.85f;
     float         maxTraceDistance           = 50.0f;
+    // Surface offset applied to shadow, gather, and probe rays (see
+    // trace.bias_m). One bias behind every trace site keeps the acne/leak
+    // trade-off a single tuning decision.
+    float         traceBias                  = 0.02f;
     float         probeSpacing               = 2.0f;
     std::uint32_t probeDirectionResolution   = 32;
     std::uint32_t probeUpdatesPerFrame       = 64;
     std::uint32_t probeRaysPerUpdate         = 256;
     float         probeHysteresis            = 0.2f;
+    // Near-surface clearance a relocated probe keeps off the geometry it was
+    // pushed away from, as a fraction of the level spacing (see
+    // probes.relocation_margin). Also the margin added when clearing a slab.
+    float         probeRelocationMargin      = 0.05f;
     float         probeLevel1SpacingFactor   = 4.0f;
     float         screenRayDistance          = 2.0f;
     std::uint32_t gatherScreenScale          = 8;
-    std::uint32_t gatherRaysPerProbe         = 16;
+    std::uint32_t gatherRaysPerProbe         = 32;
     bool          gatherImportanceSampling   = true;
     float         gatherTemporalBlend        = 0.85f;
     std::uint32_t gatherSpatialFilter        = 3;
@@ -291,6 +299,19 @@ struct GiSurface
     glm::mat4         inverseTransform{1.0f};
     glm::mat3         linear{1.0f};       // upper 3x3 of transform
     glm::mat3         normalMatrix{1.0f}; // inverse-transpose of the upper 3x3
+    // Cached pieces of the forward and inverse transforms so the per-ray and
+    // per-texel hot loops multiply a mat3 and add a translation instead of
+    // building a mat3 view of a mat4 and multiplying a full 4x4 by a w=1
+    // point on every use. Filled together with the matrices above by
+    // updateSurfaceTransform; identical arithmetic, hoisted once.
+    glm::vec3         translation{0.0f};        // column 3 of transform
+    glm::mat3         inverseLinear{1.0f};      // upper 3x3 of inverseTransform
+    glm::vec3         inverseTranslation{0.0f}; // column 3 of inverseTransform
+    // Exact-identity transform: local space coincides with world space, so
+    // hot paths skip the per-ray / per-texel local<->world arithmetic (the
+    // world-space values are already the local ones). Set together with the
+    // matrices by updateSurfaceTransform.
+    bool              localIsWorld = true;
     glm::vec3         axisScale{1.0f};    // world length of each local axis
     glm::vec3         albedo{1.0f};
     glm::vec3         emissive{0.0f};
@@ -392,6 +413,28 @@ struct GiPipelineState;
 // immutable while stages run).
 bool rayTriangle(const GiRay &ray, const GiPackedTriangle &triangle, float &outT, glm::vec3 &outBarycentric);
 
+// Lean closest-hit payload for the per-frame GI passes. The surface-cache
+// shading (radianceAtHit) reads only the hit's local-space position, its
+// local normal, and the backface flag, so the gather, the probe updates, and
+// the screen-space final gather trace through this cheaper hit instead of
+// the full GiHit: the world-space normal chain (two normal-matrix products,
+// three normalizations, and the geometric-normal orientation fix-up per
+// hit) never runs on those rays. The debug views keep the full traceScene.
+// t is the world-space hit distance (the probe relocation rules need it).
+struct GiShadingHit
+{
+    bool          hit          = false;
+    bool          backface     = false;
+    std::uint32_t surfaceIndex = 0;
+    float         t            = 0.0f;
+    glm::vec3     localPosition{0.0f};
+    glm::vec3     localNormal{0.0f, 1.0f, 0.0f};
+};
+
+// Closest hit against every non-excluded surface, carrying only the fields
+// the surface-cache shading needs (see GiShadingHit).
+GiShadingHit traceSceneShading(const GiPipelineState &state, const GiRay &ray);
+
 // Closest-hit trace against every non-excluded surface; tMax limits the ray.
 GiHit traceScene(const GiPipelineState &state, const GiRay &ray);
 // Any-hit test used for shadows; returns true when geometry blocks the ray.
@@ -416,6 +459,11 @@ struct GiProbeLevel
     {
         glm::ivec3             cell{0};          // lattice cell this slot currently holds
         glm::vec3              position{0.0f};
+        // DDGI-style relocation offset (Majercik et al. 2019): probes inside
+        // geometry or grazing a surface are nudged off it so their rays see
+        // front faces and the exported validity recovers. The offset moves
+        // only the ray origin; the exported lattice stays regular.
+        glm::vec3              offset{0.0f};
         std::vector<glm::vec3> radiance;         // octahedral map (directionResolution^2)
         std::array<float, 27>  sh2{};            // 9 x 3, basis order of GiProbe
         float                  validity   = 0.0f;
@@ -427,7 +475,6 @@ struct GiProbeLevel
     float                        spacing = 2.0f;
     std::array<std::uint32_t, 3> dimensions{0u, 0u, 0u};
     glm::ivec3                   originCell{0};   // lattice cell of logical probe (0, 0, 0)
-    glm::vec3                    anchor{0.0f};    // originCell * spacing
     std::vector<Probe>           probes;          // slot-indexed (toroidal)
     std::uint32_t                updateCursor = 0;
 
@@ -733,7 +780,7 @@ void sampleSurfaceCache(const GiPipelineState &state, std::uint32_t surfaceIndex
     const glm::vec3 &normal, bool includeIndirect, glm::vec3 &outRadiance);
 void sampleSurfaceAlbedo(const GiPipelineState &state, std::uint32_t surfaceIndex, const glm::vec3 &position,
     const glm::vec3 &normal, glm::vec3 &outAlbedo);
-void radianceAtHit(const GiPipelineState &state, const GiHit &hit, bool includeIndirect, glm::vec3 &outRadiance);
+void radianceAtHit(const GiPipelineState &state, const GiShadingHit &hit, bool includeIndirect, glm::vec3 &outRadiance);
 
 void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit);
 // Writes the new indirect radiance of the unit's texels into `scratch`

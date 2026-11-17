@@ -24,8 +24,10 @@ namespace renderer
 {
 
 // Defined in render_shared.hpp (the borrowed lumen_gi probe-grid snapshot
-// passed to RenderBackend::setProbeGrid).
+// and lumen_reflection field snapshot passed to RenderBackend::setProbeGrid /
+// setReflectionField).
 struct GiProbeGrid;
+struct ReflectionField;
 
 // Lifecycle contract: createMesh/createTexture are safe any time after
 // construction; beginFrame/draw*/endFrame must nest exactly one frame at a
@@ -59,6 +61,14 @@ public:
     // packed std430 probe storage buffer). An invalid/empty grid disables the
     // hook and keeps the legacy hemispheric ambient.
     virtual void setProbeGrid(const GiProbeGrid &grid) = 0;
+
+    // The lumen_reflection screen-space field snapshot for the indirect
+    // specular hook. The view is borrowed only for this call. An invalid/
+    // empty field disables the hook and keeps the pre-hook shading. The
+    // composite currently runs in the software rasterizer; the Vulkan path
+    // consumes the module through its exported field (copyField) - see
+    // docs/backends.md.
+    virtual void setReflectionField(const ReflectionField &field) = 0;
 
     virtual void beginFrame(const FrameParameters &frame)                                          = 0;
     virtual void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) = 0;

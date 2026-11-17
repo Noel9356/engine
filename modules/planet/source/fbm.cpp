@@ -99,31 +99,27 @@ double ridgedFbm(const FbmStreamSeeds &seeds, const Vec3 &point, double waveleng
 double bandLimitedReliefGradient(const PlanetGenerationParams &params, double lowPassCutoffMeters)
 {
     // Mirrors the relief composition of DensityField::reliefImpl: every
-    // radial term's metric gradient is bounded by amplitude/wavelength,
-    // weighted by the term's fade at the cutoff (faded terms contribute
-    // nothing to the band-limited field). The factor covers the simplex
-    // gradient constant and the domain warp's position shear (the warp bends
-    // sample positions by roughly warp_amplitude * radius per unit of its own
-    // field, amplifying the composed gradient).
-    const double gradient = params.continentAmplitudeMeters / std::max(1.0, params.continentWavelengthMeters)
-        + params.abyssalDepthMeters * (1.0 / 0.58) / std::max(1.0, params.continentWavelengthMeters)
-        + params.mountainAmplitudeMeters / std::max(1.0, params.mountainWavelengthMeters)
-        + params.mountainAmplitudeMeters / std::max(1.0, params.derivedMountainMassWavelengthMeters)
-        + params.mountainAmplitudeMeters / std::max(1.0, params.rangeClusterWavelengthMeters)
-        + params.regionalAmplitudeMeters / std::max(1.0, params.regionalWavelengthMeters)
-        + params.hillAmplitudeMeters / std::max(1.0, params.hillWavelengthMeters)
-        + params.detailAmplitudeMeters / std::max(1.0, params.detailWavelengthMeters);
-    const double faded = gradient
-        * (lowPassFade(lowPassCutoffMeters, params.continentWavelengthMeters)
-            + lowPassFade(lowPassCutoffMeters, params.continentWavelengthMeters)
-            + lowPassFade(lowPassCutoffMeters, params.mountainWavelengthMeters)
-            + lowPassFade(lowPassCutoffMeters, params.derivedMountainMassWavelengthMeters)
-            + lowPassFade(lowPassCutoffMeters, params.rangeClusterWavelengthMeters)
-            + lowPassFade(lowPassCutoffMeters, params.regionalWavelengthMeters)
-            + lowPassFade(lowPassCutoffMeters, params.hillWavelengthMeters)
-            + lowPassFade(lowPassCutoffMeters, params.detailWavelengthMeters))
-        / 8.0;
-    return 3.0 * faded;
+    // radial term's metric gradient is bounded by amplitude/wavelength, and
+    // each term is weighted by ITS OWN fade at the cutoff (faded terms
+    // contribute nothing to the band-limited field, unfaded terms contribute
+    // their full gradient - so the bound is the per-term sum, never an
+    // average: averaging would both overstate the margin while any term
+    // survives and understate it once others fade). The factor covers the
+    // simplex gradient constant and the domain warp's position shear (the
+    // warp bends sample positions by roughly warp_amplitude * radius per unit
+    // of its own field, amplifying the composed gradient).
+    const auto term = [&](double amplitudeMeters, double wavelengthMeters)
+    { return amplitudeMeters / std::max(1.0, wavelengthMeters)
+         * lowPassFade(lowPassCutoffMeters, wavelengthMeters); };
+    const double gradient = term(params.continentAmplitudeMeters, params.continentWavelengthMeters)
+        + term(params.abyssalDepthMeters * (1.0 / 0.58), params.continentWavelengthMeters)
+        + term(params.mountainAmplitudeMeters, params.mountainWavelengthMeters)
+        + term(params.mountainAmplitudeMeters, params.derivedMountainMassWavelengthMeters)
+        + term(params.mountainAmplitudeMeters, params.rangeClusterWavelengthMeters)
+        + term(params.regionalAmplitudeMeters, params.regionalWavelengthMeters)
+        + term(params.hillAmplitudeMeters, params.hillWavelengthMeters)
+        + term(params.detailAmplitudeMeters, params.detailWavelengthMeters);
+    return 3.0 * gradient;
 }
 
 double bandLimitedBoundedTerms(const PlanetGenerationParams &params, double lowPassCutoffMeters)

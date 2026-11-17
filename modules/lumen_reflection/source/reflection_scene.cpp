@@ -1,0 +1,842 @@
+// lumen_reflection scene side: the surface registry's geometry storage and
+// the ray-tracing core (per-surface local-space BVHs under a top-level BVH),
+// plus the lumen_gi probe-grid copy and its irradiance/radiance lookups.
+//
+// The tracing structure deliberately mirrors lumen_gi's scene module: rays
+// transform into each surface's local space so a moving instance never
+// rebuilds its surface BVH, and an exact-identity transform skips the
+// local<->world arithmetic on the hot path.
+
+#include "lumen_reflection_internal.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <numeric>
+#include <vector>
+
+namespace engine
+{
+namespace lumen_reflection
+{
+
+namespace
+{
+
+glm::vec3 safeInverseDirection(const glm::vec3 &direction)
+{
+    glm::vec3 inverse;
+    for (std::uint32_t axis = 0; axis < 3; ++axis)
+    {
+        inverse[axis] = std::fabs(direction[axis]) > 1.0e-8f ? 1.0f / direction[axis] : 1.0e8f;
+    }
+    return inverse;
+}
+
+// Slab test returning the entry distance (used to visit the nearer child
+// first so tMax shrinks early and the far subtree is usually culled).
+inline bool slabTest(const glm::vec3 &origin, const glm::vec3 &inverseDirection, const glm::vec3 &boundsMin,
+    const glm::vec3 &boundsMax, float tMax, float &outNear)
+{
+    const float tx0 = (boundsMin.x - origin.x) * inverseDirection.x;
+    const float tx1 = (boundsMax.x - origin.x) * inverseDirection.x;
+    const float ty0 = (boundsMin.y - origin.y) * inverseDirection.y;
+    const float ty1 = (boundsMax.y - origin.y) * inverseDirection.y;
+    const float tz0 = (boundsMin.z - origin.z) * inverseDirection.z;
+    const float tz1 = (boundsMax.z - origin.z) * inverseDirection.z;
+    const float tNear = std::max(std::max(std::min(tx0, tx1), std::min(ty0, ty1)), std::max(std::min(tz0, tz1), 0.0f));
+    const float tFar  = std::min(std::min(std::max(tx0, tx1), std::max(ty0, ty1)), std::min(std::max(tz0, tz1), tMax));
+    outNear           = tNear;
+    return tNear <= tFar;
+}
+
+constexpr std::uint32_t traversalStackSize = 96;
+
+// Moller-Trumbore with a hair of edge tolerance (shared-edge watertightness),
+// identical structure to the lumen_gi ray core.
+bool rfRayTriangle(const RfRay &ray, const RfPackedTriangle &triangle, float &outT, glm::vec3 &outBarycentric)
+{
+    const glm::vec3 pVec        = glm::cross(ray.direction, triangle.edge2);
+    const float     determinant = glm::dot(triangle.edge1, pVec);
+    if (std::fabs(determinant) < 1.0e-12f)
+    {
+        return false;
+    }
+    const float     inverseDeterminant = 1.0f / determinant;
+    const glm::vec3 tVec               = ray.origin - triangle.v0;
+    constexpr float edgeTolerance = 1.0e-6f;
+    const float     u             = glm::dot(tVec, pVec) * inverseDeterminant;
+    if (u < -edgeTolerance || u > 1.0f + edgeTolerance)
+    {
+        return false;
+    }
+    const glm::vec3 qVec = glm::cross(tVec, triangle.edge1);
+    const float     v    = glm::dot(ray.direction, qVec) * inverseDeterminant;
+    if (v < -edgeTolerance || u + v > 1.0f + edgeTolerance)
+    {
+        return false;
+    }
+    const float t = glm::dot(triangle.edge2, qVec) * inverseDeterminant;
+    if (t < 1.0e-4f || t > ray.tMax)
+    {
+        return false;
+    }
+    outT           = t;
+    outBarycentric = glm::vec3(1.0f - u - v, u, v);
+    return true;
+}
+
+// Traversal of one surface's local-space BVH; ray.tMax shrinks to the
+// closest hit.
+bool traverseSurface(const RfSurfaceGeometry &geometry, RfRay &ray, const glm::vec3 &inverseDirection,
+    std::uint32_t &outTriangle, glm::vec3 &outBarycentric)
+{
+    if (geometry.bvh.empty())
+    {
+        return false;
+    }
+    float entry = 0.0f;
+    if (!slabTest(ray.origin, inverseDirection, geometry.boundsMin, geometry.boundsMax, ray.tMax, entry))
+    {
+        return false;
+    }
+    std::array<std::uint32_t, traversalStackSize> stack;
+    std::uint32_t                                 stackSize = 0;
+    stack[stackSize++]                                      = 0;
+    bool found                                              = false;
+    while (stackSize > 0)
+    {
+        const RfSurfaceGeometry::BvhNode &node = geometry.bvh[stack[--stackSize]];
+        if (node.count > 0)
+        {
+            const RfPackedTriangle *triangles = geometry.packed.data() + node.leftOrFirst;
+            for (std::uint32_t local = 0; local < node.count; ++local)
+            {
+                float     t = 0.0f;
+                glm::vec3 barycentric{};
+                if (rfRayTriangle(ray, triangles[local], t, barycentric))
+                {
+                    ray.tMax       = t;
+                    outTriangle    = triangles[local].triangle;
+                    outBarycentric = barycentric;
+                    found          = true;
+                }
+            }
+            continue;
+        }
+        const RfSurfaceGeometry::BvhNode &left  = geometry.bvh[node.leftOrFirst];
+        const RfSurfaceGeometry::BvhNode &right = geometry.bvh[node.leftOrFirst + 1];
+        float                             leftNear  = 0.0f;
+        float                             rightNear = 0.0f;
+        const bool hitLeft  = slabTest(ray.origin, inverseDirection, left.boundsMin, left.boundsMax, ray.tMax, leftNear);
+        const bool hitRight = slabTest(ray.origin, inverseDirection, right.boundsMin, right.boundsMax, ray.tMax, rightNear);
+        if (hitLeft && hitRight)
+        {
+            // Push the farther child first so the nearer one pops next.
+            if (leftNear <= rightNear)
+            {
+                stack[stackSize++] = node.leftOrFirst + 1;
+                stack[stackSize++] = node.leftOrFirst;
+            }
+            else
+            {
+                stack[stackSize++] = node.leftOrFirst;
+                stack[stackSize++] = node.leftOrFirst + 1;
+            }
+        }
+        else if (hitLeft)
+        {
+            stack[stackSize++] = node.leftOrFirst;
+        }
+        else if (hitRight)
+        {
+            stack[stackSize++] = node.leftOrFirst + 1;
+        }
+    }
+    return found;
+}
+
+struct SurfaceHit
+{
+    bool          hit          = false;
+    float         t            = 0.0f;
+    std::uint32_t surfaceIndex = noSurface;
+    std::uint32_t triangleIndex = 0;
+    glm::vec3     barycentric{0.0f};
+};
+
+// Traces one world ray through the top-level BVH and the surface BVHs.
+SurfaceHit traceSurfaces(const RfPipelineState &state, const RfRay &worldRay)
+{
+    SurfaceHit result;
+    if (state.tlas.empty())
+    {
+        return result;
+    }
+    const glm::vec3 inverseDirection = safeInverseDirection(worldRay.direction);
+    float           bestT            = worldRay.tMax;
+    float           entry            = 0.0f;
+    const RfTlasNode &root            = state.tlas[0];
+    if (!slabTest(worldRay.origin, inverseDirection, root.boundsMin, root.boundsMax, bestT, entry))
+    {
+        return result;
+    }
+    std::array<std::uint32_t, traversalStackSize> stack;
+    std::uint32_t                                 stackSize = 0;
+    stack[stackSize++]                                      = 0;
+    while (stackSize > 0)
+    {
+        const RfTlasNode &node = state.tlas[stack[--stackSize]];
+        if (node.count > 0)
+        {
+            for (std::uint32_t local = 0; local < node.count; ++local)
+            {
+                const std::uint32_t surfaceIndex = state.tlasSurfaces[node.leftOrFirst + local];
+                const RfSurface   &surface = state.surfaces[surfaceIndex];
+                float worldEntry = 0.0f;
+                if (!slabTest(worldRay.origin, inverseDirection, surface.worldMin, surface.worldMax, bestT, worldEntry))
+                {
+                    continue;
+                }
+                glm::vec3 localOrigin;
+                glm::vec3 localDirection;
+                float     directionLength = 1.0f;
+                if (surface.localIsWorld)
+                {
+                    localOrigin    = worldRay.origin;
+                    localDirection = worldRay.direction;
+                }
+                else
+                {
+                    localOrigin    = surface.inverseLinear * worldRay.origin + surface.inverseTranslation;
+                    localDirection = surface.inverseLinear * worldRay.direction;
+                    directionLength = glm::length(localDirection);
+                    if (directionLength < 1.0e-8f)
+                    {
+                        continue;
+                    }
+                }
+                RfRay localRay{localOrigin,
+                    surface.localIsWorld ? localDirection : localDirection / directionLength,
+                    bestT * directionLength};
+                std::uint32_t triangle = 0;
+                glm::vec3     barycentric{};
+                if (traverseSurface(surface.geometry, localRay,
+                        surface.localIsWorld ? inverseDirection : safeInverseDirection(localRay.direction), triangle,
+                        barycentric))
+                {
+                    result.hit          = true;
+                    result.surfaceIndex = surfaceIndex;
+                    bestT                = localRay.tMax / directionLength;
+                    result.t             = bestT;
+                    result.triangleIndex = triangle;
+                    result.barycentric    = barycentric;
+                }
+            }
+            continue;
+        }
+        const RfTlasNode &left  = state.tlas[node.leftOrFirst];
+        const RfTlasNode &right = state.tlas[node.leftOrFirst + 1];
+        float             leftNear  = 0.0f;
+        float             rightNear = 0.0f;
+        const bool hitLeft  = slabTest(worldRay.origin, inverseDirection, left.boundsMin, left.boundsMax, bestT, leftNear);
+        const bool hitRight = slabTest(worldRay.origin, inverseDirection, right.boundsMin, right.boundsMax, bestT, rightNear);
+        if (hitLeft && hitRight)
+        {
+            if (leftNear <= rightNear)
+            {
+                stack[stackSize++] = node.leftOrFirst + 1;
+                stack[stackSize++] = node.leftOrFirst;
+            }
+            else
+            {
+                stack[stackSize++] = node.leftOrFirst;
+                stack[stackSize++] = node.leftOrFirst + 1;
+            }
+        }
+        else if (hitLeft)
+        {
+            stack[stackSize++] = node.leftOrFirst;
+        }
+        else if (hitRight)
+        {
+            stack[stackSize++] = node.leftOrFirst + 1;
+        }
+    }
+    return result;
+}
+
+} // namespace
+
+// ---- public trace entry point -------------------------------------------------------
+
+RfHit rfTraceScene(const RfPipelineState &state, const RfRay &ray)
+{
+    RfHit result;
+    const SurfaceHit surfaceHit = traceSurfaces(state, ray);
+    result.hit          = surfaceHit.hit;
+    result.t           = surfaceHit.t;
+    result.surfaceIndex = surfaceHit.surfaceIndex;
+    if (!surfaceHit.hit)
+    {
+        return result;
+    }
+    const RfSurface         &surface  = state.surfaces[surfaceHit.surfaceIndex];
+    const RfSurfaceGeometry &geometry = surface.geometry;
+    const std::uint32_t i0 = geometry.indices[surfaceHit.triangleIndex * 3 + 0];
+    const std::uint32_t i1 = geometry.indices[surfaceHit.triangleIndex * 3 + 1];
+    const std::uint32_t i2 = geometry.indices[surfaceHit.triangleIndex * 3 + 2];
+    const glm::vec3    &b  = surfaceHit.barycentric;
+
+    glm::vec3 localPosition = geometry.positions[i0] * b.x + geometry.positions[i1] * b.y
+                            + geometry.positions[i2] * b.z;
+    glm::vec3 localNormal = geometry.normals[i0] * b.x + geometry.normals[i1] * b.y
+                           + geometry.normals[i2] * b.z;
+    const glm::vec3 localAlbedo = geometry.colors[i0] * b.x + geometry.colors[i1] * b.y
+                                 + geometry.colors[i2] * b.z;
+    const glm::vec3 geometric = glm::cross(
+        geometry.positions[i1] - geometry.positions[i0], geometry.positions[i2] - geometry.positions[i0]);
+    const float smoothLength = glm::length(localNormal);
+    if (smoothLength < 1.0e-8f)
+    {
+        const float geometricLength = glm::length(geometric);
+        localNormal = geometricLength > 1.0e-12f ? geometric / geometricLength : glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    else
+    {
+        localNormal /= smoothLength;
+    }
+    const glm::vec3 geometricNormal = glm::length(geometric) > 1.0e-12f
+        ? glm::normalize(surface.transform * glm::vec4(geometric, 0.0f))
+        : localNormal;
+
+    result.position = glm::vec3(surface.transform * glm::vec4(localPosition, 1.0f));
+    result.normal   = glm::normalize(surface.transform * glm::vec4(localNormal, 0.0f));
+    result.albedo   = surface.albedo * localAlbedo;
+    // Reflection rays start on surfaces and legitimately strike the back of
+    // thin geometry (the inside of the room's outer shell, seen from outside
+    // through a miss). Report a backface only when BOTH the smooth and the
+    // geometric normal face away, mirroring lumen_gi's anti-leak rule.
+    const bool smoothFaces  = glm::dot(result.normal, ray.direction) <= 0.0f;
+    const bool geometricFaces = glm::dot(geometricNormal, ray.direction) <= 0.0f;
+    result.backface = !smoothFaces && !geometricFaces;
+    if (!smoothFaces && geometricFaces)
+    {
+        // Smooth normal disagrees with the winding: trust the smooth one for
+        // shading but keep the reported normal facing the ray so the caller's
+        // hemisphere logic stays well defined.
+        result.normal = -result.normal;
+    }
+    return result;
+}
+
+// ---- geometry build -----------------------------------------------------------------
+
+void rfBuildSurfaceGeometry(RfSurfaceGeometry &geometry, const ReflectionSurfaceDescription &description,
+    std::uint64_t maxTriangles, ReflectionError *error)
+{
+    auto fail = [&](ReflectionError value)
+    {
+        if (error != nullptr)
+        {
+            *error = value;
+        }
+    };
+    if (description.positions == nullptr || description.indices == nullptr || description.vertexCount == 0
+        || description.indexCount < 3 || description.indexCount % 3 != 0)
+    {
+        fail(ReflectionError::InvalidDescription);
+        return;
+    }
+    const std::uint64_t triangleCount = description.indexCount / 3;
+    if (triangleCount > maxTriangles)
+    {
+        fail(ReflectionError::InvalidDescription);
+        return;
+    }
+    if (description.positionStrideBytes % sizeof(float) != 0)
+    {
+        fail(ReflectionError::InvalidDescription);
+        return;
+    }
+    const std::size_t positionStride = description.positionStrideBytes != 0
+                                         ? description.positionStrideBytes / sizeof(float)
+                                         : 3;
+    const bool hasNormals = description.normals != nullptr && description.normalStrideBytes != 0;
+    const bool hasColors  = description.colors != nullptr && description.colorStrideBytes != 0;
+    if (hasNormals && description.normalStrideBytes % sizeof(float) != 0)
+    {
+        fail(ReflectionError::InvalidDescription);
+        return;
+    }
+    if (hasColors && description.colorStrideBytes % sizeof(float) != 0)
+    {
+        fail(ReflectionError::InvalidDescription);
+        return;
+    }
+    for (std::uint32_t index = 0; index < description.indexCount; ++index)
+    {
+        if (description.indices[index] >= description.vertexCount)
+        {
+            fail(ReflectionError::InvalidDescription);
+            return;
+        }
+    }
+    for (std::uint32_t vertex = 0; vertex < description.vertexCount; ++vertex)
+    {
+        const float *position = description.positions + static_cast<std::size_t>(vertex) * positionStride;
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            if (!std::isfinite(position[axis]))
+            {
+                fail(ReflectionError::InvalidDescription);
+                return;
+            }
+        }
+    }
+    const std::size_t normalStride = description.normalStrideBytes != 0 ? description.normalStrideBytes / sizeof(float) : 3;
+    const std::size_t colorStride  = description.colorStrideBytes != 0 ? description.colorStrideBytes / sizeof(float) : 3;
+    if (hasNormals)
+    {
+        for (std::uint32_t vertex = 0; vertex < description.vertexCount; ++vertex)
+        {
+            const float *source = description.normals + static_cast<std::size_t>(vertex) * normalStride;
+            if (!std::isfinite(source[0]) || !std::isfinite(source[1]) || !std::isfinite(source[2]))
+            {
+                fail(ReflectionError::InvalidDescription);
+                return;
+            }
+        }
+    }
+    if (hasColors)
+    {
+        for (std::uint32_t vertex = 0; vertex < description.vertexCount; ++vertex)
+        {
+            const float *source = description.colors + static_cast<std::size_t>(vertex) * colorStride;
+            if (!std::isfinite(source[0]) || !std::isfinite(source[1]) || !std::isfinite(source[2]))
+            {
+                fail(ReflectionError::InvalidDescription);
+                return;
+            }
+        }
+    }
+
+    geometry.positions.resize(description.vertexCount);
+    for (std::uint32_t vertex = 0; vertex < description.vertexCount; ++vertex)
+    {
+        const float *source = description.positions + static_cast<std::size_t>(vertex) * positionStride;
+        geometry.positions[vertex] = glm::vec3(source[0], source[1], source[2]);
+    }
+    geometry.indices.assign(description.indices, description.indices + description.indexCount);
+
+    if (hasNormals)
+    {
+        geometry.normals.resize(description.vertexCount);
+        for (std::uint32_t vertex = 0; vertex < description.vertexCount; ++vertex)
+        {
+            const float *source = description.normals + static_cast<std::size_t>(vertex) * normalStride;
+            glm::vec3    normal(source[0], source[1], source[2]);
+            const float  length = glm::length(normal);
+            geometry.normals[vertex] = length > 1.0e-8f ? normal / length : glm::vec3(0.0f, 1.0f, 0.0f);
+        }
+    }
+    else
+    {
+        // Smooth normals from triangle geometry (the renderer's
+        // prepareMeshData does the same for missing normals).
+        geometry.normals.assign(description.vertexCount, glm::vec3(0.0f));
+        for (std::uint32_t triangle = 0; triangle < triangleCount; ++triangle)
+        {
+            const std::uint32_t i0 = geometry.indices[triangle * 3 + 0];
+            const std::uint32_t i1 = geometry.indices[triangle * 3 + 1];
+            const std::uint32_t i2 = geometry.indices[triangle * 3 + 2];
+            const glm::vec3    faceNormal = glm::cross(
+                geometry.positions[i1] - geometry.positions[i0], geometry.positions[i2] - geometry.positions[i0]);
+            geometry.normals[i0] += faceNormal;
+            geometry.normals[i1] += faceNormal;
+            geometry.normals[i2] += faceNormal;
+        }
+        for (glm::vec3 &normal : geometry.normals)
+        {
+            const float length = glm::length(normal);
+            normal = length > 1.0e-8f ? normal / length : glm::vec3(0.0f, 1.0f, 0.0f);
+        }
+    }
+
+    geometry.colors.assign(description.vertexCount, glm::vec3(1.0f));
+    if (hasColors)
+    {
+        for (std::uint32_t vertex = 0; vertex < description.vertexCount; ++vertex)
+        {
+            const float *source = description.colors + static_cast<std::size_t>(vertex) * colorStride;
+            geometry.colors[vertex] = glm::clamp(glm::vec3(source[0], source[1], source[2]),
+                glm::vec3(0.0f), glm::vec3(1.0e6f));
+        }
+    }
+}
+
+void rfBuildSurfaceBvh(RfSurfaceGeometry &geometry)
+{
+    const std::size_t triangleCount = geometry.indices.size() / 3;
+    geometry.bvh.clear();
+    geometry.packed.clear();
+    if (triangleCount == 0)
+    {
+        geometry.boundsMin = geometry.boundsMax = glm::vec3(0.0f);
+        return;
+    }
+    geometry.packed.resize(triangleCount);
+    for (std::uint32_t triangle = 0; triangle < triangleCount; ++triangle)
+    {
+        const std::uint32_t i0 = geometry.indices[triangle * 3 + 0];
+        const std::uint32_t i1 = geometry.indices[triangle * 3 + 1];
+        const std::uint32_t i2 = geometry.indices[triangle * 3 + 2];
+        RfPackedTriangle &packed = geometry.packed[triangle];
+        packed.v0      = geometry.positions[i0];
+        packed.edge1   = geometry.positions[i1] - geometry.positions[i0];
+        packed.edge2   = geometry.positions[i2] - geometry.positions[i0];
+        packed.triangle = triangle;
+    }
+
+    struct BuildEntry
+    {
+        std::uint32_t first;
+        std::uint32_t count;
+        std::uint32_t node;
+    };
+
+    // Node bounds over full triangle extents with median splits on the
+    // widest centroid axis, matching lumen_gi's build shape: enough for the
+    // few hundred triangles a reflection surface carries.
+    geometry.bvh.assign(triangleCount * 2, RfSurfaceGeometry::BvhNode{});
+    std::uint32_t        nodeCount = 0; // highest allocated node index
+    std::vector<BuildEntry> stack;
+    stack.push_back({0u, static_cast<std::uint32_t>(triangleCount), 0u});
+    while (!stack.empty())
+    {
+        const BuildEntry entry = stack.back();
+        stack.pop_back();
+        const std::uint32_t first = entry.first;
+        const std::uint32_t count = entry.count;
+        const std::uint32_t node  = entry.node;
+
+        // Bounds of this subtree's triangles (full extent, not centroids).
+        glm::vec3 boundsMin(std::numeric_limits<float>::max());
+        glm::vec3 boundsMax(-std::numeric_limits<float>::max());
+        for (std::uint32_t local = 0; local < count; ++local)
+        {
+            const RfPackedTriangle &packed = geometry.packed[first + local];
+            boundsMin = glm::min(boundsMin, glm::min(packed.v0, glm::min(packed.v0 + packed.edge1, packed.v0 + packed.edge2)));
+            boundsMax = glm::max(boundsMax, glm::max(packed.v0, glm::max(packed.v0 + packed.edge1, packed.v0 + packed.edge2)));
+        }
+        if (boundsMin.x > boundsMax.x || boundsMin.y > boundsMax.y || boundsMin.z > boundsMax.z)
+        {
+            boundsMin = boundsMax = glm::vec3(0.0f);
+        }
+        geometry.bvh[node].boundsMin = boundsMin;
+        geometry.bvh[node].boundsMax = boundsMax;
+
+        if (count <= 4)
+        {
+            geometry.bvh[node].count       = count;
+            geometry.bvh[node].leftOrFirst = first;
+            continue;
+        }
+
+        // Widest centroid axis median split; the subtree's triangles are
+        // reordered in place so both children own contiguous packed ranges.
+        glm::vec3 centroidMin(std::numeric_limits<float>::max());
+        glm::vec3 centroidMax(-std::numeric_limits<float>::max());
+        for (std::uint32_t local = 0; local < count; ++local)
+        {
+            const glm::vec3 centroid = geometry.packed[first + local].v0
+                + (geometry.packed[first + local].edge1 + geometry.packed[first + local].edge2) * (1.0f / 3.0f);
+            centroidMin = glm::min(centroidMin, centroid);
+            centroidMax = glm::max(centroidMax, centroid);
+        }
+        const glm::vec3 extent = centroidMax - centroidMin;
+        std::uint32_t axis = 0;
+        if (extent.y > extent.x && extent.y >= extent.z)
+        {
+            axis = 1;
+        }
+        else if (extent.z > extent.x && extent.z > extent.y)
+        {
+            axis = 2;
+        }
+        std::sort(geometry.packed.begin() + first, geometry.packed.begin() + first + count,
+            [&](const RfPackedTriangle &l, const RfPackedTriangle &r)
+            {
+                const float lc = l.v0[axis] + (l.edge1[axis] + l.edge2[axis]) / 3.0f;
+                const float rc = r.v0[axis] + (r.edge1[axis] + r.edge2[axis]) / 3.0f;
+                return lc < rc;
+            });
+        const std::uint32_t split     = count / 2;
+        const std::uint32_t childBase = nodeCount + 1;
+        geometry.bvh[node].count       = 0;
+        geometry.bvh[node].leftOrFirst = childBase;
+        nodeCount                      = childBase + 1;
+        // Left child pops first (LIFO) so nearer-side traversal order holds.
+        stack.push_back({first + split, count - split, childBase + 1});
+        stack.push_back({first, split, childBase});
+    }
+    geometry.bvh.resize(nodeCount + 1);
+
+    geometry.boundsMin = glm::vec3(std::numeric_limits<float>::max());
+    geometry.boundsMax = glm::vec3(-std::numeric_limits<float>::max());
+    for (const RfPackedTriangle &packed : geometry.packed)
+    {
+        geometry.boundsMin = glm::min(geometry.boundsMin, glm::min(packed.v0, glm::min(packed.v0 + packed.edge1, packed.v0 + packed.edge2)));
+        geometry.boundsMax = glm::max(geometry.boundsMax, glm::max(packed.v0, glm::max(packed.v0 + packed.edge1, packed.v0 + packed.edge2)));
+    }
+    if (geometry.boundsMin.x > geometry.boundsMax.x || geometry.boundsMin.y > geometry.boundsMax.y
+        || geometry.boundsMin.z > geometry.boundsMax.z)
+    {
+        geometry.boundsMin = geometry.boundsMax = glm::vec3(0.0f);
+    }
+}
+
+void rfUpdateSurfaceWorldBounds(RfSurface &surface)
+{
+    const glm::vec3 localCenter = (surface.geometry.boundsMin + surface.geometry.boundsMax) * 0.5f;
+    const glm::vec3 localHalf   = (surface.geometry.boundsMax - surface.geometry.boundsMin) * 0.5f;
+    glm::vec3       worldMin(std::numeric_limits<float>::max());
+    glm::vec3       worldMax(-std::numeric_limits<float>::max());
+    for (std::uint32_t corner = 0; corner < 8; ++corner)
+    {
+        const glm::vec3 local(localCenter.x + ((corner & 1u) ? localHalf.x : -localHalf.x),
+            localCenter.y + ((corner & 2u) ? localHalf.y : -localHalf.y),
+            localCenter.z + ((corner & 4u) ? localHalf.z : -localHalf.z));
+        const glm::vec3 world = glm::vec3(surface.transform * glm::vec4(local, 1.0f));
+        worldMin = glm::min(worldMin, world);
+        worldMax = glm::max(worldMax, world);
+    }
+    if (worldMin.x > worldMax.x)
+    {
+        worldMin = worldMax = glm::vec3(0.0f);
+    }
+    surface.worldMin = worldMin;
+    surface.worldMax = worldMax;
+}
+
+void rfUpdateSurfaceTransform(RfSurface &surface, const glm::mat4 &transform)
+{
+    surface.transform       = transform;
+    surface.inverseTransform = glm::inverse(transform);
+    surface.inverseLinear   = glm::mat3(surface.inverseTransform);
+    surface.inverseTranslation = glm::vec3(surface.inverseTransform[3]);
+    surface.localIsWorld    = transform == glm::mat4(1.0f);
+    rfUpdateSurfaceWorldBounds(surface);
+}
+
+void rfEnsureSceneTlas(RfPipelineState &state)
+{
+    if (!state.tlasDirty)
+    {
+        return;
+    }
+    state.tlas.clear();
+    state.tlasSurfaces.clear();
+    for (std::size_t index = 0; index < state.surfaces.size(); ++index)
+    {
+        if (!state.surfaces[index].excluded)
+        {
+            state.tlasSurfaces.push_back(static_cast<std::uint32_t>(index));
+        }
+    }
+    if (state.tlasSurfaces.empty())
+    {
+        state.tlasDirty = false;
+        return;
+    }
+
+    // One median split level over the surface world bounds (the reflection
+    // registry holds a handful of surfaces; a flat leaf list under a root
+    // node is enough, matching the scene sizes the module is designed for).
+    glm::vec3 boundsMin(std::numeric_limits<float>::max());
+    glm::vec3 boundsMax(-std::numeric_limits<float>::max());
+    for (const std::uint32_t surfaceIndex : state.tlasSurfaces)
+    {
+        const RfSurface &surface = state.surfaces[surfaceIndex];
+        boundsMin = glm::min(boundsMin, surface.worldMin);
+        boundsMax = glm::max(boundsMax, surface.worldMax);
+    }
+    state.tlas.push_back(RfTlasNode{boundsMin, boundsMax, 0u, static_cast<std::uint32_t>(state.tlasSurfaces.size())});
+    state.tlasDirty = false;
+}
+
+// ---- probe grid copy + lookups ------------------------------------------------------
+
+bool rfRefreshProbeGrid(RfPipelineState &state, const lumen_gi::LumenGiCapability *capability)
+{
+    if (capability == nullptr || capability->copyProbes == nullptr)
+    {
+        return false;
+    }
+    std::uint64_t version = 0;
+    lumen_gi::GiProbeHeader header{};
+    capability->copyProbes(capability->self, nullptr, 0, &header, &version);
+    if (state.probeGrid.valid() && version == state.probeGrid.version)
+    {
+        return false; // unchanged copy
+    }
+    RfProbeGrid grid;
+    grid.header = header;
+    if (header.probeCount != 0)
+    {
+        grid.probes.resize(header.probeCount);
+        const std::uint32_t copied = capability->copyProbes(capability->self,
+            grid.probes.data(), header.probeCount, &grid.header, &version);
+        grid.probes.resize(std::min<std::uint32_t>(copied, header.probeCount));
+    }
+    grid.version = version;
+
+    // Level descriptors (renderer's buildProbeLevels semantics).
+    if (!grid.probes.empty() && header.level0Dimensions[0] >= 2u && header.level1Dimensions[0] >= 2u
+        && header.level0ProbeOffset < grid.probes.size() && header.level1ProbeOffset < grid.probes.size()
+        && header.level1ProbeOffset > header.level0ProbeOffset)
+    {
+        grid.level0.anchor = glm::make_vec3(grid.probes[header.level0ProbeOffset].position);
+        grid.level0.dims   = glm::ivec3(static_cast<int>(header.level0Dimensions[0]),
+            static_cast<int>(header.level0Dimensions[1]), static_cast<int>(header.level0Dimensions[2]));
+        grid.level0.spacing = header.level0Spacing;
+        grid.level0.offset  = header.level0ProbeOffset;
+        grid.level1.anchor  = glm::make_vec3(grid.probes[header.level1ProbeOffset].position);
+        grid.level1.dims    = glm::ivec3(static_cast<int>(header.level1Dimensions[0]),
+            static_cast<int>(header.level1Dimensions[1]), static_cast<int>(header.level1Dimensions[2]));
+        grid.level1.spacing = header.level1Spacing;
+        grid.level1.offset  = header.level1ProbeOffset;
+        grid.levelsBuilt    = true;
+    }
+    state.probeGrid = std::move(grid);
+    return true;
+}
+
+namespace
+{
+
+// Picks the lattice level for a world position (renderer semantics: level 0
+// inside its half-cell-extended bounds, level 1 everywhere else).
+const RfProbeLevel *probeLevelFor(const RfProbeGrid &grid, const glm::vec3 &position)
+{
+    if (!grid.levelsBuilt)
+    {
+        return nullptr;
+    }
+    const glm::vec3 local   = position - grid.level0.anchor;
+    const glm::vec3 extent0 = glm::vec3(grid.level0.dims - 1) * grid.level0.spacing;
+    const float     halfCell0 = grid.level0.spacing * 0.5f;
+    const bool insideLevel0 = glm::all(glm::bvec4(local.x >= -halfCell0, local.y >= -halfCell0,
+        local.z >= -halfCell0, true))
+        && glm::all(glm::bvec4(local.x <= extent0.x + halfCell0, local.y <= extent0.y + halfCell0,
+            local.z <= extent0.z + halfCell0, true));
+    return insideLevel0 ? &grid.level0 : &grid.level1;
+}
+
+// Trilinear probe blend for one position: gathers the 8 surrounding lattice
+// probes of one level, weights them by the trilinear fractions and validity,
+// and renormalizes by the valid weight (the renderer's contract).
+struct ProbeBlend
+{
+    const lumen_gi::GiProbe *probes[8]{};
+    float                    weights[8]{};
+    std::uint32_t            count = 0;
+    float                    weightSum = 0.0f;
+};
+
+ProbeBlend probeBlendAt(const RfProbeGrid &grid, const RfProbeLevel &level, const glm::vec3 &position)
+{
+    ProbeBlend blend;
+    const glm::vec3 cell     = (position - level.anchor) / level.spacing;
+    const glm::ivec3 base    = glm::clamp(glm::ivec3(glm::floor(cell)), glm::ivec3(0), level.dims - glm::ivec3(2));
+    const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
+    for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
+    {
+        for (int cornerY = 0; cornerY < 2; ++cornerY)
+        {
+            for (int cornerX = 0; cornerX < 2; ++cornerX)
+            {
+                const glm::ivec3 corner = base + glm::ivec3(cornerX, cornerY, cornerZ);
+                const std::size_t probeIndex = static_cast<std::size_t>(level.offset)
+                    + static_cast<std::size_t>(corner.x + level.dims.x * (corner.y + level.dims.y * corner.z));
+                if (probeIndex >= grid.probes.size())
+                {
+                    continue;
+                }
+                const float latticeWeight = (cornerX != 0 ? fraction.x : 1.0f - fraction.x)
+                                          * (cornerY != 0 ? fraction.y : 1.0f - fraction.y)
+                                          * (cornerZ != 0 ? fraction.z : 1.0f - fraction.z);
+                const lumen_gi::GiProbe &probe = grid.probes[probeIndex];
+                if (probe.validity <= 0.0f)
+                {
+                    continue;
+                }
+                blend.probes[blend.count] = &probe;
+                blend.weights[blend.count] = latticeWeight;
+                blend.weightSum += latticeWeight;
+                ++blend.count;
+            }
+        }
+    }
+    return blend;
+}
+
+} // namespace
+
+bool rfProbeIrradiance(
+    const RfPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal, glm::vec3 &outIrradiance)
+{
+    outIrradiance = glm::vec3(0.0f);
+    const RfProbeGrid &grid = state.probeGrid;
+    const RfProbeLevel *level = probeLevelFor(grid, position);
+    if (level == nullptr)
+    {
+        return false;
+    }
+    const ProbeBlend blend = probeBlendAt(grid, *level, position);
+    if (blend.count == 0 || blend.weightSum <= 1.0e-6f)
+    {
+        return false;
+    }
+    float valid = 0.0f;
+    for (std::uint32_t index = 0; index < blend.count; ++index)
+    {
+        const lumen_gi::GiProbe &probe = *blend.probes[index];
+        glm::vec3 irradiance;
+        lumen_gi::evaluateProbeIrradiance(probe, glm::value_ptr(normal), glm::value_ptr(irradiance));
+        outIrradiance += irradiance * (blend.weights[index] / blend.weightSum);
+        valid += probe.validity * (blend.weights[index] / blend.weightSum);
+    }
+    return valid > 0.0f;
+}
+
+bool rfProbeRadiance(
+    const RfPipelineState &state, const glm::vec3 &position, const glm::vec3 &direction, glm::vec3 &outRadiance)
+{
+    outRadiance = glm::vec3(0.0f);
+    const RfProbeGrid &grid = state.probeGrid;
+    const RfProbeLevel *level = probeLevelFor(grid, position);
+    if (level == nullptr)
+    {
+        return false;
+    }
+    const ProbeBlend blend = probeBlendAt(grid, *level, position);
+    if (blend.count == 0 || blend.weightSum <= 1.0e-6f)
+    {
+        return false;
+    }
+    float valid = 0.0f;
+    for (std::uint32_t index = 0; index < blend.count; ++index)
+    {
+        const lumen_gi::GiProbe &probe = *blend.probes[index];
+        glm::vec3 radiance;
+        evaluateSh2Radiance(&probe.sh2[0][0], direction, radiance);
+        outRadiance += radiance * (blend.weights[index] / blend.weightSum);
+        valid += probe.validity * (blend.weights[index] / blend.weightSum);
+    }
+    return valid > 0.0f;
+}
+
+} // namespace lumen_reflection
+} // namespace engine

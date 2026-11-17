@@ -181,6 +181,33 @@ double atmosphereWeight(const PlanetGenerationParams &params, double eyeAltitude
     return 1.0 - smoothstep(floor, height, eyeAltitudeMeters);
 }
 
+AerialPerspective aerialPerspective(const PlanetGenerationParams &params, const Vec3 &eyePlanetLocal,
+    const Vec3 &targetPlanetLocal, const Vec3 &sunTint)
+{
+    AerialPerspective result{Vec3{0.0, 0.0, 0.0}, 0.0};
+    const double eyeAltitude = length(eyePlanetLocal) - params.radiusMeters;
+    const double airWeight = atmosphereWeight(params, eyeAltitude);
+    if (airWeight <= 0.0)
+    {
+        return result; // the eye is in space: the limb shell owns the depth cue
+    }
+    // Absorption profile: the haze saturates exponentially along the sight
+    // line, with a scale riding the atmosphere height (a tall air column
+    // hazes over longer sight lines) and an asymptote that keeps even the
+    // farthest terrain faintly readable as terrain instead of sky.
+    constexpr double kHazeScaleFraction = 0.45; // sight-line scale as a fraction of the air column
+    constexpr double kHazeAsymptote = 0.72;     // haze weight at infinite distance
+    const double pathMeters = length(targetPlanetLocal - eyePlanetLocal);
+    const double scale = std::max(1.0, kHazeScaleFraction * params.atmosphereHeightMeters);
+    result.weight = kHazeAsymptote * (1.0 - std::exp(-pathMeters / scale)) * airWeight;
+    // The haze color is the horizon band of the sky gradient under the same
+    // sun tint the consumer paints the sky with, so distant ground fades
+    // into the exact color the sky shows behind it.
+    const Vec3 horizon = skyGradientColor(params, 0.04);
+    result.color = Vec3{horizon.x * sunTint.x, horizon.y * sunTint.y, horizon.z * sunTint.z};
+    return result;
+}
+
 Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot)
 {
     // Pale band along the horizon, deepening toward the zenith: real skies

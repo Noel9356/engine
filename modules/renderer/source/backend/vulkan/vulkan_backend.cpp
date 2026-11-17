@@ -692,6 +692,14 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
     frameUniformDirty_ = true; // the header rides the frame uniform
 }
 
+// The reflection field composite runs in the software rasterizer; see
+// docs/backends.md ("Behavior parity") for the scope note. The hook stays
+// complete on this side so renderer.cpp's version polling is backend-agnostic.
+void VulkanBackend::setReflectionField(const ReflectionField &field)
+{
+    (void) field;
+}
+
 // Rebuilds the swapchain when it is dirty or the requested viewport no
 // longer matches. A failed recreate leaves frameActive_ false, so the
 // draw/endFrame calls become no-ops for this frame.

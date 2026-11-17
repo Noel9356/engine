@@ -32,6 +32,7 @@ struct PlanetDemoOptions
     bool orbit = false;
     bool caves = false;
     bool selfTest = false;
+    bool benchmark = false;
 };
 
 struct Viewpoint
@@ -49,6 +50,8 @@ struct SelfTestResult
     bool pass = true;
     std::string report;
 };
+
+int runBenchmark(const engine::planet::PlanetGenerationParams &params);
 
 const char *planetOptionsUsage() noexcept;
 bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOptions &options, std::string &outError);

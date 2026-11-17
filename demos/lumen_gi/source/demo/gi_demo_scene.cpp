@@ -77,6 +77,15 @@ void appendSphere(SceneMesh &mesh, const glm::vec3 &center, float radius, std::u
 // Cornell-style dark room, 4 m wide / 3 m tall / 4 m deep, camera inside.
 // Light reaches every surface only through the two emissive ceiling panels;
 // the white occluder picks up red/green color bleeding from the side walls.
+// Three reflection surfaces exercise the lumen_reflection pipeline's bands:
+// a polished-metal floor inlay (roughness 0.05 - the dedicated-ray band), a
+// chrome sphere on it (roughness 0.15 - dedicated rays), and a brushed-metal
+// back-wall panel (roughness 0.35 - the radiance-cache band between
+// ray_band_max and max_trace). The inlay is metallic on purpose: its F0 is
+// the base color (0.72), so the mirrored room renders at full mirror
+// strength instead of the 4% a dark dielectric would bounce back - a
+// dielectric slab reads as a near-black rectangle at the camera's shallow
+// floor angle, defeating the surface's purpose as a reflection test.
 std::vector<SceneMesh> buildInteriorScene()
 {
     std::vector<SceneMesh> scene;
@@ -131,6 +140,63 @@ std::vector<SceneMesh> buildInteriorScene()
     occluder.giAlbedo[1]           = 0.92f;
     occluder.giAlbedo[2]           = 0.92f;
     scene.push_back(std::move(occluder));
+
+    // Polished-metal floor inlay: a thin silver slab beside the occluder
+    // (clear of it, so no z-fighting) whose near-zero roughness sits in the
+    // dedicated reflection-ray band. Metallic 1 makes the specular F0 the
+    // 0.72 base color - the inlay answers with a full-strength mirror image
+    // of the room (walls, sphere, lamps). The GI albedo stays near zero: a
+    // metal carries almost no diffuse, so the room's bounce lighting barely
+    // notices the slab. Vertex colors stay white; both the renderer and the
+    // lumen_reflection module multiply the base color by them.
+    SceneMesh mirrorFloor;
+    appendBox(mirrorFloor, {0.55f, 0.012f, -0.35f}, {0.45f, 0.012f, 0.9f});
+    mirrorFloor.material.baseColor[0] = 0.72f;
+    mirrorFloor.material.baseColor[1] = 0.73f;
+    mirrorFloor.material.baseColor[2] = 0.75f;
+    mirrorFloor.material.roughnessFactor = 0.05f;
+    mirrorFloor.material.metallicFactor  = 1.0f;
+    mirrorFloor.giAlbedo[0]           = 0.05f;
+    mirrorFloor.giAlbedo[1]           = 0.05f;
+    mirrorFloor.giAlbedo[2]           = 0.055f;
+    mirrorFloor.rfRoughness           = 0.05f;
+    mirrorFloor.rfMetallic            = 1.0f;
+    scene.push_back(std::move(mirrorFloor));
+
+    // Chrome sphere sitting on the inlay: reflects the red/green walls, the
+    // ceiling lamps, and the occluder back to the camera. Vertex colors stay
+    // white so the 0.72 base color passes through both the renderer and the
+    // reflection module's albedo (= base color x vertex color) untouched.
+    SceneMesh chromeSphere;
+    appendSphere(chromeSphere, {0.55f, 0.34f, -0.45f}, 0.34f, 48, 24);
+    chromeSphere.material.baseColor[0] = 0.72f;
+    chromeSphere.material.baseColor[1] = 0.73f;
+    chromeSphere.material.baseColor[2] = 0.75f;
+    chromeSphere.material.roughnessFactor = 0.15f;
+    chromeSphere.material.metallicFactor  = 1.0f;
+    chromeSphere.giAlbedo[0]           = 0.72f;
+    chromeSphere.giAlbedo[1]           = 0.73f;
+    chromeSphere.giAlbedo[2]           = 0.75f;
+    chromeSphere.rfRoughness           = 0.15f;
+    chromeSphere.rfMetallic            = 1.0f;
+    scene.push_back(std::move(chromeSphere));
+
+    // Brushed-metal panel on the back wall: roughness inside the
+    // radiance-cache band (no dedicated rays; the rough lobe resamples the
+    // lumen_gi world cache).
+    SceneMesh brushedPanel;
+    appendBox(brushedPanel, {0.95f, 1.5f, -1.985f}, {0.55f, 0.85f, 0.012f});
+    brushedPanel.material.baseColor[0] = 0.65f;
+    brushedPanel.material.baseColor[1] = 0.6f;
+    brushedPanel.material.baseColor[2] = 0.55f;
+    brushedPanel.material.roughnessFactor = 0.35f;
+    brushedPanel.material.metallicFactor  = 1.0f;
+    brushedPanel.giAlbedo[0]           = 0.65f;
+    brushedPanel.giAlbedo[1]           = 0.6f;
+    brushedPanel.giAlbedo[2]           = 0.55f;
+    brushedPanel.rfRoughness           = 0.35f;
+    brushedPanel.rfMetallic            = 1.0f;
+    scene.push_back(std::move(brushedPanel));
 
     // Two emissive ceiling panels: the only light sources in the room.
     SceneMesh lamps;
@@ -189,6 +255,42 @@ std::vector<SceneMesh> buildOutdoorScene()
         mesh.giAlbedo[2]           = block.albedo.b;
         scene.push_back(std::move(mesh));
     }
+
+    // Chrome sphere on the open field: reflects the sky gradient, the
+    // colored blocks, and the ground (the sun disc is excluded geometry -
+    // its rays answer the skylight, the engine-wide rule the GI module
+    // follows too).
+    SceneMesh chromeSphere;
+    appendSphere(chromeSphere, {2.2f, 0.55f, 2.0f}, 0.55f, 48, 24);
+    chromeSphere.material.baseColor[0] = 0.8f;
+    chromeSphere.material.baseColor[1] = 0.82f;
+    chromeSphere.material.baseColor[2] = 0.85f;
+    chromeSphere.material.roughnessFactor = 0.12f;
+    chromeSphere.material.metallicFactor  = 1.0f;
+    chromeSphere.giAlbedo[0]           = 0.8f;
+    chromeSphere.giAlbedo[1]           = 0.82f;
+    chromeSphere.giAlbedo[2]           = 0.85f;
+    chromeSphere.rfRoughness           = 0.12f;
+    chromeSphere.rfMetallic            = 1.0f;
+    scene.push_back(std::move(chromeSphere));
+
+    // Polished water-like slab in the foreground: near-mirror dielectric.
+    // Water keeps its 4% F0 on purpose - the grazing view angle drives the
+    // Fresnel term up, and the sky it mirrors comes from the environment's
+    // analytic skylight, which the sunlit profile calibrates to the visual
+    // sky dome's radiance.
+    SceneMesh waterSlab;
+    appendBox(waterSlab, {-1.2f, 0.012f, 1.8f}, {1.2f, 0.012f, 1.0f});
+    waterSlab.material.baseColor[0] = 0.04f;
+    waterSlab.material.baseColor[1] = 0.05f;
+    waterSlab.material.baseColor[2] = 0.06f;
+    waterSlab.material.roughnessFactor = 0.08f;
+    waterSlab.giAlbedo[0]           = 0.04f;
+    waterSlab.giAlbedo[1]           = 0.05f;
+    waterSlab.giAlbedo[2]           = 0.06f;
+    waterSlab.rfRoughness           = 0.08f;
+    waterSlab.rfMetallic            = 0.0f;
+    scene.push_back(std::move(waterSlab));
 
     // Unlit sky dome + sun disc: the renderer shows raw albedo/emission, GI
     // ignores them (excluded) and answers those rays with the skylight.

@@ -20,11 +20,16 @@ const char *giOptionsUsage() noexcept
            "                           last frame of a default 30-frame run).\n"
            "  --export-debug <prefix>  Also write lumen_gi debug views <prefix>_<view>.ppm\n"
            "                           (final, gionly, lumenscene, surfacecache, probes,\n"
-           "                           reference) at the screenshot frame.\n"
+           "                           reference) and lumen_reflection views\n"
+           "                           (composite, reflections, resolvemask, reference)\n"
+           "                           at the screenshot frame.\n"
            "  --stats-every <n>        Print lumen_gi statistics every n frames (default 30).\n"
            "  --orbit                  Sweep the camera on a circular path around the view\n"
            "                           target (hands-free dynamic-GI testing; deterministic\n"
-           "                           under --frames).\n";
+           "                           under --frames).\n"
+           "  --no-reflections         Skip the lumen_reflection module: the same scene\n"
+           "                           renders without the indirect specular term (A/B\n"
+           "                           against the default run).\n";
 }
 
 bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &options, std::string &outError)
@@ -67,6 +72,10 @@ bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &op
         else if (argument == "--orbit")
         {
             options.orbit = true;
+        }
+        else if (argument == "--no-reflections")
+        {
+            options.reflections = false;
         }
         else
         {

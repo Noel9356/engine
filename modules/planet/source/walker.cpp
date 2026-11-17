@@ -418,9 +418,13 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
     }
 
     // ---- refresh the reported state --------------------------------------------------
+    const Vec3 displacement = state_.positionMeters - feet;
     state_.up          = normalized(state_.positionMeters);
     state_.eyePosition = state_.positionMeters + state_.up * params_.eyeHeightMeters;
-    state_.speed       = wantsMove ? speed : 0.0;
+    // Reported speed is the ACTUAL displacement over the step (blocked
+    // attempts and slide-offs report the ground truly covered, not the
+    // intended sprint speed).
+    state_.speed       = deltaSeconds > 0.0 ? length(displacement) / deltaSeconds : 0.0;
 }
 
 } // namespace planet

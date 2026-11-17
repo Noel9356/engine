@@ -30,6 +30,8 @@ const char *planetOptionsUsage() noexcept
            "  --caves                   Enable the cave worm carving field.\n"
            "  --self-test               Run determinism/order-independence checks\n"
            "                            and exit (exit code 0 = pass).\n"
+           "  --bench                   Benchmark the generation core (field sampling,\n"
+           "                            per-depth chunk builds, streaming rate) and exit.\n"
            "Windowed controls: mouse look, WASD move, Space jump (walk) or up, Ctrl down,\n"
            "                  Shift sprint, arrows look, Left Alt toggles cursor capture.\n"
            "--orbit uses the automated camera path instead of manual input.\n";
@@ -95,6 +97,10 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
         else if (argument == "--self-test")
         {
             options.selfTest = true;
+        }
+        else if (argument == "--bench")
+        {
+            options.benchmark = true;
         }
         else
         {

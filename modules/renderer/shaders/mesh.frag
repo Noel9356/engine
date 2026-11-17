@@ -322,16 +322,27 @@ void main()
     // at this point, its validity-weighted SH2 irradiance replaces the
     // hemispheric term (blended back by coverage so partially populated
     // grids degrade gracefully instead of going black).
+    // Metallic surfaces carry almost no diffuse response. The hemispheric
+    // ambient and the probe-grid GI are diffuse integrals, so they scale by
+    // (1 - metallic) exactly like the direct-lighting diffuse above
+    // (pbrShade keeps the twin of this factor).
+    const vec3 diffuseAlbedo = baseColor * (1.0 - metallic);
     const vec3 upColor   = frameData.uAmbientSky.rgb * frameData.uAmbientSky.a;
     const vec3 downColor = frameData.uAmbientGround.rgb * frameData.uAmbientSky.a;
-    const vec3 hemispheric = mix(downColor, upColor, normal.y * 0.5 + 0.5) * baseColor * occlusion;
+    const vec3 hemispheric = mix(downColor, upColor, normal.y * 0.5 + 0.5) * diffuseAlbedo * occlusion;
     vec3 ambient = hemispheric;
     vec3 giIrradiance;
     float giWeight;
     if (giGridIrradiance(vWorldPosition, normal, giIrradiance, giWeight))
     {
-        const vec3 giAmbient = baseColor * (giIrradiance * (1.0 / PI)) * occlusion;
-        ambient = mix(hemispheric, giAmbient, giWeight);
+        // The irradiance is already renormalized over the valid probes of the
+        // footprint, so a quarter of valid coverage is enough to trust it
+        // (probe lattices routinely lose the corners that fall inside nearby
+        // geometry); the ambient remains the fallback only while almost no
+        // probe is valid.
+        const float giTrust   = smoothstep(0.0, 0.25, giWeight);
+        const vec3 giAmbient = diffuseAlbedo * (giIrradiance * (1.0 / PI)) * occlusion;
+        ambient = mix(hemispheric, giAmbient, giTrust);
     }
 
     vec3 color = (diffuse + specular) * sunRadiance * nDotL + ambient;

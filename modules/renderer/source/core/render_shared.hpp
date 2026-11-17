@@ -6,6 +6,7 @@
 
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
+#include <engine/lumen_reflection/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/util/ppm.hpp>
@@ -143,6 +144,69 @@ struct GiProbeGrid
         return probes != nullptr && probeCount != 0;
     }
 };
+
+// ---- lumen_reflection field hook ---------------------------------------------
+// Snapshot of the lumen_reflection screen-space field borrowed by the
+// renderer: the indirect specular radiance buffer produced for one camera.
+// Backends copy the data synchronously inside setReflectionField(), so the
+// borrowed view only needs to stay valid for that call. A null/empty field
+// means "no reflections": the shading model keeps its pre-hook behavior
+// bit-identical.
+struct ReflectionField
+{
+    lumen_reflection::ReflectionFieldHeader header{};
+    const float *radiance = nullptr; // borrowed; width*height*3 linear HDR
+    std::uint32_t width  = 0;
+    std::uint32_t height = 0;
+
+    bool valid() const
+    {
+        return radiance != nullptr && header.width != 0 && header.height != 0;
+    }
+};
+
+// Bilinear sample of the reflection field at a shaded point: the point is
+// projected through the field's own camera, and the four surrounding texels
+// are blended (the field is lower-resolution than the framebuffer by
+// design; the screen traces inside the module already accounted for the
+// geometry the pixel sees). Returns black when the point falls outside the
+// field (behind the camera or off its frustum).
+inline glm::vec3 sampleReflectionField(const ReflectionField &field, const glm::vec3 &worldPosition)
+{
+    if (!field.valid())
+    {
+        return glm::vec3(0.0f);
+    }
+    const glm::mat4 viewProjection = glm::make_mat4(field.header.viewProjection);
+    const glm::vec4 clip = viewProjection * glm::vec4(worldPosition, 1.0f);
+    if (clip.w <= 0.05f)
+    {
+        return glm::vec3(0.0f);
+    }
+    const float u = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(field.header.width) - 0.5f;
+    const float v = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(field.header.height) - 0.5f;
+    if (u < 0.0f || v < 0.0f || u > static_cast<float>(field.header.width) - 1.0f
+        || v > static_cast<float>(field.header.height) - 1.0f)
+    {
+        return glm::vec3(0.0f);
+    }
+    const std::uint32_t x0 = static_cast<std::uint32_t>(std::floor(u));
+    const std::uint32_t y0 = static_cast<std::uint32_t>(std::floor(v));
+    const std::uint32_t x1 = std::min(x0 + 1u, field.header.width - 1u);
+    const std::uint32_t y1 = std::min(y0 + 1u, field.header.height - 1u);
+    const float       fx = u - static_cast<float>(x0);
+    const float       fy = v - static_cast<float>(y0);
+    const auto texelAt = [&field](std::uint32_t x, std::uint32_t y)
+    {
+        const float *texel = field.radiance + (static_cast<std::size_t>(y) * field.header.width + x) * 3;
+        return glm::vec3(texel[0], texel[1], texel[2]);
+    };
+    const glm::vec3 t00 = texelAt(x0, y0);
+    const glm::vec3 t10 = texelAt(x1, y0);
+    const glm::vec3 t01 = texelAt(x0, y1);
+    const glm::vec3 t11 = texelAt(x1, y1);
+    return glm::mix(glm::mix(t00, t10, fx), glm::mix(t01, t11, fx), fy);
+}
 
 // Builds both level descriptors from the snapshot's header and probe array;
 // backends call this once per setProbeGrid so per-pixel shading can pick a
@@ -450,7 +514,14 @@ inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
     const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic, float roughness, float ambientOcclusion,
     const PreparedDirectLight *directLights, std::uint32_t directLightCount, const GiProbeGrid *giGrid = nullptr)
 {
-    const glm::vec3 hemispheric = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * albedo * ambientOcclusion;
+    // Metallic surfaces carry almost no diffuse response. The hemispheric
+    // ambient and the probe-grid GI are diffuse integrals, so they scale by
+    // (1 - metallic) exactly like the direct-lighting diffuse below
+    // (mesh.frag keeps the twin of this factor).
+    metallic         = std::clamp(metallic, 0.0f, 1.0f);
+    const glm::vec3 diffuseAlbedo = albedo * (1.0f - metallic);
+    const glm::vec3 hemispheric = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * diffuseAlbedo
+                                  * ambientOcclusion;
     glm::vec3       ambient     = hemispheric;
     if (giGrid != nullptr && giGrid->valid())
     {
@@ -461,14 +532,18 @@ inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
             // The SH2 convolution returns incident irradiance; a Lambertian
             // BRDF turns it into outgoing radiance as albedo / pi * E. The
             // occlusion map darkens the indirect term like the ambient it
-            // replaces. Partial probe coverage blends back to hemispheric.
-            const glm::vec3 giAmbient = albedo * (giIrradiance * (1.0f / glm::pi<float>())) * ambientOcclusion;
-            ambient                   = glm::mix(hemispheric, giAmbient, giWeight);
+            // replaces. The irradiance is already renormalized over the valid
+            // probes of the footprint, so a quarter of valid coverage is
+            // enough to trust it (probe lattices routinely lose the corners
+            // that fall inside nearby geometry); the ambient remains the
+            // fallback only while almost no probe is valid.
+            const float     giTrust   = glm::smoothstep(0.0f, 0.25f, giWeight);
+            const glm::vec3 giAmbient = diffuseAlbedo * (giIrradiance * (1.0f / glm::pi<float>())) * ambientOcclusion;
+            ambient                   = glm::mix(hemispheric, giAmbient, giTrust);
         }
     }
     glm::vec3 result = ambient;
 
-    metallic  = std::clamp(metallic, 0.0f, 1.0f);
     roughness = std::clamp(roughness, minimumRoughness, 1.0f);
 
     const glm::vec3 view    = glm::normalize(cameraPosition - worldPosition);

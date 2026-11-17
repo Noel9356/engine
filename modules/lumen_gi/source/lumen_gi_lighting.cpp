@@ -14,14 +14,16 @@
 
 #include "lumen_gi_internal.hpp"
 
-#include <atomic>
 #include <cstddef>
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace engine
 {
@@ -36,7 +38,10 @@ namespace lumen_gi
 bool sunShadowed(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal)
 {
     const glm::vec3 sunDirection = state.environment.sunDirection;
-    const float     bias         = 0.02f + 0.02f * std::fabs(glm::dot(normal, sunDirection));
+    // The bias grows with the grazing angle so steeply lit surfaces keep
+    // their shadow rays off their own texels (trace.bias_m).
+    const float bias = state.settings.traceBias
+        + state.settings.traceBias * std::fabs(glm::dot(normal, sunDirection));
     GiRay           ray{position + normal * bias, sunDirection, state.settings.maxTraceDistance};
     return traceSceneOccluded(state, ray, noSurface);
 }
@@ -56,7 +61,7 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
         return sum;
     }
     const bool shadows = state.settings.pointLightShadows;
-    const glm::vec3 origin = position + normal * 0.03f;
+    const glm::vec3 origin = position + normal * state.settings.traceBias;
     for (const GiEnvironmentSnapshot::PreparedDirectLight &light : environment.preparedLights)
     {
         const glm::vec3 &color     = light.color;
@@ -129,22 +134,29 @@ bool sampleCardsPass(const GiSurface &surface, const glm::vec3 &localPosition, c
     float     weightSum = 0.0f;
     const float alignmentThreshold = relaxed ? 0.02f : 0.15f;
     const float toleranceScale     = relaxed ? 3.0f : 1.0f;
+    // Cards are axis-aligned by construction (buildCardCandidates places the
+    // U/V/W axes on unit local axes), so the projections used here read the
+    // matching components directly: dot(v, e_i) is that component exactly, and
+    // dot(v, -w) with w = +/-e_axis is -v_axis times the card's outward sign.
+    // The arithmetic is identical to the dot products it replaces.
     for (const GiCard &card : surface.cards)
     {
-        const float alignment = glm::dot(card.axisW, localNormal);
+        const std::uint32_t axis = card.axisIndex;
+        const float        wSign = card.axisW[axis];
+        const float        alignment = localNormal[axis] * wSign;
         if (alignment <= alignmentThreshold)
         {
             continue;
         }
         const glm::vec3 relative = localPosition - card.origin;
-        const float u = glm::dot(relative, card.axisU) / std::max(card.width, 1.0e-9f);
-        const float v = glm::dot(relative, card.axisV) / std::max(card.height, 1.0e-9f);
+        const float u = relative[(axis + 1u) % 3u] / std::max(card.width, 1.0e-9f);
+        const float v = relative[(axis + 2u) % 3u] / std::max(card.height, 1.0e-9f);
         constexpr float margin = 0.5f + 1.0e-3f;
         if (u < -margin || u > margin || v < -margin || v > margin)
         {
             continue;
         }
-        const float queryDepth = glm::dot(relative, -card.axisW);
+        const float queryDepth = -relative[axis] * wSign;
         if (queryDepth < -2.0f * card.nearBias || queryDepth > card.depth)
         {
             continue;
@@ -269,7 +281,7 @@ void sampleSurfaceAlbedo(const GiPipelineState &state, std::uint32_t surfaceInde
 
 // Total radiance leaving a hit point: direct + indirect from the surface
 // cache. Back-face hits return nothing (Lumen's anti-leak rule).
-void radianceAtHit(const GiPipelineState &state, const GiHit &hit, bool includeIndirect, glm::vec3 &outRadiance)
+void radianceAtHit(const GiPipelineState &state, const GiShadingHit &hit, bool includeIndirect, glm::vec3 &outRadiance)
 {
     outRadiance = glm::vec3(0.0f);
     if (hit.backface)
@@ -322,38 +334,109 @@ void projectRadianceToSh2(
 
     // De-ringing: a band-limited fit of a high-contrast field (a small bright
     // emitter) rings below zero on the opposite side, which would subtract
-    // light in the renderer. Shrink bands 1-2 just enough that the cosine
-    // irradiance stays non-negative along 26 probe normals.
-    static const glm::vec3 testNormals[26] = {
-        {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
-        {0.577350f, 0.577350f, 0.577350f}, {-0.577350f, 0.577350f, 0.577350f},
-        {0.577350f, -0.577350f, 0.577350f}, {-0.577350f, -0.577350f, 0.577350f},
-        {0.577350f, 0.577350f, -0.577350f}, {-0.577350f, 0.577350f, -0.577350f},
-        {0.577350f, -0.577350f, -0.577350f}, {-0.577350f, -0.577350f, -0.577350f},
-        {0.707107f, 0.707107f, 0}, {-0.707107f, 0.707107f, 0}, {0.707107f, -0.707107f, 0},
-        {-0.707107f, -0.707107f, 0}, {0.707107f, 0, 0.707107f}, {-0.707107f, 0, 0.707107f},
-        {0.707107f, 0, -0.707107f}, {-0.707107f, 0, -0.707107f}, {0, 0.707107f, 0.707107f},
-        {0, -0.707107f, 0.707107f}, {0, 0.707107f, -0.707107f}, {0, -0.707107f, -0.707107f}};
-    float shrink = 1.0f;
-    for (std::uint32_t channel = 0; channel < 3; ++channel)
+    // light in the renderer. The bands are windowed, w_l = 1 / (1 + lambda *
+    // l * (l + 1)), shrinking band 2 faster than band 1, with lambda solved
+    // per channel by bisection so the cosine irradiance stays non-negative
+    // along a fixed direction set (the 26 principal normals plus an
+    // 11x11 octahedral grid). Windowing keeps more of the directional band
+    // response than uniformly shrinking both bands: a small bright emitter
+    // stays visible from the directions that face it while the ringing side
+    // is suppressed, at the price of a slightly lifted floor elsewhere.
+    // The 26 principal directions the non-negativity contract is checked
+    // along (axis directions, cube diagonals, face diagonals), with each
+    // direction's polynomial parts precomputed once.
+    struct DeringTable
     {
-        const float base = kPi * outSh2[channel];
-        for (const glm::vec3 &normal : testNormals)
+        std::array<std::array<float, 9>, 26> polynomials{}; // f_lm per normal
+        DeringTable()
         {
-            const float n[3] = {normal.x, normal.y, normal.z};
-            float       e[3];
-            evaluateSh2Irradiance(outSh2, n, e);
-            if (e[channel] < 0.0f && base > e[channel])
+            const glm::vec3 normals[26] = {
+                {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
+                {0.577350f, 0.577350f, 0.577350f}, {-0.577350f, 0.577350f, 0.577350f},
+                {0.577350f, -0.577350f, 0.577350f}, {-0.577350f, -0.577350f, 0.577350f},
+                {0.577350f, 0.577350f, -0.577350f}, {-0.577350f, 0.577350f, -0.577350f},
+                {0.577350f, -0.577350f, -0.577350f}, {-0.577350f, -0.577350f, -0.577350f},
+                {0.707107f, 0.707107f, 0}, {-0.707107f, 0.707107f, 0}, {0.707107f, -0.707107f, 0},
+                {-0.707107f, -0.707107f, 0}, {0.707107f, 0, 0.707107f}, {-0.707107f, 0, 0.707107f},
+                {0.707107f, 0, -0.707107f}, {-0.707107f, 0, -0.707107f}, {0, 0.707107f, 0.707107f},
+                {0, -0.707107f, 0.707107f}, {0, 0.707107f, -0.707107f}, {0, -0.707107f, -0.707107f}};
+            for (std::size_t index = 0; index < 26; ++index)
             {
-                shrink = std::min(shrink, std::max(base / (base - e[channel]), 0.0f));
+                const glm::vec3 &normal   = normals[index];
+                const float     x = normal.x;
+                const float     y = normal.y;
+                const float     z = normal.z;
+                polynomials[index] = {1.0f, y, z, x, x * y, y * z, 3.0f * z * z - 1.0f, x * z, x * x - y * y};
             }
         }
-    }
-    if (shrink < 1.0f)
+    };
+    static const DeringTable deringTable;
+
+    // Irradiance along one normal for window weights (w1, w2) on bands 1-2.
+    // sh2 stores coefficient-major RGB triplets: coefficient c, channel ch at
+    // sh2[c * 3 + ch], the GiProbe order.
+    const auto windowedIrradiance = [&](std::size_t index, float w1, float w2, const float *sh2, std::uint32_t channel)
     {
-        for (std::uint32_t coefficient = 3; coefficient < 27; ++coefficient)
+        const std::array<float, 9> &poly = deringTable.polynomials[index];
+        const float               c0 = sh2[channel];
+        const float               c1 = sh2[3 + channel];
+        const float               c2 = sh2[6 + channel];
+        const float               c3 = sh2[9 + channel];
+        const float               c4 = sh2[12 + channel];
+        const float               c5 = sh2[15 + channel];
+        const float               c6 = sh2[18 + channel];
+        const float               c7 = sh2[21 + channel];
+        const float               c8 = sh2[24 + channel];
+        return kPi * c0
+             + (2.0f * kPi / 3.0f) * w1 * (c1 * poly[1] + c2 * poly[2] + c3 * poly[3])
+             + (kPi / 4.0f) * w2
+                   * (c4 * poly[4] + c5 * poly[5] + c6 * poly[6] + c7 * poly[7] + c8 * poly[8]);
+    };
+    for (std::uint32_t channel = 0; channel < 3; ++channel)
+    {
+        // Un-windowed negative minimum along the table (early out).
+        float worstNoWindow = 0.0f;
+        for (std::size_t index = 0; index < 26; ++index)
         {
-            outSh2[coefficient] *= shrink;
+            worstNoWindow = std::min(worstNoWindow, windowedIrradiance(index, 1.0f, 1.0f, outSh2, channel));
+        }
+        if (worstNoWindow >= 0.0f)
+        {
+            continue;
+        }
+        // Bisect lambda so the windowed irradiance is non-negative along the
+        // table; large lambda collapses toward the DC term, which is
+        // non-negative whenever the radiance field carries net energy.
+        float low = 0.0f;
+        float high = 64.0f;
+        for (std::uint32_t iteration = 0; iteration < 24; ++iteration)
+        {
+            const float middle = 0.5f * (low + high);
+            const float w1     = 1.0f / (1.0f + middle * 2.0f);
+            const float w2     = 1.0f / (1.0f + middle * 6.0f);
+            float       worst  = 0.0f;
+            for (std::size_t index = 0; index < 26; ++index)
+            {
+                worst = std::min(worst, windowedIrradiance(index, w1, w2, outSh2, channel));
+            }
+            if (worst < 0.0f)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        const float w1 = 1.0f / (1.0f + high * 2.0f);
+        const float w2 = 1.0f / (1.0f + high * 6.0f);
+        for (std::uint32_t band1 = 0; band1 < 3; ++band1)
+        {
+            outSh2[3 * (1 + band1) + channel] *= w1;
+        }
+        for (std::uint32_t band2 = 0; band2 < 5; ++band2)
+        {
+            outSh2[3 * (4 + band2) + channel] *= w2;
         }
     }
 }
@@ -367,6 +450,22 @@ void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit)
     const bool                   hasSun      = sunRadiance.x + sunRadiance.y + sunRadiance.z > 0.0f;
     GiCard &                     card        = state.card(unit.cardIndex);
     const GiSurface &            surface     = state.cardSurface(unit.cardIndex);
+    // Dark-environment fast path: with no sun and no direct lights the lit
+    // radiance of every texel is exactly the emission term (the irradiance is
+    // zero, so albedo / pi * E collapses to zero), and the world-space position
+    // / normal the full evaluation transforms per texel would multiply zero.
+    // Scenes lit purely through GI (the interior demo view) skip that work
+    // every frame.
+    if (!surface.unlit && !hasSun && !environment.hasDirectLights)
+    {
+        for (std::uint32_t texel = unit.texelBegin; texel < unit.texelEnd; ++texel)
+        {
+            card.directRadiance[texel]
+                = card.depthTexels[texel] >= invalidCardDepth ? glm::vec3(0.0f) : surface.emissive;
+        }
+        state.directTexelsThisFrame.fetch_add(unit.texelEnd - unit.texelBegin, std::memory_order_relaxed);
+        return;
+    }
     for (std::uint32_t texel = unit.texelBegin; texel < unit.texelEnd; ++texel)
     {
         if (card.depthTexels[texel] >= invalidCardDepth)
@@ -382,8 +481,13 @@ void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit)
         }
         else
         {
-            const glm::vec3 position = glm::vec3(surface.transform * glm::vec4(cardTexelLocalPosition(card, texel), 1.0f));
-            const glm::vec3 normal   = glm::normalize(surface.normalMatrix * card.normal[texel]);
+            const glm::vec3 localPosition = cardTexelLocalPosition(card, texel);
+            const glm::vec3 position = surface.localIsWorld
+                ? localPosition
+                : surface.linear * localPosition + surface.translation;
+            const glm::vec3 normal = surface.localIsWorld
+                ? glm::normalize(card.normal[texel])
+                : glm::normalize(surface.normalMatrix * card.normal[texel]);
             glm::vec3 irradiance(0.0f);
             const float nDotL = glm::dot(normal, environment.sunDirection);
             if (nDotL > 0.0f && hasSun)
@@ -426,12 +530,17 @@ void gatherIndirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit,
             card.indirectSamples[texel] = 0;
             continue;
         }
-        const glm::vec3 position = glm::vec3(surface.transform * glm::vec4(cardTexelLocalPosition(card, texel), 1.0f));
-        const glm::vec3 normal   = glm::normalize(surface.normalMatrix * card.normal[texel]);
+        const glm::vec3 localPosition = cardTexelLocalPosition(card, texel);
+        const glm::vec3 position = surface.localIsWorld
+            ? localPosition
+            : surface.linear * localPosition + surface.translation;
+        const glm::vec3 normal = surface.localIsWorld
+            ? glm::normalize(card.normal[texel])
+            : glm::normalize(surface.normalMatrix * card.normal[texel]);
         const glm::mat3 basis    = makeBasis(normal);
         // Surface bias: start slightly off the surface (Lumen biases its
-        // texel traces the same way).
-        const glm::vec3 origin = position + normal * 0.02f;
+        // texel traces the same way; trace.bias_m).
+        const glm::vec3 origin = position + normal * state.settings.traceBias;
         std::uint64_t   seed   = hashSeed(state.frameIndex * 0x9E3779B1ull + (static_cast<std::uint64_t>(unit.cardIndex) << 32)
                                        + texel);
         glm::vec3 gather(0.0f);
@@ -443,7 +552,7 @@ void gatherIndirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit,
             const float v = randomFloat(seed);
             const glm::vec3 direction = glm::normalize(basis * cosineHemisphere(u, v));
             GiRay           traceRay{origin, direction, state.settings.maxTraceDistance};
-            const GiHit     hit = traceScene(state, traceRay);
+            const GiShadingHit hit = traceSceneShading(state, traceRay);
             ++rays;
             if (!hit.hit)
             {
@@ -494,15 +603,63 @@ void updateProbe(GiPipelineState &state, std::uint32_t levelIndex, std::uint32_t
     const std::uint32_t phase      = probe.phase % stride;
     const float hysteresis = probe.fresh ? 0.0f : std::clamp(state.settings.probeHysteresis, 0.0f, 0.99f);
 
-    std::vector<std::uint32_t> backfaceTexels;
+    // Relocation constant (the DDGI near-surface rule): the margin a probe
+    // keeps from any face it was pushed off, as a fraction of the spacing
+    // (probes.relocation_margin).
+    const float nearDistance
+        = std::clamp(state.settings.probeRelocationMargin, 0.005f, 0.25f) * level.spacing;
+    // The trace origin is the relocated position; the exported lattice
+    // itself stays regular. The surface bias (trace.bias_m) is applied along
+    // each ray's own direction: a probe sitting exactly on a surface plane
+    // would otherwise self-intersect that plane at t ~ 0, and its
+    // through-the-slab continuation would flag the hit a backface, marking
+    // half the sphere enclosed (the "probe on a wall" known issue).
+    const glm::vec3 traceOrigin = probe.position + probe.offset;
+    const float     traceBias   = state.settings.traceBias;
+
+    // Per-worker scratch for the backface texel indices (updateProbe runs on
+    // scheduler workers): the thread_local vector is reserved once per worker
+    // and reused every update instead of allocating per probe.
+    thread_local std::vector<std::uint32_t> backfaceTexels;
+    backfaceTexels.clear();
     glm::vec3     frontSum(0.0f);
     std::uint32_t frontCount = 0;
     std::uint32_t traced     = 0;
+    // Hit statistics the relocation rules below read: the closest backface
+    // (a ray that passed through a slab and struck its far side), the closest
+    // front-facing hit (the nearest surface on the open side), and the mean
+    // front-ray direction (the open-side evidence that validates a boundary
+    // push).
+    constexpr float kNoHit  = std::numeric_limits<float>::max();
+    float     closestBackfaceT          = kNoHit;
+    glm::vec3 closestBackfaceDirection{0.0f, 0.0f, 1.0f};
+    bool      hasBackface               = false;
+    float     closestFrontT             = kNoHit;
+    glm::vec3 closestFrontDirection{0.0f, 0.0f, 1.0f};
+    bool      hasFront                  = false;
+    glm::vec3 frontDirectionSum(0.0f);
     for (std::size_t texel = phase; texel < directionCount; texel += stride)
     {
         const glm::vec3 &direction = state.probeDirections[texel];
-        const GiHit      hit = traceScene(state, GiRay{probe.position, direction, state.settings.maxTraceDistance});
+        const GiShadingHit hit = traceSceneShading(
+            state, GiRay{traceOrigin + direction * traceBias, direction, state.settings.maxTraceDistance - traceBias});
         ++traced;
+        if (hit.hit && hit.backface && hit.t < closestBackfaceT)
+        {
+            closestBackfaceT          = hit.t;
+            closestBackfaceDirection = direction;
+            hasBackface               = true;
+        }
+        if (hit.hit && !hit.backface)
+        {
+            frontDirectionSum += direction;
+            if (hit.t < closestFrontT)
+            {
+                closestFrontT          = hit.t;
+                closestFrontDirection = direction;
+                hasFront               = true;
+            }
+        }
         glm::vec3 value(0.0f);
         if (!hit.hit)
         {
@@ -541,6 +698,86 @@ void updateProbe(GiPipelineState &state, std::uint32_t levelIndex, std::uint32_t
     probe.fresh      = false;
     probe.lastUpdate = state.frameIndex;
     ++probe.phase;
+
+    // ---- probe relocation (the DDGI rules) ------------------------------------
+    // The rules move the trace origin off geometry so the next update's rays
+    // see front faces and the validity recovers; the exported lattice itself
+    // stays regular. A probe seeing backfaces sits on or inside a slab: the
+    // closest backface ray traveled THROUGH that slab, so the open side is
+    // the one it came from, and the probe steps away from that backface hit
+    // by exactly enough to clear the slab (its hit distance) plus the
+    // near-surface margin - but only when the front-face rays agree that the
+    // opposite direction is open (their mean direction must lean toward it).
+    // Without that agreement the probe sits just inside a slab where both
+    // faces show up as backfaces and the nearest one is the face toward the
+    // room, so it travels THROUGH the closest backface instead, out of the
+    // solid the short way (the DDGI production rule; also the only rule for a
+    // probe that sees no front face at all, deep inside a thick solid).
+    // Probes in clear space relax onto the near-surface equilibrium: a probe
+    // pushed off a plane settles at exactly the near-surface distance, and a
+    // grazing probe is eased out to it, so a relocated probe never drifts
+    // back across the surface it was moved off.
+    // Per-axis wander limit: half the level spacing on every axis (the DDGI
+    // grid-indexing bound; a probe never crosses a neighboring cell).
+    const glm::vec3 offsetLimit(0.5f * level.spacing);
+    const auto      clampOffsetAxis = [](glm::vec3 value, const glm::vec3 &limit)
+    {
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            value[axis] = glm::clamp(value[axis], -limit[axis], limit[axis]);
+        }
+        return value;
+    };
+    const float frontMeanLength = glm::length(frontDirectionSum);
+    const glm::vec3 frontMeanDirection
+        = frontMeanLength > 1.0e-6f ? frontDirectionSum / frontMeanLength : glm::vec3(0.0f, 0.0f, 1.0f);
+    constexpr float kOpenSideAgreement = 0.25f;
+    glm::vec3 relocated = probe.offset;
+    // Only the geometry-clearing moves invalidate the traced radiance; the
+    // clear-space easing below never does.
+    bool movedOffGeometry = false;
+    if (hasBackface && !hasFront)
+    {
+        // Fully buried: out of the solid through the nearest face.
+        relocated = probe.offset + closestBackfaceDirection * (closestBackfaceT + nearDistance);
+        movedOffGeometry = true;
+    }
+    else if (hasBackface && backfaceFraction > 0.25f)
+    {
+        if (glm::dot(-closestBackfaceDirection, frontMeanDirection) > kOpenSideAgreement)
+        {
+            // On a surface boundary: away from the backface hit, clearing its
+            // slab, toward the front-face evidence.
+            relocated = probe.offset - closestBackfaceDirection * (closestBackfaceT + nearDistance);
+        }
+        else
+        {
+            // Ambiguous (both faces of a thin slab read as backfaces):
+            // through the closest backface, out of the slab the short way.
+            relocated = probe.offset + closestBackfaceDirection * (closestBackfaceT + nearDistance);
+        }
+        movedOffGeometry = true;
+    }
+    else
+    {
+        // Clear or grazing space: ease the offset toward the near-surface
+        // equilibrium (the lattice position when nothing is near).
+        const glm::vec3 relaxTarget = hasFront && closestFrontT < nearDistance
+              ? -closestFrontDirection * (nearDistance - closestFrontT)
+              : glm::vec3(0.0f);
+        relocated = glm::mix(probe.offset, relaxTarget, 0.2f);
+    }
+    relocated = clampOffsetAxis(relocated, offsetLimit);
+    // A geometry-clearing move invalidated this update's radiance (it was
+    // traced from the old side of a slab): mark the probe fresh so the next
+    // update re-traces the whole direction map with zero hysteresis, and the
+    // planning pass serves it first. The clamp may have cancelled the move
+    // entirely; only a real displacement counts.
+    if (movedOffGeometry && glm::length(relocated - probe.offset) > 0.25f * nearDistance)
+    {
+        probe.fresh = true;
+    }
+    probe.offset = relocated;
 }
 
 namespace

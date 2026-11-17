@@ -45,6 +45,11 @@ struct CoverageShellSpec
     double lowPassCutoffMeters = 0.0;              // coverage field band limit at the sample spacing
     double coverageFloor = 0.0;                    // coverage a quad corner needs to render
     double minQuadLatitudeRadians = -6.283185307179586; // quads below this latitude are skipped
+    // Horizon-guard fade: when set, vertices within this many radians above
+    // minQuadLatitudeRadians blend their color toward the sky gradient behind
+    // them, so the deck's lower boundary reads as thinning cloud instead of
+    // the hard polygon cut the quad guard would otherwise leave.
+    double guardFadeRadians = 0.0;
     // Edge softening: when set, quad corners with coverage near the floor
     // blend their vertex color toward the sky gradient behind them (sampled
     // at the corner's own elevation), so a deck's contoured boundary reads
@@ -114,19 +119,28 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             // cutouts.
             const float shade = 0.88f + 0.12f * coverage;
             const float sunFacing = spec.sunDirection != nullptr
-                ? static_cast<float>(0.66 + 0.34 * planet::clamp01(0.5 + 0.5
+                ? static_cast<float>(0.30 + 0.70 * planet::clamp01(0.5 + 0.5
                     * planet::dot(planet::Vec3{shellDirection.x, shellDirection.y, shellDirection.z},
                         *spec.sunDirection)))
                 : 1.0f;
             glm::dvec3 color(params.cloudColor[0] * shade * sunFacing,
                 params.cloudColor[1] * shade * sunFacing,
                 params.cloudColor[2] * shade * sunFacing);
+            const planet::Vec3 sky = planet::skyGradientColor(params, sinLatitude);
             if (spec.hazeEdgeBlend)
             {
-                const planet::Vec3 sky = planet::skyGradientColor(params, sinLatitude);
                 const double blend = planet::smoothstep(spec.coverageFloor,
                     std::min(1.0, spec.coverageFloor + spec.hazeEdgeWidth), static_cast<double>(coverage));
                 color = glm::mix(glm::dvec3(sky.x, sky.y, sky.z), color, blend);
+            }
+            if (spec.guardFadeRadians > 0.0 && spec.minQuadLatitudeRadians > -3.0)
+            {
+                // Thin the deck out toward the horizon guard: the color fades
+                // into the sky behind it over the guard band, matching the
+                // haze blend's thinning read.
+                const double guardBlend = planet::smoothstep(spec.minQuadLatitudeRadians,
+                    spec.minQuadLatitudeRadians + spec.guardFadeRadians, latitude);
+                color = glm::mix(glm::dvec3(sky.x, sky.y, sky.z), color, guardBlend);
             }
             vertex.color[0] = static_cast<float>(color.x);
             vertex.color[1] = static_cast<float>(color.y);
@@ -523,7 +537,8 @@ void PlanetChunkRenderer::updateVisibleChunks()
     }
 }
 
-void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, double eyeAltitudeMeters)
+void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, const glm::dvec3 &eyePlanetLocal,
+    const planet::Vec3 &sunTint)
 {
     drawCommands_.clear();
     terrainMaterials_.clear();
@@ -603,6 +618,8 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, d
     glm::dvec4 frustumPlanes[6];
     extractFrustumPlanes(viewProjection, frustumPlanes);
 
+    const double eyeAltitudeMeters = glm::length(eyePlanetLocal) - params_.radiusMeters;
+
     // Water roughness by eye altitude: the per-vertex wave noise fades with
     // the LOD band limit, so from above the sea is a sheet of flat coarse
     // facets and a tight specular term turns each facet into a separate
@@ -614,6 +631,14 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, d
     const double orbitBlend = planet::smoothstep(params_.atmosphereHeightMeters, 2.0 * params_.atmosphereHeightMeters,
         eyeAltitudeMeters);
     const float waterRoughness = static_cast<float>(params_.waterRoughness + (0.58f - params_.waterRoughness) * orbitBlend);
+
+    // Aerial perspective: the atmosphere model's haze for the eye's sight
+    // lines, composed as exact fog through the material - the renderer's
+    // shading is albedo * light, so scaling baseColor by (1 - w) and setting
+    // the emissive term to hazeColor * w yields terrainRadiance * (1 - w) +
+    // haze * w per pixel: dark backlit slopes LIFT toward the haze color and
+    // bright snow keeps poking through it, the way real air scatters.
+    const planet::Vec3 eyeLocal{eyePlanetLocal.x, eyePlanetLocal.y, eyePlanetLocal.z};
 
     const glm::dvec3 planetCenter(params_.centerMeters[0], params_.centerMeters[1], params_.centerMeters[2]);
     for (const auto &entry : uploadedMeshes_)
@@ -648,12 +673,25 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, d
             continue;
         }
 
+        const planet::AerialPerspective haze
+            = planet::aerialPerspective(params_, eyeLocal, planet::Vec3{worldCenter.x - planetCenter.x,
+                                                                    worldCenter.y - planetCenter.y,
+                                                                    worldCenter.z - planetCenter.z},
+                sunTint);
+        const float keepTerrain = static_cast<float>(1.0 - haze.weight);
+        const float addHaze[3] = {static_cast<float>(haze.color.x * haze.weight),
+            static_cast<float>(haze.color.y * haze.weight),
+            static_cast<float>(haze.color.z * haze.weight)};
+
         if (entry.second.terrain != renderer::invalidMesh)
         {
             renderer::MeshMaterial material{};
-            material.baseColor[0] = 1.0f;
-            material.baseColor[1] = 1.0f;
-            material.baseColor[2] = 1.0f;
+            material.baseColor[0] = keepTerrain;
+            material.baseColor[1] = keepTerrain;
+            material.baseColor[2] = keepTerrain;
+            material.emissiveColor[0] = addHaze[0];
+            material.emissiveColor[1] = addHaze[1];
+            material.emissiveColor[2] = addHaze[2];
             material.roughnessFactor = 0.95f;
             terrainMaterials_.push_back(material);
 
@@ -666,9 +704,12 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, d
         if (entry.second.water != renderer::invalidMesh)
         {
             renderer::MeshMaterial material{};
-            material.baseColor[0] = 1.0f;
-            material.baseColor[1] = 1.0f;
-            material.baseColor[2] = 1.0f;
+            material.baseColor[0] = keepTerrain;
+            material.baseColor[1] = keepTerrain;
+            material.baseColor[2] = keepTerrain;
+            material.emissiveColor[0] = addHaze[0];
+            material.emissiveColor[1] = addHaze[1];
+            material.emissiveColor[2] = addHaze[2];
             material.roughnessFactor = waterRoughness;
             waterMaterials_.push_back(material);
 
@@ -801,13 +842,25 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // fraction of a showcase radius, but the VISIBLE glow hugs the ground
     // the way density does); from there, perspective compresses the ring
     // between the terrain silhouette and the shell rim into roughly 35-90
-    // degrees from orbit and 56-90 from the globe view, so the gradient
-    // starts fading at 30 degrees and lands on black at 85.
-    constexpr double kLimbFadeStartRadians = 0.5235987755982988; // 30 deg
-    constexpr double kLimbFadeEndRadians = 1.4835298641951802;   // 85 deg
+    // degrees from orbit and 56-90 from the globe view. The glow therefore
+    // stays dense past half the ring and thins out only over the last
+    // stretch before the rim - an early fade leaves a dark ring between the
+    // terrain silhouette and the air glow, which reads as a gap instead of
+    // atmosphere.
+    constexpr double kLimbFadeStartRadians = 0.8726646259971648; // 50 deg
+    constexpr double kLimbFadeEndRadians = 1.5184364497350968;  // 87 deg
     // Day/night azimuth falloff: full glow toward the sun, a faint airglow
     // residue on the night side.
     constexpr double kLimbNightFloor = 0.05;
+    // Sunset warmth: the limb ring glows warm where the terminator crosses
+    // it (the sun grazes the atmosphere there, so the light path reddens the
+    // way sunrise/sunset light does). The warm band rides the azimuthal
+    // gradient - azimuth 0 is the sunward limb (see updateAtmosphereShell),
+    // so the warmth peaks where cos(azimuth) crosses zero and melts back to
+    // the plain horizon hue well inside the day side.
+    const planet::Vec3 warmTint{1.0, 0.52, 0.26};
+    constexpr double kWarmStrength = 0.70;
+    constexpr double kWarmBandWidth = 0.55;
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -830,13 +883,18 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
             const glm::dvec3 direction(std::cos(azimuth) * cosLatitude, sinLatitude, std::sin(azimuth) * cosLatitude);
             const double day = planet::mix(kLimbNightFloor, 1.0,
                 planet::smoothstep(-0.85, 0.45, std::cos(azimuth)));
+            const double terminatorBand = 1.0 - planet::smoothstep(0.0, kWarmBandWidth, std::abs(std::cos(azimuth)));
+            const planet::Vec3 limbTint{
+                planet::mix(limbColor.x, warmTint.x, kWarmStrength * terminatorBand),
+                planet::mix(limbColor.y, warmTint.y, kWarmStrength * terminatorBand),
+                planet::mix(limbColor.z, warmTint.z, kWarmStrength * terminatorBand)};
             planet::PlanetVertex vertex{};
             vertex.position[0] = static_cast<float>(direction.x);
             vertex.position[1] = static_cast<float>(direction.y);
             vertex.position[2] = static_cast<float>(direction.z);
-            vertex.color[0] = static_cast<float>(limbColor.x * fade * day);
-            vertex.color[1] = static_cast<float>(limbColor.y * fade * day);
-            vertex.color[2] = static_cast<float>(limbColor.z * fade * day);
+            vertex.color[0] = static_cast<float>(limbTint.x * fade * day);
+            vertex.color[1] = static_cast<float>(limbTint.y * fade * day);
+            vertex.color[2] = static_cast<float>(limbTint.z * fade * day);
             vertices.push_back(vertex);
         }
     }
@@ -950,7 +1008,10 @@ void PlanetChunkRenderer::ensureStarDome()
     // stay round at any resolution and cost one tiny fan each. Disc radius
     // scales with the square root of the star's brightness (bright stars
     // read as slightly larger points, the way bright stars do through an
-    // exposure); the whole field stays a few thousand discs.
+    // exposure); the whole field stays a few thousand discs. Ten segments
+    // keep even the smallest discs round at capture resolutions (six-sided
+    // fans read as hexagons once a disc covers more than a couple of
+    // pixels).
     struct StarDiscContext
     {
         std::vector<planet::PlanetVertex> *vertices;
@@ -960,7 +1021,7 @@ void PlanetChunkRenderer::ensureStarDome()
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
     StarDiscContext context{&vertices, &indices};
-    constexpr std::uint32_t kDiscSegments = 6;
+    constexpr std::uint32_t kDiscSegments = 10;
     constexpr double kDiscRadiusRadiansMin = 0.0018; // ~0.1 degrees: a point at any capture scale
     constexpr double kDiscRadiusRadiansMax = 0.0055; // ~0.3 degrees: the brightest stars
     const auto visitor = [](const planet::Vec3 &direction, const planet::Vec3 &color, double brightness, void *raw)
@@ -1170,14 +1231,17 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // angle); the dome's per-frame update rotates it with the sky and scales
     // it inside the dome's radius. A quad guard above the horizon keeps the
     // contour off the rim, where a deck edge would paint a hard line across
-    // the haze band; the coverage field is sampled along the frame-rotated
-    // directions (from the planet center, which for a standing eye differs
-    // from the eye-local sky direction by well under the field's feature
-    // size).
-    constexpr std::uint32_t kSegments = 192;
-    constexpr std::uint32_t kBands = 96;
+    // the haze band; the guard band itself FADES the deck into the sky
+    // gradient (see buildCoverageShellMesh), so the lower boundary reads as
+    // thinning cloud instead of a straight cut. The coverage field is
+    // sampled along the frame-rotated directions (from the planet center,
+    // which for a standing eye differs from the eye-local sky direction by
+    // well under the field's feature size).
+    constexpr std::uint32_t kSegments = 288;
+    constexpr std::uint32_t kBands = 144;
     constexpr double kCoverageFloor = 0.38;
     constexpr double kHorizonGuardRadians = 0.05235987755982988; // 3 deg above the horizon
+    constexpr double kGuardFadeRadians = 0.06981317007977318;    // 4 deg of thinning cloud above it
 
     if (cloudField_ == nullptr)
     {
@@ -1216,6 +1280,7 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     spec.lowPassCutoffMeters = vertexSpacing;
     spec.coverageFloor = kCoverageFloor;
     spec.minQuadLatitudeRadians = kHorizonGuardRadians;
+    spec.guardFadeRadians = kGuardFadeRadians;
     spec.hazeEdgeBlend = true;
     spec.hazeEdgeWidth = 0.45;
     spec.frame = glm::dmat3(tangent, upNormalized, third);
