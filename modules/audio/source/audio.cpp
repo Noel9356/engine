@@ -20,8 +20,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 #include <string>
+#include <system_error>
+#include <vector>
 
 #if defined(ENGINE_AUDIO_BACKEND_MINIAUDIO)
 #include "engine_registry.hpp"
@@ -100,6 +103,31 @@ public:
             value && std::isfinite(*value) && *value >= 0.0)
         {
             configuration_.masterVolume = static_cast<float>(*value);
+        }
+        // lua_allowed_path_roots confines the paths a sandboxed Lua script may
+        // hand to audio.create_sound (the native capability stays unrestricted
+        // for trusted C++ consumers). It is a security boundary rather than a
+        // tuning key, so it is honored in both auto_config modes. Roots are
+        // canonicalized once here; entries that do not name an existing
+        // directory are skipped, because an unusable root can never widen
+        // access - only roots that exist can contain sounds.
+        for (const std::string &root : context.configurationStringArrayInSection("audio", "lua_allowed_path_roots"))
+        {
+            if (root.empty())
+                continue;
+            std::error_code filesystemError;
+            const std::filesystem::path canonical = std::filesystem::weakly_canonical(root, filesystemError);
+            if (!filesystemError && !canonical.empty()
+                && std::filesystem::is_directory(canonical, filesystemError) && !filesystemError)
+            {
+                scriptSoundRoots_.push_back(canonical);
+            }
+            else
+            {
+                std::fprintf(stderr,
+                    "audio module: ignoring lua_allowed_path_roots entry '%s' (not an existing directory)\n",
+                    root.c_str());
+            }
         }
 
         if (autoConfig)
@@ -193,9 +221,18 @@ public:
         scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
         if (script_runtime::canRegisterRuntimeInitializer(scriptRuntime_))
         {
-            luaBridgeContext_ = AudioLuaBridgeContext{scriptRuntime_, &capability_};
+            luaBridgeContext_ = AudioLuaBridgeContext{scriptRuntime_, &capability_, &scriptSoundRoots_};
             runtimeInitializer_ = script_runtime::tryRegisterRuntimeInitializer(
                 scriptRuntime_, initializeAudioLuaRuntime, &luaBridgeContext_);
+            // Secure by default: with no usable roots the bridge refuses every
+            // script sound load, so say so once at startup instead of letting
+            // scripts discover it through opaque InvalidDescription results.
+            if (runtimeInitializer_ != script_runtime::invalidScriptRuntimeInitializer && scriptSoundRoots_.empty())
+            {
+                std::fprintf(stderr,
+                    "audio module: lua_allowed_path_roots is empty; audio.create_sound is disabled for scripts "
+                    "(list the directories scripts may load sounds from under [audio] lua_allowed_path_roots)\n");
+            }
         }
     }
 
@@ -1656,6 +1693,11 @@ private:
 
     // Module-level defaults captured once in construct().
     AudioConfiguration configuration_{};
+
+    // Canonicalized [audio] lua_allowed_path_roots, filled once in
+    // construct() and read-only afterwards; borrowed by the Lua bridge
+    // context to confine script-supplied sound paths (see lua_bridge.cpp).
+    std::vector<std::filesystem::path> scriptSoundRoots_;
 
 #if defined(ENGINE_AUDIO_BACKEND_MINIAUDIO)
     // Handle-to-record index plus the lifecycle and shared-resource locks.

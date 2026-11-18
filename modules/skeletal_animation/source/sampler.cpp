@@ -18,6 +18,13 @@ namespace engine::skeletal_animation
 std::uint32_t findLeftKey(const AnimationKeyframe *keys, std::uint32_t keyCount, float sampleTime,
     std::uint32_t *cursor, std::uint32_t maximumCursorWalk) noexcept
 {
+    // Guard against an empty track: `keyCount - 1u` below would wrap to
+    // 0xffffffff, and both the cursor walk and the binary search would hand
+    // back a wild index for the caller to dereference. Clip creation rejects
+    // zero-key tracks, so this is defense-in-depth; callers must not index
+    // `keys` with the result when keyCount is zero.
+    if (keyCount == 0u)
+        return 0u;
     std::uint32_t leftIndex = cursor != nullptr ? *cursor : invalidKeyframeCursor;
     if (leftIndex < keyCount - 1u)
     {
@@ -108,6 +115,13 @@ bool sampleClipInternal(const ClipRecord &clipRecord, const SkeletonRecord &skel
         Pose &pose = output[track.jointIndex];
         const std::int32_t parentIndex = pose.parentIndex;
 
+        // A zero-key track has nothing to sample: the bind pose copied above
+        // stays in place for this joint. createClipImpl rejects zero-key
+        // tracks, so this guard only protects a future producer of
+        // ClipRecord from reading keys[0] out of bounds below.
+        if (keyCount == 0u)
+            continue;
+
         if (keyCount == 1u || sampleTime <= keys[0].timeSeconds)
         {
             copyKeyframe(keys[0], parentIndex, pose);
@@ -173,15 +187,17 @@ bool extractRootMotionInternal(const ClipRecord &clip, const SkeletonRecord &ske
     // two samples below.
     try
     {
-        std::vector<Pose> startPose(jointCount);
-        std::vector<Pose> endPose(jointCount);
+        // One scratch buffer serves both samples: the start root pose is
+        // copied out (a Pose is a small POD) before the buffer is reused,
+        // halving the allocations of every root-motion extraction.
+        std::vector<Pose> poses(jointCount);
         // `maximumCursorWalk` is unused here because we sample without cursors.
-        if (!sampleClipInternal(clip, skeleton, startTime, looping, startPose.data(), jointCount, error, nullptr, 0)
-            || !sampleClipInternal(clip, skeleton, endTime, looping, endPose.data(), jointCount, error, nullptr, 0))
+        if (!sampleClipInternal(clip, skeleton, startTime, looping, poses.data(), jointCount, error, nullptr, 0))
             return false;
-
-        const Pose &start = startPose[rootJoint];
-        const Pose &end = endPose[rootJoint];
+        const Pose start = poses[rootJoint];
+        if (!sampleClipInternal(clip, skeleton, endTime, looping, poses.data(), jointCount, error, nullptr, 0))
+            return false;
+        const Pose &end = poses[rootJoint];
         if (!finitePose(start) || !finitePose(end))
         {
             if (error != nullptr)

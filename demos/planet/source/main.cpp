@@ -38,7 +38,7 @@
 #include "demo/planet_camera_input.hpp"
 #include "demo/planet_chunk_renderer.hpp"
 #include "demo/planet_demo_support.hpp"
-#include "demo/planet_frame_timing.hpp"
+#include "demo_harness.hpp"
 #include "demo/planet_walk_controller.hpp"
 #include <engine/application/application_host.hpp>
 #include <engine/application/command_line.hpp>
@@ -68,6 +68,7 @@ namespace
 {
 using namespace engine;
 using namespace demo::planet_demo;
+using demo::harness::FrameTimingRecorder;
 namespace window = engine::window;
 namespace renderer = engine::renderer;
 namespace planet = engine::planet;
@@ -620,6 +621,14 @@ int main(int argc, char **argv)
 
     std::cout << "demo_planet: view '" << options.viewName << "', " << totalFrames << " frames ("
               << options.warmupFrames << " warmup)\n";
+    // A --screenshot-frame beyond the run's frame count can never capture;
+    // say so upfront (the lumen demo reports the same condition) instead of
+    // finishing silently without the requested file.
+    if (!options.screenshotPath.empty() && options.screenshotFrame >= totalFrames)
+    {
+        std::cout << "demo_planet: warning - --screenshot-frame " << options.screenshotFrame
+                  << " is beyond this run of " << totalFrames << " frames; no screenshot will be taken\n";
+    }
     // Warmup exhaustion warning flag: a budget that runs out before the
     // visible set is complete means the first rendered frames (and any
     // screenshot) still contain streaming gaps - the operator should know
@@ -676,14 +685,9 @@ int main(int argc, char **argv)
         frameTiming.beginFrame();
         windowCapability.pollEvents(windowCapability.self);
 
-        std::uint32_t eventCount = 0;
-        do
-        {
-            eventCount = windowCapability.popEvents(windowCapability.self, windowHandle, eventBuffer.data(),
-                static_cast<std::uint32_t>(eventBuffer.size()));
-            for (std::uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex)
+        demo::harness::drainWindowEvents(windowCapability, windowHandle, eventBuffer,
+            [&](const window::WindowEvent &event)
             {
-                const window::WindowEvent &event = eventBuffer[eventIndex];
                 if (event.kind == window::WindowEventKind::CloseRequested)
                 {
                     windowCapability.requestClose(windowCapability.self, windowHandle);
@@ -701,9 +705,7 @@ int main(int argc, char **argv)
                 {
                     cameraInput.handleWindowEvent(event);
                 }
-            }
-        }
-        while (eventCount == static_cast<std::uint32_t>(eventBuffer.size()));
+            });
 
         if (windowCapability.shouldClose(windowCapability.self, windowHandle))
         {
@@ -890,7 +892,10 @@ int main(int argc, char **argv)
                       << ", rasterized " << frameStats.trianglesRasterized << "\n";
         }
 
-        if (options.statsEveryFrames != 0 && frameIndex % options.statsEveryFrames == 0)
+        // Both stats reports cadence on framesRendered (warmup excluded):
+        // the raster stats above use the same counter, so the frame numbers
+        // in the log agree across reports.
+        if (options.statsEveryFrames != 0 && framesRendered % options.statsEveryFrames == 0)
         {
             planet::PlanetStatistics statistics{};
             if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &statistics))
@@ -910,24 +915,12 @@ int main(int argc, char **argv)
         if (!screenshotTaken && !options.screenshotPath.empty()
             && framesRendered == options.screenshotFrame + 1)
         {
-            auto *headlessWindowCapability = context.tryAcquireCapability<window::HeadlessWindowCapability>();
-            if (headlessWindowCapability != nullptr && windowBackendName == std::string("headless"))
-            {
-                window::WindowError exportError = window::WindowError::None;
-                screenshotTaken                 = headlessWindowCapability->exportSurfacePpm(
-                    headlessWindowCapability->self, windowHandle, options.screenshotPath.c_str(), &exportError);
-            }
-            if (!screenshotTaken)
-            {
-                auto *vulkanCapability = context.tryAcquireCapability<renderer::VulkanRenderCapability>();
-                if (vulkanCapability != nullptr
-                    && renderCapability.activeBackendName(renderCapability.self, rendererHandle) == std::string("vulkan"))
-                {
-                    renderer::RenderError exportError = renderer::RenderError::None;
-                    screenshotTaken                   = vulkanCapability->exportFramePpm(
-                        vulkanCapability->self, rendererHandle, options.screenshotPath.c_str(), &exportError);
-                }
-            }
+            screenshotTaken = demo::harness::exportScreenshotPpm(context,
+                windowCapability,
+                windowHandle,
+                renderCapability,
+                rendererHandle,
+                options.screenshotPath);
             if (screenshotTaken)
             {
                 std::cout << "demo_planet: screenshot written to " << options.screenshotPath << "\n";

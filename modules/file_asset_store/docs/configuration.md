@@ -40,7 +40,7 @@ All keys live in the `[file_asset_store]` section. The module's `config.toml` su
 - `file_asset_store.eviction_policy` with an unknown string prints a note to stderr and keeps `lru`.
 - `file_asset_store.cooked_catalog_path` set but unreadable/corrupt prints the catalog error to stderr and leaves cooked requests disabled (error `CatalogUnavailable`); loose-file requests continue to work.
 
-Note that configuring a `file_asset_store.root_directory` that does not resolve to an existing directory is stricter: it disables all path requests instead of falling back to unrestricted access.
+Note that configuring a `file_asset_store.root_directory` that does not resolve to an existing directory is stricter: it disables all path requests instead of falling back to unrestricted access, and prints a one-line stderr note at construction.
 
 ## Budget model
 

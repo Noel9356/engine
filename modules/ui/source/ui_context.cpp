@@ -272,6 +272,19 @@ UiContextHandle createContext(UiModuleState &state, const UiContextDescription *
         return invalidUiContext;
     }
 
+    // Handles start at 1; skip 0 (invalidUiContext) if the counter wraps.
+    // The check runs before any ImGui work: creating the native context,
+    // applying the style and adding the default font all happen below, and
+    // on the wrap path the unique_ptr record would undo them in its
+    // destructor - correct, but pure waste for a failure that is known
+    // upfront.
+    const UiContextHandle handle = state.nextContext++;
+    if (handle == invalidUiContext)
+    {
+        setError(error, UiError::CreationFailed);
+        return invalidUiContext;
+    }
+
     auto record         = std::make_unique<UiContextRecord>();
     record->ownerThread = currentThread;
     record->description = resolved;
@@ -312,13 +325,6 @@ UiContextHandle createContext(UiModuleState &state, const UiContextDescription *
         record->fonts.emplace(defaultUiFont, io.Fonts->AddFontDefault());
     }
 
-    // Handles start at 1; skip 0 (invalidUiContext) if the counter wraps.
-    const UiContextHandle handle = state.nextContext++;
-    if (handle == invalidUiContext)
-    {
-        setError(error, UiError::CreationFailed);
-        return invalidUiContext;
-    }
     try
     {
         const auto [iterator, inserted] = state.contexts.emplace(handle, std::move(record));

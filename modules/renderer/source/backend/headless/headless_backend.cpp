@@ -640,6 +640,45 @@ std::uint32_t HeadlessBackend::parallelWorkerCount() const noexcept
     return workers != 0u ? workers + 1u : 1u;
 }
 
+// Angular-size LOD pick shared by the single-draw and batch paths: returns
+// the index list to rasterize (the base list or an LOD-chain level chosen by
+// the mesh's apparent size) and, when the mesh carries valid bounds, the
+// draw's world-space bounds sphere the decision was made from (reused by
+// frustum culling and the winding vote inside prepareRasterization).
+const std::vector<std::uint32_t> *HeadlessBackend::activeIndicesForDraw(
+    const HeadlessMesh &meshData, const float *modelMatrix, DrawBounds &outBounds, bool &outHaveBounds) const
+{
+    const std::vector<std::uint32_t> *activeIndices = &meshData.indices;
+    outBounds   = DrawBounds{glm::vec3(0.0f), 0.0f};
+    outHaveBounds = false;
+    if (lodEnabled_ && !meshData.lodIndices.empty() && meshData.boundsValid && cameraInitialized_)
+    {
+        const glm::mat4 model = glm::make_mat4(modelMatrix);
+        outBounds.center      = glm::vec3(model * glm::vec4(meshData.boundsCenter, 1.0f));
+        const glm::vec3 basisX = glm::vec3(model[0]);
+        const glm::vec3 basisY = glm::vec3(model[1]);
+        const glm::vec3 basisZ = glm::vec3(model[2]);
+        const float     worldScale
+            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
+        outBounds.radius = meshData.boundsRadius * worldScale;
+        outHaveBounds    = true;
+        const float dist        = glm::distance(cameraPosition_, outBounds.center);
+        const float angularSize = dist > 0.0f ? outBounds.radius / dist : 1.0f; // ~screen fraction the mesh spans
+        int         lodLevel    = 0;
+        if (angularSize < lodThresholds_[0])
+            lodLevel = static_cast<int>(meshData.lodIndices.size()) - 1;
+        else if (angularSize < lodThresholds_[1])
+            lodLevel = std::min(3, static_cast<int>(meshData.lodIndices.size()) - 1);
+        else if (angularSize < lodThresholds_[2])
+            lodLevel = std::min(2, static_cast<int>(meshData.lodIndices.size()) - 1);
+        else if (angularSize < lodThresholds_[3])
+            lodLevel = std::min(1, static_cast<int>(meshData.lodIndices.size()) - 1);
+        if (lodLevel > 0)
+            activeIndices = &meshData.lodIndices[lodLevel];
+    }
+    return activeIndices;
+}
+
 // One draw: pick an LOD by the mesh's angular size (scaled bounds radius /
 // distance), then rasterize - splitting the triangle range across the task
 // scheduler when the draw is big enough (each worker depth-tests under a
@@ -653,34 +692,9 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
     }
     const HeadlessMesh &meshData = found->second;
 
-    const std::vector<std::uint32_t> *activeIndices = &meshData.indices;
-    DrawBounds                        bounds{glm::vec3(0.0f), 0.0f};
-    bool                              haveBounds = false;
-    if (lodEnabled_ && !meshData.lodIndices.empty() && meshData.boundsValid && cameraInitialized_)
-    {
-        const glm::mat4 model = glm::make_mat4(modelMatrix);
-        bounds.center         = glm::vec3(model * glm::vec4(meshData.boundsCenter, 1.0f));
-        const glm::vec3 basisX = glm::vec3(model[0]);
-        const glm::vec3 basisY = glm::vec3(model[1]);
-        const glm::vec3 basisZ = glm::vec3(model[2]);
-        const float     worldScale
-            = std::sqrt(glm::dot(basisX, basisX) + glm::dot(basisY, basisY) + glm::dot(basisZ, basisZ));
-        bounds.radius = meshData.boundsRadius * worldScale;
-        haveBounds    = true;
-        const float dist        = glm::distance(cameraPosition_, bounds.center);
-        const float angularSize = dist > 0.0f ? bounds.radius / dist : 1.0f; // ~screen fraction the mesh spans
-        int         lodLevel    = 0;
-        if (angularSize < lodThresholds_[0])
-            lodLevel = static_cast<int>(meshData.lodIndices.size()) - 1;
-        else if (angularSize < lodThresholds_[1])
-            lodLevel = std::min(3, static_cast<int>(meshData.lodIndices.size()) - 1);
-        else if (angularSize < lodThresholds_[2])
-            lodLevel = std::min(2, static_cast<int>(meshData.lodIndices.size()) - 1);
-        else if (angularSize < lodThresholds_[3])
-            lodLevel = std::min(1, static_cast<int>(meshData.lodIndices.size()) - 1);
-        if (lodLevel > 0)
-            activeIndices = &meshData.lodIndices[lodLevel];
-    }
+    DrawBounds bounds{glm::vec3(0.0f), 0.0f};
+    bool haveBounds = false;
+    const std::vector<std::uint32_t> *activeIndices = activeIndicesForDraw(meshData, modelMatrix, bounds, haveBounds);
 
     const std::size_t triCount = activeIndices->size() / 3;
     statistics_.trianglesSubmitted += triCount;
@@ -790,13 +804,14 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
             extentMaxY         = maxY;
         }
     }
-    // Tile-parallel path (renderer.headless_tile_parallel, default
-    // ON): triggers mirror the default paths exactly (big draws by triangle
-    // count, few-triangle wide-coverage draws by projected extent), but the
-    // execution bins triangles into 64x64 screen tiles with exclusive
-    // per-worker ownership - no per-pixel locks. Falls back to the default
-    // paths when disabled, the binning allocation fails, or the draw exceeds
-    // the record cap.
+    // Tile-parallel path (renderer.headless_tile_parallel, default adaptive:
+    // on from four logical processors): triggers mirror the default paths
+    // exactly (big draws by triangle count, few-triangle wide-coverage draws
+    // by projected extent), but the execution bins triangles into 64x64
+    // screen tiles with exclusive per-worker ownership - no per-pixel locks.
+    // Falls back to the default paths when disabled, the binning allocation
+    // fails, or the draw exceeds the record cap. Whole draw lists take the
+    // batched variant of this path instead (drawMeshBatch).
     if (tileParallelEnabled_ && workers >= 2u && taskScheduler_ != nullptr && taskScheduler_->isRunning()
         && (useParallel || useBandParallel) && buildTileRecords(meshData, setup))
     {
@@ -812,13 +827,13 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
             // submission is rejected can run inline on the calling thread
             // without any new races.
             if (!taskScheduler_->schedule(tileGroup,
-                    [this, &meshData, &setup, index, workers]()
-                    { rasterizeTileRecords(setup, index, workers, &rasterResultScratch_[index]); }))
+                    [this, &setup, index, workers]()
+                    { rasterizeTileRecords(&setup, index, workers, &rasterResultScratch_[index]); }))
             {
-                rasterizeTileRecords(setup, index, workers, &rasterResultScratch_[index]);
+                rasterizeTileRecords(&setup, index, workers, &rasterResultScratch_[index]);
             }
         }
-        rasterizeTileRecords(setup, 0u, workers, &rasterResultScratch_[0]);
+        rasterizeTileRecords(&setup, 0u, workers, &rasterResultScratch_[0]);
         tileGroup.wait(*taskScheduler_);
         std::uint64_t totalRasterized = 0;
         for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
@@ -920,8 +935,12 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
     statistics_.trianglesRasterized += totalRasterized;
 }
 
-// Instance draws are just repeated drawMesh calls on the CPU backend (the
-// transform cache still deduplicates the vertex shading).
+// Instance draws on the CPU backend replay as repeated drawMesh calls. Each
+// instance carries its own model matrix, so the shared transform cache
+// cannot carry work across instances (every call stamps a fresh generation
+// and re-transforms the vertices); the cache still deduplicates within one
+// call's overlapping index ranges. Whole-command-list batching happens one
+// level up, in drawMeshBatch.
 void HeadlessBackend::drawMeshInstances(
     MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount, const MeshMaterial &material)
 {
@@ -932,6 +951,221 @@ void HeadlessBackend::drawMeshInstances(
     for (std::uint32_t index = 0; index < instanceCount; ++index)
     {
         drawMesh(mesh, modelMatrices + static_cast<std::size_t>(index) * 16u, material);
+    }
+}
+
+// Batched tile-parallel rasterization of a whole submitted draw list (see
+// RenderBackend::drawMeshBatch). Phases, per chunk of items:
+//   1. (calling thread) per item: mesh lookup, LOD pick,
+//      prepareRasterization, then immediate fan-record emission - preparing
+//      and emitting one item at a time keeps the shared transform cache
+//      valid for exactly the item whose records are being baked, exactly
+//      like the per-draw replay interleaves them. Items accumulate until
+//      the next one would overflow the batch record cap; oversized single
+//      items (and any allocation failure) fall back to the per-draw paths,
+//      which produce identical output.
+//   2. (calling thread) one two-pass binning of the chunk's records into
+//      64x64 tiles; per-tile lists keep submission order (ascending record
+//      ids), so every pixel sees the same triangle order the sequential
+//      replay would show it - equal-depth writes, blended backdrop layers
+//      and depth-early rejections all resolve identically.
+//   3. (all workers) each worker rasterizes the tiles with
+//      index % workerCount == workerIndex; exclusive tile ownership means
+//      no per-pixel locks.
+// Chunks rasterize to completion in order, so submission order also holds
+// across chunk boundaries. This is the path that makes many-small-draw
+// scenes (streamed LOD chunks, scattered props) use the whole machine: no
+// single draw is large enough for the per-draw parallel thresholds, but the
+// frame as a whole is.
+void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t itemCount)
+{
+    if (items == nullptr)
+    {
+        return;
+    }
+    const std::uint32_t workers = parallelWorkerCount();
+    if (!batchedTileRasterizationEnabled_ || workers < 2u || itemCount < 2u || taskScheduler_ == nullptr
+        || !taskScheduler_->isRunning() || framebufferWidth == 0 || framebufferHeight == 0)
+    {
+        RenderBackend::drawMeshBatch(items, itemCount);
+        return;
+    }
+
+    const MeshMaterial defaultMaterial;
+    std::uint32_t     index = 0;
+    while (index < itemCount)
+    {
+        // ---- chunk preparation (serial) --------------------------------------
+        // [index, consumed) are the items of this chunk; consumed only
+        // advances past items whose records are in tileRecords_ (or that
+        // were safely skipped/handled inline).
+        std::uint32_t consumed = index;
+        batchSetups_.clear();
+        tileRecords_.clear();
+        while (consumed < itemCount)
+        {
+            const MeshBatchItem &item = items[consumed];
+            if (item.modelMatrix == nullptr || item.mesh == invalidMesh)
+            {
+                // The sequential replay skips these without touching
+                // statistics; so does the batch.
+                ++consumed;
+                continue;
+            }
+            const auto found = meshes.find(item.mesh);
+            if (found == meshes.end())
+            {
+                // Unknown mesh: drawMesh returns before its submitted-count,
+                // and so does the batch.
+                ++consumed;
+                continue;
+            }
+            const HeadlessMesh &meshData = found->second;
+
+            DrawBounds                             bounds{glm::vec3(0.0f), 0.0f};
+            bool                                   haveBounds = false;
+            const std::vector<std::uint32_t> *activeIndices
+                = activeIndicesForDraw(meshData, item.modelMatrix, bounds, haveBounds);
+            const std::size_t triCount = activeIndices->size() / 3;
+            const std::size_t recordEstimate = triCount * 2u; // worst case: near-clip fans
+            if (recordEstimate > maxBatchTileRecords_)
+            {
+                // A single draw too big for the batch scratch: the per-draw
+                // paths have their own larger cap and their own trigger
+                // thresholds, and this item has not been counted yet, so
+                // replaying it through drawMesh keeps the statistics exact.
+                if (consumed == index)
+                {
+                    drawMesh(item.mesh,
+                        item.modelMatrix,
+                        item.material != nullptr ? *item.material : defaultMaterial);
+                    ++consumed;
+                    index = consumed;
+                    continue;
+                }
+                break; // flush the chunk first; this item starts the next one
+            }
+            if (!tileRecords_.empty() && tileRecords_.size() + recordEstimate > maxBatchTileRecords_)
+            {
+                break; // chunk full: flush, then this item starts the next one
+            }
+
+            statistics_.trianglesSubmitted += triCount;
+            RasterSetup setup;
+            const MeshMaterial &material = item.material != nullptr ? *item.material : defaultMaterial;
+            if (!prepareRasterization(meshData, item.modelMatrix, material, activeIndices->data(),
+                    activeIndices->size(), setup, haveBounds ? &bounds : nullptr))
+            {
+                // Culled or unusable: submitted was already counted, exactly
+                // like drawMesh counts before its own prepare.
+                ++consumed;
+                continue;
+            }
+
+            const std::uint32_t setupIndex = static_cast<std::uint32_t>(batchSetups_.size());
+            const std::size_t   recordsBefore = tileRecords_.size();
+            try
+            {
+                TileBinRecord fans[2];
+                for (std::size_t triangle = 0; triangle < triCount; ++triangle)
+                {
+                    const std::size_t fanCount = prepareFanTriangles(meshData, setup, triangle, fans);
+                    for (std::size_t fan = 0; fan < fanCount; ++fan)
+                    {
+                        fans[fan].setupIndex = setupIndex;
+                        tileRecords_.push_back(fans[fan]);
+                    }
+                }
+                batchSetups_.push_back(std::move(setup));
+            }
+            catch (const std::bad_alloc &)
+            {
+                // Drop the partially emitted item (its records are
+                // incomplete), refund its submitted count and hand it to the
+                // single-draw path, then flush what complete items did make
+                // it into the chunk.
+                tileRecords_.resize(recordsBefore);
+                statistics_.trianglesSubmitted -= triCount;
+                drawMesh(item.mesh, item.modelMatrix, material);
+                ++consumed;
+                break;
+            }
+            ++consumed;
+        }
+
+        // ---- chunk flush ------------------------------------------------------
+        if (tileRecords_.empty())
+        {
+            index = consumed;
+            continue;
+        }
+        if (!buildBatchTileRecords())
+        {
+            // Binning refused the chunk (allocation failure or an un-binnable
+            // record span). The records themselves are complete geometry in
+            // submission order, so replay them sequentially over the whole
+            // framebuffer - the same pixels in the same order as the
+            // parallel path, one record at a time.
+            for (const TileBinRecord &record : tileRecords_)
+            {
+                if (rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
+                        static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                        static_cast<std::int32_t>(framebufferHeight) - 1))
+                {
+                    ++statistics_.trianglesRasterized;
+                }
+            }
+            index = consumed;
+            continue;
+        }
+
+        try
+        {
+            if (rasterResultScratch_.size() < workers)
+                rasterResultScratch_.resize(workers);
+        }
+        catch (const std::bad_alloc &)
+        {
+            // No per-worker result slots: the counts cannot be gathered, but
+            // the pixels still must be. Replay the binned records
+            // sequentially (the per-record loop above) so the chunk draws
+            // exactly once either way.
+            for (const TileBinRecord &record : tileRecords_)
+            {
+                if (rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
+                        static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                        static_cast<std::int32_t>(framebufferHeight) - 1))
+                {
+                    ++statistics_.trianglesRasterized;
+                }
+            }
+            index = consumed;
+            continue;
+        }
+        for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
+            rasterResultScratch_[workerIndex].trianglesRasterized = 0;
+        TaskGroup tileGroup;
+        const RasterSetup *setups = batchSetups_.data();
+        for (std::uint32_t workerIndex = 1; workerIndex < workers; ++workerIndex)
+        {
+            const std::uint32_t batchWorkerIndex = workerIndex;
+            // Tiles are owned exclusively by worker index, so a share whose
+            // submission is rejected can run inline on the calling thread
+            // without any new races.
+            if (!taskScheduler_->schedule(tileGroup,
+                    [this, setups, batchWorkerIndex, workers]()
+                    { rasterizeTileRecords(setups, batchWorkerIndex, workers, &rasterResultScratch_[batchWorkerIndex]); }))
+            {
+                rasterizeTileRecords(setups, batchWorkerIndex, workers, &rasterResultScratch_[batchWorkerIndex]);
+            }
+        }
+        rasterizeTileRecords(setups, 0u, workers, &rasterResultScratch_[0]);
+        tileGroup.wait(*taskScheduler_);
+        std::uint64_t totalRasterized = 0;
+        for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
+            totalRasterized += rasterResultScratch_[workerIndex].trianglesRasterized;
+        statistics_.trianglesRasterized += totalRasterized;
+        index = consumed;
     }
 }
 
@@ -1472,16 +1706,27 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
                 else if (negative > positive && negative > 0)
                     frontSign = -1.0f;
                 // Record the outcome for this index list, reusing the first
-                // free slot (or slot 0 once every slot is taken).
+                // free slot; when every slot is taken, slot 0 is the victim so
+                // a ninth index list still gets memoized instead of re-running
+                // the vote on every draw. A fixed victim is enough because the
+                // pipeline only ever samples the base list plus its (at most
+                // four) LOD lists per determinant slot - the eviction path
+                // exists to degrade gracefully, not because it is expected.
+                std::size_t memoSlot = HeadlessMesh::WindingVoteMemo::capacity;
                 for (std::size_t slot = 0; slot < HeadlessMesh::WindingVoteMemo::capacity; ++slot)
                 {
                     if (memo.sources[slot] == nullptr)
                     {
-                        memo.sources[slot] = activeIndices;
-                        memo.signs[slot]   = frontSign;
+                        memoSlot = slot;
                         break;
                     }
                 }
+                if (memoSlot == HeadlessMesh::WindingVoteMemo::capacity)
+                {
+                    memoSlot = 0;
+                }
+                memo.sources[memoSlot] = activeIndices;
+                memo.signs[memoSlot]   = frontSign;
             }
             if (frontSign != 0.0f)
             {
@@ -2582,11 +2827,6 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
     {
         return false;
     }
-    const tilebins::TileGrid grid = tilebins::makeGrid(framebufferWidth, framebufferHeight, tileWidth_, tileHeight_);
-    if (tilebins::tileCount(grid) == 0)
-    {
-        return false;
-    }
 
     try
     {
@@ -2598,6 +2838,9 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
             const std::size_t fanCount = prepareFanTriangles(mesh, setup, triangle, fans);
             for (std::size_t fan = 0; fan < fanCount; ++fan)
             {
+                // Single-draw tile paths rasterize against a one-element
+                // setup array; every record belongs to that one draw.
+                fans[fan].setupIndex = 0u;
                 tileRecords_.push_back(fans[fan]);
             }
         }
@@ -2607,6 +2850,28 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
         tileRecords_.clear();
         tileItems_.clear();
         tileOffsets_.clear();
+        return false;
+    }
+
+    return binTileRecords();
+}
+
+// Batched tile-parallel path, phase 1: the batch's records are already in
+// tileRecords_ (drawMeshBatch emitted them per item, stamped with each
+// draw's setup index); only the shared binning remains.
+bool HeadlessBackend::buildBatchTileRecords()
+{
+    return binTileRecords();
+}
+
+// Shared phase-1 tail: two-pass binning of the current tileRecords_ into the
+// 64x64 tile grid. Returns false on an empty grid or an allocation failure
+// (callers fall back or replay the records sequentially).
+bool HeadlessBackend::binTileRecords()
+{
+    const tilebins::TileGrid grid = tilebins::makeGrid(framebufferWidth, framebufferHeight, tileWidth_, tileHeight_);
+    if (tilebins::tileCount(grid) == 0)
+    {
         return false;
     }
 
@@ -2635,10 +2900,13 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
 // Tile-parallel path, phase 2: rasterise exactly the tiles this worker owns
 // (index % workerCount == workerIndex). Exclusive tile ownership means the
 // depth/colour writes need no locks; each tile's working set is cache-local.
+// Each record resolves its RasterSetup through record.setupIndex (the
+// single-draw paths pass a one-element array; the batch passes one setup per
+// item).
 void HeadlessBackend::rasterizeTileRecords(
-    const RasterSetup &setup, std::uint32_t workerIndex, std::uint32_t workerCount, StripResult *outResult)
+    const RasterSetup *setups, std::uint32_t workerIndex, std::uint32_t workerCount, StripResult *outResult)
 {
-    if (outResult == nullptr || workerCount == 0u)
+    if (outResult == nullptr || workerCount == 0u || setups == nullptr)
     {
         return;
     }
@@ -2652,16 +2920,25 @@ void HeadlessBackend::rasterizeTileRecords(
     const std::int32_t framebufferWidthInt  = static_cast<std::int32_t>(framebufferWidth);
     const std::int32_t framebufferHeightInt = static_cast<std::int32_t>(framebufferHeight);
     std::uint64_t      written              = 0;
-    for (std::uint32_t tile = workerIndex; tile < tiles; tile += workerCount)
+    for (std::uint32_t tile = 0; tile < tiles; ++tile)
     {
+        // Checkerboard ownership ((column + row) % workerCount): a strided
+        // walk over the flat tile index would hand each worker every
+        // Nth COLUMN, and coverage-heavy bands (a planet's disk, a cloud
+        // deck) sit in contiguous row ranges - the checkerboard interleaves
+        // any contiguous region across every worker instead.
+        const std::uint32_t tileX = tile % grid.tilesX;
+        const std::uint32_t tileY = tile / grid.tilesX;
+        if ((tileX + tileY) % workerCount != workerIndex)
+        {
+            continue;
+        }
         const std::uint32_t begin = tileOffsets_[tile];
         const std::uint32_t end   = tileOffsets_[tile + 1u];
         if (begin == end)
         {
             continue;
         }
-        const std::uint32_t tileX      = tile % grid.tilesX;
-        const std::uint32_t tileY      = tile / grid.tilesX;
         const std::int32_t  xBandBegin = static_cast<std::int32_t>(tileX * tileWidth_);
         const std::int32_t  xBandEnd = static_cast<std::int32_t>(
             std::min<std::int64_t>(framebufferWidthInt, static_cast<std::int64_t>(xBandBegin) + tileWidth_) - 1);
@@ -2671,7 +2948,7 @@ void HeadlessBackend::rasterizeTileRecords(
         for (std::uint32_t entry = begin; entry < end; ++entry)
         {
             const TileBinRecord &record = tileRecords_[tileItems_[entry]];
-            if (rasterizeFanRecord(setup, record, xBandBegin, xBandEnd, yBandBegin, yBandEnd))
+            if (rasterizeFanRecord(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin, yBandEnd))
             {
                 // Counted per (record, tile): a fan record spanning several
                 // tiles owned by different workers is counted once per tile

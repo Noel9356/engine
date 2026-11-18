@@ -1,16 +1,14 @@
-#include "planet_frame_timing.hpp"
+// Implementation of the shared demo scaffolding; see demo_harness.hpp.
+#include "demo_harness.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <ratio>
 #include <sstream>
-#include <string>
-#include <vector>
 
-namespace demo::planet_demo
+namespace demo::harness
 {
 namespace
 {
@@ -32,6 +30,39 @@ double nearestRankPercentile(const std::vector<double> &sortedValues, double per
 }
 
 } // namespace
+
+bool exportScreenshotPpm(engine::ParticipantContext &context, engine::window::WindowCapability &windowCapability,
+    engine::window::WindowHandle windowHandle, engine::renderer::RenderCapability &renderCapability,
+    engine::renderer::RendererHandle rendererHandle, const std::string &path)
+{
+    bool exported = false;
+    auto *headlessWindowCapability = context.tryAcquireCapability<engine::window::HeadlessWindowCapability>();
+    if (headlessWindowCapability != nullptr
+        && windowCapability.activeBackendName(windowCapability.self) == std::string("headless"))
+    {
+        engine::window::WindowError exportError = engine::window::WindowError::None;
+        exported = headlessWindowCapability->exportSurfacePpm(
+            headlessWindowCapability->self, windowHandle, path.c_str(), &exportError);
+    }
+    if (!exported)
+    {
+        auto *vulkanCapability = context.tryAcquireCapability<engine::renderer::VulkanRenderCapability>();
+        if (vulkanCapability != nullptr
+            && renderCapability.activeBackendName(renderCapability.self, rendererHandle) == std::string("vulkan"))
+        {
+            engine::renderer::RenderError exportError = engine::renderer::RenderError::None;
+            exported = vulkanCapability->exportFramePpm(
+                vulkanCapability->self, rendererHandle, path.c_str(), &exportError);
+        }
+    }
+    return exported;
+}
+
+void clampCursorDelta(double &deltaX, double &deltaY, double maximumCursorDeltaPixels)
+{
+    deltaX = std::clamp(deltaX, -maximumCursorDeltaPixels, maximumCursorDeltaPixels);
+    deltaY = std::clamp(deltaY, -maximumCursorDeltaPixels, maximumCursorDeltaPixels);
+}
 
 void FrameTimingRecorder::beginFrame()
 {
@@ -114,4 +145,4 @@ bool FrameTimingRecorder::writeCsv(const std::string &path) const
     return static_cast<bool>(file);
 }
 
-} // namespace demo::planet_demo
+} // namespace demo::harness

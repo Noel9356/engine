@@ -23,8 +23,13 @@ reflection_indirect_specular         = true
 gpu_timestamps_enabled               = false
 headless_band_split_min_screen_fraction = 0.125
 headless_band_split_triangles        = 4096
-headless_tile_parallel               = false
+# Whole draw lists can take the batched tile-parallel path
+# (headless_batched_tile_rasterization). The per-draw tile path
+# (headless_tile_parallel) has no entry here on purpose: its default adapts
+# to the machine (on from four logical processors, off below) and an
+# explicit line would pin it for every host.
 headless_transform_cache_mb          = 32
+headless_batched_tile_rasterization  = true
 instance_batch_min_count             = 4
 instance_batching                    = true
 instance_stream_mb                   = 4

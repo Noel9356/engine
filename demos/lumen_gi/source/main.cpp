@@ -31,6 +31,7 @@
 // pre-hook image.
 
 #include <engine/application/application.hpp>
+#include "demo_harness.hpp"
 #include <engine/application/frame_pacer.hpp>
 #include <engine/camera/capabilities.hpp>
 #include <engine/kernel/executable_directory.hpp>
@@ -68,6 +69,7 @@ namespace
 {
 using namespace engine;
 using namespace demo::lumen_gi;
+using demo::harness::FrameTimingRecorder;
 namespace window = engine::window;
 
 } // namespace
@@ -418,8 +420,14 @@ int main(int argc, char **argv)
                   << " left to vsync - presentation is already pacing the frame loop\n";
     }
 
+    // Per-frame timing capture, shared with the planet demo (update =
+    // events + camera + GI/reflection evaluate; upload = the draw-command
+    // submission boundary; draw = the renderer frame).
+    FrameTimingRecorder frameTiming;
+
     for (std::uint64_t frameIndex = 0; runUntilClosed || frameIndex < totalFrames; ++frameIndex)
     {
+        frameTiming.beginFrame();
         // GLFW requires its event queue to be pumped from the main thread every frame; skipping this
         // is what makes a busy window show up as "not responding" to the window manager.
         windowCapability.pollEvents(windowCapability.self);
@@ -427,14 +435,9 @@ int main(int argc, char **argv)
         // Drain and dispatch the queued events: close requests, resizes
         // (viewport + camera aspect + GI view all follow the framebuffer),
         // and the Left Alt cursor toggle.
-        std::uint32_t eventCount = 0;
-        do
-        {
-            eventCount = windowCapability.popEvents(windowCapability.self,
-                windowHandle, eventBuffer.data(), static_cast<std::uint32_t>(eventBuffer.size()));
-            for (std::uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex)
+        demo::harness::drainWindowEvents(windowCapability, windowHandle, eventBuffer,
+            [&](const window::WindowEvent &event)
             {
-                const window::WindowEvent &event = eventBuffer[eventIndex];
                 if (event.kind == window::WindowEventKind::CloseRequested)
                 {
                     windowCapability.requestClose(windowCapability.self, windowHandle);
@@ -457,9 +460,7 @@ int main(int argc, char **argv)
                         cursorCaptured ? window::CursorMode::Captured : window::CursorMode::Normal);
                     haveLastCursor = false;
                 }
-            }
-        }
-        while (eventCount == static_cast<std::uint32_t>(eventBuffer.size()));
+            });
 
         if (windowCapability.shouldClose(windowCapability.self, windowHandle))
         {
@@ -507,8 +508,11 @@ int main(int argc, char **argv)
                 if (haveLastCursor)
                 {
                     // Clamp the delta to survive platform cursor jumps.
-                    cameraInput.mouseDeltaX = static_cast<float>(std::clamp(cursorX - lastCursorX, -200.0, 200.0));
-                    cameraInput.mouseDeltaY = static_cast<float>(std::clamp(cursorY - lastCursorY, -200.0, 200.0));
+                    double deltaX = cursorX - lastCursorX;
+                    double deltaY = cursorY - lastCursorY;
+                    demo::harness::clampCursorDelta(deltaX, deltaY, 200.0);
+                    cameraInput.mouseDeltaX = static_cast<float>(deltaX);
+                    cameraInput.mouseDeltaY = static_cast<float>(deltaY);
                 }
                 lastCursorX    = cursorX;
                 lastCursorY    = cursorY;
@@ -565,9 +569,14 @@ int main(int argc, char **argv)
         {
             giCapability->setView(giCapability->self, viewProjection, cameraPosition);
         }
+        // The GI and reflection integrators advance by the same clock the
+        // camera moved on: the fixed 30 Hz step under --frames (deterministic
+        // runs), the clamped wall-clock delta in interactive runs so their
+        // temporal convergence matches the camera's actual motion speed.
+        const double evaluateDeltaSeconds = cameraDeltaSeconds;
         lumen_gi::GiError giError = lumen_gi::GiError::None;
         if (giCapability->evaluate != nullptr
-            && !giCapability->evaluate(giCapability->self, frameDeltaSeconds, &giError))
+            && !giCapability->evaluate(giCapability->self, evaluateDeltaSeconds, &giError))
         {
             std::cerr << "demo_lumen_gi: lumen_gi evaluate failed (error "
                       << static_cast<std::uint32_t>(giError) << ")\n";
@@ -584,7 +593,7 @@ int main(int argc, char **argv)
         if (options.reflections && reflectionCapability->evaluate != nullptr)
         {
             lumen_reflection::ReflectionError reflectionError = lumen_reflection::ReflectionError::None;
-            if (!reflectionCapability->evaluate(reflectionCapability->self, frameDeltaSeconds, &reflectionError))
+            if (!reflectionCapability->evaluate(reflectionCapability->self, evaluateDeltaSeconds, &reflectionError))
             {
                 std::cerr << "demo_lumen_gi: lumen_reflection evaluate failed (error "
                           << static_cast<std::uint32_t>(reflectionError) << ")\n";
@@ -592,10 +601,13 @@ int main(int argc, char **argv)
             }
         }
 
+        frameTiming.markUpdateDone();
+        frameTiming.markUploadDone();
         renderCapability.beginFrame(renderCapability.self, rendererHandle, nullptr);
         renderCapability.drawMeshes(
             renderCapability.self, rendererHandle, drawCommands.data(), static_cast<std::uint32_t>(drawCommands.size()));
         renderCapability.endFrame(renderCapability.self, rendererHandle);
+        frameTiming.markDrawDone();
         ++framesRendered;
 
         if (options.statsEveryFrames != 0 && frameIndex % options.statsEveryFrames == 0
@@ -630,31 +642,12 @@ int main(int argc, char **argv)
         {
             // Headless runs export the window surface directly; Vulkan runs
             // schedule the export on the renderer's vulkan extension.
-            auto *headlessWindowCapability = context.tryAcquireCapability<window::HeadlessWindowCapability>();
-            if (headlessWindowCapability != nullptr
-                && windowCapability.activeBackendName(windowCapability.self) == std::string("headless"))
-            {
-                window::WindowError exportError = window::WindowError::None;
-                screenshotTaken                 = headlessWindowCapability->exportSurfacePpm(
-                    headlessWindowCapability->self, windowHandle, options.screenshotPath.c_str(), &exportError);
-            }
-            if (!screenshotTaken)
-            {
-                auto *vulkanCapability = context.tryAcquireCapability<renderer::VulkanRenderCapability>();
-                if (vulkanCapability != nullptr
-                    && renderCapability.activeBackendName(renderCapability.self, rendererHandle)
-                        == std::string("vulkan"))
-                {
-                    renderer::RenderError exportError = renderer::RenderError::None;
-                    screenshotTaken                   = vulkanCapability->exportFramePpm(
-                        vulkanCapability->self, rendererHandle, options.screenshotPath.c_str(), &exportError);
-                    if (screenshotTaken)
-                    {
-                        std::cout << "demo_lumen_gi: screenshot scheduled on the vulkan backend (written at the "
-                                     "next frame retirement)\n";
-                    }
-                }
-            }
+            screenshotTaken = demo::harness::exportScreenshotPpm(context,
+                windowCapability,
+                windowHandle,
+                renderCapability,
+                rendererHandle,
+                options.screenshotPath);
             if (screenshotTaken)
             {
                 std::cout << "demo_lumen_gi: screenshot written to " << options.screenshotPath << "\n";
@@ -748,6 +741,18 @@ int main(int argc, char **argv)
     windowCapability.destroyWindow(windowCapability.self, windowHandle);
     cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
     host.stop();
+    std::cout << frameTiming.summary();
+    if (!options.frameTimesPath.empty())
+    {
+        if (frameTiming.writeCsv(options.frameTimesPath))
+        {
+            std::cout << "demo_lumen_gi: frame timings written to " << options.frameTimesPath << "\n";
+        }
+        else
+        {
+            std::cout << "demo_lumen_gi: could not write frame timings to " << options.frameTimesPath << "\n";
+        }
+    }
     std::cout << "demo_lumen_gi: stopped cleanly after " << framesRendered << " frames\n";
     return 0;
 }

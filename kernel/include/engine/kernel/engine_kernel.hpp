@@ -80,8 +80,6 @@ public:
     // real work happens in validate/construct.
     void setConfigurationFile(const std::filesystem::path &configurationPath);
 
-    void setConfigurationProfileFile(const std::filesystem::path &profilePath);
-
     void addConfigurationProfileFile(const std::filesystem::path &profilePath);
 
     void setSceneFile(const std::filesystem::path &scenePath);
@@ -301,7 +299,6 @@ private:
 
     // Staged paths: engine.toml, optional profiles, scene file, plugin roots.
     std::filesystem::path              configurationFilePath;
-    std::filesystem::path              configurationProfileFilePath;
     std::vector<std::filesystem::path> configurationProfileFilePaths;
     std::filesystem::path              sceneFilePath;
     std::filesystem::path              explicitPluginsDirectory;

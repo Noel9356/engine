@@ -333,6 +333,12 @@ private:
         // falling back to unrestricted filesystem access.
         config_.allowAbsolutePaths
             = context.configurationBooleanInSection("file_asset_store", "allow_absolute_paths").value_or(true);
+        // A configured root that does not resolve to an existing directory
+        // makes canonicalPath reject every request with InvalidPath. That is
+        // the deliberate fail-closed choice over falling back to unrestricted
+        // access, but it is indistinguishable from "file not found" at the
+        // capability level, so say so once at startup.
+        bool rootConfiguredButUnresolved = false;
         if (const auto value = context.configurationStringInSection("file_asset_store", "root_directory");
             value && !value->empty())
         {
@@ -341,6 +347,13 @@ private:
             config_.rootDirectory = std::filesystem::weakly_canonical(*value, error);
             config_.rootRestricted
                 = !error && !config_.rootDirectory.empty() && std::filesystem::is_directory(config_.rootDirectory, error) && !error;
+            rootConfiguredButUnresolved = !config_.rootRestricted;
+        }
+        if (rootConfiguredButUnresolved)
+        {
+            std::fprintf(stderr,
+                "file_asset_store: root_directory does not resolve to an existing directory; "
+                "all loose-file requests will fail with InvalidPath\n");
         }
     }
 

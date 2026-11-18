@@ -12,7 +12,7 @@ The bridge crosses the script boundary with script_runtime's four primitive valu
 
 - Handles (`AudioEngineHandle`, `AudioBusHandle`, `AudioSoundHandle`) are numbers. `0` means "none"; creation functions return `nil` in the handle slot when creation failed.
 - Numbers must be finite; `inf`/`nan` arguments make the call fail. Integer-typed arguments must be integral and inside the C++ type's range. Optional trailing arguments may be omitted - an absent argument falls back to the same default the C++ description would use.
-- Strings are borrowed for the duration of the call; paths are passed through to the backend unchanged.
+- Strings are borrowed for the duration of the call; sound paths must resolve inside the configured `[audio] lua_allowed_path_roots` - the bridge probes relative paths against the roots in order, accepts absolute paths already under a root, and refuses every script sound load when the list is empty (see [configuration.md](configuration.md)).
 - Functions that report backend errors return `(value, error_code)` where `error_code` is the numeric `AudioError` value: 0 `None`, 1 `BackendUnavailable`, 2 `CreationFailed`, 3 `InvalidHandle`, 4 `InvalidDescription`, 5 `ResourceFailed`, 6 `Busy`, 7 `Unsupported`, 8 `CapacityExceeded`. Functions without a dedicated error path return a plain success boolean.
 - A malformed call (wrong argument count, wrong types, non-finite values) returns `false` or `nil` from the binding without touching audio state.
 
@@ -28,7 +28,7 @@ Functions are listed alphabetically. `engine`/`bus`/`sound` are handles, `?` mar
 | `audio.bus_info` | engine, bus | parent, volume, muted | Observed bus state; parent `0` is the master output. Returns `nil, nil, nil` for an unknown bus. |
 | `audio.create_bus` | engine, parent? (=0), volume? (=1.0), muted? (=false) | handle or nil, error | Parent 0 creates a top-level bus. |
 | `audio.create_engine` | sample_rate? (=0), channels? (=0), listeners? (=0), master_volume? (=-1), no_device? (=false), no_auto_start? (=false) | handle or nil, error | `0` sample rate/channels/listeners and negative master volume mean "use `[audio]` configuration defaults". `no_device = true` creates a manual-render engine (see `readFrames` note above). |
-| `audio.create_sound` | engine, path, bus? (=0), volume? (=1.0), pitch? (=1.0), pan? (=0.0), looping? (=false), spatialized? (=false), streaming? (=false), decode? (=false), asynchronous? (=false), disable_pitch? (=false) | handle or nil, error | Flags map onto miniaudio load flags; `streaming` and `decode` are mutually exclusive. |
+| `audio.create_sound` | engine, path, bus? (=0), volume? (=1.0), pitch? (=1.0), pan? (=0.0), looping? (=false), spatialized? (=false), streaming? (=false), decode? (=false), asynchronous? (=false), disable_pitch? (=false) | handle or nil, error | Flags map onto miniaudio load flags; `streaming` and `decode` are mutually exclusive. The path must resolve inside `[audio] lua_allowed_path_roots`; with the default empty list the call fails with error 4 (`InvalidDescription`). |
 | `audio.destroy_bus` | engine, bus | ok, error | Refuses buses with children or attached sounds (`Busy`). |
 | `audio.destroy_engine` | engine | (none) | Releases all sounds and buses of the engine. |
 | `audio.destroy_sound` | engine, sound | (none) | |

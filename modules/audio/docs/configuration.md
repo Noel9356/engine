@@ -15,6 +15,7 @@ All keys live in the `[audio]` section. Defaults ship in `config.toml`; the appl
 | `audio.initial_engine_capacity` | integer | 0 - 65536 | `4` | Initial engine-registry bucket reservation. |
 | `audio.initial_sound_capacity` | integer | 0 - 1048576 | `64` | Initial per-engine sound-map bucket reservation. |
 | `audio.listener_count` | integer | 1 - `MA_ENGINE_MAX_LISTENERS` | `1` | Default number of spatialization listeners. The accepted maximum follows the backend build rather than a module-specific listener limit. |
+| `audio.lua_allowed_path_roots` | string array | each entry a non-empty path; entries that do not name an existing directory are ignored | `[]` | Security boundary for the Lua bridge: the directories a sandboxed script's `audio.create_sound` path may resolve into. Relative paths are probed against the roots in order (first hit wins), absolute paths must already sit under a root, and roots are canonicalized at construction so symlinks cannot widen access. Empty (the default) refuses script sound creation entirely - the native C++ capability is unaffected. Honored in both `auto_config` modes because it is a security boundary, not a tuning key. |
 | `audio.master_volume` | finite float | `>= 0` | `1.0` | Default linear master gain. Values above `1.0` amplify. |
 | `audio.max_buses_per_engine` | integer | 0 - 65536 | `0` | Maximum live buses per engine. `0` is unbounded. |
 | `audio.max_engines` | integer | 0 - 1048576 | `0` | Maximum live engines. `0` is unbounded. |

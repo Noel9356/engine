@@ -115,6 +115,10 @@ struct RendererRecord
     std::vector<std::uint32_t>     sortPermutation{};
     std::uint64_t                  sortSignature      = 0;
     bool                           sortSignatureValid = false;
+
+    // The filtered mesh-draw list handed to RenderBackend::drawMeshBatch once
+    // per frame (see drawMeshesImpl); capacity persists across frames.
+    std::vector<RenderBackend::MeshBatchItem> batchItemsScratch{};
 };
 
 // Main-thread module object. All capability entry points funnel through the
@@ -464,8 +468,16 @@ private:
 
         // Headless rasterizer tuning. Read here (not per renderer creation)
         // so live reloads and auto_config treat it like every other knob.
-        headlessTileParallel_
-            = context.configurationBooleanInSection("renderer", "headless_tile_parallel").value_or(true);
+        // The per-draw tile path defaults adaptively: the serial binning
+        // phase loses to the band/triangle-range split on two-core hosts
+        // (measured ~+55% frame time) but wins once per-pixel lock
+        // contention dominates on four cores and up. auto_config applies
+        // the same rule explicitly.
+        headlessTileParallel_ = context.configurationBooleanInSection("renderer", "headless_tile_parallel")
+                                   .value_or(util::logicalProcessorCount() >= 4u);
+        batchedTileRasterizationEnabled_
+            = context.configurationBooleanInSection("renderer", "headless_batched_tile_rasterization")
+                  .value_or(true);
         parallelTriangleThreshold_ = static_cast<std::uint32_t>(
             context.configurationIntegerInSection("renderer", "parallel_triangle_threshold").value_or(4096));
         pixelsPerLockGroup_ = static_cast<std::size_t>(
@@ -656,10 +668,13 @@ private:
         msaaSamples_        = bigVram ? 4u : 2u;
         anisotropyLevel_    = gpu.samplerAnisotropyAvailable ? (discrete ? 8.0f : 4.0f) : 1.0f;
 
-        // Headless rasterizer threading scales with the CPU shape: tile
-        // parallelism turns on from 4 logical processors, the parallel
+        // Headless rasterizer threading scales with the CPU shape: the
+        // per-draw tile path turns on from 4 logical processors (its serial
+        // binning loses on two cores), the batched tile path from 2 (one
+        // binning pass per frame amortizes the fork/join), and the parallel
         // triangle thresholds drop once there are enough workers to win.
         headlessTileParallel_       = cores >= 4u;
+        batchedTileRasterizationEnabled_ = cores >= 2u;
         parallelTriangleThreshold_  = cores >= 8u ? 2048u : 4096u;
         bandSplitTriangleThreshold_ = parallelTriangleThreshold_;
         bandSplitMinimumScreenFraction_ = 0.125f;
@@ -833,6 +848,7 @@ private:
             headlessOptions.backFaceCullingEnabled    = backFaceCulling_;
             headlessOptions.lodEnabled                = lodEnabled_;
             headlessOptions.tileParallelEnabled       = headlessTileParallel_;
+            headlessOptions.batchedTileRasterizationEnabled = batchedTileRasterizationEnabled_;
             headlessOptions.taskScheduler             = context_ != nullptr ? &context_->taskScheduler() : nullptr;
             headlessOptions.msaaSamples                = msaaSamples_;
 
@@ -1029,8 +1045,12 @@ private:
             if (!record->reflectionFieldInitialized || record->reflectionFieldVersion != version
                 || record->reflectionHeader.width != header.width || record->reflectionHeader.height != header.height)
             {
+                // copyField writes reflectionFieldTexelFloats floats per texel
+                // (the radiance triplet interleaved with the texel roughness;
+                // see the lumen_reflection ABI header) - the scratch sizing
+                // and the copy capacity must both carry that stride.
                 const std::size_t texelCount = static_cast<std::size_t>(header.width) * header.height;
-                record->reflectionScratch.resize(texelCount * 3);
+                record->reflectionScratch.resize(texelCount * lumen_reflection::reflectionFieldTexelFloats);
                 if (texelCount != 0)
                 {
                     lumenReflection_->copyField(lumenReflection_->self,
@@ -1280,9 +1300,47 @@ private:
                                 && commandCount >= instanceBatchMinimumCount_;
         if (!useInstancing)
         {
-            for (std::uint32_t index = 0; index < commandCount; ++index)
+            // One backend call for the whole frame's mesh draws. The Vulkan
+            // backend's default implementation replays the items through
+            // drawMesh; the headless backend replaces the replay with a
+            // batched tile-parallel pass that preserves per-pixel submission
+            // order exactly while spreading the pixel work across every
+            // worker (see RenderBackend::drawMeshBatch). Only the scratch
+            // build can throw here (nothing has been drawn yet); the backend
+            // call itself is allocation-failure safe and falls back to the
+            // per-draw paths internally.
+            bool batchReady = false;
+            try
             {
-                const RenderDrawCommand &command = orderedCommands[index];
+                record->batchItemsScratch.clear();
+                record->batchItemsScratch.reserve(commandCount);
+                for (std::uint32_t commandIndex = 0; commandIndex < commandCount; ++commandIndex)
+                {
+                    const RenderDrawCommand &command = orderedCommands[commandIndex];
+                    if (command.modelMatrix == nullptr || command.mesh == invalidMesh)
+                    {
+                        continue;
+                    }
+                    record->batchItemsScratch.push_back(RenderBackend::MeshBatchItem{
+                        command.mesh, command.modelMatrix, command.material});
+                }
+                batchReady = true;
+            }
+            catch (const std::bad_alloc &)
+            {
+                record->batchItemsScratch.clear();
+            }
+            if (batchReady)
+            {
+                backend->drawMeshBatch(
+                    record->batchItemsScratch.data(), static_cast<std::uint32_t>(record->batchItemsScratch.size()));
+                return;
+            }
+            // The scratch copy failed; replay through the per-command path
+            // instead (identical output, just unbached).
+            for (std::uint32_t commandIndex = 0; commandIndex < commandCount; ++commandIndex)
+            {
+                const RenderDrawCommand &command = orderedCommands[commandIndex];
                 if (command.modelMatrix == nullptr || command.mesh == invalidMesh)
                 {
                     continue;
@@ -1753,6 +1811,7 @@ private:
     // Headless rasterizer tuning, held as members so readConfiguration (with
     // or without auto_config) owns every derived value.
     bool           headlessTileParallel_       = false;
+    bool           batchedTileRasterizationEnabled_ = true;
     std::uint32_t  parallelTriangleThreshold_  = 4096u;
     std::size_t    pixelsPerLockGroup_         = 16u;
     std::size_t    lodMinTriangles_            = 4096u;

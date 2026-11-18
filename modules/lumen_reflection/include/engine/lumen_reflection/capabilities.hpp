@@ -32,6 +32,17 @@ inline constexpr std::uint32_t lumenReflectionCapabilityAbi = 2u;
 using ReflectionSurfaceHandle                                = std::uint32_t;
 inline constexpr ReflectionSurfaceHandle invalidReflectionSurface = 0;
 
+// Texel stride of copyField's output buffer: the radiance RGB triplet
+// followed by the texel's surface roughness, interleaved in row-major texel
+// order. Buffers handed to copyField must hold width * height * this many
+// floats, and readers must index with the same stride - the single source of
+// truth for both sides of the capability boundary.
+inline constexpr std::uint32_t reflectionFieldTexelFloats = 4u;
+// Roughness value the module reports for texels with no traced response
+// (background, unlit, or above the traced roughness band). A renderer's
+// field sample treats these texels as absent instead of blending them in.
+inline constexpr float reflectionFieldNeutralRoughness = 1.0f;
+
 // ReflectionSurfaceDescription.flagBits values, sharing lumen_gi's semantics:
 // Unlit surfaces emit their albedo as radiance; Excluded surfaces are
 // invisible to reflection rays (decorative sky/sun geometry the environment

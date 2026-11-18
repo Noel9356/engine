@@ -44,10 +44,13 @@ public:
     }
 
     // Resolves a request path to a canonical absolute path. Returns "" when
-    // the path is unusable, too long, or (with a configured root) escapes the
-    // root; relative paths are interpreted against the root directory. When
-    // a canonical-path cache is configured, recently resolved inputs are
-    // reused to avoid the weakly_canonical syscall on every request.
+    // the path is unusable, too long, escapes a configured root, or the
+    // configured root itself does not resolve to an existing directory (in
+    // which case every request is rejected); relative paths are interpreted
+    // against the root directory. Callers must treat "" as rejection and
+    // never fall back to the raw path. When a canonical-path cache is
+    // configured, recently resolved inputs are reused to avoid the
+    // weakly_canonical syscall on every request.
     std::string canonicalPath(const char *path) const;
 
     // Finds an existing record by handle (returns nullptr if not found).

@@ -10,6 +10,7 @@ config_keys           = [
     "audio.initial_engine_capacity",
     "audio.initial_sound_capacity",
     "audio.listener_count",
+    "audio.lua_allowed_path_roots",
     "audio.master_volume",
     "audio.max_buses_per_engine",
     "audio.max_engines",

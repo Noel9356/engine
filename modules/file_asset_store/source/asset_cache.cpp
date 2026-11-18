@@ -39,6 +39,13 @@ void setAssetState(AssetRecord &record, AssetState state, AssetError error) noex
 
 std::string AssetCache::canonicalPath(const char *path) const
 {
+    // A configured root that failed to resolve (rootConfigured without
+    // rootRestricted) rejects every request here: returning empty fails the
+    // request with InvalidPath in requestAsset, which is deliberately safer
+    // than skipping normalization and serving paths the operator asked to
+    // confine. The same empty result also covers null input and an
+    // unconfigured cache, so every caller must treat "" as rejection - never
+    // as "fall back to the raw path".
     if (path == nullptr || config_ == nullptr || (config_->rootConfigured && !config_->rootRestricted))
         return {};
     const auto *terminator = static_cast<const char *>(std::memchr(path, '\0', config_->maximumPathBytes + 1u));

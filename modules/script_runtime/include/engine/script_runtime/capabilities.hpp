@@ -89,8 +89,11 @@ struct ScriptRuntimeDescription
     // budget covers the whole execution including native callbacks, which the
     // instruction counter cannot see; it is enforced at the next hook or
     // native-call boundary, so a single native call can still run to its own
-    // completion before the abort is raised.
-    std::uint64_t wallClockLimitMilliseconds = 0;
+    // completion before the abort is raised. Defaults to the shipped
+    // [script_runtime] wall_clock_limit_milliseconds value (2000 ms) so
+    // scripts cannot stall their host thread indefinitely through slow
+    // native calls; set 0 to opt out.
+    std::uint64_t wallClockLimitMilliseconds = 2000;
 };
 
 struct ScriptRuntimeInfo

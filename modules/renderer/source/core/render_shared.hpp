@@ -155,9 +155,10 @@ struct GiProbeGrid
 struct ReflectionField
 {
     lumen_reflection::ReflectionFieldHeader header{};
-    const float *radiance = nullptr; // borrowed; width*height*3 linear HDR
-    std::uint32_t width  = 0;
-    std::uint32_t height = 0;
+    // Borrowed; width*height*reflectionFieldTexelFloats linear HDR texels
+    // (radiance RGB interleaved with the texel roughness, per the
+    // lumen_reflection ABI).
+    const float *radiance = nullptr;
 
     bool valid() const
     {
@@ -169,8 +170,13 @@ struct ReflectionField
 // projected through the field's own camera, and the four surrounding texels
 // are blended (the field is lower-resolution than the framebuffer by
 // design; the screen traces inside the module already accounted for the
-// geometry the pixel sees). Returns black when the point falls outside the
-// field (behind the camera or off its frustum).
+// geometry the pixel sees). Texels carrying the module's neutral roughness
+// (no traced response: background, unlit, above the traced roughness band)
+// are refused instead of blended, so the bilinear weights renormalize over
+// the remaining texels and a fully-refused neighborhood reads black - the
+// documented sample-gate contract of the field's texel layout. Returns
+// black when the point falls outside the field (behind the camera or off
+// its frustum).
 inline glm::vec3 sampleReflectionField(const ReflectionField &field, const glm::vec3 &worldPosition)
 {
     if (!field.valid())
@@ -196,16 +202,36 @@ inline glm::vec3 sampleReflectionField(const ReflectionField &field, const glm::
     const std::uint32_t y1 = std::min(y0 + 1u, field.header.height - 1u);
     const float       fx = u - static_cast<float>(x0);
     const float       fy = v - static_cast<float>(y0);
-    const auto texelAt = [&field](std::uint32_t x, std::uint32_t y)
+    const auto texelAt = [&field](std::uint32_t x, std::uint32_t y, bool &traced)
     {
-        const float *texel = field.radiance + (static_cast<std::size_t>(y) * field.header.width + x) * 3;
+        const float *texel
+            = field.radiance
+              + (static_cast<std::size_t>(y) * field.header.width + x) * lumen_reflection::reflectionFieldTexelFloats;
+        // The trailing roughness is the sample gate: the module reports the
+        // neutral value for every texel it never traced a response into, and
+        // blending those in would smear background radiance across the
+        // neighborhood (or resurrect a stale frame's field when the module
+        // skipped an evaluate).
+        traced = texel[3] < lumen_reflection::reflectionFieldNeutralRoughness;
         return glm::vec3(texel[0], texel[1], texel[2]);
     };
-    const glm::vec3 t00 = texelAt(x0, y0);
-    const glm::vec3 t10 = texelAt(x1, y0);
-    const glm::vec3 t01 = texelAt(x0, y1);
-    const glm::vec3 t11 = texelAt(x1, y1);
-    return glm::mix(glm::mix(t00, t10, fx), glm::mix(t01, t11, fx), fy);
+    bool        traced00 = false, traced10 = false, traced01 = false, traced11 = false;
+    const glm::vec3 t00 = texelAt(x0, y0, traced00);
+    const glm::vec3 t10 = texelAt(x1, y0, traced10);
+    const glm::vec3 t01 = texelAt(x0, y1, traced01);
+    const glm::vec3 t11 = texelAt(x1, y1, traced11);
+    // Refused texels drop out of the blend; the surviving weights
+    // renormalize, and an empty neighborhood (all four refused) reads black.
+    const float w00 = traced00 ? (1.0f - fx) * (1.0f - fy) : 0.0f;
+    const float w10 = traced10 ? fx * (1.0f - fy) : 0.0f;
+    const float w01 = traced01 ? (1.0f - fx) * fy : 0.0f;
+    const float w11 = traced11 ? fx * fy : 0.0f;
+    const float weightSum = w00 + w10 + w01 + w11;
+    if (weightSum <= 0.0f)
+    {
+        return glm::vec3(0.0f);
+    }
+    return (t00 * w00 + t10 * w10 + t01 * w01 + t11 * w11) / weightSum;
 }
 
 // Builds both level descriptors from the snapshot's header and probe array;

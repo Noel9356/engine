@@ -217,6 +217,10 @@ private:
         {
             instructionHookGranularity_ = static_cast<std::uint32_t>(*value);
         }
+        // The wall-clock budget defaults to a generous per-execute/call bound
+        // (see the ScriptRuntimeDescription default) because the instruction
+        // counter cannot see time spent inside native callbacks; 0 keeps the
+        // historical "no wall-clock limit" behavior for hosts that need it.
         if (const auto value = context.configurationIntegerInSection("script_runtime", "wall_clock_limit_milliseconds");
             value && *value >= 0)
         {
@@ -808,7 +812,20 @@ private:
             setError(error, ScriptError::CompilationFailed);
             return copyText("script file contains a null byte", errorText, errorCapacity, errorRequired);
         }
-        return executeStringImpl(handle, source.c_str(), filePath, error, errorText, errorCapacity, errorRequired);
+        // Lua prefixes every error message with the chunk name, so passing
+        // the host path here would leak the installation layout (absolute
+        // paths, user names, build directories) into errorText and the
+        // per-callback stderr diagnostics. The file name alone locates the
+        // fault: hostScriptPlugin already reports the full path when plugin
+        // hosting fails, and scripts can still read their own location from
+        // the engine_plugin_path global.
+        std::string chunkName = std::filesystem::path(filePath).filename().string();
+        if (chunkName.empty())
+        {
+            chunkName = "=(engine)";
+        }
+        return executeStringImpl(
+            handle, source.c_str(), chunkName.c_str(), error, errorText, errorCapacity, errorRequired);
     }
 
     bool callFunctionImpl(ScriptRuntimeHandle handle, const char *functionName, ScriptError *error, char *errorText,

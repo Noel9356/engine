@@ -75,6 +75,42 @@ public:
     virtual void drawMeshInstances(
         MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount, const MeshMaterial &material) = 0;
 
+    // One mesh draw inside a submitted batch; the fields mirror
+    // RenderDrawCommand (borrowed pointers, default material when null).
+    struct MeshBatchItem
+    {
+        MeshHandle           mesh        = invalidMesh;
+        const float         *modelMatrix = nullptr;
+        const MeshMaterial  *material    = nullptr;
+    };
+
+    // A frame's mesh draws in submission order. The default implementation
+    // replays the items through drawMesh one by one, so a backend that does
+    // not override this is behaviorally identical to the per-command loop it
+    // replaces. The headless backend overrides it with one batched
+    // tile-parallel pass: every item's triangles are binned into screen
+    // tiles first and each tile is then rasterized by exactly one worker,
+    // with per-tile record lists preserving submission order - so the
+    // per-pixel triangle order (and therefore the image) equals the
+    // sequential replay exactly, while the pixel work spreads across every
+    // worker. Many-small-draw scenes (streamed chunk meshes, instanced
+    // props) spend most of their frame in draws too small for the per-draw
+    // parallel thresholds; the batch is what lets those scenes use the
+    // whole machine.
+    virtual void drawMeshBatch(const MeshBatchItem *items, std::uint32_t itemCount)
+    {
+        const MeshMaterial defaultMaterial;
+        for (std::uint32_t index = 0; index < itemCount; ++index)
+        {
+            const MeshBatchItem &item = items[index];
+            if (item.modelMatrix == nullptr || item.mesh == invalidMesh)
+            {
+                continue;
+            }
+            drawMesh(item.mesh, item.modelMatrix, item.material != nullptr ? *item.material : defaultMaterial);
+        }
+    }
+
     // Shell-fur draws (see FurLayerParams in capabilities.hpp): layerCount
     // alpha-blended shell layers over the opaque base surface. Both backends
     // implement them; the headless rasterizer mirrors the fur pipeline's

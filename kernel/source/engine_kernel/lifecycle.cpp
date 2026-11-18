@@ -373,11 +373,12 @@ void EngineKernel::start()
 }
 
 // Teardown in reverse start order: deferred bus events flush and the shutdown event
-// publishes first, then participants stop and the scheduler/bus wind down.
-// Idempotent and safe during unwinding.
+// publishes first (while the provider index is still populated, so handlers run
+// against a fully started engine and may still acquire capabilities), then the
+// index resets, participants stop and the scheduler/bus wind down. Idempotent
+// and safe during unwinding.
 void EngineKernel::stop()
 {
-    capabilityProviderIndex_->reset();
     if (started)
     {
         try
@@ -390,6 +391,18 @@ void EngineKernel::stop()
             std::fprintf(stderr, "engine kernel: shutdown event handler failed: %s\n", error.what());
         }
     }
+
+    // Reset the provider index only after the dispatch above: deferred and
+    // shutdown handlers execute participant code that may resolve capabilities
+    // through ParticipantContext, and with an empty index every resolve throws
+    // "no active provider". The reset must still precede the teardown below:
+    // the index caches raw ModuleInterface*/PluginInterface* pointers, plugins
+    // are destroyed by pluginEntryTable->destroyPlugin and module instances
+    // (plus the .so files backing their vtables) only die when records.clear()
+    // unloads the libraries - entries kept past those points would be
+    // use-after-free material. No participant code runs between this reset and
+    // the last of those pointers going away.
+    capabilityProviderIndex_->reset();
 
     mainThreadTaskQueue_.clear();
 

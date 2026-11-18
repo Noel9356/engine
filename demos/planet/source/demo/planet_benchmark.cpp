@@ -236,7 +236,7 @@ int runBenchmark(const planet::PlanetGenerationParams &params)
             // elevation crosses zero (the waterline in that direction).
             for (std::uint32_t bearing = 0; bearing < 16 && !haveCrossing; ++bearing)
             {
-                const double azimuth = planet::clamp01(0.0) + 6.283185307179586 * static_cast<double>(bearing) / 16.0;
+                const double azimuth = 6.283185307179586 * static_cast<double>(bearing) / 16.0;
                 planet::Vec3 side = planet::cross(probe, planet::Vec3{0.0, 1.0, 0.0});
                 if (planet::length(side) < 1.0e-3)
                 {

@@ -18,6 +18,8 @@ const char *giOptionsUsage() noexcept
            "  --screenshot <file.ppm>  Export the rendered frame (hook output) as PPM.\n"
            "  --screenshot-frame <n>   Frame index for --screenshot (default 29, the\n"
            "                           last frame of a default 30-frame run).\n"
+           "  --frame-times <file.csv> Export per-frame timings as CSV (a percentile summary\n"
+           "                           of the rendered frames is always printed).\n"
            "  --export-debug <prefix>  Also write lumen_gi debug views <prefix>_<view>.ppm\n"
            "                           (final, gionly, lumenscene, surfacecache, probes,\n"
            "                           reference) and lumen_reflection views\n"
@@ -59,6 +61,10 @@ bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &op
         else if (argument == "--screenshot-frame" && hasValue)
         {
             options.screenshotFrame = std::strtoull(arguments[++index].c_str(), nullptr, 10);
+        }
+        else if (argument == "--frame-times" && hasValue)
+        {
+            options.frameTimesPath = arguments[++index];
         }
         else if (argument == "--export-debug" && hasValue)
         {

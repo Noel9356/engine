@@ -777,14 +777,15 @@ private:
         const std::uint32_t copied = std::min(available, capacityTexels);
         if (copied != 0)
         {
-            // Four floats per texel: the radiance triplet, then the texel's
-            // surface roughness (the renderer's sample gate material key).
+            // Interleaved texels (see reflectionFieldTexelFloats): the
+            // radiance triplet, then the texel's surface roughness (the
+            // renderer's sample gate material key).
             for (std::uint32_t texel = 0; texel < copied; ++texel)
             {
-                output[texel * 4 + 0] = snapshot->radiance[texel * 3 + 0];
-                output[texel * 4 + 1] = snapshot->radiance[texel * 3 + 1];
-                output[texel * 4 + 2] = snapshot->radiance[texel * 3 + 2];
-                output[texel * 4 + 3] = snapshot->roughness[texel];
+                output[texel * reflectionFieldTexelFloats + 0] = snapshot->radiance[texel * 3 + 0];
+                output[texel * reflectionFieldTexelFloats + 1] = snapshot->radiance[texel * 3 + 1];
+                output[texel * reflectionFieldTexelFloats + 2] = snapshot->radiance[texel * 3 + 2];
+                output[texel * reflectionFieldTexelFloats + 3] = snapshot->roughness[texel];
             }
         }
         return copied;

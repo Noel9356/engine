@@ -14,6 +14,7 @@ config_keys           = [
     "renderer.gpu_timestamps_enabled",
     "renderer.headless_band_split_min_screen_fraction",
     "renderer.headless_band_split_triangles",
+    "renderer.headless_batched_tile_rasterization",
     "renderer.headless_tile_parallel",
     "renderer.headless_transform_cache_mb",
     "renderer.instance_batch_min_count",

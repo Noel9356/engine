@@ -12,7 +12,7 @@ The module provides the `script_runtime` capability (ABI 3, see `include/engine/
 | `destroyRuntime(handle)` | Destroys the runtime and its Lua state. |
 | `runtimeInfo(handle, outInfo)` | Memory usage and active limits, for dashboards. |
 | `executeString(handle, source, chunkName, ...)` | Compiles and runs a source buffer (`"t"` text chunks only). |
-| `executeFile(handle, path, ...)` | Reads a file (size-checked against the script size limit) and runs it. |
+| `executeFile(handle, path, ...)` | Reads a file (size-checked against the script size limit) and runs it; the file's name becomes the Lua chunk name so error messages stay free of host paths. |
 | `callFunction(handle, name, ...)` | Calls a global function with no arguments. |
 | `registerNativeFunction(handle, name, fn, userData)` | Exposes a C++ function to the script as a global; dotted names create nested tables (for example, `audio.create_engine` becomes `audio.create_engine`). |
 | `setGlobalNumber/String`, `getGlobalNumber/String` | Primitive global exchange. |
@@ -41,7 +41,7 @@ Each runtime is a Lua state created with a custom allocator:
 
 - **Memory:** a per-runtime byte budget and a module-wide byte budget (atomic, shared by all runtimes). Growth beyond either fails the allocation, which Lua surfaces as a memory error. The module-wide counter uses compare-and-swap subtraction so accounting drift can never underflow the counter into wraparound.
 - **Instructions:** a count hook every `instruction_hook_granularity` VM instructions (default 1000) stops runaway scripts with an "instruction limit exceeded" error; the budget is re-armed for every execute/call. Lower granularity catches runaway loops sooner at higher overhead; higher granularity is cheaper but lets a runaway script overshoot by up to the granularity. When an instruction limit is active the effective granularity is clamped to at most a quarter of that limit, bounding the overshoot.
-- **Wall clock:** an optional wall-clock budget (`wall_clock_limit_milliseconds`, 0 = off) bounds each execute/call including time spent inside native functions, which the instruction counter cannot see. An over-budget execution fails with `ScriptError::WallClockLimitExceeded`.
+- **Wall clock:** a wall-clock budget (`wall_clock_limit_milliseconds`, default 2000 ms, 0 = off) bounds each execute/call including time spent inside native functions, which the instruction counter cannot see; it is re-armed per execute/call, so long-lived plugins are unaffected unless a single callback stalls. An over-budget execution fails with `ScriptError::WallClockLimitExceeded`.
 - **Libraries:** `math`, `string`, `table`, `utf8`, and a trimmed `base` are on by default; `coroutine` is available when `ScriptLibraryCoroutine` is set in the runtime description or in `default_enabled_libraries`. `load`, `dofile`, `loadfile`, `collectgarbage`, and `string.dump` are removed, and `io`/`os`/`package`/`debug` are never opened, so scripts cannot touch the filesystem, control the VM, or evade the text-only chunk restriction enforced by `luaL_loadbufferx`.
 - **Values:** scripts and native code exchange only nil, boolean, number, and string; argument/result counts are capped per configuration.
 - **Threads:** one mutex per runtime serializes Lua access; runtimes are independent of each other.

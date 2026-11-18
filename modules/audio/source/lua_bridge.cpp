@@ -15,7 +15,11 @@
 #include <engine/script_runtime/native_values.hpp>
 
 #include <cstdint>
+#include <filesystem>
 #include <limits>
+#include <string>
+#include <system_error>
+#include <vector>
 
 namespace engine::audio
 {
@@ -39,6 +43,56 @@ using script_runtime::native::uint32Value;
 AudioCapability &audio(void *userData)
 {
     return *static_cast<AudioLuaBridgeContext *>(userData)->audio;
+}
+
+// The allowed script-sound roots from the bridge context; empty when the
+// module configured none (or the context is unusable), which the path check
+// below treats as "refuse every script sound load".
+const std::vector<std::filesystem::path> &scriptSoundRoots(void *userData)
+{
+    static const std::vector<std::filesystem::path> none;
+    const auto *context = static_cast<const AudioLuaBridgeContext *>(userData);
+    return context != nullptr && context->scriptSoundRoots != nullptr ? *context->scriptSoundRoots : none;
+}
+
+// Sandbox boundary for script-supplied sound paths. The native capability is
+// a trusted C++ surface, but audio.create_sound feeds its path straight to
+// the miniaudio decoders, which can open any file the process can read; a
+// sandboxed script must therefore only reach paths the host explicitly
+// allowed. A path is accepted when it resolves inside one of the
+// canonicalized [audio] lua_allowed_path_roots: relative paths are probed
+// against the roots in order (first existing hit wins, matching the
+// models.search_paths convention), absolute paths must already sit under a
+// root, and weakly_canonical resolves symlinks so a link inside a root cannot
+// point outside it. Returns the resolved host path to load, or an empty
+// string to refuse the request.
+std::string resolveScriptSoundPath(const char *path, const std::vector<std::filesystem::path> &roots)
+{
+    if (path == nullptr || path[0] == '\0' || roots.empty())
+        return {};
+    const std::filesystem::path requested(path);
+    std::filesystem::path       firstContained;
+    std::error_code             error;
+    for (const std::filesystem::path &root : roots)
+    {
+        std::filesystem::path candidate
+            = std::filesystem::weakly_canonical(requested.is_absolute() ? requested : root / requested, error);
+        if (error)
+            continue;
+        const std::filesystem::path relative = candidate.lexically_relative(root);
+        if (relative.empty() || relative.is_absolute() || *relative.begin() == "..")
+            continue;
+        if (requested.is_absolute())
+            return candidate.generic_string();
+        if (firstContained.empty())
+            firstContained = candidate;
+        if (std::filesystem::exists(candidate, error) && !error)
+            return candidate.generic_string();
+    }
+    // A relative request that stays inside a root but exists in none of them
+    // still gets that root-joined path so the backend reports a truthful
+    // missing-file failure instead of a policy denial.
+    return firstContained.empty() ? std::string{} : firstContained.generic_string();
 }
 
 // Writes an error code into a result slot.
@@ -342,8 +396,21 @@ bool createSound(
         || !optionalBoolean(args, count, 10, description.asynchronous)
         || !optionalBoolean(args, count, 11, description.disablePitch))
         return false;
-    description.filePath = path;
-    description.bus = bus;
+    // Scripts are the untrusted side of this bridge: keep the raw path away
+    // from the backend decoder unless it resolves inside the configured
+    // allow-list. Refusal is reported like any other invalid description so
+    // the native capability surface (and its trusted C++ callers) is
+    // unchanged.
+    std::string resolvedPath = resolveScriptSoundPath(path, scriptSoundRoots(userData));
+    if (resolvedPath.empty())
+    {
+        resultNil(out, 0);
+        resultError(out, 1, AudioError::InvalidDescription);
+        *outCount = 2;
+        return true;
+    }
+    description.filePath = resolvedPath.c_str();
+    description.bus      = bus;
     auto &api = audio(userData);
     AudioError error = AudioError::None;
     const AudioSoundHandle handle = api.createSound(api.self, engine, &description, &error);

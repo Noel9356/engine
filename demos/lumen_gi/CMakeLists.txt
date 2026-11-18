@@ -4,6 +4,9 @@ engine_add_application(
     source/main.cpp
     source/demo/gi_demo_options.cpp
     source/demo/gi_demo_scene.cpp
+    ../common/demo_harness.cpp
+    INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../common"
     CAPABILITIES
     window
     renderer

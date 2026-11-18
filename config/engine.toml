@@ -16,15 +16,15 @@ sun_direction = [-0.55, 0.34, -0.76]
 
 [renderer]
 clear_color = [0.18, 0.3, 0.5, 1.0]
-# The character studio inspects its hero meshes up close (orbit radius
-# ~2.4 m against ~0.3 m part radii). The headless LOD path decimates by
-# striding the index list, which shreds an organic mesh into scattered
-# fragments at any level above 0; these meshes are always on screen, so
-# LOD switching has nothing to save here.
+# The headless LOD path decimates by striding the index list, which shreds
+# close-up organic meshes into scattered fragments at any level above 0.
+# Meshes that stay near the camera for a whole run (hero characters, UI
+# props) therefore run with LOD switching off; see the demos' own configs
+# for per-view choices.
 lod_enabled = false
 
 [trust]
-trustPlugins = ["main_menu", "character_lab"]
+trustPlugins = ["main_menu"]
 # The renderer acquires six capabilities now that it consumes the optional
 # lumen_gi probe grid and the lumen_reflection field (window + window.vulkan
 # + pbr + direct_lighting + lumen_gi + lumen_reflection), which the trust
@@ -32,9 +32,10 @@ trustPlugins = ["main_menu", "character_lab"]
 trustModules = ["renderer"]
 
 [window]
-# The character studio demo defaults to an 800x450 window: the CPU
-# (headless) rasterizer's cost is strictly per shaded pixel, and this keeps
-# the customisation screen above 30 fps on a two-core machine. Raise the
-# size when running on the Vulkan backend.
+# The shared default targets the CPU (headless) rasterizer, whose cost is
+# strictly per shaded pixel: 800x450 keeps interactive runs responsive on a
+# two-core machine. Demos that measure or screenshot at higher resolutions
+# override these in their own config or on the command line; raise the size
+# here for windowed runs on the Vulkan backend.
 height = 450
 width  = 800

@@ -7,9 +7,11 @@ engine_add_application(
     source/demo/planet_chunk_renderer.cpp
     source/demo/planet_demo_tests.cpp
     source/demo/planet_benchmark.cpp
-    source/demo/planet_frame_timing.cpp
     source/demo/planet_viewpoints.cpp
     source/demo/planet_walk_controller.cpp
+    ../common/demo_harness.cpp
+    INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../common"
     CAPABILITIES
     window
     renderer

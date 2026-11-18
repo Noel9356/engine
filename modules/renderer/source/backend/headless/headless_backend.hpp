@@ -64,14 +64,22 @@ struct HeadlessBackendOptions
     std::uint32_t msaaSamples             = 1;
 
     bool           lodEnabled                = true;
-    // Tile-based parallel rasterization (renderer.headless_tile_parallel,
-    // default OFF). Bins triangles into 64x64 screen tiles with exclusive
-    // per-worker ownership (no per-pixel locks). The serial binning phase
-    // makes this slower than the default band/triangle-range split on
-    // low-core machines (measured: ~+55% frame time on a 2-core host); it
-    // pays off only where per-pixel lock contention dominates - decide with
-    // the benchmark protocol on many-core targets before enabling.
+    // Tile-based parallel rasterization for single draws
+    // (renderer.headless_tile_parallel, default adaptive: on from four
+    // logical processors, off below - the serial per-draw binning phase
+    // loses to the band/triangle-range split on two-core hosts, measured
+    // ~+55% frame time). Bins one draw's triangles into 64x64 screen tiles
+    // with exclusive per-worker ownership (no per-pixel locks).
     bool           tileParallelEnabled       = false;
+    // Batched tile rasterization for whole draw lists
+    // (renderer.headless_batched_tile_rasterization, default on): one
+    // binning pass over every item of a drawMeshBatch call, then every
+    // worker rasterizes its tiles with per-tile submission order preserved.
+    // Unlike the per-draw tile path this pays off from two workers up: the
+    // fork/join and the binning run once per frame instead of once per
+    // draw, which is what makes many-small-draw scenes (streamed chunk
+    // meshes) scale across the machine.
+    bool           batchedTileRasterizationEnabled = true;
     TaskScheduler *taskScheduler             = nullptr; // borrowed; parallelism disabled when null/not running
     std::uint32_t  parallelTriangleThreshold = 4096;    // triangles per draw before splitting across workers
     std::size_t    pixelsPerLockGroup        = 16;      // pixels per depth lock during parallel rasterization
@@ -104,6 +112,7 @@ public:
           backFaceCullingEnabled_(options.backFaceCullingEnabled),
           lodEnabled_(options.lodEnabled),
           tileParallelEnabled_(options.tileParallelEnabled),
+          batchedTileRasterizationEnabled_(options.batchedTileRasterizationEnabled),
           taskScheduler_(options.taskScheduler),
           window_(windowCapability),
           bandSplitTriangleThreshold_(options.bandSplitTriangleThreshold),
@@ -197,9 +206,14 @@ public:
         reflectionRadiance_.clear();
         if (field.valid())
         {
+            // The borrowed field is interleaved texels (radiance RGB +
+            // roughness; see reflectionFieldTexelFloats), so the copy keeps
+            // the whole stride and the pixel-path sampler indexes it the
+            // same way.
             const std::size_t texelCount
                 = static_cast<std::size_t>(field.header.width) * field.header.height;
-            reflectionRadiance_.assign(field.radiance, field.radiance + texelCount * 3);
+            reflectionRadiance_.assign(
+                field.radiance, field.radiance + texelCount * lumen_reflection::reflectionFieldTexelFloats);
             reflectionField_.header = field.header;
             reflectionField_.radiance = reflectionRadiance_.data();
         }
@@ -219,6 +233,7 @@ public:
     void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) override;
     void drawMeshInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
         const MeshMaterial &material) override;
+    void drawMeshBatch(const MeshBatchItem *items, std::uint32_t itemCount) override;
     void drawFur(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material,
         const FurLayerParams &params) override;
     void drawFurInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,
@@ -276,7 +291,11 @@ private:
 
     // One rasterisable (fan) triangle after transform/near-clip/projection.
     // Produced identically by the tile binning pass and consumed by the tile
-    // rasterizer core.
+    // rasterizer core. setupIndex selects the RasterSetup (material,
+    // matrices, culling flags) the record belongs to: single-draw tile paths
+    // always emit 0 against a one-element setup array, while the batched
+    // tile path bins records from many draws and each record carries its
+    // own draw's setup index.
     struct TileBinRecord
     {
         RasterVertex  corners[3];
@@ -288,6 +307,7 @@ private:
         glm::vec3     bitangent;
         float         tangentInverseMax;
         std::uint32_t sourceTriangle;
+        std::uint32_t setupIndex;
     };
 
     struct StripResult
@@ -420,14 +440,33 @@ private:
     // two-pass binning into screen tiles (per-tile lists keep ascending
     // record order, preserving the sequential path's per-pixel triangle
     // order). Returns false on allocation failure or over-cap draws (caller
-    // falls back to the default paths).
+    // falls back to the default paths). Every record carries setupIndex 0;
+    // the caller rasterizes against a one-element setup array.
     bool buildTileRecords(const HeadlessMesh &mesh, const RasterSetup &setup);
 
+    // Batched phase 1 (calling thread): same pipeline over every triangle of
+    // every prepared item in batchSetups_ (records appended in submission
+    // order, each stamped with its draw's setup index), then the same
+    // two-pass binning. Item preparation (mesh lookup, LOD pick,
+    // prepareRasterization) happens interleaved in drawMeshBatch before this
+    // runs, so the transform cache still holds each item's vertices while
+    // its records are emitted. Returns false on allocation failure or when
+    // the records exceed the batch cap (caller falls back to per-draw
+    // paths for the chunk).
+    bool buildBatchTileRecords();
+
+    // Shared phase-1 tail of both tile paths: two-pass binning of the
+    // current tileRecords_ into the 64x64 tile grid. Returns false on an
+    // empty grid or an allocation failure.
+    bool binTileRecords();
+
     // Phase 2 (one worker): rasterise exactly the tiles with
-    // index % workerCount == workerIndex. Exclusive tile ownership: no
-    // locks. Partial statistics land in *outResult.
+    // index % workerCount == workerIndex. Records resolve their RasterSetup
+    // through record.setupIndex into the setups array (one element for the
+    // single-draw paths, one per batched item for the batch). Exclusive
+    // tile ownership: no locks. Partial statistics land in *outResult.
     void rasterizeTileRecords(
-        const RasterSetup &setup, std::uint32_t workerIndex, std::uint32_t workerCount, StripResult *outResult);
+        const RasterSetup *setups, std::uint32_t workerIndex, std::uint32_t workerCount, StripResult *outResult);
 
     // Rasterizes triangles [triStart, triEnd) with per-pixel depth testing.
     // With useAtomicDepth the thread takes a spin lock per pixel group
@@ -445,12 +484,22 @@ private:
     // picks which stand-in (white vs flat normal) fits the slot.
     const HeadlessTexture *mapFor(TextureHandle handle, const HeadlessTexture &neutral) const;
 
+    // Angular-size LOD pick shared by the single-draw and batch paths (see
+    // the .cpp): returns the index list to rasterize and the draw's
+    // world-space bounds sphere when the mesh carries valid bounds.
+    const std::vector<std::uint32_t> *activeIndicesForDraw(
+        const HeadlessMesh &meshData, const float *modelMatrix, DrawBounds &outBounds, bool &outHaveBounds) const;
+
     window::WindowHandle surface_                   = 0;
     std::size_t          transformCacheBudgetBytes_ = 32u * 1024u * 1024u;
     bool                 frustumCullingEnabled_     = true;
     bool                 backFaceCullingEnabled_    = true;
     bool                 lodEnabled_                = true;
-    bool                 tileParallelEnabled_       = true;
+    // Both tile-path flags mirror HeadlessBackendOptions (the constructor
+    // always initializes them from it; the defaults here only matter for
+    // readers).
+    bool                 tileParallelEnabled_       = false;
+    bool                 batchedTileRasterizationEnabled_ = true;
 
     TaskScheduler *taskScheduler_ = nullptr;
 
@@ -522,6 +571,21 @@ private:
     // Draws that could exceed the record cap fall back to the default
     // paths instead of growing the scratch without bound.
     static constexpr std::size_t maxTileRecords_ = 1u << 20;
+
+    // Batched tile-rasterization state (drawMeshBatch). batchSetups_ holds
+    // one RasterSetup per surviving batch item (indexed by
+    // TileBinRecord::setupIndex) and is filled by the serial prepare loop
+    // before any worker reads it; the records themselves bake each item's
+    // transformed corners, so workers never need the meshes. The batch
+    // record cap bounds the per-chunk scratch: a full streamed frame (LOD
+    // chunks plus the backdrop shells) routinely carries several hundred
+    // thousand triangles, so the cap is sized to swallow a whole typical
+    // frame in one flush; larger frames still flush in chunks, which
+    // preserves submission order across chunk boundaries - each chunk
+    // rasterizes completely before the next begins, exactly like the
+    // per-draw replay it replaces.
+    std::vector<RasterSetup>    batchSetups_;
+    static constexpr std::size_t maxBatchTileRecords_ = 512u * 1024u;
 
     std::unordered_map<MeshHandle, HeadlessMesh> meshes;
 

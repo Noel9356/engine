@@ -59,9 +59,7 @@ bool EngineKernel::loadConfiguration(std::string &report)
     {
         return false;
     }
-    std::vector<std::filesystem::path> profilePaths = configurationProfileFilePaths;
-    if (profilePaths.empty() && !configurationProfileFilePath.empty())
-        profilePaths.push_back(configurationProfileFilePath);
+    const std::vector<std::filesystem::path> &profilePaths = configurationProfileFilePaths;
     for (const std::filesystem::path &configuredProfilePath : profilePaths)
     {
         const std::filesystem::path profilePath = detail::resolveAgainstExecutableDirectory(configuredProfilePath);
@@ -245,9 +243,7 @@ bool EngineKernel::reloadConfiguration(std::string &report)
         report = "engine reload refused (the running configuration is untouched):\n- " + parseError + "\n";
         return false;
     }
-    std::vector<std::filesystem::path> profilePaths = configurationProfileFilePaths;
-    if (profilePaths.empty() && !configurationProfileFilePath.empty())
-        profilePaths.push_back(configurationProfileFilePath);
+    const std::vector<std::filesystem::path> &profilePaths = configurationProfileFilePaths;
     for (const std::filesystem::path &configuredProfilePath : profilePaths)
     {
         const std::filesystem::path profilePath = detail::resolveAgainstExecutableDirectory(configuredProfilePath);

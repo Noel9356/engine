@@ -10,6 +10,7 @@ initial_bus_capacity                 = 8
 initial_engine_capacity              = 4
 initial_sound_capacity               = 64
 listener_count                       = 1
+lua_allowed_path_roots               = []
 master_volume                        = 1.0
 max_buses_per_engine                 = 0
 max_engines                          = 0

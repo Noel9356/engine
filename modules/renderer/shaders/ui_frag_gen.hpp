@@ -9,6 +9,8 @@
 
 namespace engine
 {
+namespace renderer
+{
 
     inline constexpr std::uint32_t uiFragmentSpirv[] = {
         0x07230203, 0x00010000, 0x0008000B, 0x00000018, 0x00000000, 0x00020011, 0x00000001, 0x0006000B,
@@ -33,4 +35,5 @@ namespace engine
         0x0004003D, 0x00000007, 0x00000016, 0x00000015, 0x00050085, 0x00000007, 0x00000017, 0x00000013,
         0x00000016, 0x0003003E, 0x00000009, 0x00000017, 0x000100FD, 0x00010038,
     };
+} // namespace renderer
 } // namespace engine

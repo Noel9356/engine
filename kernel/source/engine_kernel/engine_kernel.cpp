@@ -38,27 +38,14 @@ void EngineKernel::setConfigurationFile(const std::filesystem::path &configurati
     participantsGathered = false;
 }
 
-void EngineKernel::setConfigurationProfileFile(const std::filesystem::path &profilePath)
-{
-    configurationProfileFilePath = profilePath;
-    configurationProfileFilePaths.clear();
-    configurationLoaded = false;
-    configurationStore.reset();
-    participantsGathered = false;
-}
-
-// Appends a profile; the single-profile slot is drained into the list to
-// preserve ordering across both APIs.
+// Appends a profile; profiles merge in the order they were added. This is the
+// only profile API: the application host stages a fresh kernel per run, so
+// "append to an empty list" covers the retired single-profile setter too.
 void EngineKernel::addConfigurationProfileFile(const std::filesystem::path &profilePath)
 {
     if (profilePath.empty())
         return;
 
-    if (!configurationProfileFilePath.empty())
-    {
-        configurationProfileFilePaths.insert(configurationProfileFilePaths.begin(), configurationProfileFilePath);
-        configurationProfileFilePath.clear();
-    }
     configurationProfileFilePaths.push_back(profilePath);
     configurationLoaded = false;
     configurationStore.reset();

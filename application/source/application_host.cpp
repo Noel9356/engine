@@ -71,7 +71,10 @@ bool ApplicationHost::configureKernel(EngineKernel &kernel, const ApplicationHos
     }
     else if (!options.configurationProfileFile.empty())
     {
-        kernel.setConfigurationProfileFile(resolveApplicationPath(options.configurationProfileFile));
+        // configureKernel only ever runs on a freshly constructed kernel
+        // (validate() and start() each build their own candidate), so
+        // appending reproduces the retired single-profile setter exactly.
+        kernel.addConfigurationProfileFile(resolveApplicationPath(options.configurationProfileFile));
     }
 
     if (!options.sceneFile.empty())

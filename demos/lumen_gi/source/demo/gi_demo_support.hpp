@@ -20,6 +20,7 @@ struct GiDemoOptions
     std::uint64_t frames           = 0;
     std::string   screenshotPath;
     std::uint64_t screenshotFrame  = 29;
+    std::string   frameTimesPath;
     std::string   exportDebugPrefix;
     std::uint32_t statsEveryFrames = 30;
     bool          orbit            = false;
