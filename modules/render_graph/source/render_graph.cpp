@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <memory>
 #include <string>
 
@@ -202,7 +203,10 @@ private:
     {
         if (value == nullptr || !validSettings(*value))
             return false;
-        settings_ = *value;
+        {
+            std::lock_guard lock(settingsMutex_);
+            settings_ = *value;
+        }
         planCache_.clear();
         return true;
     }
@@ -214,6 +218,7 @@ private:
     {
         if (device == nullptr || out == nullptr)
             return false;
+        const RenderGraphSettings settings = snapshotSettings();
         float memoryScale = 0.125f;
         if (device->isVulkan)
         {
@@ -228,7 +233,7 @@ private:
                     static_cast<float>(device->deviceLocalMemoryBytes) / (4.0f * 1024.0f * 1024.0f * 1024.0f));
         }
         float qualityScale = 1.0f;
-        switch (settings_.quality)
+        switch (settings.quality)
         {
         case renderer::QualityPreset::Low:
             qualityScale = 0.25f;
@@ -245,15 +250,15 @@ private:
         case renderer::QualityPreset::Auto:
             break;
         }
-        const float scale = settings_.quality == renderer::QualityPreset::Auto ? memoryScale : qualityScale;
-        out->maxPasses = std::min(settings_.maxPasses,
-            std::max(1u, static_cast<std::uint32_t>(static_cast<double>(settings_.maxPasses) * scale)));
-        out->maxResources = std::min(settings_.maxResources,
-            std::max(1u, static_cast<std::uint32_t>(static_cast<double>(settings_.maxResources) * scale)));
+        const float scale = settings.quality == renderer::QualityPreset::Auto ? memoryScale : qualityScale;
+        out->maxPasses = std::min(settings.maxPasses,
+            std::max(1u, static_cast<std::uint32_t>(static_cast<double>(settings.maxPasses) * scale)));
+        out->maxResources = std::min(settings.maxResources,
+            std::max(1u, static_cast<std::uint32_t>(static_cast<double>(settings.maxResources) * scale)));
         const std::uint64_t budget = static_cast<std::uint64_t>(
-            static_cast<double>(settings_.transientMemoryBudgetBytes) * scale);
-        out->transientMemoryBudgetBytes = std::min(budget, settings_.transientMemoryBudgetBytes);
-        out->transientAliasing          = settings_.transientAliasing;
+            static_cast<double>(settings.transientMemoryBudgetBytes) * scale);
+        out->transientMemoryBudgetBytes = std::min(budget, settings.transientMemoryBudgetBytes);
+        out->transientAliasing          = settings.transientAliasing;
         // asyncCompute is reserved for a future async-queue path; the field
         // stays false so consumers see a stable contract.
         out->asyncCompute = false;
@@ -300,7 +305,9 @@ private:
     }
 
     // Validates capacities and pointers, obtains a plan with lifetimes, then
-    // delegates slot assignment to the aliasing allocator.
+    // delegates slot assignment to the aliasing allocator. The settings are
+    // snapshotted once: compile/execute run on render threads while
+    // setSettings may swap the live object on the main thread.
     bool compileImpl(const RenderGraphPassDescription *passes, std::uint32_t passCount,
         const RenderGraphResourceDescription *resources, std::uint32_t resourceCount, std::uint32_t *outOrder,
         std::uint32_t orderCapacity, std::uint32_t *outSlots, std::uint32_t slotCapacity,
@@ -313,7 +320,9 @@ private:
                 *outError = error;
             return false;
         };
-        if (passCount > settings_.maxPasses || resourceCount > settings_.maxResources || orderCapacity < passCount
+        const RenderGraphSettings     settings = snapshotSettings();
+        const detail::AliasingStrategy strategy  = snapshotAliasingStrategy();
+        if (passCount > settings.maxPasses || resourceCount > settings.maxResources || orderCapacity < passCount
             || slotCapacity < resourceCount)
             return fail(RenderGraphError::CapacityExceeded);
         if ((passCount != 0 && (passes == nullptr || outOrder == nullptr))
@@ -329,9 +338,9 @@ private:
             return fail(analysisError);
 
         detail::AliasingConfig aliasingConfig;
-        aliasingConfig.aliasingEnabled           = settings_.transientAliasing;
-        aliasingConfig.strategy                  = aliasingStrategy_;
-        aliasingConfig.transientMemoryBudgetBytes = settings_.transientMemoryBudgetBytes;
+        aliasingConfig.aliasingEnabled           = settings.transientAliasing;
+        aliasingConfig.strategy                  = strategy;
+        aliasingConfig.transientMemoryBudgetBytes = settings.transientMemoryBudgetBytes;
 
         detail::AliasingResult aliasingResult{};
         RenderGraphError       aliasingError = RenderGraphError::None;
@@ -361,7 +370,8 @@ private:
         };
         if (scheduler_ == nullptr || callback == nullptr)
             return fail(RenderGraphError::InvalidInput);
-        if (passCount > settings_.maxPasses || resourceCount > settings_.maxResources)
+        const RenderGraphSettings settings = snapshotSettings();
+        if (passCount > settings.maxPasses || resourceCount > settings.maxResources)
             return fail(RenderGraphError::CapacityExceeded);
 
         RenderGraphPlan                        localPlan;
@@ -383,14 +393,30 @@ private:
 
     // scheduler_/profiler_ are borrowed from the ParticipantContext in
     // construct(); the profiler feeds the RenderGraphCompile/Execute metrics.
-    ParticipantManifest         manifest_;
-    RenderGraphCapability       capability_{};
-    RenderGraphSettings         settings_{};
-    TaskScheduler              *scheduler_ = nullptr;
-    PerformanceProfiler        *profiler_  = nullptr;
+    // settings_ and aliasingStrategy_ are guarded by settingsMutex_ (written
+    // by setSettings/construct on the main thread, snapshotted by the
+    // const compile/execute paths that run on render threads).
+    ParticipantManifest          manifest_;
+    RenderGraphCapability        capability_{};
+    RenderGraphSettings          settings_{};
+    mutable std::mutex           settingsMutex_;
+    TaskScheduler               *scheduler_ = nullptr;
+    PerformanceProfiler         *profiler_  = nullptr;
     detail::RenderGraphPlanCache planCache_;
-    detail::ExecutionCache      executionCache_;
-    detail::AliasingStrategy    aliasingStrategy_ = detail::AliasingStrategy::BestFit;
+    detail::ExecutionCache       executionCache_;
+    detail::AliasingStrategy     aliasingStrategy_ = detail::AliasingStrategy::BestFit;
+
+    [[nodiscard]] RenderGraphSettings snapshotSettings() const
+    {
+        std::lock_guard lock(settingsMutex_);
+        return settings_;
+    }
+
+    [[nodiscard]] detail::AliasingStrategy snapshotAliasingStrategy() const
+    {
+        std::lock_guard lock(settingsMutex_);
+        return aliasingStrategy_;
+    }
 };
 
 } // namespace

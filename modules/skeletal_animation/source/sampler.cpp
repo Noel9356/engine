@@ -144,7 +144,7 @@ bool sampleClipInternal(const ClipRecord &clipRecord, const SkeletonRecord &skel
         const float inverseInterval = clipRecord.inverseIntervals[intervalIndex];
         const float t = inverseInterval > 0.0f
             ? (sampleTime - left.timeSeconds) * inverseInterval
-            : (sampleTime - left.timeSeconds) / (right.timeSeconds - left.timeSeconds);
+            : 0.5f; // degenerate interval: split the keyframe pair evenly
         const QuaternionInterval *rotationInterval = track.rotationDataOffset != invalidKeyframeCursor
             ? &clipRecord.rotationIntervals[static_cast<std::size_t>(track.rotationDataOffset) + leftIndex + 1u]
             : nullptr;

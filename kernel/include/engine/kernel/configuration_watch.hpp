@@ -211,9 +211,13 @@ inline void ConfigurationWatchHub::handleReloaded(const ConfigurationReloadedEve
         {
             continue;
         }
-        if (std::find(event.changedKeys.begin(), event.changedKeys.end(), stillHeld->key) != event.changedKeys.end())
+        // The key is copied out before the callback runs: the callback may
+        // register or release watches, and a push_back reallocation would
+        // leave the reference into the watches vector dangling.
+        const std::string key = stillHeld->key;
+        if (std::find(event.changedKeys.begin(), event.changedKeys.end(), key) != event.changedKeys.end())
         {
-            stillHeld->callback(stillHeld->key);
+            stillHeld->callback(key);
         }
     }
 }

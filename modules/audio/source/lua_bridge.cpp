@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -39,11 +40,33 @@ using script_runtime::native::resultString;
 using script_runtime::native::stringValue;
 using script_runtime::native::uint32Value;
 
-// The bridge context every native function receives as userData.
-AudioCapability &audio(void *userData)
+// Guards one bridge call against module shutdown: stop() nulls the context's
+// capability pointer under the same mutex before closing the registry, so a
+// script call racing the stop either observes a live capability or fails
+// cleanly instead of dereferencing a module that is going away.
+class AudioApiScope
 {
-    return *static_cast<AudioLuaBridgeContext *>(userData)->audio;
-}
+public:
+    explicit AudioApiScope(void *userData)
+        : context_(userData != nullptr ? static_cast<AudioLuaBridgeContext *>(userData) : nullptr)
+        , lock_(context_ != nullptr ? std::unique_lock<std::mutex>(context_->apiMutex) : std::unique_lock<std::mutex>())
+    {
+    }
+
+    [[nodiscard]] AudioCapability *operator->() const noexcept
+    {
+        return context_ != nullptr ? context_->audio : nullptr;
+    }
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return operator->() != nullptr;
+    }
+
+private:
+    AudioLuaBridgeContext  *context_;
+    std::unique_lock<std::mutex> lock_;
+};
 
 // The allowed script-sound roots from the bridge context; empty when the
 // module configured none (or the context is unusable), which the path check
@@ -119,7 +142,9 @@ bool createEngine(
 {
     if (count > 6 || capacity < 2)
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioEngineDescription description{};
     float master = -1.0f;
     if (!uint32Value(args, count, 0, description.sampleRate, 0, false)
@@ -131,7 +156,7 @@ bool createEngine(
         return false;
     description.masterVolume = master;
     AudioError error = AudioError::None;
-    const AudioEngineHandle handle = api.createEngine(api.self, &description, &error);
+    const AudioEngineHandle handle = api->createEngine(api->self, &description, &error);
     if (handle == invalidAudioEngine)
         resultNil(out, 0);
     else
@@ -147,8 +172,10 @@ bool destroyEngine(
     std::uint32_t engine = 0;
     if (count != 1 || !uint32Value(args, count, 0, engine))
         return false;
-    auto &api = audio(userData);
-    api.destroyEngine(api.self, engine);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    api->destroyEngine(api->self, engine);
     *outCount = 0;
     return true;
 }
@@ -161,8 +188,10 @@ bool engineInfo(
     if (count != 1 || capacity < 4 || !uint32Value(args, count, 0, engine))
         return false;
     AudioEngineInfo info{};
-    auto &api = audio(userData);
-    if (!api.engineInfo(api.self, engine, &info))
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    if (!api->engineInfo(api->self, engine, &info))
     {
         resultNil(out, 0);
         *outCount = 1;
@@ -184,8 +213,10 @@ bool engineStatistics(
     if (count != 1 || capacity < 2 || !uint32Value(args, count, 0, engine))
         return false;
     AudioEngineStatistics statistics{};
-    auto &api = audio(userData);
-    if (!api.engineStatistics(api.self, engine, &statistics))
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    if (!api->engineStatistics(api->self, engine, &statistics))
     {
         resultNil(out, 0);
         resultNil(out, 1);
@@ -207,9 +238,11 @@ bool engineAction(
     std::uint32_t engine = 0;
     if (count != 1 || capacity < 2 || !uint32Value(args, count, 0, engine))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
-    const bool ok = start ? api.startEngine(api.self, engine, &error) : api.stopEngine(api.self, engine, &error);
+    const bool ok = start ? api->startEngine(api->self, engine, &error) : api->stopEngine(api->self, engine, &error);
     resultBoolean(out, 0, ok);
     resultError(out, 1, error);
     *outCount = 2;
@@ -237,8 +270,10 @@ bool isEngineStarted(
     std::uint32_t engine = 0;
     if (count != 1 || capacity < 1 || !uint32Value(args, count, 0, engine))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.isEngineStarted(api.self, engine));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->isEngineStarted(api->self, engine));
     *outCount = 1;
     return true;
 }
@@ -251,8 +286,10 @@ bool setMasterVolume(
     float volume = 0.0f;
     if (count != 2 || capacity < 1 || !uint32Value(args, count, 0, engine) || !floatValue(args, count, 1, volume))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setMasterVolume(api.self, engine, volume));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setMasterVolume(api->self, engine, volume));
     *outCount = 1;
     return true;
 }
@@ -264,9 +301,11 @@ bool getMasterVolume(
     std::uint32_t engine = 0;
     if (count != 1 || capacity < 1 || !uint32Value(args, count, 0, engine))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     float volume = 0.0f;
-    if (!api.getMasterVolume(api.self, engine, &volume))
+    if (!api->getMasterVolume(api->self, engine, &volume))
         resultNil(out, 0);
     else
         resultNumber(out, 0, volume);
@@ -288,9 +327,11 @@ bool createBus(
         || !optionalBoolean(args, count, 3, description.muted))
         return false;
     description.parent = parent;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
-    const AudioBusHandle handle = api.createBus(api.self, engine, &description, &error);
+    const AudioBusHandle handle = api->createBus(api->self, engine, &description, &error);
     if (handle == invalidAudioBus)
         resultNil(out, 0);
     else
@@ -308,9 +349,11 @@ bool destroyBus(
     std::uint32_t bus = 0;
     if (count != 2 || capacity < 2 || !uint32Value(args, count, 0, engine) || !uint32Value(args, count, 1, bus))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
-    resultBoolean(out, 0, api.destroyBus(api.self, engine, bus, &error));
+    resultBoolean(out, 0, api->destroyBus(api->self, engine, bus, &error));
     resultError(out, 1, error);
     *outCount = 2;
     return true;
@@ -326,8 +369,10 @@ bool setBusVolume(
     if (count != 3 || capacity < 1 || !uint32Value(args, count, 0, engine) || !uint32Value(args, count, 1, bus)
         || !floatValue(args, count, 2, volume))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setBusVolume(api.self, engine, bus, volume));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setBusVolume(api->self, engine, bus, volume));
     *outCount = 1;
     return true;
 }
@@ -342,8 +387,10 @@ bool setBusMuted(
     if (count != 3 || capacity < 1 || !uint32Value(args, count, 0, engine) || !uint32Value(args, count, 1, bus)
         || !optionalBoolean(args, count, 2, muted, false, true))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setBusMuted(api.self, engine, bus, muted));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setBusMuted(api->self, engine, bus, muted));
     *outCount = 1;
     return true;
 }
@@ -357,8 +404,10 @@ bool busInfo(
     if (count != 2 || capacity < 3 || !uint32Value(args, count, 0, engine) || !uint32Value(args, count, 1, bus))
         return false;
     AudioBusInfo info{};
-    auto &api = audio(userData);
-    if (!api.busInfo(api.self, engine, bus, &info))
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    if (!api->busInfo(api->self, engine, bus, &info))
     {
         resultNil(out, 0);
         resultNil(out, 1);
@@ -411,9 +460,11 @@ bool createSound(
     }
     description.filePath = resolvedPath.c_str();
     description.bus      = bus;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
-    const AudioSoundHandle handle = api.createSound(api.self, engine, &description, &error);
+    const AudioSoundHandle handle = api->createSound(api->self, engine, &description, &error);
     if (handle == invalidAudioSound)
         resultNil(out, 0);
     else
@@ -430,8 +481,10 @@ bool destroySound(
     AudioSoundHandle sound = 0;
     if (count != 2 || !parseEngineSound(args, count, engine, sound))
         return false;
-    auto &api = audio(userData);
-    api.destroySound(api.self, engine, sound);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    api->destroySound(api->self, engine, sound);
     *outCount = 0;
     return true;
 }
@@ -452,19 +505,21 @@ bool soundAction(
     AudioSoundHandle sound = 0;
     if (count != 2 || capacity < 2 || !parseEngineSound(args, count, engine, sound))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
     bool ok = false;
     switch (action)
     {
     case SoundAction::Play:
-        ok = api.play(api.self, engine, sound, &error);
+        ok = api->play(api->self, engine, sound, &error);
         break;
     case SoundAction::Pause:
-        ok = api.pause(api.self, engine, sound, &error);
+        ok = api->pause(api->self, engine, sound, &error);
         break;
     case SoundAction::Stop:
-        ok = api.stop(api.self, engine, sound, &error);
+        ok = api->stop(api->self, engine, sound, &error);
         break;
     }
     resultBoolean(out, 0, ok);
@@ -500,8 +555,10 @@ bool seekSeconds(
     double seconds = 0.0;
     if (count != 3 || capacity < 1 || !parseEngineSound(args, count, engine, sound) || !number(args, count, 2, seconds))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.seekSeconds(api.self, engine, sound, seconds));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->seekSeconds(api->self, engine, sound, seconds));
     *outCount = 1;
     return true;
 }
@@ -515,8 +572,10 @@ bool querySound(
     AudioSoundHandle sound = 0;
     if (count != 2 || capacity < 1 || !parseEngineSound(args, count, engine, sound))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, end ? api.atEnd(api.self, engine, sound) : api.isPlaying(api.self, engine, sound));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, end ? api->atEnd(api->self, engine, sound) : api->isPlaying(api->self, engine, sound));
     *outCount = 1;
     return true;
 }
@@ -543,8 +602,10 @@ bool soundTimes(
         return false;
     double cursor = 0.0;
     double length = 0.0;
-    auto &api = audio(userData);
-    if (!api.soundTimes(api.self, engine, sound, &cursor, &length))
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    if (!api->soundTimes(api->self, engine, sound, &cursor, &length))
     {
         resultNil(out, 0);
         resultNil(out, 1);
@@ -567,8 +628,10 @@ bool soundInfo(
     if (count != 2 || capacity < 6 || !parseEngineSound(args, count, engine, sound))
         return false;
     AudioSoundInfo info{};
-    auto &api = audio(userData);
-    if (!api.soundInfo(api.self, engine, sound, &info))
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    if (!api->soundInfo(api->self, engine, sound, &info))
     {
         for (std::uint32_t index = 0; index < 6; ++index)
             resultNil(out, index);
@@ -605,21 +668,23 @@ bool floatSoundSetter(
     if (count != 3 || capacity < 1 || !parseEngineSound(args, count, engine, sound)
         || !floatValue(args, count, 2, value))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     bool ok = false;
     switch (which)
     {
     case FloatSetter::Volume:
-        ok = api.setSoundVolume(api.self, engine, sound, value);
+        ok = api->setSoundVolume(api->self, engine, sound, value);
         break;
     case FloatSetter::Pitch:
-        ok = api.setSoundPitch(api.self, engine, sound, value);
+        ok = api->setSoundPitch(api->self, engine, sound, value);
         break;
     case FloatSetter::Pan:
-        ok = api.setSoundPan(api.self, engine, sound, value);
+        ok = api->setSoundPan(api->self, engine, sound, value);
         break;
     case FloatSetter::Doppler:
-        ok = api.setSoundDopplerFactor(api.self, engine, sound, value, nullptr);
+        ok = api->setSoundDopplerFactor(api->self, engine, sound, value, nullptr);
         break;
     }
     resultBoolean(out, 0, ok);
@@ -665,8 +730,10 @@ bool setSoundLooping(
     if (count != 3 || capacity < 1 || !parseEngineSound(args, count, engine, sound)
         || !optionalBoolean(args, count, 2, looping, false, true))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setSoundLooping(api.self, engine, sound, looping));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setSoundLooping(api->self, engine, sound, looping));
     *outCount = 1;
     return true;
 }
@@ -690,18 +757,20 @@ bool vectorSoundSetter(
         || !floatValue(args, count, 2, values[0]) || !floatValue(args, count, 3, values[1])
         || !floatValue(args, count, 4, values[2]))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     bool ok = false;
     switch (which)
     {
     case VectorSetter::Position:
-        ok = api.setSoundPosition(api.self, engine, sound, values);
+        ok = api->setSoundPosition(api->self, engine, sound, values);
         break;
     case VectorSetter::Velocity:
-        ok = api.setSoundVelocity(api.self, engine, sound, values);
+        ok = api->setSoundVelocity(api->self, engine, sound, values);
         break;
     case VectorSetter::Direction:
-        ok = api.setSoundDirection(api.self, engine, sound, values, nullptr);
+        ok = api->setSoundDirection(api->self, engine, sound, values, nullptr);
         break;
     }
     resultBoolean(out, 0, ok);
@@ -743,8 +812,10 @@ bool setSoundCone(
         || !floatValue(args, count, 2, innerAngle) || !floatValue(args, count, 3, outerAngle)
         || !floatValue(args, count, 4, outerGain))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setSoundCone(api.self, engine, sound, innerAngle, outerAngle, outerGain, nullptr));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setSoundCone(api->self, engine, sound, innerAngle, outerAngle, outerGain, nullptr));
     *outCount = 1;
     return true;
 }
@@ -759,8 +830,10 @@ bool setSoundListener(
     if (count != 3 || capacity < 1 || !parseEngineSound(args, count, engine, sound)
         || !uint32Value(args, count, 2, listener, std::numeric_limits<std::uint32_t>::max()))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setSoundListener(api.self, engine, sound, listener, nullptr));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setSoundListener(api->self, engine, sound, listener, nullptr));
     *outCount = 1;
     return true;
 }
@@ -775,8 +848,10 @@ bool setSoundSpatialization(
     if (count != 3 || capacity < 1 || !parseEngineSound(args, count, engine, sound)
         || !optionalBoolean(args, count, 2, enabled, false, true))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setSoundSpatializationEnabled(api.self, engine, sound, enabled, nullptr));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setSoundSpatializationEnabled(api->self, engine, sound, enabled, nullptr));
     *outCount = 1;
     return true;
 }
@@ -792,8 +867,10 @@ bool setSoundGainRange(
     if (count != 4 || capacity < 1 || !parseEngineSound(args, count, engine, sound)
         || !floatValue(args, count, 2, minimum) || !floatValue(args, count, 3, maximum))
         return false;
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setSoundGainRange(api.self, engine, sound, minimum, maximum, nullptr));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setSoundGainRange(api->self, engine, sound, minimum, maximum, nullptr));
     *outCount = 1;
     return true;
 }
@@ -814,9 +891,11 @@ bool setSoundAttenuation(
         return false;
     if (model > static_cast<std::uint32_t>(AudioAttenuationModel::Exponential))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     resultBoolean(out, 0,
-        api.setSoundAttenuation(api.self, engine, sound, minimumDistance, maximumDistance, rolloff,
+        api->setSoundAttenuation(api->self, engine, sound, minimumDistance, maximumDistance, rolloff,
             static_cast<AudioAttenuationModel>(model), nullptr));
     *outCount = 1;
     return true;
@@ -833,9 +912,11 @@ bool fadeSoundGain(
     if (count != 4 || capacity < 2 || !parseEngineSound(args, count, engine, sound)
         || !floatValue(args, count, 2, gain) || !number(args, count, 3, seconds))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
-    const bool ok = api.fadeSoundGain(api.self, engine, sound, gain, seconds, &error);
+    const bool ok = api->fadeSoundGain(api->self, engine, sound, gain, seconds, &error);
     resultBoolean(out, 0, ok);
     resultError(out, 1, error);
     *outCount = 2;
@@ -851,9 +932,11 @@ bool schedulePlay(
     double delay = 0.0;
     if (count != 3 || capacity < 2 || !parseEngineSound(args, count, engine, sound) || !number(args, count, 2, delay))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
-    const bool ok = api.schedulePlay(api.self, engine, sound, delay, &error);
+    const bool ok = api->schedulePlay(api->self, engine, sound, delay, &error);
     resultBoolean(out, 0, ok);
     resultError(out, 1, error);
     *outCount = 2;
@@ -871,9 +954,11 @@ bool scheduleStop(
     if (count != 4 || capacity < 2 || !parseEngineSound(args, count, engine, sound)
         || !number(args, count, 2, delay) || !number(args, count, 3, fade))
         return false;
-    auto &api = audio(userData);
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
     AudioError error = AudioError::None;
-    const bool ok = api.scheduleStop(api.self, engine, sound, delay, fade, &error);
+    const bool ok = api->scheduleStop(api->self, engine, sound, delay, fade, &error);
     resultBoolean(out, 0, ok);
     resultError(out, 1, error);
     *outCount = 2;
@@ -910,8 +995,10 @@ bool setListener(
         if (!floatValue(args, count, next++, value))
             return false;
     }
-    auto &api = audio(userData);
-    resultBoolean(out, 0, api.setListener(api.self, engine, index, &description));
+    AudioApiScope api(userData);
+    if (!api.valid())
+        return false;
+    resultBoolean(out, 0, api->setListener(api->self, engine, index, &description));
     *outCount = 1;
     return true;
 }

@@ -39,14 +39,21 @@ void RenderGraphPlanCache::clear() noexcept
 
 bool RenderGraphPlanCache::enabled() const noexcept
 {
-    return capacity_ != 0 && maximumGraphElements_ != 0;
+    const Limits current = limits();
+    return current.capacity != 0 && current.maximumGraphElements != 0;
+}
+
+RenderGraphPlanCache::Limits RenderGraphPlanCache::limits() const noexcept
+{
+    std::lock_guard lock(mutex_);
+    return Limits{.capacity = capacity_, .maximumGraphElements = maximumGraphElements_};
 }
 
 std::shared_ptr<const RenderGraphPlan> RenderGraphPlanCache::find(const RenderGraphPassDescription *passes,
     std::uint32_t passCount, const RenderGraphResourceDescription *resources, std::uint32_t resourceCount,
     bool includeResourceLifetimes) const noexcept
 {
-    if (capacity_ == 0 || (passCount != 0 && passes == nullptr) || (resourceCount != 0 && resources == nullptr))
+    if (limits().capacity == 0 || (passCount != 0 && passes == nullptr) || (resourceCount != 0 && resources == nullptr))
         return {};
     std::lock_guard lock(mutex_);
     for (Entry &entry : entries_)
@@ -63,8 +70,9 @@ std::shared_ptr<const RenderGraphPlan> RenderGraphPlanCache::store(const RenderG
     std::uint32_t passCount, const RenderGraphResourceDescription *resources, std::uint32_t resourceCount,
     bool includeResourceLifetimes, std::size_t graphElementCount, RenderGraphPlan &plan) const noexcept
 {
-    if (capacity_ == 0 || graphElementCount > maximumGraphElements_ || (passCount != 0 && passes == nullptr)
-        || (resourceCount != 0 && resources == nullptr))
+    const Limits current = limits();
+    if (current.capacity == 0 || graphElementCount > current.maximumGraphElements
+        || (passCount != 0 && passes == nullptr) || (resourceCount != 0 && resources == nullptr))
         return {};
 
     Entry entry;

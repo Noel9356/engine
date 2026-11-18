@@ -87,112 +87,6 @@ bool transformMatricesEqual(const glm::mat4 &a, const glm::mat4 &b)
 }
 } // namespace
 
-// CPU texture sampler: wrap or clamp UVs, then nearest or bilinear filter
-// against the base image. Returns white when empty.
-glm::vec3 HeadlessTexture::sample(float u, float v) const
-{
-    const float *data = pixelsRGB.data();
-    const std::uint32_t mipW = width;
-    const std::uint32_t mipH = height;
-    if (mipW == 0 || mipH == 0 || data == nullptr)
-        return glm::vec3(1.0f);
-    if (mipW == 1 && mipH == 1)
-        return glm::vec3(data[0], data[1], data[2]);
-    if (address == TextureAddress::Repeat)
-    {
-        u -= std::floor(u);
-        v -= std::floor(v);
-    }
-    else
-    {
-        u = std::clamp(u, 0.0f, 1.0f);
-        v = std::clamp(v, 0.0f, 1.0f);
-    }
-    const float texelX    = u * static_cast<float>(mipW) - 0.5f;
-    const float texelY    = v * static_cast<float>(mipH) - 0.5f;
-    const auto  addrCoord = [&](std::int32_t cc, std::uint32_t e) -> std::uint32_t
-    {
-        const std::int32_t lim = static_cast<std::int32_t>(e);
-        if (address == TextureAddress::Repeat)
-        {
-            const std::int32_t w = cc % lim;
-            return static_cast<std::uint32_t>(w < 0 ? w + lim : w);
-        }
-        return static_cast<std::uint32_t>(std::clamp(cc, 0, lim - 1));
-    };
-    const auto pixelAt = [data, mipW](std::uint32_t x, std::uint32_t y) -> const float *
-    { return data + (static_cast<std::size_t>(y) * mipW + x) * 3; };
-    if (filter == TextureFilter::Nearest)
-    {
-        const auto   x = addrCoord(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), mipW);
-        const auto   y = addrCoord(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), mipH);
-        const float *p = pixelAt(x, y);
-        return glm::vec3(p[0], p[1], p[2]);
-    }
-    const auto          x0i = static_cast<std::int32_t>(std::floor(texelX));
-    const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
-    const float         fx  = texelX - static_cast<float>(x0i);
-    const float         fy  = texelY - static_cast<float>(y0i);
-    const std::uint32_t x0 = addrCoord(x0i, mipW), x1 = addrCoord(x0i + 1, mipW);
-    const std::uint32_t y0 = addrCoord(y0i, mipH), y1 = addrCoord(y0i + 1, mipH);
-    const float        *p00 = pixelAt(x0, y0), *p10 = pixelAt(x1, y0), *p01 = pixelAt(x0, y1), *p11 = pixelAt(x1, y1);
-    const float         omx = 1.0f - fx, omy = 1.0f - fy;
-    const float         w00 = omx * omy, w10 = fx * omy, w01 = omx * fy, w11 = fx * fy;
-    return glm::vec3(p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11,
-        p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11,
-        p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11);
-}
-
-// Alpha-channel sample over the RGBA8 upload copy: same wrap/clamp, same
-// nearest/bilinear filtering as sample() (mip level 0). The fur strand field
-// lives in the fur texture's alpha channel (see shaders/fur.frag), so the
-float HeadlessTexture::sampleAlpha(float u, float v) const
-{
-    if (width == 0 || height == 0 || pixels.size() < static_cast<std::size_t>(width) * height * 4)
-        return 1.0f;
-    if (width == 1 && height == 1)
-        return static_cast<float>(pixels[3]) / 255.0f;
-    if (address == TextureAddress::Repeat)
-    {
-        u -= std::floor(u);
-        v -= std::floor(v);
-    }
-    else
-    {
-        u = std::clamp(u, 0.0f, 1.0f);
-        v = std::clamp(v, 0.0f, 1.0f);
-    }
-    const float texelX = u * static_cast<float>(width) - 0.5f;
-    const float texelY = v * static_cast<float>(height) - 0.5f;
-    const auto  addrCoord = [&](std::int32_t cc, std::uint32_t e) -> std::uint32_t
-    {
-        const std::int32_t lim = static_cast<std::int32_t>(e);
-        if (address == TextureAddress::Repeat)
-        {
-            const std::int32_t w = cc % lim;
-            return static_cast<std::uint32_t>(w < 0 ? w + lim : w);
-        }
-        return static_cast<std::uint32_t>(std::clamp(cc, 0, lim - 1));
-    };
-    const auto alphaAt = [&](std::uint32_t x, std::uint32_t y) -> float
-    { return static_cast<float>(pixels[(static_cast<std::size_t>(y) * width + x) * 4 + 3]) / 255.0f; };
-    if (filter == TextureFilter::Nearest)
-    {
-        const auto x = addrCoord(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), width);
-        const auto y = addrCoord(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), height);
-        return alphaAt(x, y);
-    }
-    const auto          x0i = static_cast<std::int32_t>(std::floor(texelX));
-    const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
-    const float         fx  = texelX - static_cast<float>(x0i);
-    const float         fy  = texelY - static_cast<float>(y0i);
-    const std::uint32_t x0 = addrCoord(x0i, width), x1 = addrCoord(x0i + 1, width);
-    const std::uint32_t y0 = addrCoord(y0i, height), y1 = addrCoord(y0i + 1, height);
-    const float a00 = alphaAt(x0, y0), a10 = alphaAt(x1, y0), a01 = alphaAt(x0, y1), a11 = alphaAt(x1, y1);
-    const float omx = 1.0f - fx, omy = 1.0f - fy;
-    return a00 * omx * omy + a10 * fx * omy + a01 * omx * fy + a11 * fx * fy;
-}
-
 // Precomputes shading inputs: radiance = color * intensity, inverse-squared
 // range falloff (range clamped away from zero), cone cosines for spots.
 void HeadlessBackend::setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count)
@@ -2348,12 +2242,11 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 shaded += emissiveColor;
                             }
                         }
-                        // Output transform: tone map, then the fast sRGB
-                        // lookup (see fastSrgbEncode; the CPU raster always
-                        // writes UNORM targets; see SRGB_OUTPUT in mesh.frag
-                        // for the GPU-side switch).
+                        // Output transform: tone map here; the commit paths
+                        // encode to bytes (see encodeColorRgba; the CPU
+                        // raster always writes UNORM targets; see
+                        // SRGB_OUTPUT in mesh.frag for the GPU-side switch).
                         shaded = toneMapColor(shaded, environment_.exposure, environment_.toneMapping);
-                        shaded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
 
                         if (setup.fur)
                         {
@@ -2362,11 +2255,12 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             // fixed-function blending operates in on the UNORM
                             // target - and NO depth write (transparent layers
                             // must not occlude each other or later geometry).
+                            const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
                             std::uint8_t *pixel  = colorBuffer + pixelIndex * 4;
                             const float   oneMinus = 1.0f - furPixelAlpha;
-                            pixel[0] = toByte(shaded.x * furPixelAlpha + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
-                            pixel[1] = toByte(shaded.y * furPixelAlpha + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
-                            pixel[2] = toByte(shaded.z * furPixelAlpha + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                            pixel[0] = toByte(encoded.x * furPixelAlpha + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                            pixel[1] = toByte(encoded.y * furPixelAlpha + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                            pixel[2] = toByte(encoded.z * furPixelAlpha + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
                             pixel[3] = 255;
                             rasterized = true;
                             weightA += weightADx;
@@ -2375,6 +2269,10 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             continue;
                         }
 
+                        // Opaque commit: one packed word (the composed
+                        // sRGB+quantize table; identical output to the byte
+                        // stores it replaces).
+                        const std::uint32_t packed = encodeColorRgba(shaded);
                         if (useAtomicDepth)
                         {
                             // Parallel path: one spin lock per pixel group keeps
@@ -2394,12 +2292,10 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 {
                                     depthBuffer[pixelIndex] = pixelDepth;
                                 }
-                                std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
-                                pixel[0]                = toByte(shaded.x);
-                                pixel[1]                = toByte(shaded.y);
-                                pixel[2]                = toByte(shaded.z);
-                                pixel[3]                = 255;
-                                rasterized              = true;
+                                std::atomic_ref<std::uint32_t> pixelWord(
+                                    *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4));
+                                pixelWord.store(packed, std::memory_order_relaxed);
+                                rasterized = true;
                             }
                             lockRef.store(0, std::memory_order_release);
                         }
@@ -2411,12 +2307,8 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 {
                                     depthBuffer[pixelIndex] = pixelDepth;
                                 }
-                                std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
-                                pixel[0]                = toByte(shaded.x);
-                                pixel[1]                = toByte(shaded.y);
-                                pixel[2]                = toByte(shaded.z);
-                                pixel[3]                = 255;
-                                rasterized              = true;
+                                *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = packed;
+                                rasterized = true;
                             }
                         }
                     }
@@ -2808,9 +2700,10 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             shaded += emissiveColor;
         }
     }
-    shaded = toneMapColor(shaded, environment_.exposure, environment_.toneMapping);
-    shaded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
-    return shaded;
+    // Tone map only: the commit paths fold the sRGB encode and the byte
+    // quantization into one table (encodeColorRgba); the shell-fur path
+    // blends in encoded space and applies fastSrgbEncode itself.
+    return toneMapColor(shaded, environment_.exposure, environment_.toneMapping);
 }
 
 // Shared rasterizer core. Scans the fan record's bounding box clamped to the
@@ -2914,9 +2807,11 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                 }
 
                 // Perspective-correct attributes are interpolated inside the
-                // shading kernel; the depth re-check below mirrors the
-                // previous write path exactly (the pre-shade test above is
-                // the early-out, this is the commit).
+                // shading kernel, which returns the tone-mapped linear color;
+                // the commit folds the sRGB encode and quantization into one
+                // packed word. The depth re-check below mirrors the previous
+                // write path exactly (the pre-shade test above is the
+                // early-out, this is the commit).
                 const glm::vec3 shaded
                     = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC);
 
@@ -2926,11 +2821,7 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                     {
                         depthBuffer[pixelIndex] = pixelDepth;
                     }
-                    std::uint8_t *pixel     = colorBuffer + pixelIndex * 4;
-                    pixel[0]                = toByte(shaded.x);
-                    pixel[1]                = toByte(shaded.y);
-                    pixel[2]                = toByte(shaded.z);
-                    pixel[3]                = 255;
+                    *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = encodeColorRgba(shaded);
                     wrote                   = true;
                 }
             }

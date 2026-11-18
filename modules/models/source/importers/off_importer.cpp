@@ -104,6 +104,13 @@ bool parseFiniteFloat(const std::string &token, float &value)
 bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const ModelLoadOptions &options,
     const ModelTransform &transform, ModelLoadError *error)
 {
+    std::error_code     fileError;
+    const std::uint64_t fileSize = std::filesystem::file_size(path, fileError);
+    if (fileError)
+    {
+        reportError(error, ModelLoadError::ParseFailed);
+        return false;
+    }
     std::ifstream input(path, std::ios::binary);
     if (!input)
     {
@@ -134,6 +141,16 @@ bool importOffFile(const std::filesystem::path &path, ModelRecord &record, const
 
     if (vertexCount > maximumVertexElementCount
         || faceCount > maximumVertexElementCount / 3u)
+    {
+        reportError(error, ModelLoadError::FileTooLarge);
+        return false;
+    }
+    // Every declared row needs at least one byte in the file (a vertex needs
+    // at least three one-character coordinates, a face at least four), so a
+    // header claiming more rows than the file has bytes cannot be honest;
+    // rejecting it keeps the staging allocations proportional to the file.
+    if (static_cast<std::uint64_t>(vertexCount) > fileSize / 3
+        || static_cast<std::uint64_t>(faceCount) > fileSize / 4)
     {
         reportError(error, ModelLoadError::FileTooLarge);
         return false;

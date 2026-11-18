@@ -57,8 +57,6 @@ public:
 
     // Legacy lookup: size, mtime and content hash must all match. Kept for
     // callers that already computed the hash and want a fully-validated hit.
-    const ModuleDescriptorCacheEntry *find(const std::filesystem::path &libraryPath, std::uintmax_t sizeBytes,
-        std::uintmax_t modificationStamp, const std::string &contentSha256) const;
 
     // Adds or overwrites the in-memory entry for libraryPath; persisted by
     // save().

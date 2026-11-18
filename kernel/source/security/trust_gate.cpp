@@ -50,7 +50,9 @@ bool trustBindingMatches(const TrustBinding &binding, const ParticipantTrustAdvi
     return true;
 }
 
-// Bindings with a malformed sha256 degrade to name-only matching, with a warning.
+// Bindings with a malformed sha256 are ignored: the digest field is either
+// absent (name-only trust) or a well-formed 64-character hex digest, and a
+// malformed value fails closed rather than silently degrading.
 bool anyTrustBindingMatches(const std::vector<TrustBinding> &bindings, const ParticipantTrustAdvisory &advisory,
     std::vector<std::string> &warnings)
 {
@@ -59,8 +61,8 @@ bool anyTrustBindingMatches(const std::vector<TrustBinding> &bindings, const Par
         if (!binding.sha256.empty() && !isValidSha256HexDigest(binding.sha256))
         {
             warnings.push_back("the [trust] entry for '" + binding.name
-                               + "' carries a malformed sha256 (must be 64 hexadecimal characters); it is treated "
-                                 "as name-only trust for this run");
+                               + "' carries a malformed sha256 (must be 64 hexadecimal characters); the entry is "
+                                 "ignored for this run");
             continue;
         }
         if (trustBindingMatches(binding, advisory))
@@ -96,9 +98,13 @@ std::string nativePluginContentHash(const PluginManifest &pluginManifest)
 // Reads an entire file into a string using a single seek+read rather than
 // the istreambuf_iterator approach (which is noticeably slower on large
 // files). Returns an empty string and sets error on failure; the empty
-// string is the caller's signal that the file could not be read.
+// string is the caller's signal that the file could not be read. Files above
+// the size cap are refused instead of allocated: this reads untrusted plugin
+// content during trust evaluation, and a sparse multi-gigabyte script must
+// not turn a pre-load check into an out-of-memory abort.
 std::string readFileIntoString(const std::filesystem::path &path, std::string &error)
 {
+    constexpr std::streamoff maximumScriptFileBytes = 64ll * 1024ll * 1024ll; // matches the descriptor cache cap
     std::ifstream stream(path, std::ios::in | std::ios::binary | std::ios::ate);
     if (!stream.is_open())
     {
@@ -109,6 +115,12 @@ std::string readFileIntoString(const std::filesystem::path &path, std::string &e
     if (fileSize < 0)
     {
         error = "cannot size '" + path.string() + "'";
+        return {};
+    }
+    if (fileSize > maximumScriptFileBytes)
+    {
+        error = "'" + path.string() + "' is " + std::to_string(fileSize) + " bytes; plugin script files are capped at "
+                + std::to_string(maximumScriptFileBytes) + " bytes";
         return {};
     }
     stream.seekg(0, std::ios::beg);
@@ -200,15 +212,7 @@ std::string scriptPluginContentHash(const PluginManifest &pluginManifest)
 
     std::uint8_t digest[Sha256::digestSize];
     hasher.finish(digest);
-    std::string hex;
-    hex.reserve(Sha256::hexDigestSize);
-    static const char digits[] = "0123456789abcdef";
-    for (const std::uint8_t byte : digest)
-    {
-        hex.push_back(digits[byte >> 4]);
-        hex.push_back(digits[byte & 0x0F]);
-    }
-    return hex;
+    return Sha256::toHex(digest);
 }
 
 // Permissions outside the capability.* namespace - the ones the trust gate flags.

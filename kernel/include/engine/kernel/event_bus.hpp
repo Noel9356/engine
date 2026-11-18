@@ -481,6 +481,11 @@ public:
 
     virtual void flush() = 0;
 
+    // True when the queue still holds undelivered events (main thread);
+    // lets the bus re-arm its pending flag after an exception interrupted
+    // a flush.
+    [[nodiscard]] virtual bool hasPendingEvents() const = 0;
+
     virtual void closeQueue()
     {}
 };
@@ -541,6 +546,12 @@ public:
     [[nodiscard]] std::size_t pendingEventCount() const
     {
         return pendingCount.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool hasPendingEvents() const override
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        return !pendingEvents.empty();
     }
 
     [[nodiscard]] std::size_t rejectedEventCount() const
@@ -727,7 +738,10 @@ public:
     // relaxed atomic load. Handlers may create new channels (e.g. by
     // publishing a first-time event type), so the channel list is snapshotted
     // before dispatching instead of iterated while handlers run; channels
-    // created during this flush are drained on the next call.
+    // created during this flush are drained on the next call. A throwing
+    // handler interrupts the flush; the pending flag is re-armed whenever any
+    // queue retained events, so the next call drains the remainder instead of
+    // stalling until an unrelated deferred publish.
     void flushDeferredEvents()
     {
         if (!deferredPending.load(std::memory_order_relaxed))
@@ -735,23 +749,51 @@ public:
             return;
         }
         deferredPending.store(false, std::memory_order_relaxed);
-        std::vector<ChannelHolderBase *> pendingChannels;
+        const auto restorePendingIfStalled = [this]()
         {
             std::lock_guard<std::mutex> lock(channelMutex);
-            pendingChannels = channelOrder;
-        }
-        for (ChannelHolderBase *channelHolder : pendingChannels)
+            for (ChannelHolderBase *channelHolder : channelOrder)
+            {
+                if (channelHolder->hasDeferredEvents())
+                {
+                    deferredPending.store(true, std::memory_order_relaxed);
+                    return;
+                }
+            }
+            for (const std::shared_ptr<WorkerQueueBase> &workerQueue : workerQueues)
+            {
+                if (workerQueue->hasPendingEvents())
+                {
+                    deferredPending.store(true, std::memory_order_relaxed);
+                    return;
+                }
+            }
+        };
+        try
         {
-            channelHolder->flushDeferredChannel();
+            std::vector<ChannelHolderBase *> pendingChannels;
+            {
+                std::lock_guard<std::mutex> lock(channelMutex);
+                pendingChannels = channelOrder;
+            }
+            for (ChannelHolderBase *channelHolder : pendingChannels)
+            {
+                channelHolder->flushDeferredChannel();
+            }
+            std::vector<std::shared_ptr<WorkerQueueBase>> queuesToFlush;
+            {
+                std::lock_guard<std::mutex> lock(channelMutex);
+                queuesToFlush = workerQueues;
+            }
+            for (const std::shared_ptr<WorkerQueueBase> &workerQueue : queuesToFlush)
+            {
+                workerQueue->flush();
+            }
         }
-        std::vector<std::shared_ptr<WorkerQueueBase>> queuesToFlush;
+        catch (...)
         {
-            std::lock_guard<std::mutex> lock(channelMutex);
-            queuesToFlush = workerQueues;
-        }
-        for (const std::shared_ptr<WorkerQueueBase> &workerQueue : queuesToFlush)
-        {
-            workerQueue->flush();
+            restorePendingIfStalled();
+            throw;
         }
     }
 
@@ -877,6 +919,10 @@ private:
 
         virtual void flushDeferredChannel() = 0;
 
+        // True when the channel still holds deferred events; lets the bus
+        // re-arm its pending flag after an exception interrupted a flush.
+        [[nodiscard]] virtual bool hasDeferredEvents() const = 0;
+
         virtual std::size_t subscriberCount() const = 0;
 
         virtual void appendSubscriptionLine(std::string &report) const = 0;
@@ -927,6 +973,11 @@ private:
         void flushDeferredChannel() override
         {
             channel.flushDeferred();
+        }
+
+        [[nodiscard]] bool hasDeferredEvents() const override
+        {
+            return channel.hasDeferredEvents();
         }
 
         std::size_t subscriberCount() const override

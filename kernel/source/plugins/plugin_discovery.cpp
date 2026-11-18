@@ -161,31 +161,54 @@ bool loadNativePluginEntry(const DiscoveredPluginPackage &package, NativePluginL
                 + std::string(enginePluginEntryTableSymbol) + ".\n";
         return false;
     }
-    load.entryTable = queryFunction();
-    if (load.entryTable == nullptr)
+    // The plugin's code runs from here on (entry query, factory, manifest):
+    // like the module factory path, a throwing plugin must become a failed
+    // participant instead of an exception escaping the kernel's construct().
+    try
     {
-        report += "- shared library plugin '" + libraryPath.string() + "' returned no entry table.\n";
-        return false;
+        load.entryTable = queryFunction();
+        if (load.entryTable == nullptr)
+        {
+            report += "- shared library plugin '" + libraryPath.string() + "' returned no entry table.\n";
+            return false;
+        }
+        if (load.entryTable->interfaceVersion != enginePluginInterfaceVersion)
+        {
+            report += "- shared library plugin '" + libraryPath.string() + "' reports interface version "
+                    + std::to_string(load.entryTable->interfaceVersion) + " but the engine provides version "
+                    + std::to_string(enginePluginInterfaceVersion) + "; rebuild the plugin against this engine.\n";
+            return false;
+        }
+        load.pluginInstance = load.entryTable->createPlugin();
+        if (load.pluginInstance == nullptr)
+        {
+            report += "- shared library plugin '" + libraryPath.string() + "' created no plugin instance.\n";
+            return false;
+        }
     }
-    if (load.entryTable->interfaceVersion != enginePluginInterfaceVersion)
+    catch (const std::exception &error)
     {
-        report += "- shared library plugin '" + libraryPath.string() + "' reports interface version "
-                + std::to_string(load.entryTable->interfaceVersion) + " but the engine provides version "
-                + std::to_string(enginePluginInterfaceVersion) + "; rebuild the plugin against this engine.\n";
-        return false;
-    }
-    load.pluginInstance = load.entryTable->createPlugin();
-    if (load.pluginInstance == nullptr)
-    {
-        report += "- shared library plugin '" + libraryPath.string() + "' created no plugin instance.\n";
+        report += "- shared library plugin '" + libraryPath.string() + "' threw during loading: " + error.what() + "\n";
+        load.pluginInstance = nullptr;
         return false;
     }
 
-    const ParticipantManifest compiledManifest = load.pluginInstance->manifest();
-    if (!compiledManifest.name.empty() && compiledManifest.name != pluginManifest.id)
+    try
     {
-        report += "- native plugin '" + pluginManifest.id + "' reports the compiled manifest name '"
-                + compiledManifest.name + "'; the compiled manifest and plugin.toml must agree.\n";
+        const ParticipantManifest compiledManifest = load.pluginInstance->manifest();
+        if (!compiledManifest.name.empty() && compiledManifest.name != pluginManifest.id)
+        {
+            report += "- native plugin '" + pluginManifest.id + "' reports the compiled manifest name '"
+                    + compiledManifest.name + "'; the compiled manifest and plugin.toml must agree.\n";
+            load.entryTable->destroyPlugin(load.pluginInstance);
+            load.pluginInstance = nullptr;
+            return false;
+        }
+    }
+    catch (const std::exception &error)
+    {
+        report += "- native plugin '" + pluginManifest.id + "' threw while reporting its manifest: " + error.what()
+                + "\n";
         load.entryTable->destroyPlugin(load.pluginInstance);
         load.pluginInstance = nullptr;
         return false;

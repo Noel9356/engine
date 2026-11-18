@@ -55,8 +55,12 @@ std::filesystem::path executableDirectory()
 #else
         char          executablePath[PATH_MAX] = {};
         const ssize_t written = ::readlink("/proc/self/exe", executablePath, sizeof(executablePath) - 1);
-        if (written <= 0)
+        if (written <= 0 || static_cast<std::size_t>(written) == sizeof(executablePath) - 1)
         {
+            // A full buffer means the path was truncated (readlink writes at
+            // most that many bytes); resolving configuration against a
+            // truncated prefix would silently misplace config, plugins and
+            // modules, so both cases fall back to the working directory.
             return std::filesystem::current_path();
         }
         executablePath[written] = '\0';

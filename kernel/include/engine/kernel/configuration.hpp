@@ -152,6 +152,16 @@ public:
     // Replaces the store's [scene] section with the scene file's content.
     bool applySceneFile(const std::filesystem::path &path, std::string &errorMessage);
 
+    // Moves the current [scene] section out of the store (empty when none is
+    // defined). Reload support: the caller snapshots the live world content
+    // before reloading and reinstates it afterwards, so scene changes stay
+    // restart-only as documented.
+    [[nodiscard]] toml::table takeSceneSection();
+
+    // Reinstates a [scene] section previously taken by takeSceneSection,
+    // replacing whatever the store currently holds under [scene].
+    void restoreSceneSection(toml::table &&sceneTable);
+
     // Validates and queues a KEY=VALUE assignment; applyCommandLineOverrides
     // writes it into the document as the CommandLine layer.
     bool stageCommandLineOverride(const std::string &assignment, std::string &errorMessage);
@@ -190,14 +200,13 @@ public:
     std::vector<std::pair<std::string, std::string>> permissionDenials() const;
 
     // [trust] readers; the *Bindings variants also parse {id/version/sha256}
-    // table entries (sha256 binds trust to specific content).
-    std::vector<std::string> trustedPlugins() const;
-    std::vector<std::string> trustedModules() const;
-
+    // table entries (sha256 binds trust to specific content) - the trust gate
+    // consumes only these, since a bare name list cannot express a content
+    // binding.
     bool trustAllPlugins() const;
     bool trustAllModules() const;
 
-    // Binding form of the [trust] lists (see trustedPlugins).
+    // Binding form of the [trust] lists.
     std::vector<TrustBinding> trustedPluginBindings() const;
 
     std::vector<TrustBinding> trustedModuleBindings() const;
@@ -242,8 +251,6 @@ public:
 
 private:
     const toml::table *sectionTable(const std::string &sectionName) const;
-
-    std::vector<std::string>  trustSectionStringArray(const std::string &key) const;
     std::vector<TrustBinding> trustSectionBindings(const std::string &key) const;
     bool                      trustSectionBoolean(const std::string &key) const;
 

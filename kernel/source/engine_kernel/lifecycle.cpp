@@ -415,6 +415,14 @@ void EngineKernel::stop()
 
     mainThreadTaskQueue_.clear();
 
+    // Drain the scheduler BEFORE any participant stops or is destroyed: a
+    // scheduled task can hold a capability pointer into a participant (module
+    // instance or native plugin), and waitIdle only guarantees completion
+    // when it runs ahead of the teardown that invalidates those pointers.
+    // Modules die later still (records_.clear() unloads their libraries), but
+    // no participant code runs past this point.
+    taskScheduler_.waitIdle();
+
     for (auto iterator = participantStartOrder_.rbegin(); iterator != participantStartOrder_.rend(); ++iterator)
     {
         ParticipantRecord &record = **iterator;
@@ -440,7 +448,6 @@ void EngineKernel::stop()
     started     = false;
     constructed = false;
 
-    taskScheduler_.waitIdle();
     taskScheduler_.stop();
     bus_.releaseChannels();
 

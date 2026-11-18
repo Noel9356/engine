@@ -257,13 +257,8 @@ void Sha256::finish(std::uint8_t outDigest[digestSize])
     }
 }
 
-std::string Sha256::hexDigest(const void *data, std::size_t size)
+std::string Sha256::toHex(const std::uint8_t (&digest)[digestSize])
 {
-    Sha256       hasher;
-    std::uint8_t digest[digestSize];
-    hasher.update(data, size);
-    hasher.finish(digest);
-
     std::string hex;
     hex.reserve(hexDigestSize);
     for (const std::uint8_t byte : digest)
@@ -272,6 +267,15 @@ std::string Sha256::hexDigest(const void *data, std::size_t size)
         hex.push_back(hexDigit(byte));
     }
     return hex;
+}
+
+std::string Sha256::hexDigest(const void *data, std::size_t size)
+{
+    Sha256       hasher;
+    std::uint8_t digest[digestSize];
+    hasher.update(data, size);
+    hasher.finish(digest);
+    return toHex(digest);
 }
 
 // Streams the file in 64 KiB chunks; empty digest plus error text on I/O failure.
@@ -302,15 +306,7 @@ std::string Sha256::fileHexDigest(const std::filesystem::path &path, std::string
         }
     }
     hasher.finish(digest);
-
-    std::string hex;
-    hex.reserve(hexDigestSize);
-    for (const std::uint8_t byte : digest)
-    {
-        hex.push_back(hexDigit(static_cast<std::uint8_t>(byte >> 4)));
-        hex.push_back(hexDigit(byte));
-    }
-    return hex;
+    return toHex(digest);
 }
 
 bool isValidSha256HexDigest(const std::string &text)

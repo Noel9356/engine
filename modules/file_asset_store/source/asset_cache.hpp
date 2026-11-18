@@ -118,10 +118,6 @@ private:
     std::atomic<std::uint64_t>                                    accessSequence_{0};
     std::uint64_t                                                 residentBytes_   = 0;
     std::uint64_t                                                 reservedBytes_   = 0;
-    // Running counters for fast statistics snapshots (maintained under
-    // mutex_ alongside residentBytes_).
-    std::uint64_t evictableBytes_ = 0;
-    std::size_t   evictableCount_ = 0;
     // Canonical-path cache (input → canonical). Bounded FIFO; cleared when
     // full so the common case stays O(1) without a linked list. Guarded by
     // canonicalPathMutex_: requestAsset is callable from any thread, so the

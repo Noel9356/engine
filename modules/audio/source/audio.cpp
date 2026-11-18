@@ -221,7 +221,9 @@ public:
         scriptRuntime_ = context.tryAcquireCapability<script_runtime::ScriptRuntimeCapability>();
         if (script_runtime::canRegisterRuntimeInitializer(scriptRuntime_))
         {
-            luaBridgeContext_ = AudioLuaBridgeContext{scriptRuntime_, &capability_, &scriptSoundRoots_};
+            luaBridgeContext_.scriptRuntime   = scriptRuntime_;
+            luaBridgeContext_.audio           = &capability_;
+            luaBridgeContext_.scriptSoundRoots = &scriptSoundRoots_;
             runtimeInitializer_ = script_runtime::tryRegisterRuntimeInitializer(
                 scriptRuntime_, initializeAudioLuaRuntime, &luaBridgeContext_);
             // Secure by default: with no usable roots the bridge refuses every
@@ -242,6 +244,16 @@ public:
     void stop() override
     {
         script_runtime::unregisterRuntimeInitializer(scriptRuntime_, runtimeInitializer_);
+        // Invalidate the bridge context under its mutex before closing the
+        // registry: a script call that is already inside a bridge entry holds
+        // the mutex and finishes against a live capability, while calls that
+        // arrive after this point fail cleanly instead of touching a module
+        // that is shutting down.
+        {
+            std::lock_guard bridgeLock(luaBridgeContext_.apiMutex);
+            luaBridgeContext_.audio = nullptr;
+            luaBridgeContext_.scriptRuntime = nullptr;
+        }
 #if defined(ENGINE_AUDIO_BACKEND_MINIAUDIO)
         const auto lifecycleLock = registry_.lifecycleLock();
         registry_.closeAll();

@@ -37,18 +37,20 @@ bool ExecutionCache::execute(const std::shared_ptr<const RenderGraphPlan> &planO
     RenderGraphError &outError) const
 {
     // Only cache-owned plans can keep the cached TaskGraph alive safely.
-    if (!enabled_ || !planOwner)
+    if (!enabled_.load(std::memory_order_relaxed) || !planOwner)
         return runPerCall(plan, passCount, callback, userData, scheduler, outError);
 
-    std::unique_lock lock(mutex_, std::defer_lock);
-    lock.lock();
-    if (!cache_.executing.exchange(true, std::memory_order_acq_rel))
+    bool cacheBusy = false;
     {
-        const bool success = runCached(cache_, planOwner, plan, passCount, callback, userData, scheduler, outError);
-        // runCached always clears the executing flag before returning.
-        return success;
+        std::lock_guard lock(mutex_);
+        cacheBusy = cache_.executing.exchange(true, std::memory_order_acq_rel);
+        if (!cacheBusy)
+        {
+            // runCached always clears the executing flag before returning; the
+            // lock releases with this scope.
+            return runCached(cache_, planOwner, plan, passCount, callback, userData, scheduler, outError);
+        }
     }
-    lock.unlock();
     // Cache busy (concurrent caller): fall back to a per-call graph.
     return runPerCall(plan, passCount, callback, userData, scheduler, outError);
 }

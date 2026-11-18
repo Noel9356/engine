@@ -132,8 +132,8 @@ void Planet::update(const Vec3 &eyeLocal)
     // threshold of 2..7 updates with an 8-update cadence could let a
     // visible chunk's stamp age past the threshold between scans, evicting
     // meshes the streamer is about to select again.
-    const std::uint32_t evictionScanInterval
-        = std::min<std::uint32_t>(kEvictionScanInterval, params_.chunkEvictionUpdates);
+    const std::uint32_t evictionScanInterval = std::max<std::uint32_t>(1u,
+        std::min<std::uint32_t>(kEvictionScanInterval, params_.chunkEvictionUpdates));
     const bool evictionDue = updateCount_ % evictionScanInterval == 0;
     const bool visiblePassNeeded = selectionChanged || delivered > 0 || evictionDue;
 

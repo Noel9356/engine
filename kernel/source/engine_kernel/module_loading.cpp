@@ -258,8 +258,10 @@ void EngineKernel::loadModuleLibraries(std::string &report)
         // entry, the cached descriptor and the cached content hash are reused
         // directly. The hash is recomputed only on a cache miss, which avoids
         // re-hashing every module library on every startup of an unchanged
-        // build - the cache lives next to the executable, so trusting size+mtime
-        // as the validity signal is as strong as trusting the executable itself.
+        // build. The stamps alone are not a trust signal (they are writable
+        // by whoever can write the file), so loadModuleLibrary re-verifies the
+        // recorded digest against the bytes it actually loads; a library
+        // replaced under forged stamps fails there instead of executing.
         if (const ModuleDescriptorCacheEntry *remembered
             = descriptorCache.findByStamps(libraryPath, sizeBytes, modificationStamp))
         {
@@ -452,9 +454,12 @@ bool EngineKernel::scanUndescribedModuleLibraryDescriptor(const UndescribedModul
     {
         return false;
     }
-    outRecord.createModule = moduleEntryTable->createModule;
     fillDescriptorFromEntryTable(*moduleEntryTable, outRecord.descriptor);
 
+    // The factory pointer is only valid while the library stays loaded; the
+    // scan path releases the library again, so the record must not keep a
+    // callable pointer (the real load refreshes it through
+    // loadModuleLibrary).
     library->release();
 
     outCacheEntry.sizeBytes         = candidate.sizeBytes;
@@ -465,8 +470,31 @@ bool EngineKernel::scanUndescribedModuleLibraryDescriptor(const UndescribedModul
 }
 
 // Same discovery as the scan path, but keeps the library loaded and records_ its factory.
+// The recorded content hash is re-verified against the bytes actually loaded: the
+// descriptor cache reuses a remembered hash on a size+mtime match, and both the
+// cached and the freshly scanned digest predate this dlopen, so a file replaced
+// between hashing and loading (or one whose stamps were forged to hit the cache)
+// must fail here instead of loading content the trust decision never saw.
 bool EngineKernel::loadModuleLibrary(ModuleLibraryRecord &module, std::string &report)
 {
+    if (!module.contentSha256.empty())
+    {
+        std::string       hashError;
+        const std::string loadedSha256 = Sha256::fileHexDigest(module.libraryPath, hashError);
+        if (loadedSha256.empty())
+        {
+            report += "- module library '" + module.libraryPath.string()
+                    + "' cannot be re-hashed for loading: " + hashError + "\n";
+            return false;
+        }
+        if (loadedSha256 != module.contentSha256)
+        {
+            report += "- module library '" + module.libraryPath.string()
+                    + "' changed on disk after it was hashed for the trust gate; refusing to load it.\n";
+            return false;
+        }
+    }
+
     auto library = std::make_unique<DynamicLibrary>();
     const EngineModuleEntryTable *moduleEntryTable
         = loadAndQueryModuleEntryTable(*library, module.libraryPath, report);

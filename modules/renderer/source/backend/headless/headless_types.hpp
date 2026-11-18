@@ -7,14 +7,16 @@
 // bounding-sphere data for culling/LOD. lodIndices holds decimated index
 // lists (every 4th/16th/64th triangle) generated at creation.
 //
-// HeadlessTexture keeps the RGBA8 upload copy plus a float RGB mip chain
-// (box-filtered, halved each level) read by the sampler.
+// HeadlessTexture keeps the RGBA8 upload copy plus the float RGB view read by
+// the sampler.
 
 #pragma once
 
 #include <engine/renderer/capabilities.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <glm/ext/vector_float3.hpp>
@@ -80,14 +82,109 @@ struct HeadlessTexture
     TextureAddress address = TextureAddress::Repeat;
 
     // Bilinear or nearest sample with repeat/clamp addressing; returns white
-    // when empty.
-    glm::vec3 sample(float u, float v) const;
+    // when empty. Defined inline in the header: the rasterizer calls it per
+    // covered pixel, and an out-of-line definition compiles to a real call
+    // per sampled texel.
+    [[nodiscard]] glm::vec3 sample(float u, float v) const
+    {
+        const float *data = pixelsRGB.data();
+        const std::uint32_t mipW = width;
+        const std::uint32_t mipH = height;
+        if (mipW == 0 || mipH == 0 || data == nullptr)
+            return glm::vec3(1.0f);
+        if (mipW == 1 && mipH == 1)
+            return glm::vec3(data[0], data[1], data[2]);
+        if (address == TextureAddress::Repeat)
+        {
+            u -= std::floor(u);
+            v -= std::floor(v);
+        }
+        else
+        {
+            u = std::clamp(u, 0.0f, 1.0f);
+            v = std::clamp(v, 0.0f, 1.0f);
+        }
+        const float texelX = u * static_cast<float>(mipW) - 0.5f;
+        const float texelY = v * static_cast<float>(mipH) - 0.5f;
+        const auto pixelAt = [data, mipW](std::uint32_t x, std::uint32_t y) -> const float *
+        { return data + (static_cast<std::size_t>(y) * mipW + x) * 3; };
+        if (filter == TextureFilter::Nearest)
+        {
+            const auto x = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), mipW);
+            const auto y = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), mipH);
+            const float *p = pixelAt(x, y);
+            return glm::vec3(p[0], p[1], p[2]);
+        }
+        const auto          x0i = static_cast<std::int32_t>(std::floor(texelX));
+        const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
+        const float         fx  = texelX - static_cast<float>(x0i);
+        const float         fy  = texelY - static_cast<float>(y0i);
+        const std::uint32_t x0 = wrappedCoordinate(x0i, mipW), x1 = wrappedCoordinate(x0i + 1, mipW);
+        const std::uint32_t y0 = wrappedCoordinate(y0i, mipH), y1 = wrappedCoordinate(y0i + 1, mipH);
+        const float        *p00 = pixelAt(x0, y0), *p10 = pixelAt(x1, y0), *p01 = pixelAt(x0, y1), *p11 = pixelAt(x1, y1);
+        const float         omx = 1.0f - fx, omy = 1.0f - fy;
+        const float         w00 = omx * omy, w10 = fx * omy, w01 = omx * fy, w11 = fx * fy;
+        return glm::vec3(p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11,
+            p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11,
+            p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11);
+    }
 
     // Alpha-channel sample from the RGBA8 upload copy, same addressing and
     // filtering as sample(). Alpha always samples the base image - matching
     // the fur pipeline, whose strand-field fetch (the fur texture's alpha)
     // runs at the base level on the GPU side too. Returns 1 when empty.
-    float sampleAlpha(float u, float v) const;
+    [[nodiscard]] float sampleAlpha(float u, float v) const
+    {
+        if (width == 0 || height == 0 || pixels.size() < static_cast<std::size_t>(width) * height * 4)
+            return 1.0f;
+        if (width == 1 && height == 1)
+            return static_cast<float>(pixels[3]) / 255.0f;
+        if (address == TextureAddress::Repeat)
+        {
+            u -= std::floor(u);
+            v -= std::floor(v);
+        }
+        else
+        {
+            u = std::clamp(u, 0.0f, 1.0f);
+            v = std::clamp(v, 0.0f, 1.0f);
+        }
+        const float texelX = u * static_cast<float>(width) - 0.5f;
+        const float texelY = v * static_cast<float>(height) - 0.5f;
+        const auto alphaAt = [&](std::uint32_t x, std::uint32_t y) -> float
+        { return static_cast<float>(pixels[(static_cast<std::size_t>(y) * width + x) * 4 + 3]) / 255.0f; };
+        if (filter == TextureFilter::Nearest)
+        {
+            const auto x = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), width);
+            const auto y = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), height);
+            return alphaAt(x, y);
+        }
+        const auto          x0i = static_cast<std::int32_t>(std::floor(texelX));
+        const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
+        const float         fx  = texelX - static_cast<float>(x0i);
+        const float         fy  = texelY - static_cast<float>(y0i);
+        const std::uint32_t x0 = wrappedCoordinate(x0i, width), x1 = wrappedCoordinate(x0i + 1, width);
+        const std::uint32_t y0 = wrappedCoordinate(y0i, height), y1 = wrappedCoordinate(y0i + 1, height);
+        const float a00 = alphaAt(x0, y0), a10 = alphaAt(x1, y0), a01 = alphaAt(x0, y1), a11 = alphaAt(x1, y1);
+        const float omx = 1.0f - fx, omy = 1.0f - fy;
+        return a00 * omx * omy + a10 * fx * omy + a01 * omx * fy + a11 * fx * fy;
+    }
+
+private:
+    // Maps one texel coordinate onto the texture under this sampler's
+    // addressing: repeat wraps the coordinate into [0, extent), clamp pins
+    // it to the edge. Shared by the color and alpha samplers so both walk
+    // coordinates identically.
+    [[nodiscard]] std::uint32_t wrappedCoordinate(std::int32_t coordinate, std::uint32_t extent) const
+    {
+        const std::int32_t limit = static_cast<std::int32_t>(extent);
+        if (address == TextureAddress::Repeat)
+        {
+            const std::int32_t wrapped = coordinate % limit;
+            return static_cast<std::uint32_t>(wrapped < 0 ? wrapped + limit : wrapped);
+        }
+        return static_cast<std::uint32_t>(std::clamp(coordinate, 0, limit - 1));
+    }
 };
 
 // 1x1 stand-ins so materials without maps still sample something sensible.

@@ -128,6 +128,18 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
                 reportError(error, ModelLoadError::FileTooLarge);
                 return false;
             }
+            // Element names must be unique: the body reader indexes its
+            // per-element staging by the one count it selected, so a duplicate
+            // name (with a different count) would walk one element's rows into
+            // storage sized for the other. The format allows no duplicates.
+            for (const PlyElement &existing : elements)
+            {
+                if (existing.name == element.name)
+                {
+                    reportError(error, ModelLoadError::ParseFailed);
+                    return false;
+                }
+            }
             elements.push_back(std::move(element));
             currentElement = &elements.back();
         }
@@ -327,6 +339,44 @@ bool importPlyFile(const std::filesystem::path &path, ModelRecord &record, const
     {
         reportError(error, ModelLoadError::FileTooLarge);
         return false;
+    }
+    // Declared counts must fit in the file: every row needs at least one byte
+    // per declared property in ASCII (one character per value), or the exact
+    // fixed byte size in binary. Without this, a header claiming billions of
+    // rows passes the element-count cap and turns a small file into a giant
+    // staging allocation.
+    {
+        const auto scalarTypeBytes = [](const std::string &type) -> std::uint64_t
+        {
+            if (type == "char" || type == "int8" || type == "uchar" || type == "uint8")
+                return 1;
+            if (type == "short" || type == "int16" || type == "ushort" || type == "uint16")
+                return 2;
+            if (type == "int" || type == "int32" || type == "uint" || type == "uint32" || type == "float"
+                || type == "float32")
+                return 4;
+            return 8; // double / float64
+        };
+        for (const PlyElement &element : elements)
+        {
+            std::uint64_t minimumRowBytes = 0;
+            for (const PlyProperty &property : element.properties)
+            {
+                minimumRowBytes += encoding == PlyEncoding::Ascii
+                    ? 1
+                    : (property.list ? scalarTypeBytes(property.countType) : scalarTypeBytes(property.valueType));
+            }
+            // A row may legitimately be empty in ASCII only when the element
+            // declares no properties at all; treat that as one byte (the row
+            // terminator) so an empty-property element still cannot claim more
+            // rows than the file has bytes.
+            minimumRowBytes = std::max<std::uint64_t>(minimumRowBytes, 1);
+            if (element.count > fileSize / minimumRowBytes)
+            {
+                reportError(error, ModelLoadError::FileTooLarge);
+                return false;
+            }
+        }
     }
     const std::size_t xIndex = propertyIndex(*vertexElement, "x");
     const std::size_t yIndex = propertyIndex(*vertexElement, "y");

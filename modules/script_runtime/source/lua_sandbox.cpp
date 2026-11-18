@@ -104,13 +104,18 @@ void *luaAllocator(void *userData, void *pointer, std::size_t oldSize, std::size
         runtime->memoryUsed -= std::min(runtime->memoryUsed, actualOldSize);
         if (runtime->globalMemoryUsed != nullptr)
         {
-            std::uint64_t       current  = runtime->globalMemoryUsed->load(std::memory_order_relaxed);
-            const std::uint64_t released = std::min(current, actualOldSize);
-            while (released > 0
-                   && !runtime->globalMemoryUsed->compare_exchange_weak(
-                       current, current - released, std::memory_order_acq_rel, std::memory_order_relaxed))
+            // The decrement is recomputed from the refreshed counter on every
+            // retry: clamping a stale value below it would let the subtraction
+            // wrap and disable the limit for the whole process.
+            std::uint64_t current = runtime->globalMemoryUsed->load(std::memory_order_relaxed);
+            for (;;)
             {
-                current = std::min(current, runtime->globalMemoryUsed->load(std::memory_order_relaxed));
+                const std::uint64_t released = std::min(current, actualOldSize);
+                if (released == 0)
+                    break;
+                if (runtime->globalMemoryUsed->compare_exchange_weak(
+                        current, current - released, std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
             }
         }
         return nullptr;
@@ -149,13 +154,15 @@ void *luaAllocator(void *userData, void *pointer, std::size_t oldSize, std::size
     {
         if (growing && runtime->globalMemoryUsed != nullptr)
         {
-            std::uint64_t       current  = runtime->globalMemoryUsed->load(std::memory_order_relaxed);
-            const std::uint64_t rollback = std::min(current, growth);
-            while (rollback > 0
-                   && !runtime->globalMemoryUsed->compare_exchange_weak(
-                       current, current - rollback, std::memory_order_acq_rel, std::memory_order_relaxed))
+            std::uint64_t current = runtime->globalMemoryUsed->load(std::memory_order_relaxed);
+            for (;;)
             {
-                current = std::min(current, runtime->globalMemoryUsed->load(std::memory_order_relaxed));
+                const std::uint64_t rollback = std::min(current, growth);
+                if (rollback == 0)
+                    break;
+                if (runtime->globalMemoryUsed->compare_exchange_weak(
+                        current, current - rollback, std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
             }
         }
         return nullptr;

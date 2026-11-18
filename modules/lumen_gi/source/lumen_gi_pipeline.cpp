@@ -177,8 +177,15 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                 continue;
             }
             eligibleTexels += card.totalTexels();
-            directKeys.push_back(GiCardOrderKey{state.frameIndex - card.lastDirectFrame, card.cameraDistance, index});
-            indirectKeys.push_back(GiCardOrderKey{state.frameIndex - card.lastIndirectFrame, card.cameraDistance, index});
+            // Ages clamp at zero: a stale lastDirect/lastIndirectFrame (from a
+            // frame-counter reset or state reuse) must not wrap unsigned and
+            // starve every other card behind one "infinitely old" entry.
+            const std::uint64_t directAge
+                = state.frameIndex >= card.lastDirectFrame ? state.frameIndex - card.lastDirectFrame : 0u;
+            const std::uint64_t indirectAge
+                = state.frameIndex >= card.lastIndirectFrame ? state.frameIndex - card.lastIndirectFrame : 0u;
+            directKeys.push_back(GiCardOrderKey{directAge, card.cameraDistance, index});
+            indirectKeys.push_back(GiCardOrderKey{indirectAge, card.cameraDistance, index});
         }
         std::vector<GiTexelWork> &directWork   = state.scratchDirectWork;
         std::vector<GiTexelWork> &indirectWork = state.scratchIndirectWork;

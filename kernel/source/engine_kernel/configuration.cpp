@@ -13,6 +13,8 @@
 #include "engine_kernel_internal.hpp"
 #include "kernel_internals.hpp"
 
+#include <toml.hpp>
+
 #include <cstddef>
 #include <filesystem>
 #include <map>
@@ -299,8 +301,12 @@ bool EngineKernel::reloadConfiguration(std::string &report)
     }
 
     // Flattened "type:value" text of every leaf before and after; the diff
-    // drives the changed-keys report and the reload event.
+    // drives the changed-keys report and the reload event. The live [scene]
+    // section is snapshotted here and reinstated after the reload: world
+    // content is restart-only by contract, so the reloaded store must keep
+    // serving the previous world even when the scene file changed on disk.
     const std::map<std::string, std::string> previousValues = configurationStore_.flattenedValueReprs();
+    toml::table                             previousScene  = configurationStore_.takeSceneSection();
 
     configurationStore_.resetForReload();
     configurationLoaded = false;
@@ -330,11 +336,17 @@ bool EngineKernel::reloadConfiguration(std::string &report)
             std::string finishError;
             if (finishConfiguration(finishError))
             {
+                // The scene snapshot still holds the live world; put it back
+                // so even the restored store keeps serving it.
+                configurationStore_.restoreSceneSection(std::move(previousScene));
                 configurationLoaded = true;
                 report = "engine reload refused (the running configuration is restored):\n- " + reloadError + "\n";
                 return false;
             }
         }
+        // Nothing to restore into a broken store; the snapshot dies with the
+        // reload attempt, matching the previous behavior for its other keys.
+        previousScene = toml::table{};
         configurationLoaded = true;
         report = "engine reload failed and the previous configuration could not be fully restored:\n- reload error: "
                + reloadError + "\n- restore status: " + (restored ? "partial" : "failed") + "\n";
@@ -401,12 +413,17 @@ bool EngineKernel::reloadConfiguration(std::string &report)
         }
     }
 
+    // Reinstating the snapshot keeps live reads of [scene] on the previous
+    // world (the diff above already counted what the new file would change);
+    // the reload report tells the operator those changes wait for a restart.
+    configurationStore_.restoreSceneSection(std::move(previousScene));
+
     report += "engine configuration reloaded: " + std::to_string(changedCount) + " key(s) changed, "
             + std::to_string(removedCount) + " key(s) removed";
     if (sceneChanges > 0)
     {
         report += "; " + std::to_string(sceneChanges)
-                + " world content ([scene]) change(s) require a restart and were not applied live";
+                + " world content ([scene]) change(s) were detected and held back; they take effect after a restart";
     }
     report += "\n";
     if (changedKeys.empty())

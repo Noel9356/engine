@@ -23,6 +23,10 @@ reflection_indirect_specular         = true
 gpu_timestamps_enabled               = false
 headless_band_split_min_screen_fraction = 0.125
 headless_band_split_triangles        = 4096
+# Record cap of the batched tile path (one record per rasterisable fan
+# triangle): bounds the transient scratch of one batch flush; frames that
+# would exceed it flush in more chunks with identical output.
+headless_batch_tile_records          = 524288
 # Whole draw lists can take the batched tile-parallel path
 # (headless_batched_tile_rasterization). The per-draw tile path
 # (headless_tile_parallel) has no entry here on purpose: its default adapts

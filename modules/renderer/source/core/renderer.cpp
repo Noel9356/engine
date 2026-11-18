@@ -557,6 +557,22 @@ private:
             tilePixels_ = static_cast<std::uint32_t>(lowered);
         }
 
+        // Record cap of the batched tile path (one record per rasterisable
+        // fan triangle): memory-tight targets can lower it, and oversized
+        // batches simply flush in more chunks with identical output.
+        if (const auto batchRecords = context.configurationIntegerInSection("renderer", "headless_batch_tile_records");
+            batchRecords.has_value())
+        {
+            if (*batchRecords < 1024 || *batchRecords > 4194304)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] headless_batch_tile_records %lld to range 1024..4194304\n",
+                    static_cast<long long>(*batchRecords));
+            }
+            maxBatchTileRecords_
+                = static_cast<std::size_t>(std::clamp<std::int64_t>(*batchRecords, 1024, 4194304));
+        }
+
         // Angular-size LOD cutoffs (boundsRadius / distance): four strictly
         // descending values in (0, 1]; coarser chains are picked as the
         // apparent size drops below each cutoff.
@@ -830,6 +846,8 @@ private:
         bandSplitMinimumScreenFraction_ = 0.125f;
         pixelsPerLockGroup_         = 16;
         lodMinTriangles_            = 4096;
+        tilePixels_                 = 64u;
+        maxBatchTileRecords_        = 512u * 1024u;
 
         readClearColorConfiguration(context);
 
@@ -1009,6 +1027,7 @@ private:
             headlessOptions.bandSplitMinimumScreenFraction = bandSplitMinimumScreenFraction_;
             headlessOptions.parallelTransformVertexThreshold = parallelTransformVertexThreshold_;
             headlessOptions.tilePixels                 = tilePixels_;
+            headlessOptions.maxBatchTileRecords        = maxBatchTileRecords_;
             headlessOptions.lodThresholds              = lodThresholds_;
             headlessOptions.lodStrides                 = lodStrides_;
             return registerRenderer(Backend::Headless,
@@ -1977,6 +1996,7 @@ private:
     float          bandSplitMinimumScreenFraction_ = 0.125f;
     std::uint32_t  parallelTransformVertexThreshold_ = 8192u;
     std::uint32_t  tilePixels_                 = 64u;
+    std::size_t    maxBatchTileRecords_        = 512u * 1024u;
     std::array<float, 4>        lodThresholds_ = {0.02f, 0.05f, 0.1f, 0.2f};
     std::array<std::uint32_t, 3> lodStrides_   = {4u, 16u, 64u};
 

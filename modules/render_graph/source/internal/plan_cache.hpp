@@ -68,6 +68,17 @@ private:
         const RenderGraphResourceDescription *resources, std::uint32_t resourceCount,
         bool includeResourceLifetimes) noexcept;
 
+    // Snapshot of the configuration fields, taken under mutex_ (they are
+    // written by configure() and read on the render thread by find()/store(),
+    // so the unsynchronized members themselves must not be read directly).
+    struct Limits
+    {
+        std::size_t capacity             = 0;
+        std::size_t maximumGraphElements = 0;
+    };
+
+    [[nodiscard]] Limits limits() const noexcept;
+
     mutable std::mutex         mutex_;
     mutable std::vector<Entry> entries_;
     mutable std::uint64_t      clock_                = 0;

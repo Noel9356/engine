@@ -28,6 +28,16 @@ namespace engine
 namespace renderer
 {
 
+// The CPU shading kernel runs once per covered pixel; an outlined call per
+// pixel measurably regresses the frame time (and blocks hoisting loop-
+// invariant material terms out of the rasterizer's scan loops), so the hot
+// shading entry points force inlining on compilers that support it.
+#if defined(__GNUC__) || defined(__clang__)
+#define ENGINE_SHADING_INLINE inline __attribute__((always_inline))
+#else
+#define ENGINE_SHADING_INLINE inline
+#endif
+
 // Device selection bias used when a renderer is created.
 enum class DevicePreference : std::uint32_t
 {
@@ -360,16 +370,25 @@ inline bool giProbeLevelFor(const PreparedGiProbeGrid &grid, const glm::vec3 &po
     return true;
 }
 
-// Cosine-lobed SH2 irradiance at one probe (the same convolution as
-// lumen_gi::evaluateProbeIrradiance; kept textually in sync because the GLSL
-// mirror in shaders/mesh.frag must match this CPU path like the rest of the
-// shading model). sh2 is 27 floats in the GiProbe [basis][channel] order.
-inline glm::vec3 giEvaluateSh2Irradiance(const float sh2[27], const glm::vec3 &normal)
+// The SH2 basis evaluated at one direction. The band-1 terms are the
+// direction's components and the band-2 terms their products; a probe
+// footprint evaluation (giProbeGridIrradiance) shades several probes against
+// the SAME normal, so the products are computed once per lookup and shared by
+// every probe instead of being re-derived per probe.
+struct Sh2Basis
 {
-    constexpr float k0 = 3.141592654f;  // pi      (band 0)
-    constexpr float k1 = 2.094395102f;  // 2pi/3   (band 1)
-    constexpr float k2 = 0.785398163f;  // pi/4    (band 2)
+    float x  = 0.0f;
+    float y  = 0.0f;
+    float z  = 0.0f;
+    float xy = 0.0f;
+    float yz = 0.0f;
+    float zz3m1 = 0.0f; // 3zz - 1
+    float xz = 0.0f;
+    float xxmyy = 0.0f; // xx - yy
+};
 
+inline Sh2Basis sh2BasisFor(const glm::vec3 &normal)
+{
     const float x  = normal.x;
     const float y  = normal.y;
     const float z  = normal.z;
@@ -377,23 +396,58 @@ inline glm::vec3 giEvaluateSh2Irradiance(const float sh2[27], const glm::vec3 &n
     const float yy = y * y;
     const float zz = z * z;
 
-    glm::vec3 irradiance(0.0f);
-    for (std::uint32_t channel = 0; channel < 3; ++channel)
-    {
-        irradiance[channel] = k0 * sh2[channel]
-                            + k1 * (sh2[3 + channel] * y + sh2[6 + channel] * z + sh2[9 + channel] * x)
-                            + k2 * (sh2[12 + channel] * x * y + sh2[15 + channel] * y * z
-                                    + sh2[18 + channel] * (3.0f * zz - 1.0f) + sh2[21 + channel] * x * z
-                                    + sh2[24 + channel] * (xx - yy));
-    }
-    return irradiance;
+    Sh2Basis basis;
+    basis.x     = x;
+    basis.y     = y;
+    basis.z     = z;
+    basis.xy    = x * y;
+    basis.yz    = y * z;
+    basis.zz3m1 = 3.0f * zz - 1.0f;
+    basis.xz    = x * z;
+    basis.xxmyy = xx - yy;
+    return basis;
+}
+
+// Cosine-lobed SH2 irradiance at one probe (the same convolution as
+// lumen_gi::evaluateProbeIrradiance; kept textually in sync because the GLSL
+// mirror in shaders/mesh.frag must match this CPU path like the rest of the
+// shading model). sh2 is 27 floats in the GiProbe [basis][channel] order; the
+// basis comes from sh2BasisFor so a shared normal evaluates its products once.
+//
+// The three color channels run as packed lanes of one vector each (the SH
+// layout is [basis][channel], so each basis term's three channel coefficients
+// are contiguous): every lane performs the exact scalar operation sequence the
+// per-channel form performed - same products, same addition grouping, hence
+// the same rounding - while issuing a third of the instructions.
+ENGINE_SHADING_INLINE glm::vec3 giEvaluateSh2Irradiance(const float sh2[27], const Sh2Basis &basis)
+{
+    constexpr float k0 = 3.141592654f; // pi      (band 0)
+    constexpr float k1 = 2.094395102f; // 2pi/3   (band 1)
+    constexpr float k2 = 0.785398163f; // pi/4    (band 2)
+
+    const glm::vec3 band0(sh2[0], sh2[1], sh2[2]);
+    const glm::vec3 band1Y(sh2[3], sh2[4], sh2[5]);
+    const glm::vec3 band1Z(sh2[6], sh2[7], sh2[8]);
+    const glm::vec3 band1X(sh2[9], sh2[10], sh2[11]);
+    const glm::vec3 band2XY(sh2[12], sh2[13], sh2[14]);
+    const glm::vec3 band2YZ(sh2[15], sh2[16], sh2[17]);
+    const glm::vec3 band2ZZ(sh2[18], sh2[19], sh2[20]);
+    const glm::vec3 band2XZ(sh2[21], sh2[22], sh2[23]);
+    const glm::vec3 band2XXYY(sh2[24], sh2[25], sh2[26]);
+
+    // Grouped exactly as the scalar per-channel form grouped its terms:
+    // (k0*band0 + k1*((Y*y + Z*z) + X*x)) + k2*(((XY*xy + YZ*yz) + ZZ*zz3m1) + XZ*xz) + XXYY*xxmyy).
+    return (k0 * band0 + k1 * ((band1Y * basis.y + band1Z * basis.z) + band1X * basis.x))
+           + (k2
+                 * ((((band2XY * basis.xy + band2YZ * basis.yz) + band2ZZ * basis.zz3m1) + band2XZ * basis.xz)
+                     + band2XXYY * basis.xxmyy));
 }
 
 // Trilinear probe-grid irradiance for one shaded point, validity-weighted.
 // Returns false when the grid holds no valid probes along this footprint (the
 // caller keeps its legacy ambient); outWeight is the validity coverage of the
 // footprint in 0..1, used to blend GI against the hemispheric ambient.
-inline bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid, const glm::vec3 &position,
+ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid, const glm::vec3 &position,
     const glm::vec3 &normal, glm::vec3 &outIrradiance, float &outWeight)
 {
     outIrradiance = glm::vec3(0.0f);
@@ -404,10 +458,18 @@ inline bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid, const glm::ve
         return false;
     }
 
+    // The SH2 basis is shared by every probe of the footprint (same normal),
+    // so its products are computed once here instead of once per probe.
+    const Sh2Basis basis = sh2BasisFor(normal);
+
     const glm::vec3 cell     = (position - level.anchor) / level.spacing;
     const glm::ivec3 base    = glm::clamp(glm::ivec3(glm::floor(cell)), glm::ivec3(0), level.dims - glm::ivec3(2));
     const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
 
+    // The irradiance sum evaluates each valid probe corner against the shared
+    // basis and accumulates its weighted result; the corner loop keeps its
+    // early-outs (probe index range, zero-weight corners) so invalid probes
+    // never touch the arithmetic at all.
     float    weightSum     = 0.0f;
     glm::vec3 irradianceSum(0.0f);
     for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
@@ -432,7 +494,7 @@ inline bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid, const glm::ve
                 {
                     continue;
                 }
-                irradianceSum += weight * giEvaluateSh2Irradiance(&probe.sh2[0][0], normal);
+                irradianceSum += weight * giEvaluateSh2Irradiance(&probe.sh2[0][0], basis);
                 weightSum += weight;
             }
         }
@@ -575,7 +637,7 @@ inline glm::vec3 furShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
 // smoothstep cones). Roughness/metallic are clamped here exactly like the
 // shader. giGrid is the borrowed probe-grid snapshot; nullptr keeps the
 // legacy ambient path bit-identical.
-inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPosition, const glm::vec3 &cameraPosition,
+ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPosition, const glm::vec3 &cameraPosition,
     const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance, const glm::vec3 &ambientSky,
     const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic, float roughness, float ambientOcclusion,
     const PreparedDirectLight *directLights, std::uint32_t directLightCount,
@@ -688,26 +750,43 @@ inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
     return result;
 }
 
+// Unsigned-byte quantization with round-to-nearest; NaN-safe through the
+// clamps (toByte(NaN) would otherwise be undefined through the float->int
+// conversion).
+inline std::uint8_t toByte(float value)
+{
+    return static_cast<std::uint8_t>(std::min(1.0f, std::max(0.0f, value)) * 255.0f + 0.5f);
+}
+
 // Fast sRGB encode for the CPU rasterizer. glm::pow(c, 1/2.2) costs three
 // powf calls per pixel - by far the most expensive op in the shading loop -
 // while the output lands in an 8-bit target anyway. A 256-entry nearest
 // lookup keeps the error below half an output quantization step.
+//
+// The tables are C++17 inline variables (dynamically initialized before the
+// first use of anything defined alongside them), so the hot pixel path reads
+// them without a thread-safe-initialization guard check.
+namespace srgb_tables
+{
+struct FloatEncodeTable
+{
+    float values[256];
+    FloatEncodeTable()
+    {
+        for (std::uint32_t index = 0; index < 256; ++index)
+        {
+            values[index] = std::pow(static_cast<float>(index) / 255.0f, 1.0f / 2.2f);
+        }
+    }
+};
+
+inline const FloatEncodeTable floatEncode;
+} // namespace srgb_tables
+
 inline float fastSrgbEncode(float channel)
 {
-    struct SrgbTable
-    {
-        float values[256];
-        SrgbTable()
-        {
-            for (std::uint32_t index = 0; index < 256; ++index)
-            {
-                values[index] = std::pow(static_cast<float>(index) / 255.0f, 1.0f / 2.2f);
-            }
-        }
-    };
-    static const SrgbTable table;
-    const float            clamped = channel < 0.0f ? 0.0f : (channel > 1.0f ? 1.0f : channel);
-    return table.values[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
+    const float clamped = channel < 0.0f ? 0.0f : (channel > 1.0f ? 1.0f : channel);
+    return srgb_tables::floatEncode.values[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
 }
 
 inline glm::vec3 fastSrgbEncode(const glm::vec3 &color)
@@ -715,8 +794,52 @@ inline glm::vec3 fastSrgbEncode(const glm::vec3 &color)
     return glm::vec3(fastSrgbEncode(color.r), fastSrgbEncode(color.g), fastSrgbEncode(color.b));
 }
 
+// The composed output transform for opaque pixels: fastSrgbEncode followed
+// by toByte. Both stages quantize through the same 256-step grid, so the
+// composition is itself a function of the grid index alone; folding the two
+// tables into one byte-per-index table reproduces the exact sequence of
+// operations the two-stage form performs (the intermediate float is the float
+// table's entry in both cases), bit for bit, while replacing three clamps,
+// three multiplies and three conversions per pixel with one lookup per
+// channel.
+namespace srgb_tables
+{
+struct ByteEncodeTable
+{
+    std::uint8_t values[256];
+    ByteEncodeTable()
+    {
+        // Built from the same float encode the two-stage form uses, so every
+        // entry equals toByte(fastSrgbEncode(index / 255)).
+        for (std::uint32_t index = 0; index < 256; ++index)
+        {
+            values[index] = toByte(std::pow(static_cast<float>(index) / 255.0f, 1.0f / 2.2f));
+        }
+    }
+};
+
+inline const ByteEncodeTable byteEncode;
+} // namespace srgb_tables
+
+// Encodes a tone-mapped linear color as the packed little-endian RGBA word
+// the rasterizer commits (R at the lowest address, alpha 255). Channels at or
+// outside [0, 1] clamp exactly like the two-stage encode does.
+ENGINE_SHADING_INLINE std::uint32_t encodeColorRgba(const glm::vec3 &color)
+{
+    const std::uint8_t *values = srgb_tables::byteEncode.values;
+    const auto channelByte = [values](float channel)
+    {
+        const float clamped = channel < 0.0f ? 0.0f : (channel > 1.0f ? 1.0f : channel);
+        return values[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
+    };
+    const std::uint32_t red   = channelByte(color.r);
+    const std::uint32_t green = channelByte(color.g);
+    const std::uint32_t blue  = channelByte(color.b);
+    return red | (green << 8) | (blue << 16) | (0xFFu << 24);
+}
+
 // Tone mappers mirroring mesh.frag's toneMap(): none / Reinhard / ACES filmic.
-inline glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
+ENGINE_SHADING_INLINE glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
 {
     color *= exposure;
     switch (mapper)
@@ -731,11 +854,6 @@ inline glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping 
         break;
     }
     return color;
-}
-
-inline std::uint8_t toByte(float value)
-{
-    return static_cast<std::uint8_t>(std::min(1.0f, std::max(0.0f, value)) * 255.0f + 0.5f);
 }
 
 // Stores an error code through an optional out-parameter (nullptr allowed).

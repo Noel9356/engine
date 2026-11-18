@@ -400,17 +400,12 @@ void AssetCache::releaseReservation(std::uint64_t bytes)
 bool AssetCache::reserveForLoad(const std::shared_ptr<AssetRecord> &record, std::uint64_t newSize, AssetError *error)
 {
     std::lock_guard lock(mutex_);
-    if (!records_.contains(record->handle))
-    {
-        // The record was evicted while we were not holding the lock; treat
-        // this as a successful no-op (the caller still has the shared_ptr
-        // so the bytes will be swapped in, but the cache no longer tracks
-        // them until the next request re-creates the identity).
-        setAssetState(*record, AssetState::Ready, AssetError::None);
-        if (error != nullptr)
-            *error = AssetError::None;
-        return true;
-    }
+    const bool tracked = records_.contains(record->handle);
+    // The in-flight budget guards the read itself, so it applies whether or
+    // not the cache still tracks the record; the reservation is always made
+    // so the matching commitLoad/releaseReservation release stays balanced
+    // (an unreserved "successful no-op" here would let the commit subtract
+    // bytes another load had reserved).
     const std::uint64_t inflightAvailable
         = config_->maximumInflightBytes - std::min(config_->maximumInflightBytes, reservedBytes_);
     if (newSize > inflightAvailable)
@@ -420,31 +415,44 @@ bool AssetCache::reserveForLoad(const std::shared_ptr<AssetRecord> &record, std:
             *error = AssetError::CapacityExceeded;
         return false;
     }
-    const std::uint64_t accounted
-        = residentBytes_ > config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, reservedBytes_)
-              ? config_->maximumResidentBytes
-              : residentBytes_ + reservedBytes_;
-    const std::uint64_t residentAvailable
-        = config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, accounted);
-    if (newSize > residentAvailable)
+    if (tracked)
     {
-        const std::uint64_t shortage = newSize - residentAvailable;
-        const std::uint64_t evictionTarget
-            = shortage > std::numeric_limits<std::uint64_t>::max() - config_->cacheEvictionBatchBytes
-                  ? shortage
-                  : shortage + config_->cacheEvictionBatchBytes;
-        evictLocked(evictionTarget, 0);
+        const std::uint64_t accounted
+            = residentBytes_ > config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, reservedBytes_)
+                  ? config_->maximumResidentBytes
+                  : residentBytes_ + reservedBytes_;
+        const std::uint64_t residentAvailable
+            = config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, accounted);
+        if (newSize > residentAvailable)
+        {
+            const std::uint64_t shortage = newSize - residentAvailable;
+            const std::uint64_t evictionTarget
+                = shortage > std::numeric_limits<std::uint64_t>::max() - config_->cacheEvictionBatchBytes
+                      ? shortage
+                      : shortage + config_->cacheEvictionBatchBytes;
+            evictLocked(evictionTarget, 0);
+        }
+        const std::uint64_t currentAccounted
+            = residentBytes_ > config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, reservedBytes_)
+                  ? config_->maximumResidentBytes
+                  : residentBytes_ + reservedBytes_;
+        if (newSize > config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, currentAccounted))
+        {
+            setAssetState(*record, AssetState::Failed, AssetError::CapacityExceeded);
+            if (error != nullptr)
+                *error = AssetError::CapacityExceeded;
+            return false;
+        }
     }
-    const std::uint64_t currentAccounted
-        = residentBytes_ > config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, reservedBytes_)
-              ? config_->maximumResidentBytes
-              : residentBytes_ + reservedBytes_;
-    if (newSize > config_->maximumResidentBytes - std::min(config_->maximumResidentBytes, currentAccounted))
+    else
     {
-        setAssetState(*record, AssetState::Failed, AssetError::CapacityExceeded);
+        // The record was evicted while we were not holding the lock: the load
+        // proceeds against the caller's shared_ptr (the bytes will be swapped
+        // in, but the cache no longer tracks them until the next request
+        // re-creates the identity), so only the in-flight budget applies.
+        setAssetState(*record, AssetState::Ready, AssetError::None);
         if (error != nullptr)
-            *error = AssetError::CapacityExceeded;
-        return false;
+            *error = AssetError::None;
     }
     reservedBytes_ += newSize;
     return true;

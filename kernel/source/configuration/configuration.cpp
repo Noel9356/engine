@@ -777,6 +777,46 @@ bool ConfigurationStore::applySceneFile(const std::filesystem::path &path, std::
     return true;
 }
 
+// Moves the [scene] section out (empty table when absent): reload support for
+// keeping live world content stable while the files underneath are re-read.
+toml::table ConfigurationStore::takeSceneSection()
+{
+    toml::table taken;
+    if (parsedTable == nullptr)
+    {
+        return taken;
+    }
+    const auto found = parsedTable->find(sceneSectionName);
+    if (found == parsedTable->end() || found->second.as_table() == nullptr)
+    {
+        return taken;
+    }
+    taken = std::move(*found->second.as_table());
+    parsedTable->erase(sceneSectionName);
+    provenanceTracker->eraseUnder(sceneSectionName);
+    return taken;
+}
+
+// Reinstates a taken [scene] section under a synthetic reload provenance so
+// provenance queries keep working for the restored keys.
+void ConfigurationStore::restoreSceneSection(toml::table &&sceneTable)
+{
+    if (parsedTable == nullptr)
+    {
+        parsedTable = new toml::table();
+    }
+    parsedTable->erase(sceneSectionName);
+    provenanceTracker->eraseUnder(sceneSectionName);
+    if (sceneTable.empty())
+    {
+        return;
+    }
+    const ConfigProvenance provenance{
+        .layer = ConfigProvenance::Layer::SceneFile, .source = "previous run (scene kept across reload)"};
+    provenanceTracker->record(sceneTable, sceneSectionName, provenance);
+    parsedTable->insert_or_assign(sceneSectionName, std::move(sceneTable));
+}
+
 bool ConfigurationStore::stageCommandLineOverride(const std::string &assignment, std::string &errorMessage)
 {
     return commandLineOverrides->stage(assignment, errorMessage);
@@ -1273,34 +1313,10 @@ std::vector<TrustBinding> ConfigurationStore::trustSectionBindings(const std::st
     return bindings;
 }
 
-std::vector<std::string> ConfigurationStore::trustSectionStringArray(const std::string &key) const
-{
-    std::vector<std::string> values;
-    const toml::table       *trustTable = sectionTable(trustSectionName);
-    if (trustTable == nullptr)
-    {
-        return values;
-    }
-    if (const toml::array *valueArray = trustTable->get_as<toml::array>(key))
-    {
-        valueArray->for_each([&values](const toml::value<std::string> &element) { values.push_back(element.get()); });
-    }
-    return values;
-}
-
-std::vector<std::string> ConfigurationStore::trustedPlugins() const
-{
-    return trustSectionStringArray(trustPluginsKey);
-}
 
 bool ConfigurationStore::trustAllPlugins() const
 {
     return trustSectionBoolean(trustAllPluginsKey);
-}
-
-std::vector<std::string> ConfigurationStore::trustedModules() const
-{
-    return trustSectionStringArray(trustModulesKey);
 }
 
 bool ConfigurationStore::trustAllModules() const

@@ -225,25 +225,6 @@ void ModuleDescriptorCache::load()
     }
 }
 
-// A hit requires size and mtime to match; the stored sha256 is for advisories, not
-// compared here.
-const ModuleDescriptorCacheEntry *ModuleDescriptorCache::find(const std::filesystem::path &libraryPath,
-    std::uintmax_t sizeBytes, std::uintmax_t modificationStamp, const std::string &contentSha256) const
-{
-    const ModuleDescriptorCacheEntry *entry = findByStamps(libraryPath, sizeBytes, modificationStamp);
-    if (entry == nullptr)
-    {
-        return nullptr;
-    }
-    // Case-insensitive so cached lowercase and freshly-computed lowercase (or any
-    // case in [trust] bindings) compare equal.
-    if (!sha256HexDigestsEqual(entry->contentSha256, contentSha256))
-    {
-        return nullptr;
-    }
-    return entry;
-}
-
 // Fast path: trust size+mtime as the validity signal and return the cached sha256
 // alongside the descriptor so the caller can skip re-hashing unchanged binaries.
 const ModuleDescriptorCacheEntry *ModuleDescriptorCache::findByStamps(

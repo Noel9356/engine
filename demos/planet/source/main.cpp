@@ -629,11 +629,15 @@ int main(int argc, char **argv)
         std::cout << "demo_planet: warning - --screenshot-frame " << options.screenshotFrame
                   << " is beyond this run of " << totalFrames << " frames; no screenshot will be taken\n";
     }
-    // Warmup exhaustion warning flag: a budget that runs out before the
-    // visible set is complete means the first rendered frames (and any
-    // screenshot) still contain streaming gaps - the operator should know
-    // the capture is early rather than trust it blindly.
-    bool warmupExhausted = false;
+    // Warmup exhaustion record: a budget that runs out before the visible
+    // set is complete means the first rendered frames (and any screenshot)
+    // still contain streaming gaps - the operator should know the capture is
+    // early rather than trust it blindly. The statistics are snapshotted at
+    // the moment the budget ends; the run's final counts can only be more
+    // complete (streaming continues through the rendered frames), so a
+    // warning based on them would report a finished set and mislead.
+    bool                       warmupExhausted      = false;
+    planet::PlanetStatistics warmupExhaustionStats{};
 
     // GPU chunk residency and draw-command storage are isolated from the
     // application loop; this keeps planet streaming and camera control from
@@ -837,6 +841,8 @@ int main(int argc, char **argv)
                 if (warmupRemaining == 0)
                 {
                     warmupExhausted = true;
+                    (void)planetCapability->copyStatistics(
+                        planetCapability->self, planetHandle, &warmupExhaustionStats);
                 }
             }
             (void)framePacer.pace(&host.kernel().profiler());
@@ -970,10 +976,18 @@ int main(int argc, char **argv)
                   << finalStatistics.triangleCount << ", vertices " << finalStatistics.verticesTotal << "\n";
         if (warmupExhausted)
         {
-            std::cout << "demo_planet: warning - the warmup budget ran out with " << finalStatistics.chunksReady
-                      << "/" << finalStatistics.chunksVisible
-                      << " visible chunks ready; rendered frames and the screenshot"
-                      << " may show streaming gaps (raise --warmup for a complete capture)\n";
+            const bool completedLater = finalStatistics.chunksVisible > 0
+                && finalStatistics.chunksReady >= finalStatistics.chunksVisible;
+            std::cout << "demo_planet: warning - the warmup budget ran out with "
+                      << warmupExhaustionStats.chunksReady << "/" << warmupExhaustionStats.chunksVisible
+                      << " visible chunks ready; the first rendered frames and any early screenshot"
+                      << " may show streaming gaps (raise --warmup for a complete capture)";
+            if (completedLater)
+            {
+                std::cout << "; the set finished building during the rendered frames (now "
+                          << finalStatistics.chunksReady << "/" << finalStatistics.chunksVisible << " ready)";
+            }
+            std::cout << "\n";
         }
     }
     planetCapability->destroyPlanet(planetCapability->self, planetHandle);

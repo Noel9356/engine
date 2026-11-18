@@ -72,7 +72,9 @@ private:
     bool runPerCall(const RenderGraphPlan &plan, std::uint32_t passCount, RenderGraphExecuteCallback callback,
         void *userData, TaskScheduler &scheduler, RenderGraphError &outError) const;
 
-    bool                   enabled_ = true;
+    // setEnabled runs on the main thread while execute() runs on render
+    // threads, so the switch is atomic.
+    std::atomic<bool>      enabled_{true};
     mutable std::mutex     mutex_;
     mutable CachedExecution cache_;
 };

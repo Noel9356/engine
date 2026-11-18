@@ -81,8 +81,11 @@ inline std::vector<std::filesystem::path> collectModuleDefaultsFiles()
         {
             continue;
         }
-        if (!std::filesystem::exists(entry.path() / ConfigurationStore::moduleDefaultsFileName, entryError)
-            || entryError)
+        // Only directories that actually ship a config.toml contribute a
+        // defaults file; anything else under config/modules would fail the
+        // merge with a "cannot be stat-ed" error and abort configuration.
+        if (std::filesystem::exists(entry.path() / ConfigurationStore::moduleDefaultsFileName, entryError)
+            && !entryError)
         {
             moduleDirectories.push_back(entry.path());
         }

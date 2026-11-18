@@ -33,6 +33,10 @@ public:
     // error when the file cannot be opened or read.
     static std::string fileHexDigest(const std::filesystem::path &path, std::string &error);
 
+    // Lowercase hex text of a finished 32-byte digest (the shared encoder for
+    // the one-shot and file helpers and any caller that hashes incrementally).
+    static std::string toHex(const std::uint8_t (&digest)[digestSize]);
+
 private:
     // state: 8 chaining words; buffer: the 64-byte block under construction;
     // totalBytes: bytes hashed so far (for the length footer).

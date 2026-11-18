@@ -109,6 +109,13 @@ struct HeadlessBackendOptions
     // kept a power of two so the tile grid aligns with the framebuffer.
     std::uint32_t tilePixels = 64;
 
+    // Cap on the batched tile path's record scratch (renderer.
+    // headless_batch_tile_records): one record is one rasterisable fan
+    // triangle, so this bounds the transient memory of the whole-draw-list
+    // batching; chunks that would exceed it fall back to the per-draw paths
+    // with identical output.
+    std::size_t maxBatchTileRecords = 512u * 1024u;
+
     // Angular-size LOD cutoffs (renderer.lod_thresholds) and the triangle
     // strides of the decimated chains (renderer.lod_strides); level 0 is
     // always the full index list.
@@ -124,7 +131,9 @@ class HeadlessBackend final : public RenderBackend
 public:
     HeadlessBackend(window::WindowHandle surfaceHandle, window::WindowCapability *windowCapability,
         const HeadlessBackendOptions &options)
-        : surface_(surfaceHandle),
+        : tileWidth_(options.tilePixels),
+          tileHeight_(options.tilePixels),
+          surface_(surfaceHandle),
           transformCacheBudgetBytes_(options.transformCacheBudgetBytes),
           frustumCullingEnabled_(options.frustumCullingEnabled),
           backFaceCullingEnabled_(options.backFaceCullingEnabled),
@@ -137,10 +146,9 @@ public:
           bandSplitMinimumScreenFraction_(options.bandSplitMinimumScreenFraction),
           lodMinTriangles_(options.lodMinTriangles),
           parallelTransformVertexThreshold_(options.parallelTransformVertexThreshold),
-          tileWidth_(options.tilePixels),
-          tileHeight_(options.tilePixels),
+          lodStrides_(options.lodStrides),
           lodThresholds_(options.lodThresholds),
-          lodStrides_(options.lodStrides)
+          maxBatchTileRecords_(options.maxBatchTileRecords)
     {
         // Supersampling grid from the requested sample count (see
         // HeadlessBackendOptions::msaaSamples); sampleScaleX_/Y_ stay 1 when
@@ -621,15 +629,15 @@ private:
     // TileBinRecord::setupIndex) and is filled by the serial prepare loop
     // before any worker reads it; the records themselves bake each item's
     // transformed corners, so workers never need the meshes. The batch
-    // record cap bounds the per-chunk scratch: a full streamed frame (LOD
-    // chunks plus the backdrop shells) routinely carries several hundred
-    // thousand triangles, so the cap is sized to swallow a whole typical
-    // frame in one flush; larger frames still flush in chunks, which
-    // preserves submission order across chunk boundaries - each chunk
-    // rasterizes completely before the next begins, exactly like the
-    // per-draw replay it replaces.
-    std::vector<RasterSetup>    batchSetups_;
-    static constexpr std::size_t maxBatchTileRecords_ = 512u * 1024u;
+    // record cap (renderer.headless_batch_tile_records) bounds the per-chunk
+    // scratch: a full streamed frame (LOD chunks plus the backdrop shells)
+    // routinely carries several hundred thousand triangles, so the default
+    // cap is sized to swallow a whole typical frame in one flush; larger
+    // frames still flush in chunks, which preserves submission order across
+    // chunk boundaries - each chunk rasterizes completely before the next
+    // begins, exactly like the per-draw replay it replaces.
+    std::vector<RasterSetup> batchSetups_;
+    std::size_t              maxBatchTileRecords_ = 512u * 1024u;
 
     std::unordered_map<MeshHandle, HeadlessMesh> meshes;
 

@@ -174,13 +174,12 @@ public:
     // ParticipantAccessError. Returns true when the call may resolve.
     bool checkCapabilityPermission(const std::string &capabilityName) const
     {
-        permissionScratch_.assign(capabilityPermissionPrefix);
-        permissionScratch_ += capabilityName;
-        if (permissionSystem_.isGranted(participantName_, permissionScratch_))
+        const std::string permissionName
+            = std::string(capabilityPermissionPrefix) + capabilityName;
+        if (permissionSystem_.isGranted(participantName_, permissionName))
         {
             return true;
         }
-        const std::string permissionName = permissionScratch_;
         throw ParticipantAccessError("participant '" + participantName_
                                      + "' was blocked by the permission system while acquiring '" + capabilityName
                                      + "': the permission '" + permissionName
@@ -228,9 +227,9 @@ public:
     // provider exists.
     void *tryAcquireCapability(const std::string &capabilityName) const
     {
-        permissionScratch_.assign(capabilityPermissionPrefix);
-        permissionScratch_ += capabilityName;
-        if (!permissionSystem_.isGranted(participantName_, permissionScratch_))
+        const std::string permissionName
+            = std::string(capabilityPermissionPrefix) + capabilityName;
+        if (!permissionSystem_.isGranted(participantName_, permissionName))
         {
             return nullptr;
         }
@@ -255,9 +254,9 @@ public:
     // True when the permission is granted and exactly one provider exists.
     bool isCapabilityAvailable(const std::string &capabilityName) const
     {
-        permissionScratch_.assign(capabilityPermissionPrefix);
-        permissionScratch_ += capabilityName;
-        if (!permissionSystem_.isGranted(participantName_, permissionScratch_))
+        const std::string permissionName
+            = std::string(capabilityPermissionPrefix) + capabilityName;
+        if (!permissionSystem_.isGranted(participantName_, permissionName))
         {
             return false;
         }
@@ -293,7 +292,7 @@ public:
 
 private:
     // demandedCapabilities_ is shared with the CapabilityProviderIndex demand
-    // closure; permissionScratch_ avoids an allocation per permission check.
+    // closure.
     EventBus                 &eventBus_;
     CapabilityResolver       &capabilityResolver_;
     PermissionSystem         &permissionSystem_;
@@ -305,8 +304,6 @@ private:
     MainThreadTaskQueue                                                        &mainThreadTaskQueue_;
     TaskScheduler                                                              &taskScheduler_;
     PerformanceProfiler                                                        &profiler_;
-
-    mutable std::string permissionScratch_;
 };
 
 // Native module entry point: one instance per .so, created via
