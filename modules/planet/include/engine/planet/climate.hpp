@@ -69,6 +69,12 @@ private:
     // strata stream, so the color stripes and the geometric strata bands
     // correlate (the stripe's phase warp uses the same seed and scale).
     std::int64_t seedRockStripes_;
+    // Erosion patches: the sparse ground-scale field that pulls vegetated
+    // ground toward the bare-soil tone (see the soil_patch_* keys).
+    std::int64_t seedSoilPatches_;
+    // Dryness mosaic: the broad ground-scale field that senesces vegetated
+    // ground toward its dry, yellow-tan counterpart (see the dry_patch_* keys).
+    std::int64_t seedDryPatches_;
 
     // Per-octave noise seeds, derived once per sampler from the base seeds
     // (hashCombine64(baseSeed, octave) is sample-independent). The moisture
@@ -80,6 +86,8 @@ private:
     FbmStreamSeeds seedJitterOctaves_{};
     FbmStreamSeeds seedDetailJitterOctaves_{};
     FbmStreamSeeds seedGroundJitterOctaves_{};
+    FbmStreamSeeds seedSoilPatchOctaves_{};
+    FbmStreamSeeds seedDryPatchOctaves_{};
     std::array<std::int64_t, 3> seedMoistureWarpOctaves_{};
 };
 

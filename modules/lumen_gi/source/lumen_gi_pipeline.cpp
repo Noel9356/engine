@@ -261,20 +261,21 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                 }
             });
         const std::size_t indirectCount = indirectWork.size();
-        parallelRange(scheduler, indirectCount + probeItems.size(), 1,
+        parallelRange(scheduler, indirectCount, 1,
             [&](std::size_t begin, std::size_t end)
             {
                 for (std::size_t item = begin; item < end; ++item)
                 {
-                    if (item < indirectCount)
-                    {
-                        gatherIndirectLightingUnit(state, indirectWork[item], scratch + scratchOffsets[item]);
-                    }
-                    else
-                    {
-                        const GiProbeItem &probe = probeItems[item - indirectCount];
-                        updateProbe(state, probe.level, probe.slot);
-                    }
+                    gatherIndirectLightingUnit(state, indirectWork[item], scratch + scratchOffsets[item]);
+                }
+            });
+        parallelRange(scheduler, probeItems.size(), 1,
+            [&](std::size_t begin, std::size_t end)
+            {
+                for (std::size_t item = begin; item < end; ++item)
+                {
+                    const GiProbeItem &probe = probeItems[item];
+                    updateProbe(state, probe.level, probe.slot);
                 }
             });
         for (std::size_t index = 0; index < indirectWork.size(); ++index)
@@ -291,7 +292,7 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
         needed = std::max(needed, cycles(eligibleTexels, settings.directTexelsPerFrame) + 1);
         needed = std::max(needed, cycles(eligibleTexels, settings.indirectTexelsPerFrame) * indirectSettlePasses);
         needed = std::max(needed, cycles(pendingTexels, settings.captureTexelsPerFrame) + 1);
-        state.convergenceFrames = static_cast<std::uint32_t>(std::min<std::uint64_t>(needed + 2, 4096));
+        state.convergenceFrames = static_cast<std::uint32_t>(std::min<std::uint64_t>(needed + 2, 100000000ull));
 
         state.totalRaysTraced.fetch_add(
             static_cast<std::uint64_t>(state.probeTracesThisFrame.load(std::memory_order_relaxed))

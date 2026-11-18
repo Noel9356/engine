@@ -141,9 +141,17 @@ void setMoistureWarpAmplitude(PlanetGenerationParams &params, double value) { pa
 void setCoastalMoistureBoost(PlanetGenerationParams &params, double value) { params.coastalMoistureBoost = value; }
 void setCoastalMoistureBand(PlanetGenerationParams &params, double value) { params.coastalMoistureBandMeters = value; }
 void setMoistureLatitudeBands(PlanetGenerationParams &params, double value) { params.moistureLatitudeBands = value != 0.0; }
+void setMoistureBeltEquator(PlanetGenerationParams &params, double value) { params.moistureBeltEquatorAmplitude = value; }
+void setMoistureBeltSubtropical(PlanetGenerationParams &params, double value) { params.moistureBeltSubtropicalAmplitude = value; }
+void setMoistureBeltTemperate(PlanetGenerationParams &params, double value) { params.moistureBeltTemperateAmplitude = value; }
+void setMoistureBeltPolar(PlanetGenerationParams &params, double value) { params.moistureBeltPolarAmplitude = value; }
 void setColorVariation(PlanetGenerationParams &params, double value) { params.colorVariation = value; }
 void setColorVariationWavelength(PlanetGenerationParams &params, double value) { params.colorVariationWavelengthMeters = value; }
 void setColorVariationGroundWavelength(PlanetGenerationParams &params, double value) { params.colorVariationGroundWavelengthMeters = value; }
+void setSoilPatchStrength(PlanetGenerationParams &params, double value) { params.soilPatchStrength = value; }
+void setSoilPatchWavelength(PlanetGenerationParams &params, double value) { params.soilPatchWavelengthMeters = value; }
+void setDryPatchStrength(PlanetGenerationParams &params, double value) { params.dryPatchStrength = value; }
+void setDryPatchWavelength(PlanetGenerationParams &params, double value) { params.dryPatchWavelengthMeters = value; }
 void setSnowLine(PlanetGenerationParams &params, double value) { params.snowLineMeters = value; }
 void setBeachWidth(PlanetGenerationParams &params, double value) { params.beachWidthMeters = value; }
 void setRockSlopeThreshold(PlanetGenerationParams &params, double value) { params.rockSlopeThreshold = value; }
@@ -184,7 +192,9 @@ void setCloudAltitude(PlanetGenerationParams &params, double value) { params.clo
 void setCloudDetailStrength(PlanetGenerationParams &params, double value) { params.cloudDetailStrength = value; }
 void setCloudEdgeSoftness(PlanetGenerationParams &params, double value) { params.cloudEdgeSoftness = value; }
 void setCloudWeatherStrength(PlanetGenerationParams &params, double value) { params.cloudWeatherStrength = value; }
+void setCloudWeatherWavelengthMultiple(PlanetGenerationParams &params, double value) { params.cloudWeatherWavelengthMultiple = value; }
 void setCloudLatitudeBandStrength(PlanetGenerationParams &params, double value) { params.cloudLatitudeBandStrength = value; }
+void setCloudBandFrequency(PlanetGenerationParams &params, double value) { params.cloudBandFrequency = value; }
 void setCloudShadowStrength(PlanetGenerationParams &params, double value) { params.cloudShadowStrength = value; }
 void setStarsEnabled(PlanetGenerationParams &params, double value) { params.starsEnabled = value != 0.0; }
 void setStarsDensity(PlanetGenerationParams &params, double value) { params.starsDensity = value; }
@@ -265,9 +275,17 @@ constexpr SettingRow kSettingRows[] = {
     {"coastal_moisture_boost",        SettingKind::Floating, setCoastalMoistureBoost},
     {"coastal_moisture_band_meters",  SettingKind::Floating, setCoastalMoistureBand},
     {"moisture_latitude_bands",       SettingKind::Boolean,  setMoistureLatitudeBands},
+    {"moisture_belt_equator_amplitude",     SettingKind::Floating, setMoistureBeltEquator},
+    {"moisture_belt_subtropical_amplitude", SettingKind::Floating, setMoistureBeltSubtropical},
+    {"moisture_belt_temperate_amplitude",   SettingKind::Floating, setMoistureBeltTemperate},
+    {"moisture_belt_polar_amplitude",       SettingKind::Floating, setMoistureBeltPolar},
     {"color_variation",               SettingKind::Floating, setColorVariation},
     {"color_variation_wavelength_meters", SettingKind::Floating, setColorVariationWavelength},
     {"color_variation_ground_wavelength_meters", SettingKind::Floating, setColorVariationGroundWavelength},
+    {"soil_patch_strength",           SettingKind::Floating, setSoilPatchStrength},
+    {"soil_patch_wavelength_meters",  SettingKind::Floating, setSoilPatchWavelength},
+    {"dry_patch_strength",            SettingKind::Floating, setDryPatchStrength},
+    {"dry_patch_wavelength_meters",   SettingKind::Floating, setDryPatchWavelength},
     {"snow_line_meters",              SettingKind::Floating, setSnowLine},
     {"beach_width_meters",            SettingKind::Floating, setBeachWidth},
     {"beach_wet_width_meters",        SettingKind::Floating, setBeachWetWidth},
@@ -288,7 +306,9 @@ constexpr SettingRow kSettingRows[] = {
     {"cloud_detail_strength",         SettingKind::Floating, setCloudDetailStrength},
     {"cloud_edge_softness",           SettingKind::Floating, setCloudEdgeSoftness},
     {"cloud_weather_strength",        SettingKind::Floating, setCloudWeatherStrength},
+    {"cloud_weather_wavelength_multiple", SettingKind::Floating, setCloudWeatherWavelengthMultiple},
     {"cloud_latitude_band_strength",  SettingKind::Floating, setCloudLatitudeBandStrength},
+    {"cloud_band_frequency",          SettingKind::Floating, setCloudBandFrequency},
     {"cloud_shadow_strength",         SettingKind::Floating, setCloudShadowStrength},
     {"stars_enabled",                 SettingKind::Boolean,  setStarsEnabled},
     {"stars_density",                 SettingKind::Floating, setStarsDensity},

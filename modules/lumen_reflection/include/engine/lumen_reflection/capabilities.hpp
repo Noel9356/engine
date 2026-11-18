@@ -23,7 +23,12 @@ namespace lumen_reflection
 {
 
 // ABI version of this capability struct; consumers must match it.
-inline constexpr std::uint32_t lumenReflectionCapabilityAbi = 1u;
+// ABI 2: copyField's buffer grew to four floats per texel - the radiance
+// triplet plus the texel's surface roughness - so renderers can gate the
+// bilinear field sample on material similarity instead of blending the
+// field across surface boundaries (a rough wall texel must not darken the
+// mirror image texel beside it).
+inline constexpr std::uint32_t lumenReflectionCapabilityAbi = 2u;
 using ReflectionSurfaceHandle                                = std::uint32_t;
 inline constexpr ReflectionSurfaceHandle invalidReflectionSurface = 0;
 
@@ -85,11 +90,16 @@ struct ReflectionSurfaceDescription
 // specular radiance produced for one camera. Each texel is the expected
 // GGX-lobe response (importance-sampled estimator, Fresnel included) of the
 // surface its ray chain saw - the term a renderer adds to its shaded pixel.
-// radiance is tightly packed RGB float triplets in row-major texel order;
-// viewProjection is the column-major matrix the field was evaluated with (the
-// same convention as setView), cameraPosition the matching eye point.
-// maxRoughness echoes the configured roughness.max_trace: surfaces rougher
-// than that carry no specular environment response and read as zero.
+// copyField writes four floats per texel in row-major texel order: the
+// radiance RGB triplet followed by the texel's surface roughness, so the
+// renderer's bilinear sample can refuse texels from materials outside the
+// shaded pixel's roughness band instead of blending across surface
+// boundaries (texels with no response - background, unlit, or above the
+// traced roughness band - report 1.0). viewProjection is the column-major
+// matrix the field was evaluated with (the same convention as setView),
+// cameraPosition the matching eye point. maxRoughness echoes the configured
+// roughness.max_trace: surfaces rougher than that carry no specular
+// environment response and read as zero.
 struct ReflectionFieldHeader
 {
     std::uint32_t width            = 0;
@@ -185,8 +195,12 @@ struct LumenReflectionCapability
 
     // Snapshot read of the reflection field. With a null/zero-capacity
     // buffer it still reports the version and fills outHeader, so callers
-    // can size their buffer and detect changes. Returns the number of texel
-    // triplets copied (truncated to capacity*3 floats).
+    // can size their buffer and detect changes. The buffer layout is four
+    // floats per texel: the linear-HDR radiance triplet followed by the
+    // texel's surface roughness (1.0 for texels that carry no response -
+    // background, unlit, or above the traced roughness band - which lets the
+    // renderer gate its bilinear sample on material similarity). Returns the
+    // number of texels copied (truncated to capacity).
     std::uint32_t (*copyField)(void *self, float *output, std::uint32_t capacityTexels,
         ReflectionFieldHeader *outHeader, std::uint64_t *outVersion);
 

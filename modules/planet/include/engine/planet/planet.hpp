@@ -134,11 +134,13 @@ private:
 
     // Scratch for the nearest-first request pass of update() (kept at member
     // scope so streaming frames do not reallocate the missing-chunk buffer).
+    // Entries carry the INDEX of the visible chunk (and of its conforming
+    // mask in visibleMasks_), not the mask itself: the sort below moves only
+    // the small tuple, and the mask is read once when the request is issued.
     struct MissingChunk
     {
-        ChunkCoord  coord;
-        ConformMask conformMask;
-        double      apparentSize = 0.0; // chunk width / distance (screen-size priority)
+        double        apparentSize = 0.0; // chunk width / distance (screen-size priority)
+        std::uint32_t visibleIndex = 0;   // index into lastVisible_ / visibleMasks_
     };
     std::vector<MissingChunk> missingScratch_;
 

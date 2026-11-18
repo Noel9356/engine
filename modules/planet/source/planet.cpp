@@ -202,8 +202,8 @@ void Planet::update(const Vec3 &eyeLocal)
             const double dz = center.z - eyeLocal.z;
             const double distanceSquared = dx * dx + dy * dy + dz * dz;
             const double chunkWidth = chunkSizeMeters(params_, coord.depth);
-            missing.push_back(MissingChunk{coord, visibleMasks_[index],
-                chunkWidth / std::max(std::sqrt(distanceSquared), 1.0e-6)});
+            missing.push_back(MissingChunk{chunkWidth / std::max(std::sqrt(distanceSquared), 1.0e-6),
+                static_cast<std::uint32_t>(index)});
         }
 
         // Requests within this update's budget, apparent-size first (see the
@@ -216,19 +216,7 @@ void Planet::update(const Vec3 &eyeLocal)
                 {
                     return a.apparentSize > b.apparentSize;
                 }
-                if (a.coord.depth != b.coord.depth)
-                {
-                    return a.coord.depth < b.coord.depth;
-                }
-                if (a.coord.x != b.coord.x)
-                {
-                    return a.coord.x < b.coord.x;
-                }
-                if (a.coord.y != b.coord.y)
-                {
-                    return a.coord.y < b.coord.y;
-                }
-                return a.coord.z < b.coord.z;
+                return a.visibleIndex < b.visibleIndex;
             });
             std::uint32_t newRequests = 0;
             for (const MissingChunk &entry : missing)
@@ -238,7 +226,7 @@ void Planet::update(const Vec3 &eyeLocal)
                 {
                     break;
                 }
-                requestBuild(entry.coord, entry.conformMask);
+                requestBuild(visible[entry.visibleIndex], visibleMasks_[entry.visibleIndex]);
                 ++newRequests;
             }
             inflightBuilds += newRequests;

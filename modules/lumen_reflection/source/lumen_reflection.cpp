@@ -30,6 +30,7 @@
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/device_profile.hpp>
+#include <engine/util/hardware_info.hpp>
 #include "lumen_reflection_internal.hpp"
 
 #include <glm/geometric.hpp>
@@ -63,32 +64,17 @@ void setError(ReflectionError *output, ReflectionError value)
     }
 }
 
-// Quality presets scale the field resolution and the ray budget like the
-// render graph's device resolution: Low 0.25x, Medium 0.5x, High 1x, Ultra
-// 2x of the configured values; Auto resolves through resolveProfile's device
-// class.
-float qualityScale(std::uint32_t quality)
-{
-    switch (quality)
-    {
-    case 1: // Low
-        return 0.25f;
-    case 2: // Medium
-        return 0.5f;
-    case 4: // Ultra
-        return 2.0f;
-    case 3: // High
-    default:
-        return 1.0f;
-    }
-}
+// Quality presets and their scaling come from
+// engine/renderer/lumen_ray_core.hpp (shared with lumen_gi); Auto derives
+// its scale from the host's logical processor count, which this module
+// queries once at construction.
 
-void applySettingsToState(const ReflectionSettings &settings, RfPipelineState &state)
+void applySettingsToState(const ReflectionSettings &settings, RfPipelineState &state, float autoScale)
 {
     state.settings = settings;
     // The quality preset scales the linear resolution (screen_scale is the
     // linear divisor), then the ray budget.
-    const float scale = settings.quality == 0 ? 1.0f : qualityScale(settings.quality);
+    const float scale = settings.quality == 0 ? autoScale : qualityScale(settings.quality, 0u);
     if (scale != 1.0f)
     {
         const float inverse = 1.0f / scale;
@@ -99,6 +85,9 @@ void applySettingsToState(const ReflectionSettings &settings, RfPipelineState &s
         state.settings.spatialReuseRadius = std::max<std::uint32_t>(
             static_cast<std::uint32_t>(std::lround(static_cast<float>(settings.spatialReuseRadius) * scale)), 0u);
     }
+    // The registry capacity follows the configured scene bound (the setting
+    // is the documented limit createSurface enforces).
+    state.registryCapacity = settings.maxSurfaces;
 }
 
 // The module singleton backing the "lumen_reflection" capability. moduleMutex_
@@ -242,14 +231,19 @@ private:
         settings.roughMaxTrace         = static_cast<float>(floating("roughness.max_trace", 0.4, 0.0, 1.0));
         settings.maxTraceDistance      = static_cast<float>(floating("trace.max_distance_m", 50.0, 1.0, 2000.0));
         settings.traceBias             = static_cast<float>(floating("trace.bias_m", 0.02, 0.001, 0.5));
-        settings.temporalStrength      = static_cast<float>(floating("temporal.strength", 0.9, 0.0, 0.99));
+        settings.temporalStrength      = static_cast<float>(floating("temporal.strength", 0.9, 0.0, 0.95));
         settings.neighborhoodClampSigma = static_cast<float>(
             floating("temporal.neighborhood_clamp_sigma", 1.0, 0.0, 16.0));
+        settings.varianceThreshold    = static_cast<float>(floating("filter.variance_threshold", 0.02, 0.0, 4.0));
         settings.spatialReuseRadius    = static_cast<std::uint32_t>(integer("filter.spatial_reuse_radius", 1, 0, 9));
         settings.bilateralEnabled      = boolean("filter.bilateral", true);
         settings.bilateralRadius       = static_cast<std::uint32_t>(integer("filter.bilateral_radius", 2, 1, 9));
+        settings.screenTraceMaxSteps   = static_cast<std::uint32_t>(integer("screen_trace.max_steps", 48, 4, 256));
+        settings.screenTraceThickness  = static_cast<float>(floating("screen_trace.thickness_m", 0.5, 0.01, 8.0));
         settings.referenceSamples      = static_cast<std::uint32_t>(integer("debug.reference_samples", 16, 1, 4096));
         settings_                      = settings;
+        // The capacity key is the documented registry bound.
+        state_.registryCapacity = settings_.maxSurfaces;
     }
 
     void onConfigurationReloaded(const ConfigurationReloadedEvent &event)
@@ -269,10 +263,12 @@ private:
         }
         std::lock_guard<std::mutex> lock(moduleMutex_);
         readConfigurationLocked();
-        applySettingsToState(settings_, state_);
-        // A resolution change invalidates the temporal history.
+        applySettingsToState(settings_, state_, qualityScale(0u, processorCount_));
+        // A resolution change invalidates the temporal history and the
+        // raster caches.
         state_.historyValid = false;
         state_.sceneDirty   = true;
+        ++state_.rasterSerial;
         publishSnapshotLocked();
     }
 
@@ -320,6 +316,9 @@ private:
     {
         state_.tlasDirty  = true;
         state_.sceneDirty = true;
+        // Registry changes shift surface indices: every projected-triangle
+        // cache rebuilds on the next raster pass.
+        ++state_.rasterSerial;
     }
 
     ReflectionSurfaceHandle createSurfaceImpl(const ReflectionSurfaceDescription *description, ReflectionError *error)
@@ -529,6 +528,8 @@ private:
         if (viewChanged)
         {
             state_.viewDirty = true;
+            // Projected-triangle caches depend on the view matrices.
+            ++state_.rasterSerial;
         }
         state_.viewProjection  = glm::make_mat4(viewProjectionColumnMajor16);
         state_.cameraPosition  = glm::make_vec3(cameraPosition3);
@@ -690,7 +691,7 @@ private:
 
         TaskScheduler *scheduler = schedulerLocked();
         rfEnsureSceneTlas(state_);
-        applySettingsToState(settings_, state_);
+        applySettingsToState(settings_, state_, qualityScale(0u, processorCount_));
         if (!rfRunReflectionFrame(state_, scheduler))
         {
             state_.framesSinceDirty = 0;
@@ -725,7 +726,8 @@ private:
         auto snapshot = std::make_shared<FieldSnapshot>();
         if (previous != nullptr && previous.use_count() == 1)
         {
-            snapshot->radiance = std::move(previous->radiance);
+            snapshot->radiance  = std::move(previous->radiance);
+            snapshot->roughness = std::move(previous->roughness);
         }
         buildFieldSnapshot(state_, *snapshot);
         snapshot->version = fieldVersion_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
@@ -775,7 +777,15 @@ private:
         const std::uint32_t copied = std::min(available, capacityTexels);
         if (copied != 0)
         {
-            std::memcpy(output, snapshot->radiance.data(), static_cast<std::size_t>(copied) * 3 * sizeof(float));
+            // Four floats per texel: the radiance triplet, then the texel's
+            // surface roughness (the renderer's sample gate material key).
+            for (std::uint32_t texel = 0; texel < copied; ++texel)
+            {
+                output[texel * 4 + 0] = snapshot->radiance[texel * 3 + 0];
+                output[texel * 4 + 1] = snapshot->radiance[texel * 3 + 1];
+                output[texel * 4 + 2] = snapshot->radiance[texel * 3 + 2];
+                output[texel * 4 + 3] = snapshot->roughness[texel];
+            }
         }
         return copied;
     }
@@ -786,6 +796,10 @@ private:
         {
             return false;
         }
+        // The registry and the counters mutate under the module mutex: a
+        // statistics poll from another thread must not race the surfaces
+        // vector while an evaluate() frame is running.
+        std::lock_guard<std::mutex> lock(moduleMutex_);
         ReflectionStatistics &statistics = *outStatistics;
         statistics.frameIndex               = state_.frameIndex;
         statistics.surfaces                 = static_cast<std::uint32_t>(state_.surfaces.size());
@@ -814,6 +828,9 @@ private:
         {
             return false;
         }
+        // Settings mutate under the module mutex (live reload); the profile
+        // reads them under the same lock.
+        std::lock_guard<std::mutex> lock(moduleMutex_);
         ReflectionProfile profile;
         profile.screenScale      = settings_.screenScale;
         profile.raysPerPixel     = settings_.raysPerPixel;
@@ -881,7 +898,8 @@ private:
     struct FieldSnapshot
     {
         ReflectionFieldHeader header{};
-        std::vector<float>    radiance; // width * height * 3, linear HDR
+        std::vector<float>    radiance;  // width * height * 3, linear HDR
+        std::vector<float>    roughness; // width * height, the texel's surface roughness
         std::uint64_t         version = 0;
     };
 
@@ -895,7 +913,10 @@ private:
         header.maxRoughness = state.settings.roughMaxTrace;
         snapshot.header     = header;
         const std::size_t texelCount = static_cast<std::size_t>(state.fieldWidth) * state.fieldHeight;
-        snapshot.radiance.assign(texelCount * 3, 0.0f);
+        // resize (not assign): at steady state the buffer keeps its size, so
+        // the loop below overwrites every texel without re-zeroing it first.
+        snapshot.radiance.resize(texelCount * 3);
+        snapshot.roughness.resize(texelCount);
         if (!state.fieldFiltered.empty())
         {
             for (std::size_t texel = 0; texel < texelCount; ++texel)
@@ -903,7 +924,16 @@ private:
                 snapshot.radiance[texel * 3 + 0] = state.fieldFiltered[texel].x;
                 snapshot.radiance[texel * 3 + 1] = state.fieldFiltered[texel].y;
                 snapshot.radiance[texel * 3 + 2] = state.fieldFiltered[texel].z;
+                // The texel's surface roughness travels with the radiance:
+                // texels the pass never traced (background, unlit, above the
+                // roughness band) keep the GBuffer's neutral 1.0, which the
+                // renderer's sample gate reads as "no response here".
+                snapshot.roughness[texel] = state.gbufferRoughness[texel];
             }
+        }
+        else
+        {
+            std::fill(snapshot.roughness.begin(), snapshot.roughness.end(), 1.0f);
         }
     }
 
@@ -913,6 +943,9 @@ private:
     direct_lighting::DirectLightingCapability *directLightingCapability_ = nullptr;
     lumen_gi::LumenGiCapability           *lumenGiCapability_ = nullptr;
     SubscriptionToken                      reloadSubscription_ = 0;
+    // Host shape queried once (the Auto quality preset derives its scale from
+    // it; system queries must not run per frame).
+    std::uint32_t                          processorCount_ = util::logicalProcessorCount();
 
     mutable std::mutex moduleMutex_;
     mutable std::mutex snapshotMutex_;

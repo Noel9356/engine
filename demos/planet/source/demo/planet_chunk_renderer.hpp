@@ -126,6 +126,8 @@ private:
         engine::renderer::MeshHandle water = engine::renderer::invalidMesh;
         glm::mat4 terrainTransform{1.0f};
         glm::mat4 waterTransform{1.0f};
+        bool terrainPlacementBuilt = false; // terrainTransform carries the chunk's placement
+        bool waterPlacementBuilt = false;   // waterTransform carries the chunk's placement
         std::uint64_t lastSeenUpdate = 0;  // update that last listed this chunk as visible
         std::uint64_t terrainHash = 0;     // content hash of the uploaded terrain mesh
         std::uint64_t waterHash = 0;       // content hash of the uploaded water mesh

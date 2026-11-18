@@ -25,6 +25,7 @@
 #include <engine/kernel/task_scheduler.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/device_profile.hpp>
+#include <engine/util/hardware_info.hpp>
 #include "lumen_gi_internal.hpp"
 
 #include <glm/geometric.hpp>
@@ -62,29 +63,15 @@ glm::mat4 makeTransform(const float *columnMajor16)
     return glm::make_mat4(columnMajor16);
 }
 
-// Quality presets scale the amortization budgets like the render graph's
-// device resolution: Low 0.25x, Medium 0.5x, High 1x, Ultra 2x of the
-// configured values; Auto resolves through resolveProfile's device class.
-float qualityScale(std::uint32_t quality)
-{
-    switch (quality)
-    {
-    case 1: // Low
-        return 0.25f;
-    case 2: // Medium
-        return 0.5f;
-    case 4: // Ultra
-        return 2.0f;
-    case 3: // High
-    default:
-        return 1.0f;
-    }
-}
+// Quality presets and their budget scaling come from
+// engine/renderer/lumen_ray_core.hpp (shared with lumen_reflection); Auto
+// derives its scale from the host's logical processor count, which this
+// module queries once at construction.
 
-void applySettingsToState(const GiSettings &settings, GiPipelineState &state)
+void applySettingsToState(const GiSettings &settings, GiPipelineState &state, float autoScale)
 {
     state.settings = settings;
-    const float scale = settings.quality == 0 ? 1.0f : qualityScale(settings.quality);
+    const float scale = settings.quality == 0 ? autoScale : qualityScale(settings.quality, 0u);
     // lighting.update_speed scales the two lighting refresh budgets on top of
     // the quality preset (Lumen's "Lumen Scene Lighting Update Speed").
     const double lightingScale = static_cast<double>(scale) * static_cast<double>(settings.lightingUpdateSpeed);
@@ -229,6 +216,18 @@ private:
             const auto value = context_->configurationBooleanInSection("lumen_gi", key);
             return value.has_value() ? *value : fallback;
         };
+        auto environmentVector = [&](const char *key, glm::vec3 fallback, bool nonNegative)
+        {
+            const auto values = context_->configurationFloatingArrayInSection("lumen_gi", key);
+            if (values.size() != 3 || !std::isfinite(values[0]) || !std::isfinite(values[1])
+                || !std::isfinite(values[2]) || (nonNegative && (values[0] < 0.0 || values[1] < 0.0
+                    || values[2] < 0.0)))
+            {
+                return fallback;
+            }
+            return glm::vec3(static_cast<float>(values[0]), static_cast<float>(values[1]),
+                static_cast<float>(values[2]));
+        };
         settings.enabled                  = boolean("enabled", true);
         settings.skipUnchangedFrames      = boolean("skip_unchanged_frames", true);
         settings.quality                  = static_cast<std::uint32_t>(integer("quality", 3, 0, 4));
@@ -258,7 +257,9 @@ private:
         settings.traceBias                = static_cast<float>(floating("trace.bias_m", 0.02, 0.001, 0.5));
         settings.probeSpacing             = static_cast<float>(floating("probes.spacing_m", 2.0, 0.25, 32.0));
         settings.probeDirectionResolution = static_cast<std::uint32_t>(
-            integer("probes.direction_resolution", 32, 4, 64));
+            integer("probes.direction_resolution", 32,
+                static_cast<std::int64_t>(minProbeDirectionResolution),
+                static_cast<std::int64_t>(maxProbeDirectionResolution)));
         settings.probeUpdatesPerFrame     = static_cast<std::uint32_t>(
             integer("probes.updates_per_frame", 64, 1, 1458));
         settings.probeRaysPerUpdate       = static_cast<std::uint32_t>(
@@ -266,6 +267,8 @@ private:
         settings.probeHysteresis          = static_cast<float>(floating("probes.hysteresis", 0.2, 0.0, 0.99));
         settings.probeRelocationMargin    = static_cast<float>(
             floating("probes.relocation_margin", 0.05, 0.005, 0.25));
+        settings.dynamicRelightRadius     = static_cast<float>(
+            floating("probes.dynamic_relight_radius_m", 2.0, 0.0, 64.0));
         settings.probeLevel1SpacingFactor =
             static_cast<float>(floating("probes.level1_spacing_factor", 4.0, 2.0, 16.0));
         settings.screenRayDistance =
@@ -284,6 +287,20 @@ private:
         settings.debugIncludeAmbient      = boolean("debug.include_ambient", false);
         settings.continuousGather         = boolean("debug.continuous_gather", false);
         settings.exportGatherFrames       = static_cast<std::uint32_t>(integer("debug.export_gather_frames", 16, 1, 64));
+        // Fallback environment (used when the optional pbr capability is
+        // absent): the same defaults the renderer's built-in environment
+        // carries, overridable so a headless consumer without pbr can still
+        // tune the sun and the hemispheric skylight.
+        fallbackEnvironment_.sunDirection = environmentVector("environment.sun_direction",
+            glm::vec3(0.45f, 0.62f, 0.35f), false);
+        fallbackEnvironment_.sunColor     = environmentVector("environment.sun_color", glm::vec3(1.0f, 0.96f, 0.88f), true);
+        fallbackEnvironment_.sunIntensity =
+            static_cast<float>(floating("environment.sun_intensity", 3.0, 0.0, 1.0e6));
+        fallbackEnvironment_.sunEnabled   = boolean("environment.sun_enabled", true);
+        fallbackEnvironment_.ambientSky    = environmentVector("environment.ambient_sky", glm::vec3(0.55f, 0.65f, 0.80f), true);
+        fallbackEnvironment_.ambientGround = environmentVector("environment.ambient_ground", glm::vec3(0.35f, 0.30f, 0.25f), true);
+        fallbackEnvironment_.ambientIntensity =
+            static_cast<float>(floating("environment.ambient_intensity", 0.5, 0.0, 1.0e6));
         settings_                         = settings;
     }
 
@@ -314,7 +331,7 @@ private:
     // left probe maps sized for the previous resolution.
     void rebuildPipelineAfterConfigChangeLocked()
     {
-        applySettingsToState(settings_, state_);
+        applySettingsToState(settings_, state_, qualityScale(0u, processorCount_));
         state_.registryCapacity = settings_.maxSurfaces;
         const std::uint32_t resolution = std::max(settings_.probeDirectionResolution, 4u);
         const bool probesChanged = state_.probeDirections.empty() || resolution != builtDirectionResolution_
@@ -386,7 +403,17 @@ private:
         surface.unlit    = (description.flagBits & giSurfaceFlagUnlit) != 0u;
         surface.dynamic  = (description.flagBits & giSurfaceFlagDynamic) != 0u;
         surface.cards.clear();
-        updateSurfaceTransform(surface, makeTransform(description.transform));
+        // A singular transform is rejected like any other malformed
+        // description: the surface keeps the geometry it was built with and
+        // the caller reports the error.
+        if (!updateSurfaceTransform(surface, makeTransform(description.transform)))
+        {
+            if (error != nullptr)
+            {
+                *error = GiError::InvalidDescription;
+            }
+            return;
+        }
         // Only this surface's cards are rebuilt (and recaptured); every other
         // surface keeps its captured and lit data. The old code re-placed the
         // cards of ALL surfaces on every registry change.
@@ -398,6 +425,24 @@ private:
         rebuildCardRefs(state_);
         state_.tlasDirty  = true;
         state_.sceneDirty = true;
+    }
+
+    // Marks the probes around a changed world volume for a full retrace (the
+    // swept volume of a move/deform, or the volume itself for a
+    // create/destroy), expanded by probes.dynamic_relight_radius_m so the
+    // neighboring probes also refresh. probeUpdatesPerFrame bounds how much
+    // retrace work a frame can absorb.
+    void markDynamicRelightLocked(const glm::vec3 &minA, const glm::vec3 &maxA, const glm::vec3 &minB,
+        const glm::vec3 &maxB)
+    {
+        if (settings_.dynamicRelightRadius <= 0.0f)
+        {
+            return;
+        }
+        const glm::vec3 expansion(settings_.dynamicRelightRadius);
+        const glm::vec3 volumeMin = glm::min(minA, minB) - expansion;
+        const glm::vec3 volumeMax = glm::max(maxA, maxB) + expansion;
+        markProbesNearVolume(state_, volumeMin, volumeMax);
     }
 
     GiSurfaceHandle createSurfaceImpl(const GiSurfaceDescription *description, GiError *error)
@@ -418,7 +463,7 @@ private:
             setError(error, GiError::CapacityReached);
             return invalidGiSurface;
         }
-        if (state_.nextHandle == invalidGiSurface || state_.nextHandle == 0xffffffffu)
+        if (state_.nextHandle == 0xffffffffu)
         {
             setError(error, GiError::CapacityReached);
             return invalidGiSurface;
@@ -436,6 +481,10 @@ private:
         const GiSurfaceHandle handle = state_.nextHandle++;
         state_.surfaces.push_back(std::move(surface));
         registryChangedLocked();
+        // A new surface lights its neighborhood: the probes around it retrace
+        // from scratch so the world radiance cache picks it up immediately.
+        markDynamicRelightLocked(state_.surfaces.back().worldMin, state_.surfaces.back().worldMax,
+            state_.surfaces.back().worldMin, state_.surfaces.back().worldMax);
         setError(error, GiError::None);
         return handle;
     }
@@ -492,6 +541,8 @@ private:
         GiSurface replacement;
         replacement.handle = handle;
         GiError localError = GiError::None;
+        const glm::vec3 oldMin = state_.surfaces[index].worldMin;
+        const glm::vec3 oldMax = state_.surfaces[index].worldMax;
         applySurfaceDescriptionLocked(replacement, *description, &localError);
         if (localError != GiError::None)
         {
@@ -500,6 +551,8 @@ private:
         }
         state_.surfaces[index] = std::move(replacement);
         registryChangedLocked();
+        // A deformed surface relights the volume it covered and now covers.
+        markDynamicRelightLocked(oldMin, oldMax, state_.surfaces[index].worldMin, state_.surfaces[index].worldMax);
         setError(error, GiError::None);
         return true;
     }
@@ -524,14 +577,23 @@ private:
             }
         }
         GiSurface &     surface   = state_.surfaces[index];
+        const glm::vec3 oldMin = surface.worldMin;
+        const glm::vec3 oldMax = surface.worldMax;
         const glm::mat4 transform = makeTransform(transformColumnMajor16);
         if (transform == surface.transform)
         {
             return true; // unchanged: keep the frame clean for the static skip
         }
-        updateSurfaceTransform(surface, transform);
+        // A singular transform is refused and the previous one kept; the
+        // caller only sees the boolean.
+        if (!updateSurfaceTransform(surface, transform))
+        {
+            return false;
+        }
         state_.tlasDirty  = true;
         state_.sceneDirty = true;
+        // A moved surface relights the volume it swept through.
+        markDynamicRelightLocked(oldMin, oldMax, surface.worldMin, surface.worldMax);
         return true;
     }
 
@@ -543,8 +605,13 @@ private:
         {
             return false;
         }
+        // A removed surface leaves its volume dark/changed: the probes around
+        // it retrace from scratch.
+        const glm::vec3 oldMin = state_.surfaces[index].worldMin;
+        const glm::vec3 oldMax = state_.surfaces[index].worldMax;
         state_.surfaces.erase(state_.surfaces.begin() + index);
         registryChangedLocked();
+        markDynamicRelightLocked(oldMin, oldMax, oldMin, oldMax);
         return true;
     }
 
@@ -613,13 +680,20 @@ private:
         GiEnvironmentSnapshot snapshot;
         std::uint64_t         pbrVersion    = 0;
         std::uint64_t         lightsVersion = 0;
-        snapshot.sunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
-        snapshot.sunColor     = glm::vec3(1.0f, 0.96f, 0.88f);
-        snapshot.sunIntensity = 3.0f;
-        snapshot.sunEnabled   = true;
-        snapshot.ambientSky     = glm::vec3(0.55f, 0.65f, 0.80f);
-        snapshot.ambientGround  = glm::vec3(0.35f, 0.30f, 0.25f);
-        snapshot.ambientIntensity = 0.5f;
+        snapshot.sunDirection = glm::normalize(fallbackEnvironment_.sunDirection);
+        if (!std::isfinite(snapshot.sunDirection.x) || !std::isfinite(snapshot.sunDirection.y)
+            || !std::isfinite(snapshot.sunDirection.z))
+        {
+            // A zero (or degenerate) configured direction: fall back to the
+            // built-in default instead of a NaN direction.
+            snapshot.sunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
+        }
+        snapshot.sunColor     = fallbackEnvironment_.sunColor;
+        snapshot.sunIntensity = fallbackEnvironment_.sunIntensity;
+        snapshot.sunEnabled   = fallbackEnvironment_.sunEnabled;
+        snapshot.ambientSky     = fallbackEnvironment_.ambientSky;
+        snapshot.ambientGround  = fallbackEnvironment_.ambientGround;
+        snapshot.ambientIntensity = fallbackEnvironment_.ambientIntensity;
         snapshot.exposure       = 1.0f;
         snapshot.toneMapping    = pbr::ToneMapping::AcesFilmic;
         if (pbrCapability_ != nullptr && pbrCapability_->copyEnvironment != nullptr)
@@ -650,12 +724,14 @@ private:
         }
         if (directLightingCapability_ != nullptr && directLightingCapability_->copyLights != nullptr)
         {
-            std::vector<direct_lighting::DirectLight> lights(direct_lighting::maxDirectLights);
+            // The scratch is a member, not a local: steady-state evaluates
+            // stop hitting the allocator for the same worst-case light set.
+            directLightsScratch_.resize(direct_lighting::maxDirectLights);
             const std::uint32_t count = directLightingCapability_->copyLights(directLightingCapability_->self,
-                lights.data(), static_cast<std::uint32_t>(lights.size()), &lightsVersion);
-            lights.resize(std::min<std::size_t>(count, lights.size()));
-            snapshot.hasDirectLights = !lights.empty();
-            snapshot.directLights    = std::move(lights);
+                directLightsScratch_.data(), static_cast<std::uint32_t>(directLightsScratch_.size()), &lightsVersion);
+            snapshot.directLights.assign(directLightsScratch_.begin(),
+                directLightsScratch_.begin() + std::min<std::size_t>(count, directLightsScratch_.size()));
+            snapshot.hasDirectLights = !snapshot.directLights.empty();
         }
         // Precompute the per-light constants the shading loop needs and drop
         // inactive lights; the per-texel evaluation then skips them without
@@ -991,6 +1067,25 @@ private:
     pbr::PbrCapability        *pbrCapability_            = nullptr;
     direct_lighting::DirectLightingCapability *directLightingCapability_ = nullptr;
     SubscriptionToken reloadSubscription_ = 0;
+
+    // Built-in environment used when the pbr capability is absent; fed from
+    // the [lumen_gi.environment] configuration keys.
+    struct FallbackEnvironment
+    {
+        glm::vec3 sunDirection{0.45f, 0.62f, 0.35f};
+        glm::vec3 sunColor{1.0f, 0.96f, 0.88f};
+        float     sunIntensity     = 3.0f;
+        bool      sunEnabled       = true;
+        glm::vec3 ambientSky{0.55f, 0.65f, 0.80f};
+        glm::vec3 ambientGround{0.35f, 0.30f, 0.25f};
+        float     ambientIntensity = 0.5f;
+    };
+    FallbackEnvironment fallbackEnvironment_;
+    // Worst-case light buffer reused by the per-frame environment snapshot.
+    std::vector<direct_lighting::DirectLight> directLightsScratch_;
+    // Host shape queried once (the Auto quality preset derives its scale from
+    // it; system queries must not run per frame).
+    std::uint32_t processorCount_ = util::logicalProcessorCount();
 
     mutable std::mutex moduleMutex_;
     GiSettings         settings_;

@@ -180,11 +180,19 @@ bool PlanetGenerationParams::validate(std::string &error)
     moistureWavelengthMeters    = clampRange(moistureWavelengthMeters, radiusMeters / 1024.0, radiusMeters * 16.0);
     moisturePerturbation        = clampRange(moisturePerturbation, 0.0, 1.0);
     moistureWarpAmplitude       = clampRange(moistureWarpAmplitude, 0.0, 2.0);
+    moistureBeltEquatorAmplitude     = clampRange(moistureBeltEquatorAmplitude, -1.0, 1.0);
+    moistureBeltSubtropicalAmplitude = clampRange(moistureBeltSubtropicalAmplitude, -1.0, 1.0);
+    moistureBeltTemperateAmplitude   = clampRange(moistureBeltTemperateAmplitude, -1.0, 1.0);
+    moistureBeltPolarAmplitude       = clampRange(moistureBeltPolarAmplitude, -1.0, 1.0);
     coastalMoistureBoost        = clampRange(coastalMoistureBoost, 0.0, 1.0);
     coastalMoistureBandMeters   = clampRange(coastalMoistureBandMeters, 1.0, radiusMeters);
     colorVariation       = clampRange(colorVariation, 0.0, 1.0);
     colorVariationWavelengthMeters = clampRange(colorVariationWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     colorVariationGroundWavelengthMeters = clampRange(colorVariationGroundWavelengthMeters, radiusMeters / 16384.0, colorVariationWavelengthMeters);
+    soilPatchStrength            = clampRange(soilPatchStrength, 0.0, 1.0);
+    soilPatchWavelengthMeters    = clampRange(soilPatchWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
+    dryPatchStrength             = clampRange(dryPatchStrength, 0.0, 1.0);
+    dryPatchWavelengthMeters     = clampRange(dryPatchWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     snowLineMeters       = clampRange(snowLineMeters, 0.0, 0.5 * radiusMeters);
     beachWidthMeters     = clampRange(beachWidthMeters, 0.0, 0.05 * radiusMeters);
     beachWetWidthMeters  = clampRange(beachWetWidthMeters, 0.0, 0.05 * radiusMeters);
@@ -235,7 +243,9 @@ bool PlanetGenerationParams::validate(std::string &error)
     cloudDetailStrength    = clampRange(cloudDetailStrength, 0.0, 1.0);
     cloudEdgeSoftness      = clampRange(cloudEdgeSoftness, 0.01, 0.6);
     cloudWeatherStrength   = clampRange(cloudWeatherStrength, 0.0, 1.0);
+    cloudWeatherWavelengthMultiple = clampRange(cloudWeatherWavelengthMultiple, 1.0, 16.0);
     cloudLatitudeBandStrength = clampRange(cloudLatitudeBandStrength, 0.0, 0.5);
+    cloudBandFrequency     = clampRange(cloudBandFrequency, 0.0, 24.0);
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
         cloudColor[channel] = std::clamp(cloudColor[channel], 0.0f, 1.0f);

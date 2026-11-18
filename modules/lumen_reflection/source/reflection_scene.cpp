@@ -24,68 +24,19 @@ namespace lumen_reflection
 namespace
 {
 
-glm::vec3 safeInverseDirection(const glm::vec3 &direction)
-{
-    glm::vec3 inverse;
-    for (std::uint32_t axis = 0; axis < 3; ++axis)
-    {
-        inverse[axis] = std::fabs(direction[axis]) > 1.0e-8f ? 1.0f / direction[axis] : 1.0e8f;
-    }
-    return inverse;
-}
-
-// Slab test returning the entry distance (used to visit the nearer child
-// first so tMax shrinks early and the far subtree is usually culled).
-inline bool slabTest(const glm::vec3 &origin, const glm::vec3 &inverseDirection, const glm::vec3 &boundsMin,
-    const glm::vec3 &boundsMax, float tMax, float &outNear)
-{
-    const float tx0 = (boundsMin.x - origin.x) * inverseDirection.x;
-    const float tx1 = (boundsMax.x - origin.x) * inverseDirection.x;
-    const float ty0 = (boundsMin.y - origin.y) * inverseDirection.y;
-    const float ty1 = (boundsMax.y - origin.y) * inverseDirection.y;
-    const float tz0 = (boundsMin.z - origin.z) * inverseDirection.z;
-    const float tz1 = (boundsMax.z - origin.z) * inverseDirection.z;
-    const float tNear = std::max(std::max(std::min(tx0, tx1), std::min(ty0, ty1)), std::max(std::min(tz0, tz1), 0.0f));
-    const float tFar  = std::min(std::min(std::max(tx0, tx1), std::max(ty0, ty1)), std::min(std::max(tz0, tz1), tMax));
-    outNear           = tNear;
-    return tNear <= tFar;
-}
+// safeInverseDirection, slabTest, and the Moller-Trumbore kernel come from
+// engine/renderer/lumen_ray_core.hpp (shared with lumen_gi).
 
 constexpr std::uint32_t traversalStackSize = 96;
 
-// Moller-Trumbore with a hair of edge tolerance (shared-edge watertightness),
-// identical structure to the lumen_gi ray core.
-bool rfRayTriangle(const RfRay &ray, const RfPackedTriangle &triangle, float &outT, glm::vec3 &outBarycentric)
-{
-    const glm::vec3 pVec        = glm::cross(ray.direction, triangle.edge2);
-    const float     determinant = glm::dot(triangle.edge1, pVec);
-    if (std::fabs(determinant) < 1.0e-12f)
-    {
-        return false;
-    }
-    const float     inverseDeterminant = 1.0f / determinant;
-    const glm::vec3 tVec               = ray.origin - triangle.v0;
-    constexpr float edgeTolerance = 1.0e-6f;
-    const float     u             = glm::dot(tVec, pVec) * inverseDeterminant;
-    if (u < -edgeTolerance || u > 1.0f + edgeTolerance)
-    {
-        return false;
-    }
-    const glm::vec3 qVec = glm::cross(tVec, triangle.edge1);
-    const float     v    = glm::dot(ray.direction, qVec) * inverseDeterminant;
-    if (v < -edgeTolerance || u + v > 1.0f + edgeTolerance)
-    {
-        return false;
-    }
-    const float t = glm::dot(triangle.edge2, qVec) * inverseDeterminant;
-    if (t < 1.0e-4f || t > ray.tMax)
-    {
-        return false;
-    }
-    outT           = t;
-    outBarycentric = glm::vec3(1.0f - u - v, u, v);
-    return true;
-}
+// Attribute strides must hold their three floats and stay sane (an interleaved
+// vertex layout has no reason to jump pages between attributes); a smaller
+// stride would read past the attribute the index addresses.
+constexpr std::uint32_t minimumAttributeStrideBytes = 3 * sizeof(float);
+constexpr std::uint32_t maximumAttributeStrideBytes = 4096;
+// Registry descriptions are module-internal API input, not trusted data: a
+// vertex count above this is rejected before any allocation is sized from it.
+constexpr std::uint32_t maximumDescriptionVertices = 1u << 24;
 
 // Traversal of one surface's local-space BVH; ray.tMax shrinks to the
 // closest hit.
@@ -115,7 +66,7 @@ bool traverseSurface(const RfSurfaceGeometry &geometry, RfRay &ray, const glm::v
             {
                 float     t = 0.0f;
                 glm::vec3 barycentric{};
-                if (rfRayTriangle(ray, triangles[local], t, barycentric))
+                if (rayTriangle(ray, triangles[local], t, barycentric))
                 {
                     ray.tMax       = t;
                     outTriangle    = triangles[local].triangle;
@@ -133,25 +84,46 @@ bool traverseSurface(const RfSurfaceGeometry &geometry, RfRay &ray, const glm::v
         const bool hitRight = slabTest(ray.origin, inverseDirection, right.boundsMin, right.boundsMax, ray.tMax, rightNear);
         if (hitLeft && hitRight)
         {
-            // Push the farther child first so the nearer one pops next.
+            // Push the farther child first so the nearer one pops next. The
+            // pushes are guarded: a median-split BVH over N triangles is about
+            // log2(N/4) deep, so the stack cannot fill in practice, but a
+            // degenerate split must never write past it either.
             if (leftNear <= rightNear)
             {
-                stack[stackSize++] = node.leftOrFirst + 1;
-                stack[stackSize++] = node.leftOrFirst;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
             }
             else
             {
-                stack[stackSize++] = node.leftOrFirst;
-                stack[stackSize++] = node.leftOrFirst + 1;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
             }
         }
         else if (hitLeft)
         {
-            stack[stackSize++] = node.leftOrFirst;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst;
+            }
         }
         else if (hitRight)
         {
-            stack[stackSize++] = node.leftOrFirst + 1;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst + 1;
+            }
         }
     }
     return found;
@@ -246,22 +218,40 @@ SurfaceHit traceSurfaces(const RfPipelineState &state, const RfRay &worldRay)
         {
             if (leftNear <= rightNear)
             {
-                stack[stackSize++] = node.leftOrFirst + 1;
-                stack[stackSize++] = node.leftOrFirst;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
             }
             else
             {
-                stack[stackSize++] = node.leftOrFirst;
-                stack[stackSize++] = node.leftOrFirst + 1;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
             }
         }
         else if (hitLeft)
         {
-            stack[stackSize++] = node.leftOrFirst;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst;
+            }
         }
         else if (hitRight)
         {
-            stack[stackSize++] = node.leftOrFirst + 1;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst + 1;
+            }
         }
     }
     return result;
@@ -355,7 +345,11 @@ void rfBuildSurfaceGeometry(RfSurfaceGeometry &geometry, const ReflectionSurface
         fail(ReflectionError::InvalidDescription);
         return;
     }
-    if (description.positionStrideBytes % sizeof(float) != 0)
+    if (description.positionStrideBytes % sizeof(float) != 0
+        || (description.positionStrideBytes != 0
+            && (description.positionStrideBytes < minimumAttributeStrideBytes
+                || description.positionStrideBytes > maximumAttributeStrideBytes))
+        || description.vertexCount > maximumDescriptionVertices)
     {
         fail(ReflectionError::InvalidDescription);
         return;
@@ -365,12 +359,16 @@ void rfBuildSurfaceGeometry(RfSurfaceGeometry &geometry, const ReflectionSurface
                                          : 3;
     const bool hasNormals = description.normals != nullptr && description.normalStrideBytes != 0;
     const bool hasColors  = description.colors != nullptr && description.colorStrideBytes != 0;
-    if (hasNormals && description.normalStrideBytes % sizeof(float) != 0)
+    if (hasNormals && (description.normalStrideBytes % sizeof(float) != 0
+            || description.normalStrideBytes < minimumAttributeStrideBytes
+            || description.normalStrideBytes > maximumAttributeStrideBytes))
     {
         fail(ReflectionError::InvalidDescription);
         return;
     }
-    if (hasColors && description.colorStrideBytes % sizeof(float) != 0)
+    if (hasColors && (description.colorStrideBytes % sizeof(float) != 0
+            || description.colorStrideBytes < minimumAttributeStrideBytes
+            || description.colorStrideBytes > maximumAttributeStrideBytes))
     {
         fail(ReflectionError::InvalidDescription);
         return;
@@ -628,6 +626,10 @@ void rfUpdateSurfaceTransform(RfSurface &surface, const glm::mat4 &transform)
     surface.inverseTranslation = glm::vec3(surface.inverseTransform[3]);
     surface.localIsWorld    = transform == glm::mat4(1.0f);
     rfUpdateSurfaceWorldBounds(surface);
+    // The raster caches depend on the transform: the projected triangles and
+    // the world-space vertex positions rebuild on the next raster pass.
+    surface.rasterBuiltSerial = 0;
+    surface.rasterWorldDirty  = true;
 }
 
 void rfEnsureSceneTlas(RfPipelineState &state)
@@ -651,18 +653,88 @@ void rfEnsureSceneTlas(RfPipelineState &state)
         return;
     }
 
-    // One median split level over the surface world bounds (the reflection
-    // registry holds a handful of surfaces; a flat leaf list under a root
-    // node is enough, matching the scene sizes the module is designed for).
-    glm::vec3 boundsMin(std::numeric_limits<float>::max());
-    glm::vec3 boundsMax(-std::numeric_limits<float>::max());
-    for (const std::uint32_t surfaceIndex : state.tlasSurfaces)
+    // A binary BVH over the surface world bounds, median-split on the widest
+    // centroid axis with leaves of up to four surfaces - the same shape as
+    // the per-surface builds. A ray then slab-tests only the surface cells
+    // its sweep actually intersects, however far the registry grows, instead
+    // of scanning every surface (the flat leaf list the module started with).
+    struct BuildEntry
     {
-        const RfSurface &surface = state.surfaces[surfaceIndex];
-        boundsMin = glm::min(boundsMin, surface.worldMin);
-        boundsMax = glm::max(boundsMax, surface.worldMax);
+        std::uint32_t first;
+        std::uint32_t count;
+        std::uint32_t node;
+    };
+    const std::uint32_t surfaceCount = static_cast<std::uint32_t>(state.tlasSurfaces.size());
+    state.tlas.assign(static_cast<std::size_t>(surfaceCount) * 2, RfTlasNode{});
+    std::uint32_t            nodeCount = 0;
+    std::vector<BuildEntry> stack;
+    stack.push_back({0u, surfaceCount, 0u});
+    while (!stack.empty())
+    {
+        const BuildEntry entry = stack.back();
+        stack.pop_back();
+        const std::uint32_t first = entry.first;
+        const std::uint32_t count = entry.count;
+        const std::uint32_t node  = entry.node;
+
+        glm::vec3 boundsMin(std::numeric_limits<float>::max());
+        glm::vec3 boundsMax(-std::numeric_limits<float>::max());
+        for (std::uint32_t local = 0; local < count; ++local)
+        {
+            const RfSurface &surface = state.surfaces[state.tlasSurfaces[first + local]];
+            boundsMin = glm::min(boundsMin, surface.worldMin);
+            boundsMax = glm::max(boundsMax, surface.worldMax);
+        }
+        if (boundsMin.x > boundsMax.x || boundsMin.y > boundsMax.y || boundsMin.z > boundsMax.z)
+        {
+            boundsMin = boundsMax = glm::vec3(0.0f);
+        }
+        state.tlas[node].boundsMin = boundsMin;
+        state.tlas[node].boundsMax = boundsMax;
+
+        if (count <= 4)
+        {
+            state.tlas[node].count       = count;
+            state.tlas[node].leftOrFirst = first;
+            continue;
+        }
+
+        glm::vec3 centroidMin(std::numeric_limits<float>::max());
+        glm::vec3 centroidMax(-std::numeric_limits<float>::max());
+        for (std::uint32_t local = 0; local < count; ++local)
+        {
+            const RfSurface &surface = state.surfaces[state.tlasSurfaces[first + local]];
+            const glm::vec3 centroid = (surface.worldMin + surface.worldMax) * 0.5f;
+            centroidMin = glm::min(centroidMin, centroid);
+            centroidMax = glm::max(centroidMax, centroid);
+        }
+        const glm::vec3 extent = centroidMax - centroidMin;
+        std::uint32_t axis = 0;
+        if (extent.y > extent.x && extent.y >= extent.z)
+        {
+            axis = 1;
+        }
+        else if (extent.z > extent.x && extent.z > extent.y)
+        {
+            axis = 2;
+        }
+        std::sort(state.tlasSurfaces.begin() + first, state.tlasSurfaces.begin() + first + count,
+            [&](std::uint32_t left, std::uint32_t right)
+            {
+                const glm::vec3 leftCentroid = (state.surfaces[left].worldMin + state.surfaces[left].worldMax) * 0.5f;
+                const glm::vec3 rightCentroid = (state.surfaces[right].worldMin + state.surfaces[right].worldMax) * 0.5f;
+                return leftCentroid[axis] < rightCentroid[axis];
+            });
+        const std::uint32_t split     = count / 2;
+        const std::uint32_t childBase = nodeCount + 1;
+        state.tlas[node].count       = 0;
+        state.tlas[node].leftOrFirst = childBase;
+        nodeCount                    = childBase + 1;
+        // Left child pops first (LIFO) so the nearer-side traversal holds.
+        stack.push_back({first + split, count - split, childBase + 1});
+        stack.push_back({first, split, childBase});
     }
-    state.tlas.push_back(RfTlasNode{boundsMin, boundsMax, 0u, static_cast<std::uint32_t>(state.tlasSurfaces.size())});
+    state.tlas.resize(nodeCount + 1);
     state.tlasDirty = false;
 }
 
@@ -773,8 +845,8 @@ ProbeBlend probeBlendAt(const RfProbeGrid &grid, const RfProbeLevel &level, cons
                     continue;
                 }
                 blend.probes[blend.count] = &probe;
-                blend.weights[blend.count] = latticeWeight;
-                blend.weightSum += latticeWeight;
+                blend.weights[blend.count] = latticeWeight * probe.validity;
+                blend.weightSum += latticeWeight * probe.validity;
                 ++blend.count;
             }
         }

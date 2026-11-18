@@ -38,13 +38,6 @@ constexpr FbmParams kCloudSwirlFbm{2, 2.0, 0.5};
 constexpr double kCloudStretchFactor = 0.62;
 constexpr double kCloudSwirlAmplitude = 0.35;
 
-// Amplitude of the regional weather shift's wavelength, as a multiple of the
-// cloud field's own wavelength.
-constexpr double kCloudWeatherWavelengthMultiple = 3.2;
-// Latitude band frequency: ~0.9 wet/dry cycles per hemisphere (equatorial
-// belt, subtropical dry band, mid-latitude storm belt).
-constexpr double kCloudBandFrequency = 5.5;
-
 constexpr std::uint64_t kCloudSeedTag    = 0xC10D1ULL;
 constexpr std::uint64_t kCloudDetailSeedTag  = 0xC10D2ULL;
 constexpr std::uint64_t kCloudWeatherSeedTag = 0xC10D3ULL;
@@ -155,17 +148,18 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
     // Latitude bands: a wet belt at the equator, dry subtropics, stormy
     // mid-latitudes - the circulation-cell pattern every rotating planet
     // with an atmosphere shows. The band weight follows the spin axis, so
-    // the belts wrap the planet the way the climate's latitude bands do.
+    // the belts wrap the planet the way the climate's latitude bands do; the
+    // band frequency is the configured cloud_band_frequency key.
     const double latitude = std::asin(std::clamp(dot(direction, spinAxis_), -1.0, 1.0));
     crossing -= params_.cloudLatitudeBandStrength
-        * std::cos(latitude * kCloudBandFrequency) * lowPassFade(lowPassCutoffMeters,
+        * std::cos(latitude * params_.cloudBandFrequency) * lowPassFade(lowPassCutoffMeters,
             params_.cloudWavelengthMeters * 2.0);
     const double weatherFade = params_.cloudWeatherStrength * lowPassFade(lowPassCutoffMeters,
-        params_.cloudWavelengthMeters * kCloudWeatherWavelengthMultiple);
+        params_.cloudWavelengthMeters * params_.cloudWeatherWavelengthMultiple);
     if (weatherFade > 0.0)
     {
         crossing -= weatherFade * fbm(seedsWeather_, shellPosition,
-            params_.cloudWavelengthMeters * kCloudWeatherWavelengthMultiple, kCloudWeatherFbm, lowPassCutoffMeters);
+            params_.cloudWavelengthMeters * params_.cloudWeatherWavelengthMultiple, kCloudWeatherFbm, lowPassCutoffMeters);
     }
     const double edgeHalfWidth = std::max(0.01, params_.cloudEdgeSoftness);
     return smoothstep(crossing - edgeHalfWidth, crossing + edgeHalfWidth, field);

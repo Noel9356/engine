@@ -62,23 +62,13 @@ void blendColors(const double *rowA, const double *rowB, double weight, double o
     }
 }
 
-// Amplitude and wet-belt geometry of the latitude moisture bands (ITCZ wet
-// belt, subtropical dry belts, temperate westerlies, polar highs). Central
-// values follow the classic atmospheric circulation cells; the amplitudes
-// tune how strongly each belt shifts the humidity field.
-struct MoistureBelt
-{
-    double amplitude;
-    double centerDegrees;
-    double widthDegrees;
-};
-
-constexpr MoistureBelt kMoistureBelts[] = {
-    {+0.20, 0.0, 11.0},   // ITCZ
-    {-0.26, 26.0, 10.0},  // subtropical highs
-    {+0.10, 54.0, 13.0},  // temperate westerlies
-    {-0.06, 88.0, 10.0},  // polar highs
-};
+// Latitude moisture belt geometry (ITCZ wet belt, subtropical dry belts,
+// temperate westerlies, polar highs). Centers/widths follow the classic
+// atmospheric circulation cells (fixed model shape); the amplitudes are the
+// configured moisture_belt_*_amplitude keys and tune how strongly each belt
+// shifts the humidity field.
+constexpr double kMoistureBeltCenters[] = {0.0, 26.0, 54.0, 88.0};
+constexpr double kMoistureBeltWidths[]  = {11.0, 10.0, 13.0, 10.0};
 
 constexpr double kPi = 3.14159265358979323846;
 
@@ -90,6 +80,8 @@ ClimateSampler::ClimateSampler(const PlanetGenerationParams &params)
     , seedMoisture_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x40157)))
     , seedMoistureWarp_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A9E51)))
     , seedRockStripes_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x572A7A)))
+    , seedSoilPatches_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x50117A)))
+    , seedDryPatches_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x327174A)))
 {
     const auto streamSeed = [](std::int64_t base, std::uint64_t tag)
     { return static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(base), tag)); };
@@ -98,6 +90,8 @@ ClimateSampler::ClimateSampler(const PlanetGenerationParams &params)
     seedJitterOctaves_       = makeFbmSeeds(streamSeed(seedMoisture_, 0xB10B), 2);
     seedDetailJitterOctaves_ = makeFbmSeeds(streamSeed(seedMoisture_, 0xB10C), 2);
     seedGroundJitterOctaves_ = makeFbmSeeds(streamSeed(seedMoisture_, 0xB10D), 2);
+    seedSoilPatchOctaves_    = makeFbmSeeds(seedSoilPatches_, 2);
+    seedDryPatchOctaves_     = makeFbmSeeds(seedDryPatches_, 2);
     for (std::uint32_t octave = 0; octave < 3; ++octave)
     {
         seedMoistureWarpOctaves_[octave] = streamSeed(seedMoistureWarp_, octave);
@@ -151,9 +145,12 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
     if (params_.moistureLatitudeBands)
     {
         const double latitudeDegrees = std::asin(clamp01(std::abs(dot(direction, Vec3{params_.axis[0], params_.axis[1], params_.axis[2]})))) * (180.0 / kPi);
-        for (const MoistureBelt &belt : kMoistureBelts)
+        const double beltAmplitudes[4] = {params_.moistureBeltEquatorAmplitude, params_.moistureBeltSubtropicalAmplitude,
+            params_.moistureBeltTemperateAmplitude, params_.moistureBeltPolarAmplitude};
+        for (std::size_t belt = 0; belt < 4; ++belt)
         {
-            moisture += belt.amplitude * latitudeBelt(latitudeDegrees, belt.centerDegrees, belt.widthDegrees);
+            moisture += beltAmplitudes[belt]
+                * latitudeBelt(latitudeDegrees, kMoistureBeltCenters[belt], kMoistureBeltWidths[belt]);
         }
     }
     sample.moisture01 = clamp01(moisture);
@@ -410,24 +407,103 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
         // stripes track the geometric ridges. The same field gates the
         // stripe AMPLITUDE (bedding strength): outcrops alternate between
         // strongly banded and almost plain rock the way the geometric beds
-        // do.
+        // do - the gate's wide spread keeps most beds faint so banded stretches
+        // read as geology rather than wallpaper. The stripe is band-limited at
+        // the sample spacing like every other noise term: below two samples per
+        // bed the sine aliases into uncorrelated per-vertex speckle, so it fades
+        // out on the coarse LOD chunks that cannot resolve the beds.
         const double bandWidth = std::max(1.0, params_.strataBandMeters);
-        const Vec3   stripePosition = direction * params_.radiusMeters;
-        const double thicknessWarp = noise::simplex3ImproveXY(seedRockStripes_,
-            stripePosition.x / (bandWidth * 5.0), stripePosition.y / (bandWidth * 5.0),
-            stripePosition.z / (bandWidth * 5.0));
-        const double strataPhase = 6.283185307179586 * (radiusMeters / bandWidth)
-            + params_.strataWarp * 2.6 * thicknessWarp;
-        const double bedding = 0.30 + 0.70 * smoothstep(-0.55, 0.55, thicknessWarp);
-        const double stripe = 1.0 + params_.rockStrataContrast * bedding * std::sin(strataPhase);
-        for (std::size_t channel = 0; channel < 3; ++channel)
+        const double stripeFade = lowPassFade(lowPassCutoffMeters, bandWidth);
+        if (stripeFade > 0.0)
         {
-            rockRow[channel] = std::clamp(rockRow[channel] * stripe, 0.0, 1.0);
+            const Vec3   stripePosition = direction * params_.radiusMeters;
+            const double thicknessWarp = noise::simplex3ImproveXY(seedRockStripes_,
+                stripePosition.x / (bandWidth * 5.0), stripePosition.y / (bandWidth * 5.0),
+                stripePosition.z / (bandWidth * 5.0));
+            const double strataPhase = 6.283185307179586 * (radiusMeters / bandWidth)
+                + params_.strataWarp * 2.6 * thicknessWarp;
+            const double bedding = 0.10 + 0.90 * smoothstep(-0.80, 0.80, thicknessWarp);
+            const double stripe = 1.0 + params_.rockStrataContrast * stripeFade * bedding * std::sin(strataPhase);
+            for (std::size_t channel = 0; channel < 3; ++channel)
+            {
+                rockRow[channel] = std::clamp(rockRow[channel] * stripe, 0.0, 1.0);
+            }
         }
     }
     blendColors(color, beachRow, beachW * (1.0 - snowW), color);
     blendColors(color, snowRow, snowW, color);
     blendColors(color, rockRow, rockW, color);
+
+    // Surface position shared by the ground-scale fields below (erosion
+    // patches, albedo jitter).
+    const Vec3 surfacePosition = direction * params_.radiusMeters;
+
+    // Erosion patches: a sparse ground-scale field pulls vegetated ground
+    // toward the bare-soil tone (the plain rock palette row), so biome sheets
+    // break into soil scars and worn earth instead of one unbroken color.
+    // Gated off where rock, snow or beach already own the surface, and
+    // band-limited at the sample spacing like every other noise term (coarse
+    // LOD chunks neither spend the evaluation nor alias the patches). The
+    // smoothstep keeps the patches SPARSE - a plain fbm mottle would speckle
+    // every square meter instead of carving distinct scars, and large soft
+    // blobs read as stains on the ground rather than exposed soil.
+    if (params_.soilPatchStrength > 0.0 && params_.soilPatchWavelengthMeters > 0.0)
+    {
+        const double patchFade = lowPassFade(lowPassCutoffMeters, params_.soilPatchWavelengthMeters);
+        if (patchFade > 0.0)
+        {
+            const double patchNoise = fbm(seedSoilPatchOctaves_, surfacePosition, params_.soilPatchWavelengthMeters,
+                FbmParams{2, 2.0, 0.5});
+            const double patch = smoothstep(0.26, 0.72, patchNoise) * patchFade;
+            const double patchW = params_.soilPatchStrength * patch * (1.0 - rockW) * (1.0 - snowW);
+            if (patchW > 0.0)
+            {
+                const double soilW = std::min(1.0, patchW);
+                double soilRow[3];
+                rowOf(paletteRow(Biome::Rock), soilRow);
+                blendColors(color, soilRow, soilW, color);
+            }
+        }
+    }
+
+    // Dryness mosaic: a broad ground-scale field senesces vegetated ground -
+    // the current biome tone lerps toward its dry, yellow-tan counterpart
+    // (the color desaturated and shifted toward the red end), so grasslands,
+    // meadows and forest floors break into the lush/dry mosaics real
+    // vegetation shows at walking and mid distance. The tone derives from the
+    // blended biome color itself, so every biome keeps its own dry direction
+    // (grass goes khaki, forest olive, tundra straw) without a second palette.
+    // Gated off where rock, snow or beach own the surface, and band-limited at
+    // the sample spacing like every other noise term (coarse LOD chunks
+    // neither spend the evaluation nor alias the mosaic into blotches).
+    if (params_.dryPatchStrength > 0.0 && params_.dryPatchWavelengthMeters > 0.0)
+    {
+        const double dryFade = lowPassFade(lowPassCutoffMeters, params_.dryPatchWavelengthMeters);
+        if (dryFade > 0.0)
+        {
+            const double dryNoise = fbm(seedDryPatchOctaves_, surfacePosition, params_.dryPatchWavelengthMeters,
+                FbmParams{2, 2.0, 0.5});
+            // A broad, graded window: senescence covers roughly a third of
+            // the ground at full strength and tints the rest faintly, so the
+            // mosaic reads as continuous vegetation variation rather than
+            // scattered stains.
+            const double dry = smoothstep(0.05, 0.85, dryNoise) * dryFade;
+            const double dryW = params_.dryPatchStrength * dry * (1.0 - rockW) * (1.0 - snowW) * (1.0 - beachW);
+            if (dryW > 0.0)
+            {
+                // Dry-tone multipliers: red doubles, green lifts, blue
+                // collapses - the senesced-grass direction. The absolute
+                // luminance rises slightly, the way dry vegetation does.
+                constexpr double kDryTone[3] = {2.0, 1.40, 0.50};
+                double dryRow[3];
+                for (std::size_t channel = 0; channel < 3; ++channel)
+                {
+                    dryRow[channel] = std::clamp(color[channel] * kDryTone[channel], 0.0, 1.0);
+                }
+                blendColors(color, dryRow, dryW, color);
+            }
+        }
+    }
 
     // Albedo: jittered by a per-point variation field so large biomes do not
     // read as flat plastic sheets. The field carries THREE scales - the base
@@ -435,15 +511,21 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     // of that wavelength covers the mid-range, and an octave at the ground
     // wavelength keeps ground-level views (a walking camera sees metres)
     // from reading as one unbroken color. Each scale is a pure function of
-    // direction (order independent), and the channel weighting turns them
-    // into subtle hue mottling (warm/cool patches) instead of pure luminance
-    // banding. Each scale fades under the optional band-limit cutoff like
+    // direction (order independent). The base and detail scales apply as a
+    // multiplicative hue tint through the channel weights below (biome sheets
+    // at distance need relative shifts); the ground scale is ADDITIVE in
+    // absolute color units and rotates the hue - positive ground noise pushes
+    // a point toward its dry, warm direction (red and green lift, blue sinks)
+    // and negative noise toward the lush, cool one. Absolute shifts are what
+    // a walking eye sees: dark albedos would swallow a multiplicative wiggle,
+    // while the same absolute offset reads as a clear dry/lush mosaic on
+    // every biome. Each scale fades under the optional band-limit cutoff like
     // every other noise term a rendered chunk samples, so coarse LOD chunks
     // neither spend the evaluations nor alias sub-voxel mottle as speckle.
-    const Vec3 surfacePosition = direction * params_.radiusMeters;
     const double baseWavelength = std::max(1.0, params_.colorVariationWavelengthMeters);
     const double groundWavelength = std::max(1.0, params_.colorVariationGroundWavelengthMeters);
     double variation = 0.0;
+    double groundVariation = 0.0;
     if (params_.colorVariation > 0.0)
     {
         const double baseFade = lowPassFade(lowPassCutoffMeters, baseWavelength);
@@ -451,25 +533,34 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
         const double groundFade = lowPassFade(lowPassCutoffMeters, groundWavelength);
         if (baseFade > 0.0)
         {
-            variation += 0.52 * baseFade
+            variation += 0.32 * baseFade
                 * fbm(seedJitterOctaves_, surfacePosition, baseWavelength, FbmParams{2, 2.0, 0.5});
         }
         if (detailFade > 0.0)
         {
-            variation += 0.22 * detailFade
+            variation += 0.12 * detailFade
                 * fbm(seedDetailJitterOctaves_, surfacePosition, baseWavelength / 8.0, FbmParams{2, 2.0, 0.5});
         }
         if (groundFade > 0.0)
         {
-            variation += 0.26 * groundFade
+            groundVariation = groundFade
                 * fbm(seedGroundJitterOctaves_, surfacePosition, groundWavelength, FbmParams{2, 2.0, 0.5});
         }
         variation *= params_.colorVariation;
     }
-    constexpr double kChannelWeights[3] = {1.0, 0.85, 0.70};
+    constexpr double kChannelWeights[3] = {1.0, 0.82, 0.58};
+    // The ground octave's additive hue rotation (color units at
+    // colorVariation = 1): red and green lift on positive noise while blue
+    // sinks - complementary warm/dry and cool/lush ground patches. The 2.0
+    // gain sizes the octave against the multiplicative scales: dark albedos
+    // need absolute offsets in the 0.02-0.06 range to read at all, which a
+    // proportional wiggle of the same nominal strength never delivers.
+    constexpr double kGroundAbsolute[3] = {0.10, 0.065, -0.085};
+    const double groundAmp = 2.0 * params_.colorVariation;
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
-        sample.color[channel] = static_cast<float>(clamp01(color[channel] * (1.0 + variation * kChannelWeights[channel])));
+        sample.color[channel] = static_cast<float>(clamp01(color[channel] * (1.0 + variation * kChannelWeights[channel])
+            + groundAmp * groundVariation * kGroundAbsolute[channel]));
     }
     return sample;
 }

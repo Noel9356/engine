@@ -456,6 +456,12 @@ namespace
 {
 
 // Shared conform decision: `visibleContains(probe)` answers membership in the visible leaf list.
+//
+// Every coarse cell the per-face probes can ask about lies in the 3x3x3 block of depth-(depth-1) cells around the
+// chunk's own coarse cell: the far cell of each face is the chunk's coarse cell shifted one along the face axis, and
+// the tangential offsets span +-1; the symmetry probe re-reads the chunk's own coarse cell at the same tangential
+// offsets. The block is therefore collected ONCE per chunk (27 membership probes) and every face decision reads the
+// collected table instead of re-probing the visible set 54+ times.
 template <typename Contains>
 void computeConformMaskImpl(const PlanetGenerationParams &params, const ChunkCoord &coord, ConformMask &outMask,
     const Contains &visibleContains)
@@ -482,6 +488,57 @@ void computeConformMaskImpl(const PlanetGenerationParams &params, const ChunkCoo
     const std::int64_t chunkCoord[3] = {static_cast<std::int64_t>(coord.x), static_cast<std::int64_t>(coord.y),
         static_cast<std::int64_t>(coord.z)};
     const std::int64_t coarseCellCount = static_cast<std::int64_t>(1) << (coord.depth - 1u); // depth-(d-1) cells per axis
+
+    // The chunk's own coarse cell and the 27-cell block around it (index (du+1) + (dv+1)*3 + (dw+1)*9, du along the
+    // chunk's x axis). Cells outside the depth lattice (the root rim) collect as absent.
+    std::int64_t blockBase[3] = {0, 0, 0};
+    bool         blockAny     = false;
+    bool         blockLeaf[27];
+    {
+        const std::int64_t base[3] = {chunkCoord[0] / 2, chunkCoord[1] / 2, chunkCoord[2] / 2};
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            blockBase[axis] = base[axis];
+        }
+        for (int dw = -1; dw <= 1; ++dw)
+        {
+            for (int dv = -1; dv <= 1; ++dv)
+            {
+                for (int du = -1; du <= 1; ++du)
+                {
+                    const std::uint32_t slot
+                        = static_cast<std::uint32_t>((du + 1) + (dv + 1) * 3 + (dw + 1) * 9);
+                    blockLeaf[slot] = false;
+                    const std::int64_t cell[3] = {blockBase[0] + du, blockBase[1] + dv, blockBase[2] + dw};
+                    if (cell[0] < 0 || cell[1] < 0 || cell[2] < 0 || cell[0] >= coarseCellCount || cell[1] >= coarseCellCount
+                        || cell[2] >= coarseCellCount)
+                    {
+                        continue;
+                    }
+                    const ChunkCoord probe{coord.depth - 1u, static_cast<std::uint32_t>(cell[0]),
+                        static_cast<std::uint32_t>(cell[1]), static_cast<std::uint32_t>(cell[2])};
+                    if (visibleContains(probe))
+                    {
+                        blockLeaf[slot] = true;
+                        blockAny        = true;
+                    }
+                }
+            }
+        }
+    }
+    if (!blockAny)
+    {
+        return; // no rendered leaf one level coarser anywhere around this chunk: nothing can conform
+    }
+
+    const auto blockLeafAt = [&blockLeaf](int du, int dv, int dw)
+    {
+        if (du < -1 || du > 1 || dv < -1 || dv > 1 || dw < -1 || dw > 1)
+        {
+            return false;
+        }
+        return blockLeaf[static_cast<std::uint32_t>((du + 1) + (dv + 1) * 3 + (dw + 1) * 9)];
+    };
 
     for (std::uint32_t axis = 0; axis < 3; ++axis)
     {
@@ -511,48 +568,50 @@ void computeConformMaskImpl(const PlanetGenerationParams &params, const ChunkCoo
                     bool conform = false;
                     if (perp >= 0 && perp < coarseCellCount)
                     {
-                        const std::int64_t tangentialU = baseU + offsetU;
-                        const std::int64_t tangentialV = baseV + offsetV;
-                        if (tangentialU >= 0 && tangentialU < coarseCellCount && tangentialV >= 0 && tangentialV < coarseCellCount)
-                        {
-                            // The probe cell: the PERPENDICULAR index goes into
-                            // the face's own axis, the tangential indices into
-                            // the other two. Building it as {perp, u, v} would
-                            // describe a wrong cell for every non-x face and
-                            // silently corrupt the whole conform mask.
-                            std::int64_t cell[3] = {0, 0, 0};
-                            cell[axis]  = perp;
-                            cell[axisU] = tangentialU;
-                            cell[axisV] = tangentialV;
-                            const ChunkCoord probe{coord.depth - 1u, static_cast<std::uint32_t>(cell[0]),
-                                static_cast<std::uint32_t>(cell[1]), static_cast<std::uint32_t>(cell[2])};
-                            conform = visibleContains(probe);
+                        // The probe cell: the PERPENDICULAR index goes into
+                        // the face's own axis, the tangential indices into
+                        // the other two. Building it as {perp, u, v} would
+                        // describe a wrong cell for every non-x face and
+                        // silently corrupt the whole conform mask. Every
+                        // probe lands inside the collected 27-cell block:
+                        // the perpendicular offset against the chunk's own
+                        // coarse cell is always -1 or 0 (min face) or 0 or
+                        // +1 (max face), and the tangential offsets are the
+                        // loop's +-1 ring.
+                        std::int64_t cell[3] = {0, 0, 0};
+                        cell[axis]  = perp;
+                        cell[axisU] = baseU + offsetU;
+                        cell[axisV] = baseV + offsetV;
+                        const int blockDu = static_cast<int>(cell[0] - blockBase[0]);
+                        const int blockDv = static_cast<int>(cell[1] - blockBase[1]);
+                        const int blockDw = static_cast<int>(cell[2] - blockBase[2]);
+                        conform = blockLeafAt(blockDu, blockDv, blockDw);
 
-                            // SYMMETRY of the decision: the chunk on the OTHER
-                            // side of this face plane sees the mirrored cell
-                            // column (the depth-(d-1) cell adjacent to the
-                            // plane on OUR side, at the same diagonal
-                            // tangential position). Its material can differ
-                            // from ours - a coarse leaf below the plane while
-                            // fine material splits above it - and then one
-                            // side would conform while the other stays raw,
-                            // cracking the shared plane at the corners. The
-                            // conform decision therefore ORs both adjacent
-                            // cells; every chunk touching the same plane point
-                            // derives the identical answer from the identical
-                            // pair of cells, and the conforming value (the
-                            // coarse lattice interpolant) is the same
-                            // function either way.
-                            std::int64_t nearCell[3] = {0, 0, 0};
-                            nearCell[axis]  = chunkCoord[axis] / 2; // the depth-(d-1) cell containing this chunk
-                            nearCell[axisU] = tangentialU;
-                            nearCell[axisV] = tangentialV;
-                            if (nearCell[axis] != cell[axis])
-                            {
-                                const ChunkCoord nearProbe{coord.depth - 1u, static_cast<std::uint32_t>(nearCell[0]),
-                                    static_cast<std::uint32_t>(nearCell[1]), static_cast<std::uint32_t>(nearCell[2])};
-                                conform = conform || visibleContains(nearProbe);
-                            }
+                        // SYMMETRY of the decision: the chunk on the OTHER
+                        // side of this face plane sees the mirrored cell
+                        // column (the depth-(d-1) cell adjacent to the
+                        // plane on OUR side, at the same diagonal
+                        // tangential position). Its material can differ
+                        // from ours - a coarse leaf below the plane while
+                        // fine material splits above it - and then one
+                        // side would conform while the other stays raw,
+                        // cracking the shared plane at the corners. The
+                        // conform decision therefore ORs both adjacent
+                        // cells; every chunk touching the same plane point
+                        // derives the identical answer from the identical
+                        // pair of cells, and the conforming value (the
+                        // coarse lattice interpolant) is the same
+                        // function either way.
+                        std::int64_t nearCell[3] = {0, 0, 0};
+                        nearCell[axis]  = chunkCoord[axis] / 2; // the depth-(d-1) cell containing this chunk
+                        nearCell[axisU] = baseU + offsetU;
+                        nearCell[axisV] = baseV + offsetV;
+                        if (nearCell[axis] != cell[axis])
+                        {
+                            const int nearDu = static_cast<int>(nearCell[0] - blockBase[0]);
+                            const int nearDv = static_cast<int>(nearCell[1] - blockBase[1]);
+                            const int nearDw = static_cast<int>(nearCell[2] - blockBase[2]);
+                            conform = conform || blockLeafAt(nearDu, nearDv, nearDw);
                         }
                     }
                     setConformBit(outMask, face, offsetU, offsetV, conform);
@@ -609,11 +668,6 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
     ++updateIndex_;
     outVisible.clear();
 
-    // ---- phase 1: descent ------------------------------------------------------
-    //
-    // Iterative descent with an explicit stack; every visited node is recorded
-    // (Split and Hidden included) so the balancing pass can reason about the
-    // tree shape afterwards.
     std::vector<ChunkCoord> &stack = descentStack_;
     stack.clear();
     stack.push_back(ChunkCoord{0u, 0u, 0u, 0u});

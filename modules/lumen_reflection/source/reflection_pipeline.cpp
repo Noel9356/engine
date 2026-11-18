@@ -4,15 +4,16 @@
 // Stage order per evaluate() (Lumen's reflection solve):
 //   1. rasterize the GBuffer at field resolution (depth, position, normal,
 //      albedo, roughness/metallic, emission);
-//   2. shade the whole GBuffer once into the screen color buffer (Lumen
-//      Scene lighting - what screen traces sample);
-//   3. per texel inside the traced roughness bands, importance-sample the
-//      visible GGX lobe and resolve each ray: screen trace first (against
-//      the shaded GBuffer), then a scene trace with hit lighting (sun +
-//      direct lights + the lumen_gi probe-grid diffuse GI + emission), then
-//      the skylight; the rough band resamples the lumen_gi probe radiance
-//      instead of tracing rays;
-//   4. the denoise chain (reflection_denoise.cpp) turns the stochastic field
+//   2. per texel inside the traced roughness bands, importance-sample the
+//      visible GGX lobe and resolve each ray: screen trace first (against the
+//      frame GBuffer), then a scene trace with hit lighting (sun + direct
+//      lights + the lumen_gi probe-grid diffuse GI + emission), then the
+//      skylight; the rough band resamples the lumen_gi probe radiance
+//      instead of tracing rays. Screen-trace hits land on GBuffer texels
+//      whose shaded color is resolved by a lazy shading pass that runs over
+//      exactly the texels the rays actually hit (Lumen Scene lighting on
+//      demand) and is applied afterwards;
+//   3. the denoise chain (reflection_denoise.cpp) turns the stochastic field
 //      into the published one.
 
 #include "lumen_reflection_internal.hpp"
@@ -33,35 +34,10 @@ namespace lumen_reflection
 namespace
 {
 
-constexpr float kMinimumRoughness = 0.045f; // matches the renderer's clamp floor
-constexpr float kDielectricF0 = 0.04f;
+constexpr float nearW = 0.05f;         // near-plane clip distance of the raster
+constexpr std::uint32_t bandRows = 16;  // rasterized rows per parallel band
 
 // ---- GBuffer raster ------------------------------------------------------------
-
-struct ClipVertex
-{
-    glm::vec4 clip{0.0f};
-    glm::vec3 world{0.0f};
-    glm::vec3 bary{0.0f};
-};
-
-struct ScreenVertex
-{
-    glm::vec2 pixel{0.0f};
-    float     inverseW = 0.0f;
-    glm::vec3 world{0.0f};
-    glm::vec3 bary{0.0f};
-};
-
-struct ScreenTriangle
-{
-    ScreenVertex  vertex[3];
-    std::uint32_t surface  = 0;
-    std::uint32_t triangle = 0;
-};
-
-constexpr float nearW = 0.05f;
-constexpr std::uint32_t bandRows = 16;
 
 bool surfaceOutsideFrustum(const glm::mat4 &viewProjection, const RfSurface &surface)
 {
@@ -82,40 +58,64 @@ bool surfaceOutsideFrustum(const glm::mat4 &viewProjection, const RfSurface &sur
     return (outcodeAnd & 0x1fu) != 0u;
 }
 
-void setupSurfaceTriangles(const RfPipelineState &state, std::uint32_t surfaceIndex, std::uint32_t width,
-    std::uint32_t height, std::vector<ScreenTriangle> &out)
+// Projects one surface's triangles to the field, caching them per surface:
+// the world-space vertices depend only on the surface transform, the clip
+// vertices on the view, and the projected triangles on both, so the work is
+// only redone when the surface's recorded raster serial no longer matches the
+// pipeline's (view / registry / field-size change, or a transform update).
+void setupSurfaceTriangles(RfPipelineState &state, std::uint32_t surfaceIndex, std::uint32_t width,
+    std::uint32_t height, std::vector<RfScreenTriangle> &out)
 {
-    const RfSurface &surface = state.surfaces[surfaceIndex];
+    RfSurface &surface = state.surfaces[surfaceIndex];
+    if (surface.rasterBuiltSerial == state.rasterSerial)
+    {
+        return; // the projected triangles are still current
+    }
+    out.clear();
+    surface.rasterBuiltSerial = state.rasterSerial;
     if (surface.excluded || surfaceOutsideFrustum(state.viewProjection, surface))
     {
         return;
     }
     const RfSurfaceGeometry &geometry = surface.geometry;
-    std::vector<glm::vec3> world(geometry.positions.size());
-    std::vector<glm::vec4> clip(geometry.positions.size());
-    for (std::size_t vertex = 0; vertex < geometry.positions.size(); ++vertex)
+    const std::size_t         vertexCount = geometry.positions.size();
+    if (surface.rasterWorldPositions.size() != vertexCount)
     {
-        world[vertex] = glm::vec3(surface.transform * glm::vec4(geometry.positions[vertex], 1.0f));
-        clip[vertex]  = state.viewProjection * glm::vec4(world[vertex], 1.0f);
+        surface.rasterWorldPositions.resize(vertexCount);
+        surface.rasterWorldDirty = true;
+    }
+    if (surface.rasterWorldDirty)
+    {
+        for (std::size_t vertex = 0; vertex < vertexCount; ++vertex)
+        {
+            surface.rasterWorldPositions[vertex]
+                = glm::vec3(surface.transform * glm::vec4(geometry.positions[vertex], 1.0f));
+        }
+        surface.rasterWorldDirty = false;
+    }
+    surface.rasterClipPositions.resize(vertexCount);
+    for (std::size_t vertex = 0; vertex < vertexCount; ++vertex)
+    {
+        surface.rasterClipPositions[vertex] = state.viewProjection * glm::vec4(surface.rasterWorldPositions[vertex], 1.0f);
     }
     const std::uint32_t triangleCount = static_cast<std::uint32_t>(geometry.indices.size() / 3);
     for (std::uint32_t triangle = 0; triangle < triangleCount; ++triangle)
     {
-        ClipVertex polygon[4];
+        RfClipVertex polygon[4];
         std::uint32_t count = 0;
-        ClipVertex input[3];
+        RfClipVertex input[3];
         for (std::uint32_t corner = 0; corner < 3; ++corner)
         {
             const std::uint32_t index = geometry.indices[triangle * 3 + corner];
-            input[corner].clip  = clip[index];
-            input[corner].world = world[index];
+            input[corner].clip  = surface.rasterClipPositions[index];
+            input[corner].world = surface.rasterWorldPositions[index];
             input[corner].bary  = glm::vec3(corner == 0 ? 1.0f : 0.0f, corner == 1 ? 1.0f : 0.0f, corner == 2 ? 1.0f : 0.0f);
         }
         // Sutherland-Hodgman against the near plane w = nearW.
         for (std::uint32_t corner = 0; corner < 3; ++corner)
         {
-            const ClipVertex &current = input[corner];
-            const ClipVertex &next    = input[(corner + 1) % 3];
+            const RfClipVertex &current = input[corner];
+            const RfClipVertex &next    = input[(corner + 1) % 3];
             const float       dCurrent = current.clip.w - nearW;
             const float       dNext    = next.clip.w - nearW;
             if (dCurrent >= 0.0f)
@@ -125,7 +125,7 @@ void setupSurfaceTriangles(const RfPipelineState &state, std::uint32_t surfaceIn
             if ((dCurrent >= 0.0f) != (dNext >= 0.0f))
             {
                 const float t = dCurrent / (dCurrent - dNext);
-                ClipVertex  edge;
+                RfClipVertex edge;
                 edge.clip  = glm::mix(current.clip, next.clip, t);
                 edge.world = glm::mix(current.world, next.world, t);
                 edge.bary  = glm::mix(current.bary, next.bary, t);
@@ -136,7 +136,7 @@ void setupSurfaceTriangles(const RfPipelineState &state, std::uint32_t surfaceIn
         {
             continue;
         }
-        ScreenVertex projected[4];
+        RfScreenVertex projected[4];
         for (std::uint32_t corner = 0; corner < count; ++corner)
         {
             const glm::vec4 &c = polygon[corner].clip;
@@ -148,7 +148,7 @@ void setupSurfaceTriangles(const RfPipelineState &state, std::uint32_t surfaceIn
         }
         for (std::uint32_t fan = 1; fan + 1 < count; ++fan)
         {
-            ScreenTriangle screen;
+            RfScreenTriangle screen;
             screen.vertex[0] = projected[0];
             screen.vertex[1] = projected[fan];
             screen.vertex[2] = projected[fan + 1];
@@ -159,13 +159,13 @@ void setupSurfaceTriangles(const RfPipelineState &state, std::uint32_t surfaceIn
     }
 }
 
-void rasterizeBand(RfPipelineState &state, const std::vector<ScreenTriangle> &triangles,
+void rasterizeBand(RfPipelineState &state, const std::vector<RfScreenTriangle> &triangles,
     const std::vector<std::uint32_t> &binned, std::uint32_t rowBegin, std::uint32_t rowEnd)
 {
     const std::uint32_t width = state.fieldWidth;
     for (const std::uint32_t triangleIndex : binned)
     {
-        const ScreenTriangle &screen = triangles[triangleIndex];
+        const RfScreenTriangle &screen = triangles[triangleIndex];
         const glm::vec2 a = screen.vertex[0].pixel;
         const glm::vec2 b = screen.vertex[1].pixel;
         const glm::vec2 c = screen.vertex[2].pixel;
@@ -188,18 +188,27 @@ void rasterizeBand(RfPipelineState &state, const std::vector<ScreenTriangle> &tr
         {
             continue;
         }
+        const float invDenominator = 1.0f / denominator;
         const RfSurface         &surface  = state.surfaces[screen.surface];
         const RfSurfaceGeometry &geometry = surface.geometry;
         const std::uint32_t      i0 = geometry.indices[screen.triangle * 3 + 0];
         const std::uint32_t      i1 = geometry.indices[screen.triangle * 3 + 1];
         const std::uint32_t      i2 = geometry.indices[screen.triangle * 3 + 2];
+        // World-space vertex normals: the transform is linear, so shifting it
+        // before the barycentric interpolation instead of after gives the same
+        // interpolated direction (and the length change the interpolation
+        // applies is erased by the final normalize).
+        const glm::mat3 linear(surface.transform);
+        const glm::vec3 worldNormal0 = linear * geometry.normals[i0];
+        const glm::vec3 worldNormal1 = linear * geometry.normals[i1];
+        const glm::vec3 worldNormal2 = linear * geometry.normals[i2];
         for (std::int32_t y = yBegin; y < yEnd; ++y)
         {
             for (std::int32_t x = xBegin; x < xEnd; ++x)
             {
                 const glm::vec2 toPixel(static_cast<float>(x) + 0.5f - a.x, static_cast<float>(y) + 0.5f - a.y);
-                const float     u = (toPixel.x * edge2.y - edge2.x * toPixel.y) / denominator;
-                const float     v = (edge1.x * toPixel.y - toPixel.x * edge1.y) / denominator;
+                const float     u = (toPixel.x * edge2.y - edge2.x * toPixel.y) * invDenominator;
+                const float     v = (edge1.x * toPixel.y - toPixel.x * edge1.y) * invDenominator;
                 if (u < 0.0f || v < 0.0f || u + v > 1.0f)
                 {
                     continue;
@@ -213,27 +222,33 @@ void rasterizeBand(RfPipelineState &state, const std::vector<ScreenTriangle> &tr
                 {
                     continue;
                 }
-                const float mu0 = w0 / sum;
-                const float mu1 = w1 / sum;
-                const float mu2 = w2 / sum;
+                const float invSum = 1.0f / sum;
+                const float mu0 = w0 * invSum;
+                const float mu1 = w1 * invSum;
+                const float mu2 = w2 * invSum;
                 const glm::vec3 worldPosition = screen.vertex[0].world * mu0 + screen.vertex[1].world * mu1
                                               + screen.vertex[2].world * mu2;
-                const float       distance   = glm::length(worldPosition - state.cameraPosition);
+                const glm::vec3   relative = worldPosition - state.cameraPosition;
+                const float       distanceSquared = glm::dot(relative, relative);
                 const std::size_t pixelIndex = static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x);
-                if (distance >= state.gbufferDepth[pixelIndex])
+                // Squared comparison against the stored camera distance (the
+                // square root is only spent on the texels that win the depth
+                // test; the background sentinel squares to infinity).
+                if (distanceSquared >= state.gbufferDepth[pixelIndex] * state.gbufferDepth[pixelIndex])
                 {
                     continue;
                 }
                 const glm::vec3 bary = screen.vertex[0].bary * mu0 + screen.vertex[1].bary * mu1
                                      + screen.vertex[2].bary * mu2;
-                glm::vec3 localNormal = geometry.normals[i0] * bary.x + geometry.normals[i1] * bary.y
-                                      + geometry.normals[i2] * bary.z;
-                const float normalLength = glm::length(localNormal);
-                localNormal = normalLength > 1.0e-8f ? localNormal / normalLength : glm::vec3(0.0f, 1.0f, 0.0f);
-                state.gbufferDepth[pixelIndex]         = distance;
+                glm::vec3 interpolatedNormal = worldNormal0 * bary.x + worldNormal1 * bary.y
+                                              + worldNormal2 * bary.z;
+                const float normalLength = glm::length(interpolatedNormal);
+                const glm::vec3 normal = normalLength > 1.0e-8f ? interpolatedNormal / normalLength
+                                                               : glm::vec3(0.0f, 1.0f, 0.0f);
+                state.gbufferDepth[pixelIndex]         = std::sqrt(distanceSquared);
                 state.gbufferPosition[pixelIndex]       = worldPosition;
                 state.gbufferSurface[pixelIndex]        = screen.surface;
-                state.gbufferNormal[pixelIndex]         = glm::normalize(surface.transform * glm::vec4(localNormal, 0.0f));
+                state.gbufferNormal[pixelIndex]         = normal;
                 state.gbufferAlbedo[pixelIndex] = surface.albedo
                     * (geometry.colors[i0] * bary.x + geometry.colors[i1] * bary.y + geometry.colors[i2] * bary.z);
                 state.gbufferRoughness[pixelIndex]      = surface.roughness;
@@ -265,25 +280,49 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler)
     state.gbufferUnlit.assign(pixelCount, 0u);
     state.gbufferSurface.assign(pixelCount, noSurface);
 
-    std::vector<std::vector<ScreenTriangle>> perSurface(state.surfaces.size());
+    // A field-size change retires every projected-triangle cache (the pixel
+    // coordinates depend on the resolution).
+    if (state.rasterFieldWidth != width || state.rasterFieldHeight != height)
+    {
+        state.rasterFieldWidth  = width;
+        state.rasterFieldHeight = height;
+        ++state.rasterSerial;
+    }
+    if (state.rasterTriangles.size() < state.surfaces.size())
+    {
+        state.rasterTriangles.resize(state.surfaces.size());
+    }
     rfParallelRange(scheduler, state.surfaces.size(), 1,
         [&](std::size_t begin, std::size_t end)
         {
             for (std::size_t surface = begin; surface < end; ++surface)
             {
-                setupSurfaceTriangles(state, static_cast<std::uint32_t>(surface), width, height, perSurface[surface]);
+                setupSurfaceTriangles(state, static_cast<std::uint32_t>(surface), width, height,
+                    state.rasterTriangles[surface]);
             }
         });
-    std::vector<ScreenTriangle> triangles;
-    for (const std::vector<ScreenTriangle> &list : perSurface)
+    state.rasterConcat.clear();
+    const std::size_t cachedSurfaces = std::min(state.surfaces.size(), state.rasterTriangles.size());
+    for (std::size_t surface = 0; surface < cachedSurfaces; ++surface)
     {
-        triangles.insert(triangles.end(), list.begin(), list.end());
+        state.rasterConcat.insert(state.rasterConcat.end(), state.rasterTriangles[surface].begin(),
+            state.rasterTriangles[surface].end());
     }
     const std::uint32_t bandCount = (height + bandRows - 1) / bandRows;
-    std::vector<std::vector<std::uint32_t>> bins(bandCount);
-    for (std::uint32_t index = 0; index < triangles.size(); ++index)
+    if (state.rasterBins.size() != bandCount)
     {
-        const ScreenTriangle &screen = triangles[index];
+        state.rasterBins.assign(bandCount, std::vector<std::uint32_t>());
+    }
+    else
+    {
+        for (std::vector<std::uint32_t> &bin : state.rasterBins)
+        {
+            bin.clear();
+        }
+    }
+    for (std::uint32_t index = 0; index < state.rasterConcat.size(); ++index)
+    {
+        const RfScreenTriangle &screen = state.rasterConcat[index];
         const float yMin = std::min({screen.vertex[0].pixel.y, screen.vertex[1].pixel.y, screen.vertex[2].pixel.y});
         const float yMax = std::max({screen.vertex[0].pixel.y, screen.vertex[1].pixel.y, screen.vertex[2].pixel.y});
         if (yMax < 0.0f || yMin > static_cast<float>(height))
@@ -295,7 +334,7 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler)
             static_cast<std::int32_t>(bandCount) - 1);
         for (std::int32_t band = firstBand; band <= lastBand; ++band)
         {
-            bins[band].push_back(index);
+            state.rasterBins[band].push_back(index);
         }
     }
     rfParallelRange(scheduler, bandCount, 1,
@@ -304,7 +343,7 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler)
             for (std::size_t band = begin; band < end; ++band)
             {
                 const std::uint32_t rowBegin = static_cast<std::uint32_t>(band) * bandRows;
-                rasterizeBand(state, triangles, bins[band], rowBegin, std::min(rowBegin + bandRows, height));
+                rasterizeBand(state, state.rasterConcat, state.rasterBins[band], rowBegin, std::min(rowBegin + bandRows, height));
             }
         });
 }
@@ -324,8 +363,11 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
     const glm::vec3 diffuse = albedo * (1.0f / kPi);
 
     const RfEnvironmentSnapshot &environment = state.environment;
-    // Sun (shadow ray with the grazing-angle bias lumen_gi uses).
-    if (environment.hasSun && environment.sunEnabled)
+    // Sun (shadow ray with the grazing-angle bias lumen_gi uses). A sun with
+    // zero radiance (disabled or fully dark) contributes nothing, so no
+    // shadow ray is spent on it.
+    const glm::vec3 sunRadiance = environment.sunRadiance();
+    if (environment.hasSun && environment.sunEnabled && glm::dot(sunRadiance, sunRadiance) > 0.0f)
     {
         const glm::vec3 sunDirection = environment.sunDirection;
         const float nDotL = glm::dot(normal, sunDirection);
@@ -337,14 +379,13 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
             const RfHit blocked = rfTraceScene(state, shadowRay);
             if (!blocked.hit)
             {
-                result += diffuse * environment.sunRadiance() * nDotL;
+                result += diffuse * sunRadiance * nDotL;
             }
         }
     }
 
     // Direct lights (point/spot/directional of the direct_lighting module):
     // the renderer's attenuation formulas.
-    const glm::vec3 origin = position + normal * state.settings.traceBias;
     for (const RfEnvironmentSnapshot::PreparedDirectLight &light : environment.preparedLights)
     {
         glm::vec3  localLightDirection;
@@ -416,42 +457,7 @@ glm::vec3 rfRadianceAtHit(const RfPipelineState &state, const RfHit &hit)
     return rfShadeHitPoint(state, hit.position, hit.normal, hit.albedo, surface.emissive);
 }
 
-// ---- screen color + screen traces ----------------------------------------------------
-
-// Shaded color of every GBuffer texel (Lumen Scene lighting): what a screen
-// trace samples when it hits. Background texels read as black; rays that
-// march into background texels resolve the skylight at the trace site
-// instead (resolveSkyFallback).
-void rfShadeScreenColor(const RfPipelineState &state, TaskScheduler *scheduler, std::vector<glm::vec3> &outColor)
-{
-    const std::size_t pixelCount = static_cast<std::size_t>(state.fieldWidth) * state.fieldHeight;
-    outColor.assign(pixelCount, glm::vec3(0.0f));
-    rfParallelRange(scheduler, state.fieldHeight, 1,
-        [&](std::size_t rowBegin, std::size_t rowEnd)
-        {
-            for (std::size_t y = rowBegin; y < rowEnd; ++y)
-            {
-                for (std::uint32_t x = 0; x < state.fieldWidth; ++x)
-                {
-                    const std::size_t index = y * state.fieldWidth + x;
-                    if (rfIsBackground(state.gbufferDepth[index]))
-                    {
-                        continue;
-                    }
-                    if (state.gbufferUnlit[index] != 0u)
-                    {
-                        outColor[index] = state.gbufferAlbedo[index];
-                        continue;
-                    }
-                    outColor[index] = rfShadeHitPoint(state,
-                        state.gbufferPosition[index],
-                        state.gbufferNormal[index],
-                        state.gbufferAlbedo[index],
-                        state.gbufferEmissive[index]);
-                }
-            }
-        });
-}
+// ---- screen traces -------------------------------------------------------------------
 
 // Screen-space march of one reflection ray (Lumen's screen traces): steps
 // through the field's depth buffer in equal world-space increments (the ray
@@ -460,28 +466,29 @@ void rfShadeScreenColor(const RfPipelineState &state, TaskScheduler *scheduler, 
 // the stored surface by at most `thickness` (thin-occluder heuristic). Rays
 // leaving the screen or exceeding the trace distance miss, handing the rest
 // to the scene trace. Background texels never intersect (the sky sits behind
-// everything).
+// everything). The hit's radiance is not read here: the texel is shaded by the
+// lazy pass that follows the ray pass, so only texels rays actually land on
+// are ever shaded.
 struct ScreenTraceResult
 {
-    bool          hit = false;
-    std::uint32_t x = 0;
-    std::uint32_t y = 0;
+    bool        hit = false;
+    std::size_t texel = 0;
 };
 
-ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec3 &origin, const glm::vec3 &direction,
-    const std::vector<glm::vec3> &screenColor, float maxDistance, glm::vec3 &outRadiance)
+ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec4 &clipOrigin, const glm::vec3 &origin,
+    const glm::vec3 &direction, float maxDistance)
 {
     ScreenTraceResult result;
-    outRadiance = glm::vec3(0.0f);
     // Clip-space linearization: clip(t) = clipOrigin + clipDir * t lets the
-    // march project each step exactly without per-step matrix products.
-    const glm::vec4 clipOrigin = state.viewProjection * glm::vec4(origin, 1.0f);
-    const glm::vec4 clipDir    = state.viewProjection * glm::vec4(direction, 0.0f);
-    const float      width     = static_cast<float>(state.fieldWidth);
-    const float      height     = static_cast<float>(state.fieldHeight);
+    // march project each step exactly without per-step matrix products. The
+    // origin's clip position is shared by every ray of a texel, so the caller
+    // passes it in.
+    const glm::vec4 clipDir = state.viewProjection * glm::vec4(direction, 0.0f);
+    const float     width   = static_cast<float>(state.fieldWidth);
+    const float     height  = static_cast<float>(state.fieldHeight);
 
-    constexpr std::uint32_t maxSteps = 48;
-    constexpr float         thickness = 0.5f;
+    const std::uint32_t maxSteps  = std::max(state.settings.screenTraceMaxSteps, 1u);
+    const float         thickness = std::max(state.settings.screenTraceThickness, 0.01f);
     // The world step is derived from the on-screen ray extent so near-surface
     // reflections get dense sampling and long grazes stay cheap.
     const glm::vec2 ndcStart(clipOrigin.x / clipOrigin.w, clipOrigin.y / clipOrigin.w);
@@ -492,6 +499,13 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec3 &ori
     const std::uint32_t steps = std::min(maxSteps, static_cast<std::uint32_t>(screenSteps));
     const float stepLength = maxDistance / static_cast<float>(steps);
 
+    // Camera distance of the marched point as a quadratic in t (the direction
+    // is unit length): d(t)^2 = t^2 + linear * t + constant, so each step
+    // needs two multiplies and an add instead of a vector rebuild.
+    const glm::vec3 relative = origin - state.cameraPosition;
+    const float     linear   = 2.0f * glm::dot(direction, relative);
+    const float     constant = glm::dot(relative, relative);
+
     for (std::uint32_t step = 1; step <= steps; ++step)
     {
         const float t = step * stepLength;
@@ -500,8 +514,9 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec3 &ori
         {
             break; // behind the eye: no more screen content
         }
-        const float u = (clipOrigin.x + clipDir.x * t) / w * 0.5f + 0.5f;
-        const float v = 0.5f - (clipOrigin.y + clipDir.y * t) / w * 0.5f;
+        const float inverseW = 1.0f / w;
+        const float u = (clipOrigin.x + clipDir.x * t) * inverseW * 0.5f + 0.5f;
+        const float v = 0.5f - (clipOrigin.y + clipDir.y * t) * inverseW * 0.5f;
         if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f)
         {
             // Off-screen: Lumen hands the remainder to the scene trace.
@@ -515,13 +530,11 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec3 &ori
         {
             continue;
         }
-        const float rayDepth = glm::length((origin + direction * t) - state.cameraPosition);
+        const float rayDepth = std::sqrt(t * t + linear * t + constant);
         if (rayDepth > storedDepth && rayDepth - storedDepth <= thickness)
         {
-            result.hit = true;
-            result.x   = x;
-            result.y   = y;
-            outRadiance = screenColor[index];
+            result.hit  = true;
+            result.texel = index;
             return result;
         }
         // A ray well behind the stored surface here means it slipped past
@@ -532,7 +545,7 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec3 &ori
 
 // ---- the stochastic ray pass ---------------------------------------------------------
 
-glm::vec3 rfSampleGgxVndf(const glm::vec3 &view, const glm::vec3 &normal, float alpha, std::uint64_t &seed)
+glm::vec3 rfSampleGgxVndf(const glm::mat3 &basis, const glm::vec3 &localView, float alpha, std::uint64_t &seed)
 {
     // Heitz 2018, "Sampling the GGX Distribution of Visible Normals",
     // isotropic case, evaluated in the tangent frame (+Z = normal): the
@@ -542,10 +555,9 @@ glm::vec3 rfSampleGgxVndf(const glm::vec3 &view, const glm::vec3 &normal, float 
     // reflecting the view. The lobe pdf cancels the lobe half of the BRDF, so
     // the traced radiance IS the estimator (the caller applies the Fresnel
     // weight; the masking term is left to the denoising filters - the
-    // standard real-time stochastic-SSR approximation).
-    const glm::mat3 basis = makeBasis(normal);
-    const glm::vec3 localView = glm::normalize(glm::transpose(basis) * view);
-    const float     alphaUsed = std::max(alpha, 1.0e-3f);
+    // standard real-time stochastic-SSR approximation). The tangent frame is
+    // provided by the caller because every ray of a texel shares it.
+    const float alphaUsed = std::max(alpha, 1.0e-3f);
 
     // Section 3.2: transform the view direction to the hemisphere
     // configuration.
@@ -590,30 +602,36 @@ glm::vec3 rfSampleGgxVndf(const glm::vec3 &view, const glm::vec3 &normal, float 
 
 // Fresnel weight of one sample (Schlick on the view/half-vector cosine),
 // applied at trace time so dielectrics and metals both get the right share.
-glm::vec3 rfFresnelWeight(const glm::vec3 &view, const glm::vec3 &sampledDirection, const glm::vec3 &albedo, float metallic)
+// `f0` is the texel's base reflectivity, hoisted by the caller.
+glm::vec3 rfFresnelWeight(const glm::vec3 &view, const glm::vec3 &sampledDirection, const glm::vec3 &f0)
 {
     const glm::vec3 halfVector = glm::normalize(view + sampledDirection);
     const float     vDotH      = std::max(glm::dot(view, halfVector), 0.0f);
-    const glm::vec3 f0        = glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
-    const glm::vec3 specular  = f0 + (1.0f - f0) * std::pow(1.0f - vDotH, 5.0f);
-    return specular;
+    const float     complement = 1.0f - vDotH;
+    const float     complementSquared = complement * complement;
+    const float     powered = complementSquared * complementSquared * complement; // (1-v)^5
+    return f0 + (glm::vec3(1.0f) - f0) * powered;
 }
 
-// One full reflection ray: screen trace tier, scene trace tier, skylight.
-glm::vec3 resolveDedicatedRay(const RfPipelineState &state, const std::vector<glm::vec3> &screenColor,
-    const glm::vec3 &position, const glm::vec3 &normal, const glm::vec3 &view, const glm::vec3 &direction,
-    const glm::vec3 &fresnel, RfResolve &outResolve)
+// One full reflection ray: screen trace tier, scene trace tier, skylight. A
+// screen hit defers its radiance - the texel it landed on is shaded by the
+// lazy pass that follows the ray pass, so `outScreenHitTexel` carries the hit
+// texel back to the caller and the returned radiance is zero for that tier.
+glm::vec3 resolveDedicatedRay(const RfPipelineState &state, const glm::vec4 &clipOrigin,
+    const glm::vec3 &position, const glm::vec3 &normal, const glm::vec3 &direction,
+    const glm::vec3 &fresnel, RfResolve &outResolve, std::uint32_t &outScreenHitTexel)
 {
     const float screenDistance = std::max(state.settings.screenRayDistance, 0.05f);
+    const glm::vec3 rayOrigin = position + normal * state.settings.traceBias;
     glm::vec3   radiance(0.0f);
-    ScreenTraceResult screen = screenTrace(state, position + normal * state.settings.traceBias, direction,
-        screenColor, screenDistance, radiance);
+    ScreenTraceResult screen = screenTrace(state, clipOrigin, rayOrigin, direction, screenDistance);
     if (screen.hit)
     {
         outResolve = RfResolve::ScreenTrace;
-        return radiance * fresnel;
+        outScreenHitTexel = static_cast<std::uint32_t>(screen.texel);
+        return radiance; // resolved by the lazy shading pass
     }
-    const RfRay ray{position + normal * state.settings.traceBias, direction, state.settings.maxTraceDistance};
+    const RfRay ray{rayOrigin, direction, state.settings.maxTraceDistance};
     const RfHit hit = rfTraceScene(state, ray);
     if (hit.hit)
     {
@@ -631,19 +649,33 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
     state.fieldResolve.assign(pixelCount, RfResolve::None);
     state.fieldValid.assign(pixelCount, 0u);
     state.fieldRayCount.assign(pixelCount, 0.0f);
+    if (state.screenColor.size() != pixelCount)
+    {
+        state.screenColor.resize(pixelCount);
+        state.screenNeedShade.resize(pixelCount);
+    }
+    state.screenNeedShade.assign(pixelCount, 0u);
+    if (state.screenDeferredRows.size() != state.fieldHeight)
+    {
+        state.screenDeferredRows.resize(state.fieldHeight);
+    }
+    for (std::vector<RfScreenDeferred> &row : state.screenDeferredRows)
+    {
+        row.clear();
+    }
     state.pixelsTracedThisFrame.store(0, std::memory_order_relaxed);
     state.raysTracedThisFrame.store(0, std::memory_order_relaxed);
     state.raysReusedCacheThisFrame.store(0, std::memory_order_relaxed);
     state.screenTraceHitsThisFrame.store(0, std::memory_order_relaxed);
     state.sceneTraceHitsThisFrame.store(0, std::memory_order_relaxed);
 
-    std::vector<glm::vec3> screenColor;
-    rfShadeScreenColor(state, scheduler, screenColor);
-
     const std::uint32_t raysPerPixel = std::max(state.settings.raysPerPixel, 1u);
     const float         rayBandMax  = std::min(state.settings.roughRayBandMax, state.settings.roughMaxTrace);
     const std::size_t   width       = state.fieldWidth;
 
+    // Pass 1 - the stochastic ray pass. Screen-trace hits defer their
+    // radiance: the ray records the texel it landed on (and the texel's row
+    // list keeps the Fresnel-weighted contribution to apply afterwards).
     rfParallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
@@ -654,6 +686,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
             std::uint32_t sceneHits  = 0;
             for (std::size_t y = rowBegin; y < rowEnd; ++y)
             {
+                std::vector<RfScreenDeferred> &rowDeferred = state.screenDeferredRows[y];
                 for (std::uint32_t x = 0; x < state.fieldWidth; ++x)
                 {
                     const std::size_t index = y * width + x;
@@ -685,21 +718,40 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                     const float clampedRoughness = std::max(roughness, kMinimumRoughness);
                     const float alpha            = clampedRoughness * clampedRoughness;
 
+                    // Per-texel constants shared by every ray of the texel:
+                    // the tangent frame, the Fresnel base reflectivity, and
+                    // the screen-trace origin's clip position.
+                    const glm::mat3 basis     = makeBasis(normal);
+                    const glm::vec3 localView = glm::normalize(glm::transpose(basis) * view);
+                    const glm::vec3 f0        = glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
+                    const glm::vec3 rayOrigin = position + normal * state.settings.traceBias;
+                    const glm::vec4 clipOrigin = state.viewProjection * glm::vec4(rayOrigin, 1.0f);
+
                     std::uint64_t seed = hashSeed(state.frameIndex * 7919ull + index * 104729ull);
                     glm::vec3    sum(0.0f);
                     RfResolve   resolve = RfResolve::None;
                     for (std::uint32_t ray = 0; ray < raysPerPixel; ++ray)
                     {
-                        const glm::vec3 direction = rfSampleGgxVndf(view, normal, alpha, seed);
-                        const glm::vec3 fresnel  = rfFresnelWeight(view, direction, albedo, metallic);
+                        const glm::vec3 direction = rfSampleGgxVndf(basis, localView, alpha, seed);
+                        const glm::vec3 fresnel  = rfFresnelWeight(view, direction, f0);
                         if (roughness < rayBandMax)
                         {
                             // Dedicated reflection ray through the tracing
                             // tiers.
                             RfResolve rayResolve = RfResolve::None;
+                            std::uint32_t screenHitTexel = 0;
                             const glm::vec3 radiance = resolveDedicatedRay(
-                                state, screenColor, position, normal, view, direction, fresnel, rayResolve);
-                            sum += radiance;
+                                state, clipOrigin, position, normal, direction, fresnel, rayResolve,
+                                screenHitTexel);
+                            if (rayResolve == RfResolve::ScreenTrace)
+                            {
+                                rowDeferred.push_back(
+                                    RfScreenDeferred{static_cast<std::uint32_t>(index), screenHitTexel, fresnel});
+                            }
+                            else
+                            {
+                                sum += radiance;
+                            }
                             ++raysDone;
                             resolve = rayResolve;
                             if (rayResolve == RfResolve::ScreenTrace)
@@ -717,8 +769,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                             // (Lumen's radiance-cache reuse); the analytic sky
                             // when no probe covers the position.
                             glm::vec3 radiance(0.0f);
-                            if (!rfProbeRadiance(state,
-                                    position + normal * state.settings.traceBias, direction, radiance))
+                            if (!rfProbeRadiance(state, rayOrigin, direction, radiance))
                             {
                                 radiance = state.environment.skyRadiance(direction);
                             }
@@ -740,6 +791,61 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
             state.screenTraceHitsThisFrame.fetch_add(screenHits, std::memory_order_relaxed);
             state.sceneTraceHitsThisFrame.fetch_add(sceneHits, std::memory_order_relaxed);
         });
+
+    // Mark the texels the screen rays landed on (a single-threaded walk over
+    // the deferred lists; several rays can land on the same texel).
+    for (const std::vector<RfScreenDeferred> &row : state.screenDeferredRows)
+    {
+        for (const RfScreenDeferred &deferred : row)
+        {
+            state.screenNeedShade[deferred.hitTexel] = 1u;
+        }
+    }
+
+    // Pass 2 - lazy screen shading: shade exactly the GBuffer texels the
+    // screen traces hit (Lumen Scene lighting on demand). Unlit texels read
+    // as their albedo, as the full-field shading did.
+    rfParallelRange(scheduler, state.fieldHeight, 1,
+        [&](std::size_t rowBegin, std::size_t rowEnd)
+        {
+            for (std::size_t y = rowBegin; y < rowEnd; ++y)
+            {
+                for (std::uint32_t x = 0; x < state.fieldWidth; ++x)
+                {
+                    const std::size_t index = y * state.fieldWidth + x;
+                    if (state.screenNeedShade[index] == 0u)
+                    {
+                        continue;
+                    }
+                    if (state.gbufferUnlit[index] != 0u)
+                    {
+                        state.screenColor[index] = state.gbufferAlbedo[index];
+                        continue;
+                    }
+                    state.screenColor[index] = rfShadeHitPoint(state,
+                        state.gbufferPosition[index],
+                        state.gbufferNormal[index],
+                        state.gbufferAlbedo[index],
+                        state.gbufferEmissive[index]);
+                }
+            }
+        });
+
+    // Pass 3 - apply the deferred screen-hit contributions.
+    const float inverseRaysPerPixel = 1.0f / static_cast<float>(raysPerPixel);
+    rfParallelRange(scheduler, state.fieldHeight, 1,
+        [&](std::size_t rowBegin, std::size_t rowEnd)
+        {
+            for (std::size_t y = rowBegin; y < rowEnd; ++y)
+            {
+                for (const RfScreenDeferred &deferred : state.screenDeferredRows[y])
+                {
+                    state.fieldRaw[deferred.sourceTexel]
+                        += state.screenColor[deferred.hitTexel] * deferred.fresnel * inverseRaysPerPixel;
+                }
+            }
+        });
+
     state.totalRaysTraced.fetch_add(
         state.raysTracedThisFrame.load(std::memory_order_relaxed)
             + state.raysReusedCacheThisFrame.load(std::memory_order_relaxed),

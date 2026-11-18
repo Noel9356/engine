@@ -35,6 +35,7 @@
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/lumen_reflection/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/lumen_ray_core.hpp>
 
 #include <exception>
 #include <glm/ext/matrix_float3x3.hpp>
@@ -58,39 +59,26 @@ namespace engine
 namespace lumen_reflection
 {
 
-inline constexpr float kPi = 3.14159265358979f;
 inline constexpr std::uint32_t noSurface = 0xffffffffu;
+// Specular-response constants shared by the tracing pass and the debug views.
+inline constexpr float kMinimumRoughness = 0.045f; // matches the renderer's clamp floor
+inline constexpr float kDielectricF0 = 0.04f;
 
 // ---- small shared helpers --------------------------------------------------------
 
-inline std::uint64_t hashSeed(std::uint64_t seed)
-{
-    std::uint64_t hash = seed * 0x9E3779B97F4A7C15ull;
-    hash ^= hash >> 30;
-    hash *= 0xBF58476D1CE4E5B9ull;
-    hash ^= hash >> 27;
-    hash *= 0x94D049BB133111EBull;
-    hash ^= hash >> 31;
-    return hash;
-}
-
-// Uniform [0, 1) float; advances the seed.
-inline float randomFloat(std::uint64_t &seed)
-{
-    seed = hashSeed(seed + 0x632BE59BD9B4E019ull);
-    return static_cast<float>(seed >> 40) * (1.0f / 16777216.0f);
-}
-
-// Orthonormal basis with `normal` as the third column (Duff et al. 2017).
-inline glm::mat3 makeBasis(const glm::vec3 &normal)
-{
-    const float     sign = normal.z >= 0.0f ? 1.0f : -1.0f;
-    const float     a    = -1.0f / (sign + normal.z);
-    const float     b    = normal.x * normal.y * a;
-    const glm::vec3 tangent(1.0f + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
-    const glm::vec3 bitangent(b, sign + normal.y * normal.y * a, -sign * normal.y);
-    return glm::mat3(tangent, bitangent, normal);
-}
+// The RNG, sampling frames, intersection kernels, luminance weight, and
+// quality preset table are shared with lumen_gi through
+// engine/renderer/lumen_ray_core.hpp so both modules draw from the same
+// distributions and accept the same hits.
+using engine::lumen::kPi;
+using engine::lumen::hashSeed;
+using engine::lumen::randomFloat;
+using engine::lumen::makeBasis;
+using engine::lumen::luminance;
+using engine::lumen::qualityScale;
+using engine::lumen::safeInverseDirection;
+using engine::lumen::slabTest;
+using engine::lumen::rayTriangle;
 
 // Directional radiance of one probe's SH2 projection along `direction`: the
 // stored coefficients are the standard SH coefficients pre-multiplied by
@@ -151,10 +139,18 @@ struct ReflectionSettings
     float         maxTraceDistance       = 50.0f;
     float         traceBias              = 0.02f;
 
+    // Screen traces: marching step budget and thin-occluder thickness (the
+    // depth slack a ray may pass behind a surface and still count as a hit).
+    std::uint32_t screenTraceMaxSteps    = 48;
+    float         screenTraceThickness   = 0.5f;
+
     // Temporal accumulation: history weight and neighborhood clamp width
     // (standard deviations of the current 3x3 neighborhood).
     float         temporalStrength       = 0.9f;
     float         neighborhoodClampSigma = 1.0f;
+
+    // Luminance variance threshold above which the bilateral filter smooths.
+    float         varianceThreshold      = 0.02f;
 
     // Spatial reuse radius in pixels (BRDF-weighted 3x3 at radius 1) and the
     // variance-driven bilateral filter.
@@ -222,6 +218,15 @@ struct RfSurface
     bool                     dynamic      = false;
     glm::vec3                worldMin{0.0f};
     glm::vec3                worldMax{0.0f};
+    // GBuffer raster caches: world-space vertex positions depend only on the
+    // transform and clip-space positions only on the view, so both are kept
+    // per surface and refreshed on demand. `rasterBuiltSerial` records the
+    // raster serial the projected triangle cache was built at (0 = stale);
+    // `rasterWorldDirty` marks the world positions for recomputation.
+    std::vector<glm::vec3>   rasterWorldPositions;
+    std::vector<glm::vec4>   rasterClipPositions;
+    std::uint64_t            rasterBuiltSerial = 0;
+    bool                     rasterWorldDirty   = true;
 };
 
 // Top-level acceleration structure over the non-excluded surfaces.
@@ -305,6 +310,43 @@ struct RfProbeGrid
     }
 };
 
+// ---- frame GBuffer rasterization types ---------------------------------------------
+
+// Vertices carried from local space through the near-plane clip to the screen
+// projection (perspective-correct interpolation keeps world position and
+// barycentric attributes).
+struct RfClipVertex
+{
+    glm::vec4 clip{0.0f};
+    glm::vec3 world{0.0f};
+    glm::vec3 bary{0.0f};
+};
+
+struct RfScreenVertex
+{
+    glm::vec2 pixel{0.0f};
+    float     inverseW = 0.0f;
+    glm::vec3 world{0.0f};
+    glm::vec3 bary{0.0f};
+};
+
+struct RfScreenTriangle
+{
+    RfScreenVertex vertex[3];
+    std::uint32_t  surface  = 0;
+    std::uint32_t  triangle = 0;
+};
+
+// A screen-trace hit whose radiance is resolved after the lazy shading pass:
+// the texel that cast the ray, the texel the ray landed on, and the Fresnel
+// weight of the sample.
+struct RfScreenDeferred
+{
+    std::uint32_t sourceTexel = 0;
+    std::uint32_t hitTexel   = 0;
+    glm::vec3     fresnel{0.0f};
+};
+
 // ---- rays and hits ------------------------------------------------------------------
 
 struct RfRay
@@ -368,6 +410,16 @@ struct RfPipelineState
     std::vector<std::uint32_t> tlasSurfaces;
     bool                       tlasDirty = true;
 
+    // GBuffer raster caches: `rasterSerial` is bumped whenever the view, the
+    // registry, or the field resolution changes, so each surface rebuilds its
+    // projected triangles only when something they depend on actually moved.
+    std::uint64_t                             rasterSerial = 1;
+    std::uint32_t                             rasterFieldWidth  = 0;
+    std::uint32_t                             rasterFieldHeight = 0;
+    std::vector<std::vector<RfScreenTriangle>> rasterTriangles;
+    std::vector<RfScreenTriangle>             rasterConcat;
+    std::vector<std::vector<std::uint32_t>>    rasterBins;
+
     // Camera + viewport for the running frame.
     bool      hasView   = false;
     glm::mat4 viewProjection{1.0f};
@@ -418,10 +470,22 @@ struct RfPipelineState
     std::uint32_t historyHeight = 0;
     std::vector<glm::vec3> historyField;
     std::vector<float>     historyDepth;
-    std::vector<std::uint8_t> historyAge; // accumulated frames, saturates at 255
     std::vector<glm::vec3> scratchSpatial; // spatial reuse output, committed per frame
     std::vector<std::uint8_t> scratchDisoccluded; // temporal pass output flags
     std::vector<float>     scratchVariance;       // bilateral pass input
+
+    // Lazy screen color: only texels actually hit by screen traces are shaded
+    // (the whole-GBuffer shading the traces sample would otherwise dominate
+    // the frame). `screenNeedShade` is the per-frame request mask,
+    // `screenDeferredRows` collects the per-row deferred contributions that
+    // are applied once the requested texels hold their shaded color.
+    std::vector<glm::vec3>                  screenColor;
+    std::vector<std::uint8_t>               screenNeedShade;
+    std::vector<std::vector<RfScreenDeferred>> screenDeferredRows;
+
+    // Per-texel luminance of the buffer the denoise passes weight against
+    // (fieldRaw for spatial reuse, fieldFiltered for the bilateral pass).
+    std::vector<float>                      fieldLuminance;
 
     // Statistics, accumulated by parallel stages through fetch_add.
     std::atomic<std::uint32_t> pixelsTracedThisFrame{0};
@@ -532,8 +596,10 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler);
 // GGX visible-normal importance sampling (Heitz 2018): draws a reflection
 // direction from the visible GGX lobe of (view, normal, alpha) using two
 // uniforms; returns the sampling weight-free direction (the estimator's PDF
-// cancels the lobe, so the contribution is the traced radiance itself).
-glm::vec3 rfSampleGgxVndf(const glm::vec3 &view, const glm::vec3 &normal, float alpha, std::uint64_t &seed);
+// cancels the lobe, so the contribution is the traced radiance itself). The
+// tangent frame (`basis` with `localView`, both hoisted per texel by the
+// caller) is passed in because it is identical for every ray of a texel.
+glm::vec3 rfSampleGgxVndf(const glm::mat3 &basis, const glm::vec3 &localView, float alpha, std::uint64_t &seed);
 
 // Runs the stochastic reflection pass: for each field texel whose roughness
 // is inside the traced bands, samples the GGX lobe and resolves the radiance
@@ -555,9 +621,9 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
 glm::vec3 rfRadianceAtHit(const RfPipelineState &state, const RfHit &hit);
 
 // Fresnel weight of one GGX sample (Schlick on the view/half-vector cosine),
-// applied at trace time so dielectrics and metals both get the right share.
-glm::vec3 rfFresnelWeight(
-    const glm::vec3 &view, const glm::vec3 &sampledDirection, const glm::vec3 &albedo, float metallic);
+// applied at trace time so dielectrics and metals both get the right share;
+// `f0` is hoisted per texel by the caller.
+glm::vec3 rfFresnelWeight(const glm::vec3 &view, const glm::vec3 &sampledDirection, const glm::vec3 &f0);
 
 // Runs one complete reflection frame: GBuffer + trace + denoise; publishes
 // fieldFiltered. Returns false when a stage failed.

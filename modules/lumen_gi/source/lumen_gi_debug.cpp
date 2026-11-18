@@ -365,6 +365,7 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
     {
         state.screenProbeRadiance.assign(probeCount * directionCount, glm::vec3(0.0f));
         state.screenProbePosition.assign(probeCount, glm::vec3(1.0e30f));
+        state.screenProbeSurface.assign(probeCount, noSurface);
     }
     state.screenProbePixel.assign(probeCount, 0u);
     state.screenProbeSh2.assign(probeCount * 27, 0.0f);
@@ -385,7 +386,13 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
                 for (std::uint32_t probeX = 0; probeX < probeWidth; ++probeX)
                 {
                     const std::size_t probeIndex = probeY * probeWidth + probeX;
-                    // Jittered placement inside the scale x scale cell.
+                    // Jittered placement inside the scale x scale cell. The
+                    // jitter rotates per pass: the pixel-level temporal filter
+                    // then averages probe placements across the whole cell
+                    // (a temporal supersample) instead of freezing one
+                    // placement's bias into the converged image. The strata
+                    // coverage rule below keeps the persistent map honest
+                    // when the ray budget is too small to refresh it fully.
                     std::uint64_t seed = hashSeed(state.gatherFrame * 7919ull + probeIndex);
                     const float   jitterX = randomFloat(seed);
                     const float   jitterY = randomFloat(seed);
@@ -406,14 +413,19 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
 
                     // The persistent map describes the place the probe last
                     // traced from; once the placement moved on (camera motion,
-                    // different surface) the old radiance is a stale importance
-                    // hint and a wrong accumulation seed, so start over.
+                    // a different surface under the same cell) the old radiance
+                    // is a stale importance hint and a wrong accumulation seed,
+                    // so start over. The surface test catches the silhouette
+                    // case where the jitter alternates between two surfaces
+                    // closer than the distance threshold.
                     const float resetDistance = std::max(0.5f, 0.08f * state.viewDepth[pixelIndex]);
-                    if (glm::distance(position, state.screenProbePosition[probeIndex]) > resetDistance)
+                    if (glm::distance(position, state.screenProbePosition[probeIndex]) > resetDistance
+                        || state.viewSurfaceIndex[pixelIndex] != state.screenProbeSurface[probeIndex])
                     {
                         std::fill(radiance, radiance + directionCount, glm::vec3(0.0f));
                     }
                     state.screenProbePosition[probeIndex] = position;
+                    state.screenProbeSurface[probeIndex]  = state.viewSurfaceIndex[pixelIndex];
 
                     // Candidate strata: the texels of the 8x8 map whose center
                     // lies above the surface (the lower half sees only the
@@ -437,10 +449,32 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
                         continue;
                     }
                     const bool useImportance = state.settings.gatherImportanceSampling && luminanceTotal > 1.0e-5f;
+                    // History weight of a re-traced texel: one minus the
+                    // fraction of the strata the per-pass ray budget covers.
+                    // A budget that reaches every candidate (the default
+                    // rays_per_probe over the ~32 above-horizon texels of the
+                    // 8x8 map) writes fresh samples each pass, so the
+                    // downstream pixel temporal filter averages independent
+                    // draws; a smaller budget accumulates over passes instead
+                    // (the map fills in as the strata rotate).
+                    const float strataHistory = std::clamp(
+                        (static_cast<float>(candidates.size()) - static_cast<float>(rayCount))
+                            / static_cast<float>(candidates.size()),
+                        0.0f, 1.0f);
+                    // Strata coverage first: the first min(rayCount, strata)
+                    // rays rotate through every above-horizon texel, and only
+                    // the surplus rays reuse the previous radiance. The
+                    // radiance hint is noisy while the map is young; letting
+                    // it steer base rays would starve dim strata of fresh
+                    // samples and their stale values would poison the
+                    // projection for the passes that follow.
+                    const std::uint32_t coverageRays = static_cast<std::uint32_t>(std::min<std::size_t>(
+                        rayCount, candidates.size()));
                     for (std::uint32_t ray = 0; ray < rayCount; ++ray)
                     {
-                        std::size_t selected = candidates[(state.gatherFrame * rayCount + ray) % candidates.size()];
-                        if (useImportance && randomFloat(seed) < 0.5f)
+                        const bool importanceRay = useImportance && ray >= coverageRays;
+                        std::size_t selected = candidates[(state.gatherFrame * coverageRays + ray) % candidates.size()];
+                        if (importanceRay)
                         {
                             // Inverse-transform sampling over previous radiance.
                             const float pick = randomFloat(seed) * luminanceTotal;
@@ -457,8 +491,10 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
                         }
                         // A direction jittered inside the selected texel, so the
                         // traced direction and the texel it is stored into agree.
-                        const float u = (static_cast<float>(selected % 8) + randomFloat(seed)) / 8.0f * 2.0f - 1.0f;
-                        const float v = (static_cast<float>(selected / 8) + randomFloat(seed)) / 8.0f * 2.0f - 1.0f;
+                        const float u = (static_cast<float>(selected % screenProbeResolution) + randomFloat(seed))
+                            / static_cast<float>(screenProbeResolution) * 2.0f - 1.0f;
+                        const float v = (static_cast<float>(selected / screenProbeResolution) + randomFloat(seed))
+                            / static_cast<float>(screenProbeResolution) * 2.0f - 1.0f;
                         glm::vec3 direction = octahedralDecode(u, v);
                         const float facing = glm::dot(direction, normal);
                         if (facing < 0.02f)
@@ -467,12 +503,18 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
                         }
                         ++raysDone;
                         const glm::vec3 value = gatherRayRadiance(state, position + normal * state.settings.traceBias, direction);
-                        glm::vec3 &target = radiance[octahedralTexelIndex(direction, 8)];
+                        // The sample belongs to the stratum it was selected
+                        // for (the jittered direction usually encodes back to
+                        // that same texel; at the octahedral fold or after the
+                        // horizon clamp it would not, and letting the write
+                        // target wander migrates energy between texels).
+                        glm::vec3 &target = radiance[selected];
                         // An untouched texel takes the fresh sample whole;
-                        // touched ones blend (accumulation without first-frame bias).
-                        target = glm::dot(target, target) > 0.0f ? glm::mix(value, target, 0.35f) : value;
+                        // touched ones blend with the strata-coverage history
+                        // weight above.
+                        target = glm::dot(target, target) > 0.0f ? glm::mix(value, target, strataHistory) : value;
                     }
-                    projectRadianceToSh2(state.screenProbeDirections.data(), radiance,
+                    projectRadianceToSh2(state.screenProbeDirectionBasis.data(), radiance,
                         state.screenProbeDirectionWeights.data(), directionCount, &state.screenProbeSh2[probeIndex * 27]);
                 }
             }
@@ -484,7 +526,9 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
 // Full-resolution pass: interpolate probe SH2 within the depth plane (Lumen
 // interpolates "to pixels within the same plane"), then temporal accumulation
 // against the reprojection of the previous frame and a bilateral spatial
-// filter. Writes gatherIrradiance per pixel (indirect irradiance E).
+// filter. Writes gatherIrradiance per pixel (the raw accumulated indirect
+// irradiance E, the temporal history) and gatherFiltered (the display value
+// the debug views read).
 void resolvePixelIrradiance(GiPipelineState &state, TaskScheduler *scheduler)
 {
     const std::uint32_t width  = state.viewWidth;
@@ -499,6 +543,10 @@ void resolvePixelIrradiance(GiPipelineState &state, TaskScheduler *scheduler)
     {
         state.gatherIrradiancePrevious.assign(pixelCount, glm::vec3(0.0f));
     }
+    if (state.gatherFiltered.size() != pixelCount)
+    {
+        state.gatherFiltered.assign(pixelCount, glm::vec3(0.0f));
+    }
     const std::uint32_t scale = std::max(state.settings.gatherScreenScale, 1u);
     const bool      temporalEnabled = state.gatherHasHistory && state.gatherPreviousWidth == width
                                    && state.gatherPreviousHeight == height
@@ -512,6 +560,9 @@ void resolvePixelIrradiance(GiPipelineState &state, TaskScheduler *scheduler)
     const float historyRamp = static_cast<float>(state.gatherHistoryLength) / static_cast<float>(state.gatherHistoryLength + 1);
     const float temporalBlend = std::min(std::clamp(state.settings.gatherTemporalBlend, 0.0f, 0.99f), historyRamp);
     const glm::mat4 previousViewProjection = state.gatherPreviousViewProjection;
+    // The repeated accumulation passes of one export share the view, so the
+    // reprojection is the identity: the history of a pixel is that pixel.
+    const bool sameView = temporalEnabled && previousViewProjection == state.viewProjection;
     parallelRange(scheduler, height, 4,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
@@ -524,6 +575,7 @@ void resolvePixelIrradiance(GiPipelineState &state, TaskScheduler *scheduler)
                     if (isBackground(depth))
                     {
                         state.gatherIrradiance[pixelIndex] = glm::vec3(0.0f);
+                        state.gatherFiltered[pixelIndex]   = glm::vec3(0.0f);
                         continue;
                     }
                     const glm::vec3 pixelNormal = state.viewNormal[pixelIndex];
@@ -570,88 +622,121 @@ void resolvePixelIrradiance(GiPipelineState &state, TaskScheduler *scheduler)
                             weightSum += weight;
                         }
                     }
-                    glm::vec3 irradiance = weightSum > 1.0e-6f ? interpolated / weightSum : glm::vec3(0.0f);
+                    glm::vec3 irradiance(0.0f);
+                    if (weightSum > 1.0e-6f)
+                    {
+                        irradiance = interpolated / weightSum;
+                    }
+                    else
+                    {
+                        // No screen probe survived the plane tests: fall back
+                        // to the world-space radiance cache (leaves 0 when it
+                        // cannot serve this position either).
+                        worldCacheIrradiance(state, state.viewWorldPosition[pixelIndex], pixelNormal, irradiance);
+                    }
                     // Temporal accumulation: reproject into the previous frame.
+                    // Texel centers sit at (index + 0.5) in the continuous
+                    // screen space the rasterizer uses, so the nearest history
+                    // texel of a reprojected coordinate s is round(s - 0.5);
+                    // truncating instead sampled a neighbor half of the time
+                    // and dragged a directional ghost across moving frames.
                     if (temporalEnabled)
                     {
-                        const glm::vec4 previousClip = previousViewProjection
-                            * glm::vec4(state.viewWorldPosition[pixelIndex], 1.0f);
-                        if (previousClip.w > 0.0f)
+                        if (sameView)
                         {
-                            const float previousX = (previousClip.x / previousClip.w * 0.5f + 0.5f) * static_cast<float>(width) - 0.5f;
-                            const float previousY = (0.5f - previousClip.y / previousClip.w * 0.5f) * static_cast<float>(height) - 0.5f;
-                            if (previousX >= 0.0f && previousY >= 0.0f && previousX < static_cast<float>(width - 1)
-                                && previousY < static_cast<float>(height - 1))
+                            const float previousDepth = state.gatherPreviousDepth[pixelIndex];
+                            if (!isBackground(previousDepth)
+                                && std::fabs(previousDepth - depth) / (depth + 1.0f) < 0.2f)
                             {
-                                const std::size_t previousIndex = static_cast<std::size_t>(previousY) * width
-                                    + static_cast<std::size_t>(previousX);
-                                const float previousDepth = state.gatherPreviousDepth[previousIndex];
-                                const float depthChange   = std::fabs(previousDepth - depth) / (depth + 1.0f);
-                                if (!isBackground(previousDepth) && depthChange < 0.2f)
+                                irradiance = glm::mix(irradiance, state.gatherIrradiancePrevious[pixelIndex], temporalBlend);
+                            }
+                        }
+                        else
+                        {
+                            const glm::vec4 previousClip = previousViewProjection
+                                * glm::vec4(state.viewWorldPosition[pixelIndex], 1.0f);
+                            if (previousClip.w > 0.0f)
+                            {
+                                const float previousX = (previousClip.x / previousClip.w * 0.5f + 0.5f) * static_cast<float>(width) - 0.5f;
+                                const float previousY = (0.5f - previousClip.y / previousClip.w * 0.5f) * static_cast<float>(height) - 0.5f;
+                                const std::int32_t previousXi = static_cast<std::int32_t>(std::lround(previousX));
+                                const std::int32_t previousYi = static_cast<std::int32_t>(std::lround(previousY));
+                                if (previousXi >= 0 && previousYi >= 0 && previousXi < static_cast<std::int32_t>(width)
+                                    && previousYi < static_cast<std::int32_t>(height))
                                 {
-                                    irradiance = glm::mix(irradiance, state.gatherIrradiancePrevious[previousIndex], temporalBlend);
+                                    const std::size_t previousIndex = static_cast<std::size_t>(previousYi) * width
+                                        + static_cast<std::size_t>(previousXi);
+                                    const float previousDepth = state.gatherPreviousDepth[previousIndex];
+                                    const float depthChange   = std::fabs(previousDepth - depth) / (depth + 1.0f);
+                                    if (!isBackground(previousDepth) && depthChange < 0.2f)
+                                    {
+                                        irradiance = glm::mix(irradiance, state.gatherIrradiancePrevious[previousIndex], temporalBlend);
+                                    }
                                 }
                             }
                         }
                     }
+                    // The RAW accumulation is the temporal history; the
+                    // bilateral filter below writes a separate display buffer,
+                    // so repeated passes accumulate the gather itself and the
+                    // filter is applied exactly once to what is shown.
                     state.gatherIrradiance[pixelIndex] = irradiance;
                 }
             }
         });
-    // Bilateral spatial filter guided by depth and normal.
-    if (state.settings.gatherSpatialFilter > 0)
+    // Bilateral spatial filter guided by depth and normal, into the display
+    // buffer (gather.spatial_filter, 0 = off: the display IS the raw buffer;
+    // the configured radius is honored verbatim).
+    const std::int32_t radius = static_cast<std::int32_t>(state.settings.gatherSpatialFilter);
+    if (radius <= 0)
     {
-        std::vector<glm::vec3> filtered(pixelCount, glm::vec3(0.0f));
-        // The bilateral filter radius is the configured value verbatim
-        // (gather.spatial_filter, 0 = off), bounded so the pass stays cheap.
-        const std::int32_t radius
-            = static_cast<std::int32_t>(std::min(state.settings.gatherSpatialFilter, 4u));
-        parallelRange(scheduler, height, 4,
-            [&](std::size_t rowBegin, std::size_t rowEnd)
-            {
-                for (std::size_t y = rowBegin; y < rowEnd; ++y)
-                {
-                    for (std::uint32_t x = 0; x < width; ++x)
-                    {
-                        const std::size_t pixelIndex = y * width + x;
-                        if (isBackground(state.viewDepth[pixelIndex]))
-                        {
-                            continue;
-                        }
-                        glm::vec3 sum(0.0f);
-                        float     weightSum = 0.0f;
-                        const glm::vec3 centerNormal = state.viewNormal[pixelIndex];
-                        const float     centerDepth  = state.viewDepth[pixelIndex];
-                        for (std::int32_t dy = -radius; dy <= radius; ++dy)
-                        {
-                            for (std::int32_t dx = -radius; dx <= radius; ++dx)
-                            {
-                                const std::int32_t sx = static_cast<std::int32_t>(x) + dx;
-                                const std::int32_t sy = static_cast<std::int32_t>(y) + dy;
-                                if (sx < 0 || sy < 0 || sx >= static_cast<std::int32_t>(width)
-                                    || sy >= static_cast<std::int32_t>(height))
-                                {
-                                    continue;
-                                }
-                                const std::size_t sampleIndex = static_cast<std::size_t>(sy) * width + sx;
-                                if (isBackground(state.viewDepth[sampleIndex]))
-                                {
-                                    continue;
-                                }
-                                const float depthWeight  = std::exp(-std::fabs(state.viewDepth[sampleIndex] - centerDepth)
-                                    / (0.05f * centerDepth + 0.05f));
-                                const float normalWeight = std::max(glm::dot(state.viewNormal[sampleIndex], centerNormal), 0.0f);
-                                const float weight       = depthWeight * normalWeight;
-                                sum += state.gatherIrradiance[sampleIndex] * weight;
-                                weightSum += weight;
-                            }
-                        }
-                        filtered[pixelIndex] = weightSum > 1.0e-6f ? sum / weightSum : state.gatherIrradiance[pixelIndex];
-                    }
-                }
-            });
-        state.gatherIrradiance.swap(filtered);
+        state.gatherFiltered = state.gatherIrradiance;
+        return;
     }
+    parallelRange(scheduler, height, 4,
+        [&](std::size_t rowBegin, std::size_t rowEnd)
+        {
+            for (std::size_t y = rowBegin; y < rowEnd; ++y)
+            {
+                for (std::uint32_t x = 0; x < width; ++x)
+                {
+                    const std::size_t pixelIndex = y * width + x;
+                    if (isBackground(state.viewDepth[pixelIndex]))
+                    {
+                        continue;
+                    }
+                    glm::vec3 sum(0.0f);
+                    float     weightSum = 0.0f;
+                    const glm::vec3 centerNormal = state.viewNormal[pixelIndex];
+                    const float     centerDepth  = state.viewDepth[pixelIndex];
+                    for (std::int32_t dy = -radius; dy <= radius; ++dy)
+                    {
+                        for (std::int32_t dx = -radius; dx <= radius; ++dx)
+                        {
+                            const std::int32_t sx = static_cast<std::int32_t>(x) + dx;
+                            const std::int32_t sy = static_cast<std::int32_t>(y) + dy;
+                            if (sx < 0 || sy < 0 || sx >= static_cast<std::int32_t>(width)
+                                || sy >= static_cast<std::int32_t>(height))
+                            {
+                                continue;
+                            }
+                            const std::size_t sampleIndex = static_cast<std::size_t>(sy) * width + sx;
+                            if (isBackground(state.viewDepth[sampleIndex]))
+                            {
+                                continue;
+                            }
+                            const float depthWeight  = std::exp(-std::fabs(state.viewDepth[sampleIndex] - centerDepth)
+                                / (0.05f * centerDepth + 0.05f));
+                            const float normalWeight = std::max(glm::dot(state.viewNormal[sampleIndex], centerNormal), 0.0f);
+                            const float weight       = depthWeight * normalWeight;
+                            sum += state.gatherIrradiance[sampleIndex] * weight;
+                            weightSum += weight;
+                        }
+                    }
+                    state.gatherFiltered[pixelIndex] = weightSum > 1.0e-6f ? sum / weightSum : state.gatherIrradiance[pixelIndex];
+                }
+            }
+        });
 }
 
 } // namespace

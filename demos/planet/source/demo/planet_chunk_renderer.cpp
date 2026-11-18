@@ -61,6 +61,20 @@ struct CoverageShellSpec
     // values stretch the thinning fringe (soft decks), narrow ones keep the
     // contour crisp (puffy cumulus against the sky).
     double hazeEdgeWidth = 0.45;
+    // Number of 3x3 box-smoothing passes over the coverage grid before the
+    // contour walk. Each pass rounds the quad inclusion boundary one grid
+    // step further; two passes give contour lines whose curvature stays
+    // above the grid spacing, so the marching-squares polygons read as
+    // organic bank outlines instead of angular cutouts.
+    std::uint32_t smoothingPasses = 1;
+    // Per-quad floor jitter (0 = off): every quad's inclusion threshold is
+    // modulated by a deterministic hash noise at a few quads' scale, so the
+    // cutout boundary wiggles between quads instead of following the grid's
+    // stair pattern. Grid-aligned stair steps are the strongest tell of a
+    // polygon cutout; the jitter replaces them with ragged, cloud-like
+    // edges at zero extra geometry.
+    double floorJitter = 0.0;
+    std::uint64_t floorJitterSeed = 0;
     // Frame applied to each unit direction before coverage sampling: the sky
     // deck is built in the sky dome's initial frame (its +Y on the spawn
     // up), the macro shell samples directions directly (identity).
@@ -71,7 +85,7 @@ struct CoverageShellSpec
 };
 
 // Builds the contoured shell mesh: coverage is sampled on the lat-long grid,
-// smoothed once, then every quad whose corner coverage clears the floor
+// smoothed, then every quad whose corner coverage clears the floor
 // contributes its inside polygon (marching squares with linearly
 // interpolated crossings, ambiguous saddles resolved by the cell mean).
 // Vertices carry the coverage-shaded cloud color and the radial normal, so
@@ -151,9 +165,12 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
         }
     }
 
-    // One 3x3 box pass over the coverage grid (wrap the segments; clamp the
-    // bands): rounds the quad inclusion boundary the same way an alpha edge
-    // would soften a textured deck.
+    // One 3x3 box pass per smoothing round over the coverage grid (wrap the
+    // segments; clamp the bands): rounds the quad inclusion boundary the same
+    // way an alpha edge would soften a textured deck. Two rounds give the
+    // contour walk a field whose curvature stays above the grid spacing, so
+    // the polygons read as bank outlines instead of angular cutouts.
+    for (std::uint32_t pass = 0; pass < std::max(1u, spec.smoothingPasses); ++pass)
     {
         std::vector<float> smoothed(coverageGrid.size());
         for (std::uint32_t band = 0; band <= spec.bands; ++band)
@@ -197,6 +214,44 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
         return slot;
     };
 
+    // Per-quad threshold noise: a deterministic hash of the quad index mixed
+    // into [0, 1) (see spec.floorJitter).
+    const auto quadFloor = [&spec](std::uint32_t band, std::uint32_t segment)
+    {
+        if (spec.floorJitter <= 0.0)
+        {
+            return spec.coverageFloor;
+        }
+        std::uint64_t mixed = static_cast<std::uint64_t>(segment) * 0x9E3779B97F4A7C15ull
+            ^ static_cast<std::uint64_t>(band) * 0xC2B2AE3D27D4EB4Full
+            ^ spec.floorJitterSeed;
+        mixed ^= mixed >> 33;
+        mixed *= 0xFF51AFD7ED558CCDull;
+        mixed ^= mixed >> 33;
+        const double unit = static_cast<double>(mixed >> 11) / 9007199254740992.0;
+        return spec.coverageFloor * (1.0 - spec.floorJitter) + spec.coverageFloor * 2.0 * spec.floorJitter * unit;
+    };
+
+    // Linear interpolation of the floor crossing along one grid edge (shared
+    // by the coarse boundary walk and the sub-cell walk below).
+    const auto crossingT = [](float coverageA, float coverageB, float floor) -> float
+    {
+        const float denominator = coverageA - coverageB;
+        return std::abs(denominator) < 1.0e-6f
+            ? 0.5f
+            : std::clamp((coverageA - floor) / denominator, 0.0f, 1.0f);
+    };
+
+    // Subdivision of near-boundary quads and the width of the near-boundary
+    // band in coverage units: quads whose corners sit within the band of the
+    // inclusion floor are marched at kSub x kSub sub-resolution, so every
+    // visual boundary lives at 1/kSub of the grid spacing and the
+    // marching-squares isolines curve at sub-quad precision instead of
+    // snapping to the grid stair pattern. Interior quads keep their
+    // single-pair cost.
+    constexpr std::uint32_t kSub = 4;
+    constexpr float kBoundaryBand = 0.30f;
+
     for (std::uint32_t band = 0; band < spec.bands; ++band)
     {
         const double quadLatitude = spec.latitudeLowRadians
@@ -218,11 +273,49 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             const std::uint32_t ring[4] = {tl, tr, br, bl};
             const float cornerCoverage[4] = {coverageAt(band, segment), coverageAt(band, segment + 1u),
                 coverageAt(band + 1u, segment + 1u), coverageAt(band + 1u, segment)};
+            float floorThisQuad = static_cast<float>(quadFloor(band, segment));
+            if (floorThisQuad < static_cast<float>(spec.coverageFloor))
+            {
+                // Neighbor gate on the threshold wiggle: a quad may clear a
+                // LOWERED floor only while its neighborhood genuinely clears
+                // the base floor. A sub-floor bump that keeps its threshold
+                // lowered with no solid neighbor around renders as a lone
+                // speck floating in clear sky; restoring the base floor there
+                // keeps the ragged bank edges (their neighbors are solid) and
+                // drops the isolated fragments.
+                const float baseFloor = static_cast<float>(spec.coverageFloor);
+                bool neighborGround = false;
+                // Valid quad rows are [0, bands), valid columns [0, segments);
+                // clamp the 3x3 neighborhood to them (the grid's own corner
+                // rows/cols belong to quad corners, not quads).
+                const std::uint32_t bandLow = band > 0u ? band - 1u : 0u;
+                const std::uint32_t bandHigh = band + 2u < spec.bands ? band + 1u : spec.bands - 1u;
+                const std::uint32_t segmentLow = segment > 0u ? segment - 1u : 0u;
+                const std::uint32_t segmentHigh = segment + 2u < spec.segments ? segment + 1u : spec.segments - 1u;
+                for (std::uint32_t neighborBand = bandLow; neighborBand <= bandHigh && !neighborGround; ++neighborBand)
+                {
+                    for (std::uint32_t neighborSegment = segmentLow;
+                        neighborSegment <= segmentHigh && !neighborGround; ++neighborSegment)
+                    {
+                        if (neighborBand == band && neighborSegment == segment)
+                        {
+                            continue;
+                        }
+                        const std::uint32_t nl = neighborBand * stride + neighborSegment;
+                        neighborGround = coverageGrid[nl] >= baseFloor || coverageGrid[nl + 1u] >= baseFloor
+                            || coverageGrid[nl + stride] >= baseFloor || coverageGrid[nl + stride + 1u] >= baseFloor;
+                    }
+                }
+                if (!neighborGround)
+                {
+                    floorThisQuad = baseFloor;
+                }
+            }
             bool inside[4];
             std::uint32_t insideCount = 0;
             for (std::uint32_t corner = 0; corner < 4; ++corner)
             {
-                inside[corner] = cornerCoverage[corner] >= spec.coverageFloor;
+                inside[corner] = cornerCoverage[corner] >= floorThisQuad;
                 insideCount += inside[corner] ? 1u : 0u;
             }
             if (insideCount == 0)
@@ -231,62 +324,217 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             }
             if (insideCount == 4)
             {
-                indices.insert(indices.end(), {tl, tr, br, tl, br, bl});
-                continue;
-            }
-
-            // Ambiguous diagonal case (TL/BR or TR/BL inside): the saddle
-            // either joins the diagonal pair into one bank or splits it into
-            // two wedges - the cell average picks which corners join.
-            const float cellMean = 0.25f * (cornerCoverage[0] + cornerCoverage[1] + cornerCoverage[2] + cornerCoverage[3]);
-            if (insideCount == 2 && inside[0] != inside[1] && inside[1] != inside[2])
-            {
-                for (std::uint32_t corner = 0; corner < 4; ++corner)
+                // Interior quads need one more test before the cheap full
+                // quad: a quad whose corners all clear the floor can still
+                // DIP below it inside (the bilinear saddle between its
+                // corners), and an outer boundary that snaps to the quad
+                // grid reads as stair steps against its cut-out neighbors.
+                // Quads fully above the floor + boundary band take the fast
+                // path; the rest are marched at kSub x kSub sub-resolution,
+                // where the isoline curves at sub-quad precision.
+                bool nearBoundary = false;
+                for (std::uint32_t corner = 0; corner < 4 && !nearBoundary; ++corner)
                 {
-                    inside[corner] = cornerCoverage[corner] >= spec.coverageFloor
-                        && cornerCoverage[corner] >= cellMean;
+                    nearBoundary = cornerCoverage[corner] < floorThisQuad + kBoundaryBand;
                 }
-                insideCount = (inside[0] ? 1u : 0u) + (inside[1] ? 1u : 0u) + (inside[2] ? 1u : 0u)
-                    + (inside[3] ? 1u : 0u);
-                if (insideCount == 0)
-                {
-                    continue;
-                }
-                if (insideCount == 4)
+                if (!nearBoundary)
                 {
                     indices.insert(indices.end(), {tl, tr, br, tl, br, bl});
                     continue;
                 }
             }
-
-            // Boundary walk: for each ring edge, the crossing point (if the
-            // edge straddles the floor) or the inside corner itself; the
-            // polygon is the crossing points plus inside corners in ring
-            // order, fan-triangulated from its first point.
-            std::uint32_t polygon[8];
-            std::uint32_t polygonCount = 0;
-            for (std::uint32_t corner = 0; corner < 4; ++corner)
+            else
             {
-                const std::uint32_t next = (corner + 1u) % 4u;
-                const bool straddles = inside[corner] != inside[next];
-                if (inside[corner])
+                // Ambiguous diagonal case (TL/BR or TR/BL inside): the
+                // saddle either joins the diagonal pair into one bank or
+                // splits it into two wedges - the cell average picks which
+                // corners join. Resolving the saddle at COARSE resolution
+                // keeps the boundary walk's polygon ring-shaped (sub-testing
+                // a saddle instead scatters corner islands along the edge).
+                const float cellMean = 0.25f * (cornerCoverage[0] + cornerCoverage[1] + cornerCoverage[2] + cornerCoverage[3]);
+                if (insideCount == 2 && inside[0] != inside[1] && inside[1] != inside[2])
                 {
-                    polygon[polygonCount++] = ring[corner];
+                    for (std::uint32_t corner = 0; corner < 4; ++corner)
+                    {
+                        inside[corner] = cornerCoverage[corner] >= floorThisQuad
+                            && cornerCoverage[corner] >= cellMean;
+                    }
+                    insideCount = (inside[0] ? 1u : 0u) + (inside[1] ? 1u : 0u)
+                        + (inside[2] ? 1u : 0u) + (inside[3] ? 1u : 0u);
+                    if (insideCount == 0)
+                    {
+                        continue;
+                    }
+                    if (insideCount == 4)
+                    {
+                        indices.insert(indices.end(), {tl, tr, br, tl, br, bl});
+                        continue;
+                    }
                 }
-                if (straddles)
+
+                // Boundary walk: for each ring edge, the crossing point (if
+                // the edge straddles the floor) or the inside corner itself;
+                // the polygon is the crossing points plus inside corners in
+                // ring order, fan-triangulated from its first point.
+                std::uint32_t polygon[8];
+                std::uint32_t polygonCount = 0;
+                for (std::uint32_t corner = 0; corner < 4; ++corner)
                 {
-                    const float coverageA = cornerCoverage[corner];
-                    const float coverageB = cornerCoverage[next];
-                    const float denominator = coverageA - coverageB;
-                    const float t = std::abs(denominator) < 1.0e-6f
-                        ? 0.5f
-                        : std::clamp(static_cast<float>((coverageA - spec.coverageFloor) / denominator), 0.0f, 1.0f);
-                    polygon[polygonCount++] = interpolatedVertex(ring[corner], ring[next], t);
+                    const std::uint32_t next = (corner + 1u) % 4u;
+                    const bool straddles = inside[corner] != inside[next];
+                    if (inside[corner])
+                    {
+                        polygon[polygonCount++] = ring[corner];
+                    }
+                    if (straddles)
+                    {
+                        polygon[polygonCount++] = interpolatedVertex(ring[corner], ring[next],
+                            crossingT(cornerCoverage[corner], cornerCoverage[next], floorThisQuad));
+                    }
+                }
+                for (std::uint32_t fan = 1; fan + 1 < polygonCount; ++fan)
+                {
+                    indices.insert(indices.end(), {polygon[0], polygon[fan], polygon[fan + 1]});
+                }
+                continue;
+            }
+
+            // Fully-inside near-boundary quad: subdivide into kSub x kSub
+            // cells (bilinear coverage + corner colors over the quad) and
+            // march the cells. Sub-cell coverage values are shared arithmetic
+            // between neighboring sub-cells (bilinear from the same corners),
+            // so edges weld; the sub-resolution pushes the polygonal boundary
+            // below one pixel of quantization at capture scales.
+            float subCoverage[kSub + 1][kSub + 1];
+            {
+                for (std::uint32_t row = 0; row <= kSub; ++row)
+                {
+                    const float v = static_cast<float>(row) / static_cast<float>(kSub);
+                    const float top = cornerCoverage[0] + (cornerCoverage[1] - cornerCoverage[0]) * v;
+                    const float bottom = cornerCoverage[3] + (cornerCoverage[2] - cornerCoverage[3]) * v;
+                    for (std::uint32_t column = 0; column <= kSub; ++column)
+                    {
+                        const float u = static_cast<float>(column) / static_cast<float>(kSub);
+                        subCoverage[row][column] = top + (bottom - top) * u;
+                    }
                 }
             }
-            for (std::uint32_t fan = 1; fan + 1 < polygonCount; ++fan)
+            // Sub-cell vertex slots: -2 = not needed yet, >= 0 = vertex slot
+            // in the vertex buffer. The sub-grid's corner vertices reuse the
+            // coarse quad's grid vertices when they coincide, and create
+            // fresh (bilinear) vertices for the interior lattice points -
+            // their colors come from the same bilinear blend as the coverage,
+            // so shading stays continuous with the surrounding quads.
+            const auto subVertex = [&vertices, &tl, &tr, &br, &bl](
+                std::uint32_t row, std::uint32_t column) -> std::int32_t
             {
-                indices.insert(indices.end(), {polygon[0], polygon[fan], polygon[fan + 1]});
+                if (row == 0 && column == 0) return static_cast<std::int32_t>(tl);
+                if (row == 0 && column == kSub) return static_cast<std::int32_t>(tr);
+                if (row == kSub && column == kSub) return static_cast<std::int32_t>(br);
+                if (row == kSub && column == 0) return static_cast<std::int32_t>(bl);
+                const float u = static_cast<float>(column) / static_cast<float>(kSub);
+                const float v = static_cast<float>(row) / static_cast<float>(kSub);
+                const planet::PlanetVertex &topLeft = vertices[tl];
+                const planet::PlanetVertex &topRight = vertices[tr];
+                const planet::PlanetVertex &bottomRight = vertices[br];
+                const planet::PlanetVertex &bottomLeft = vertices[bl];
+                planet::PlanetVertex vertex{};
+                for (std::uint32_t k = 0; k < 3; ++k)
+                {
+                    const float top = topLeft.position[k] + (topRight.position[k] - topLeft.position[k]) * u;
+                    const float bottom = bottomLeft.position[k] + (bottomRight.position[k] - bottomLeft.position[k]) * u;
+                    vertex.position[k] = top + (bottom - top) * v;
+                    const float normalTop = topLeft.normal[k] + (topRight.normal[k] - topLeft.normal[k]) * u;
+                    const float normalBottom = bottomLeft.normal[k] + (bottomRight.normal[k] - bottomLeft.normal[k]) * u;
+                    vertex.normal[k] = normalTop + (normalBottom - normalTop) * v;
+                    const float colorTop = topLeft.color[k] + (topRight.color[k] - topLeft.color[k]) * u;
+                    const float colorBottom = bottomLeft.color[k] + (bottomRight.color[k] - bottomLeft.color[k]) * u;
+                    vertex.color[k] = colorTop + (colorBottom - colorTop) * v;
+                }
+                vertices.push_back(vertex);
+                return static_cast<std::int32_t>(vertices.size() - 1u);
+            };
+            std::int32_t subSlots[kSub + 1][kSub + 1];
+            for (std::uint32_t row = 0; row <= kSub; ++row)
+            {
+                for (std::uint32_t column = 0; column <= kSub; ++column)
+                {
+                    subSlots[row][column] = -2;
+                }
+            }
+            for (std::uint32_t row = 0; row < kSub; ++row)
+            {
+                for (std::uint32_t column = 0; column < kSub; ++column)
+                {
+                    const float cellFloor = floorThisQuad;
+                    const float cellCorner[4] = {subCoverage[row][column], subCoverage[row][column + 1u],
+                        subCoverage[row + 1u][column + 1u], subCoverage[row + 1u][column]};
+                    bool cellInside[4];
+                    std::uint32_t cellInsideCount = 0;
+                    for (std::uint32_t corner = 0; corner < 4; ++corner)
+                    {
+                        cellInside[corner] = cellCorner[corner] >= cellFloor;
+                        cellInsideCount += cellInside[corner] ? 1u : 0u;
+                    }
+                    if (cellInsideCount == 0)
+                    {
+                        continue;
+                    }
+                    const std::uint32_t cornerRow[4] = {row, row, row + 1u, row + 1u};
+                    const std::uint32_t cornerColumn[4] = {column, column + 1u, column + 1u, column};
+                    std::int32_t cellSlot[4];
+                    for (std::uint32_t corner = 0; corner < 4; ++corner)
+                    {
+                        if (subSlots[cornerRow[corner]][cornerColumn[corner]] == -2)
+                        {
+                            subSlots[cornerRow[corner]][cornerColumn[corner]]
+                                = subVertex(cornerRow[corner], cornerColumn[corner]);
+                        }
+                        cellSlot[corner] = subSlots[cornerRow[corner]][cornerColumn[corner]];
+                    }
+                    if (cellInsideCount == 4)
+                    {
+                        indices.insert(indices.end(), {static_cast<std::uint32_t>(cellSlot[0]),
+                            static_cast<std::uint32_t>(cellSlot[1]), static_cast<std::uint32_t>(cellSlot[2]),
+                            static_cast<std::uint32_t>(cellSlot[0]), static_cast<std::uint32_t>(cellSlot[2]),
+                            static_cast<std::uint32_t>(cellSlot[3])});
+                        continue;
+                    }
+                    // Boundary walk over the sub-cell; interpolated crossings
+                    // reuse the same arithmetic so adjacent sub-cells weld.
+                    std::uint32_t polygon[8];
+                    std::uint32_t polygonCount = 0;
+                    for (std::uint32_t corner = 0; corner < 4; ++corner)
+                    {
+                        const std::uint32_t next = (corner + 1u) % 4u;
+                        const bool straddles = cellInside[corner] != cellInside[next];
+                        if (cellInside[corner])
+                        {
+                            polygon[polygonCount++] = static_cast<std::uint32_t>(cellSlot[corner]);
+                        }
+                        if (straddles)
+                        {
+                            const std::uint32_t slotA = static_cast<std::uint32_t>(cellSlot[corner]);
+                            const std::uint32_t slotB = static_cast<std::uint32_t>(cellSlot[next]);
+                            const planet::PlanetVertex &vertexA = vertices[slotA];
+                            const planet::PlanetVertex &vertexB = vertices[slotB];
+                            const float t = crossingT(cellCorner[corner], cellCorner[next], cellFloor);
+                            planet::PlanetVertex vertex{};
+                            for (std::uint32_t k = 0; k < 3; ++k)
+                            {
+                                vertex.position[k] = vertexA.position[k] + (vertexB.position[k] - vertexA.position[k]) * t;
+                                vertex.normal[k] = vertexA.normal[k] + (vertexB.normal[k] - vertexA.normal[k]) * t;
+                                vertex.color[k] = vertexA.color[k] + (vertexB.color[k] - vertexA.color[k]) * t;
+                            }
+                            vertices.push_back(vertex);
+                            polygon[polygonCount++] = static_cast<std::uint32_t>(vertices.size() - 1u);
+                        }
+                    }
+                    for (std::uint32_t fan = 1; fan + 1 < polygonCount; ++fan)
+                    {
+                        indices.insert(indices.end(), {polygon[0], polygon[fan], polygon[fan + 1]});
+                    }
+                }
             }
         }
     }
@@ -439,6 +687,8 @@ void PlanetChunkRenderer::destroyChunkMeshes(ChunkMeshHandles &handles)
         renderer_->destroyMesh(renderer_->self, rendererHandle_, handles.water);
         handles.water = renderer::invalidMesh;
     }
+    handles.terrainPlacementBuilt = false;
+    handles.waterPlacementBuilt = false;
 }
 
 void PlanetChunkRenderer::updateVisibleChunks()
@@ -509,6 +759,15 @@ void PlanetChunkRenderer::updateVisibleChunks()
         // Chunk vertices are planet-local offsets from the chunk center; the
         // world placement adds the planet's own center offset (world =
         // planet-local + center, matching the module's worldPointToPlanetLocal).
+        // The placement is a pure function of the chunk key (the module's
+        // centers never move), so it is built only once per chunk and pass
+        // instead of once per visible chunk per frame - including for
+        // all-water chunks, whose terrain slot never opens but whose water
+        // draw still needs the placement.
+        if (wantTerrain ? handles.terrainPlacementBuilt : handles.waterPlacementBuilt)
+        {
+            continue;
+        }
         const glm::mat4 transform = glm::translate(glm::mat4(1.0f),
             glm::vec3(static_cast<float>(params_.centerMeters[0] + view.centerMeters.x),
                 static_cast<float>(params_.centerMeters[1] + view.centerMeters.y),
@@ -516,10 +775,12 @@ void PlanetChunkRenderer::updateVisibleChunks()
         if (wantTerrain)
         {
             handles.terrainTransform = transform;
+            handles.terrainPlacementBuilt = true;
         }
         else
         {
             handles.waterTransform = transform;
+            handles.waterPlacementBuilt = true;
         }
     }
 
@@ -777,8 +1038,25 @@ void PlanetChunkRenderer::ensureCloudLayer()
     spec.latitudeLowRadians = -glm::pi<double>() * 0.5;
     spec.latitudeHighRadians = glm::pi<double>() * 0.5;
     spec.shellRadiusMeters = shellRadius;
-    spec.lowPassCutoffMeters = vertexSpacing;
+    // The contour walk interpolates the grid linearly, so the field it
+    // follows must not carry content the grid cannot represent: the band
+    // limit sits at twice the vertex spacing (content at four spacings
+    // renders at full strength, anything below two spacings fades out), and
+    // three grid-smoothing rounds round the inclusion boundary. Together
+    // they keep the bank outlines curved at the grid scale instead of
+    // angular.
+    spec.lowPassCutoffMeters = 2.0 * vertexSpacing;
     spec.coverageFloor = kCoverageFloor;
+    spec.smoothingPasses = 3;
+    // Ragged bank edges: the per-quad threshold wiggle breaks the grid stair
+    // pattern of the cutout (see CoverageShellSpec::floorJitter).
+    spec.floorJitter = 0.25;
+    spec.floorJitterSeed = 0xC10D5C0Full;
+    // Thinning fringes: quad corners just above the floor blend their color
+    // toward the sky behind them, so the banks' outer boundary reads as
+    // thinning cloud instead of a hard polygon cutout at orbit distance.
+    spec.hazeEdgeBlend = true;
+    spec.hazeEdgeWidth = 0.30;
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -1239,7 +1517,13 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // well under the field's feature size).
     constexpr std::uint32_t kSegments = 288;
     constexpr std::uint32_t kBands = 144;
-    constexpr double kCoverageFloor = 0.38;
+    // The deck's coverage floor sits BELOW the visual cloud edge on purpose:
+    // quads between the floor and the floor + haze width carry the thinning
+    // fringe (their color fades from the sky gradient into the cloud tone),
+    // so the deck dissolves into the sky instead of cutting off at a polygon
+    // boundary. The opaque cutout then happens where quads are already
+    // nearly sky-colored and its silhouette cannot read.
+    constexpr double kCoverageFloor = 0.22;
     constexpr double kHorizonGuardRadians = 0.05235987755982988; // 3 deg above the horizon
     constexpr double kGuardFadeRadians = 0.06981317007977318;    // 4 deg of thinning cloud above it
 
@@ -1277,12 +1561,19 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     spec.latitudeLowRadians = 0.0;
     spec.latitudeHighRadians = glm::pi<double>() * 0.5;
     spec.shellRadiusMeters = 1.0; // scaled per frame with the dome
-    spec.lowPassCutoffMeters = vertexSpacing;
+    // Same contour discipline as the macro shell (see ensureCloudLayer): the
+    // field band-limits at twice the vertex spacing and three smoothing
+    // rounds round the inclusion boundary, so the deck's outline stays
+    // curved at the grid scale.
+    spec.lowPassCutoffMeters = 2.0 * vertexSpacing;
     spec.coverageFloor = kCoverageFloor;
+    spec.smoothingPasses = 3;
+    spec.floorJitter = 0.25;
+    spec.floorJitterSeed = 0xC10D5C11ull;
     spec.minQuadLatitudeRadians = kHorizonGuardRadians;
     spec.guardFadeRadians = kGuardFadeRadians;
     spec.hazeEdgeBlend = true;
-    spec.hazeEdgeWidth = 0.45;
+    spec.hazeEdgeWidth = 0.55;
     spec.frame = glm::dmat3(tangent, upNormalized, third);
     spec.sunDirection = glm::length(sunLocal) > 1.0e-9 ? &deckSun : nullptr;
 

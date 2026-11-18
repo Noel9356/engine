@@ -228,11 +228,37 @@ struct PlanetGenerationParams
     double coastalMoistureBoost = 0.18;     // moisture added right at the shoreline
     double coastalMoistureBandMeters = 400.0; // elevation over which the boost fades out
     bool   moistureLatitudeBands = true;    // ITCZ wet belt + subtropical dry belts
-    double colorVariation = 0.24;           // per-point albedo jitter (0 = flat palette)
+    // Amplitudes of the four circulation-cell humidity belts (see climate.hpp
+    // for the fixed belt geometry: an ITCZ wet belt on the equator, subtropical
+    // dry belts, a mild wet belt over the temperate westerlies and weak polar
+    // highs). Positive wets the belt's latitude band, negative dries it; 0
+    // removes the belt. Keys: moisture_belt_*_amplitude.
+    double moistureBeltEquatorAmplitude    = 0.20;
+    double moistureBeltSubtropicalAmplitude = -0.26;
+    double moistureBeltTemperateAmplitude  = 0.10;
+    double moistureBeltPolarAmplitude      = -0.06;
+    double colorVariation = 0.34;           // per-point albedo jitter (0 = flat palette)
     double colorVariationWavelengthMeters = 260.0; // feature size of the albedo jitter field
     double colorVariationGroundWavelengthMeters = 11.0; // near-field mottle for ground-level views;
                                                         // keep above ~2x the finest voxel or the LOD
                                                         // band limit fades it out entirely
+    // Erosion patches: a sparse ground-scale field that pulls the albedo of
+    // vegetated ground toward the bare-soil tone (the rock palette row), so
+    // biome sheets break up into soil scars, gravel fans and worn earth the
+    // way real ground does. Strength 0 disables; the wavelength is the patch
+    // feature size (keep it above ~4x the finest voxel so the field survives
+    // the LOD band limit). Keys: soil_patch_strength, soil_patch_wavelength_meters.
+    double soilPatchStrength          = 0.30;
+    double soilPatchWavelengthMeters  = 60.0;
+    // Dryness mosaic: a broad ground-scale field that senesces vegetated
+    // ground - the current biome tone shifts toward its dry, yellow-tan
+    // counterpart over roughly a third of the surface, breaking grasslands,
+    // meadows and forests into the lush/dry mosaics real vegetation shows at
+    // walking and mid distance. Strength 0 disables; the wavelength is the
+    // mosaic feature size (keep it above ~4x the finest voxel). Keys:
+    // dry_patch_strength, dry_patch_wavelength_meters.
+    double dryPatchStrength           = 0.45;
+    double dryPatchWavelengthMeters   = 30.0;
     double snowLineMeters = 2400.0;          // sea-level snow line (drops as climate cools);
                                             // only the highest massifs are glaciated, polar
                                             // caps come from latitude alone. Earth's
@@ -251,7 +277,7 @@ struct PlanetGenerationParams
     double rockSlopeThreshold = 0.46;       // slope (1 - up-dot-normal) where rock takes over;
                                             // steep faces scrape soil and grass into bare
                                             // rock while rolling hills stay green
-    double rockStrataContrast = 0.30;       // luminance banding on rock faces, keyed to the
+    double rockStrataContrast = 0.24;       // luminance banding on rock faces, keyed to the
                                             // strata band spacing (sediment layer stripes);
                                             // strong values read as dirt smears at grazing light
 
@@ -263,19 +289,23 @@ struct PlanetGenerationParams
     double elevationBlendFraction = 0.12; // snow/water band blend as a fraction of band width
 
     // Biome palette, linear RGB rows in Biome enum order (biomeCount rows of 3).
+    // The rows carry the albedos the surface photographs through the demo's
+    // exposure (albedo x sun x NdotL lands land mid-tone and only snow near
+    // white): vegetation rows sit near real canopy/grass reflectances (dark
+    // and saturated), sand and tundra stay bright, snow keeps its ~0.9.
     float biomePalette[biomeCount * 3] = {
         // deep ocean      ocean            shallow ocean
         0.006f, 0.024f, 0.055f,   0.013f, 0.048f, 0.100f,   0.034f, 0.115f, 0.165f,
         // beach           desert           savanna
-        0.540f, 0.490f, 0.350f,   0.560f, 0.500f, 0.330f,   0.520f, 0.470f, 0.245f,
+        0.550f, 0.460f, 0.280f,   0.480f, 0.360f, 0.180f,   0.340f, 0.300f, 0.110f,
         // grassland       shrubland        temperate forest
-        0.360f, 0.500f, 0.220f,   0.310f, 0.355f, 0.165f,   0.180f, 0.330f, 0.130f,
+        0.130f, 0.220f, 0.050f,   0.150f, 0.190f, 0.070f,   0.060f, 0.130f, 0.035f,
         // seasonal forest tropical forest   temperate rainforest
-        0.130f, 0.360f, 0.120f,   0.100f, 0.310f, 0.090f,   0.090f, 0.280f, 0.110f,
+        0.050f, 0.130f, 0.030f,   0.035f, 0.100f, 0.025f,   0.030f, 0.090f, 0.030f,
         // taiga           tundra           snow
-        0.150f, 0.260f, 0.180f,   0.480f, 0.500f, 0.450f,   0.870f, 0.900f, 0.930f,
+        0.060f, 0.100f, 0.050f,   0.260f, 0.240f, 0.170f,   0.870f, 0.900f, 0.930f,
         // rock (cliff faces)
-        0.280f, 0.250f, 0.210f,
+        0.160f, 0.140f, 0.120f,
     };
 
     // ---- surface walking (kinematic controller; see walker.hpp) ----------------
@@ -309,9 +339,9 @@ struct PlanetGenerationParams
 
     // ---- water -----------------------------------------------------------------
     bool  waterEnabled        = true;
-    float waterColorShallow[3] = {0.085f, 0.320f, 0.330f};
+    float waterColorShallow[3] = {0.070f, 0.255f, 0.275f};
     float waterColorDeep[3]    = {0.012f, 0.060f, 0.130f};
-    float waterRoughness      = 0.42f; // consumer hint (exposed via chunk material); low values make the
+    float waterRoughness      = 0.55f; // consumer hint (exposed via chunk material); low values make the
                                        // coarse far-water facets band with sharp mirror glints
     // Depth tint per channel: water absorbs red fastest, green next, blue
     // last, so the surface tint runs shallow turquoise -> green-teal mid shelf
@@ -329,7 +359,7 @@ struct PlanetGenerationParams
     // instead of a painted stripe.
     double waterFoamWidthMeters = 2.5;  // depth band under the surface that reads as surf; wide
                                         // enough to read as a breaker line from a standing eye
-    double waterFoamStrength    = 0.85; // 0 = no foam, 1 = solid white surf band
+    double waterFoamStrength    = 0.60; // 0 = no foam, 1 = solid white surf band
     // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
     // below seaIceTemperature (the same climate field that drives the land's
     // freeze line, so ice caps and snowy poles line up with an organic, noisy
@@ -357,21 +387,33 @@ struct PlanetGenerationParams
     // sub-spacing speckle.
     bool  cloudsEnabled       = true;
     double cloudCoverageAmount    = 0.42;   // approximate sky fraction under cloud (0 = clear)
-    double cloudWavelengthMeters  = 9000.0; // feature scale of the cloud field (scale with the radius)
+    double cloudWavelengthMeters  = 13000.0; // feature scale of the cloud field (scale with the radius):
+                                             // Earth-like weather systems span ~3-6 features around
+                                             // the globe, so keep the wavelength at ~0.2 of the radius
     double cloudAltitudeMeters    = 1200.0; // height of the cloud shell above the datum
-    double cloudDetailStrength    = 0.45;   // amplitude of the fine breakup octave relative to the base field
+    double cloudDetailStrength    = 0.35;   // amplitude of the fine breakup octave relative to the base field
     // Softness of the cloud edge: the coverage field crosses into cloud over
     // a band of this half-width. Narrow values scatter crisp cloud clumps;
-    // wide values grow soft decks with veiled edges.
-    double cloudEdgeSoftness = 0.10;
+    // wide values grow soft decks with veiled edges whose thinning fringes
+    // consumers can paint (the deck contour then dissolves into the sky
+    // instead of cutting off at a polygon boundary).
+    double cloudEdgeSoftness = 0.22;
     // Amplitude of the very-low-frequency weather field that shifts the
     // coverage threshold regionally (positive weather = cloudier). Stronger
     // values organize the banks into larger cloudy and clear systems.
     double cloudWeatherStrength = 0.45;
+    // Wavelength of that weather field as a multiple of the cloud field's own
+    // wavelength: larger values organize the banks into fewer, broader
+    // weather systems.
+    double cloudWeatherWavelengthMultiple = 4.0;
     // Amplitude of the latitudinal coverage bands (a wet equatorial belt,
     // dry subtropics, stormy mid-latitudes), keyed to the spin axis. 0 gives
     // a latitude-blind field.
     double cloudLatitudeBandStrength = 0.16;
+    // Frequency of those bands over latitude (radians of phase per radian of
+    // latitude): ~3.4 places a wet equatorial belt, dry subtropics and wet
+    // mid-latitudes the way Earth's circulation cells do.
+    double cloudBandFrequency = 3.4;
     // Warm white, so the cloud layer reads against the bluer sea ice at
     // globe scale (both are bright; the hue carries the distinction).
     float cloudColor[3]          = {0.985f, 0.975f, 0.955f}; // linear RGB of the cloud tops

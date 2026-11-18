@@ -26,6 +26,7 @@
 #include <engine/kernel/task_scheduler.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/lumen_ray_core.hpp>
 
 #include <exception>
 #include <glm/ext/matrix_float3x3.hpp>
@@ -49,53 +50,32 @@ namespace engine
 namespace lumen_gi
 {
 
-inline constexpr float kPi               = 3.14159265358979f;
 inline constexpr float invalidCardDepth  = std::numeric_limits<float>::max();
 inline constexpr std::uint32_t noSurface = 0xffffffffu;
 // Fixed probe clip box edge (the renderer's fixed probe buffer holds 2 x 9^3).
 inline constexpr std::uint32_t probeGridDimension = 9;
 inline constexpr std::uint32_t maxCardLayers      = 4;
+// Octahedral map resolution bounds of the world probes (the documented
+// config range; the exporter stores the resolution in the probe header).
+inline constexpr std::uint32_t minProbeDirectionResolution = 4;
+inline constexpr std::uint32_t maxProbeDirectionResolution = 64;
+// Screen probes keep Lumen's fixed 8x8 directional map.
+inline constexpr std::uint32_t screenProbeResolution       = 8;
 
-// ---- small shared helpers (hash, sampling, octahedral mapping) ---------------
+// ---- small shared helpers ----------------------------------------------------
 
-inline std::uint64_t hashSeed(std::uint64_t seed)
-{
-    std::uint64_t hash = seed * 0x9E3779B97F4A7C15ull;
-    hash ^= hash >> 30;
-    hash *= 0xBF58476D1CE4E5B9ull;
-    hash ^= hash >> 27;
-    hash *= 0x94D049BB133111EBull;
-    hash ^= hash >> 31;
-    return hash;
-}
-
-// Uniform [0, 1) float; advances the seed.
-inline float randomFloat(std::uint64_t &seed)
-{
-    seed = hashSeed(seed + 0x632BE59BD9B4E019ull);
-    return static_cast<float>(seed >> 40) * (1.0f / 16777216.0f);
-}
-
-// Malley cosine-hemisphere sample around +Z from two uniform numbers.
-inline glm::vec3 cosineHemisphere(float u, float v)
-{
-    const float radius = std::sqrt(std::max(0.0f, u));
-    const float phi    = v * 2.0f * kPi;
-    return glm::vec3(radius * std::cos(phi), radius * std::sin(phi), std::sqrt(std::max(0.0f, 1.0f - u)));
-}
-
-// Orthonormal basis with `normal` as the third column (Duff et al. 2017;
-// branchless and free of the discontinuity of the older cross-product axis
-// switch).
-inline glm::mat3 makeBasis(const glm::vec3 &normal)
-{
-    const float     sign = normal.z >= 0.0f ? 1.0f : -1.0f;
-    const float     a    = -1.0f / (sign + normal.z);
-    const float     b    = normal.x * normal.y * a;
-    const glm::vec3 tangent(1.0f + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
-    const glm::vec3 bitangent(b, sign + normal.y * normal.y * a, -normal.y);
-    return glm::mat3(tangent, bitangent, normal);
-}
+// The RNG, sampling frames, and intersection kernels are shared with
+// lumen_reflection through engine/renderer/lumen_ray_core.hpp so both
+// modules draw from the same distributions and accept the same hits.
+using engine::lumen::kPi;
+using engine::lumen::hashSeed;
+using engine::lumen::randomFloat;
+using engine::lumen::makeBasis;
+using engine::lumen::cosineHemisphere;
+using engine::lumen::safeInverseDirection;
+using engine::lumen::slabTest;
+using engine::lumen::rayTriangle;
+using engine::lumen::qualityScale;
 
 // Octahedral mapping (unit sphere <-> [-1, 1]^2). decode/encode are exact
 // inverses of each other; every consumer of probe maps goes through these two
@@ -181,6 +161,12 @@ struct GiSettings
     // pushed away from, as a fraction of the level spacing (see
     // probes.relocation_margin). Also the margin added when clearing a slab.
     float         probeRelocationMargin      = 0.05f;
+    // Dynamic relight: probes whose lattice position falls inside a moved or
+    // re-created surface's swept world volume, expanded by this radius (see
+    // probes.dynamic_relight_radius_m), retrace from scratch so moving or
+    // deforming geometry does not linger in the world radiance cache for a
+    // full stratum cycle. 0 disables the marking.
+    float         dynamicRelightRadius      = 2.0f;
     float         probeLevel1SpacingFactor   = 4.0f;
     float         screenRayDistance          = 2.0f;
     std::uint32_t gatherScreenScale          = 8;
@@ -411,7 +397,6 @@ struct GiPipelineState;
 // Ray-primitive core shared by every stage. Implemented in
 // lumen_gi_scene.cpp; parallel stages call these freely (all inputs are
 // immutable while stages run).
-bool rayTriangle(const GiRay &ray, const GiPackedTriangle &triangle, float &outT, glm::vec3 &outBarycentric);
 
 // Lean closest-hit payload for the per-frame GI passes. The surface-cache
 // shading (radianceAtHit) reads only the hit's local-space position, its
@@ -575,11 +560,17 @@ struct GiPipelineState
     // Octahedral direction tables: the world cache uses
     // directionResolution^2 directions (Lumen's 32x32 world probes); screen
     // probes use their own coarser 8x8 map (Lumen's screen probe resolution).
-    // Weights are the exact octahedral solid angles, normalized to 4 pi.
+    // Weights are the exact octahedral solid angles, normalized to 4 pi. The
+    // basis tables hold the SH2 projection weight of each direction
+    // (normalization constant squared times the basis polynomial, see
+    // projectRadianceToSh2), precomputed so per-probe projections skip the
+    // per-direction trigonometry.
     std::vector<glm::vec3> probeDirections;
     std::vector<float>     probeDirectionWeights;
+    std::vector<float>     probeDirectionBasis;   // directions.size() * 9
     std::vector<glm::vec3> screenProbeDirections;
     std::vector<float>     screenProbeDirectionWeights;
+    std::vector<float>     screenProbeDirectionBasis;
 
     // Screen-space final gather (debug view) buffers at internal resolution.
     std::uint32_t viewWidth  = 0;
@@ -596,10 +587,12 @@ struct GiPipelineState
     std::vector<glm::vec3> screenProbeRadiance;   // per probe: persistent octahedral radiance
     std::vector<glm::vec3> screenProbePosition;   // per probe: where its map was last traced
     std::vector<std::uint32_t> screenProbePixel;  // per probe: pixel index of the placement
+    std::vector<std::uint32_t> screenProbeSurface; // per probe: surface the placement hit
     std::vector<float>     screenProbeSh2;        // per probe: 9 x 3
     std::vector<std::uint8_t> screenProbeValid;
-    std::vector<glm::vec3> gatherIrradiance;      // per pixel indirect irradiance
+    std::vector<glm::vec3> gatherIrradiance;      // per pixel indirect irradiance (raw accumulation)
     std::vector<glm::vec3> gatherIrradiancePrevious;
+    std::vector<glm::vec3> gatherFiltered;        // per pixel display value (bilateral-filtered)
     // Temporal history of the final gather (self-contained: the gather runs on
     // demand, so it keeps its own previous camera).
     bool          gatherHasHistory = false;
@@ -720,7 +713,6 @@ void parallelRange(TaskScheduler *scheduler, std::size_t count, std::size_t grai
 void buildSurfaceGeometry(GiSurfaceGeometry &geometry, const GiSurfaceDescription &description,
     std::uint64_t maxTriangles, GiError *error);
 void buildSurfaceBvh(GiSurfaceGeometry &geometry);
-void updateSurfaceTransform(GiSurface &surface, const glm::mat4 &transform);
 void updateSurfaceWorldBounds(GiSurface &surface);
 // Rebuilds the card set of one surface (drops its captured data).
 void placeSurfaceCards(const GiSettings &settings, GiSurface &surface);
@@ -738,14 +730,28 @@ void buildProbeSnapshot(const GiPipelineState &state, GiProbeSnapshot &snapshot)
 
 // Captures xy texels [texelBegin, texelEnd) of one card (all layers).
 void captureCardTexels(const GiSurface &surface, GiCard &card, std::uint32_t texelBegin, std::uint32_t texelEnd);
-// Local-space position / world-space normal of one layered card texel.
-glm::vec3 cardTexelLocalPosition(const GiCard &card, std::uint32_t flatTexel);
+// Local-space lit point of one layered card texel; the (x, y) plane cell is
+// passed in because the lighting loops track it incrementally (the flat
+// index still selects the depth layer, so the caller hands both over).
+glm::vec3 cardTexelLocalPositionXY(const GiCard &card, std::uint32_t x, std::uint32_t y, std::size_t texel);
 
 // ---- pipeline.cpp ------------------------------------------------------------------
 
 // Runs one amortized GI frame: capture, direct, indirect + probe stages.
 // Blocks until the stages finish. Returns false when a stage failed.
 bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler);
+
+// Applies one model transform to a surface and refreshes the derived
+// matrices/bounds. Returns false (leaving the surface untouched) when the
+// transform is singular - its inverse or normal matrix is not finite.
+bool updateSurfaceTransform(GiSurface &surface, const glm::mat4 &transform);
+
+// Dynamic relight marking: every probe of both levels whose lattice position
+// lies inside the given world volume re-traces from scratch on its next update
+// (fresh probes are served first by the planning pass), so a moved, deformed,
+// created, or destroyed surface refreshes the world radiance cache around it
+// instead of waiting out the rotating stratum cycle.
+void markProbesNearVolume(GiPipelineState &state, const glm::vec3 &minBounds, const glm::vec3 &maxBounds);
 
 // ---- debug.cpp ---------------------------------------------------------------------
 
@@ -763,10 +769,11 @@ bool exportDebugView(
 
 // Projects a radiance array onto the 9-coefficient SH2 basis (GiProbe order,
 // pre-multiplied by the basis normalization constants so evaluateSh2Irradiance
-// is a plain polynomial) using per-direction solid-angle weights, then
+// is a plain polynomial) using per-direction solid-angle weights and the
+// per-direction basis table that buildProbeDirectionTable fills, then
 // suppresses ringing so the irradiance never goes negative.
 void projectRadianceToSh2(
-    const glm::vec3 *directions, const glm::vec3 *radiance, const float *weights, std::size_t count, float *outSh2);
+    const float *basis, const glm::vec3 *radiance, const float *weights, std::size_t count, float *outSh2);
 glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal);
 bool sunShadowed(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal);
 

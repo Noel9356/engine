@@ -152,17 +152,17 @@ water_depth_tint_meters = 70.0
 # (the bottom seen through the sheet). 0 disables.
 water_shore_mix_meters  = 3.0
 water_enabled           = true
-water_color_shallow     = [0.085, 0.320, 0.330]
+water_color_shallow     = [0.070, 0.255, 0.275]
 water_color_deep        = [0.012, 0.060, 0.130]
 # gloss of the ocean surface: low = mirror-sharp sun glints (the coarse
 # far-water facets then band at grazing angles), high = matte.
-water_roughness         = 0.42
+water_roughness         = 0.55
 # Surf: a white breaker band where the water shallows toward the shore,
 # noise-modulated so it breaks into wave crests instead of a painted stripe.
 # Strength 0 disables; width is the depth band under the surface that reads
 # as surf (real breaker zones sit in the first few meters of depth).
 water_foam_width_meters = 2.5
-water_foam_strength    = 0.85
+water_foam_strength    = 0.60
 
 # sea ice: the water surface freezes where the SEA-LEVEL temperature drops
 # below sea_ice_temperature (the same climate field that drives the land's
@@ -198,12 +198,24 @@ water_wave_wavelength_meters  = 8.0
 # mid-latitudes), keyed to the spin axis.
 clouds_enabled               = true
 cloud_coverage               = 0.42
-cloud_wavelength_meters      = 9000.0
+# feature scale of the cloud field (raise it with radius_meters like the
+# other large-scale layers; ~0.2 of the radius gives Earth-like weather
+# systems that span 3-6 features around the globe).
+cloud_wavelength_meters      = 13000.0
 cloud_altitude_meters        = 1200.0
-cloud_detail_strength        = 0.45
-cloud_edge_softness          = 0.10
+cloud_detail_strength        = 0.35
+cloud_edge_softness          = 0.22
 cloud_weather_strength       = 0.45
+# cloud_weather_wavelength_multiple is the weather field's wavelength as a
+# multiple of the cloud field's own wavelength: larger values organize the
+# banks into fewer, broader weather systems.
+cloud_weather_wavelength_multiple = 4.0
 cloud_latitude_band_strength = 0.16
+# cloud_band_frequency is the latitudinal band frequency (radians of phase
+# per radian of latitude): ~3.4 places a wet equatorial belt, dry subtropics
+# and wet mid-latitudes the way Earth's circulation cells do. 0 gives a
+# latitude-blind field on top of the weather systems.
+cloud_band_frequency         = 3.4
 cloud_color                  = [0.985, 0.975, 0.955]
 # cloud_shadow_strength darkens the terrain and water albedo under the same
 # coverage field the cloud layer renders from, sampled along the sun ray
@@ -274,15 +286,38 @@ moisture_warp_amplitude    = 0.22
 coastal_moisture_boost     = 0.18
 coastal_moisture_band_meters = 400.0
 moisture_latitude_bands    = true
-color_variation            = 0.24
+# amplitudes of the circulation-cell humidity belts (ITCZ wet belt on the
+# equator, subtropical dry belts, a mild wet belt over the temperate
+# westerlies, weak polar highs); 0 removes a belt.
+moisture_belt_equator_amplitude     = 0.20
+moisture_belt_subtropical_amplitude = -0.26
+moisture_belt_temperate_amplitude   = 0.10
+moisture_belt_polar_amplitude       = -0.06
+color_variation            = 0.34
 # feature size of the albedo jitter field (the mottling that keeps large
 # biomes from reading as flat plastic sheets).
 color_variation_wavelength_meters = 260.0
 # near-field mottle octave on the same field: ground-level views keep
-# surface texture instead of one unbroken color. Keep the wavelength above
-# twice the finest voxel (the LOD band limit fades octaves below it - at the
-# showcase's 2.6 m voxels an 11 m mottle renders at full strength).
+# surface texture instead of one unbroken color, and the octave rotates the
+# hue (warm/dry vs cool/lush patches) instead of only shifting brightness.
+# Keep the wavelength above twice the finest voxel (the LOD band limit fades
+# octaves below it - at the showcase's 2.6 m voxels an 11 m mottle renders at
+# full strength).
 color_variation_ground_wavelength_meters = 11.0
+# erosion patches: a sparse ground-scale field pulls vegetated ground toward
+# the bare-soil tone, so biome sheets break into soil scars and worn earth.
+# strength 0 disables; the wavelength is the patch feature size (keep it
+# above ~4x the finest voxel so the field survives the LOD band limit).
+soil_patch_strength           = 0.30
+soil_patch_wavelength_meters  = 60.0
+# dryness mosaic: a broad ground-scale field senesces vegetated ground - the
+# biome tone shifts toward its dry, yellow-tan counterpart over roughly a
+# third of the surface, breaking grasslands, meadows and forest floors into
+# the lush/dry mosaics real vegetation shows at walking and mid distance.
+# strength 0 disables; the wavelength is the mosaic feature size (keep it
+# above ~4x the finest voxel).
+dry_patch_strength            = 0.45
+dry_patch_wavelength_meters   = 30.0
 # Sea-level snow line (drops as climate cools; only the highest massifs are
 # glaciated, polar caps come from latitude alone).
 snow_line_meters           = 2400.0
@@ -295,7 +330,7 @@ beach_wet_darkening        = 0.45
 rock_slope_threshold       = 0.46
 # luminance banding of rock faces at the strata band spacing (sediment
 # stripes); 0 disables.
-rock_strata_contrast       = 0.30
+rock_strata_contrast       = 0.24
 
 # biome color BLENDING (see docs/configuration.md): biome colors interpolate
 # between palette rows over these widths instead of hard-switching per vertex
@@ -314,9 +349,9 @@ elevation_blend_fraction   = 0.12
 # two matched, the sea read as a flat sheet of sea floor with no water at all.
 biome_palette = [
     0.006, 0.024, 0.055,   0.013, 0.048, 0.100,   0.034, 0.115, 0.165,
-    0.540, 0.490, 0.350,   0.560, 0.500, 0.330,   0.520, 0.470, 0.245,
-    0.360, 0.500, 0.220,   0.310, 0.355, 0.165,   0.180, 0.330, 0.130,
-    0.130, 0.360, 0.120,   0.100, 0.310, 0.090,   0.090, 0.280, 0.110,
-    0.150, 0.260, 0.180,   0.480, 0.500, 0.450,   0.870, 0.900, 0.930,
+    0.550, 0.460, 0.280,   0.480, 0.360, 0.180,   0.340, 0.300, 0.110,
+    0.130, 0.220, 0.050,   0.150, 0.190, 0.070,   0.060, 0.130, 0.035,
+    0.050, 0.130, 0.030,   0.035, 0.100, 0.025,   0.030, 0.090, 0.030,
+    0.060, 0.100, 0.050,   0.260, 0.240, 0.170,   0.870, 0.900, 0.930,
     0.280, 0.250, 0.210,
 ]

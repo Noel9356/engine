@@ -11,6 +11,7 @@
 #include <engine/kernel/task_scheduler.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
+#include <engine/util/ppm.hpp>
 #include "lumen_gi_internal.hpp"
 
 #include <cstdint>
@@ -70,25 +71,24 @@ void storePixel(std::vector<std::uint8_t> &rgb, std::size_t pixelIndex, const gl
 
 bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgb)
 {
-    std::FILE *file = std::fopen(filePath, "wb");
-    if (file == nullptr)
-    {
-        return false;
-    }
-    std::fprintf(file, "P6\n%u %u\n255\n", width, height);
-    const std::size_t byteCount = static_cast<std::size_t>(width) * height * 3;
-    const bool        ok        = std::fwrite(rgb, 1, byteCount, file) == byteCount;
-    return std::fclose(file) == 0 && ok;
+    // The shared util writer (engine::util::writePpmRgb) carries the overflow
+    // guards this local copy never had.
+    return util::writePpmRgb(filePath, width, height, rgb, static_cast<std::size_t>(width) * 3);
 }
 
-// Camera ray through the pixel (u, v in pixels).
+// Camera ray through the pixel (u, v in pixels). Unprojects two NDC depths
+// and takes their difference, so perspective and orthographic projections
+// both give the exact view ray.
 glm::vec3 viewRayDirection(const GiPipelineState &state, const glm::mat4 &inverseViewProjection, float px, float py)
 {
     const glm::vec2 ndc(px / static_cast<float>(state.viewWidth) * 2.0f - 1.0f,
         1.0f - py / static_cast<float>(state.viewHeight) * 2.0f);
-    const glm::vec4 target = inverseViewProjection * glm::vec4(ndc, 1.0f, 1.0f);
-    return glm::normalize(glm::vec3(target) / (std::fabs(target.w) > 1.0e-6f ? target.w : 1.0e-6f)
-        - state.cameraPosition);
+    const auto unproject = [&](float depthNdc)
+    {
+        const glm::vec4 target = inverseViewProjection * glm::vec4(ndc, depthNdc, 1.0f);
+        return glm::vec3(target) / (std::fabs(target.w) > 1.0e-6f ? target.w : 1.0e-6f);
+    };
+    return glm::normalize(unproject(1.0f) - unproject(-1.0f));
 }
 
 } // namespace
@@ -148,7 +148,9 @@ void composeDebugView(
                         break;
                     }
                     case GiDebugView::GiOnly:
-                        color = albedo / kPi * constState.gatherIrradiance[pixelIndex] + emissive;
+                        // The indirect term on top of emission, so lamp pixels
+                        // stay identifiable in the A/B against FinalImage.
+                        color = albedo / kPi * constState.gatherFiltered[pixelIndex] + emissive;
                         break;
                     case GiDebugView::FinalImage:
                     default:
@@ -174,7 +176,7 @@ void composeDebugView(
                         {
                             color += albedo * snapshot.skyRadiance(normal);
                         }
-                        color += albedo / kPi * constState.gatherIrradiance[pixelIndex];
+                        color += albedo / kPi * constState.gatherFiltered[pixelIndex];
                         break;
                     }
                     }
@@ -212,8 +214,12 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                     glm::vec3 sum(0.0f);
                     for (std::uint32_t sample = 0; sample < samples; ++sample)
                     {
+                        // Sequenced draws: the jitter offsets are consumed in a
+                        // fixed order so every toolchain sees the same path.
+                        const float jitterX = randomFloat(seed);
+                        const float jitterY = randomFloat(seed);
                         glm::vec3 direction = viewRayDirection(constState, inverseViewProjection,
-                            static_cast<float>(x) + randomFloat(seed), static_cast<float>(y) + randomFloat(seed));
+                            static_cast<float>(x) + jitterX, static_cast<float>(y) + jitterY);
                         glm::vec3 pathRadiance(0.0f);
                         glm::vec3 throughput(1.0f);
                         glm::vec3 origin = constState.cameraPosition;

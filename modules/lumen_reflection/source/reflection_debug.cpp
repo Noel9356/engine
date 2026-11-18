@@ -197,14 +197,20 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                             const float     viewLength = glm::length(view);
                             view /= viewLength;
                             const float clampedRoughness
-                                = std::max(state.gbufferRoughness[index], 0.045f);
+                                = std::max(state.gbufferRoughness[index], kMinimumRoughness);
                             const float alpha = clampedRoughness * clampedRoughness;
+                            // The tangent frame and the Fresnel base reflectivity
+                            // are shared by every sample of the texel, exactly
+                            // as the per-frame pass hoists them.
+                            const glm::mat3 basis     = makeBasis(normal);
+                            const glm::vec3 localView = glm::normalize(glm::transpose(basis) * view);
+                            const glm::vec3 f0        = glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
                             std::uint64_t seed = hashSeed(0x5EEDBEEFull + index * 2654435761ull);
                             glm::vec3    sum(0.0f);
                             for (std::uint32_t sample = 0; sample < samples; ++sample)
                             {
-                                const glm::vec3 direction = rfSampleGgxVndf(view, normal, alpha, seed);
-                                const glm::vec3 fresnel  = rfFresnelWeight(view, direction, albedo, metallic);
+                                const glm::vec3 direction = rfSampleGgxVndf(basis, localView, alpha, seed);
+                                const glm::vec3 fresnel  = rfFresnelWeight(view, direction, f0);
                                 const RfRay ray{position + normal * state.settings.traceBias, direction,
                                     state.settings.maxTraceDistance};
                                 const RfHit hit = rfTraceScene(state, ray);

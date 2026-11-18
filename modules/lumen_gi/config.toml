@@ -68,6 +68,11 @@ updates_per_frame           = 64
 rays_per_update             = 256
 # Fraction of the previous radiance kept when a texel is re-traced.
 hysteresis                  = 0.2
+# Dynamic relight: probes whose lattice position falls inside a moved,
+# deformed, created, or destroyed surface's swept volume (expanded by this
+# radius) retrace from scratch, so dynamic geometry refreshes the world
+# radiance cache within a few frames. 0 disables the marking.
+dynamic_relight_radius_m    = 2.0
 # Near-surface clearance a relocated probe keeps off the geometry it was
 # pushed away from, as a fraction of the level spacing. Also the margin added
 # when a boundary probe steps off a surface plane. The exported lattice stays
@@ -99,3 +104,15 @@ include_ambient             = false
 # run one pass every evaluate() instead (costs CPU every frame).
 continuous_gather           = false
 export_gather_frames        = 16
+
+[lumen_gi.environment]
+# The built-in fallback environment the module shades with when the optional
+# pbr capability is absent (with pbr present, its environment wins and these
+# keys are unused). Defaults match the renderer's built-in environment.
+sun_direction               = [0.45, 0.62, 0.35]
+sun_color                   = [1.0, 0.96, 0.88]
+sun_intensity               = 3.0
+sun_enabled                 = true
+ambient_sky                 = [0.55, 0.65, 0.80]
+ambient_ground              = [0.35, 0.30, 0.25]
+ambient_intensity           = 0.5

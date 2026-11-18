@@ -30,70 +30,11 @@ namespace lumen_gi
 
 
 // ---- ray helpers -----------------------------------------------------------
-
-bool rayTriangle(const GiRay &ray, const GiPackedTriangle &triangle, float &outT, glm::vec3 &outBarycentric)
-{
-    const glm::vec3 pVec        = glm::cross(ray.direction, triangle.edge2);
-    const float     determinant = glm::dot(triangle.edge1, pVec);
-    if (std::fabs(determinant) < 1.0e-12f)
-    {
-        return false;
-    }
-    const float     inverseDeterminant = 1.0f / determinant;
-    const glm::vec3 tVec               = ray.origin - triangle.v0;
-    // A hair of tolerance keeps rays that hit a shared edge exactly from
-    // slipping between two triangles (watertight in practice).
-    constexpr float edgeTolerance = 1.0e-6f;
-    const float     u             = glm::dot(tVec, pVec) * inverseDeterminant;
-    if (u < -edgeTolerance || u > 1.0f + edgeTolerance)
-    {
-        return false;
-    }
-    const glm::vec3 qVec = glm::cross(tVec, triangle.edge1);
-    const float     v    = glm::dot(ray.direction, qVec) * inverseDeterminant;
-    if (v < -edgeTolerance || u + v > 1.0f + edgeTolerance)
-    {
-        return false;
-    }
-    const float t = glm::dot(triangle.edge2, qVec) * inverseDeterminant;
-    if (t < 1.0e-4f || t > ray.tMax)
-    {
-        return false;
-    }
-    outT           = t;
-    outBarycentric = glm::vec3(1.0f - u - v, u, v);
-    return true;
-}
+// safeInverseDirection, slabTest, and the Moller-Trumbore kernel come from
+// engine/renderer/lumen_ray_core.hpp (shared with lumen_reflection).
 
 namespace
 {
-
-glm::vec3 safeInverseDirection(const glm::vec3 &direction)
-{
-    glm::vec3 inverse;
-    for (std::uint32_t axis = 0; axis < 3; ++axis)
-    {
-        inverse[axis] = std::fabs(direction[axis]) > 1.0e-8f ? 1.0f / direction[axis] : 1.0e8f;
-    }
-    return inverse;
-}
-
-// Slab test returning the entry distance (used to visit the nearer child
-// first so tMax shrinks early and the far subtree is usually culled).
-inline bool slabTest(const glm::vec3 &origin, const glm::vec3 &inverseDirection, const glm::vec3 &boundsMin,
-    const glm::vec3 &boundsMax, float tMax, float &outNear)
-{
-    const float tx0 = (boundsMin.x - origin.x) * inverseDirection.x;
-    const float tx1 = (boundsMax.x - origin.x) * inverseDirection.x;
-    const float ty0 = (boundsMin.y - origin.y) * inverseDirection.y;
-    const float ty1 = (boundsMax.y - origin.y) * inverseDirection.y;
-    const float tz0 = (boundsMin.z - origin.z) * inverseDirection.z;
-    const float tz1 = (boundsMax.z - origin.z) * inverseDirection.z;
-    const float tNear = std::max(std::max(std::min(tx0, tx1), std::min(ty0, ty1)), std::max(std::min(tz0, tz1), 0.0f));
-    const float tFar  = std::min(std::min(std::max(tx0, tx1), std::max(ty0, ty1)), std::min(std::max(tz0, tz1), tMax));
-    outNear           = tNear;
-    return tNear <= tFar;
-}
 
 constexpr std::uint32_t traversalStackSize = 96;
 
@@ -151,25 +92,46 @@ bool traverseSurface(const GiSurfaceGeometry &geometry, GiRay &ray, const glm::v
         const bool hitRight = slabTest(ray.origin, inverseDirection, right.boundsMin, right.boundsMax, ray.tMax, rightNear);
         if (hitLeft && hitRight)
         {
-            // Push the farther child first so the nearer one pops next.
+            // Push the farther child first so the nearer one pops next. The
+            // pushes are guarded: a median-split BVH over N triangles is about
+            // log2(N/4) deep, so the stack cannot fill in practice, but a
+            // degenerate split must never write past it either.
             if (leftNear <= rightNear)
             {
-                stack[stackSize++] = node.leftOrFirst + 1;
-                stack[stackSize++] = node.leftOrFirst;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
             }
             else
             {
-                stack[stackSize++] = node.leftOrFirst;
-                stack[stackSize++] = node.leftOrFirst + 1;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
             }
         }
         else if (hitLeft)
         {
-            stack[stackSize++] = node.leftOrFirst;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst;
+            }
         }
         else if (hitRight)
         {
-            stack[stackSize++] = node.leftOrFirst + 1;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst + 1;
+            }
         }
     }
     return found;
@@ -315,24 +277,44 @@ SurfaceHit traceSurfaces(const GiPipelineState &state, const GiRay &worldRay, st
         const bool hitRight = slabTest(worldRay.origin, inverseDirection, right.boundsMin, right.boundsMax, bestT, rightNear);
         if (hitLeft && hitRight)
         {
+            // Farther child first (see traverseSurface); the pushes are
+            // guarded the same way.
             if (leftNear <= rightNear)
             {
-                stack[stackSize++] = node.leftOrFirst + 1;
-                stack[stackSize++] = node.leftOrFirst;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
             }
             else
             {
-                stack[stackSize++] = node.leftOrFirst;
-                stack[stackSize++] = node.leftOrFirst + 1;
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst;
+                }
+                if (stackSize < traversalStackSize)
+                {
+                    stack[stackSize++] = node.leftOrFirst + 1;
+                }
             }
         }
         else if (hitLeft)
         {
-            stack[stackSize++] = node.leftOrFirst;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst;
+            }
         }
         else if (hitRight)
         {
-            stack[stackSize++] = node.leftOrFirst + 1;
+            if (stackSize < traversalStackSize)
+            {
+                stack[stackSize++] = node.leftOrFirst + 1;
+            }
         }
     }
     return result;
@@ -436,13 +418,29 @@ void buildSurfaceGeometry(GiSurfaceGeometry &geometry, const GiSurfaceDescriptio
         fail(GiError::InvalidDescription);
         return;
     }
+    // Registry descriptions are module-internal API input, not trusted data:
+    // the vertex count is bounded before any allocation is sized from it, and
+    // every attribute stride must hold its three floats while staying sane (an
+    // interleaved vertex layout has no reason to jump pages between
+    // attributes; a smaller stride would read past the attribute an index
+    // addresses).
+    if (description.vertexCount > (1u << 24))
+    {
+        fail(GiError::InvalidDescription);
+        return;
+    }
     const std::uint64_t triangleCount = description.indexCount / 3;
     if (triangleCount > maxTriangles)
     {
         fail(GiError::InvalidDescription);
         return;
     }
-    if (description.positionStrideBytes % sizeof(float) != 0)
+    constexpr std::uint32_t minimumAttributeStrideBytes = 3 * sizeof(float);
+    constexpr std::uint32_t maximumAttributeStrideBytes = 4096;
+    if (description.positionStrideBytes % sizeof(float) != 0
+        || (description.positionStrideBytes != 0
+            && (description.positionStrideBytes < minimumAttributeStrideBytes
+                || description.positionStrideBytes > maximumAttributeStrideBytes)))
     {
         fail(GiError::InvalidDescription);
         return;
@@ -456,12 +454,16 @@ void buildSurfaceGeometry(GiSurfaceGeometry &geometry, const GiSurfaceDescriptio
     // float triplets instead.
     const bool hasNormals = description.normals != nullptr && description.normalStrideBytes != 0;
     const bool hasColors  = description.colors != nullptr && description.colorStrideBytes != 0;
-    if (hasNormals && description.normalStrideBytes % sizeof(float) != 0)
+    if (hasNormals && (description.normalStrideBytes % sizeof(float) != 0
+            || description.normalStrideBytes < minimumAttributeStrideBytes
+            || description.normalStrideBytes > maximumAttributeStrideBytes))
     {
         fail(GiError::InvalidDescription);
         return;
     }
-    if (hasColors && description.colorStrideBytes % sizeof(float) != 0)
+    if (hasColors && (description.colorStrideBytes % sizeof(float) != 0
+            || description.colorStrideBytes < minimumAttributeStrideBytes
+            || description.colorStrideBytes > maximumAttributeStrideBytes))
     {
         fail(GiError::InvalidDescription);
         return;
@@ -631,7 +633,7 @@ void buildSurfaceBvh(GiSurfaceGeometry &geometry)
     constexpr std::uint32_t leafSize     = 4;
     constexpr std::uint32_t maxDepth     = 48;
     constexpr std::uint32_t binCount     = 16;
-    geometry.bvh.reserve(2 * static_cast<std::size_t>(triangleCount) / 2 + 2);
+    geometry.bvh.reserve(2 * static_cast<std::size_t>(triangleCount) + 2);
     auto makeNode = [&](const glm::vec3 &boundsMin, const glm::vec3 &boundsMax) -> std::uint32_t
     {
         GiSurfaceGeometry::BvhNode node;
@@ -818,12 +820,48 @@ void updateSurfaceWorldBounds(GiSurface &surface)
     surface.worldMax = worldMax;
 }
 
-void updateSurfaceTransform(GiSurface &surface, const glm::mat4 &transform)
+bool updateSurfaceTransform(GiSurface &surface, const glm::mat4 &transform)
 {
+    // Validate the derived matrices before committing anything: a singular
+    // transform (zero scale, collapsed basis) produces a non-finite inverse,
+    // and every slab test against NaN bounds fails closed, so the surface
+    // would silently vanish from all rays. The caller keeps the previous
+    // transform instead.
+    const glm::mat4 inverse        = glm::inverse(transform);
+    const glm::mat3 linear        = glm::mat3(transform);
+    const glm::mat3 normalMatrix  = glm::inverseTranspose(linear);
+    const auto      allFinite4    = [](const glm::mat4 &matrix)
+    {
+        const float *elements = glm::value_ptr(matrix);
+        for (std::uint32_t element = 0; element < 16; ++element)
+        {
+            if (!std::isfinite(elements[element]))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto allFinite3 = [](const glm::mat3 &matrix)
+    {
+        const float *elements = glm::value_ptr(matrix);
+        for (std::uint32_t element = 0; element < 9; ++element)
+        {
+            if (!std::isfinite(elements[element]))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!allFinite4(transform) || !allFinite4(inverse) || !allFinite3(normalMatrix))
+    {
+        return false;
+    }
     surface.transform        = transform;
-    surface.inverseTransform = glm::inverse(transform);
-    surface.linear           = glm::mat3(transform);
-    surface.normalMatrix     = glm::inverseTranspose(surface.linear);
+    surface.inverseTransform = inverse;
+    surface.linear           = linear;
+    surface.normalMatrix     = normalMatrix;
     // Cached transform pieces for the per-ray / per-texel hot paths: the
     // translation columns and the upper 3x3 of the inverse. A point through
     // inverseLinear + inverseTranslation performs the same three dot products
@@ -848,6 +886,31 @@ void updateSurfaceTransform(GiSurface &surface, const glm::mat4 &transform)
     {
         card.lastDirectFrame   = 0;
         card.lastIndirectFrame = 0;
+    }
+    return true;
+}
+
+// ---- dynamic relight marking ---------------------------------------------
+
+void markProbesNearVolume(GiPipelineState &state, const glm::vec3 &minBounds, const glm::vec3 &maxBounds)
+{
+    // Every probe whose lattice position lies inside the volume re-traces
+    // from scratch on its next update (the planning pass serves fresh probes
+    // first and probeUpdatesPerFrame bounds the work), so a moved, deformed,
+    // created, or destroyed surface refreshes the world radiance cache
+    // around it within a few frames instead of waiting out the rotating
+    // stratum cycle.
+    for (GiProbeLevel *level : {&state.level0, &state.level1})
+    {
+        for (GiProbeLevel::Probe &probe : level->probes)
+        {
+            if (probe.position.x >= minBounds.x && probe.position.x <= maxBounds.x
+                && probe.position.y >= minBounds.y && probe.position.y <= maxBounds.y
+                && probe.position.z >= minBounds.z && probe.position.z <= maxBounds.z)
+            {
+                probe.fresh = true;
+            }
+        }
     }
 }
 
@@ -916,11 +979,15 @@ std::vector<CardCandidate> buildCardCandidates(const glm::vec3 &boundsMin, const
             face.width                = extent[uAxis];
             face.height               = extent[vAxis];
             // Texel counts follow the WORLD size of the face so a scaled
-            // instance keeps a consistent density.
+            // instance keeps a consistent density. The count is clamped in
+            // the float domain before the integer conversion: an extreme
+            // extent or instance scale would otherwise overflow the cast.
             const float worldWidth    = extent[uAxis] * axisScale[uAxis];
             const float worldHeight   = extent[vAxis] * axisScale[vAxis];
-            face.texelWidth  = std::clamp(static_cast<std::uint32_t>(std::ceil(worldWidth * density)), 4u, 4096u);
-            face.texelHeight = std::clamp(static_cast<std::uint32_t>(std::ceil(worldHeight * density)), 4u, 4096u);
+            face.texelWidth  = static_cast<std::uint32_t>(
+                std::clamp(std::ceil(worldWidth * density), 4.0f, 4096.0f));
+            face.texelHeight = static_cast<std::uint32_t>(
+                std::clamp(std::ceil(worldHeight * density), 4.0f, 4096.0f));
 
             std::uint32_t splitU = 1;
             std::uint32_t splitV = 1;
@@ -948,10 +1015,10 @@ std::vector<CardCandidate> buildCardCandidates(const glm::vec3 &boundsMin, const
                     const float uOffset = (-0.5f + (static_cast<float>(u) + 0.5f) / static_cast<float>(splitU)) * face.width;
                     const float vOffset = (-0.5f + (static_cast<float>(v) + 0.5f) / static_cast<float>(splitV)) * face.height;
                     piece.origin += face.axisU * uOffset + face.axisV * vOffset;
-                    piece.texelWidth = std::clamp(
-                        static_cast<std::uint32_t>(std::ceil(piece.width * axisScale[uAxis] * density)), 4u, maxAxisTexels);
-                    piece.texelHeight = std::clamp(
-                        static_cast<std::uint32_t>(std::ceil(piece.height * axisScale[vAxis] * density)), 4u, maxAxisTexels);
+                    piece.texelWidth = static_cast<std::uint32_t>(std::clamp(
+                        std::ceil(piece.width * axisScale[uAxis] * density), 4.0f, static_cast<float>(maxAxisTexels)));
+                    piece.texelHeight = static_cast<std::uint32_t>(std::clamp(
+                        std::ceil(piece.height * axisScale[vAxis] * density), 4.0f, static_cast<float>(maxAxisTexels)));
                     pieces.push_back(piece);
                 }
             }
@@ -1053,86 +1120,90 @@ void ensureSceneTlas(GiPipelineState &state)
     {
         return;
     }
-    state.tlasDirty = false;
-    state.tlas.clear();
-    state.tlasSurfaces.clear();
+    // Built into locals and swapped in on success: a failed allocation half
+    // way must leave the previous tree in place (with the dirty flag still
+    // set) instead of an empty TLAS that silently swallows every ray.
+    std::vector<GiTlasNode>    tlas;
+    std::vector<std::uint32_t> tlasSurfaces;
     for (std::uint32_t index = 0; index < state.surfaces.size(); ++index)
     {
         const GiSurface &surface = state.surfaces[index];
         if (!surface.excluded && !surface.geometry.bvh.empty())
         {
-            state.tlasSurfaces.push_back(index);
+            tlasSurfaces.push_back(index);
         }
     }
-    if (state.tlasSurfaces.empty())
+    if (!tlasSurfaces.empty())
     {
-        return;
-    }
-    struct BuildEntry
-    {
-        std::uint32_t nodeIndex;
-        std::uint32_t begin;
-        std::uint32_t end;
-    };
-    auto boundsOf = [&](std::uint32_t begin, std::uint32_t end, glm::vec3 &outMin, glm::vec3 &outMax)
-    {
-        outMin = glm::vec3(std::numeric_limits<float>::max());
-        outMax = glm::vec3(-std::numeric_limits<float>::max());
-        for (std::uint32_t i = begin; i < end; ++i)
+        struct BuildEntry
         {
-            const GiSurface &surface = state.surfaces[state.tlasSurfaces[i]];
-            outMin                   = glm::min(outMin, surface.worldMin);
-            outMax                   = glm::max(outMax, surface.worldMax);
-        }
-    };
-    auto makeNode = [&](std::uint32_t begin, std::uint32_t end) -> std::uint32_t
-    {
-        GiTlasNode node;
-        boundsOf(begin, end, node.boundsMin, node.boundsMax);
-        state.tlas.push_back(node);
-        return static_cast<std::uint32_t>(state.tlas.size() - 1);
-    };
-    std::vector<BuildEntry> stack;
-    stack.push_back(BuildEntry{makeNode(0, static_cast<std::uint32_t>(state.tlasSurfaces.size())), 0,
-        static_cast<std::uint32_t>(state.tlasSurfaces.size())});
-    while (!stack.empty())
-    {
-        const BuildEntry entry = stack.back();
-        stack.pop_back();
-        const std::uint32_t span = entry.end - entry.begin;
-        if (span <= 2)
+            std::uint32_t nodeIndex;
+            std::uint32_t begin;
+            std::uint32_t end;
+        };
+        auto boundsOf = [&](std::uint32_t begin, std::uint32_t end, glm::vec3 &outMin, glm::vec3 &outMax)
         {
-            state.tlas[entry.nodeIndex].leftOrFirst = entry.begin;
-            state.tlas[entry.nodeIndex].count       = span;
-            continue;
-        }
-        const glm::vec3 extent = state.tlas[entry.nodeIndex].boundsMax - state.tlas[entry.nodeIndex].boundsMin;
-        std::uint32_t   axis   = 0;
-        if (extent.y >= extent.x && extent.y >= extent.z)
-        {
-            axis = 1;
-        }
-        else if (extent.z >= extent.x && extent.z >= extent.y)
-        {
-            axis = 2;
-        }
-        const std::uint32_t middle = entry.begin + span / 2;
-        std::nth_element(state.tlasSurfaces.begin() + static_cast<std::ptrdiff_t>(entry.begin),
-            state.tlasSurfaces.begin() + static_cast<std::ptrdiff_t>(middle),
-            state.tlasSurfaces.begin() + static_cast<std::ptrdiff_t>(entry.end),
-            [&](std::uint32_t left, std::uint32_t right)
+            outMin = glm::vec3(std::numeric_limits<float>::max());
+            outMax = glm::vec3(-std::numeric_limits<float>::max());
+            for (std::uint32_t i = begin; i < end; ++i)
             {
-                const GiSurface &a = state.surfaces[left];
-                const GiSurface &b = state.surfaces[right];
-                return a.worldMin[axis] + a.worldMax[axis] < b.worldMin[axis] + b.worldMax[axis];
-            });
-        const std::uint32_t leftIndex  = makeNode(entry.begin, middle);
-        const std::uint32_t rightIndex = makeNode(middle, entry.end);
-        state.tlas[entry.nodeIndex].leftOrFirst = leftIndex;
-        state.tlas[entry.nodeIndex].count       = 0;
-        stack.push_back(BuildEntry{leftIndex, entry.begin, middle});
-        stack.push_back(BuildEntry{rightIndex, middle, entry.end});
+                const GiSurface &surface = state.surfaces[tlasSurfaces[i]];
+                outMin                   = glm::min(outMin, surface.worldMin);
+                outMax                   = glm::max(outMax, surface.worldMax);
+            }
+        };
+        auto makeNode = [&](std::uint32_t begin, std::uint32_t end) -> std::uint32_t
+        {
+            GiTlasNode node;
+            boundsOf(begin, end, node.boundsMin, node.boundsMax);
+            tlas.push_back(node);
+            return static_cast<std::uint32_t>(tlas.size() - 1);
+        };
+        std::vector<BuildEntry> stack;
+        stack.push_back(BuildEntry{makeNode(0, static_cast<std::uint32_t>(tlasSurfaces.size())), 0,
+            static_cast<std::uint32_t>(tlasSurfaces.size())});
+        while (!stack.empty())
+        {
+            const BuildEntry entry = stack.back();
+            stack.pop_back();
+            const std::uint32_t span = entry.end - entry.begin;
+            if (span <= 2)
+            {
+                tlas[entry.nodeIndex].leftOrFirst = entry.begin;
+                tlas[entry.nodeIndex].count       = span;
+                continue;
+            }
+            const glm::vec3 extent = tlas[entry.nodeIndex].boundsMax - tlas[entry.nodeIndex].boundsMin;
+            std::uint32_t   axis   = 0;
+            if (extent.y >= extent.x && extent.y >= extent.z)
+            {
+                axis = 1;
+            }
+            else if (extent.z >= extent.x && extent.z >= extent.y)
+            {
+                axis = 2;
+            }
+            const std::uint32_t middle = entry.begin + span / 2;
+            std::nth_element(tlasSurfaces.begin() + static_cast<std::ptrdiff_t>(entry.begin),
+                tlasSurfaces.begin() + static_cast<std::ptrdiff_t>(middle),
+                tlasSurfaces.begin() + static_cast<std::ptrdiff_t>(entry.end),
+                [&](std::uint32_t left, std::uint32_t right)
+                {
+                    const GiSurface &a = state.surfaces[left];
+                    const GiSurface &b = state.surfaces[right];
+                    return a.worldMin[axis] + a.worldMax[axis] < b.worldMin[axis] + b.worldMax[axis];
+                });
+            const std::uint32_t leftIndex  = makeNode(entry.begin, middle);
+            const std::uint32_t rightIndex = makeNode(middle, entry.end);
+            tlas[entry.nodeIndex].leftOrFirst = leftIndex;
+            tlas[entry.nodeIndex].count       = 0;
+            stack.push_back(BuildEntry{leftIndex, entry.begin, middle});
+            stack.push_back(BuildEntry{rightIndex, middle, entry.end});
+        }
     }
+    state.tlas         = std::move(tlas);
+    state.tlasSurfaces = std::move(tlasSurfaces);
+    state.tlasDirty    = false;
 }
 
 // ---- probe lattice -----------------------------------------------------------
@@ -1140,17 +1211,26 @@ void ensureSceneTlas(GiPipelineState &state)
 namespace
 {
 
-// Fills a resolution^2 octahedral table: unit directions at texel centers and
-// the exact solid angle of every texel (normalized to sum to 4 pi). The
-// octahedron-plane element maps to the sphere with dOmega = dA / |p|^3, so
-// texels near the diagonals cover less solid angle than the ones at the
-// axes; using a flat 4 pi / N weight (as before) skews every SH projection.
-void fillOctahedralTable(std::uint32_t resolution, std::vector<glm::vec3> &directions, std::vector<float> &weights)
+// Fills a resolution^2 octahedral table: unit directions at texel centers,
+// the exact solid angle of every texel (normalized to sum to 4 pi), and the
+// per-direction SH2 projection basis values (normalization constant squared
+// times the basis polynomial - the stored coefficient folds the basis, see
+// projectRadianceToSh2). The octahedron-plane element maps to the sphere with
+// dOmega = dA / |p|^3, so texels near the diagonals cover less solid angle
+// than the ones at the axes; using a flat 4 pi / N weight (as before) skews
+// every SH projection.
+void fillOctahedralTable(std::uint32_t resolution, std::vector<glm::vec3> &directions, std::vector<float> &weights,
+    std::vector<float> &basis)
 {
+    constexpr float kConstants[9] = {0.282094792f, 0.488602512f, 0.488602512f, 0.488602512f,
+        1.092548431f, 1.092548431f, 0.315391565f, 1.092548431f, 0.546274215f};
     directions.clear();
     weights.clear();
-    directions.reserve(static_cast<std::size_t>(resolution) * resolution);
-    weights.reserve(static_cast<std::size_t>(resolution) * resolution);
+    basis.clear();
+    const std::size_t count = static_cast<std::size_t>(resolution) * resolution;
+    directions.reserve(count);
+    weights.reserve(count);
+    basis.reserve(count * 9);
     double total = 0.0;
     for (std::uint32_t y = 0; y < resolution; ++y)
     {
@@ -1165,10 +1245,19 @@ void fillOctahedralTable(std::uint32_t resolution, std::vector<glm::vec3> &direc
                 p.y = (1.0f - std::fabs(u)) * (v >= 0.0f ? 1.0f : -1.0f);
             }
             const float length = std::max(glm::length(p), 1.0e-8f);
-            directions.push_back(p / length);
+            const glm::vec3 direction = p / length;
+            directions.push_back(direction);
             const float weight = 1.0f / (length * length * length);
             weights.push_back(weight);
             total += weight;
+            const float dx = direction.x;
+            const float dy = direction.y;
+            const float dz = direction.z;
+            const float polynomial[9] = {1.0f, dy, dz, dx, dx * dy, dy * dz, 3.0f * dz * dz - 1.0f, dx * dz, dx * dx - dy * dy};
+            for (std::uint32_t coefficient = 0; coefficient < 9; ++coefficient)
+            {
+                basis.push_back(kConstants[coefficient] * polynomial[coefficient] * kConstants[coefficient]);
+            }
         }
     }
     const float normalization = total > 0.0 ? static_cast<float>(4.0 * 3.14159265358979 / total) : 0.0f;
@@ -1182,12 +1271,14 @@ void fillOctahedralTable(std::uint32_t resolution, std::vector<glm::vec3> &direc
 
 void buildProbeDirectionTable(GiPipelineState &state)
 {
-    const std::uint32_t resolution = std::max(state.settings.probeDirectionResolution, 4u);
-    fillOctahedralTable(resolution, state.probeDirections, state.probeDirectionWeights);
+    const std::uint32_t resolution = std::clamp(state.settings.probeDirectionResolution,
+        minProbeDirectionResolution, maxProbeDirectionResolution);
+    fillOctahedralTable(resolution, state.probeDirections, state.probeDirectionWeights, state.probeDirectionBasis);
     state.settings.probeDirectionResolution = resolution;
     // Screen probes: fixed 8x8 octahedral map (Lumen's screen probe directional
     // resolution).
-    fillOctahedralTable(8, state.screenProbeDirections, state.screenProbeDirectionWeights);
+    fillOctahedralTable(screenProbeResolution, state.screenProbeDirections, state.screenProbeDirectionWeights,
+        state.screenProbeDirectionBasis);
 }
 
 void buildProbeLevels(GiPipelineState &state)
@@ -1227,7 +1318,12 @@ void snapProbeLevels(GiPipelineState &state, const glm::vec3 &cameraPosition)
         }
         const std::int32_t dim  = static_cast<std::int32_t>(level.dimensions[0]);
         const std::int32_t half = dim / 2;
-        const glm::ivec3   origin = glm::ivec3(glm::floor(cameraPosition / level.spacing)) - glm::ivec3(half);
+        // The scaled camera is clamped into int32 range before the cell
+        // conversion: a camera millions of spacing units out still scrolls
+        // the toroidal lattice correctly, but the raw floor would overflow.
+        const float maxCell    = static_cast<float>(std::numeric_limits<std::int32_t>::max() / 4);
+        const glm::vec3 scaled = glm::clamp(cameraPosition / level.spacing, glm::vec3(-maxCell), glm::vec3(maxCell));
+        const glm::ivec3   origin = glm::ivec3(glm::floor(scaled)) - glm::ivec3(half);
         level.originCell = origin;
         for (std::int32_t z = 0; z < dim; ++z)
         {
@@ -1267,6 +1363,12 @@ void buildProbeSnapshot(const GiPipelineState &state, GiProbeSnapshot &snapshot)
     snapshot.probes.clear();
     GiProbeHeader &header = snapshot.header;
     header                = GiProbeHeader{};
+    if (state.level0.probes.empty() || state.level1.probes.empty())
+    {
+        // Levels not built yet (no configuration applied): export the empty
+        // header rather than touching the lattice math.
+        return;
+    }
     header.gridCenter[0]  = state.cameraPosition.x;
     header.gridCenter[1]  = state.cameraPosition.y;
     header.gridCenter[2]  = state.cameraPosition.z;
@@ -1324,19 +1426,18 @@ void buildProbeSnapshot(const GiPipelineState &state, GiProbeSnapshot &snapshot)
 
 // ---- card capture --------------------------------------------------------------
 
-glm::vec3 cardTexelLocalPosition(const GiCard &card, std::uint32_t flatTexel)
+// Local-space lit point of one card texel with the (x, y) cell already known
+// (the lighting loops track the cell incrementally, so the hot path never
+// pays the flat-index divisions). Same arithmetic as the flat-index variant.
+glm::vec3 cardTexelLocalPositionXY(const GiCard &card, std::uint32_t x, std::uint32_t y, std::size_t texel)
 {
-    const std::uint32_t plane = static_cast<std::uint32_t>(card.planeTexels());
-    const std::uint32_t xy    = flatTexel % plane;
-    const std::uint32_t x     = xy % card.texelWidth;
-    const std::uint32_t y     = xy / card.texelWidth;
     const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(card.texelWidth) - 0.5f;
     const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(card.texelHeight) - 0.5f;
     const glm::vec3 planePoint = card.origin + card.axisU * (u * card.width) + card.axisV * (v * card.height);
     // The lit point is the actual surface behind the plane (depth below it),
     // not the plane point: for surfaces inset from the card plane the plane
     // point lies in free space or inside another object.
-    return planePoint - card.axisW * card.depthTexels[flatTexel];
+    return planePoint - card.axisW * card.depthTexels[texel];
 }
 
 // Captures xy texels [texelBegin, texelEnd) of one card, all depth layers: a
@@ -1370,7 +1471,14 @@ void captureCardTexels(const GiSurface &surface, GiCard &card, std::uint32_t tex
 
         std::uint32_t layer   = 0;
         float         offset  = 0.0f;
-        while (layer < card.layers)
+        // The step loop always advances (every hit moves the origin at least
+        // one epsilon plus the restart bias), so it terminates on its own;
+        // the iteration bound only keeps stacked coplanar backfaces - a
+        // common baked-model pathology - from spending hundreds of
+        // traversals per texel. Layers left over stay invalid.
+        const std::uint32_t stepLimit = 64u + 8u * card.layers;
+        std::uint32_t       steps     = 0;
+        while (layer < card.layers && steps++ < stepLimit)
         {
             GiRay         ray{start + inward * offset, inward, rayLength - offset};
             if (ray.tMax <= 0.0f)

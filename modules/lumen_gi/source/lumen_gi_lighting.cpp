@@ -38,10 +38,13 @@ namespace lumen_gi
 bool sunShadowed(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal)
 {
     const glm::vec3 sunDirection = state.environment.sunDirection;
-    // The bias grows with the grazing angle so steeply lit surfaces keep
-    // their shadow rays off their own texels (trace.bias_m).
+    // The bias grows with the grazing angle so grazing-lit surfaces keep
+    // their shadow rays off their own texels (trace.bias_m): a ray leaving a
+    // surface head-on clears it immediately, while a grazing ray travels
+    // nearly parallel to it and needs the full offset to clear the same
+    // texels.
     const float bias = state.settings.traceBias
-        + state.settings.traceBias * std::fabs(glm::dot(normal, sunDirection));
+        + state.settings.traceBias * (1.0f - std::fabs(glm::dot(normal, sunDirection)));
     GiRay           ray{position + normal * bias, sunDirection, state.settings.maxTraceDistance};
     return traceSceneOccluded(state, ray, noSurface);
 }
@@ -299,37 +302,28 @@ void radianceAtHit(const GiPipelineState &state, const GiShadingHit &hit, bool i
 // cosine-lobe irradiance evaluation in capabilities.hpp / the renderer is the
 // plain polynomial Sum A_l * s_lm * f_lm(n) and a constant radiance L yields
 // exactly pi * L (the old storage was missing this factor, which made every
-// probe-lit surface ~3.5x too bright).
+// probe-lit surface ~3.5x too bright). The per-direction basis values
+// (K_lm^2 * f_lm) come precomputed from the direction table, so the hot loop
+// is a fused multiply-add per coefficient and channel.
 void projectRadianceToSh2(
-    const glm::vec3 *directions, const glm::vec3 *radiance, const float *weights, std::size_t count, float *outSh2)
+    const float *basis, const glm::vec3 *radiance, const float *weights, std::size_t count, float *outSh2)
 {
-    constexpr float kY00 = 0.282094792f;
-    constexpr float kY1m = 0.488602512f;
-    constexpr float kY2m = 1.092548431f;
-    constexpr float kY20 = 0.315391565f;
-    constexpr float kY22 = 0.546274215f;
-    constexpr float kConstants[9] = {kY00, kY1m, kY1m, kY1m, kY2m, kY2m, kY20, kY2m, kY22};
-    double accumulator[27] = {};
+    float accumulator[27] = {};
     for (std::size_t index = 0; index < count; ++index)
     {
-        const glm::vec3 &dir = directions[index];
-        const float      x = dir.x;
-        const float      y = dir.y;
-        const float      z = dir.z;
-        // Polynomial parts f_lm; the true basis value is K_lm * f_lm.
-        const float polynomial[9] = {1.0f, y, z, x, x * y, y * z, 3.0f * z * z - 1.0f, x * z, x * x - y * y};
+        const float      *directionBasis = basis + index * 9;
         const glm::vec3 value = radiance[index] * weights[index];
         for (std::uint32_t coefficient = 0; coefficient < 9; ++coefficient)
         {
-            const float basis = kConstants[coefficient] * polynomial[coefficient] * kConstants[coefficient];
-            accumulator[coefficient * 3 + 0] += static_cast<double>(basis * value.r);
-            accumulator[coefficient * 3 + 1] += static_cast<double>(basis * value.g);
-            accumulator[coefficient * 3 + 2] += static_cast<double>(basis * value.b);
+            const float projected = directionBasis[coefficient];
+            accumulator[coefficient * 3 + 0] += projected * value.r;
+            accumulator[coefficient * 3 + 1] += projected * value.g;
+            accumulator[coefficient * 3 + 2] += projected * value.b;
         }
     }
     for (std::uint32_t coefficient = 0; coefficient < 27; ++coefficient)
     {
-        outSh2[coefficient] = static_cast<float>(accumulator[coefficient]);
+        outSh2[coefficient] = accumulator[coefficient];
     }
 
     // De-ringing: a band-limited fit of a high-contrast field (a small bright
@@ -466,43 +460,66 @@ void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit)
         state.directTexelsThisFrame.fetch_add(unit.texelEnd - unit.texelBegin, std::memory_order_relaxed);
         return;
     }
+    // The unit walks flat layered texels; the (x, y) cell of the plane is
+    // tracked incrementally so the loop never pays the flat-index divisions
+    // (one integer division pair per unit instead of per texel).
+    const std::uint32_t plane = static_cast<std::uint32_t>(card.planeTexels());
+    std::uint32_t       xy    = unit.texelBegin % plane;
+    std::uint32_t       x     = xy % card.texelWidth;
+    std::uint32_t       y     = xy / card.texelWidth;
     for (std::uint32_t texel = unit.texelBegin; texel < unit.texelEnd; ++texel)
     {
         if (card.depthTexels[texel] >= invalidCardDepth)
         {
             card.directRadiance[texel] = glm::vec3(0.0f);
-            continue;
-        }
-        glm::vec3 radiance(0.0f);
-        if (surface.unlit)
-        {
-            // Unlit surfaces emit their albedo; no lighting is applied.
-            radiance = card.albedo[texel];
         }
         else
         {
-            const glm::vec3 localPosition = cardTexelLocalPosition(card, texel);
-            const glm::vec3 position = surface.localIsWorld
-                ? localPosition
-                : surface.linear * localPosition + surface.translation;
-            const glm::vec3 normal = surface.localIsWorld
-                ? glm::normalize(card.normal[texel])
-                : glm::normalize(surface.normalMatrix * card.normal[texel]);
-            glm::vec3 irradiance(0.0f);
-            const float nDotL = glm::dot(normal, environment.sunDirection);
-            if (nDotL > 0.0f && hasSun)
+            glm::vec3 radiance(0.0f);
+            if (surface.unlit)
             {
-                if (!state.settings.sunShadows || !sunShadowed(state, position, normal))
-                {
-                    irradiance += sunRadiance * nDotL;
-                }
+                // Unlit surfaces emit their albedo; no lighting is applied.
+                radiance = card.albedo[texel];
             }
-            irradiance += directLightRadiance(state, position, normal);
-            // Lambertian outgoing radiance: albedo / pi * E.
-            radiance = card.albedo[texel] * (irradiance * (1.0f / kPi));
+            else
+            {
+                const glm::vec3 localPosition = cardTexelLocalPositionXY(card, x, y, texel);
+                const glm::vec3 position = surface.localIsWorld
+                    ? localPosition
+                    : surface.linear * localPosition + surface.translation;
+                // Captured card normals are unit length: an identity transform
+                // passes them through untouched, anything else re-orthonormalizes
+                // through the normal matrix (non-uniform scale skews them).
+                const glm::vec3 normal = surface.localIsWorld
+                    ? card.normal[texel]
+                    : glm::normalize(surface.normalMatrix * card.normal[texel]);
+                glm::vec3 irradiance(0.0f);
+                const float nDotL = glm::dot(normal, environment.sunDirection);
+                if (nDotL > 0.0f && hasSun)
+                {
+                    if (!state.settings.sunShadows || !sunShadowed(state, position, normal))
+                    {
+                        irradiance += sunRadiance * nDotL;
+                    }
+                }
+                irradiance += directLightRadiance(state, position, normal);
+                // Lambertian outgoing radiance: albedo / pi * E.
+                radiance = card.albedo[texel] * (irradiance * (1.0f / kPi));
+            }
+            radiance += surface.emissive;
+            card.directRadiance[texel] = radiance;
         }
-        radiance += surface.emissive;
-        card.directRadiance[texel] = radiance;
+        if (++x == card.texelWidth)
+        {
+            x = 0;
+            ++y;
+        }
+        if (++xy == plane)
+        {
+            xy = 0;
+            x  = 0;
+            y  = 0;
+        }
     }
     state.directTexelsThisFrame.fetch_add(unit.texelEnd - unit.texelBegin, std::memory_order_relaxed);
 }
@@ -516,62 +533,85 @@ void gatherIndirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit,
     GiCard &            card     = state.card(unit.cardIndex);
     const GiSurface &   surface  = state.cardSurface(unit.cardIndex);
     std::uint32_t       rays     = 0;
+    // Incremental (x, y) cell like the direct pass: one division pair per
+    // unit instead of per texel.
+    const std::uint32_t plane = static_cast<std::uint32_t>(card.planeTexels());
+    std::uint32_t       xy    = unit.texelBegin % plane;
+    std::uint32_t       x     = xy % card.texelWidth;
+    std::uint32_t       y     = xy / card.texelWidth;
     for (std::uint32_t texel = unit.texelBegin; texel < unit.texelEnd; ++texel)
     {
         glm::vec3 &out = scratch[texel - unit.texelBegin];
         out            = card.indirectRadiance[texel];
         if (surface.unlit)
         {
-            continue; // unlit surfaces do not receive indirect lighting
+            // unlit surfaces do not receive indirect lighting
         }
-        if (card.depthTexels[texel] >= invalidCardDepth)
+        else if (card.depthTexels[texel] >= invalidCardDepth)
         {
             out                      = glm::vec3(0.0f);
             card.indirectSamples[texel] = 0;
-            continue;
         }
-        const glm::vec3 localPosition = cardTexelLocalPosition(card, texel);
-        const glm::vec3 position = surface.localIsWorld
-            ? localPosition
-            : surface.linear * localPosition + surface.translation;
-        const glm::vec3 normal = surface.localIsWorld
-            ? glm::normalize(card.normal[texel])
-            : glm::normalize(surface.normalMatrix * card.normal[texel]);
-        const glm::mat3 basis    = makeBasis(normal);
-        // Surface bias: start slightly off the surface (Lumen biases its
-        // texel traces the same way; trace.bias_m).
-        const glm::vec3 origin = position + normal * state.settings.traceBias;
-        std::uint64_t   seed   = hashSeed(state.frameIndex * 0x9E3779B1ull + (static_cast<std::uint64_t>(unit.cardIndex) << 32)
-                                       + texel);
-        glm::vec3 gather(0.0f);
-        for (std::uint32_t ray = 0; ray < rayCount; ++ray)
+        else
         {
-            // Stratified over the cosine-weighted hemisphere: ray r owns the
-            // r-th slice of the radial axis.
-            const float u = (static_cast<float>(ray) + randomFloat(seed)) / static_cast<float>(rayCount);
-            const float v = randomFloat(seed);
-            const glm::vec3 direction = glm::normalize(basis * cosineHemisphere(u, v));
-            GiRay           traceRay{origin, direction, state.settings.maxTraceDistance};
-            const GiShadingHit hit = traceSceneShading(state, traceRay);
-            ++rays;
-            if (!hit.hit)
+            const glm::vec3 localPosition = cardTexelLocalPositionXY(card, x, y, texel);
+            const glm::vec3 position = surface.localIsWorld
+                ? localPosition
+                : surface.linear * localPosition + surface.translation;
+            // Captured card normals are unit length (see the direct pass).
+            const glm::vec3 normal = surface.localIsWorld
+                ? card.normal[texel]
+                : glm::normalize(surface.normalMatrix * card.normal[texel]);
+            const glm::mat3 basis    = makeBasis(normal);
+            // Surface bias: start slightly off the surface (Lumen biases its
+            // texel traces the same way; trace.bias_m).
+            const glm::vec3 origin = position + normal * state.settings.traceBias;
+            std::uint64_t   seed   = hashSeed(state.frameIndex * 0x9E3779B1ull + (static_cast<std::uint64_t>(unit.cardIndex) << 32)
+                                           + texel);
+            glm::vec3 gather(0.0f);
+            for (std::uint32_t ray = 0; ray < rayCount; ++ray)
             {
-                gather += state.environment.skyRadiance(direction);
-                continue;
+                // Stratified over the cosine-weighted hemisphere: ray r owns the
+                // r-th slice of the radial axis.
+                const float u = (static_cast<float>(ray) + randomFloat(seed)) / static_cast<float>(rayCount);
+                const float v = randomFloat(seed);
+                // The Duff basis is orthonormal and the Malley sample is unit
+                // by construction, so the product is already unit length - no
+                // normalize (a sqrt plus three divisions per ray) needed.
+                const glm::vec3 direction = basis * cosineHemisphere(u, v);
+                GiRay           traceRay{origin, direction, state.settings.maxTraceDistance};
+                const GiShadingHit hit = traceSceneShading(state, traceRay);
+                ++rays;
+                if (!hit.hit)
+                {
+                    gather += state.environment.skyRadiance(direction);
+                    continue;
+                }
+                glm::vec3 hitRadiance(0.0f);
+                radianceAtHit(state, hit, true, hitRadiance);
+                gather += hitRadiance;
             }
-            glm::vec3 hitRadiance(0.0f);
-            radianceAtHit(state, hit, true, hitRadiance);
-            gather += hitRadiance;
+            // Cosine-weighted sampling: E = pi * mean(L_i), and the Lambertian
+            // radiance is albedo / pi * E = albedo * mean(L_i).
+            gather = card.albedo[texel] * (gather / static_cast<float>(rayCount));
+            // Exponential history with a ramp-up: the first update takes the
+            // fresh sample whole, then the weight settles at (1 - history).
+            const std::uint32_t seen  = std::min<std::uint32_t>(card.indirectSamples[texel] + 1u, 255u);
+            const float         alpha = std::max(1.0f / static_cast<float>(seen), 1.0f - history);
+            out                       = glm::mix(card.indirectRadiance[texel], gather, alpha);
+            card.indirectSamples[texel] = static_cast<std::uint8_t>(seen);
         }
-        // Cosine-weighted sampling: E = pi * mean(L_i), and the Lambertian
-        // radiance is albedo / pi * E = albedo * mean(L_i).
-        gather = card.albedo[texel] * (gather / static_cast<float>(rayCount));
-        // Exponential history with a ramp-up: the first update takes the
-        // fresh sample whole, then the weight settles at (1 - history).
-        const std::uint32_t seen  = std::min<std::uint32_t>(card.indirectSamples[texel] + 1u, 255u);
-        const float         alpha = std::max(1.0f / static_cast<float>(seen), 1.0f - history);
-        out                       = glm::mix(card.indirectRadiance[texel], gather, alpha);
-        card.indirectSamples[texel] = static_cast<std::uint8_t>(seen);
+        if (++x == card.texelWidth)
+        {
+            x = 0;
+            ++y;
+        }
+        if (++xy == plane)
+        {
+            xy = 0;
+            x  = 0;
+            y  = 0;
+        }
     }
     state.indirectTexelsThisFrame.fetch_add(unit.texelEnd - unit.texelBegin, std::memory_order_relaxed);
     state.indirectRaysThisFrame.fetch_add(rays, std::memory_order_relaxed);
@@ -693,7 +733,7 @@ void updateProbe(GiPipelineState &state, std::uint32_t levelIndex, std::uint32_t
     const float backfaceFraction = traced > 0 ? static_cast<float>(backfaceTexels.size()) / static_cast<float>(traced) : 0.0f;
     probe.enclosed = backfaceFraction > 0.5f;
     probe.validity = probe.enclosed ? 0.0f : std::clamp(1.0f - (backfaceFraction - 0.15f) / 0.35f, 0.0f, 1.0f);
-    projectRadianceToSh2(state.probeDirections.data(), probe.radiance.data(), state.probeDirectionWeights.data(),
+    projectRadianceToSh2(state.probeDirectionBasis.data(), probe.radiance.data(), state.probeDirectionWeights.data(),
         directionCount, probe.sh2.data());
     probe.fresh      = false;
     probe.lastUpdate = state.frameIndex;
@@ -790,6 +830,11 @@ struct LatticeCorners
 };
 
 // Trilinear corner slots / weights of a world position inside one level.
+// The lattice arithmetic runs in double precision: the level's origin cell
+// grows with the distance the camera has traveled, and subtracting it in
+// float32 would cancel the fractional position away (the clipmap tracks
+// cells as exact integers for exactly this reason - the float remainder is
+// the only place the cancellation can appear).
 bool latticeCorners(const GiProbeLevel &level, const glm::vec3 &position, LatticeCorners &out)
 {
     const std::int32_t dim = static_cast<std::int32_t>(level.dimension());
@@ -797,15 +842,17 @@ bool latticeCorners(const GiProbeLevel &level, const glm::vec3 &position, Lattic
     {
         return false;
     }
-    const glm::vec3 logical = position / level.spacing - glm::vec3(level.originCell);
-    const float     limit   = static_cast<float>(dim - 1);
-    if (logical.x < 0.0f || logical.y < 0.0f || logical.z < 0.0f || logical.x > limit || logical.y > limit
+    const glm::dvec3 logical(double(position.x) / double(level.spacing) - double(level.originCell.x),
+        double(position.y) / double(level.spacing) - double(level.originCell.y),
+        double(position.z) / double(level.spacing) - double(level.originCell.z));
+    const double limit   = static_cast<double>(dim - 1);
+    if (logical.x < 0.0 || logical.y < 0.0 || logical.z < 0.0 || logical.x > limit || logical.y > limit
         || logical.z > limit)
     {
         return false;
     }
-    const glm::vec3 base = glm::min(glm::floor(logical), glm::vec3(static_cast<float>(dim - 2)));
-    const glm::vec3 fraction = logical - base;
+    const glm::dvec3 base = glm::min(glm::floor(logical), glm::dvec3(double(dim - 2)));
+    const glm::vec3 fraction(logical - base);
     for (std::uint32_t corner = 0; corner < 8; ++corner)
     {
         const std::uint32_t cx = static_cast<std::uint32_t>(base.x) + (corner & 1u);

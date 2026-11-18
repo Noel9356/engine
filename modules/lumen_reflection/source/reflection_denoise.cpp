@@ -4,7 +4,9 @@
 //   Spatial reuse: BRDF-weighted averaging over screen-space neighbors
 //   (Lumen: "looks at screen space neighbors and reweights them based on
 //   their BRDF"). Plane, normal, and roughness similarity gate the neighbors;
-//   the pass also leaves a per-texel variance estimate.
+//   the pass also leaves a per-texel variance estimate (the true luminance
+//   variance of the texel and its accepted neighbors, which the bilateral
+//   stage then gates on).
 //
 //   Temporal accumulation: the previous frame's field is reprojected through
 //   the stored matrices, validated against the current depth (disocclusion
@@ -36,17 +38,12 @@ namespace lumen_reflection
 namespace
 {
 
-inline float luminance(const glm::vec3 &value)
-{
-    return 0.2126f * value.x + 0.7152f * value.y + 0.0722f * value.z;
-}
-
 // Tone-mapped weight (1/(1+L)): fireflies (huge L deltas) contribute a
 // bounded share of the bilateral average, exactly the "tonemapped weighting
 // to remove fireflies" the Lumen presentation describes for this pass.
-inline float tonemappedWeight(const glm::vec3 &center, const glm::vec3 &neighbor)
+inline float tonemappedWeight(float centerLuminance, float neighborLuminance)
 {
-    const float difference = std::fabs(luminance(center) - luminance(neighbor));
+    const float difference = std::fabs(centerLuminance - neighborLuminance);
     return 1.0f / (1.0f + difference);
 }
 
@@ -59,10 +56,31 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
     const std::size_t pixelCount = static_cast<std::size_t>(state.fieldWidth) * state.fieldHeight;
     state.scratchSpatial.assign(pixelCount, glm::vec3(0.0f));
     state.scratchVariance.assign(pixelCount, 0.0f);
+    if (state.fieldLuminance.size() != pixelCount)
+    {
+        state.fieldLuminance.resize(pixelCount);
+    }
 
     const std::uint32_t radius    = state.settings.spatialReuseRadius;
     const float         planeTolerance = 0.1f; // same-surface plane distance gate (m)
     const float         roughnessTolerance = 0.15f;
+
+    // Luminance of this frame's raw field, once per texel (the spatial pass
+    // and the bilateral pass both weight through it).
+    rfParallelRange(scheduler, state.fieldHeight, 1,
+        [&](std::size_t rowBegin, std::size_t rowEnd)
+        {
+            for (std::size_t y = rowBegin; y < rowEnd; ++y)
+            {
+                for (std::uint32_t x = 0; x < state.fieldWidth; ++x)
+                {
+                    const std::size_t index = y * state.fieldWidth + x;
+                    state.fieldLuminance[index] = state.fieldValid[index] != 0u
+                        ? luminance(state.fieldRaw[index])
+                        : 0.0f;
+                }
+            }
+        });
 
     rfParallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
@@ -83,7 +101,10 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
 
                     glm::vec3 sum(0.0f);
                     float     weightSum = 0.0f;
-                    float     squaredDifference = 0.0f;
+                    // The texel itself is one sample of the variance estimate.
+                    const float centerLuminance = state.fieldLuminance[index];
+                    float luminanceSum        = centerLuminance;
+                    float luminanceSquaredSum = centerLuminance * centerLuminance;
                     for (std::int32_t offsetY = -static_cast<std::int32_t>(radius);
                          offsetY <= static_cast<std::int32_t>(radius); ++offsetY)
                     {
@@ -111,10 +132,14 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
                             const float     sampledRoughness = state.gbufferRoughness[sampledIndex];
 
                             // BRDF similarity: same depth plane, compatible
-                            // normal, compatible roughness.
+                            // normal, compatible roughness. The plane gate
+                            // compares |n.d| against the tolerance times the
+                            // neighbor distance, so no per-neighbor
+                            // normalization is needed.
                             const glm::vec3 delta = sampledPosition - position;
-                            if (glm::length(delta) > 0.0f
-                                && std::fabs(glm::dot(normal, glm::normalize(delta))) > planeTolerance)
+                            const float     deltaLength = glm::length(delta);
+                            if (deltaLength > 0.0f
+                                && std::fabs(glm::dot(normal, delta)) > planeTolerance * deltaLength)
                             {
                                 continue;
                             }
@@ -129,6 +154,9 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
                             const glm::vec3 sampled = state.fieldRaw[sampledIndex];
                             sum += sampled;
                             weightSum += 1.0f;
+                            const float sampledLuminance = state.fieldLuminance[sampledIndex];
+                            luminanceSum += sampledLuminance;
+                            luminanceSquaredSum += sampledLuminance * sampledLuminance;
                         }
                     }
                     if (weightSum <= 0.0f)
@@ -138,11 +166,12 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
                     }
                     const glm::vec3 mean = sum / weightSum;
                     state.scratchSpatial[index] = mean;
-                    // Luminance variance over the accepted neighborhood.
-                    const float centerLuminance = luminance(center);
-                    const float meanLuminance   = luminance(mean);
-                    squaredDifference = (centerLuminance - meanLuminance) * (centerLuminance - meanLuminance);
-                    state.scratchVariance[index] = squaredDifference;
+                    // Luminance variance of the texel and its accepted
+                    // neighbors (E[x^2] - E[x]^2 over the sample set).
+                    const float sampleCount = weightSum + 1.0f;
+                    const float meanLuminance = luminanceSum / sampleCount;
+                    state.scratchVariance[index] = std::max(0.0f,
+                        luminanceSquaredSum / sampleCount - meanLuminance * meanLuminance);
                 }
             }
         });
@@ -287,12 +316,32 @@ void rfbilateralFilter(RfPipelineState &state, TaskScheduler *scheduler)
         return;
     }
     const std::size_t pixelCount = static_cast<std::size_t>(state.fieldWidth) * state.fieldHeight;
-    state.scratchSpatial.assign(pixelCount, glm::vec3(0.0f));
+    if (state.fieldLuminance.size() != pixelCount)
+    {
+        state.fieldLuminance.resize(pixelCount);
+    }
 
     const std::uint32_t radius = state.settings.bilateralRadius;
     // Variance threshold above which the pass smooths (luminance variance
     // of the spatial-reused field).
-    const float varianceThreshold = 0.02f;
+    const float varianceThreshold = std::max(state.settings.varianceThreshold, 0.0f);
+
+    // Luminance of the filtered field the bilateral weights read (computed
+    // once per texel instead of per neighbor pair).
+    rfParallelRange(scheduler, state.fieldHeight, 1,
+        [&](std::size_t rowBegin, std::size_t rowEnd)
+        {
+            for (std::size_t y = rowBegin; y < rowEnd; ++y)
+            {
+                for (std::uint32_t x = 0; x < state.fieldWidth; ++x)
+                {
+                    const std::size_t index = y * state.fieldWidth + x;
+                    state.fieldLuminance[index] = state.fieldValid[index] != 0u
+                        ? luminance(state.fieldFiltered[index])
+                        : 0.0f;
+                }
+            }
+        });
 
     rfParallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
@@ -308,6 +357,7 @@ void rfbilateralFilter(RfPipelineState &state, TaskScheduler *scheduler)
                         state.scratchSpatial[index] = center;
                         continue;
                     }
+                    const float centerLuminance = state.fieldLuminance[index];
                     const bool disoccluded = state.scratchDisoccluded[index] != 0u;
                     if (!disoccluded && state.scratchVariance[index] < varianceThreshold)
                     {
@@ -346,7 +396,7 @@ void rfbilateralFilter(RfPipelineState &state, TaskScheduler *scheduler)
                                 continue;
                             }
                             const glm::vec3 sampled = state.fieldFiltered[sampledIndex];
-                            const float     weight  = tonemappedWeight(center, sampled);
+                            const float     weight  = tonemappedWeight(centerLuminance, state.fieldLuminance[sampledIndex]);
                             sum += sampled * weight;
                             weightSum += weight;
                         }
