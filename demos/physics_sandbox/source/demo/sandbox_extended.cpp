@@ -560,6 +560,115 @@ void addParticlesScene(const SceneDependencies &dependencies, const SceneConfig 
     handles.extended.emitters[static_cast<std::uint32_t>(engine::physics_particles::EmitterKind::Fire)]
         = dependencies.particles->createEmitter(dependencies.particles->self, handles.world, &fire, &particlesError);
 
+    // Hail falls fast into its own zone, ash drifts up from a slow burn,
+    // leaves flutter down beside a stand-in canopy, pollen hangs in the
+    // warm air, and insects wander around the fire pit's light.
+    engine::physics_particles::EmitterDescription hail;
+    hail.kind                  = engine::physics_particles::EmitterKind::Hail;
+    hail.origin[0]             = -8.0;
+    hail.origin[1]             = 9.0;
+    hail.halfExtents[0]        = 2.4;
+    hail.halfExtents[2]        = 3.0;
+    hail.emitRate              = 140.0;
+    hail.maximumParticles      = 700;
+    hail.minimumLifetime       = 0.8;
+    hail.maximumLifetime       = 1.2;
+    hail.initialVelocity[1]    = -14.0;
+    hail.gravityScale          = 1.0;
+    hail.airDrag               = 0.15;
+    hail.swayAmplitude         = 0.1;
+    hail.particleRadius        = 0.06;
+    hail.minimumSize           = 0.06;
+    hail.maximumSize           = 0.12;
+    hail.collideWithWorld      = true;
+    hail.useGroundPlane        = true;
+    hail.groundHeight          = 0.02;
+    handles.extended.emitters[static_cast<std::uint32_t>(engine::physics_particles::EmitterKind::Hail)]
+        = dependencies.particles->createEmitter(dependencies.particles->self, handles.world, &hail, &particlesError);
+
+    engine::physics_particles::EmitterDescription ash;
+    ash.kind                  = engine::physics_particles::EmitterKind::Ash;
+    ash.origin[0]             = 8.0;
+    ash.origin[1]             = 2.5;
+    ash.halfExtents[0]        = 1.6;
+    ash.halfExtents[1]        = 0.6;
+    ash.halfExtents[2]        = 1.6;
+    ash.emitRate              = 26.0;
+    ash.maximumParticles      = 320;
+    ash.minimumLifetime       = 4.0;
+    ash.maximumLifetime       = 7.0;
+    ash.initialVelocity[1]    = 0.25;
+    ash.gravityScale          = 0.08;
+    ash.airDrag               = 2.5;
+    ash.swayAmplitude         = 0.4;
+    ash.particleRadius        = 0.03;
+    ash.minimumSize           = 0.03;
+    ash.maximumSize           = 0.06;
+    handles.extended.emitters[static_cast<std::uint32_t>(engine::physics_particles::EmitterKind::Ash)]
+        = dependencies.particles->createEmitter(dependencies.particles->self, handles.world, &ash, &particlesError);
+
+    engine::physics_particles::EmitterDescription leaves;
+    leaves.kind                  = engine::physics_particles::EmitterKind::Leaves;
+    leaves.origin[0]             = -3.5;
+    leaves.origin[1]             = 3.4;
+    leaves.halfExtents[0]        = 1.8;
+    leaves.halfExtents[2]        = 1.8;
+    leaves.emitRate              = 12.0;
+    leaves.maximumParticles      = 140;
+    leaves.minimumLifetime       = 3.5;
+    leaves.maximumLifetime       = 6.0;
+    leaves.initialVelocity[1]    = -0.4;
+    leaves.gravityScale          = 0.35;
+    leaves.airDrag               = 3.0;
+    leaves.swayAmplitude         = 2.2;
+    leaves.swayFrequency         = 0.4;
+    leaves.particleRadius        = 0.05;
+    leaves.minimumSize           = 0.07;
+    leaves.maximumSize           = 0.12;
+    leaves.collideWithWorld      = true;
+    handles.extended.emitters[static_cast<std::uint32_t>(engine::physics_particles::EmitterKind::Leaves)]
+        = dependencies.particles->createEmitter(dependencies.particles->self, handles.world, &leaves, &particlesError);
+
+    engine::physics_particles::EmitterDescription pollen;
+    pollen.kind                  = engine::physics_particles::EmitterKind::Pollen;
+    pollen.origin[0]             = 3.5;
+    pollen.origin[1]             = 1.4;
+    pollen.halfExtents[0]        = 2.0;
+    pollen.halfExtents[1]        = 1.0;
+    pollen.halfExtents[2]        = 2.0;
+    pollen.emitRate              = 18.0;
+    pollen.maximumParticles      = 200;
+    pollen.minimumLifetime       = 6.0;
+    pollen.maximumLifetime       = 10.0;
+    pollen.initialVelocity[1]    = 0.05;
+    pollen.gravityScale          = 0.02;
+    pollen.airDrag               = 3.5;
+    pollen.swayAmplitude         = 0.6;
+    pollen.particleRadius        = 0.02;
+    pollen.minimumSize           = 0.02;
+    pollen.maximumSize           = 0.04;
+    handles.extended.emitters[static_cast<std::uint32_t>(engine::physics_particles::EmitterKind::Pollen)]
+        = dependencies.particles->createEmitter(dependencies.particles->self, handles.world, &pollen, &particlesError);
+
+    engine::physics_particles::EmitterDescription insects;
+    insects.kind                  = engine::physics_particles::EmitterKind::Insects;
+    insects.origin[0]             = 2.5;
+    insects.origin[1]             = 1.0;
+    insects.halfExtents[0]        = 0.8;
+    insects.halfExtents[1]        = 0.5;
+    insects.halfExtents[2]        = 0.8;
+    insects.emitRate              = 5.0;
+    insects.maximumParticles      = 40;
+    insects.minimumLifetime       = 8.0;
+    insects.maximumLifetime       = 12.0;
+    insects.gravityScale          = 0.0;
+    insects.airDrag               = 1.0;
+    insects.particleRadius        = 0.02;
+    insects.minimumSize           = 0.03;
+    insects.maximumSize           = 0.05;
+    handles.extended.emitters[static_cast<std::uint32_t>(engine::physics_particles::EmitterKind::Insects)]
+        = dependencies.particles->createEmitter(dependencies.particles->self, handles.world, &insects, &particlesError);
+
     // A stone ring around the fire pit.
     const float stoneColor[3] = {0.44f, 0.44f, 0.46f};
     for (std::uint32_t index = 0; index < 8; ++index)

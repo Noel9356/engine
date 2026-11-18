@@ -20,16 +20,9 @@ namespace engine
 namespace renderer
 {
 
-// Presentation-queue policy for the swapchain. Auto keeps the historical
-// behaviour; the explicit modes exist so frame-latency behaviour is a
-// configuration decision instead of a driver default.
-enum class SwapchainPresentMode
-{
-    Auto,      // FIFO when vsync, else mailbox, else immediate
-    Fifo,      // always tear-free, one image on screen, blocks on the compositor
-    Mailbox,   // triple buffered, latency-bounded, never blocks the CPU for long
-    Immediate, // no presentation queue at all: lowest latency, may tear
-};
+// SwapchainPresentMode (the presentation-queue policy) is declared in
+// render_shared.hpp alongside DevicePreference: [renderer] present_mode is
+// parsed by the module core even when this backend is compiled out.
 
 // One swapchain per renderer. pickFormats() must be called before
 // createObjects(); recreate() tears everything down and rebuilds it (called

@@ -18,6 +18,11 @@
 
 namespace engine::physics_rigid
 {
+
+// Helpers defined further down; destroyBodyFromWorld reports trigger exits.
+bool destroyTriggerFromWorld(World &world, TriggerHandle handle);
+void reportTriggerExit(World &world, Trigger &trigger, BodyHandle body);
+
 namespace
 {
 
@@ -245,6 +250,7 @@ bool validateBodyDescription(const World &world, const SimulationSettings &setti
     // is the contact distance from the rolling axis.
     body.rollingRadius = body.shape.kind == ShapeKind::Sphere      ? body.shape.sphereRadius
                          : body.shape.kind == ShapeKind::Capsule ? body.shape.capsuleRadius
+                         : body.shape.kind == ShapeKind::Cylinder ? body.shape.cylinderRadius
                                                                  : 0.0;
 
     refreshBodyAabb(body);
@@ -664,6 +670,12 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
         return false;
     }
 
+    // Trigger evaluation against the integrated transforms; overlap events
+    // accumulate for the consumer's next poll. A rolled-back (non-finite)
+    // step above never reaches this point, so events always describe a
+    // committed step.
+    evaluateTriggers(world, scratch.triggerOverlapScratch);
+
     // Island-based sleeping over the contact and joint graphs.
     scratch.islandParent.resize(world.bodies.size());
     for (std::size_t index = 0; index < world.bodies.size(); ++index)
@@ -855,6 +867,29 @@ bool destroyBodyFromWorld(World &world, BodyHandle handle)
             break;
         }
     }
+
+    // Triggers attached to the body die with it (their pending events are
+    // dropped); every other trigger reports the body's exit.
+    for (std::size_t triggerIndex = 0; triggerIndex < world.triggers.size();)
+    {
+        Trigger &trigger = world.triggers[triggerIndex];
+        if (trigger.attachedBody == handle)
+        {
+            destroyTriggerFromWorld(world, trigger.handle);
+            triggerIndex = 0; // index map compaction invalidates positions; restart the scan
+            continue;
+        }
+        ++triggerIndex;
+    }
+    for (Trigger &trigger : world.triggers)
+    {
+        const auto overlapIterator = std::find(trigger.overlapping.begin(), trigger.overlapping.end(), handle);
+        if (overlapIterator != trigger.overlapping.end())
+        {
+            trigger.overlapping.erase(overlapIterator);
+            reportTriggerExit(world, trigger, handle);
+        }
+    }
     return true;
 }
 
@@ -875,6 +910,208 @@ bool destroyJointFromWorld(World &world, JointHandle handle)
     }
     world.joints.pop_back();
     return true;
+}
+
+// Appends one overlap transition, evicting the oldest event with the
+// overflow flag set once the configured queue bound is exceeded.
+void appendTriggerEvent(World &world, const TriggerEvent &event)
+{
+    if (world.settings.maximumTriggerEvents == 0)
+    {
+        world.triggerEventOverflow = true;
+        return;
+    }
+    while (world.pendingTriggerEvents.size() >= world.settings.maximumTriggerEvents)
+    {
+        world.pendingTriggerEvents.erase(world.pendingTriggerEvents.begin());
+        world.triggerEventOverflow = true;
+    }
+    world.pendingTriggerEvents.push_back(event);
+}
+
+// Reports one body leaving one trigger (destruction path).
+void reportTriggerExit(World &world, Trigger &trigger, BodyHandle body)
+{
+    TriggerEvent event;
+    event.kind    = TriggerEventKind::Exit;
+    event.trigger = trigger.handle;
+    event.body    = body;
+    appendTriggerEvent(world, event);
+}
+
+bool validateTriggerDescription(
+    const World &world, const TriggerDescription &description, Trigger &outTrigger, PhysicsError *error)
+{
+    const auto setFailure = [&](PhysicsError value)
+    {
+        if (error != nullptr)
+        {
+            *error = value;
+        }
+        return false;
+    };
+    if (world.triggers.size() >= world.settings.maximumTriggers)
+    {
+        return setFailure(PhysicsError::CapacityExceeded);
+    }
+    Trigger trigger;
+    if (!makeShape(description.shape, trigger.shape) || trigger.shape.kind == ShapeKind::Plane)
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
+    if (!math::isFinite(description.transform.position))
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
+    trigger.transform.position = description.transform.position;
+    trigger.transform.rotation = math::normalize(description.transform.rotation);
+    if (math::dot(trigger.transform.rotation, trigger.transform.rotation) < 1.0e-12)
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
+    if (description.attachedBody != invalidBody
+        && world.bodyIndexByHandle.find(description.attachedBody) == world.bodyIndexByHandle.end())
+    {
+        return setFailure(PhysicsError::InvalidHandle);
+    }
+    trigger.localTransform = trigger.transform;
+    trigger.attachedBody   = description.attachedBody;
+    trigger.categoryBits   = description.categoryBits != 0u ? description.categoryBits : 1u;
+    trigger.maskBits       = description.maskBits;
+    trigger.enabled        = description.enabled;
+    trigger.userTag        = description.userTag;
+    computeShapeAabb(trigger.shape, trigger.transform, trigger.aabbMinimum, trigger.aabbMaximum);
+    outTrigger = trigger;
+    if (error != nullptr)
+    {
+        *error = PhysicsError::None;
+    }
+    return true;
+}
+
+bool destroyTriggerFromWorld(World &world, TriggerHandle handle)
+{
+    const auto iterator = world.triggerIndexByHandle.find(handle);
+    if (iterator == world.triggerIndexByHandle.end())
+    {
+        return false;
+    }
+    const std::size_t index = iterator->second;
+    world.triggerIndexByHandle.erase(iterator);
+    if (index + 1 != world.triggers.size())
+    {
+        world.triggers[index]                                    = world.triggers.back();
+        world.triggerIndexByHandle[world.triggers[index].handle] = index;
+    }
+    world.triggers.pop_back();
+    // A destroyed trigger stops reporting: its pending transitions are
+    // dropped so consumers never observe events from a dead handle.
+    for (std::size_t eventIndex = 0; eventIndex < world.pendingTriggerEvents.size();)
+    {
+        if (world.pendingTriggerEvents[eventIndex].trigger == handle)
+        {
+            world.pendingTriggerEvents.erase(world.pendingTriggerEvents.begin()
+                + static_cast<std::ptrdiff_t>(eventIndex));
+        }
+        else
+        {
+            ++eventIndex;
+        }
+    }
+    return true;
+}
+
+void evaluateTriggers(World &world, std::vector<BodyHandle> &overlapScratch)
+{
+    // Compose attached poses and refresh the trigger AABBs first, so a
+    // moving trigger sees one consistent transform for the whole pass.
+    for (Trigger &trigger : world.triggers)
+    {
+        if (trigger.attachedBody != invalidBody)
+        {
+            const auto bodyIterator = world.bodyIndexByHandle.find(trigger.attachedBody);
+            if (bodyIterator != world.bodyIndexByHandle.end())
+            {
+                const Body &body = world.bodies[bodyIterator->second];
+                trigger.transform.position
+                    = body.transform.position + math::rotate(body.transform.rotation, trigger.localTransform.position);
+                trigger.transform.rotation
+                    = math::normalize(body.transform.rotation * trigger.localTransform.rotation);
+            }
+        }
+        computeShapeAabb(trigger.shape, trigger.transform, trigger.aabbMinimum, trigger.aabbMaximum);
+    }
+
+    for (Trigger &trigger : world.triggers)
+    {
+        if (!trigger.enabled)
+        {
+            for (const BodyHandle body : trigger.overlapping)
+            {
+                reportTriggerExit(world, trigger, body);
+            }
+            trigger.overlapping.clear();
+            continue;
+        }
+
+        overlapScratch.clear();
+        for (std::size_t bodyIndex = 0; bodyIndex < world.bodies.size(); ++bodyIndex)
+        {
+            const Body &body = world.bodies[bodyIndex];
+            if (body.shape.kind == ShapeKind::Plane)
+            {
+                continue;
+            }
+            if ((trigger.categoryBits & body.maskBits) == 0u || (body.categoryBits & trigger.maskBits) == 0u)
+            {
+                continue;
+            }
+            if (body.aabbMinimum.x > trigger.aabbMaximum.x || body.aabbMaximum.x < trigger.aabbMinimum.x
+                || body.aabbMinimum.y > trigger.aabbMaximum.y || body.aabbMaximum.y < trigger.aabbMinimum.y
+                || body.aabbMinimum.z > trigger.aabbMaximum.z || body.aabbMaximum.z < trigger.aabbMinimum.z)
+            {
+                continue;
+            }
+            ContactManifold manifold;
+            if (collideShapes(trigger.shape, trigger.transform, body.shape, body.transform, 0.0, manifold))
+            {
+                overlapScratch.push_back(body.handle);
+            }
+        }
+        std::sort(overlapScratch.begin(), overlapScratch.end());
+
+        // Linear diff over the ascending handle sets: one walk reports the
+        // exits and enters in deterministic order.
+        std::size_t previousIndex = 0;
+        std::size_t currentIndex  = 0;
+        while (previousIndex < trigger.overlapping.size() || currentIndex < overlapScratch.size())
+        {
+            if (previousIndex < trigger.overlapping.size()
+                && (currentIndex >= overlapScratch.size()
+                    || trigger.overlapping[previousIndex] < overlapScratch[currentIndex]))
+            {
+                reportTriggerExit(world, trigger, trigger.overlapping[previousIndex]);
+                ++previousIndex;
+            }
+            else if (currentIndex < overlapScratch.size()
+                     && (previousIndex >= trigger.overlapping.size()
+                         || overlapScratch[currentIndex] < trigger.overlapping[previousIndex]))
+            {
+                TriggerEvent event;
+                event.kind    = TriggerEventKind::Enter;
+                event.trigger = trigger.handle;
+                event.body    = overlapScratch[currentIndex];
+                appendTriggerEvent(world, event);
+                ++currentIndex;
+            }
+            else
+            {
+                ++previousIndex;
+                ++currentIndex;
+            }
+        }
+        trigger.overlapping = overlapScratch;
+    }
 }
 
 bool rayCastWorldIgnoring(const World &world, const math::Vec3 &origin, const math::Vec3 &direction,
@@ -943,6 +1180,15 @@ bool rayCastWorldIgnoring(const World &world, const math::Vec3 &origin, const ma
                 bestDistance,
                 distance);
             break;
+        case ShapeKind::Cylinder:
+            touches = rayCastCylinder(body.transform,
+                body.shape.cylinderRadius,
+                body.shape.cylinderHalfHeight,
+                origin,
+                normalizedDirection,
+                bestDistance,
+                distance);
+            break;
         case ShapeKind::Plane:
         default:
             break;
@@ -978,6 +1224,19 @@ bool rayCastWorldIgnoring(const World &world, const math::Vec3 &origin, const ma
                 const double     segmentLength = math::length(endpointB - endpointA);
                 const double projection = std::clamp(math::dot(bestHit.point - endpointA, axis), 0.0, segmentLength);
                 candidate               = math::normalized(bestHit.point - (endpointA + axis * projection));
+            }
+            else if (body.shape.kind == ShapeKind::Cylinder)
+            {
+                const math::Vec3 axis = math::rotate(body.transform.rotation, math::Vec3{0.0, body.shape.cylinderHalfHeight, 0.0});
+                const double     projection = std::clamp(math::dot(bestHit.point - body.transform.position, axis),
+                    -body.shape.cylinderHalfHeight,
+                    body.shape.cylinderHalfHeight);
+                math::Vec3 axisPoint   = body.transform.position + axis * (projection / body.shape.cylinderHalfHeight);
+                math::Vec3 radial      = bestHit.point - axisPoint;
+                const double radialLength = math::length(radial);
+                candidate = radialLength > kEpsilon && radialLength > body.shape.cylinderRadius * 0.5
+                    ? radial * (1.0 / radialLength)
+                    : axis * (projection >= 0.0 ? 1.0 : -1.0);
             }
             bestHit.normal = math::dot(candidate, normalizedDirection) > 0.0 ? candidate * -1.0 : candidate;
             hit            = true;
@@ -1127,6 +1386,8 @@ void fillWorldStatistics(const World &world, WorldStatistics &outStatistics)
     {
         statistics.contactPointCount += entry.second.pointCount;
     }
+    statistics.triggerCount             = static_cast<std::uint32_t>(world.triggers.size());
+    statistics.pendingTriggerEventCount = static_cast<std::uint32_t>(world.pendingTriggerEvents.size());
     statistics.stepsSimulated       = world.stepsSimulated;
     statistics.lastStepMilliseconds = world.lastStepMilliseconds;
     outStatistics                   = statistics;

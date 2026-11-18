@@ -2,14 +2,16 @@
 // module.
 //
 // Deterministic particle systems for ambient and gameplay effects: rain,
-// snow, dust, and fire emitters over a physics_rigid world. Every emitter
-// keeps a fixed pool of particles whose parameters derive from an integer
-// hash of (slot, generation), so identical emitters produce identical
-// results without random-number state. Particles integrate per fixed step,
-// respond to a uniform wind acceleration (consumers can bridge a wind
-// field's local sample), and optionally collide against the rigid world
-// through the sphere-overlap query (rain dies on impact, snow settles).
-// Consumers acquire it via ParticipantContext::acquireCapability
+// snow, dust, fire, hail, ash, leaves, pollen, and insect emitters over a
+// physics_rigid world. Every emitter keeps a fixed pool of particles whose
+// parameters derive from an integer hash of (slot, generation), so
+// identical emitters produce identical results without random-number
+// state. Particles integrate per fixed step, respond to a uniform wind
+// acceleration (consumers can bridge a wind field's local sample), and
+// optionally collide against the rigid world through the sphere-overlap
+// query (rain and hail die on impact, snow settles, leaves settle briefly
+// before expiring, ash/pollen/insects pass through). Consumers acquire it
+// via ParticipantContext::acquireCapability
 // <ParticlesCapability>(); the module declares physics_rigid as a required
 // capability.
 
@@ -24,7 +26,16 @@ namespace engine::physics_particles
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsParticlesCapabilityAbi = 1u;
+//
+// ABI history:
+//   1 - initial surface (Rain/Snow/Dust/Fire kinds, the emitter
+//       description, bursts, wind, statistics, and the step/simulate
+//       entry points).
+//   2 - appended EmitterKind::Hail, Ash, Leaves, Pollen, and Insects with
+//       their deterministic behaviors. Everything from ABI 1 keeps its
+//       slot and meaning; consumers check `abi >= 2` before touching the
+//       additions.
+inline constexpr std::uint32_t physicsParticlesCapabilityAbi = 2u;
 
 using EmitterHandle = std::uint32_t;
 
@@ -43,12 +54,27 @@ enum class ParticlesError : std::uint32_t
 // Particle behavior classes. Rain falls fast and dies at the ground; snow
 // falls slowly, sways, and settles on contact; dust drifts with the wind
 // inside its volume and respawns; fire rises buoyantly and flickers.
+// Hail falls fast like rain (about 1.6x rain's effective descent) and dies
+// on impact without bouncing.
+// Ash descends slowly and drifts buoyantly with the wind, shrinks toward
+// the end of its life, and ignores impacts.
+// Leaves flutter on a strong slow sway with heavy horizontal drag and
+// settle briefly on impact before expiring.
+// Pollen rides the wind nearly weightless on a long drift and fades out at
+// the end of its lifetime without impact death.
+// Insects hover with no gravity and wander deterministically around their
+// spawn point, ignoring impacts.
 enum class EmitterKind : std::uint32_t
 {
     Rain = 0,
     Snow,
     Dust,
-    Fire
+    Fire,
+    Hail,   // appended in ABI 2: fast ballistic fall, dies on impact like rain
+    Ash,    // appended in ABI 2: slow buoyant drift, shrinks late, passes through
+    Leaves, // appended in ABI 2: slow heavy flutter, settles briefly on impact
+    Pollen, // appended in ABI 2: near-weightless wind drift, fades at lifetime
+    Insects // appended in ABI 2: no gravity, deterministic hover-and-wander
 };
 
 struct EmitterDescription
@@ -75,18 +101,22 @@ struct EmitterDescription
     double initialVelocity[3] = {0.0, -9.0, 0.0};
     double velocityJitter     = 0.1;
 
-    // Gravity scale against the world gravity (rain 1.0, fire -0.15 for
-    // buoyant rise; a negative scale makes particles rise).
+    // Gravity scale against the world gravity (rain and hail 1.0, leaves
+    // 0.35, ash 0.08, pollen 0.02, fire -0.15 for buoyant rise; a negative
+    // scale makes particles rise, and the insect wander controller replaces
+    // gravity entirely).
     double gravityScale = 1.0;
 
     // Air drag: exponential velocity damping per second toward the wind
-    // acceleration target (snow and dust carry a high drag so they track
-    // the wind; rain barely reacts).
+    // acceleration target (snow, dust, ash, leaves, and pollen carry a
+    // high drag so they track the wind; rain and hail barely react, and
+    // insects blend their wander target at a moderate drag).
     double airDrag = 0.5;
 
     // Sway amplitude (meters per second of horizontal drift oscillation)
-    // and sway frequency (hertz), phase-derived from the slot hash. Snow
-    // and dust use visible sway; rain and fire keep it small.
+    // and sway frequency (hertz), phase-derived from the slot hash. Snow,
+    // dust, and ash use visible sway, leaves flutter hard on a slow phase;
+    // rain, hail, and fire keep it small.
     double swayAmplitude     = 0.8;
     double swayFrequency     = 1.5;
 
@@ -101,13 +131,14 @@ struct EmitterDescription
     // particle lifetime (0 = steady).
     double flicker = 0.5;
 
-    // World collision through the rigid capability: rain dies on impact,
-    // snow settles on impact (velocity zeroed, slides with friction 0.2,
-    // resumes when the surface moves away), dust ignores impact.
+    // World collision through the rigid capability: rain and hail die on
+    // impact, snow settles on impact (velocity zeroed, slides with friction 0.2,
+    // resumes when the surface moves away), leaves settle briefly and then
+    // expire, ash/pollen/insects ignore impact like dust.
     bool collideWithWorld = false;
 
     // Ground plane fallback: particles below this height die when they have
-    // no world collision (rain ends at the floor even without colliders).
+    // no world collision (rain and hail end at the floor even without colliders).
     bool   useGroundPlane     = false;
     double groundHeight       = 0.0;
 };

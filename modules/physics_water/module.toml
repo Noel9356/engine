@@ -9,6 +9,9 @@ config_keys           = [
     "physics_water.ripple_decay",
     "physics_water.ripple_speed",
     "physics_water.ripple_wavelength",
+    "physics_water.wake_spacing_meters",
+    "physics_water.wake_speed_threshold",
+    "physics_water.wake_strength_scale",
     "physics_water.water_density",
 ]
 name                  = "physics_water"

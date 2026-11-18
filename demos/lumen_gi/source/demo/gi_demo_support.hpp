@@ -24,6 +24,11 @@ struct GiDemoOptions
     std::string   exportDebugPrefix;
     std::uint32_t statsEveryFrames = 30;
     bool          orbit            = false;
+    // --spin: rotate one scene object around its own center every frame
+    // (renderer, lumen_gi, and lumen_reflection all receive the same
+    // per-frame model matrix), exercising the dynamic-surface path without
+    // manual input.
+    bool          spin             = false;
     // --no-reflections: skip the lumen_reflection module (no surfaces
     // registered, no evaluate) so the same scene renders without the
     // indirect specular term for A/B comparison. The module itself stays
@@ -41,6 +46,8 @@ struct SceneVertex
 
 struct SceneMesh
 {
+    // Stable identifier for demo-side object selection (--spin).
+    std::string name;
     std::vector<SceneVertex> vertices;
     std::vector<std::uint32_t> indices;
     engine::renderer::MeshHandle rendererMesh = engine::renderer::invalidMesh;

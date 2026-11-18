@@ -20,6 +20,8 @@ Every value is read once in `construct()` and copied into each world at `createW
 | `physics_rigid.maximum_linear_correction` | number | (0, 10) | `0.4` | Upper bound (meters for the position solver's per-iteration displacement, meters per second for joint bias velocities) so deep overlaps correct over several steps instead of popping. |
 | `physics_rigid.maximum_linear_velocity` | number | >= 1 | `500.0` | Linear speed clamp (meters per second) applied after integration as a tunneling safety net. |
 | `physics_rigid.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped instead of accumulating into a catch-up spiral. |
+| `physics_rigid.maximum_trigger_events` | integer | 1 - 1000000 | `1024` | Bound on the per-world pending trigger-event queue; once full, the oldest event is dropped with the overflow flag set (visible through `triggerEventCount`) until the consumer drains the queue. |
+| `physics_rigid.maximum_triggers` | integer | 1 - 100000 | `256` | Largest trigger count accepted per world; `createTrigger` reports `CapacityExceeded` beyond it. |
 | `physics_rigid.maximum_worlds` | integer | 1 - 4096 | `16` | Maximum concurrently existing worlds. |
 | `physics_rigid.position_correction_factor` | number | (0, 1] | `0.4` | Fraction of the contact penetration the position solver removes per iteration. Higher values de-penetrate faster; the per-iteration correction stays clamped by `maximum_linear_correction`. |
 | `physics_rigid.restitution_velocity_threshold` | number | [0, 100) | `0.3` | Approach speed (meters per second) below which restitution is suppressed so resting contact does not jitter. |
@@ -31,7 +33,7 @@ Every value is read once in `construct()` and copied into each world at `createW
 | `physics_rigid.warm_starting` | boolean | `true` / `false` | `true` | Applies the previous step's accumulated contact and joint impulses before iterating. Disabling it makes the solver re-converge from zero every step (useful for A/B comparisons). |
 ## Out-of-range and invalid values
 
-Out-of-range numeric values, missing values, and non-finite arrays are ignored and the built-in default stays active. Budgets are enforced when objects are created: `createWorld` beyond `maximum_worlds`, `createBody` beyond `maximum_bodies`, and `createJoint` beyond `maximum_joints` report `CapacityExceeded`. Lowering a configured limit affects new allocations; it does not evict existing objects. `stop()` releases all worlds and resets the handle counters.
+Out-of-range numeric values, missing values, and non-finite arrays are ignored and the built-in default stays active. Budgets are enforced when objects are created: `createWorld` beyond `maximum_worlds`, `createBody` beyond `maximum_bodies`, `createJoint` beyond `maximum_joints`, and `createTrigger` beyond `maximum_triggers` report `CapacityExceeded`. Lowering a configured limit affects new allocations; it does not evict existing objects. `stop()` releases all worlds and resets the handle counters.
 
 ## Where the settings show up
 
@@ -39,4 +41,5 @@ Out-of-range numeric values, missing values, and non-finite arrays are ignored a
 - The clamps (`maximum_linear_velocity`, `maximum_angular_velocity`) are the tunneling and spin safety net applied after every integration.
 - `substep_maximum_delta` is the frame-rate independence guarantee made internal: the demo's 30/60/120 Hz comparison runs finish bit-identical because every rate integrates through the same canonical substeps; see [overview.md](overview.md) for the splitting rule.
 - The sleep block (`linear_sleep_tolerance`, `angular_sleep_tolerance`, `time_to_sleep`) trades idle CPU for wake latency; sleeping islands skip broadphase pairs and solve nothing until touched.
-- `spatial_hash_cell_size` and the budgets (`maximum_worlds`, `maximum_bodies`, `maximum_joints`) bound memory: bodies, joints, and manifolds are dense arrays sized by the live object counts, and the broadphase scratch reuses its cell buckets across steps. See [overview.md](overview.md) for the stepping and sleeping paths.
+- `spatial_hash_cell_size` and the budgets (`maximum_worlds`, `maximum_bodies`, `maximum_joints`, `maximum_triggers`) bound memory: bodies, joints, triggers, and manifolds are dense arrays sized by the live object counts, and the broadphase scratch reuses its cell buckets across steps. See [overview.md](overview.md) for the stepping and sleeping paths.
+- `maximum_trigger_events` bounds the overlap-event queue; consumers that poll less often than the event rate raise it so transitions are never dropped (the overflow flag reports a drop either way).

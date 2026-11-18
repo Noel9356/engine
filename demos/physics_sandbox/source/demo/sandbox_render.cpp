@@ -665,7 +665,7 @@ void SandboxRenderer::recordExtendedFixedStep(
     // Particles: one buffer per emitter kind.
     if (dependencies.particles != nullptr)
     {
-        for (std::uint32_t kind = 0; kind < 4; ++kind)
+        for (std::uint32_t kind = 0; kind < ExtendedHandles::kEmitterSlotCount; ++kind)
         {
             particleBuffers_[kind].states.clear();
             const engine::physics_particles::EmitterHandle emitter = handles.extended.emitters[kind];
@@ -726,7 +726,7 @@ void SandboxRenderer::buildExtendedDrawCommands(
     ropeNodeMatrices_.clear();
     ropeLinkMatrices_.clear();
     fluidMatrices_.clear();
-    for (std::uint32_t kind = 0; kind < 4; ++kind)
+    for (std::uint32_t kind = 0; kind < ExtendedHandles::kEmitterSlotCount; ++kind)
     {
         particleMatrices_[kind].clear();
     }
@@ -826,7 +826,7 @@ void SandboxRenderer::buildExtendedDrawCommands(
     }
 
     // Particles as small spheres colored per kind.
-    for (std::uint32_t kind = 0; kind < 4; ++kind)
+    for (std::uint32_t kind = 0; kind < ExtendedHandles::kEmitterSlotCount; ++kind)
     {
         for (const engine::physics_particles::ParticleState &state : particleBuffers_[kind].states)
         {
@@ -976,7 +976,7 @@ void SandboxRenderer::submitExtended(renderer::RenderCapability &renderCapabilit
     fluidMaterial.roughnessFactor = 0.25f;
     drawInstances(sphereMesh_, fluidMatrices_, fluidMaterial);
 
-    const renderer::MeshMaterial particleMaterials[4] = {
+    const renderer::MeshMaterial particleMaterials[ExtendedHandles::kEmitterSlotCount] = {
         [] // rain
         {
             renderer::MeshMaterial material;
@@ -1015,8 +1015,53 @@ void SandboxRenderer::submitExtended(renderer::RenderCapability &renderCapabilit
             material.emissiveColor[2] = 0.05f;
             material.unlit        = false;
             return material;
+        }(),
+        [] // hail
+        {
+            renderer::MeshMaterial material;
+            material.baseColor[0] = 0.82f;
+            material.baseColor[1] = 0.90f;
+            material.baseColor[2] = 0.97f;
+            material.unlit        = false;
+            return material;
+        }(),
+        [] // ash
+        {
+            renderer::MeshMaterial material;
+            material.baseColor[0] = 0.42f;
+            material.baseColor[1] = 0.40f;
+            material.baseColor[2] = 0.40f;
+            material.unlit        = false;
+            return material;
+        }(),
+        [] // leaves
+        {
+            renderer::MeshMaterial material;
+            material.baseColor[0] = 0.72f;
+            material.baseColor[1] = 0.48f;
+            material.baseColor[2] = 0.16f;
+            material.unlit        = false;
+            return material;
+        }(),
+        [] // pollen
+        {
+            renderer::MeshMaterial material;
+            material.baseColor[0] = 0.88f;
+            material.baseColor[1] = 0.82f;
+            material.baseColor[2] = 0.30f;
+            material.unlit        = false;
+            return material;
+        }(),
+        [] // insects
+        {
+            renderer::MeshMaterial material;
+            material.baseColor[0] = 0.35f;
+            material.baseColor[1] = 0.16f;
+            material.baseColor[2] = 0.10f;
+            material.unlit        = false;
+            return material;
         }()};
-    for (std::uint32_t kind = 0; kind < 4; ++kind)
+    for (std::uint32_t kind = 0; kind < ExtendedHandles::kEmitterSlotCount; ++kind)
     {
         drawInstances(clothNodeMesh_, particleMatrices_[kind], particleMaterials[kind]);
     }

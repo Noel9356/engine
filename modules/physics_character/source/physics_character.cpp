@@ -187,11 +187,47 @@ struct FootPlanterRecord
     FootRuntime feet[2];
 };
 
+struct HandRuntime
+{
+    bool       hasTarget  = false; // setHandTarget overrides the root-local rest offset
+    math::Vec3 target{};
+    math::Vec3 handPosition{};
+    math::Vec3 elbowDirection{0.0, 0.0, -1.0};
+    double     elbowBendRadians = 0.0;
+    double     stretchMeters    = 0.0;
+    bool       withinReach      = false;
+};
+
+struct HandPlanterRecord
+{
+    HandPlanterHandle handle = invalidHandPlanter;
+
+    HandPlanterDescription description{};
+
+    HandRuntime hands[2];
+};
+
+struct LeanRecord
+{
+    LeanHandle handle = invalidLeanController;
+
+    LeanControllerDescription description{};
+
+    math::Quaternion leanRotation{0.0, 0.0, 0.0, 1.0};
+    double           leanAngleRadians = 0.0;
+    math::Vec3       leanAxis{1.0, 0.0, 0.0};
+    double           angularVelocity = 0.0;
+    math::Vec3       previousVelocity{};
+    bool             hasPreviousVelocity = false;
+};
+
 struct CharacterSettings
 {
-    std::uint32_t maximumCharacters  = 32;
-    std::uint32_t maximumJiggleChains = 256;
-    std::uint32_t maximumPlanters    = 64;
+    std::uint32_t maximumCharacters     = 32;
+    std::uint32_t maximumJiggleChains   = 256;
+    std::uint32_t maximumPlanters       = 64;
+    std::uint32_t maximumHandPlanters   = 64;
+    std::uint32_t maximumLeanControllers = 64;
 };
 
 class CharacterModule final : public ModuleInterface
@@ -219,6 +255,12 @@ public:
         if (const auto value = context.configurationIntegerInSection("physics_character", "maximum_foot_planters");
             value && *value > 0 && *value <= 4096)
             settings_.maximumPlanters = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationIntegerInSection("physics_character", "maximum_hand_planters");
+            value && *value > 0 && *value <= 4096)
+            settings_.maximumHandPlanters = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationIntegerInSection("physics_character", "maximum_lean_controllers");
+            value && *value > 0 && *value <= 4096)
+            settings_.maximumLeanControllers = static_cast<std::uint32_t>(*value);
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -244,10 +286,16 @@ public:
         chainIndexByHandle_.clear();
         planters_.clear();
         planterIndexByHandle_.clear();
-        nextCharacterHandle_   = 1;
-        nextChainHandle_       = 1;
-        nextPlanterHandle_     = 1;
-        statistics_            = CharacterStatistics{};
+        handPlanters_.clear();
+        handPlanterIndexByHandle_.clear();
+        leans_.clear();
+        leanIndexByHandle_.clear();
+        nextCharacterHandle_    = 1;
+        nextChainHandle_        = 1;
+        nextPlanterHandle_      = 1;
+        nextHandPlanterHandle_  = 1;
+        nextLeanHandle_         = 1;
+        statistics_             = CharacterStatistics{};
     }
 
     void *capabilityPointerFor(const std::string &name) override
@@ -290,6 +338,18 @@ private:
     {
         const auto iterator = planterIndexByHandle_.find(handle);
         return iterator != planterIndexByHandle_.end() ? &planters_[iterator->second] : nullptr;
+    }
+
+    HandPlanterRecord *findHandPlanter(HandPlanterHandle handle)
+    {
+        const auto iterator = handPlanterIndexByHandle_.find(handle);
+        return iterator != handPlanterIndexByHandle_.end() ? &handPlanters_[iterator->second] : nullptr;
+    }
+
+    LeanRecord *findLean(LeanHandle handle)
+    {
+        const auto iterator = leanIndexByHandle_.find(handle);
+        return iterator != leanIndexByHandle_.end() ? &leans_[iterator->second] : nullptr;
     }
 
     static bool finiteArray(const double *values, std::uint32_t count)
@@ -1091,6 +1151,356 @@ private:
         return true;
     }
 
+    // ---- hand placement ------------------------------------------------------
+
+    HandPlanterHandle createHandPlanterImpl(const HandPlanterDescription *description, CharacterError *error)
+    {
+        setError(error, CharacterError::None);
+        if (description == nullptr || !std::isfinite(description->armUpperLength)
+            || description->armUpperLength <= 0.0 || !std::isfinite(description->armLowerLength)
+            || description->armLowerLength <= 0.0 || !finiteArray(&description->shoulderOffsets[0][0], 6)
+            || !finiteArray(&description->handOffsets[0][0], 6) || !finiteArray(description->elbowDirection, 3))
+        {
+            setError(error, CharacterError::InvalidDescription);
+            return invalidHandPlanter;
+        }
+        const math::Vec3 elbow{
+            description->elbowDirection[0], description->elbowDirection[1], description->elbowDirection[2]};
+        if (math::lengthSquared(elbow) < 1.0e-12)
+        {
+            setError(error, CharacterError::InvalidDescription);
+            return invalidHandPlanter;
+        }
+        if (description->armUpperLength + description->armLowerLength <= 0.0)
+        {
+            setError(error, CharacterError::InvalidDescription);
+            return invalidHandPlanter;
+        }
+        if (handPlanters_.size() >= settings_.maximumHandPlanters)
+        {
+            setError(error, CharacterError::CapacityExceeded);
+            return invalidHandPlanter;
+        }
+        if (nextHandPlanterHandle_ == invalidHandPlanter)
+        {
+            setError(error, CharacterError::CapacityExceeded);
+            return invalidHandPlanter;
+        }
+        HandPlanterRecord planter;
+        planter.handle      = nextHandPlanterHandle_;
+        nextHandPlanterHandle_ = nextHandPlanterHandle_ == std::numeric_limits<HandPlanterHandle>::max()
+            ? invalidHandPlanter
+            : nextHandPlanterHandle_ + 1;
+        planter.description = *description;
+        handPlanters_.push_back(std::move(planter));
+        handPlanterIndexByHandle_.emplace(handPlanters_.back().handle, handPlanters_.size() - 1);
+        statistics_.handPlanterCount = static_cast<std::uint32_t>(handPlanters_.size());
+        return handPlanters_.back().handle;
+    }
+
+    void destroyHandPlanterImpl(HandPlanterHandle handle)
+    {
+        const auto iterator = handPlanterIndexByHandle_.find(handle);
+        if (iterator == handPlanterIndexByHandle_.end())
+        {
+            return;
+        }
+        const std::size_t index = iterator->second;
+        handPlanterIndexByHandle_.erase(iterator);
+        if (index + 1 != handPlanters_.size())
+        {
+            handPlanters_[index]                                       = handPlanters_.back();
+            handPlanterIndexByHandle_[handPlanters_[index].handle]     = index;
+        }
+        handPlanters_.pop_back();
+        statistics_.handPlanterCount = static_cast<std::uint32_t>(handPlanters_.size());
+    }
+
+    bool setHandTargetImpl(HandPlanterHandle handle, std::uint32_t handIndex, const double target[3])
+    {
+        HandPlanterRecord *planter = findHandPlanter(handle);
+        if (planter == nullptr || handIndex > 1 || target == nullptr || !finiteArray(target, 3))
+        {
+            return false;
+        }
+        HandRuntime &runtime = planter->hands[handIndex];
+        runtime.target       = math::Vec3{target[0], target[1], target[2]};
+        runtime.hasTarget    = true;
+        return true;
+    }
+
+    bool updateHandPlanterImpl(HandPlanterHandle handle, const engine::physics_rigid::RigidTransform *root)
+    {
+        HandPlanterRecord *planter = findHandPlanter(handle);
+        if (planter == nullptr || root == nullptr)
+        {
+            return false;
+        }
+        if (!std::isfinite(root->position.x) || !std::isfinite(root->position.y) || !std::isfinite(root->position.z))
+        {
+            return false;
+        }
+        const HandPlanterDescription &description = planter->description;
+        const math::Quaternion rootRotation = math::normalize(root->rotation);
+        const math::Vec3 rootPosition       = root->position;
+        const double     reach              = description.armUpperLength + description.armLowerLength;
+        const math::Vec3 elbowPoleLocal
+            = math::normalized(math::Vec3{description.elbowDirection[0], description.elbowDirection[1], description.elbowDirection[2]});
+        const math::Vec3 elbowPoleWorld = math::rotate(rootRotation, elbowPoleLocal);
+
+        for (std::uint32_t hand = 0; hand < 2; ++hand)
+        {
+            HandRuntime &runtime = planter->hands[hand];
+            const math::Vec3 shoulderWorld = rootPosition + math::rotate(rootRotation,
+                math::Vec3{description.shoulderOffsets[hand][0], description.shoulderOffsets[hand][1],
+                    description.shoulderOffsets[hand][2]});
+            if (!runtime.hasTarget)
+            {
+                runtime.target = rootPosition + math::rotate(rootRotation,
+                    math::Vec3{description.handOffsets[hand][0], description.handOffsets[hand][1],
+                        description.handOffsets[hand][2]});
+            }
+
+            // Two-bone IK: clamp the target to full extension, then the law
+            // of cosines gives the elbow interior angle.
+            const math::Vec3 shoulderToTarget = runtime.target - shoulderWorld;
+            const double     distance         = math::length(shoulderToTarget);
+            const double     clamped          = std::clamp(distance, 1.0e-6, reach - 1.0e-6);
+            runtime.withinReach               = distance <= reach;
+            runtime.stretchMeters             = distance > reach ? distance - reach : 0.0;
+            runtime.handPosition              = shoulderWorld
+                                  + (distance > 1.0e-6 ? shoulderToTarget * (clamped / distance) : math::Vec3{0.0, 0.0, 0.0});
+            const double cosElbow = (description.armUpperLength * description.armUpperLength
+                                        + description.armLowerLength * description.armLowerLength
+                                        - clamped * clamped)
+                / (2.0 * description.armUpperLength * description.armLowerLength);
+            runtime.elbowBendRadians = std::max(kPi - std::acos(std::clamp(cosElbow, -1.0, 1.0)), 0.0);
+            runtime.elbowDirection   = elbowPoleWorld;
+        }
+        return true;
+    }
+
+    bool copyHandStatesImpl(
+        HandPlanterHandle handle, HandState *outStates, std::uint32_t capacity, std::uint32_t *outRequired)
+    {
+        HandPlanterRecord *planter = findHandPlanter(handle);
+        if (planter == nullptr || outRequired == nullptr)
+        {
+            return false;
+        }
+        *outRequired = 2;
+        if (outStates == nullptr || capacity < 2)
+        {
+            return false;
+        }
+        for (std::uint32_t hand = 0; hand < 2; ++hand)
+        {
+            const HandRuntime &runtime = planter->hands[hand];
+            HandState state;
+            state.withinReach = runtime.withinReach;
+            state.handPosition[0] = runtime.handPosition.x;
+            state.handPosition[1] = runtime.handPosition.y;
+            state.handPosition[2] = runtime.handPosition.z;
+            state.elbowDirection[0] = runtime.elbowDirection.x;
+            state.elbowDirection[1] = runtime.elbowDirection.y;
+            state.elbowDirection[2] = runtime.elbowDirection.z;
+            state.elbowBendRadians = runtime.elbowBendRadians;
+            state.stretchMeters    = runtime.stretchMeters;
+            outStates[hand] = state;
+        }
+        return true;
+    }
+
+    // ---- procedural lean -------------------------------------------------------
+
+    LeanHandle createLeanControllerImpl(const LeanControllerDescription *description, CharacterError *error)
+    {
+        setError(error, CharacterError::None);
+        if (description == nullptr || !std::isfinite(description->maximumLeanRadians)
+            || description->maximumLeanRadians <= 0.0 || description->maximumLeanRadians > 1.2
+            || !std::isfinite(description->stiffness) || description->stiffness <= 0.0
+            || !std::isfinite(description->damping) || description->damping < 0.0
+            || !std::isfinite(description->accelerationGain) || description->accelerationGain < 0.0)
+        {
+            setError(error, CharacterError::InvalidDescription);
+            return invalidLeanController;
+        }
+        if (leans_.size() >= settings_.maximumLeanControllers)
+        {
+            setError(error, CharacterError::CapacityExceeded);
+            return invalidLeanController;
+        }
+        if (nextLeanHandle_ == invalidLeanController)
+        {
+            setError(error, CharacterError::CapacityExceeded);
+            return invalidLeanController;
+        }
+        LeanRecord lean;
+        lean.handle      = nextLeanHandle_;
+        nextLeanHandle_  = nextLeanHandle_ == std::numeric_limits<LeanHandle>::max()
+                              ? invalidLeanController
+                              : nextLeanHandle_ + 1;
+        lean.description = *description;
+        leans_.push_back(std::move(lean));
+        leanIndexByHandle_.emplace(leans_.back().handle, leans_.size() - 1);
+        statistics_.leanControllerCount = static_cast<std::uint32_t>(leans_.size());
+        return leans_.back().handle;
+    }
+
+    void destroyLeanControllerImpl(LeanHandle handle)
+    {
+        const auto iterator = leanIndexByHandle_.find(handle);
+        if (iterator == leanIndexByHandle_.end())
+        {
+            return;
+        }
+        const std::size_t index = iterator->second;
+        leanIndexByHandle_.erase(iterator);
+        if (index + 1 != leans_.size())
+        {
+            leans_[index]                              = leans_.back();
+            leanIndexByHandle_[leans_[index].handle]   = index;
+        }
+        leans_.pop_back();
+        statistics_.leanControllerCount = static_cast<std::uint32_t>(leans_.size());
+    }
+
+    bool updateLeanControllerImpl(LeanHandle handle, const engine::physics_rigid::RigidTransform *root,
+        const double rootVelocity[3], double fixedDeltaSeconds, LeanState *outState)
+    {
+        LeanRecord *lean = findLean(handle);
+        if (lean == nullptr || root == nullptr || rootVelocity == nullptr || outState == nullptr
+            || !std::isfinite(fixedDeltaSeconds) || fixedDeltaSeconds <= 0.0 || fixedDeltaSeconds > 0.1)
+        {
+            return false;
+        }
+        if (!finiteArray(rootVelocity, 3) || !std::isfinite(root->position.x) || !std::isfinite(root->position.y)
+            || !std::isfinite(root->position.z))
+        {
+            return false;
+        }
+        const math::Vec3 velocity{rootVelocity[0], rootVelocity[1], rootVelocity[2]};
+        math::Vec3 acceleration{};
+        if (lean->hasPreviousVelocity)
+        {
+            acceleration = (velocity - lean->previousVelocity) * (1.0 / fixedDeltaSeconds);
+        }
+        lean->previousVelocity      = velocity;
+        lean->hasPreviousVelocity   = true;
+
+        // Lateral acceleration only: the vertical component is dropped so
+        // jumping and falling never lean the character over.
+        math::Vec3 lateral = acceleration;
+        lateral.y          = 0.0;
+        const double lateralMagnitude = math::length(lateral);
+
+        double targetAngle  = 0.0;
+        math::Vec3 targetAxis = lean->leanAxis;
+        if (lateralMagnitude > 1.0e-6)
+        {
+            targetAxis = math::normalized(math::cross(math::Vec3{0.0, 1.0, 0.0}, lateral));
+            targetAngle = std::clamp(
+                lateralMagnitude * lean->description.accelerationGain, 0.0, lean->description.maximumLeanRadians);
+        }
+
+        // Spring-damper scalar lean around the (possibly retargeted) axis.
+        lean->angularVelocity += (-lean->description.stiffness * (lean->leanAngleRadians - targetAngle)
+                                     - lean->description.damping * lean->angularVelocity)
+            * fixedDeltaSeconds;
+        lean->leanAngleRadians += lean->angularVelocity * fixedDeltaSeconds;
+        lean->leanAngleRadians = std::clamp(lean->leanAngleRadians, -lean->description.maximumLeanRadians,
+            lean->description.maximumLeanRadians);
+        if (lateralMagnitude > 1.0e-6)
+        {
+            lean->leanAxis = targetAxis;
+        }
+
+        const double angle = std::abs(lean->leanAngleRadians);
+        if (angle > 1.0e-9)
+        {
+            const math::Vec3 axis   = lean->leanAxis * (lean->leanAngleRadians >= 0.0 ? 1.0 : -1.0);
+            const double     half   = angle * 0.5;
+            const double     sine   = std::sin(half);
+            lean->leanRotation = math::normalize(math::Quaternion{
+                axis.x * sine, axis.y * sine, axis.z * sine, std::cos(half)});
+        }
+        else
+        {
+            lean->leanRotation = math::Quaternion{0.0, 0.0, 0.0, 1.0};
+        }
+
+        outState->leanRadians       = lean->leanAngleRadians;
+        outState->leanAxis[0]       = lean->leanAxis.x;
+        outState->leanAxis[1]       = lean->leanAxis.y;
+        outState->leanAxis[2]       = lean->leanAxis.z;
+        outState->leanRotation[0]   = lean->leanRotation.x;
+        outState->leanRotation[1]   = lean->leanRotation.y;
+        outState->leanRotation[2]   = lean->leanRotation.z;
+        outState->leanRotation[3]   = lean->leanRotation.w;
+        return std::isfinite(lean->leanAngleRadians) && std::isfinite(lean->angularVelocity);
+    }
+
+    // ---- physical pushing --------------------------------------------------------
+
+    bool applyCharacterPushImpl(engine::physics_rigid::WorldHandle world, const double center[3], double radius,
+        const double pushVelocity[3], double forceScale)
+    {
+        if (rigid_ == nullptr || center == nullptr || pushVelocity == nullptr || !finiteArray(center, 3)
+            || !finiteArray(pushVelocity, 3) || !std::isfinite(radius) || radius <= 0.0 || !std::isfinite(forceScale)
+            || forceScale < 0.0)
+        {
+            return false;
+        }
+        std::uint32_t bodyCount = rigid_->bodyCount(rigid_->self, world);
+        if (bodyCount == 0u)
+        {
+            return true;
+        }
+        // Fixed upper bound keeps the pass allocation-free; worlds above the
+        // bound are simply not pushed this call.
+        constexpr std::uint32_t kMaximumPushBodies = 4096;
+        if (bodyCount > kMaximumPushBodies)
+        {
+            bodyCount = kMaximumPushBodies;
+        }
+        engine::physics_rigid::BodyHandle handles[kMaximumPushBodies];
+        std::uint32_t required = 0u;
+        if (!rigid_->copyBodyHandles(rigid_->self, world, handles, bodyCount, &required))
+        {
+            return false;
+        }
+        const double radiusSquared = radius * radius;
+        for (std::uint32_t index = 0; index < bodyCount && index < required; ++index)
+        {
+            engine::physics_rigid::BodyDescription description;
+            if (!rigid_->copyBodyDescription(rigid_->self, world, handles[index], &description))
+            {
+                continue;
+            }
+            if (description.kind != engine::physics_rigid::BodyKind::Dynamic)
+            {
+                continue;
+            }
+            engine::physics_rigid::BodyState state;
+            if (!rigid_->copyBodyState(rigid_->self, world, handles[index], &state))
+            {
+                continue;
+            }
+            const double offsetX = state.transform.position.x - center[0];
+            const double offsetY = state.transform.position.y - center[1];
+            const double offsetZ = state.transform.position.z - center[2];
+            if (offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ > radiusSquared)
+            {
+                continue;
+            }
+            const double impulse[3] = {pushVelocity[0] * forceScale, pushVelocity[1] * forceScale,
+                pushVelocity[2] * forceScale};
+            const double point[3]   = {state.transform.position.x, state.transform.position.y, state.transform.position.z};
+            rigid_->applyImpulseAtPoint(rigid_->self, world, handles[index], impulse, point);
+        }
+        return true;
+    }
+
     void assignCapabilityPointers()
     {
         capability_.abi  = physicsCharacterCapabilityAbi;
@@ -1114,6 +1524,15 @@ private:
         ENGINE_PHYSICS_CHARACTER_BIND(destroyFootPlanter, destroyFootPlanterImpl);
         ENGINE_PHYSICS_CHARACTER_BIND(updateFootPlanter, updateFootPlanterImpl);
         ENGINE_PHYSICS_CHARACTER_BIND(copyFootStates, copyFootStatesImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(createHandPlanter, createHandPlanterImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(destroyHandPlanter, destroyHandPlanterImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(setHandTarget, setHandTargetImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(updateHandPlanter, updateHandPlanterImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(copyHandStates, copyHandStatesImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(createLeanController, createLeanControllerImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(destroyLeanController, destroyLeanControllerImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(updateLeanController, updateLeanControllerImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(applyCharacterPush, applyCharacterPushImpl);
         ENGINE_PHYSICS_CHARACTER_BIND(characterStatistics, characterStatisticsImpl);
 #undef ENGINE_PHYSICS_CHARACTER_BIND
     }
@@ -1137,6 +1556,12 @@ private:
     std::vector<FootPlanterRecord>                        planters_;
     std::unordered_map<FootPlanterHandle, std::size_t>    planterIndexByHandle_;
     FootPlanterHandle                                     nextPlanterHandle_ = 1;
+    std::vector<HandPlanterRecord>                        handPlanters_;
+    std::unordered_map<HandPlanterHandle, std::size_t>    handPlanterIndexByHandle_;
+    HandPlanterHandle                                     nextHandPlanterHandle_ = 1;
+    std::vector<LeanRecord>                               leans_;
+    std::unordered_map<LeanHandle, std::size_t>           leanIndexByHandle_;
+    LeanHandle                                            nextLeanHandle_ = 1;
 };
 
 } // namespace

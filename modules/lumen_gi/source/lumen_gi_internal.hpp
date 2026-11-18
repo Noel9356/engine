@@ -26,6 +26,7 @@
 #include <engine/kernel/task_scheduler.hpp>
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/lumen_cpu_pipeline.hpp>
 #include <engine/renderer/lumen_ray_core.hpp>
 
 #include <exception>
@@ -76,6 +77,11 @@ using engine::lumen::safeInverseDirection;
 using engine::lumen::slabTest;
 using engine::lumen::rayTriangle;
 using engine::lumen::qualityScale;
+using engine::lumen::parallelRange;
+using engine::lumen::toneMapColor;
+using engine::lumen::toByte;
+using engine::lumen::gammaEncode;
+using engine::lumen::storePixel;
 
 // Octahedral mapping (unit sphere <-> [-1, 1]^2). decode/encode are exact
 // inverses of each other; every consumer of probe maps goes through these two
@@ -647,66 +653,8 @@ struct GiPipelineState
     }
 };
 
-// ---- parallel helper --------------------------------------------------------------
-
-// Runs fn(begin, end) over [0, count) in chunks of `grain` with dynamic
-// (atomic-counter) scheduling, so uneven ray-tracing costs balance across
-// workers. The calling thread participates; with no running scheduler (or a
-// small range) everything runs inline. Rethrows the first exception.
-template <typename Fn>
-void parallelRange(TaskScheduler *scheduler, std::size_t count, std::size_t grain, Fn &&fn)
-{
-    if (count == 0)
-    {
-        return;
-    }
-    grain = std::max<std::size_t>(grain, 1);
-    if (scheduler == nullptr || !scheduler->isRunning() || count <= grain)
-    {
-        fn(static_cast<std::size_t>(0), count);
-        return;
-    }
-    const std::size_t         chunks = (count + grain - 1) / grain;
-    std::atomic<std::size_t>  next{0};
-    std::exception_ptr        failure;
-    std::mutex                failureMutex;
-    auto runner = [&]()
-    {
-        try
-        {
-            for (;;)
-            {
-                const std::size_t begin = next.fetch_add(grain, std::memory_order_relaxed);
-                if (begin >= count)
-                {
-                    break;
-                }
-                fn(begin, std::min(begin + grain, count));
-            }
-        }
-        catch (...)
-        {
-            std::lock_guard<std::mutex> lock(failureMutex);
-            if (!failure)
-            {
-                failure = std::current_exception();
-            }
-            next.store(count, std::memory_order_relaxed);
-        }
-    };
-    const std::size_t helpers = std::min<std::size_t>(scheduler->statistics().workerCount, chunks - 1);
-    TaskGroup         group;
-    for (std::size_t helper = 0; helper < helpers; ++helper)
-    {
-        scheduler->schedule(group, runner);
-    }
-    runner();
-    group.wait(*scheduler);
-    if (failure)
-    {
-        std::rethrow_exception(failure);
-    }
-}
+// The task-parallel range helper and the debug-image composition helpers are
+// shared with lumen_reflection through engine/renderer/lumen_cpu_pipeline.hpp.
 
 // ---- scene.cpp -------------------------------------------------------------------
 

@@ -31,6 +31,7 @@
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/device_profile.hpp>
 #include <engine/util/hardware_info.hpp>
+#include <engine/util/ppm.hpp>
 #include "lumen_reflection_internal.hpp"
 
 #include <glm/geometric.hpp>
@@ -41,7 +42,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -85,6 +85,15 @@ void applySettingsToState(const ReflectionSettings &settings, RfPipelineState &s
         state.settings.spatialReuseRadius = std::max<std::uint32_t>(
             static_cast<std::uint32_t>(std::lround(static_cast<float>(settings.spatialReuseRadius) * scale)), 0u);
     }
+    // Static-frame skip convergence: after N clean frames the temporal
+    // history's fresh-trace share is (1 - strength)^N; the skip may freeze
+    // the field once that falls below 1%, so a frozen field is a converged
+    // one (the same contract as lumen_gi's budget-derived convergenceFrames).
+    const float strength = std::clamp(settings.temporalStrength, 0.0f, 0.95f);
+    state.convergenceFrames = strength <= 1.0e-3f
+        ? 1u
+        : static_cast<std::uint32_t>(std::clamp(
+              std::ceil(std::log(0.01f) / std::log(1.0f - strength)), 1.0f, 128.0f));
     // The registry capacity follows the configured scene bound (the setting
     // is the documented limit createSurface enforces).
     state.registryCapacity = settings.maxSurfaces;
@@ -240,6 +249,7 @@ private:
         settings.bilateralRadius       = static_cast<std::uint32_t>(integer("filter.bilateral_radius", 2, 1, 9));
         settings.screenTraceMaxSteps   = static_cast<std::uint32_t>(integer("screen_trace.max_steps", 48, 4, 256));
         settings.screenTraceThickness  = static_cast<float>(floating("screen_trace.thickness_m", 0.5, 0.01, 8.0));
+        settings.screenTracesEnabled   = boolean("screen_trace.enabled", true);
         settings.referenceSamples      = static_cast<std::uint32_t>(integer("debug.reference_samples", 16, 1, 4096));
         settings_                      = settings;
         // The capacity key is the documented registry bound.
@@ -667,10 +677,10 @@ private:
         ++state_.frameIndex;
 
         // Static-frame skip: when the camera, the scene, and the environment
-        // are all unchanged and the temporal history has had a full frame to
-        // accumulate, re-running would only re-trace the same rays. Return
-        // early - and keep the field version so a renderer polling copyField
-        // skips its upload too.
+        // are all unchanged and the temporal history has had the blend's
+        // convergence window to settle (see convergenceFrames), re-running
+        // would only re-blend the same radiance. Return early - and keep the
+        // field version so a renderer polling copyField skips its upload too.
         const bool viewChanged  = state_.viewDirty;
         const bool sceneChanged = state_.sceneDirty;
         state_.viewDirty  = false;
@@ -680,7 +690,8 @@ private:
             state_.framesSinceDirty = 0;
         }
         if (settings_.skipUnchangedFrames && state_.hasPreviousView && !viewChanged && !sceneChanged
-            && !environmentChanged && !probeGridChanged && state_.framesSinceDirty >= 1)
+            && !environmentChanged && !probeGridChanged
+            && state_.framesSinceDirty >= state_.convergenceFrames)
         {
             state_.framesSkippedStatic.fetch_add(1, std::memory_order_relaxed);
             lastEvaluateMilliseconds_ = 0.0;
@@ -875,17 +886,10 @@ private:
             setError(error, ReflectionError::ExportFailed);
             return false;
         }
-        std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
-        if (!file)
-        {
-            setError(error, ReflectionError::ExportFailed);
-            return false;
-        }
-        const std::uint32_t width  = state_.fieldWidth;
-        const std::uint32_t height = state_.fieldHeight;
-        file << "P6\n" << width << ' ' << height << "\n255\n";
-        file.write(reinterpret_cast<const char *>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
-        if (!file)
+        // The shared util writer (engine::util::writePpmRgb) - the same
+        // overflow-guarded export path lumen_gi's debug views use.
+        if (!util::writePpmRgb(filePath, state_.fieldWidth, state_.fieldHeight, rgb.data(),
+                static_cast<std::size_t>(state_.fieldWidth) * 3u))
         {
             setError(error, ReflectionError::ExportFailed);
             return false;

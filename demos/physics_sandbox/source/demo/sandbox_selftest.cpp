@@ -413,7 +413,7 @@ SelfTestResult runSelfTestExtended(const SceneDependencies &dependencies, const 
         auto collectParticles = [&](SceneHandles &handles)
         {
             std::vector<double> values;
-            for (std::uint32_t kind = 0; kind < 4; ++kind)
+            for (std::uint32_t kind = 0; kind < ExtendedHandles::kEmitterSlotCount; ++kind)
             {
                 const engine::physics_particles::EmitterHandle emitter = handles.extended.emitters[kind];
                 if (emitter == engine::physics_particles::invalidEmitter)
@@ -446,7 +446,7 @@ SelfTestResult runSelfTestExtended(const SceneDependencies &dependencies, const 
         };
         for (std::uint32_t step = 0; step < 120; ++step)
         {
-            for (std::uint32_t kind = 0; kind < 4; ++kind)
+            for (std::uint32_t kind = 0; kind < ExtendedHandles::kEmitterSlotCount; ++kind)
             {
                 const engine::physics_particles::EmitterHandle firstEmitter  = first.extended.emitters[kind];
                 const engine::physics_particles::EmitterHandle secondEmitter = second.extended.emitters[kind];
@@ -863,6 +863,551 @@ SelfTestResult runSelfTestExtended(const SceneDependencies &dependencies, const 
                << ", jiggle chain finite " << chainFinite << ", feet planted " << feetPlanted << "\n";
         pass = pass && testPassed;
         destroyScene(dependencies, handles);
+    }
+
+    // ---- 14. cylinder shapes rest, stack, and ray cast ----------------------
+    {
+        EXTENDED_TEST_MARKER("cylinder")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        engine::physics_rigid::BodyDescription ground;
+        ground.shape.kind           = engine::physics_rigid::ShapeKind::Plane;
+        ground.shape.planeNormal[1] = 1.0;
+        ground.kind                 = engine::physics_rigid::BodyKind::Static;
+        ground.material.friction    = 0.7;
+        dependencies.rigid->createBody(dependencies.rigid->self, world, &ground, nullptr);
+        engine::physics_rigid::BodyDescription barrel;
+        barrel.shape.kind               = engine::physics_rigid::ShapeKind::Cylinder;
+        barrel.shape.cylinderRadius     = 0.4;
+        barrel.shape.cylinderHalfHeight = 0.5;
+        barrel.transform.position       = engine::physics_rigid::Vec3{0.0, 0.5, 0.0};
+        barrel.kind                     = engine::physics_rigid::BodyKind::Dynamic;
+        barrel.density                  = 300.0;
+        barrel.material.friction        = 0.6;
+        const engine::physics_rigid::BodyHandle barrelBody
+            = dependencies.rigid->createBody(dependencies.rigid->self, world, &barrel, nullptr);
+        engine::physics_rigid::BodyDescription barrelTop = barrel;
+        barrelTop.transform.position                     = engine::physics_rigid::Vec3{0.05, 1.52, 0.0};
+        const engine::physics_rigid::BodyHandle barrelTopBody
+            = dependencies.rigid->createBody(dependencies.rigid->self, world, &barrelTop, nullptr);
+        for (std::uint32_t step = 0; step < 240; ++step)
+        {
+            dependencies.rigid->step(dependencies.rigid->self, world, 1.0 / 60.0);
+        }
+        engine::physics_rigid::BodyState baseState{};
+        engine::physics_rigid::BodyState topState{};
+        dependencies.rigid->copyBodyState(dependencies.rigid->self, world, barrelBody, &baseState);
+        dependencies.rigid->copyBodyState(dependencies.rigid->self, world, barrelTopBody, &topState);
+        // Mass properties: the solid-cylinder inertia about the axis is
+        // m r^2 / 2 with m = density pi r^2 (2h).
+        engine::physics_rigid::BodyMassProperties mass{};
+        dependencies.rigid->copyBodyMassProperties(dependencies.rigid->self, world, barrelBody, &mass);
+        const double expectedMass  = 300.0 * 3.14159265358979323846 * 0.16 * 1.0;
+        const double expectedAxial = 0.5 * expectedMass * 0.16;
+        // Ground probe straight down onto the cap.
+        const double probeOrigin[3] = {0.0, 4.0, 0.0};
+        const double probeDirection[3] = {0.0, -1.0, 0.0};
+        engine::physics_rigid::RayHit probe{};
+        const bool probed = dependencies.rigid->rayCast(
+            dependencies.rigid->self, world, probeOrigin, probeDirection, 10.0, &probe);
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const double expectedProbe = 4.0 - (topState.transform.position.y + 0.5);
+        const bool resting  = std::abs(baseState.transform.position.y - 0.5) < 0.05
+            && std::abs(topState.transform.position.y - 1.52) < 0.15;
+        const bool massOk   = std::abs(mass.mass - expectedMass) / expectedMass < 1.0e-9
+            && std::abs(mass.inertiaLocal.y - expectedAxial) / expectedAxial < 1.0e-9;
+        const bool probeOk  = probed && std::abs(probe.distance - expectedProbe) < 0.02;
+        const bool testPassed = resting && massOk && probeOk;
+        report << (testPassed ? "PASS" : "FAIL") << ": cylinder shape - the barrel rests at y "
+               << baseState.transform.position.y << " with the stacked one at y " << topState.transform.position.y
+               << ", the axial inertia matches the closed form, and the cap ray cast hits at " << probe.distance
+               << " m (expected " << expectedProbe << ")\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 15. trigger volumes report enter and exit --------------------------
+    {
+        EXTENDED_TEST_MARKER("triggers")
+        auto runTriggerRun = [&](std::uint32_t &outEnters, std::uint32_t &outExits, double &outFinalZ)
+        {
+            engine::physics_rigid::WorldDescription worldDescription;
+            const engine::physics_rigid::WorldHandle world
+                = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+            engine::physics_rigid::BodyDescription ground;
+            ground.shape.kind           = engine::physics_rigid::ShapeKind::Plane;
+            ground.shape.planeNormal[1] = 1.0;
+            ground.kind                 = engine::physics_rigid::BodyKind::Static;
+            ground.material.friction    = 0.8;
+            dependencies.rigid->createBody(dependencies.rigid->self, world, &ground, nullptr);
+            engine::physics_rigid::TriggerDescription zone;
+            zone.shape.kind              = engine::physics_rigid::ShapeKind::Box;
+            zone.shape.boxHalfExtents[0] = 0.75;
+            zone.shape.boxHalfExtents[1] = 0.75;
+            zone.shape.boxHalfExtents[2] = 0.75;
+            zone.transform.position      = engine::physics_rigid::Vec3{0.0, 0.75, 0.0};
+            engine::physics_rigid::PhysicsError triggerError = engine::physics_rigid::PhysicsError::None;
+            const engine::physics_rigid::TriggerHandle trigger
+                = dependencies.rigid->createTrigger(dependencies.rigid->self, world, &zone, &triggerError);
+            engine::physics_rigid::BodyDescription ball;
+            ball.shape.kind             = engine::physics_rigid::ShapeKind::Sphere;
+            ball.shape.sphereRadius     = 0.2;
+            ball.transform.position     = engine::physics_rigid::Vec3{0.0, 0.4, 5.0};
+            ball.kind                   = engine::physics_rigid::BodyKind::Dynamic;
+            ball.density                = 500.0;
+            ball.material.friction      = 0.05;
+            ball.linearDamping          = 0.0;
+            const engine::physics_rigid::BodyHandle ballBody
+                = dependencies.rigid->createBody(dependencies.rigid->self, world, &ball, nullptr);
+            const double launch[3] = {0.0, 0.0, -4.0};
+            dependencies.rigid->setBodyLinearVelocity(dependencies.rigid->self, world, ballBody, launch);
+            outEnters = 0;
+            outExits  = 0;
+            for (std::uint32_t step = 0; step < 150; ++step)
+            {
+                dependencies.rigid->step(dependencies.rigid->self, world, 1.0 / 60.0);
+                std::uint32_t pending = 0;
+                bool          overflowed = false;
+                if (dependencies.rigid->triggerEventCount(dependencies.rigid->self, world, &pending, &overflowed)
+                    && pending > 0)
+                {
+                    std::vector<engine::physics_rigid::TriggerEvent> events(pending);
+                    std::uint32_t                                    copied = 0;
+                    if (dependencies.rigid->copyTriggerEvents(
+                            dependencies.rigid->self, world, 0, events.data(), pending, &copied))
+                    {
+                        for (const engine::physics_rigid::TriggerEvent &event : events)
+                        {
+                            if (event.trigger != trigger)
+                            {
+                                continue;
+                            }
+                            if (event.kind == engine::physics_rigid::TriggerEventKind::Enter)
+                            {
+                                ++outEnters;
+                            }
+                            else
+                            {
+                                ++outExits;
+                            }
+                        }
+                    }
+                    dependencies.rigid->clearTriggerEvents(dependencies.rigid->self, world);
+                }
+            }
+            engine::physics_rigid::BodyState state{};
+            dependencies.rigid->copyBodyState(dependencies.rigid->self, world, ballBody, &state);
+            outFinalZ = state.transform.position.z;
+            dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        };
+        std::uint32_t entersA = 0;
+        std::uint32_t exitsA  = 0;
+        double        finalZA = 0.0;
+        std::uint32_t entersB = 0;
+        std::uint32_t exitsB  = 0;
+        double        finalZB = 0.0;
+        runTriggerRun(entersA, exitsA, finalZA);
+        runTriggerRun(entersB, exitsB, finalZB);
+        const bool transitions = entersA == 1 && exitsA == 1;
+        const bool deterministic = entersA == entersB && exitsA == exitsB
+            && std::abs(finalZA - finalZB) <= kDeterminismTolerance;
+        const bool testPassed = transitions && deterministic;
+        report << (testPassed ? "PASS" : "FAIL") << ": trigger volumes - the ball through the zone reports " << entersA
+               << " enter and " << exitsA << " exit events, and the repeat run is bit-identical (final z " << finalZA
+               << " vs " << finalZB << ")\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 16. cloth tear, self-collision, surface sampling -------------------
+    if (dependencies.cloth != nullptr)
+    {
+        EXTENDED_TEST_MARKER("cloth-ext")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        engine::physics_rigid::BodyDescription ground;
+        ground.shape.kind           = engine::physics_rigid::ShapeKind::Plane;
+        ground.shape.planeNormal[1] = 1.0;
+        ground.kind                 = engine::physics_rigid::BodyKind::Static;
+        ground.material.friction    = 0.8;
+        dependencies.rigid->createBody(dependencies.rigid->self, world, &ground, nullptr);
+        // Two pinned top corners, weak middle: the falling sheet strains past
+        // the tear tolerance and rips through the middle.
+        engine::physics_cloth::ClothDescription torn;
+        torn.columns             = 8;
+        torn.rows                = 8;
+        torn.spacing             = 0.18;
+        torn.transform.position  = engine::physics_rigid::Vec3{-0.63, 2.5, 0.0};
+        torn.particleMass        = 0.3;
+        torn.tearStrain          = 0.22;
+        torn.selfCollisionRadius = 0.045;
+        std::uint32_t pinned[2]  = {0, 7}; // the top row's two ends
+        torn.pinnedParticles     = pinned;
+        torn.pinnedCount         = 2;
+        engine::physics_cloth::ClothError clothError = engine::physics_cloth::ClothError::None;
+        const engine::physics_cloth::ClothHandle tornCloth
+            = dependencies.cloth->createCloth(dependencies.cloth->self, world, &torn, &clothError);
+        std::uint32_t brokenCount = 0;
+        double        centerSample[3] = {0.0, 0.0, 0.0};
+        double        centerNormal[3] = {0.0, 0.0, 0.0};
+        bool          sampled = false;
+        bool          finiteRun = true;
+        if (tornCloth != engine::physics_cloth::invalidCloth)
+        {
+            // Stretch the pinned ends far beyond the span's rest length: the
+            // corner constraints strain past the tear tolerance immediately.
+            const double leftPin[3]  = {-1.5, 2.5, 0.0};
+            const double rightPin[3] = {1.5, 2.5, 0.0};
+            dependencies.cloth->pinParticleToPosition(dependencies.cloth->self, tornCloth, 0, leftPin);
+            dependencies.cloth->pinParticleToPosition(dependencies.cloth->self, tornCloth, 7, rightPin);
+            for (std::uint32_t step = 0; step < 150; ++step)
+            {
+                if (!dependencies.cloth->step(dependencies.cloth->self, tornCloth, 1.0 / 60.0))
+                {
+                    finiteRun = false;
+                    break;
+                }
+            }
+            engine::physics_cloth::ClothStatistics clothStats{};
+            dependencies.cloth->clothStatistics(dependencies.cloth->self, tornCloth, &clothStats);
+            brokenCount = clothStats.brokenConstraintCount;
+            sampled = dependencies.cloth->sampleClothSurface(
+                dependencies.cloth->self, tornCloth, 0.5, 0.5, centerSample, centerNormal);
+            for (const double value : centerSample)
+            {
+                finiteRun = finiteRun && std::isfinite(value);
+            }
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool tore = tornCloth != engine::physics_cloth::invalidCloth && brokenCount > 0;
+        const bool testPassed = tore && sampled && finiteRun;
+        report << (testPassed ? "PASS" : "FAIL") << ": cloth extensions - the strained sheet tears " << brokenCount
+               << " constraints, the surface sample stays finite, and the self-collision run never diverges\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 17. rope tension, reeling, breaking --------------------------------
+    if (dependencies.rope != nullptr)
+    {
+        EXTENDED_TEST_MARKER("rope-ext")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        engine::physics_rope::RopeDescription hanging;
+        hanging.segments    = 5;
+        hanging.restLength  = 2.0;
+        hanging.nodeMass    = 0.4;
+        hanging.start[0]    = 0.0;
+        hanging.start[1]    = 3.0;
+        hanging.end[1]      = 1.0;
+        hanging.pinStart    = true;
+        hanging.breakStrain = 0.35;
+        engine::physics_rope::RopeError ropeError = engine::physics_rope::RopeError::None;
+        const engine::physics_rope::RopeHandle rope
+            = dependencies.rope->createRope(dependencies.rope->self, world, &hanging, &ropeError);
+        double topTension = 0.0;
+        bool   tensionFinite = true;
+        bool   reeled = false;
+        std::uint32_t brokenSegments = 0;
+        if (rope != engine::physics_rope::invalidRope)
+        {
+            for (std::uint32_t step = 0; step < 120; ++step)
+            {
+                dependencies.rope->step(dependencies.rope->self, rope, 1.0 / 60.0);
+            }
+            double tension[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+            std::uint32_t required = 0;
+            if (dependencies.rope->copyRopeTension(dependencies.rope->self, rope, tension, 5, &required)
+                && required == 5)
+            {
+                topTension = tension[0];
+                for (const double value : tension)
+                {
+                    tensionFinite = tensionFinite && std::isfinite(value) && value >= 0.0;
+                }
+            }
+            // Reel in to half length; the segment rest lengths follow.
+            reeled = dependencies.rope->setRopeLength(dependencies.rope->self, rope, 1.0);
+            // Then pin both ends farther apart than the reeled length allows:
+            // the whole chain must stretch past the break strain.
+            if (reeled)
+            {
+                const double lowerPin[3] = {0.0, 0.5, 0.0};
+                if (dependencies.rope->pinNodeToPosition(dependencies.rope->self, rope, 5, lowerPin))
+                {
+                    for (std::uint32_t step = 0; step < 90; ++step)
+                    {
+                        dependencies.rope->step(dependencies.rope->self, rope, 1.0 / 60.0);
+                    }
+                }
+            }
+            engine::physics_rope::RopeStatistics ropeStats{};
+            dependencies.rope->ropeStatistics(dependencies.rope->self, rope, &ropeStats);
+            brokenSegments = ropeStats.brokenSegmentCount;
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool tensionOk = rope != engine::physics_rope::invalidRope && tensionFinite && topTension > 0.0;
+        const bool broke = brokenSegments > 0;
+        const bool testPassed = tensionOk && reeled && broke;
+        report << (testPassed ? "PASS" : "FAIL") << ": rope extensions - the hanging rope reads top tension " << topTension
+               << " N, reeling accepts half length, and the over-stretch breaks " << brokenSegments << " segments\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 18. water Gerstner displacement, currents, wakes --------------------
+    if (dependencies.water != nullptr)
+    {
+        EXTENDED_TEST_MARKER("water-ext")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        engine::physics_water::OceanDescription oceanDescription;
+        oceanDescription.waterLevel          = 0.0;
+        oceanDescription.waveCount           = 2;
+        oceanDescription.waves[0].directionX = 1.0;
+        oceanDescription.waves[0].wavelength = 12.0;
+        oceanDescription.waves[0].amplitude  = 0.35;
+        oceanDescription.waves[0].steepness  = 0.8;
+        oceanDescription.waves[1].directionX = 0.0;
+        oceanDescription.waves[1].directionZ = 1.0;
+        oceanDescription.waves[1].wavelength = 7.0;
+        oceanDescription.waves[1].amplitude  = 0.2;
+        oceanDescription.waves[1].steepness  = 0.6;
+        oceanDescription.current[0]          = 0.6;
+        engine::physics_water::WaterError waterError = engine::physics_water::WaterError::None;
+        const engine::physics_water::OceanHandle ocean = dependencies.water->createOcean(
+            dependencies.water->self, world, &oceanDescription, &waterError);
+        bool surfaceFinite = true;
+        bool displacedFinite = false;
+        double displacement[3] = {0.0, 0.0, 0.0};
+        const double displacedProbe[3] = {1.7, 0.0, -2.3};
+        std::uint32_t wakeRipples = 0;
+        bool currentDrift = false;
+        if (ocean != engine::physics_water::invalidOcean)
+        {
+            double height = 0.0;
+            double normal[3] = {0.0, 1.0, 0.0};
+            surfaceFinite = dependencies.water->sampleSurface(
+                dependencies.water->self, ocean, 1.7, -2.3, 0.75, &height, normal);
+            surfaceFinite = surfaceFinite && std::isfinite(height);
+            displacedFinite = dependencies.water->sampleSurfaceDisplaced(
+                dependencies.water->self, ocean, displacedProbe, 0.75, displacement);
+            for (const double value : displacement)
+            {
+                displacedFinite = displacedFinite && std::isfinite(value);
+            }
+            // A fast raft drives straight through the ocean for the wake pass.
+            engine::physics_rigid::BodyDescription raft;
+            raft.shape.kind             = engine::physics_rigid::ShapeKind::Box;
+            raft.shape.boxHalfExtents[0] = 0.5;
+            raft.shape.boxHalfExtents[1] = 0.15;
+            raft.shape.boxHalfExtents[2] = 0.35;
+            raft.transform.position      = engine::physics_rigid::Vec3{-6.0, 0.0, 0.0};
+            raft.kind                    = engine::physics_rigid::BodyKind::Dynamic;
+            raft.density                 = 220.0;
+            raft.linearDamping           = 0.0;
+            const engine::physics_rigid::BodyHandle raftBody
+                = dependencies.rigid->createBody(dependencies.rigid->self, world, &raft, nullptr);
+            dependencies.water->registerBody(dependencies.water->self, ocean, raftBody, nullptr);
+            const double drive[3] = {3.0, 0.0, 0.0};
+            for (std::uint32_t step = 0; step < 180; ++step)
+            {
+                const double waterTime = static_cast<double>(step) / 60.0;
+                dependencies.rigid->setBodyLinearVelocity(dependencies.rigid->self, world, raftBody, drive);
+                dependencies.water->applyBuoyancy(dependencies.water->self, ocean, waterTime, 1.0 / 60.0);
+                dependencies.rigid->step(dependencies.rigid->self, world, 1.0 / 60.0);
+                dependencies.water->stepRipples(dependencies.water->self, ocean, 1.0 / 60.0);
+            }
+            engine::physics_water::WaterStatistics waterStats{};
+            dependencies.water->waterStatistics(dependencies.water->self, &waterStats);
+            wakeRipples = waterStats.activeRipples;
+            engine::physics_rigid::BodyState raftState{};
+            dependencies.rigid->copyBodyState(dependencies.rigid->self, world, raftBody, &raftState);
+            // The current drags the floating raft beyond its driven position.
+            currentDrift = raftState.transform.position.x > 0.2;
+            dependencies.water->unregisterBody(dependencies.water->self, ocean, raftBody);
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool testPassed = ocean != engine::physics_water::invalidOcean && surfaceFinite && displacedFinite
+            && wakeRipples > 0 && currentDrift;
+        report << (testPassed ? "PASS" : "FAIL") << ": water extensions - the steep Gerstner surface samples finite ("
+               << surfaceFinite << "), the displaced query stays finite (" << displacedFinite
+               << "), the fast raft sheds " << wakeRipples << " wake ripples, and the current carries it ("
+               << currentDrift << ")\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 19. scheduling determinism, staggering, hysteresis ------------------
+    if (dependencies.scheduling != nullptr)
+    {
+        EXTENDED_TEST_MARKER("scheduling")
+        engine::physics_scheduling::ScheduleDescription description;
+        engine::physics_scheduling::SchedulingError schedulingError = engine::physics_scheduling::SchedulingError::None;
+        const engine::physics_scheduling::ScheduleHandle first
+            = dependencies.scheduling->createSchedule(dependencies.scheduling->self, &description, &schedulingError);
+        const engine::physics_scheduling::ScheduleHandle second
+            = dependencies.scheduling->createSchedule(dependencies.scheduling->self, &description, &schedulingError);
+        bool schedulesMatch = first != engine::physics_scheduling::invalidSchedule
+            && second != engine::physics_scheduling::invalidSchedule;
+        if (schedulesMatch)
+        {
+            for (std::uint64_t id = 1; id <= 12; ++id)
+            {
+                engine::physics_scheduling::ItemDescription item;
+                item.id             = id;
+                item.updateInterval = 4;
+                dependencies.scheduling->addItem(dependencies.scheduling->self, first, &item, nullptr);
+                dependencies.scheduling->addItem(dependencies.scheduling->self, second, &item, nullptr);
+            }
+            for (std::uint32_t step = 0; step < 32; ++step)
+            {
+                dependencies.scheduling->updateSchedule(dependencies.scheduling->self, first);
+                dependencies.scheduling->updateSchedule(dependencies.scheduling->self, second);
+                std::uint64_t dueIdsA[16] = {};
+                std::uint64_t dueIdsB[16] = {};
+                std::uint32_t requiredA = 0;
+                std::uint32_t requiredB = 0;
+                dependencies.scheduling->copyDueItems(dependencies.scheduling->self, first, dueIdsA, 16, &requiredA);
+                dependencies.scheduling->copyDueItems(dependencies.scheduling->self, second, dueIdsB, 16, &requiredB);
+                if (requiredA != requiredB)
+                {
+                    schedulesMatch = false;
+                    continue;
+                }
+                for (std::uint32_t index = 0; index < requiredA; ++index)
+                {
+                    if (dueIdsA[index] != dueIdsB[index])
+                    {
+                        schedulesMatch = false;
+                    }
+                }
+            }
+        }
+        // Hysteresis: a score between the release threshold and the entry
+        // threshold holds the Full band.
+        bool hysteresisHolds = false;
+        bool demoteWorks = false;
+        if (schedulesMatch)
+        {
+            const std::uint64_t probe = 7;
+            dependencies.scheduling->setItemImportance(dependencies.scheduling->self, first, probe, 0.9);
+            dependencies.scheduling->updateSchedule(dependencies.scheduling->self, first);
+            engine::physics_scheduling::FidelityLevel level = engine::physics_scheduling::FidelityLevel::Cached;
+            dependencies.scheduling->itemLevel(dependencies.scheduling->self, first, probe, &level);
+            hysteresisHolds = level == engine::physics_scheduling::FidelityLevel::Full;
+            dependencies.scheduling->setItemImportance(dependencies.scheduling->self, first, probe, 0.62);
+            dependencies.scheduling->updateSchedule(dependencies.scheduling->self, first);
+            dependencies.scheduling->itemLevel(dependencies.scheduling->self, first, probe, &level);
+            hysteresisHolds = hysteresisHolds && level == engine::physics_scheduling::FidelityLevel::Full;
+            dependencies.scheduling->setItemImportance(dependencies.scheduling->self, first, probe, 0.55);
+            dependencies.scheduling->updateSchedule(dependencies.scheduling->self, first);
+            dependencies.scheduling->itemLevel(dependencies.scheduling->self, first, probe, &level);
+            demoteWorks = level == engine::physics_scheduling::FidelityLevel::Simplified;
+        }
+        dependencies.scheduling->destroySchedule(dependencies.scheduling->self, first);
+        dependencies.scheduling->destroySchedule(dependencies.scheduling->self, second);
+        const bool testPassed = schedulesMatch && hysteresisHolds && demoteWorks;
+        report << (testPassed ? "PASS" : "FAIL") << ": simulation scheduling - two identically driven schedules emit "
+               << "identical due sets, the hysteresis band holds Full at 0.62, and 0.55 demotes\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 20. hand planter, lean controller, character push -------------------
+    if (dependencies.character != nullptr)
+    {
+        EXTENDED_TEST_MARKER("character-ext")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        engine::physics_character::HandPlanterDescription handDescription;
+        engine::physics_character::CharacterError characterError = engine::physics_character::CharacterError::None;
+        const engine::physics_character::HandPlanterHandle hands = dependencies.character->createHandPlanter(
+            dependencies.character->self, &handDescription, &characterError);
+        engine::physics_character::LeanControllerDescription leanDescription;
+        const engine::physics_character::LeanHandle lean = dependencies.character->createLeanController(
+            dependencies.character->self, &leanDescription, &characterError);
+        engine::physics_rigid::RigidTransform root{};
+        root.position = engine::physics_rigid::Vec3{0.0, 1.0, 0.0};
+        bool reachClamps = false;
+        bool reachHolds = false;
+        bool leanTilts = false;
+        bool pushMoves = false;
+        if (hands != engine::physics_character::invalidHandPlanter)
+        {
+            const double farTarget[3] = {0.0, 1.2, 3.0};
+            const double nearTarget[3] = {0.05, 1.15, 0.45};
+            dependencies.character->setHandTarget(dependencies.character->self, hands, 0, farTarget);
+            dependencies.character->updateHandPlanter(dependencies.character->self, hands, &root);
+            engine::physics_character::HandState states[2];
+            std::uint32_t required = 0;
+            if (dependencies.character->copyHandStates(dependencies.character->self, hands, states, 2, &required)
+                && required == 2)
+            {
+                reachClamps = !states[0].withinReach && states[0].stretchMeters > 0.5;
+            }
+            dependencies.character->setHandTarget(dependencies.character->self, hands, 0, nearTarget);
+            dependencies.character->updateHandPlanter(dependencies.character->self, hands, &root);
+            if (dependencies.character->copyHandStates(dependencies.character->self, hands, states, 2, &required)
+                && required == 2)
+            {
+                reachHolds = states[0].withinReach && std::abs(states[0].stretchMeters) < 1.0e-9;
+            }
+        }
+        if (lean != engine::physics_character::invalidLeanController)
+        {
+            const double zeroVelocity[3] = {0.0, 0.0, 0.0};
+            const double runVelocity[3] = {0.0, 0.0, 4.0};
+            engine::physics_character::LeanState warmup{};
+            dependencies.character->updateLeanController(
+                dependencies.character->self, lean, &root, zeroVelocity, 1.0 / 60.0, &warmup);
+            bool finiteLean = true;
+            for (std::uint32_t step = 0; step < 30; ++step)
+            {
+                engine::physics_character::LeanState state{};
+                if (!dependencies.character->updateLeanController(
+                        dependencies.character->self, lean, &root, runVelocity, 1.0 / 60.0, &state))
+                {
+                    finiteLean = false;
+                    break;
+                }
+                leanTilts = leanTilts || std::abs(state.leanRadians) > 1.0e-3;
+                for (const double value : state.leanRotation)
+                {
+                    finiteLean = finiteLean && std::isfinite(value);
+                }
+            }
+            leanTilts = leanTilts && finiteLean;
+        }
+        // Push: a crate sits in front of the character; one push pass shoves it.
+        engine::physics_rigid::BodyDescription crate;
+        crate.shape.kind             = engine::physics_rigid::ShapeKind::Box;
+        crate.shape.boxHalfExtents[0] = 0.25;
+        crate.shape.boxHalfExtents[1] = 0.25;
+        crate.shape.boxHalfExtents[2] = 0.25;
+        crate.transform.position     = engine::physics_rigid::Vec3{0.0, 0.25, 0.6};
+        crate.kind                   = engine::physics_rigid::BodyKind::Dynamic;
+        crate.density                = 200.0;
+        const engine::physics_rigid::BodyHandle crateBody
+            = dependencies.rigid->createBody(dependencies.rigid->self, world, &crate, nullptr);
+        const double pushCenter[3] = {0.0, 1.0, 0.0};
+        const double pushVelocity[3] = {0.0, 0.0, 1.0};
+        dependencies.character->applyCharacterPush(dependencies.character->self, world, pushCenter, 2.0, pushVelocity, 60.0);
+        engine::physics_rigid::BodyState crateState{};
+        dependencies.rigid->copyBodyState(dependencies.rigid->self, world, crateBody, &crateState);
+        pushMoves = crateState.linearVelocity.z > 0.5;
+        if (hands != engine::physics_character::invalidHandPlanter)
+        {
+            dependencies.character->destroyHandPlanter(dependencies.character->self, hands);
+        }
+        if (lean != engine::physics_character::invalidLeanController)
+        {
+            dependencies.character->destroyLeanController(dependencies.character->self, lean);
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool testPassed = reachClamps && reachHolds && leanTilts && pushMoves;
+        report << (testPassed ? "PASS" : "FAIL") << ": character extensions - far-hand clamp " << reachClamps
+               << ", near-hand reach " << reachHolds << ", lean tilt " << leanTilts << ", crate push " << pushMoves << "\n";
+        pass = pass && testPassed;
     }
 
     result.pass   = pass;

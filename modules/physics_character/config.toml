@@ -1,4 +1,6 @@
 [physics_character]
-maximum_characters    = 32
-maximum_foot_planters = 64
-maximum_jiggle_chains = 256
+maximum_characters      = 32
+maximum_foot_planters   = 64
+maximum_hand_planters   = 64
+maximum_jiggle_chains   = 256
+maximum_lean_controllers = 64

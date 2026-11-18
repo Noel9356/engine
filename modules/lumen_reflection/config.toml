@@ -30,6 +30,9 @@ screen_ray_distance_m       = 2.0
 # by at most thickness_m.
 max_steps                  = 48
 thickness_m                = 0.5
+# Screen-trace tier toggle (Lumen's Screen Traces switch): false sends every
+# dedicated ray straight to the scene trace, skipping the GBuffer march.
+enabled                    = true
 
 [lumen_reflection.scene]
 max_surfaces                = 256

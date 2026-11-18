@@ -133,7 +133,7 @@ private:
     };
     std::vector<RopeRenderBuffers>     ropeBuffers_;
     std::vector<double>                fluidPositions_;
-    std::array<ParticleRenderBuffers, 4> particleBuffers_;
+    std::array<ParticleRenderBuffers, ExtendedHandles::kEmitterSlotCount> particleBuffers_;
     FoliageRenderBuffers               foliageBends_;
     bool                               foliageValid_ = false;
     double                             waterClock_   = 0.0;
@@ -151,7 +151,7 @@ private:
     std::vector<Matrix16>                    ropeNodeMatrices_;
     std::vector<Matrix16>                    ropeLinkMatrices_;
     std::vector<Matrix16>                    fluidMatrices_;
-    std::vector<Matrix16>                    particleMatrices_[4];
+    std::vector<Matrix16>                    particleMatrices_[ExtendedHandles::kEmitterSlotCount];
     std::vector<Matrix16>                    foliageMatrices_;
     std::vector<Matrix16>                    footMatrices_;
     std::vector<Matrix16>                    jiggleMatrices_;

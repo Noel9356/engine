@@ -34,8 +34,12 @@ namespace renderer
 // shading entry points force inlining on compilers that support it.
 #if defined(__GNUC__) || defined(__clang__)
 #define ENGINE_SHADING_INLINE inline __attribute__((always_inline))
+// Outlined but ODR-safe: declared inline for the header definition while the
+// attribute keeps calls to it real calls.
+#define ENGINE_SHADING_NOINLINE inline __attribute__((noinline))
 #else
 #define ENGINE_SHADING_INLINE inline
+#define ENGINE_SHADING_NOINLINE inline
 #endif
 
 // Device selection bias used when a renderer is created.
@@ -44,6 +48,20 @@ enum class DevicePreference : std::uint32_t
     Auto, // any device, discrete preferred
     Discrete,
     Integrated
+};
+
+// Presentation-queue policy for the swapchain. Auto keeps the historical
+// behaviour; the explicit modes exist so frame-latency behaviour is a
+// configuration decision instead of a driver default. The enum lives here
+// (backend-neutral) because [renderer] present_mode is parsed by the module
+// core regardless of which backends are compiled in; only the Vulkan
+// backend's swapchain consumes it.
+enum class SwapchainPresentMode
+{
+    Auto,      // FIFO when vsync, else mailbox, else immediate
+    Fifo,      // always tear-free, one image on screen, blocks on the compositor
+    Mailbox,   // triple buffered, latency-bounded, never blocks the CPU for long
+    Immediate, // no presentation queue at all: lowest latency, may tear
 };
 
 // BRDF constants shared with shaders/mesh.frag so both backends shade alike.

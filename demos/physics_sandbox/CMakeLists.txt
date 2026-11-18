@@ -27,6 +27,7 @@ engine_add_application(
     physics_particles
     physics_foliage
     physics_character
+    physics_scheduling
     CONFIG_DIRECTORY
     "${CMAKE_CURRENT_SOURCE_DIR}/config"
 )

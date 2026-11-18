@@ -2,11 +2,12 @@
 //
 // XPBD rope chains over a physics_rigid world: nodes integrate velocities,
 // stretch and bending constraints solve in Gauss-Seidel order with
-// compliance-scaled corrections, attached nodes follow rigid bodies or pin
-// positions, and free nodes resolve against the rigid world's bodies and
-// planes through the collideSphere query. Stepping happens in whole fixed
-// steps with internal substeps (the "small steps" XPBD schedule), so the
-// simulation is independent of frame rate.
+// compliance-scaled corrections (accumulating a per-segment tension readout),
+// over-stretched segments break permanently when the description enables it,
+// attached nodes follow rigid bodies or pin positions, and free nodes resolve
+// against the rigid world's bodies and planes through the collideSphere query.
+// Stepping happens in whole fixed steps with internal substeps (the "small
+// steps" XPBD schedule), so the simulation is independent of frame rate.
 
 #include "records.hpp"
 #include <engine/kernel/module_api.hpp>
@@ -115,7 +116,7 @@ private:
         return iterator != ropeIndexByHandle_.end() ? &ropes_[iterator->second] : nullptr;
     }
 
-    std::size_t nodeOffset(const RopeRecord &rope, std::uint32_t nodeIndex) const
+    std::size_t nodeOffset(std::uint32_t nodeIndex) const
     {
         return static_cast<std::size_t>(nodeIndex) * 3;
     }
@@ -184,34 +185,81 @@ private:
         }
     }
 
+    // Strain check ahead of each substep solve: a segment stretched beyond
+    // restLength * (1 + breakStrain) breaks permanently (stretch only — a
+    // compressed segment never snaps). Breaking is a flag flip, so it can
+    // never trip the non-finite failure path.
+    void checkSegmentStrain(RopeRecord &rope)
+    {
+        const double strainLimit = 1.0 + rope.breakStrain;
+        for (std::size_t index = 0; index < rope.stretchConstraints.size(); ++index)
+        {
+            if (rope.brokenSegments[index] != 0u)
+            {
+                continue;
+            }
+            const RopeRecord::StretchConstraint &constraint = rope.stretchConstraints[index];
+            const std::size_t offsetA           = nodeOffset(constraint.nodeA);
+            const std::size_t offsetB           = nodeOffset(constraint.nodeB);
+            const double      deltaX            = rope.positions[offsetB] - rope.positions[offsetA];
+            const double      deltaY            = rope.positions[offsetB + 1] - rope.positions[offsetA + 1];
+            const double      deltaZ            = rope.positions[offsetB + 2] - rope.positions[offsetA + 2];
+            const double      length            = std::sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+            if (length > constraint.restLength * strainLimit)
+            {
+                rope.brokenSegments[index] = 1u;
+                rope.brokenSegmentCount += 1;
+            }
+        }
+    }
+
     void solveConstraints(RopeRecord &rope, double substepDelta)
     {
         const double inverseDeltaTimeSquared = 1.0 / (substepDelta * substepDelta);
-        for (const RopeRecord::StretchConstraint &constraint : rope.stretchConstraints)
+        if (rope.breakStrain > 0.0)
         {
+            checkSegmentStrain(rope);
+        }
+        for (std::size_t index = 0; index < rope.stretchConstraints.size(); ++index)
+        {
+            const RopeRecord::StretchConstraint &constraint = rope.stretchConstraints[index];
+            if (rope.brokenSegments[index] != 0u)
+            {
+                continue; // a broken segment no longer pulls its nodes together
+            }
             solveDistanceConstraint(rope,
                 constraint.nodeA,
                 constraint.nodeB,
                 constraint.restLength,
                 constraint.compliance,
-                inverseDeltaTimeSquared);
+                inverseDeltaTimeSquared,
+                &rope.tensionAccumulator[index]);
         }
         for (const RopeRecord::BendConstraint &constraint : rope.bendConstraints)
         {
+            // A bend row spans the two stretch segments between its node
+            // pair; either one breaking releases the row, since holding the
+            // two-apart distance across a break would drag the separated
+            // pieces back together.
+            if (rope.brokenSegments[constraint.nodeA] != 0u || rope.brokenSegments[constraint.nodeA + 1] != 0u)
+            {
+                continue;
+            }
             solveDistanceConstraint(rope,
                 constraint.nodeA,
                 constraint.nodeB,
                 constraint.restLength,
                 constraint.compliance,
-                inverseDeltaTimeSquared);
+                inverseDeltaTimeSquared,
+                nullptr);
         }
     }
 
     void solveDistanceConstraint(RopeRecord &rope, std::uint32_t nodeA, std::uint32_t nodeB, double restLength,
-        double compliance, double inverseDeltaTimeSquared)
+        double compliance, double inverseDeltaTimeSquared, double *lambdaAccumulator)
     {
-        const std::size_t offsetA = nodeOffset(rope, nodeA);
-        const std::size_t offsetB = nodeOffset(rope, nodeB);
+        const std::size_t offsetA = nodeOffset(nodeA);
+        const std::size_t offsetB = nodeOffset(nodeB);
         const double      inverseMassA = rope.inverseMasses[nodeA];
         const double      inverseMassB = rope.inverseMasses[nodeB];
         const double      weightSum    = inverseMassA + inverseMassB;
@@ -229,6 +277,12 @@ private:
         }
         const double complianceScaled = compliance * inverseDeltaTimeSquared;
         const double lambda           = (-length + restLength) / (weightSum + complianceScaled);
+        if (lambdaAccumulator != nullptr)
+        {
+            // Tension bookkeeping: the stretch row's |lambda| lands in its
+            // owning segment's accumulator (bend rows pass nullptr).
+            *lambdaAccumulator += std::abs(lambda);
+        }
         const double scaleX = deltaX / length * lambda;
         const double scaleY = deltaY / length * lambda;
         const double scaleZ = deltaZ / length * lambda;
@@ -325,6 +379,7 @@ private:
         const std::size_t   nodeCount    = rope.positions.size() / 3;
         contactFlags_.assign(nodeCount, 0u);
         contactNormals_.assign(nodeCount * 3, 0.0);
+        rope.tensionAccumulator.assign(rope.segments, 0.0); // fresh |lambda| sums for this step
         const std::uint32_t substeps     = settings_.substepsPerStep;
         const double        substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
         for (std::uint32_t substep = 0; substep < substeps; ++substep)
@@ -352,6 +407,17 @@ private:
         }
         rope.stepsSimulated += 1;
         rope.substepsExecuted += substeps;
+        // Publish the tension readout: the step's accumulated |lambda| per
+        // segment converts to force units through the fixed delta squared,
+        // and the maximum rides along for the statistics.
+        const double inverseDeltaSquared = 1.0 / (fixedDeltaSeconds * fixedDeltaSeconds);
+        double       maximumTension      = 0.0;
+        for (std::size_t segment = 0; segment < rope.lastTension.size(); ++segment)
+        {
+            rope.lastTension[segment] = rope.tensionAccumulator[segment] * inverseDeltaSquared;
+            maximumTension            = std::max(maximumTension, rope.lastTension[segment]);
+        }
+        rope.maximumTension = maximumTension;
         const auto stepEnd         = std::chrono::steady_clock::now();
         rope.lastStepMilliseconds = std::chrono::duration<double, std::milli>(stepEnd - stepStart).count();
         return true;
@@ -386,6 +452,7 @@ private:
             || !std::isfinite(description->bendingCompliance) || description->bendingCompliance < 0.0
             || !std::isfinite(description->damping) || description->damping < 0.0
             || !std::isfinite(description->friction) || description->friction < 0.0 || description->friction > 1.0
+            || !std::isfinite(description->breakStrain) || description->breakStrain < 0.0
             || !std::isfinite(description->start[0]) || !std::isfinite(description->start[1])
             || !std::isfinite(description->start[2]) || !std::isfinite(description->end[0])
             || !std::isfinite(description->end[1]) || !std::isfinite(description->end[2]))
@@ -431,6 +498,7 @@ private:
         rope.damping          = description->damping;
         rope.friction         = description->friction;
         rope.collideWithWorld = description->collideWithWorld;
+        rope.breakStrain      = description->breakStrain;
         if (!rigid_->copyWorldGravity(rigid_->self, world, rope.gravity))
         {
             rope.gravity[0] = 0.0;
@@ -482,6 +550,12 @@ private:
                 rope.bendConstraints.push_back(constraint);
             }
         }
+
+        // Breaking and tension bookkeeping start clean: nothing broken, zero
+        // tension until the first step completes.
+        rope.brokenSegments.assign(description->segments, 0u);
+        rope.tensionAccumulator.assign(description->segments, 0.0);
+        rope.lastTension.assign(description->segments, 0.0);
 
         if (description->pinStart || description->attachStartToBody)
         {
@@ -604,6 +678,51 @@ private:
         return true;
     }
 
+    bool copyRopeTensionImpl(
+        RopeHandle handle, double *outTension, std::uint32_t capacity, std::uint32_t *outRequired)
+    {
+        RopeRecord *rope = findRope(handle);
+        if (rope == nullptr || outTension == nullptr)
+        {
+            return false;
+        }
+        const std::uint32_t count = static_cast<std::uint32_t>(rope->lastTension.size());
+        if (outRequired != nullptr)
+        {
+            *outRequired = count;
+        }
+        if (capacity < count)
+        {
+            return false;
+        }
+        std::copy(rope->lastTension.begin(), rope->lastTension.end(), outTension);
+        return true;
+    }
+
+    bool setRopeLengthImpl(RopeHandle handle, double length)
+    {
+        RopeRecord *rope = findRope(handle);
+        if (rope == nullptr || !std::isfinite(length) || length <= 0.0)
+        {
+            return false;
+        }
+        // Rest lengths retarget immediately: stretch rows take the total
+        // length split evenly across the segments, and bend rows keep the
+        // twice-the-segment rest they were built with, so reeling is never
+        // fought by stale bend rests. No warm start exists to reset; nodes
+        // respond from the next step on.
+        const double segmentLength = length / static_cast<double>(rope->segments);
+        for (RopeRecord::StretchConstraint &constraint : rope->stretchConstraints)
+        {
+            constraint.restLength = segmentLength;
+        }
+        for (RopeRecord::BendConstraint &constraint : rope->bendConstraints)
+        {
+            constraint.restLength = segmentLength * 2.0;
+        }
+        return true;
+    }
+
     bool setNodePinnedImpl(RopeHandle handle, std::uint32_t nodeIndex, bool pinned)
     {
         RopeRecord *rope = findRope(handle);
@@ -611,7 +730,7 @@ private:
         {
             return false;
         }
-        const std::size_t offset = nodeOffset(*rope, nodeIndex);
+        const std::size_t offset = nodeOffset(nodeIndex);
         if (pinned && rope->attachments[nodeIndex] == NodeAttachment::Free)
         {
             rope->attachments[nodeIndex]          = NodeAttachment::Pinned;
@@ -643,7 +762,7 @@ private:
         rope->attachments[nodeIndex]          = NodeAttachment::Pinned;
         rope->inverseMasses[nodeIndex]        = 0.0;
         rope->attachedBodies[nodeIndex]       = engine::physics_rigid::invalidBody;
-        const std::size_t offset              = nodeOffset(*rope, nodeIndex);
+        const std::size_t offset              = nodeOffset(nodeIndex);
         rope->pinPositions[offset]            = position[0];
         rope->pinPositions[offset + 1]        = position[1];
         rope->pinPositions[offset + 2]        = position[2];
@@ -674,7 +793,7 @@ private:
         rope->attachments[nodeIndex]    = NodeAttachment::Body;
         rope->inverseMasses[nodeIndex]  = 0.0;
         rope->attachedBodies[nodeIndex] = body;
-        const std::size_t offset        = nodeOffset(*rope, nodeIndex);
+        const std::size_t offset        = nodeOffset(nodeIndex);
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
             rope->attachedLocalAnchors[offset + axis] = localAnchor[axis];
@@ -771,6 +890,8 @@ private:
         outStatistics->substepsExecuted     = rope->substepsExecuted;
         outStatistics->lastContactCount     = rope->lastContactCount;
         outStatistics->lastStepMilliseconds = rope->lastStepMilliseconds;
+        outStatistics->brokenSegmentCount   = rope->brokenSegmentCount;
+        outStatistics->maximumTension       = rope->maximumTension;
         return true;
     }
 
@@ -795,6 +916,8 @@ private:
         ENGINE_PHYSICS_ROPE_BIND(step, stepImpl);
         ENGINE_PHYSICS_ROPE_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_ROPE_BIND(ropeStatistics, ropeStatisticsImpl);
+        ENGINE_PHYSICS_ROPE_BIND(copyRopeTension, copyRopeTensionImpl);
+        ENGINE_PHYSICS_ROPE_BIND(setRopeLength, setRopeLengthImpl);
 #undef ENGINE_PHYSICS_ROPE_BIND
     }
 

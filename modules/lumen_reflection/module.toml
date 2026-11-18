@@ -13,6 +13,7 @@ config_keys           = [
     "lumen_reflection.scene.max_triangles_per_surface",
     "lumen_reflection.screen_ray_distance_m",
     "lumen_reflection.screen_scale",
+    "lumen_reflection.screen_trace.enabled",
     "lumen_reflection.screen_trace.max_steps",
     "lumen_reflection.screen_trace.thickness_m",
     "lumen_reflection.skip_unchanged_frames",

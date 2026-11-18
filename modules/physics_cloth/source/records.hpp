@@ -18,6 +18,14 @@ struct DistanceConstraint
     std::uint32_t particleB  = 0;
     double        restLength = 0.0;
     double        compliance = 0.0;
+    bool          broken     = false; // torn constraint; skipped from then on
+};
+
+// One (cell id, particle) pair for the self-collision spatial hash.
+struct SelfCollisionEntry
+{
+    std::uint64_t cellId   = 0;
+    std::uint32_t particle = 0;
 };
 
 // One live cloth.
@@ -51,6 +59,9 @@ struct ClothRecord
     double shearCompliance   = 0.0;
     double bendCompliance    = 0.0;
 
+    double tearStrain          = 0.0; // stretch ratio beyond rest that permanently breaks a constraint (0 = off)
+    double selfCollisionRadius = 0.0; // self-collision sphere radius per particle (0 = off)
+
     double windAcceleration[3] = {0.0, 0.0, 0.0};
 
     ClothParticleDrag drag;
@@ -61,12 +72,21 @@ struct ClothRecord
     std::uint64_t stepsSimulated       = 0;
     std::uint64_t substepsExecuted     = 0;
     std::uint32_t lastContactCount     = 0;
+    std::uint32_t brokenConstraintCount = 0;
     double        lastStepMilliseconds = 0.0;
 
     // Per-step contact scratch (one entry per particle): 0 none, 1 contact,
     // plus the push-out normal.
     std::vector<std::uint8_t> contactFlags;
     std::vector<double>       contactNormals;
+
+    // Self-collision scratch (rebuilt per substep while enabled; reused so
+    // stepping stays allocation-free after the first pass): the sorted (cell
+    // id, particle) pairs, the unique ascending cell ids, and each bucket's
+    // start offset into the sorted pairs.
+    std::vector<SelfCollisionEntry> selfCollisionEntries;
+    std::vector<std::uint64_t>      selfCollisionCells;
+    std::vector<std::uint32_t>      selfCollisionCellStarts;
 };
 
 // Module-wide budgets read from the [physics_cloth] section.

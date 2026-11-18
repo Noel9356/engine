@@ -292,7 +292,7 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler)
     {
         state.rasterTriangles.resize(state.surfaces.size());
     }
-    rfParallelRange(scheduler, state.surfaces.size(), 1,
+    parallelRange(scheduler, state.surfaces.size(), 1,
         [&](std::size_t begin, std::size_t end)
         {
             for (std::size_t surface = begin; surface < end; ++surface)
@@ -337,7 +337,7 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler)
             state.rasterBins[band].push_back(index);
         }
     }
-    rfParallelRange(scheduler, bandCount, 1,
+    parallelRange(scheduler, bandCount, 1,
         [&](std::size_t begin, std::size_t end)
         {
             for (std::size_t band = begin; band < end; ++band)
@@ -621,15 +621,18 @@ glm::vec3 resolveDedicatedRay(const RfPipelineState &state, const glm::vec4 &cli
     const glm::vec3 &position, const glm::vec3 &normal, const glm::vec3 &direction,
     const glm::vec3 &fresnel, RfResolve &outResolve, std::uint32_t &outScreenHitTexel)
 {
-    const float screenDistance = std::max(state.settings.screenRayDistance, 0.05f);
     const glm::vec3 rayOrigin = position + normal * state.settings.traceBias;
     glm::vec3   radiance(0.0f);
-    ScreenTraceResult screen = screenTrace(state, clipOrigin, rayOrigin, direction, screenDistance);
-    if (screen.hit)
+    if (state.settings.screenTracesEnabled)
     {
-        outResolve = RfResolve::ScreenTrace;
-        outScreenHitTexel = static_cast<std::uint32_t>(screen.texel);
-        return radiance; // resolved by the lazy shading pass
+        const float screenDistance = std::max(state.settings.screenRayDistance, 0.05f);
+        ScreenTraceResult screen = screenTrace(state, clipOrigin, rayOrigin, direction, screenDistance);
+        if (screen.hit)
+        {
+            outResolve = RfResolve::ScreenTrace;
+            outScreenHitTexel = static_cast<std::uint32_t>(screen.texel);
+            return radiance; // resolved by the lazy shading pass
+        }
     }
     const RfRay ray{rayOrigin, direction, state.settings.maxTraceDistance};
     const RfHit hit = rfTraceScene(state, ray);
@@ -676,7 +679,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
     // Pass 1 - the stochastic ray pass. Screen-trace hits defer their
     // radiance: the ray records the texel it landed on (and the texel's row
     // list keeps the Fresnel-weighted contribution to apply afterwards).
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             std::uint32_t pixelsDone = 0;
@@ -753,7 +756,14 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                                 sum += radiance;
                             }
                             ++raysDone;
-                            resolve = rayResolve;
+                            // The resolve mask reports the tier of the texel's
+                            // first dedicated ray (deterministic given the seed
+                            // sequence); with more than one ray per texel the
+                            // rest may resolve elsewhere.
+                            if (resolve == RfResolve::None)
+                            {
+                                resolve = rayResolve;
+                            }
                             if (rayResolve == RfResolve::ScreenTrace)
                             {
                                 ++screenHits;
@@ -805,7 +815,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
     // Pass 2 - lazy screen shading: shade exactly the GBuffer texels the
     // screen traces hit (Lumen Scene lighting on demand). Unlit texels read
     // as their albedo, as the full-field shading did.
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -833,7 +843,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
 
     // Pass 3 - apply the deferred screen-hit contributions.
     const float inverseRaysPerPixel = 1.0f / static_cast<float>(raysPerPixel);
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             for (std::size_t y = rowBegin; y < rowEnd; ++y)

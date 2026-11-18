@@ -39,8 +39,8 @@ struct Body
     math::Vec3 inverseInertiaLocal = {};
 
     // Effective rolling radius for the rolling-resistance contact rows: the
-    // sphere radius, the capsule radius, or 0 for shapes that cannot roll
-    // (boxes, planes). Derived from the shape at creation.
+    // sphere radius, the capsule or cylinder radius, or 0 for shapes that
+    // cannot roll (boxes, planes). Derived from the shape at creation.
     double rollingRadius = 0.0;
 
     // Continuous collision detection switch (mirrors BodyDescription; only
@@ -103,6 +103,39 @@ struct Joint
     double prismaticTwistImpulse      = 0.0;              // prismatic twist-lock row
     double weldImpulses[3]            = {0.0, 0.0, 0.0};  // fixed joint angular rows
     double sliderRestDistance         = 0.0;              // prismatic anchor separation along the axis at creation
+};
+
+// One trigger volume: a non-solid shape region that reports overlap
+// transitions for the world's solid bodies. Triggers never enter the
+// broadphase or solver; they are evaluated once per step against body
+// transforms, so their cost is one overlap test per (trigger, body) pair.
+struct Trigger
+{
+    TriggerHandle handle = invalidTrigger;
+
+    Shape shape;
+
+    // Composed world pose (the description pose for unattached triggers, or
+    // the attached body's transform composed with the local offset pose).
+    RigidTransform transform;
+
+    // Body-local offset pose applied when attachedBody is valid.
+    RigidTransform localTransform;
+
+    BodyHandle attachedBody = invalidBody;
+
+    std::uint32_t categoryBits = 1u;
+    std::uint32_t maskBits     = 0xFFFFFFFFu;
+
+    bool          enabled = true;
+    std::uint64_t userTag = 0;
+
+    // Bodies overlapping as of the last evaluation, sorted ascending so the
+    // enter/exit diff against the previous set is deterministic.
+    std::vector<BodyHandle> overlapping;
+
+    math::Vec3 aabbMinimum;
+    math::Vec3 aabbMaximum;
 };
 
 // One world-space contact point carried between steps for warm starting.
@@ -188,9 +221,14 @@ struct SimulationSettings
 
     bool warmStarting = true;
 
-    std::uint32_t maximumWorlds = 16;
-    std::uint32_t maximumBodies = 100000;
-    std::uint32_t maximumJoints = 50000;
+    std::uint32_t maximumWorlds  = 16;
+    std::uint32_t maximumBodies  = 100000;
+    std::uint32_t maximumJoints  = 50000;
+    std::uint32_t maximumTriggers = 256;
+
+    // Pending overlap-event queue bound per world; the oldest events are
+    // dropped with the overflow flag set once the bound is exceeded.
+    std::uint32_t maximumTriggerEvents = 1024;
 
     math::Vec3 gravity = {0.0, -9.81, 0.0};
 };
@@ -211,6 +249,14 @@ struct World
 
     std::vector<Joint>                           joints;
     std::unordered_map<JointHandle, std::size_t> jointIndexByHandle;
+
+    std::vector<Trigger>                           triggers;
+    std::unordered_map<TriggerHandle, std::size_t> triggerIndexByHandle;
+
+    // Overlap transitions accumulated by evaluateTriggers; consumers drain
+    // them through the capability's event entry points.
+    std::vector<TriggerEvent> pendingTriggerEvents;
+    bool                      triggerEventOverflow = false;
 
     std::unordered_map<std::uint64_t, PersistedManifold> manifolds;
 

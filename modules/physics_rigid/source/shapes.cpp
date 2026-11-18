@@ -42,6 +42,9 @@ bool validateShape(const ShapeDescription &description)
     case ShapeKind::Capsule:
         return std::isfinite(description.capsuleRadius) && description.capsuleRadius > 0.0
             && std::isfinite(description.capsuleHalfLength) && description.capsuleHalfLength > 0.0;
+    case ShapeKind::Cylinder:
+        return std::isfinite(description.cylinderRadius) && description.cylinderRadius > 0.0
+            && std::isfinite(description.cylinderHalfHeight) && description.cylinderHalfHeight > 0.0;
     case ShapeKind::Plane: {
         const math::Vec3 normal{description.planeNormal[0], description.planeNormal[1], description.planeNormal[2]};
         return math::isFinite(normal) && math::lengthSquared(normal) > kEpsilon
@@ -592,6 +595,410 @@ bool capsulePlane(const RigidTransform &transformA, double radiusA, double halfL
     return manifold.pointCount > 0;
 }
 
+// World-space cylinder cap endpoints (transformed local +Y axis).
+void cylinderEndpoints(
+    const RigidTransform &transform, double halfHeight, math::Vec3 &outEndpointA, math::Vec3 &outEndpointB)
+{
+    const math::Vec3 axis = math::rotate(transform.rotation, math::Vec3{0.0, halfHeight, 0.0});
+    outEndpointA          = transform.position - axis;
+    outEndpointB          = transform.position + axis;
+}
+
+// Deterministic orthonormal pair spanning the disc plane perpendicular to the
+// unit `axis`; the seed branch on the smallest component keeps the basis
+// stable for a given axis direction, so sampling order never depends on the
+// transform's rotation representation.
+void cylinderDiscBasis(const math::Vec3 &axis, math::Vec3 &outTangentU, math::Vec3 &outTangentV)
+{
+    const math::Vec3 seed = std::abs(axis.x) <= std::abs(axis.y) && std::abs(axis.x) <= std::abs(axis.z)
+        ? math::Vec3{1.0, 0.0, 0.0}
+        : (std::abs(axis.y) <= std::abs(axis.z) ? math::Vec3{0.0, 1.0, 0.0} : math::Vec3{0.0, 0.0, 1.0});
+    outTangentU = math::normalized(math::cross(axis, seed));
+    outTangentV = math::cross(axis, outTangentU);
+}
+
+// Surface sample points of a cylinder: the two cap centers followed by four
+// rim points on each cap rim at fixed quarter angles. The fixed sampling is
+// the deterministic primitive approximation for cylinder pairs and plane
+// contacts, matching the sampled-sphere idiom used for capsule pairs.
+void appendCylinderSurfaceSamples(const RigidTransform &transform, double radius, double halfHeight,
+    math::Vec3 outPoints[10])
+{
+    math::Vec3 endpointA;
+    math::Vec3 endpointB;
+    cylinderEndpoints(transform, halfHeight, endpointA, endpointB);
+    const math::Vec3 axis        = endpointB - endpointA;
+    const double     axisLength  = math::length(axis);
+    math::Vec3       tangentU;
+    math::Vec3       tangentV;
+    if (axisLength > kEpsilon)
+    {
+        cylinderDiscBasis(axis * (1.0 / axisLength), tangentU, tangentV);
+    }
+    else
+    {
+        tangentU = math::Vec3{1.0, 0.0, 0.0};
+        tangentV = math::Vec3{0.0, 0.0, 1.0};
+    }
+    std::uint32_t index = 0;
+    outPoints[index++]  = endpointA;
+    outPoints[index++]  = endpointB;
+    for (std::uint32_t rim = 0; rim < 2; ++rim)
+    {
+        const math::Vec3 capCenter = rim == 0 ? endpointA : endpointB;
+        for (std::uint32_t quadrant = 0; quadrant < 4; ++quadrant)
+        {
+            const double     angle = static_cast<double>(quadrant) * kPi * 0.5;
+            const math::Vec3 radial = tangentU * (std::cos(angle) * radius) + tangentV * (std::sin(angle) * radius);
+            outPoints[index++]      = capCenter + radial;
+        }
+    }
+}
+
+// Closest point on the local-frame solid cylinder (axis along local +Y,
+// centered at the origin) to `localPoint`. Inside points return themselves
+// with outInside set; the projection clamps the axis coordinate and the
+// radial distance independently, which is exact for the slab/cylinder
+// intersection region.
+math::Vec3 closestPointOnSolidCylinderLocal(
+    const math::Vec3 &localPoint, double radius, double halfHeight, bool &outInside)
+{
+    const double radialSquared = localPoint.x * localPoint.x + localPoint.z * localPoint.z;
+    outInside = radialSquared <= radius * radius && localPoint.y >= -halfHeight && localPoint.y <= halfHeight;
+    if (outInside)
+    {
+        return localPoint;
+    }
+    math::Vec3 clamped   = localPoint;
+    clamped.y            = std::clamp(clamped.y, -halfHeight, halfHeight);
+    const double radial  = std::sqrt(radialSquared);
+    const double radialScale = radial > radius && radial > kEpsilon ? radius / radial : 1.0;
+    clamped.x *= radialScale;
+    clamped.z *= radialScale;
+    return clamped;
+}
+
+// Nearest-surface push-out for a point inside the local-frame solid cylinder:
+// the outLocalNormal is the unit surface normal at the escape point and the
+// return value is the distance to that surface (cap plane or side wall).
+double insideSolidCylinderEscape(
+    const math::Vec3 &localPoint, double radius, double halfHeight, math::Vec3 &outLocalNormal)
+{
+    const double radial        = std::sqrt(localPoint.x * localPoint.x + localPoint.z * localPoint.z);
+    const double faceDistance  = halfHeight - std::abs(localPoint.y);
+    const double sideDistance  = radius - radial;
+    if (faceDistance <= sideDistance)
+    {
+        outLocalNormal           = math::Vec3{};
+        outLocalNormal.y         = localPoint.y >= 0.0 ? 1.0 : -1.0;
+        return faceDistance;
+    }
+    if (radial > kEpsilon)
+    {
+        outLocalNormal = math::Vec3{localPoint.x / radial, 0.0, localPoint.z / radial};
+    }
+    else
+    {
+        outLocalNormal = math::Vec3{0.0, 0.0, 1.0};
+    }
+    return sideDistance;
+}
+
+// Sphere against a solid cylinder (sphere A, cylinder B). Mirrors sphereBox:
+// the query runs in the cylinder's local frame, with an inside push-out
+// through the nearest surface and a closest-point test otherwise.
+bool sphereCylinder(const RigidTransform &transformA, double radiusA, const RigidTransform &transformB, double radiusB,
+    double halfHeightB, double margin, ContactManifold &manifold)
+{
+    const math::Vec3 local = math::inverseRotate(transformB.rotation, transformA.position - transformB.position);
+    bool             inside  = false;
+    const math::Vec3 closest = closestPointOnSolidCylinderLocal(local, radiusB, halfHeightB, inside);
+    math::Vec3       localNormal;
+    double           depth        = 0.0;
+    math::Vec3       surfaceLocal;
+    if (inside)
+    {
+        const double escape = insideSolidCylinderEscape(local, radiusB, halfHeightB, localNormal);
+        depth               = radiusA + escape;
+        surfaceLocal        = local + localNormal * escape;
+    }
+    else
+    {
+        const math::Vec3 delta           = local - closest;
+        const double     distanceSquared = math::lengthSquared(delta);
+        if (distanceSquared >= (radiusA + margin) * (radiusA + margin))
+        {
+            return false;
+        }
+        const double distance = std::sqrt(distanceSquared);
+        localNormal           = distance > kEpsilon ? delta * (1.0 / distance) : math::Vec3{0.0, 1.0, 0.0};
+        depth                 = radiusA - distance;
+        surfaceLocal          = closest;
+    }
+    manifold.normal         = math::rotate(transformB.rotation, localNormal);
+    manifold.pointCount     = 0;
+    const math::Vec3 pointB = transformB.position + math::rotate(transformB.rotation, surfaceLocal);
+    const math::Vec3 pointA = pointB + manifold.normal * depth;
+    appendContact(manifold, pointA, pointB);
+    return true;
+}
+
+// Box against solid cylinder: the box's eight corners are projected onto the
+// cylinder and the cylinder's ten surface samples onto the box; the deepest
+// contact's normal becomes the manifold normal (the sampled-sphere idiom).
+bool boxCylinder(const RigidTransform &transformA, const double halfExtents[3], const RigidTransform &transformB,
+    double radiusB, double halfHeightB, double margin, ContactManifold &manifold)
+{
+    manifold.pointCount       = 0;
+    manifold.normal           = math::Vec3{0.0, 1.0, 0.0};
+    bool             touching = false;
+    double           bestDepth = 0.0;
+
+    const auto offerContact = [&](const math::Vec3 &pointA, const math::Vec3 &pointB, const math::Vec3 &normal,
+                              double depth)
+    {
+        if (!touching || depth > bestDepth)
+        {
+            bestDepth      = depth;
+            manifold.normal = normal;
+        }
+        touching = true;
+        appendContact(manifold, pointA, pointB);
+    };
+
+    // Box corners against the cylinder solid.
+    for (std::uint32_t cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
+    {
+        const math::Vec3 localCorner{
+            cornerIndex & 1u ? halfExtents[0] : -halfExtents[0],
+            cornerIndex & 2u ? halfExtents[1] : -halfExtents[1],
+            cornerIndex & 4u ? halfExtents[2] : -halfExtents[2]};
+        const math::Vec3 corner = transformA.position + math::rotate(transformA.rotation, localCorner);
+        const math::Vec3 local  = math::inverseRotate(transformB.rotation, corner - transformB.position);
+        bool             inside  = false;
+        const math::Vec3 closest = closestPointOnSolidCylinderLocal(local, radiusB, halfHeightB, inside);
+        if (inside)
+        {
+            math::Vec3 localNormal;
+            const double escape = insideSolidCylinderEscape(local, radiusB, halfHeightB, localNormal);
+            const math::Vec3 normal = math::rotate(transformB.rotation, localNormal);
+            const math::Vec3 surface = transformB.position + math::rotate(transformB.rotation, local + localNormal * escape);
+            offerContact(corner, surface, normal, escape);
+        }
+        else
+        {
+            const math::Vec3 delta           = local - closest;
+            const double     distanceSquared = math::lengthSquared(delta);
+            if (distanceSquared >= margin * margin)
+            {
+                continue;
+            }
+            const double     distance = std::sqrt(distanceSquared);
+            const math::Vec3 normal
+                = distance > kEpsilon ? delta * (1.0 / distance) : math::Vec3{0.0, 1.0, 0.0};
+            const math::Vec3 worldClosest = transformB.position + math::rotate(transformB.rotation, closest);
+            offerContact(corner, worldClosest, normal, distance);
+        }
+    }
+
+    // Cylinder surface samples against the box solid.
+    math::Vec3 samples[10];
+    appendCylinderSurfaceSamples(transformB, radiusB, halfHeightB, samples);
+    const math::Mat3 rotationA = math::makeRotationMatrix(transformA.rotation);
+    for (std::uint32_t sampleIndex = 0; sampleIndex < 10; ++sampleIndex)
+    {
+        const math::Vec3 local = math::inverseRotate(transformA.rotation, samples[sampleIndex] - transformA.position);
+        const math::Vec3 clamped{
+            std::clamp(local.x, -halfExtents[0], halfExtents[0]),
+            std::clamp(local.y, -halfExtents[1], halfExtents[1]),
+            std::clamp(local.z, -halfExtents[2], halfExtents[2])};
+        math::Vec3 localNormal;
+        math::Vec3 closestLocal;
+        double     depth = 0.0;
+        if (math::distanceSquared(local, clamped) <= kEpsilon * kEpsilon)
+        {
+            // Sample inside the box: push out through the nearest face.
+            const double faceDistances[3] = {halfExtents[0] - std::abs(local.x),
+                halfExtents[1] - std::abs(local.y),
+                halfExtents[2] - std::abs(local.z)};
+            std::uint32_t nearestAxis = 0;
+            for (std::uint32_t axis = 1; axis < 3; ++axis)
+            {
+                if (faceDistances[axis] < faceDistances[nearestAxis])
+                {
+                    nearestAxis = axis;
+                }
+            }
+            localNormal                           = math::Vec3{};
+            componentOf(localNormal, nearestAxis) = componentOf(local, nearestAxis) >= 0.0 ? 1.0 : -1.0;
+            depth                                 = faceDistances[nearestAxis];
+            closestLocal                          = localNormal * halfExtents[nearestAxis];
+        }
+        else
+        {
+            const math::Vec3 delta           = local - clamped;
+            const double     distanceSquared = math::lengthSquared(delta);
+            if (distanceSquared >= margin * margin)
+            {
+                continue;
+            }
+            const double distance = std::sqrt(distanceSquared);
+            localNormal           = distance > kEpsilon ? delta * (1.0 / distance) : math::Vec3{0.0, 1.0, 0.0};
+            depth                 = distance;
+            closestLocal          = clamped;
+        }
+        const math::Vec3 normal      = math::rotate(transformA.rotation, localNormal) * -1.0;
+        const math::Vec3 pointOnBox  = transformA.position + math::multiplyMatrixVector(rotationA, closestLocal);
+        offerContact(pointOnBox, samples[sampleIndex], normal, depth);
+    }
+
+    if (!touching)
+    {
+        return false;
+    }
+    trimManifold(manifold, 4);
+    return true;
+}
+
+// Capsule against solid cylinder: the capsule's two interior spheres are
+// tested against the cylinder (the sampled-sphere idiom of boxCapsule).
+bool capsuleCylinder(const RigidTransform &transformA, double radiusA, double halfLengthA,
+    const RigidTransform &transformB, double radiusB, double halfHeightB, double margin, ContactManifold &manifold)
+{
+    manifold.pointCount       = 0;
+    manifold.normal           = math::Vec3{0.0, 1.0, 0.0};
+    bool             touching = false;
+    const math::Vec3 halfAxis = math::rotate(transformA.rotation, math::Vec3{0.0, halfLengthA * 0.5, 0.0});
+    for (std::uint32_t sample = 0; sample < 2; ++sample)
+    {
+        RigidTransform   sphereTransform{};
+        sphereTransform.position = transformA.position + (sample == 0 ? halfAxis * -1.0 : halfAxis);
+        ContactManifold sampleManifold;
+        if (sphereCylinder(sphereTransform, radiusA, transformB, radiusB, halfHeightB, margin, sampleManifold))
+        {
+            touching        = true;
+            manifold.normal = sampleManifold.normal;
+            for (std::uint32_t point = 0; point < sampleManifold.pointCount; ++point)
+            {
+                appendContact(manifold, sampleManifold.points[point].pointA, sampleManifold.points[point].pointB);
+            }
+        }
+    }
+    if (!touching)
+    {
+        return false;
+    }
+    trimManifold(manifold, 2);
+    return true;
+}
+
+// Solid cylinder against solid cylinder: each cylinder's ten surface samples
+// are projected onto the other solid; the deepest contact's normal becomes
+// the manifold normal. The fixed sample sets keep the result deterministic.
+bool cylinderCylinder(const RigidTransform &transformA, double radiusA, double halfHeightA,
+    const RigidTransform &transformB, double radiusB, double halfHeightB, double margin, ContactManifold &manifold)
+{
+    manifold.pointCount       = 0;
+    manifold.normal           = math::Vec3{0.0, 1.0, 0.0};
+    bool             touching = false;
+    double           bestDepth = 0.0;
+
+    const auto projectSamples = [&](const RigidTransform &fromTransform, double fromRadius, double fromHalfHeight,
+                                const RigidTransform &toTransform, double toRadius, double toHalfHeight,
+                                bool flip)
+    {
+        math::Vec3 samples[10];
+        appendCylinderSurfaceSamples(fromTransform, fromRadius, fromHalfHeight, samples);
+        for (std::uint32_t sampleIndex = 0; sampleIndex < 10; ++sampleIndex)
+        {
+            const math::Vec3 local
+                = math::inverseRotate(toTransform.rotation, samples[sampleIndex] - toTransform.position);
+            bool        inside  = false;
+            const math::Vec3 closest = closestPointOnSolidCylinderLocal(local, toRadius, toHalfHeight, inside);
+            math::Vec3 normal;
+            double     depth      = 0.0;
+            math::Vec3 pointOnTo;
+            if (inside)
+            {
+                math::Vec3 localNormal;
+                depth          = insideSolidCylinderEscape(local, toRadius, toHalfHeight, localNormal);
+                normal         = math::rotate(toTransform.rotation, localNormal);
+                pointOnTo      = toTransform.position + math::rotate(toTransform.rotation, local + localNormal * depth);
+            }
+            else
+            {
+                const math::Vec3 delta           = local - closest;
+                const double     distanceSquared = math::lengthSquared(delta);
+                if (distanceSquared >= margin * margin)
+                {
+                    continue;
+                }
+                const double distance = std::sqrt(distanceSquared);
+                normal                = distance > kEpsilon
+                        ? delta * (1.0 / distance)
+                        : math::Vec3{0.0, 1.0, 0.0};
+                depth                 = distance;
+                pointOnTo             = toTransform.position + math::rotate(toTransform.rotation, closest);
+            }
+            if (flip)
+            {
+                normal = normal * -1.0;
+            }
+            if (!touching || depth > bestDepth)
+            {
+                bestDepth       = depth;
+                manifold.normal = normal;
+            }
+            touching = true;
+            if (flip)
+            {
+                appendContact(manifold, pointOnTo, samples[sampleIndex]);
+            }
+            else
+            {
+                appendContact(manifold, samples[sampleIndex], pointOnTo);
+            }
+        }
+    };
+
+    projectSamples(transformA, radiusA, halfHeightA, transformB, radiusB, halfHeightB, false);
+    projectSamples(transformB, radiusB, halfHeightB, transformA, radiusA, halfHeightA, true);
+
+    if (!touching)
+    {
+        return false;
+    }
+    trimManifold(manifold, 4);
+    return true;
+}
+
+// Solid cylinder against a plane: cap centers and both cap rims are sampled
+// at fixed quarter angles, so an upright cylinder rests on four rim contacts
+// the way a box rests on four corner contacts.
+bool cylinderPlane(const RigidTransform &transformA, double radiusA, double halfHeightA,
+    const math::Vec3 &planeNormal, double planeOffset, double margin, ContactManifold &manifold)
+{
+    manifold.normal     = planeNormal;
+    manifold.pointCount = 0;
+    math::Vec3 samples[10];
+    appendCylinderSurfaceSamples(transformA, radiusA, halfHeightA, samples);
+    for (std::uint32_t sampleIndex = 0; sampleIndex < 10; ++sampleIndex)
+    {
+        const math::Vec3 point          = samples[sampleIndex];
+        const double     signedDistance = math::dot(point, planeNormal) - planeOffset;
+        if (signedDistance < margin)
+        {
+            appendContact(manifold, point, point - planeNormal * std::min(signedDistance, 0.0));
+        }
+    }
+    if (manifold.pointCount == 0)
+    {
+        return false;
+    }
+    trimManifold(manifold, 4);
+    return true;
+}
+
 } // namespace
 
 bool makeShape(const ShapeDescription &description, Shape &outShape)
@@ -608,6 +1015,8 @@ bool makeShape(const ShapeDescription &description, Shape &outShape)
     shape.boxHalfExtents[2] = description.boxHalfExtents[2];
     shape.capsuleRadius     = description.capsuleRadius;
     shape.capsuleHalfLength = description.capsuleHalfLength;
+    shape.cylinderRadius     = description.cylinderRadius;
+    shape.cylinderHalfHeight = description.cylinderHalfHeight;
     shape.planeNormal
         = math::normalized(Vec3{description.planeNormal[0], description.planeNormal[1], description.planeNormal[2]});
     shape.planeOffset = description.planeOffset;
@@ -628,6 +1037,8 @@ double computeShapeVolume(const Shape &shape)
         const double sphereVolume = (4.0 / 3.0) * kPi * shape.capsuleRadius * shape.capsuleRadius * shape.capsuleRadius;
         return cylinderVolume + sphereVolume;
     }
+    case ShapeKind::Cylinder:
+        return 2.0 * shape.cylinderHalfHeight * kPi * shape.cylinderRadius * shape.cylinderRadius;
     case ShapeKind::Plane:
     default:
         return 0.0;
@@ -680,6 +1091,18 @@ bool computeMassProperties(
                 * (4.0 * shape.capsuleHalfLength * shape.capsuleHalfLength + 3.0 * radiusSquared)
             + 2.0 * ((83.0 / 320.0) * hemisphereMass * radiusSquared + hemisphereMass * offsetSquared);
         inertia = math::Vec3{transverse, yAxis, transverse};
+        break;
+    }
+    case ShapeKind::Cylinder: {
+        // Solid cylinder about its local +Y axis: the axial moment is the
+        // disc moment; the transverse moments follow from the parallel-axis
+        // form for a solid cylinder of half height `h`.
+        const double radius        = shape.cylinderRadius;
+        const double heightSquared = 4.0 * shape.cylinderHalfHeight * shape.cylinderHalfHeight;
+        inertia                    = math::Vec3{
+            mass * (3.0 * radius * radius + heightSquared) / 12.0,
+            0.5 * mass * radius * radius,
+            mass * (3.0 * radius * radius + heightSquared) / 12.0};
         break;
     }
     case ShapeKind::Plane:
@@ -739,6 +1162,23 @@ void computeShapeAabb(
             std::max(endpointA.x, endpointB.x) + padding.x,
             std::max(endpointA.y, endpointB.y) + padding.y,
             std::max(endpointA.z, endpointB.z) + padding.z};
+        break;
+    }
+    case ShapeKind::Cylinder: {
+        // Support-function AABB: along each world axis the extent is the
+        // half-height projected on the axis plus the cap-disc radius in the
+        // perpendicular plane, which is exact for a rotated cylinder.
+        const math::Vec3 axis = math::rotate(transform.rotation, math::Vec3{0.0, shape.cylinderHalfHeight, 0.0});
+        math::Vec3       extent;
+        const double     components[3] = {axis.x, axis.y, axis.z};
+        for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
+        {
+            const double axial       = components[axisIndex];
+            (&extent.x)[axisIndex] = shape.cylinderHalfHeight * std::abs(axial)
+                + shape.cylinderRadius * std::sqrt(std::max(0.0, 1.0 - axial * axial));
+        }
+        outMinimum = transform.position - extent;
+        outMaximum = transform.position + extent;
         break;
     }
     case ShapeKind::Plane:
@@ -836,6 +1276,91 @@ bool collideShapes(const Shape &shapeA, const RigidTransform &transformA, const 
             margin,
             manifold);
     }
+    else if (kindA == ShapeKind::Sphere && kindB == ShapeKind::Cylinder)
+    {
+        touching = sphereCylinder(transformA,
+            shapeA.sphereRadius,
+            transformB,
+            shapeB.cylinderRadius,
+            shapeB.cylinderHalfHeight,
+            margin,
+            manifold);
+    }
+    else if (kindA == ShapeKind::Cylinder && kindB == ShapeKind::Sphere)
+    {
+        touching = sphereCylinder(transformB,
+            shapeB.sphereRadius,
+            transformA,
+            shapeA.cylinderRadius,
+            shapeA.cylinderHalfHeight,
+            margin,
+            manifold);
+        if (touching)
+        {
+            flipManifold(manifold);
+        }
+    }
+    else if (kindA == ShapeKind::Box && kindB == ShapeKind::Cylinder)
+    {
+        touching = boxCylinder(transformA,
+            shapeA.boxHalfExtents,
+            transformB,
+            shapeB.cylinderRadius,
+            shapeB.cylinderHalfHeight,
+            margin,
+            manifold);
+    }
+    else if (kindA == ShapeKind::Cylinder && kindB == ShapeKind::Box)
+    {
+        touching = boxCylinder(transformB,
+            shapeB.boxHalfExtents,
+            transformA,
+            shapeA.cylinderRadius,
+            shapeA.cylinderHalfHeight,
+            margin,
+            manifold);
+        if (touching)
+        {
+            flipManifold(manifold);
+        }
+    }
+    else if (kindA == ShapeKind::Capsule && kindB == ShapeKind::Cylinder)
+    {
+        touching = capsuleCylinder(transformA,
+            shapeA.capsuleRadius,
+            shapeA.capsuleHalfLength,
+            transformB,
+            shapeB.cylinderRadius,
+            shapeB.cylinderHalfHeight,
+            margin,
+            manifold);
+    }
+    else if (kindA == ShapeKind::Cylinder && kindB == ShapeKind::Capsule)
+    {
+        touching = capsuleCylinder(transformB,
+            shapeB.capsuleRadius,
+            shapeB.capsuleHalfLength,
+            transformA,
+            shapeA.cylinderRadius,
+            shapeA.cylinderHalfHeight,
+            margin,
+            manifold);
+        if (touching)
+        {
+            flipManifold(manifold);
+        }
+    }
+    else if (kindA == ShapeKind::Cylinder && kindB == ShapeKind::Cylinder)
+    {
+        touching = cylinderCylinder(transformA,
+            shapeA.cylinderRadius,
+            shapeA.cylinderHalfHeight,
+            transformB,
+            shapeB.cylinderRadius,
+            shapeB.cylinderHalfHeight,
+            margin,
+            manifold);
+    }
     if (!touching)
     {
         return false;
@@ -861,6 +1386,15 @@ bool collidePlaneSolid(const math::Vec3 &planeNormal, double planeOffset, const 
         touching = capsulePlane(solidTransform,
             solidShape.capsuleRadius,
             solidShape.capsuleHalfLength,
+            planeNormal,
+            planeOffset,
+            margin,
+            manifold);
+        break;
+    case ShapeKind::Cylinder:
+        touching = cylinderPlane(solidTransform,
+            solidShape.cylinderRadius,
+            solidShape.cylinderHalfHeight,
             planeNormal,
             planeOffset,
             margin,
@@ -1024,6 +1558,66 @@ bool rayCastCapsule(const RigidTransform &transform, double radius, double halfL
     return true;
 }
 
+// Ray against a solid cylinder: the side surface (infinite cylinder of the
+// given radius clipped to the half-height) and the two flat cap discs, all in
+// the cylinder's local frame; the nearest valid entry wins.
+bool rayCastCylinder(const RigidTransform &transform, double radius, double halfHeight, const math::Vec3 &origin,
+    const math::Vec3 &direction, double maximumDistance, double &outDistance)
+{
+    const math::Vec3 localOrigin    = math::inverseRotate(transform.rotation, origin - transform.position);
+    const math::Vec3 localDirection = math::inverseRotate(transform.rotation, direction);
+    double           bestDistance   = -1.0;
+
+    const double radialSquared = localDirection.x * localDirection.x + localDirection.z * localDirection.z;
+    if (radialSquared > kEpsilon)
+    {
+        const double a            = radialSquared;
+        const double b            = 2.0 * (localOrigin.x * localDirection.x + localOrigin.z * localDirection.z);
+        const double c            = localOrigin.x * localOrigin.x + localOrigin.z * localOrigin.z - radius * radius;
+        const double discriminant = b * b - 4.0 * a * c;
+        if (discriminant >= 0.0)
+        {
+            const double root = std::sqrt(discriminant);
+            for (const double t : {(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)})
+            {
+                if (t <= 0.0 || t > maximumDistance || (bestDistance >= 0.0 && t >= bestDistance))
+                {
+                    continue;
+                }
+                const double y = localOrigin.y + localDirection.y * t;
+                if (std::abs(y) <= halfHeight)
+                {
+                    bestDistance = t;
+                }
+            }
+        }
+    }
+
+    for (const double cap : {-halfHeight, halfHeight})
+    {
+        if (std::abs(localDirection.y) > kEpsilon)
+        {
+            const double t = (cap - localOrigin.y) / localDirection.y;
+            if (t > 0.0 && t <= maximumDistance && (bestDistance < 0.0 || t < bestDistance))
+            {
+                const double x = localOrigin.x + localDirection.x * t;
+                const double z = localOrigin.z + localDirection.z * t;
+                if (x * x + z * z <= radius * radius)
+                {
+                    bestDistance = t;
+                }
+            }
+        }
+    }
+
+    if (bestDistance <= 0.0)
+    {
+        return false;
+    }
+    outDistance = bestDistance;
+    return true;
+}
+
 bool rayCastPlane(const math::Vec3 &planeNormal, double planeOffset, const math::Vec3 &origin,
     const math::Vec3 &direction, double maximumDistance, double &outDistance)
 {
@@ -1092,6 +1686,33 @@ bool collideSphereSolid(const math::Vec3 &center, double radius, const Shape &so
         outDepth              = combined - distance;
         return true;
     }
+    case ShapeKind::Cylinder: {
+        const math::Vec3 local    = math::inverseRotate(solidTransform.rotation, center - solidTransform.position);
+        bool             inside   = false;
+        const math::Vec3 closest  = closestPointOnSolidCylinderLocal(
+            local, solidShape.cylinderRadius, solidShape.cylinderHalfHeight, inside);
+        math::Vec3 localNormal;
+        double     depth = 0.0;
+        if (inside)
+        {
+            depth = radius + insideSolidCylinderEscape(local, solidShape.cylinderRadius, solidShape.cylinderHalfHeight, localNormal);
+        }
+        else
+        {
+            const math::Vec3 delta           = local - closest;
+            const double     distanceSquared = math::lengthSquared(delta);
+            if (distanceSquared >= radius * radius)
+            {
+                return false;
+            }
+            const double distance = std::sqrt(distanceSquared);
+            localNormal           = distance > kEpsilon ? delta * (1.0 / distance) : math::Vec3{0.0, 1.0, 0.0};
+            depth                 = radius - distance;
+        }
+        outNormal = math::rotate(solidTransform.rotation, localNormal);
+        outDepth  = depth;
+        return true;
+    }
     case ShapeKind::Plane:
     default:
         return false;
@@ -1121,6 +1742,8 @@ double computeShapeBoundingRadius(const Shape &shape)
         return math::length(math::Vec3{shape.boxHalfExtents[0], shape.boxHalfExtents[1], shape.boxHalfExtents[2]});
     case ShapeKind::Capsule:
         return shape.capsuleHalfLength + shape.capsuleRadius;
+    case ShapeKind::Cylinder:
+        return std::sqrt(shape.cylinderHalfHeight * shape.cylinderHalfHeight + shape.cylinderRadius * shape.cylinderRadius);
     case ShapeKind::Plane:
     default:
         return 0.0;
@@ -1259,6 +1882,86 @@ bool sweepSphereSolid(const math::Vec3 &start, double radius, const math::Vec3 &
                         bestDistance = t;
                         bestNormal   = math::rotate(solidTransform.rotation, math::normalized(hitLocal));
                         break;
+                    }
+                }
+            }
+        }
+        break;
+    }
+    case ShapeKind::Cylinder: {
+        // Ray against the cylinder inflated by the query radius: the side
+        // band, the flat cap discs, and the rounded rim spheres at the cap
+        // centers. The union is conservative (a sweep may stop slightly
+        // early near the rim rounding) and never tunnels.
+        const math::Vec3 axis
+            = math::rotate(solidTransform.rotation, math::Vec3{0.0, solidShape.cylinderHalfHeight, 0.0});
+        double distance = 0.0;
+        RigidTransform capTransform{};
+        capTransform.position = solidTransform.position;
+        if (rayCastSphere(capTransform, solidShape.cylinderRadius + radius, start, direction, length, distance))
+        {
+            bestDistance = distance;
+            bestNormal   = math::normalized(start + direction * distance - solidTransform.position);
+        }
+        for (const double sign : {-1.0, 1.0})
+        {
+            RigidTransform endTransform{};
+            endTransform.position = solidTransform.position + axis * sign;
+            double endDistance    = 0.0;
+            if (rayCastSphere(endTransform, solidShape.cylinderRadius + radius, start, direction, length, endDistance)
+                && (bestDistance < 0.0 || endDistance < bestDistance))
+            {
+                bestDistance = endDistance;
+                bestNormal   = math::normalized(start + direction * endDistance - endTransform.position);
+            }
+        }
+        const math::Vec3 localOrigin    = math::inverseRotate(solidTransform.rotation, start - solidTransform.position);
+        const math::Vec3 localDirection = math::inverseRotate(solidTransform.rotation, direction);
+        const double     radialSquared  = localDirection.x * localDirection.x + localDirection.z * localDirection.z;
+        const double     inflated       = solidShape.cylinderRadius + radius;
+        if (radialSquared > kEpsilon)
+        {
+            const double b            = 2.0 * (localOrigin.x * localDirection.x + localOrigin.z * localDirection.z);
+            const double c            = localOrigin.x * localOrigin.x + localOrigin.z * localOrigin.z - inflated * inflated;
+            const double discriminant = b * b - 4.0 * radialSquared * c;
+            if (discriminant >= 0.0)
+            {
+                const double root = std::sqrt(discriminant);
+                for (const double t : {(-b - root) / (2.0 * radialSquared), (-b + root) / (2.0 * radialSquared)})
+                {
+                    if (t <= 0.0 || t > length || (bestDistance >= 0.0 && t >= bestDistance))
+                    {
+                        continue;
+                    }
+                    const double y = localOrigin.y + localDirection.y * t;
+                    if (std::abs(y) <= solidShape.cylinderHalfHeight)
+                    {
+                        const math::Vec3 hitLocal{localOrigin.x + localDirection.x * t,
+                            y,
+                            localOrigin.z + localDirection.z * t};
+                        bestDistance = t;
+                        bestNormal   = math::rotate(solidTransform.rotation, math::normalized(hitLocal));
+                        break;
+                    }
+                }
+            }
+        }
+        for (const double cap : {-1.0, 1.0})
+        {
+            if (std::abs(localDirection.y) > kEpsilon)
+            {
+                const double capPlane = solidShape.cylinderHalfHeight + cap * radius;
+                const double t        = (capPlane - localOrigin.y) / localDirection.y;
+                if (t > 0.0 && t <= length && (bestDistance < 0.0 || t < bestDistance))
+                {
+                    const double x = localOrigin.x + localDirection.x * t;
+                    const double z = localOrigin.z + localDirection.z * t;
+                    if (x * x + z * z <= solidShape.cylinderRadius * solidShape.cylinderRadius)
+                    {
+                        math::Vec3 localNormal{};
+                        localNormal.y = cap;
+                        bestDistance  = t;
+                        bestNormal    = math::rotate(solidTransform.rotation, localNormal);
                     }
                 }
             }

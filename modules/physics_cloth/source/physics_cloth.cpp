@@ -2,9 +2,11 @@
 //
 // XPBD cloth over a physics_rigid world: particles integrate velocities,
 // constraints solve in Gauss-Seidel order with compliance-scaled corrections,
-// and particles resolve against the rigid world's bodies and planes through
-// the collideSphere query. Stepping happens in whole fixed steps with
-// internal substeps (the "small steps" XPBD schedule), so the simulation is
+// constraints tear when stretched past their tolerance, overlapping particle
+// pairs repel each other through a deterministic spatial hash, and particles
+// resolve against the rigid world's bodies and planes through the
+// collideSphere query. Stepping happens in whole fixed steps with internal
+// substeps (the "small steps" XPBD schedule), so the simulation is
 // independent of frame rate.
 
 #include "records.hpp"
@@ -185,11 +187,31 @@ private:
     void solveConstraints(ClothRecord &cloth, double substepDelta)
     {
         const double inverseDeltaTimeSquared = 1.0 / (substepDelta * substepDelta);
+        const bool   tearingEnabled          = cloth.tearStrain > 0.0;
+        const double stretchLimitFactor      = 1.0 + cloth.tearStrain;
         for (DistanceConstraint &constraint : cloth.constraints)
         {
             const std::size_t offsetA = static_cast<std::size_t>(constraint.particleA) * 3;
             const std::size_t offsetB = static_cast<std::size_t>(constraint.particleB) * 3;
-            const double      inverseMassA
+            const double      deltaX  = cloth.positions[offsetB] - cloth.positions[offsetA];
+            const double      deltaY  = cloth.positions[offsetB + 1] - cloth.positions[offsetA + 1];
+            const double      deltaZ  = cloth.positions[offsetB + 2] - cloth.positions[offsetA + 2];
+            const double length = std::sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+            // Tearing: check before solving, every substep, in the fixed
+            // constraint order. Only stretched constraints break (never
+            // compressed), a broken constraint is skipped from then on, and
+            // the count accumulates once per torn constraint. Tearing is a
+            // normal outcome and never triggers the step's failure path.
+            if (tearingEnabled && !constraint.broken && length > constraint.restLength * stretchLimitFactor)
+            {
+                constraint.broken             = true;
+                cloth.brokenConstraintCount += 1;
+            }
+            if (constraint.broken)
+            {
+                continue;
+            }
+            const double inverseMassA
                 = cloth.pinned[constraint.particleA] != 0u ? 0.0 : cloth.inverseMasses[constraint.particleA];
             const double inverseMassB
                 = cloth.pinned[constraint.particleB] != 0u ? 0.0 : cloth.inverseMasses[constraint.particleB];
@@ -198,10 +220,6 @@ private:
             {
                 continue;
             }
-            const double deltaX = cloth.positions[offsetB] - cloth.positions[offsetA];
-            const double deltaY = cloth.positions[offsetB + 1] - cloth.positions[offsetA + 1];
-            const double deltaZ = cloth.positions[offsetB + 2] - cloth.positions[offsetA + 2];
-            const double length = std::sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
             if (length <= 1.0e-12)
             {
                 continue;
@@ -219,6 +237,152 @@ private:
             cloth.positions[offsetB] += inverseMassB * scaleX;
             cloth.positions[offsetB + 1] += inverseMassB * scaleY;
             cloth.positions[offsetB + 2] += inverseMassB * scaleZ;
+        }
+    }
+
+    // Cell coordinate for the self-collision hash: clamps the scaled
+    // position before the integer cast so huge or non-finite positions
+    // cannot overflow (the step's finite check rejects them afterwards; the
+    // hash stays well-defined meanwhile).
+    static std::int64_t selfCollisionCellCoordinate(double scaled)
+    {
+        if (!std::isfinite(scaled))
+        {
+            return 0;
+        }
+        constexpr double extent = 1.0e9;
+        scaled                  = std::min(std::max(scaled, -extent), extent);
+        return static_cast<std::int64_t>(std::floor(scaled));
+    }
+
+    // Bounds-free cell-id hash (the same primes the fluid module uses); two
+    // distinct cells colliding into one id merely merge their candidate
+    // lists, which the distance check tolerates deterministically.
+    static std::uint64_t selfCollisionCellId(std::int64_t cellX, std::int64_t cellY, std::int64_t cellZ)
+    {
+        return (static_cast<std::uint64_t>(cellX) * 73856093ull)
+               ^ (static_cast<std::uint64_t>(cellY) * 19349663ull)
+               ^ (static_cast<std::uint64_t>(cellZ) * 83492791ull);
+    }
+
+    // Repels particle pairs closer than twice the self-collision radius.
+    // Runs after the constraint iterations of each substep and before the
+    // rigid-world resolution, so geometry keeps the final positional word.
+    // Pinned particles join the hash as infinite-mass obstacles (inverse
+    // mass 0, they never move). The hash is a flat, sorted bucket structure
+    // with no map iteration anywhere: cells hash into 64-bit ids, the (id,
+    // particle) pairs sort by id with an index tiebreak (so every bucket
+    // holds ascending particle indices), and both the particle walk and the
+    // 3x3x3 neighbor-cell scan follow fixed orders, which keeps pair
+    // discovery and correction order deterministic.
+    void resolveSelfCollisions(ClothRecord &cloth)
+    {
+        if (cloth.selfCollisionRadius <= 0.0)
+        {
+            return;
+        }
+        const std::size_t particleCount = cloth.positions.size() / 3;
+        if (particleCount < 2)
+        {
+            return;
+        }
+        const double minimumDistance        = 2.0 * cloth.selfCollisionRadius;
+        const double minimumDistanceSquared = minimumDistance * minimumDistance;
+        const double cellSize               = minimumDistance; // cell edge >= 2 x radius
+
+        cloth.selfCollisionEntries.resize(particleCount);
+        for (std::size_t particle = 0; particle < particleCount; ++particle)
+        {
+            const std::size_t offset = particle * 3;
+            const std::int64_t cellX = selfCollisionCellCoordinate(cloth.positions[offset] / cellSize);
+            const std::int64_t cellY = selfCollisionCellCoordinate(cloth.positions[offset + 1] / cellSize);
+            const std::int64_t cellZ = selfCollisionCellCoordinate(cloth.positions[offset + 2] / cellSize);
+            cloth.selfCollisionEntries[particle].cellId   = selfCollisionCellId(cellX, cellY, cellZ);
+            cloth.selfCollisionEntries[particle].particle = static_cast<std::uint32_t>(particle);
+        }
+        std::sort(cloth.selfCollisionEntries.begin(), cloth.selfCollisionEntries.end(),
+            [](const SelfCollisionEntry &a, const SelfCollisionEntry &b)
+            { return a.cellId != b.cellId ? a.cellId < b.cellId : a.particle < b.particle; });
+
+        // Unique ascending cell ids and the start offset of each bucket;
+        // a bucket ends where the next one starts (the last runs to the end).
+        cloth.selfCollisionCells.clear();
+        cloth.selfCollisionCellStarts.clear();
+        for (std::size_t entry = 0; entry < particleCount; ++entry)
+        {
+            if (entry == 0 || cloth.selfCollisionEntries[entry].cellId != cloth.selfCollisionCells.back())
+            {
+                cloth.selfCollisionCells.push_back(cloth.selfCollisionEntries[entry].cellId);
+                cloth.selfCollisionCellStarts.push_back(static_cast<std::uint32_t>(entry));
+            }
+        }
+
+        for (std::uint32_t particle = 0; particle < particleCount; ++particle)
+        {
+            const std::size_t  offsetI = static_cast<std::size_t>(particle) * 3;
+            const std::int64_t cellX   = selfCollisionCellCoordinate(cloth.positions[offsetI] / cellSize);
+            const std::int64_t cellY   = selfCollisionCellCoordinate(cloth.positions[offsetI + 1] / cellSize);
+            const std::int64_t cellZ   = selfCollisionCellCoordinate(cloth.positions[offsetI + 2] / cellSize);
+            for (std::int64_t offsetX = -1; offsetX <= 1; ++offsetX)
+            {
+                for (std::int64_t offsetY = -1; offsetY <= 1; ++offsetY)
+                {
+                    for (std::int64_t offsetZ = -1; offsetZ <= 1; ++offsetZ)
+                    {
+                        const std::uint64_t neighborId
+                            = selfCollisionCellId(cellX + offsetX, cellY + offsetY, cellZ + offsetZ);
+                        const auto slot = std::lower_bound(
+                            cloth.selfCollisionCells.begin(), cloth.selfCollisionCells.end(), neighborId);
+                        if (slot == cloth.selfCollisionCells.end() || *slot != neighborId)
+                        {
+                            continue;
+                        }
+                        const std::size_t cellIndex  = static_cast<std::size_t>(slot - cloth.selfCollisionCells.begin());
+                        const std::uint32_t start    = cloth.selfCollisionCellStarts[cellIndex];
+                        const std::uint32_t end      = cellIndex + 1 < cloth.selfCollisionCellStarts.size()
+                                                          ? cloth.selfCollisionCellStarts[cellIndex + 1]
+                                                          : static_cast<std::uint32_t>(particleCount);
+                        for (std::uint32_t entry = start; entry < end; ++entry)
+                        {
+                            const std::uint32_t other = cloth.selfCollisionEntries[entry].particle;
+                            if (other <= particle)
+                            {
+                                continue; // each pair is handled once, with j > i
+                            }
+                            const std::size_t offsetJ = static_cast<std::size_t>(other) * 3;
+                            const double deltaX = cloth.positions[offsetJ] - cloth.positions[offsetI];
+                            const double deltaY = cloth.positions[offsetJ + 1] - cloth.positions[offsetI + 1];
+                            const double deltaZ = cloth.positions[offsetJ + 2] - cloth.positions[offsetI + 2];
+                            const double distanceSquared
+                                = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
+                            if (distanceSquared >= minimumDistanceSquared || distanceSquared <= 1.0e-12)
+                            {
+                                continue;
+                            }
+                            const double inverseMassI
+                                = cloth.pinned[particle] != 0u ? 0.0 : cloth.inverseMasses[particle];
+                            const double inverseMassJ
+                                = cloth.pinned[other] != 0u ? 0.0 : cloth.inverseMasses[other];
+                            const double weightSum = inverseMassI + inverseMassJ;
+                            if (weightSum <= 0.0)
+                            {
+                                continue;
+                            }
+                            // XPBD positional correction along the pair axis,
+                            // split by inverse mass: pinned particles never
+                            // move, equal masses split the push in half.
+                            const double distance = std::sqrt(distanceSquared);
+                            const double scale    = (minimumDistance - distance) / (distance * weightSum);
+                            cloth.positions[offsetI] -= inverseMassI * deltaX * scale;
+                            cloth.positions[offsetI + 1] -= inverseMassI * deltaY * scale;
+                            cloth.positions[offsetI + 2] -= inverseMassI * deltaZ * scale;
+                            cloth.positions[offsetJ] += inverseMassJ * deltaX * scale;
+                            cloth.positions[offsetJ + 1] += inverseMassJ * deltaY * scale;
+                            cloth.positions[offsetJ + 2] += inverseMassJ * deltaZ * scale;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -307,6 +471,7 @@ private:
         {
             integrateSubstep(cloth, substepDelta);
             solveConstraints(cloth, substepDelta);
+            resolveSelfCollisions(cloth);
             resolveCollisions(cloth);
             finalizeSubstepVelocities(cloth, substepDelta);
         }
@@ -362,7 +527,9 @@ private:
             || description->stretchCompliance < 0.0 || !std::isfinite(description->shearCompliance)
             || description->shearCompliance < 0.0 || !std::isfinite(description->bendCompliance)
             || description->bendCompliance < 0.0 || !std::isfinite(description->damping) || description->damping < 0.0
-            || !std::isfinite(description->friction) || description->friction < 0.0 || description->friction > 1.0)
+            || !std::isfinite(description->friction) || description->friction < 0.0 || description->friction > 1.0
+            || !std::isfinite(description->tearStrain) || description->tearStrain < 0.0
+            || !std::isfinite(description->selfCollisionRadius) || description->selfCollisionRadius < 0.0)
         {
             setError(error, ClothError::InvalidDescription);
             return invalidCloth;
@@ -382,6 +549,8 @@ private:
         cloth.stretchCompliance = description->stretchCompliance;
         cloth.shearCompliance   = description->shearCompliance;
         cloth.bendCompliance    = description->bendCompliance;
+        cloth.tearStrain          = description->tearStrain;
+        cloth.selfCollisionRadius = description->selfCollisionRadius;
 
         cloth.positions.resize(particleCount * 3);
         cloth.velocities.assign(particleCount * 3, 0.0);
@@ -738,10 +907,89 @@ private:
         {
             return false;
         }
-        outStatistics->stepsSimulated       = cloth->stepsSimulated;
-        outStatistics->substepsExecuted     = cloth->substepsExecuted;
-        outStatistics->lastContactCount     = cloth->lastContactCount;
-        outStatistics->lastStepMilliseconds = cloth->lastStepMilliseconds;
+        outStatistics->stepsSimulated        = cloth->stepsSimulated;
+        outStatistics->substepsExecuted      = cloth->substepsExecuted;
+        outStatistics->lastContactCount      = cloth->lastContactCount;
+        outStatistics->brokenConstraintCount = cloth->brokenConstraintCount;
+        outStatistics->lastStepMilliseconds  = cloth->lastStepMilliseconds;
+        return true;
+    }
+
+    // Bilinear interpolation of the particle grid at normalized coordinates
+    // (u along columns, v along rows, clamped into [0, 1]; the fractional
+    // cell index uses the last full segment so u = 1 lands exactly on the
+    // final particle column). The normal is the cross product of the two
+    // grid-direction tangents — the central differences of the surrounding
+    // particles blended across the sampled cell — ordered so a flat grid
+    // (u along +X, v along +Z) faces +Y like the degenerate fallback.
+    bool sampleClothSurfaceImpl(ClothHandle handle, double u, double v, double outPosition[3], double outNormal[3])
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || outPosition == nullptr || outNormal == nullptr)
+        {
+            return false;
+        }
+        if (!std::isfinite(u) || !std::isfinite(v))
+        {
+            return false;
+        }
+        const double fractionalColumn
+            = std::min(std::max(u, 0.0), 1.0) * static_cast<double>(cloth->columns - 1);
+        const double fractionalRow = std::min(std::max(v, 0.0), 1.0) * static_cast<double>(cloth->rows - 1);
+        std::uint32_t column = static_cast<std::uint32_t>(fractionalColumn);
+        std::uint32_t row    = static_cast<std::uint32_t>(fractionalRow);
+        if (column > cloth->columns - 2)
+        {
+            column = cloth->columns - 2;
+        }
+        if (row > cloth->rows - 2)
+        {
+            row = cloth->rows - 2;
+        }
+        const double tx = fractionalColumn - static_cast<double>(column);
+        const double ty = fractionalRow - static_cast<double>(row);
+
+        const std::size_t offset00 = particleIndex(*cloth, column, row);
+        const std::size_t offset10 = particleIndex(*cloth, column + 1, row);
+        const std::size_t offset01 = particleIndex(*cloth, column, row + 1);
+        const std::size_t offset11 = particleIndex(*cloth, column + 1, row + 1);
+
+        double position[3] = {0.0, 0.0, 0.0};
+        double tangentU[3] = {0.0, 0.0, 0.0};
+        double tangentV[3] = {0.0, 0.0, 0.0};
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            const double p00 = cloth->positions[offset00 + axis];
+            const double p10 = cloth->positions[offset10 + axis];
+            const double p01 = cloth->positions[offset01 + axis];
+            const double p11 = cloth->positions[offset11 + axis];
+            position[axis] = (1.0 - tx) * ((1.0 - ty) * p00 + ty * p01) + tx * ((1.0 - ty) * p10 + ty * p11);
+            tangentU[axis] = (1.0 - ty) * (p10 - p00) + ty * (p11 - p01);
+            tangentV[axis] = (1.0 - tx) * (p01 - p00) + tx * (p11 - p10);
+        }
+        const double normalX = tangentV[1] * tangentU[2] - tangentV[2] * tangentU[1];
+        const double normalY = tangentV[2] * tangentU[0] - tangentV[0] * tangentU[2];
+        const double normalZ = tangentV[0] * tangentU[1] - tangentV[1] * tangentU[0];
+        const double normalLength = std::sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+        double normal[3]          = {0.0, 1.0, 0.0};
+        if (normalLength > 1.0e-12)
+        {
+            const double inverseLength = 1.0 / normalLength;
+            normal[0]                  = normalX * inverseLength;
+            normal[1]                  = normalY * inverseLength;
+            normal[2]                  = normalZ * inverseLength;
+        }
+        if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2])
+            || !std::isfinite(normal[0]) || !std::isfinite(normal[1]) || !std::isfinite(normal[2]))
+        {
+            return false;
+        }
+        outPosition[0] = position[0];
+        outPosition[1] = position[1];
+        outPosition[2] = position[2];
+        outNormal[0]   = normal[0];
+        outNormal[1]   = normal[1];
+        outNormal[2]   = normal[2];
         return true;
     }
 
@@ -767,6 +1015,7 @@ private:
         ENGINE_PHYSICS_CLOTH_BIND(step, stepImpl);
         ENGINE_PHYSICS_CLOTH_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_CLOTH_BIND(clothStatistics, clothStatisticsImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(sampleClothSurface, sampleClothSurfaceImpl);
 #undef ENGINE_PHYSICS_CLOTH_BIND
     }
 

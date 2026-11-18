@@ -25,48 +25,6 @@ namespace engine
 namespace lumen_reflection
 {
 
-namespace
-{
-
-glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
-{
-    color *= exposure;
-    switch (mapper)
-    {
-    case pbr::ToneMapping::None:
-        break;
-    case pbr::ToneMapping::Reinhard:
-        color = color / (1.0f + color);
-        break;
-    case pbr::ToneMapping::AcesFilmic:
-    default:
-        color = glm::clamp((color * (2.51f * color + 0.03f)) / (color * (2.43f * color + 0.59f) + 0.14f), 0.0f, 1.0f);
-        break;
-    }
-    return color;
-}
-
-std::uint8_t toByte(float value)
-{
-    return static_cast<std::uint8_t>(std::min(1.0f, std::max(0.0f, value)) * 255.0f + 0.5f);
-}
-
-glm::vec3 gammaEncode(glm::vec3 color)
-{
-    return glm::pow(glm::max(color, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
-}
-
-void storePixel(std::vector<std::uint8_t> &rgb, std::size_t pixelIndex, const glm::vec3 &linearColor,
-    const RfEnvironmentSnapshot &environment)
-{
-    const glm::vec3 encoded = gammaEncode(toneMapColor(linearColor, environment.exposure, environment.toneMapping));
-    rgb[pixelIndex * 3 + 0] = toByte(encoded.x);
-    rgb[pixelIndex * 3 + 1] = toByte(encoded.y);
-    rgb[pixelIndex * 3 + 2] = toByte(encoded.z);
-}
-
-} // namespace
-
 bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, ReflectionDebugView view,
     std::vector<std::uint8_t> &outRgb)
 {
@@ -89,7 +47,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
         // Background texels resolve the skylight along their view ray (the
         // un-projection of the pixel center through the inverse camera).
         const glm::mat4 inverseViewProjection = glm::inverse(state.viewProjection);
-        rfParallelRange(scheduler, viewHeight, 1,
+        parallelRange(scheduler, viewHeight, 1,
             [&](std::size_t rowBegin, std::size_t rowEnd)
             {
                 for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -122,7 +80,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                             const glm::vec3 direction = glm::normalize(glm::vec3(nearPlane) / nearPlane.w - state.cameraPosition);
                             color = state.environment.skyRadiance(direction);
                         }
-                        storePixel(outRgb, index, color, state.environment);
+                        storePixel(outRgb, index, color, state.environment.exposure, state.environment.toneMapping);
                     }
                 }
             });
@@ -130,7 +88,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
     }
     case ReflectionDebugView::ReflectionsOnly:
     {
-        rfParallelRange(scheduler, viewHeight, 1,
+        parallelRange(scheduler, viewHeight, 1,
             [&](std::size_t rowBegin, std::size_t rowEnd)
             {
                 for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -138,7 +96,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                     for (std::uint32_t x = 0; x < viewWidth; ++x)
                     {
                         const std::size_t index = y * viewWidth + x;
-                        storePixel(outRgb, index, state.fieldFiltered[index], state.environment);
+                        storePixel(outRgb, index, state.fieldFiltered[index], state.environment.exposure, state.environment.toneMapping);
                     }
                 }
             });
@@ -153,7 +111,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
             glm::vec3(0.9f, 0.8f, 0.1f), // Cache: yellow
             glm::vec3(0.1f, 0.8f, 0.9f), // Sky: cyan
         };
-        rfParallelRange(scheduler, viewHeight, 1,
+        parallelRange(scheduler, viewHeight, 1,
             [&](std::size_t rowBegin, std::size_t rowEnd)
             {
                 for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -175,7 +133,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
     case ReflectionDebugView::Reference:
     {
         const std::uint32_t samples = std::max(state.settings.referenceSamples, 1u);
-        rfParallelRange(scheduler, viewHeight, 1,
+        parallelRange(scheduler, viewHeight, 1,
             [&](std::size_t rowBegin, std::size_t rowEnd)
             {
                 for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -227,7 +185,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                             }
                             color = sum / static_cast<float>(samples);
                         }
-                        storePixel(outRgb, index, color, state.environment);
+                        storePixel(outRgb, index, color, state.environment.exposure, state.environment.toneMapping);
                     }
                 }
             });

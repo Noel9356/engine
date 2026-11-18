@@ -1,7 +1,9 @@
 config_keys           = [
     "physics_character.maximum_characters",
     "physics_character.maximum_foot_planters",
+    "physics_character.maximum_hand_planters",
     "physics_character.maximum_jiggle_chains",
+    "physics_character.maximum_lean_controllers",
 ]
 name                  = "physics_character"
 provides              = ["physics_character"]

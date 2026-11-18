@@ -15,6 +15,7 @@
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
 #include <engine/physics_rope/capabilities.hpp>
+#include <engine/physics_scheduling/capabilities.hpp>
 #include <engine/physics_water/capabilities.hpp>
 
 #include <cstdint>
@@ -59,12 +60,11 @@ struct ExtendedHandles
     // physics_fluid.
     engine::physics_fluid::FluidHandle fluid = engine::physics_fluid::invalidFluid;
 
-    // physics_particles: one emitter per kind, in EmitterKind order
-    // (rain, snow, dust, fire); unused slots stay invalid.
-    engine::physics_particles::EmitterHandle emitters[4] = {engine::physics_particles::invalidEmitter,
-        engine::physics_particles::invalidEmitter,
-        engine::physics_particles::invalidEmitter,
-        engine::physics_particles::invalidEmitter};
+    // physics_particles: one emitter per kind, in EmitterKind order (rain,
+    // snow, dust, fire, hail, ash, leaves, pollen, insects); unused slots
+    // stay invalid.
+    static constexpr std::uint32_t kEmitterSlotCount = 9;
+    engine::physics_particles::EmitterHandle emitters[kEmitterSlotCount] = {};
 
     // physics_foliage: the bend field plus a copy of the instance layout for
     // the renderer (base positions, heights, seeds).
@@ -119,6 +119,7 @@ struct SceneDependencies
     engine::physics_particles::ParticlesCapability     *particles    = nullptr;
     engine::physics_foliage::FoliageCapability         *foliage      = nullptr;
     engine::physics_character::CharacterCapability     *character    = nullptr;
+    engine::physics_scheduling::SchedulingCapability   *scheduling   = nullptr;
 };
 
 // Scene tuning read once from the [physics_sandbox] configuration section.

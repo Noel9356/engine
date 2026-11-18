@@ -7,7 +7,7 @@ Every key of the `[lumen_reflection]` configuration section, in TOML path form. 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
 | `lumen_reflection.enabled` | bool | `true` | Master switch: `false` makes `evaluate` a no-op that keeps returning true; the published field keeps its last content and version, so a renderer polling it stops copying. |
-| `lumen_reflection.skip_unchanged_frames` | bool | `true` | Static-frame skip: when the camera, the scene, the environment, and the lumen_gi probe-grid version are all unchanged (the GI the reflections carry must have converged), `evaluate` returns early instead of re-tracing the same rays. The exported field version stops changing; renderers polling it skip their upload too. |
+| `lumen_reflection.skip_unchanged_frames` | bool | `true` | Static-frame skip: when the camera, the scene, the environment, and the lumen_gi probe-grid version are all unchanged and the temporal history has had the blend's convergence window to settle (see `temporal.strength`), `evaluate` returns early instead of re-tracing the same rays. The exported field version stops changing; renderers polling it skip their upload too. |
 | `lumen_reflection.quality` | 0..4 | `3` | Quality preset like the render graph's device resolution: 0 Auto (the host's logical processor count decides - at least 8 processors runs 1x, otherwise 0.5x), 1 Low (0.25x), 2 Medium (0.5x), 3 High (1x), 4 Ultra (2x). The preset scales the linear field resolution (`screen_scale` inversely) and the ray budget; explicit keys below still cap the result. |
 
 ## Scene
@@ -29,6 +29,7 @@ Every key of the `[lumen_reflection]` configuration section, in TOML path form. 
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
+| `lumen_reflection.screen_trace.enabled` | bool | `true` | Screen-trace tier toggle (Lumen's Screen Traces switch): `false` sends every dedicated ray straight to the scene trace, skipping the GBuffer march. |
 | `lumen_reflection.screen_trace.max_steps` | 4..256 | `48` | Marching step budget of one screen trace; longer on-screen extents trade resolution for distance coverage. |
 | `lumen_reflection.screen_trace.thickness_m` | 0.01..8 | `0.5` | Thin-occluder thickness: a ray accepts the texel it passes behind when it exceeds the stored camera distance by at most this many meters. |
 
@@ -50,7 +51,7 @@ Every key of the `[lumen_reflection]` configuration section, in TOML path form. 
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
-| `lumen_reflection.temporal.strength` | 0..0.95 | `0.9` | History weight when the reprojection validates: the published texel is `(1-strength) * current + strength * clamped history`. 0 replaces every frame; high values accumulate more effective samples. |
+| `lumen_reflection.temporal.strength` | 0..0.95 | `0.9` | History weight when the reprojection validates: the published texel is `(1-strength) * current + strength * clamped history`. 0 replaces every frame; high values accumulate more effective samples. The static-frame skip's convergence threshold derives from this value: the fresh-trace share falls below 1% after `ceil(log(0.01) / log(1 - strength))` clean frames (clamped to 1..128), so a frozen field is always a converged one. |
 | `lumen_reflection.temporal.neighborhood_clamp_sigma` | 0..16 | `1.0` | Neighborhood clamp width: the history is clamped to mean +/- sigma * value of the current 3x3 neighborhood before blending, so a changed scene cannot ghost through the accumulation. |
 
 ## Spatial reuse and bilateral filter

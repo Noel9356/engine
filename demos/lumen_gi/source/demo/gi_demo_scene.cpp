@@ -105,6 +105,7 @@ std::vector<SceneMesh> buildInteriorScene()
     room.giAlbedo[0]           = 0.9f;
     room.giAlbedo[1]           = 0.9f;
     room.giAlbedo[2]           = 0.9f;
+    room.name = "room";
     scene.push_back(std::move(room));
 
     SceneMesh leftWall;
@@ -115,6 +116,7 @@ std::vector<SceneMesh> buildInteriorScene()
     leftWall.giAlbedo[0]           = 0.85f;
     leftWall.giAlbedo[1]           = 0.10f;
     leftWall.giAlbedo[2]           = 0.10f;
+    leftWall.name = "left wall";
     scene.push_back(std::move(leftWall));
 
     SceneMesh rightWall;
@@ -125,6 +127,7 @@ std::vector<SceneMesh> buildInteriorScene()
     rightWall.giAlbedo[0]           = 0.10f;
     rightWall.giAlbedo[1]           = 0.85f;
     rightWall.giAlbedo[2]           = 0.10f;
+    rightWall.name = "right wall";
     scene.push_back(std::move(rightWall));
 
     SceneMesh occluder;
@@ -139,6 +142,7 @@ std::vector<SceneMesh> buildInteriorScene()
     occluder.giAlbedo[0]           = 0.92f;
     occluder.giAlbedo[1]           = 0.92f;
     occluder.giAlbedo[2]           = 0.92f;
+    occluder.name = "occluder";
     scene.push_back(std::move(occluder));
 
     // Polished-metal floor inlay: a thin silver slab beside the occluder
@@ -161,6 +165,7 @@ std::vector<SceneMesh> buildInteriorScene()
     mirrorFloor.giAlbedo[2]           = 0.055f;
     mirrorFloor.rfRoughness           = 0.05f;
     mirrorFloor.rfMetallic            = 1.0f;
+    mirrorFloor.name = "mirror floor";
     scene.push_back(std::move(mirrorFloor));
 
     // Chrome sphere sitting on the inlay: reflects the red/green walls, the
@@ -179,6 +184,7 @@ std::vector<SceneMesh> buildInteriorScene()
     chromeSphere.giAlbedo[2]           = 0.75f;
     chromeSphere.rfRoughness           = 0.15f;
     chromeSphere.rfMetallic            = 1.0f;
+    chromeSphere.name = "chrome sphere";
     scene.push_back(std::move(chromeSphere));
 
     // Brushed-metal panel on the back wall: roughness inside the
@@ -196,6 +202,7 @@ std::vector<SceneMesh> buildInteriorScene()
     brushedPanel.giAlbedo[2]           = 0.55f;
     brushedPanel.rfRoughness           = 0.35f;
     brushedPanel.rfMetallic            = 1.0f;
+    brushedPanel.name = "brushed panel";
     scene.push_back(std::move(brushedPanel));
 
     // Two emissive ceiling panels: the only light sources in the room.
@@ -208,6 +215,7 @@ std::vector<SceneMesh> buildInteriorScene()
     lamps.giEmissive[0]             = 7.0f;
     lamps.giEmissive[1]             = 6.8f;
     lamps.giEmissive[2]             = 6.2f;
+    lamps.name = "lamps";
     scene.push_back(std::move(lamps));
 
     return scene;
@@ -228,6 +236,7 @@ std::vector<SceneMesh> buildOutdoorScene()
     ground.giAlbedo[0]           = 0.55f;
     ground.giAlbedo[1]           = 0.58f;
     ground.giAlbedo[2]           = 0.52f;
+    ground.name = "ground";
     scene.push_back(std::move(ground));
 
     struct Block
@@ -272,6 +281,7 @@ std::vector<SceneMesh> buildOutdoorScene()
     chromeSphere.giAlbedo[2]           = 0.85f;
     chromeSphere.rfRoughness           = 0.12f;
     chromeSphere.rfMetallic            = 1.0f;
+    chromeSphere.name = "chrome sphere";
     scene.push_back(std::move(chromeSphere));
 
     // Polished water-like slab in the foreground: near-mirror dielectric.
@@ -290,6 +300,7 @@ std::vector<SceneMesh> buildOutdoorScene()
     waterSlab.giAlbedo[2]           = 0.06f;
     waterSlab.rfRoughness           = 0.08f;
     waterSlab.rfMetallic            = 0.0f;
+    waterSlab.name = "water slab";
     scene.push_back(std::move(waterSlab));
 
     // Unlit sky dome + sun disc: the renderer shows raw albedo/emission, GI
@@ -301,6 +312,7 @@ std::vector<SceneMesh> buildOutdoorScene()
     skyDome.material.baseColor[1] = 0.65f;
     skyDome.material.baseColor[2] = 0.80f;
     skyDome.giFlagBits            = lumen_gi::giSurfaceFlagExcluded;
+    skyDome.name = "sky dome";
     scene.push_back(std::move(skyDome));
 
     SceneMesh sunDisc;
@@ -311,6 +323,7 @@ std::vector<SceneMesh> buildOutdoorScene()
     sunDisc.material.emissiveColor[1] = 11.5f;
     sunDisc.material.emissiveColor[2] = 10.5f;
     sunDisc.giFlagBits                = lumen_gi::giSurfaceFlagExcluded;
+    sunDisc.name = "sun disc";
     scene.push_back(std::move(sunDisc));
 
     return scene;

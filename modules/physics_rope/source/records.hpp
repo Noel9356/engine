@@ -57,15 +57,31 @@ struct RopeRecord
     std::vector<StretchConstraint> stretchConstraints;
     std::vector<BendConstraint>    bendConstraints;
 
+    // Strain-breaking state: one flag per segment (index matches the
+    // stretch-constraint index). A broken segment stops solving and releases
+    // the bend rows that span it; the count is cumulative.
+    std::vector<std::uint8_t> brokenSegments;
+    std::uint32_t             brokenSegmentCount = 0;
+
     double nodeMass = 0.0;
     double nodeRadius = 0.0;
     double damping = 0.0;
     double friction = 0.6;
+    double breakStrain = 0.0; // elongation ratio tolerance beyond rest; 0 disables breaking
     bool   collideWithWorld = true;
 
     double gravity[3] = {0.0, -9.81, 0.0}; // read from the rigid world at creation
 
     double windAcceleration[3] = {0.0, 0.0, 0.0};
+
+    // Tension readout bookkeeping: the accumulator sums each segment's
+    // |lambda| over the running step (reset at step start); when the step
+    // completes, the values convert to force units (divided by the fixed
+    // step delta squared) into lastTension and maximumTension tracks the
+    // largest published value.
+    std::vector<double> tensionAccumulator; // |lambda| per segment, current step
+    std::vector<double> lastTension;        // force units per segment, last completed step
+    double              maximumTension = 0.0;
 
     std::uint64_t stepsSimulated   = 0;
     std::uint64_t substepsExecuted = 0;

@@ -1,11 +1,12 @@
 // physics_particles module implementation.
 //
-// Deterministic particle pools for rain, snow, dust, and fire. Every slot's
-// lifetime, jitter, sway phase, and size derive from an integer hash of
-// (slot, generation), so identical emitters replay identically with no
-// random-number state. Particles integrate per fixed step against the world
-// gravity plus a uniform wind acceleration, optionally collide with the
-// rigid world through collideSphere, and recycle their slots FIFO.
+// Deterministic particle pools for rain, snow, dust, fire, hail, ash,
+// leaves, pollen, and insects. Every slot's lifetime, jitter, sway phase,
+// and size derive from an integer hash of (slot, generation), so identical
+// emitters replay identically with no random-number state. Particles
+// integrate per fixed step against the world gravity plus a uniform wind
+// acceleration, optionally collide with the rigid world through
+// collideSphere, and recycle their slots FIFO.
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -51,7 +52,9 @@ struct SlotState
     double baseSize     = 0.1;
     double swayPhase    = 0.0;
     double jitter[3]    = {0.0, 0.0, 0.0};
+    double spawnPosition[3] = {0.0, 0.0, 0.0}; // spawn anchor for the insect wander
     bool   settled      = false; // snow resting on geometry
+    double settledTime  = 0.0;   // total settle seconds (leaves' brief settle)
     std::uint32_t seed  = 0;
     bool   alive        = false;
 };
@@ -207,6 +210,9 @@ private:
             const double fraction = hashFraction(baseSeed + 0x1000ull * (axis + 1)) * 2.0 - 1.0;
             slot.position[axis]   = description.origin[axis] + fraction * description.halfExtents[axis];
         }
+        slot.spawnPosition[0] = slot.position[0];
+        slot.spawnPosition[1] = slot.position[1];
+        slot.spawnPosition[2] = slot.position[2];
         const double lifetimeFraction = hashFraction(baseSeed + 0x2000ull);
         slot.lifetime = description.minimumLifetime
                         + (description.maximumLifetime - description.minimumLifetime) * lifetimeFraction;
@@ -226,6 +232,7 @@ private:
         slot.age       = 0.0;
         slot.seed      = seed;
         slot.settled   = false;
+        slot.settledTime = 0.0;
         slot.alive     = true;
         emitter.spawnedTotal += 1;
     }
@@ -278,7 +285,22 @@ private:
                 slot.velocity[0] = 0.0;
                 slot.velocity[1] = 0.0;
                 slot.velocity[2] = 0.0;
-                slot.size        = slot.baseSize * (1.0 - 0.5 * slot.age / slot.lifetime);
+                if (description.kind == EmitterKind::Snow)
+                {
+                    slot.size = slot.baseSize * (1.0 - 0.5 * slot.age / slot.lifetime);
+                }
+                else
+                {
+                    // Leaves settle briefly on impact and then expire (they
+                    // hold the contact for 0.8 seconds at most).
+                    slot.settledTime += fixedDeltaSeconds;
+                    if (slot.settledTime >= 0.8)
+                    {
+                        slot.alive = false;
+                        emitter.expiredTotal += 1;
+                        continue;
+                    }
+                }
                 continue;
             }
 
@@ -291,6 +313,35 @@ private:
             const double swayPhase = slot.swayPhase + emitter.swayClock_ * description.swayFrequency * 6.283185307179586;
             acceleration[0] += std::cos(swayPhase) * description.swayAmplitude * slot.jitter[0];
             acceleration[2] += std::sin(swayPhase * 1.3 + slot.jitter[1]) * description.swayAmplitude * slot.jitter[2];
+
+            // Insects hover and wander: gravity, wind, and sway are replaced
+            // by a velocity target that is a stateless function of the slot
+            // hash and the emitter clock (exact replays), steered toward at
+            // a fixed rate, with a soft pull that keeps each insect inside a
+            // small 1.5 meter wander radius around its spawn point.
+            if (description.kind == EmitterKind::Insects)
+            {
+                const double wanderPhase = emitter.swayClock_ * 3.141592653589793; // slow 0.5 Hz wander phase
+                double targetVelocity[3] = {
+                    0.9 * std::sin(wanderPhase + slot.swayPhase + slot.jitter[0] * 2.4),
+                    0.35 * std::sin(wanderPhase * 1.7 + slot.swayPhase * 2.0 + slot.jitter[1] * 3.1),
+                    0.9 * std::cos(wanderPhase * 1.3 + slot.swayPhase * 0.5 + slot.jitter[2] * 2.9)};
+                const double offsetX = slot.position[0] - slot.spawnPosition[0];
+                const double offsetY = slot.position[1] - slot.spawnPosition[1];
+                const double offsetZ = slot.position[2] - slot.spawnPosition[2];
+                const double wanderDistance = std::sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
+                if (wanderDistance > 1.5)
+                {
+                    const double excess = (wanderDistance - 1.5) / wanderDistance;
+                    targetVelocity[0] -= offsetX * excess * 2.5;
+                    targetVelocity[1] -= offsetY * excess * 2.5;
+                    targetVelocity[2] -= offsetZ * excess * 2.5;
+                }
+                for (std::uint32_t axis = 0; axis < 3; ++axis)
+                {
+                    acceleration[axis] = 8.0 * (targetVelocity[axis] - slot.velocity[axis]);
+                }
+            }
 
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
@@ -310,6 +361,16 @@ private:
                                          : 1.0;
                 slot.size = slot.baseSize * flickerScale * burnOut;
             }
+            else if (description.kind == EmitterKind::Ash)
+            {
+                // Ash shrinks toward the end of its life (a quiet fade-out
+                // over the final 35% of the lifetime, no flicker).
+                const double fadeStart = slot.lifetime * 0.65;
+                const double fade      = slot.age > fadeStart
+                                           ? std::max(0.0, 1.0 - (slot.age - fadeStart) / (slot.lifetime * 0.35))
+                                           : 1.0;
+                slot.size = slot.baseSize * fade;
+            }
             else
             {
                 slot.size = slot.baseSize;
@@ -328,7 +389,9 @@ private:
         {
             for (SlotState &slot : emitter.slots)
             {
-                if (!slot.alive || slot.settled || description.kind == EmitterKind::Dust)
+                if (!slot.alive || slot.settled || description.kind == EmitterKind::Dust
+                    || description.kind == EmitterKind::Ash || description.kind == EmitterKind::Pollen
+                    || description.kind == EmitterKind::Insects)
                 {
                     continue;
                 }
@@ -348,7 +411,7 @@ private:
                 slot.position[0] += normal[0] * depth;
                 slot.position[1] += normal[1] * depth;
                 slot.position[2] += normal[2] * depth;
-                if (description.kind == EmitterKind::Rain)
+                if (description.kind == EmitterKind::Rain || description.kind == EmitterKind::Hail)
                 {
                     slot.alive = false;
                     emitter.expiredTotal += 1;
@@ -513,6 +576,9 @@ private:
             slot.position[0] = position[0];
             slot.position[1] = position[1];
             slot.position[2] = position[2];
+            slot.spawnPosition[0] = position[0]; // bursts re-anchor the insect wander
+            slot.spawnPosition[1] = position[1];
+            slot.spawnPosition[2] = position[2];
             slot.velocity[0] = (std::cos(azimuth) * horizontal) * speed;
             slot.velocity[1] = elevation * speed;
             slot.velocity[2] = (std::sin(azimuth) * horizontal) * speed;

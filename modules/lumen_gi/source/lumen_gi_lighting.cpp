@@ -106,10 +106,18 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
         {
             continue;
         }
-        if (shadows && distance > 0.06f
-            && traceSceneOccluded(state, GiRay{origin, direction, distance - 0.06f}, noSurface))
+        if (shadows && distance > 0.0f)
         {
-            continue;
+            // Point-light shadow rays start at the same surface bias as the
+            // other trace sites and are skipped entirely for very close
+            // lights, where a shadow ray would immediately re-hit the
+            // receiver (trace.bias_m).
+            const float shadowMinimum = state.settings.traceBias * 3.0f;
+            if (distance > shadowMinimum
+                && traceSceneOccluded(state, GiRay{origin, direction, distance - shadowMinimum}, noSurface))
+            {
+                continue;
+            }
         }
         sum += color * intensity * attenuation * nDotL;
     }

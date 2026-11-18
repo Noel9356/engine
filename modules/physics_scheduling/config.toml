@@ -1,0 +1,3 @@
+[physics_scheduling]
+maximum_items_per_schedule = 65536
+maximum_schedules          = 16

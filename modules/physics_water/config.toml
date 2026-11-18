@@ -9,4 +9,7 @@ ripple_attenuation        = 0.35
 ripple_decay              = 1.2
 ripple_speed              = 4.0
 ripple_wavelength         = 1.6
+wake_spacing_meters       = 1.5
+wake_speed_threshold      = 1.2
+wake_strength_scale       = 0.35
 water_density             = 1000.0

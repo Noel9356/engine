@@ -44,7 +44,7 @@ Every key of the `[lumen_gi]` configuration section, in TOML path form. All keys
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
 | `trace.max_distance_m` | 1-2000 | `50.0` | Maximum ray distance for shadow, gather, and probe rays (Lumen's "Max Trace Distance"; too-small values leak light into large enclosed areas). |
-| `trace.bias_m` | 0.001-0.5 | `0.02` | Surface offset for shadow, gather, and probe rays. One bias behind every trace site: sun shadow rays scale it by the grazing factor, direct-light and card-gather rays offset along the normal, screen-gather rays offset the GBuffer surface point along its normal before tracing, and world-probe rays along each ray's own direction (so a probe sitting exactly on a surface plane does not self-intersect it). |
+| `trace.bias_m` | 0.001-0.5 | `0.02` | Surface offset for shadow, gather, and probe rays. One bias behind every trace site: sun shadow rays scale it by the grazing factor, direct-light and card-gather rays offset along the normal, screen-gather rays offset the GBuffer surface point along its normal before tracing, world-probe rays along each ray's own direction (so a probe sitting exactly on a surface plane does not self-intersect it), and point-light shadow rays are skipped entirely for lights within three biases of the receiver, where the shadow ray would immediately re-hit it. |
 
 ## World-space radiance cache
 

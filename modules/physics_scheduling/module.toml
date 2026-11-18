@@ -1,0 +1,8 @@
+config_keys           = [
+    "physics_scheduling.maximum_items_per_schedule",
+    "physics_scheduling.maximum_schedules",
+]
+name                  = "physics_scheduling"
+provides              = ["physics_scheduling"]
+requires              = []
+version               = "0.1.0"

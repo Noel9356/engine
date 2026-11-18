@@ -1,11 +1,14 @@
 // physics_water module implementation.
 //
-// Gerstner ocean over a physics_rigid world: the surface is an analytic
-// deep-water wave sum with superposed expanding ripple rings; buoyancy
-// applies per-body submersion-sampled forces, drag, and angular damping
-// through the rigid capability's apply entry points inside the consumer's
-// fixed update, so water physics composes deterministically with every
-// other force source.
+// Gerstner ocean over a physics_rigid world: the surface is a steepness-
+// weighted deep-water wave sum with true horizontal crest displacement
+// (heights at fixed positions recovered by a fixed inverse iteration),
+// superposed expanding ripple rings, automatic wake ripples for fast
+// registered bodies, and a uniform current the buoyancy drag opposes;
+// buoyancy applies per-body submersion-sampled forces, drag, and angular
+// damping through the rigid capability's apply entry points inside the
+// consumer's fixed update, so water physics composes deterministically with
+// every other force source.
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -31,6 +34,9 @@ namespace math = engine::physics_rigid::math;
 constexpr double kPi            = 3.14159265358979323846;
 constexpr double kGravityForWaves = 9.81; // deep-water dispersion reference gravity
 
+constexpr int    kGerstnerIterations    = 4;    // fixed inverse-iteration count for the displaced height
+constexpr double kWakeSubmergedFraction = 0.95; // bodies at or above this submersion fraction emit no wakes
+
 double shapeVolumeOf(const engine::physics_rigid::ShapeDescription &shape)
 {
     using engine::physics_rigid::ShapeKind;
@@ -52,11 +58,11 @@ double shapeVolumeOf(const engine::physics_rigid::ShapeDescription &shape)
 
 struct PreparedWave
 {
-    math::Vec3 direction;      // unit, XZ plane
-    double     waveNumber      = 0.0;  // k = 2*pi / wavelength
-    double     amplitude       = 0.0;
-    double     steepness       = 0.0;
-    double     omega           = 0.0;  // deep-water dispersion: omega = sqrt(g * k)
+    math::Vec3 direction;           // unit, XZ plane
+    double     waveNumber           = 0.0;  // k = 2*pi / wavelength
+    double     amplitude            = 0.0;
+    double     horizontalAmplitude  = 0.0;  // Q * amplitude: Gerstner horizontal crest displacement (meters)
+    double     omega                = 0.0;  // deep-water dispersion: omega = sqrt(g * k)
 };
 
 struct Ripple
@@ -68,6 +74,16 @@ struct Ripple
     double strength  = 0.0; // initial ring amplitude (meters)
 };
 
+// Per-registration wake bookkeeping, kept parallel to the ocean's
+// registeredBodies vector: the body's last seen position and the horizontal
+// distance travelled since its last emitted wake ripple.
+struct WakeState
+{
+    double lastPositionX     = 0.0;
+    double lastPositionZ     = 0.0;
+    double travelledDistance = 0.0; // meters since the last wake ripple
+};
+
 struct OceanRecord
 {
     OceanHandle handle = invalidOcean;
@@ -76,11 +92,24 @@ struct OceanRecord
 
     OceanDescription description{};
 
+    // Effective uniform current (meters per second); the y component is
+    // always 0. Re-derived from the description on create and
+    // setOceanDescription, updatable at runtime through setCurrentVelocity.
+    math::Vec3 currentVelocity{};
+
+    // timeSeconds of the most recent applyBuoyancy pass on this ocean; the
+    // wake submersion check samples the wave surface at this clock reading
+    // (0 before the first pass).
+    double lastBuoyancyTime = 0.0;
+
     std::vector<PreparedWave> waves;
 
     std::vector<Ripple> ripples;
 
+    // Ascending body-handle order; wakeStates stays index-parallel to it.
     std::vector<engine::physics_rigid::BodyHandle> registeredBodies;
+
+    std::vector<WakeState> wakeStates;
 };
 
 struct WaterSettings
@@ -97,6 +126,9 @@ struct WaterSettings
     double        buoyancyScale           = 1.0;    // global buoyancy multiplier
     double        linearDragCoefficient   = 1.8;    // quadratic water drag per square meter of drag area
     double        angularDragCoefficient  = 3.0;    // angular damping torque per (rad/s) of submerged body
+    double        wakeSpeedThreshold      = 1.2;    // minimum horizontal speed for wake emission (meters per second)
+    double        wakeSpacingMeters       = 1.5;    // travelled distance between wake ripples (meters)
+    double        wakeStrengthScale       = 0.35;   // wake ripple amplitude per (meter per second) of speed
 };
 
 class WaterModule final : public ModuleInterface
@@ -148,6 +180,15 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_water", "angular_drag_coefficient");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
             settings_.angularDragCoefficient = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_water", "wake_speed_threshold");
+            value && *value > 0.0 && *value <= 100.0 && std::isfinite(*value))
+            settings_.wakeSpeedThreshold = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_water", "wake_spacing_meters");
+            value && *value > 0.0 && *value <= 1000.0 && std::isfinite(*value))
+            settings_.wakeSpacingMeters = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_water", "wake_strength_scale");
+            value && *value >= 0.0 && *value <= 10.0 && std::isfinite(*value))
+            settings_.wakeStrengthScale = *value;
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -191,6 +232,13 @@ private:
         }
     }
 
+    // Uniform horizontal current the buoyancy drag opposes: the y component
+    // is forced to zero (the description stays validated as finite first).
+    static math::Vec3 effectiveCurrentOf(const OceanDescription &description)
+    {
+        return math::Vec3{description.current[0], 0.0, description.current[2]};
+    }
+
     OceanRecord *findOcean(OceanHandle handle)
     {
         const auto iterator = oceanIndexByHandle_.find(handle);
@@ -209,18 +257,26 @@ private:
             if (!std::isfinite(candidate.directionX) || !std::isfinite(candidate.directionZ)
                 || !std::isfinite(candidate.wavelength) || candidate.wavelength <= 0.0
                 || !std::isfinite(candidate.amplitude) || candidate.amplitude < 0.0
-                || !std::isfinite(candidate.steepness) || candidate.steepness < 0.0 || candidate.steepness >= 1.0)
+                || !std::isfinite(candidate.steepness))
             {
                 return false;
             }
         }
-        return true;
+        return std::isfinite(description.current[0]) && std::isfinite(description.current[1])
+               && std::isfinite(description.current[2]);
     }
 
     void prepareWaves(OceanRecord &ocean)
     {
         ocean.waves.clear();
         ocean.waves.reserve(ocean.description.waveCount);
+        // GPU Gems 1 chapter 1 steepness factor: Q_i = steepness / (k_i *
+        // amplitude_i * waveCount), so Q_i * k_i * amplitude_i = steepness /
+        // waveCount per wave and the sum over the set stays <= 1 (no looping
+        // crests). The per-wave horizontal displacement amplitude is
+        // Q_i * amplitude_i = steepness / (k_i * waveCount); zero-amplitude
+        // components contribute no displacement at all.
+        const double waveCount = static_cast<double>(ocean.description.waveCount);
         for (std::uint32_t wave = 0; wave < ocean.description.waveCount; ++wave)
         {
             const WaveDescription &candidate = ocean.description.waves[wave];
@@ -237,22 +293,61 @@ private:
             }
             prepared.waveNumber = 2.0 * kPi / candidate.wavelength;
             prepared.amplitude  = candidate.amplitude;
-            prepared.steepness  = candidate.steepness;
-            prepared.omega      = std::sqrt(kGravityForWaves * prepared.waveNumber);
+            const double steepness = std::clamp(candidate.steepness, 0.0, 1.0);
+            prepared.horizontalAmplitude = steepness > 0.0 && candidate.amplitude > 0.0
+                                               ? steepness / (prepared.waveNumber * waveCount)
+                                               : 0.0;
+            prepared.omega = std::sqrt(kGravityForWaves * prepared.waveNumber);
             ocean.waves.push_back(prepared);
         }
     }
 
-    // Wave sum height at a world (x, z) and time.
-    double waveHeight(const OceanRecord &ocean, double x, double z, double timeSeconds) const
+    // Displaced Gerstner surface position for a horizontal seed (seedX,
+    // seedZ): the seed sum of horizontal crest displacements plus the wave
+    // height. Pure function of (seed, time); with every steepness at 0 the
+    // horizontal terms vanish and this reduces to the plain sinusoid sum.
+    math::Vec3 displacedPosition(const OceanRecord &ocean, double seedX, double seedZ, double timeSeconds) const
     {
-        double height = ocean.description.waterLevel;
+        double displacedX = seedX;
+        double displacedZ = seedZ;
+        double height     = ocean.description.waterLevel;
         for (const PreparedWave &wave : ocean.waves)
         {
-            const double phase = wave.waveNumber * (wave.direction.x * x + wave.direction.z * z) - wave.omega * timeSeconds;
-            height += wave.amplitude * std::sin(phase);
+            const double phase = wave.waveNumber * (wave.direction.x * seedX + wave.direction.z * seedZ)
+                                 - wave.omega * timeSeconds;
+            displacedX += wave.horizontalAmplitude * wave.direction.x * std::cos(phase);
+            displacedZ += wave.horizontalAmplitude * wave.direction.z * std::cos(phase);
+            height     += wave.amplitude * std::sin(phase);
         }
-        return height;
+        return math::Vec3{displacedX, height, displacedZ};
+    }
+
+    // Surface point whose horizontal image lands on (x, z): the Gerstner
+    // displacement moves sample points horizontally, so the height at a
+    // fixed horizontal position is recovered by inverse iteration. The seed
+    // starts at the query point and is corrected by seed += target - P.xz a
+    // fixed number of times (each pass contracts the seed error by at most
+    // the total steepness factor sum(Q_i * k_i * amplitude_i) <= 1), then
+    // the final seed is evaluated once and returned.
+    math::Vec3 displacedSurfacePoint(const OceanRecord &ocean, double x, double z, double timeSeconds) const
+    {
+        double seedX = x;
+        double seedZ = z;
+        for (int iteration = 0; iteration < kGerstnerIterations; ++iteration)
+        {
+            const math::Vec3 displaced = displacedPosition(ocean, seedX, seedZ, timeSeconds);
+            seedX += x - displaced.x;
+            seedZ += z - displaced.z;
+        }
+        return displacedPosition(ocean, seedX, seedZ, timeSeconds);
+    }
+
+    // Full surface height (waves through the Gerstner inverse mapping plus
+    // every active ripple, sampled at the query point exactly as before) at
+    // a world (x, z).
+    double surfaceHeight(const OceanRecord &ocean, double x, double z, double timeSeconds) const
+    {
+        return displacedSurfacePoint(ocean, x, z, timeSeconds).y + rippleHeight(ocean, x, z);
     }
 
     // Ripple height contribution at a world (x, z): one expanding, decaying
@@ -281,11 +376,6 @@ private:
             height += ripple.strength * envelope * std::cos(ringPhase);
         }
         return height;
-    }
-
-    double surfaceHeight(const OceanRecord &ocean, double x, double z, double timeSeconds) const
-    {
-        return waveHeight(ocean, x, z, timeSeconds) + rippleHeight(ocean, x, z);
     }
 
     void collectSamplePoints(const OceanRecord &ocean, engine::physics_rigid::BodyHandle body,
@@ -395,6 +485,7 @@ private:
             = nextOceanHandle_ == std::numeric_limits<OceanHandle>::max() ? invalidOcean : nextOceanHandle_ + 1;
         ocean.world       = world;
         ocean.description = *description;
+        ocean.currentVelocity = effectiveCurrentOf(ocean.description);
         ocean.ripples.assign(settings_.maximumRipplesPerOcean, Ripple{});
         prepareWaves(ocean);
         // The buoyancy pass pushes opposite to the world's gravity; capture
@@ -439,6 +530,7 @@ private:
             return false;
         }
         ocean->description = *description;
+        ocean->currentVelocity = effectiveCurrentOf(ocean->description);
         prepareWaves(*ocean);
         return true;
     }
@@ -466,6 +558,36 @@ private:
         return true;
     }
 
+    // Plants a validated ripple into the ocean's fixed slot array: the first
+    // inactive slot or, when every slot is active, the oldest one. Shared by
+    // addRipple and the automatic wake emission; allocation-free.
+    void plantRipple(OceanRecord &ocean, double centerX, double centerZ, double strength)
+    {
+        std::size_t slot = ocean.ripples.size();
+        for (std::size_t index = 0; index < ocean.ripples.size(); ++index)
+        {
+            if (!ocean.ripples[index].active)
+            {
+                slot = index;
+                break;
+            }
+            if (slot == ocean.ripples.size() || ocean.ripples[index].age > ocean.ripples[slot].age)
+            {
+                slot = index;
+            }
+        }
+        if (slot == ocean.ripples.size())
+        {
+            return; // unreachable while the ocean owns at least one slot
+        }
+        Ripple &ripple  = ocean.ripples[slot];
+        ripple.active   = true;
+        ripple.centerX  = centerX;
+        ripple.centerZ  = centerZ;
+        ripple.age      = 0.0;
+        ripple.strength = strength;
+    }
+
     bool addRippleImpl(OceanHandle handle, const double center[3], double strength)
     {
         OceanRecord *ocean = findOcean(handle);
@@ -477,31 +599,70 @@ private:
         {
             return false;
         }
-        // Ring-buffer placement: the oldest slot (or first inactive slot).
-        std::size_t slot = ocean->ripples.size();
-        for (std::size_t index = 0; index < ocean->ripples.size(); ++index)
-        {
-            if (!ocean->ripples[index].active)
-            {
-                slot = index;
-                break;
-            }
-            if (slot == ocean->ripples.size() || ocean->ripples[index].age > ocean->ripples[slot].age)
-            {
-                slot = index;
-            }
-        }
-        if (slot == ocean->ripples.size())
-        {
-            return false;
-        }
-        Ripple &ripple    = ocean->ripples[slot];
-        ripple.active     = true;
-        ripple.centerX    = center[0];
-        ripple.centerZ    = center[2];
-        ripple.age        = 0.0;
-        ripple.strength   = strength;
+        plantRipple(*ocean, center[0], center[2], strength);
         return true;
+    }
+
+    // Submersion fraction with the querySubmersion sample scheme, evaluated
+    // against the surface at the ocean's last buoyancy clock reading (0
+    // before the first pass); used by the wake gate.
+    double bodySubmersionFraction(OceanRecord &ocean, engine::physics_rigid::BodyHandle body)
+    {
+        collectSamplePoints(ocean, body, samplePoints_);
+        if (samplePoints_.empty())
+        {
+            return 0.0;
+        }
+        std::uint32_t below = 0;
+        for (const math::Vec3 &point : samplePoints_)
+        {
+            if (surfaceHeight(ocean, point.x, point.z, ocean.lastBuoyancyTime) > point.y)
+            {
+                ++below;
+            }
+        }
+        return static_cast<double>(below) / static_cast<double>(samplePoints_.size());
+    }
+
+    // Automatic wakes for one fixed step: registered bodies walked in
+    // ascending body-handle order accumulate travelled horizontal distance;
+    // past the configured spacing at a speed above the threshold, a ripple
+    // is planted at the body's position with amplitude proportional to
+    // speed. Fully submerged bodies stay silent, the accumulator resets on
+    // each spawn, and no allocations happen anywhere in the walk.
+    void emitWakes(OceanRecord &ocean)
+    {
+        if (rigid_ == nullptr || settings_.wakeStrengthScale <= 0.0)
+        {
+            return;
+        }
+        for (std::size_t index = 0; index < ocean.registeredBodies.size(); ++index)
+        {
+            WakeState &wake = ocean.wakeStates[index];
+            engine::physics_rigid::BodyState state;
+            if (!rigid_->copyBodyState(rigid_->self, ocean.world, ocean.registeredBodies[index], &state))
+            {
+                continue; // dormant registration; freed at the next buoyancy pass
+            }
+            const double deltaX     = state.transform.position.x - wake.lastPositionX;
+            const double deltaZ     = state.transform.position.z - wake.lastPositionZ;
+            wake.lastPositionX      = state.transform.position.x;
+            wake.lastPositionZ      = state.transform.position.z;
+            wake.travelledDistance += std::sqrt(deltaX * deltaX + deltaZ * deltaZ);
+            const double speed      = std::sqrt(state.linearVelocity.x * state.linearVelocity.x
+                                                + state.linearVelocity.z * state.linearVelocity.z);
+            if (speed < settings_.wakeSpeedThreshold || wake.travelledDistance < settings_.wakeSpacingMeters)
+            {
+                continue;
+            }
+            if (bodySubmersionFraction(ocean, ocean.registeredBodies[index]) >= kWakeSubmergedFraction)
+            {
+                continue;
+            }
+            plantRipple(ocean, state.transform.position.x, state.transform.position.z,
+                speed * settings_.wakeStrengthScale);
+            wake.travelledDistance = 0.0;
+        }
     }
 
     bool stepRipplesImpl(OceanHandle handle, double fixedDeltaSeconds)
@@ -512,6 +673,7 @@ private:
         {
             return false;
         }
+        emitWakes(*ocean);
         std::uint32_t active = 0;
         for (Ripple &ripple : ocean->ripples)
         {
@@ -555,12 +717,20 @@ private:
             setError(error, WaterError::CapacityExceeded);
             return false;
         }
-        if (std::find(ocean->registeredBodies.begin(), ocean->registeredBodies.end(), body)
-            != ocean->registeredBodies.end())
+        // Registrations stay sorted by body handle so every pass (wake
+        // emission, buoyancy) walks them in one fixed order; the wake
+        // bookkeeping vector is kept index-parallel to this list.
+        const auto entry = std::lower_bound(ocean->registeredBodies.begin(), ocean->registeredBodies.end(), body);
+        if (entry != ocean->registeredBodies.end() && *entry == body)
         {
             return true; // already registered
         }
-        ocean->registeredBodies.push_back(body);
+        const auto position = static_cast<std::ptrdiff_t>(entry - ocean->registeredBodies.begin());
+        ocean->registeredBodies.insert(ocean->registeredBodies.begin() + position, body);
+        WakeState wake;
+        wake.lastPositionX = state.transform.position.x;
+        wake.lastPositionZ = state.transform.position.z;
+        ocean->wakeStates.insert(ocean->wakeStates.begin() + position, wake);
         statistics_.registeredBodies = static_cast<std::uint32_t>(ocean->registeredBodies.size());
         return true;
     }
@@ -572,12 +742,14 @@ private:
         {
             return false;
         }
-        const auto entry = std::find(ocean->registeredBodies.begin(), ocean->registeredBodies.end(), body);
-        if (entry == ocean->registeredBodies.end())
+        const auto entry = std::lower_bound(ocean->registeredBodies.begin(), ocean->registeredBodies.end(), body);
+        if (entry == ocean->registeredBodies.end() || *entry != body)
         {
             return false;
         }
+        const auto position = static_cast<std::ptrdiff_t>(entry - ocean->registeredBodies.begin());
         ocean->registeredBodies.erase(entry);
+        ocean->wakeStates.erase(ocean->wakeStates.begin() + position);
         statistics_.registeredBodies = static_cast<std::uint32_t>(ocean->registeredBodies.size());
         return true;
     }
@@ -622,6 +794,9 @@ private:
             return false;
         }
         std::uint64_t applied = 0;
+        // Remember the pass clock: the wake submersion gate samples the
+        // surface at this reading until the next pass.
+        ocean->lastBuoyancyTime = timeSeconds;
         for (std::size_t index = 0; index < ocean->registeredBodies.size();)
         {
             const engine::physics_rigid::BodyHandle body = ocean->registeredBodies[index];
@@ -633,6 +808,7 @@ private:
                 // The body died in the rigid world: free the registration.
                 ocean->registeredBodies.erase(ocean->registeredBodies.begin()
                                               + static_cast<std::ptrdiff_t>(index));
+                ocean->wakeStates.erase(ocean->wakeStates.begin() + static_cast<std::ptrdiff_t>(index));
                 statistics_.registeredBodies
                     = static_cast<std::uint32_t>(ocean->registeredBodies.size());
                 continue;
@@ -680,14 +856,16 @@ private:
             rigid_->applyForceAtPoint(rigid_->self, ocean->world, body, buoyancyForce, centroidPoint);
 
             // Quadratic water drag on the submerged part: opposite the body
-            // velocity, scaled by the submerged fraction and shape size.
-            const double speed = math::length(state.linearVelocity);
+            // velocity relative to the ocean's uniform current, scaled by the
+            // submerged fraction and shape size.
+            const math::Vec3 relativeVelocity = state.linearVelocity - ocean->currentVelocity;
+            const double     speed            = math::length(relativeVelocity);
             if (speed > 1.0e-6)
             {
                 const double dragArea  = std::cbrt(shapeVolumeOf(description.shape) * shapeVolumeOf(description.shape));
                 const double magnitude = 0.5 * settings_.waterDensity * settings_.linearDragCoefficient * dragArea
                                          * fraction * speed * speed;
-                const math::Vec3 direction = state.linearVelocity * (-1.0 / speed);
+                const math::Vec3 direction = relativeVelocity * (-1.0 / speed);
                 const double dragForce[3]  = {direction.x * magnitude, direction.y * magnitude, direction.z * magnitude};
                 rigid_->applyForceAtPoint(rigid_->self, ocean->world, body, dragForce, centroidPoint);
             }
@@ -717,6 +895,37 @@ private:
         return true;
     }
 
+    bool sampleSurfaceDisplacedImpl(
+        OceanHandle handle, const double position[3], double timeSeconds, double outDisplacement[3])
+    {
+        OceanRecord *ocean = findOcean(handle);
+        if (ocean == nullptr || position == nullptr || outDisplacement == nullptr || !std::isfinite(timeSeconds))
+        {
+            return false;
+        }
+        if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]))
+        {
+            return false;
+        }
+        const math::Vec3 point = displacedSurfacePoint(*ocean, position[0], position[2], timeSeconds);
+        outDisplacement[0]     = point.x - position[0];
+        outDisplacement[1]     = point.y + rippleHeight(*ocean, position[0], position[2]);
+        outDisplacement[2]     = point.z - position[2];
+        return true;
+    }
+
+    bool setCurrentVelocityImpl(OceanHandle handle, const double current[3])
+    {
+        OceanRecord *ocean = findOcean(handle);
+        if (ocean == nullptr || current == nullptr || !std::isfinite(current[0]) || !std::isfinite(current[1])
+            || !std::isfinite(current[2]))
+        {
+            return false;
+        }
+        ocean->currentVelocity = math::Vec3{current[0], 0.0, current[2]};
+        return true;
+    }
+
     void assignCapabilityPointers()
     {
         capability_.abi  = physicsWaterCapabilityAbi;
@@ -735,6 +944,8 @@ private:
         ENGINE_PHYSICS_WATER_BIND(querySubmersion, querySubmersionImpl);
         ENGINE_PHYSICS_WATER_BIND(applyBuoyancy, applyBuoyancyImpl);
         ENGINE_PHYSICS_WATER_BIND(waterStatistics, waterStatisticsImpl);
+        ENGINE_PHYSICS_WATER_BIND(sampleSurfaceDisplaced, sampleSurfaceDisplacedImpl);
+        ENGINE_PHYSICS_WATER_BIND(setCurrentVelocity, setCurrentVelocityImpl);
 #undef ENGINE_PHYSICS_WATER_BIND
     }
 

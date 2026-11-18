@@ -8,8 +8,11 @@
 // mode switch and drive-strength blend between full pose tracking and free
 // ragdoll, with an upright assist torque on the torso), secondary motion
 // (jiggle chains: spring-damper bone chains excited by root acceleration
-// and gravity), and procedural foot placement (a two-foot planter with
-// ground ray casts, plant/stride logic, and a two-bone IK solve). Consumers
+// and gravity), procedural foot placement (a two-foot planter with
+// ground ray casts, plant/stride logic, and a two-bone IK solve), hand
+// placement (a two-hand planter with two-bone arm IK toward consumer
+// targets), a procedural lean controller, and a push helper that turns the
+// character's motion into impulses on nearby dynamic bodies. Consumers
 // acquire it via ParticipantContext::acquireCapability<CharacterCapability>();
 // the module declares physics_rigid and physics_articulated as required
 // capabilities.
@@ -26,15 +29,34 @@ namespace engine::physics_character
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsCharacterCapabilityAbi = 2u;
+//
+// ABI history:
+//   1 - initial surface (humanoid ragdoll construction, active ragdoll
+//       characters, jiggle chains, the foot planter, statistics).
+//   2 - appended per-joint gains through setCharacterJointGains and the
+//       reworked update pass (pose assist torque pairs on the ball-socket
+//       targets). Everything from ABI 1 keeps its slot and meaning.
+//   3 - appended the hand planter (HandPlanterDescription, HandState, the
+//       createHandPlanter / destroyHandPlanter / setHandTarget /
+//       updateHandPlanter / copyHandStates entry points), the lean
+//       controller (LeanControllerDescription, LeanState, the
+//       createLeanController / destroyLeanController /
+//       updateLeanController entry points), and the applyCharacterPush
+//       entry point. Everything from ABI 2 keeps its slot and meaning;
+//       consumers check `abi >= 3` before touching the additions.
+inline constexpr std::uint32_t physicsCharacterCapabilityAbi = 3u;
 
 using CharacterHandle    = std::uint32_t;
 using JiggleChainHandle  = std::uint32_t;
 using FootPlanterHandle  = std::uint32_t;
+using HandPlanterHandle  = std::uint32_t;
+using LeanHandle         = std::uint32_t;
 
-inline constexpr CharacterHandle   invalidCharacter   = 0;
-inline constexpr JiggleChainHandle invalidJiggleChain = 0;
-inline constexpr FootPlanterHandle invalidFootPlanter = 0;
+inline constexpr CharacterHandle   invalidCharacter     = 0;
+inline constexpr JiggleChainHandle invalidJiggleChain   = 0;
+inline constexpr FootPlanterHandle invalidFootPlanter   = 0;
+inline constexpr HandPlanterHandle invalidHandPlanter   = 0;
+inline constexpr LeanHandle        invalidLeanController = 0;
 
 enum class CharacterError : std::uint32_t
 {
@@ -182,11 +204,73 @@ struct FootState
     double hipDropMeters     = 0.0;
 };
 
+// Two-hand planter: two-bone arm IK from root-local shoulders toward
+// consumer-supplied world targets (walls, ledges, objects). Hands without a
+// set target rest at the root-local rest offsets; targets beyond full arm
+// extension clamp to the reach and report the leftover stretch.
+struct HandPlanterDescription
+{
+    // Two-bone arm lengths (meters).
+    double armUpperLength = 0.30;
+    double armLowerLength = 0.28;
+
+    // Shoulder anchors in the root's local frame, left then right.
+    double shoulderOffsets[2][3] = {{-0.23, 0.33, 0.0}, {0.23, 0.33, 0.0}};
+
+    // Hand rest offsets in the root's local frame, left then right (the
+    // default targets before setHandTarget overrides them).
+    double handOffsets[2][3] = {{-0.28, 0.05, 0.05}, {0.28, 0.05, 0.05}};
+
+    // Elbow pole direction in the root's local frame (normalized on entry):
+    // the world direction the elbows bend toward.
+    double elbowDirection[3] = {0.0, -0.5, -1.0};
+};
+
+// One hand state after an update: whether the target sat within full arm
+// extension, the solved (clamped) hand position, the world elbow pole
+// direction, the elbow bend angle, and how far the target lies beyond reach.
+struct HandState
+{
+    bool   withinReach = false;
+    double handPosition[3]    = {0.0, 0.0, 0.0};
+    double elbowDirection[3]  = {0.0, 0.0, -1.0};
+    double elbowBendRadians   = 0.0;
+    double stretchMeters      = 0.0;
+};
+
+// Procedural lean: a spring-damper that tilts the character's up axis
+// toward its lateral acceleration, producing a runner-style lean the
+// consumer composes on top of the root rotation.
+struct LeanControllerDescription
+{
+    // Hard clamp on the lean angle (radians).
+    double maximumLeanRadians = 0.35;
+
+    // Spring toward the target lean angle and velocity damping.
+    double stiffness = 12.0;
+    double damping   = 6.0;
+
+    // Lean radians per meter per second squared of lateral acceleration.
+    double accelerationGain = 0.06;
+};
+
+// One lean update result: the signed lean magnitude around the world lean
+// axis (horizontal, perpendicular to the acceleration) and the composed
+// world-space rotation offset to apply after the root rotation.
+struct LeanState
+{
+    double leanRadians  = 0.0;
+    double leanAxis[3]  = {1.0, 0.0, 0.0};
+    double leanRotation[4] = {0.0, 0.0, 0.0, 1.0}; // x,y,z,w
+};
+
 struct CharacterStatistics
 {
     std::uint32_t characterCount   = 0;
     std::uint32_t jiggleChainCount = 0;
     std::uint32_t footPlanterCount = 0;
+    std::uint32_t handPlanterCount = 0;
+    std::uint32_t leanControllerCount = 0;
 };
 
 // The "physics_character" capability. Calls are main-thread only; the
@@ -257,6 +341,42 @@ struct CharacterCapability
     // Foot results: exactly two entries, left then right.
     bool (*copyFootStates)(void *self, FootPlanterHandle planter, FootState *outStates, std::uint32_t capacity,
         std::uint32_t *outRequired);
+
+    // ---- hand placement (ABI 3 additions) -----------------------------------
+
+    HandPlanterHandle (*createHandPlanter)(void *self, const HandPlanterDescription *description, CharacterError *error);
+    void (*destroyHandPlanter)(void *self, HandPlanterHandle planter);
+
+    // Sets the world-space reach target for one hand (index 0 = left, 1 =
+    // right); the target persists across updates until changed.
+    bool (*setHandTarget)(void *self, HandPlanterHandle planter, std::uint32_t handIndex, const double target[3]);
+
+    // Per-fixed-update IK pass from the root transform (targets stay as set).
+    bool (*updateHandPlanter)(void *self, HandPlanterHandle planter, const engine::physics_rigid::RigidTransform *root);
+
+    // Hand results: exactly two entries, left then right.
+    bool (*copyHandStates)(void *self, HandPlanterHandle planter, HandState *outStates, std::uint32_t capacity,
+        std::uint32_t *outRequired);
+
+    // ---- procedural lean (ABI 3 additions) ----------------------------------
+
+    LeanHandle (*createLeanController)(void *self, const LeanControllerDescription *description, CharacterError *error);
+    void (*destroyLeanController)(void *self, LeanHandle lean);
+
+    // Per-fixed-update pass from the root transform and velocity; writes the
+    // lean magnitude, axis, and the composed world rotation offset.
+    bool (*updateLeanController)(void *self, LeanHandle lean, const engine::physics_rigid::RigidTransform *root,
+        const double rootVelocity[3], double fixedDeltaSeconds, LeanState *outState);
+
+    // ---- physical pushing (ABI 3 additions) ----------------------------------
+
+    // Applies an immediate impulse to every dynamic body whose position sits
+    // inside the sphere (center, radius): impulse = pushVelocity * forceScale
+    // at the body position. Bodies are visited in the world's body order, so
+    // the result is deterministic for a given world state. Call once per
+    // fixed update while the character moves.
+    bool (*applyCharacterPush)(void *self, engine::physics_rigid::WorldHandle world, const double center[3],
+        double radius, const double pushVelocity[3], double forceScale);
 
     bool (*characterStatistics)(void *self, CharacterStatistics *outStatistics);
 };

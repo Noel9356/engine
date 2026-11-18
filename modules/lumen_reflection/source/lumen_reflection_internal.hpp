@@ -35,6 +35,7 @@
 #include <engine/lumen_gi/capabilities.hpp>
 #include <engine/lumen_reflection/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
+#include <engine/renderer/lumen_cpu_pipeline.hpp>
 #include <engine/renderer/lumen_ray_core.hpp>
 
 #include <exception>
@@ -143,6 +144,9 @@ struct ReflectionSettings
     // depth slack a ray may pass behind a surface and still count as a hit).
     std::uint32_t screenTraceMaxSteps    = 48;
     float         screenTraceThickness   = 0.5f;
+    // Screen-trace tier toggle (Lumen's Screen Traces switch): off sends
+    // every dedicated ray straight to the scene trace.
+    bool          screenTracesEnabled    = true;
 
     // Temporal accumulation: history weight and neighborhood clamp width
     // (standard deviations of the current 3x3 neighborhood).
@@ -431,6 +435,14 @@ struct RfPipelineState
     bool          sceneDirty = true;
     bool          hasPreviousView = false;
     std::uint32_t framesSinceDirty = 0;
+    // Static-frame skip convergence threshold (frames of clean input before
+    // evaluate() may freeze the field): derived from the temporal blend so a
+    // frozen field is a converged one. applySettingsToState fills it from
+    // settings.temporalStrength - the published frame blends the fresh trace
+    // at weight (1 - strength)^N after N clean frames, so the threshold is
+    // where that weight drops below 1% (clamped to 1..128; a disabled
+    // temporal filter converges immediately).
+    std::uint32_t convergenceFrames = 1;
     RfEnvironmentSnapshot environment;
     bool        environmentValid = false;
     std::uint64_t environmentVersion = 0;
@@ -497,66 +509,13 @@ struct RfPipelineState
     std::atomic<std::uint32_t> framesSkippedStatic{0};
 };
 
-// ---- parallel helper --------------------------------------------------------------
-
-// Runs fn(begin, end) over [0, count) in chunks of `grain` with dynamic
-// (atomic-counter) scheduling. The calling thread participates; with no
-// running scheduler (or a small range) everything runs inline. Rethrows the
-// first exception.
-template <typename Fn>
-void rfParallelRange(TaskScheduler *scheduler, std::size_t count, std::size_t grain, Fn &&fn)
-{
-    if (count == 0)
-    {
-        return;
-    }
-    grain = std::max<std::size_t>(grain, 1);
-    if (scheduler == nullptr || !scheduler->isRunning() || count <= grain)
-    {
-        fn(static_cast<std::size_t>(0), count);
-        return;
-    }
-    const std::size_t         chunks = (count + grain - 1) / grain;
-    std::atomic<std::size_t>  next{0};
-    std::exception_ptr        failure;
-    std::mutex                failureMutex;
-    auto runner = [&]()
-    {
-        try
-        {
-            for (;;)
-            {
-                const std::size_t begin = next.fetch_add(grain, std::memory_order_relaxed);
-                if (begin >= count)
-                {
-                    break;
-                }
-                fn(begin, std::min(begin + grain, count));
-            }
-        }
-        catch (...)
-        {
-            std::lock_guard<std::mutex> lock(failureMutex);
-            if (!failure)
-            {
-                failure = std::current_exception();
-            }
-            next.store(count, std::memory_order_relaxed);
-        }
-    };
-    const std::size_t helpers = std::min<std::size_t>(scheduler->statistics().workerCount, chunks - 1);
-    TaskGroup         group;
-    for (std::size_t helper = 0; helper < helpers; ++helper)
-    {
-        scheduler->schedule(group, runner);
-    }
-    runner();
-    group.wait(*scheduler);
-    if (failure)
-    {
-        std::rethrow_exception(failure);
-    }
-}
+// The task-parallel range helper and the debug-image composition helpers are
+// shared with lumen_gi through engine/renderer/lumen_cpu_pipeline.hpp.
+using engine::lumen::parallelRange;
+using engine::lumen::toneMapColor;
+using engine::lumen::toByte;
+using engine::lumen::gammaEncode;
+using engine::lumen::storePixel;
 
 // ---- scene.cpp ----------------------------------------------------------------------
 

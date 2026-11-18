@@ -20,7 +20,17 @@ namespace engine::physics_rope
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsRopeCapabilityAbi = 1u;
+//
+// ABI history:
+//   1 - initial surface (rope creation and destruction, node state copies,
+//       pins and body attachments, wind, fixed-step XPBD stepping,
+//       statistics).
+//   2 - appended RopeDescription.breakStrain,
+//       RopeStatistics.brokenSegmentCount, RopeStatistics.maximumTension,
+//       and the copyRopeTension / setRopeLength entry points. Everything
+//       from ABI 1 keeps its slot and meaning; consumers check `abi >= 2`
+//       before touching the additions.
+inline constexpr std::uint32_t physicsRopeCapabilityAbi = 2u;
 
 using RopeHandle = std::uint32_t;
 
@@ -86,6 +96,13 @@ struct RopeDescription
     engine::physics_rigid::BodyHandle endBody   = engine::physics_rigid::invalidBody;
     double startLocalAnchor[3] = {0.0, 0.0, 0.0};
     double endLocalAnchor[3]   = {0.0, 0.0, 0.0};
+
+    // Maximum tolerated elongation ratio of a segment beyond its rest length
+    // before that segment's stretch constraint breaks permanently (stretch
+    // only; compression never snaps; 0 = breaking disabled). Broken segments
+    // stop solving and the rope continues as independent pieces sharing the
+    // node pool; pins and body attachments are untouched.
+    double breakStrain = 0.0;
 };
 
 struct RopeInfo
@@ -101,6 +118,12 @@ struct RopeStatistics
     std::uint64_t substepsExecuted     = 0;
     std::uint32_t lastContactCount     = 0;
     double        lastStepMilliseconds = 0.0;
+
+    // ABI 2 additions: the cumulative number of segments broken permanently
+    // by strain, and the largest per-segment tension (force units) of the
+    // most recent completed step.
+    std::uint32_t brokenSegmentCount = 0;
+    double        maximumTension     = 0.0;
 };
 
 // The "physics_rope" capability. Calls are main-thread only; the module
@@ -156,6 +179,25 @@ struct RopeCapability
     std::uint32_t (*simulate)(void *self, RopeHandle rope, double elapsedSeconds);
 
     bool (*ropeStatistics)(void *self, RopeHandle rope, RopeStatistics *outStatistics);
+
+    // Per-segment tension readout (ABI 2): one value per segment (segments
+    // = nodeCount - 1) for the most recent completed step, in force units —
+    // tension_i is the step's summed per-substep |lambda| for segment i
+    // divided by fixedDeltaSeconds^2 (lambda carries mass-times-length
+    // units, so the division yields newtons). Zero before the first
+    // completed step; broken segments stop accumulating once released. Same
+    // copy-with-capacity idiom as copyNodePositions: outRequired receives
+    // `segments`, and capacity below that returns false without copying.
+    bool (*copyRopeTension)(
+        void *self, RopeHandle rope, double *outTension, std::uint32_t capacity, std::uint32_t *outRequired);
+
+    // Reeling (ABI 2): sets the rope's total rest length immediately — every
+    // segment's rest length becomes length / segmentCount, and the two-apart
+    // bend constraints follow at twice that (the relation creation builds).
+    // Validates finite length > 0; nothing is woken or warmed (the module has
+    // no sleep and XPBD has no warm start), nodes respond from the next step
+    // on.
+    bool (*setRopeLength)(void *self, RopeHandle rope, double length);
 };
 
 } // namespace engine::physics_rope

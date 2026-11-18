@@ -37,15 +37,26 @@ namespace engine::physics_rigid
 //       skip a controller's own rig). Everything from ABI 2 keeps its slot
 //       and meaning; consumers check `abi >= 3` before touching the
 //       additions.
-inline constexpr std::uint32_t physicsRigidCapabilityAbi = 3u;
+//   4 - appended ShapeKind::Cylinder with its ShapeDescription fields, the
+//       trigger-volume surface (TriggerDescription, TriggerEventKind,
+//       TriggerEvent, the createTrigger / destroyTrigger /
+//       copyTriggerDescription / setTriggerTransform / setTriggerEnabled /
+//       triggerEventCount / copyTriggerEvents / clearTriggerEvents /
+//       triggerOverlapCount / copyTriggerOverlaps entry points), and the
+//       WorldStatistics trigger counters. Everything from ABI 3 keeps its
+//       slot and meaning; consumers check `abi >= 4` before touching the
+//       additions.
+inline constexpr std::uint32_t physicsRigidCapabilityAbi = 4u;
 
-using WorldHandle = std::uint32_t;
-using BodyHandle  = std::uint32_t;
-using JointHandle = std::uint32_t;
+using WorldHandle  = std::uint32_t;
+using BodyHandle   = std::uint32_t;
+using JointHandle  = std::uint32_t;
+using TriggerHandle = std::uint32_t;
 
-inline constexpr WorldHandle invalidWorld = 0;
-inline constexpr BodyHandle  invalidBody  = 0;
-inline constexpr JointHandle invalidJoint = 0;
+inline constexpr WorldHandle   invalidWorld   = 0;
+inline constexpr BodyHandle    invalidBody    = 0;
+inline constexpr JointHandle   invalidJoint   = 0;
+inline constexpr TriggerHandle invalidTrigger = 0;
 
 // Error codes written through optional PhysicsError out-parameters. Out
 // parameters are left untouched on success paths that do not set them
@@ -74,14 +85,16 @@ enum class BodyKind : std::uint32_t
 
 // Collision shapes. A plane is a static half-space defined in world space
 // (x dot normal = offset); its body transform is ignored and the body must be
-// Static. Sphere, box, and capsule shapes are defined around the body origin
-// in the body's local frame (a capsule segment runs along local +Y).
+// Static. Sphere, box, capsule, and cylinder shapes are defined around the
+// body origin in the body's local frame (a capsule segment and a cylinder
+// axis both run along local +Y).
 enum class ShapeKind : std::uint32_t
 {
     Sphere = 0,
     Box,
     Capsule,
-    Plane
+    Plane,
+    Cylinder
 };
 
 struct ShapeDescription
@@ -94,6 +107,9 @@ struct ShapeDescription
 
     double capsuleRadius     = 0.25;
     double capsuleHalfLength = 0.5; // half length of the inner cylinder segment along local +Y
+
+    double cylinderRadius    = 0.5;
+    double cylinderHalfHeight = 0.5; // half height of the cylinder along local +Y
 
     double planeNormal[3] = {0.0, 1.0, 0.0}; // world-space plane normal (normalized on entry)
     double planeOffset    = 0.0;             // world-space signed distance: x dot normal = offset
@@ -297,6 +313,9 @@ struct WorldStatistics
 
     std::uint64_t stepsSimulated       = 0;
     double        lastStepMilliseconds = 0.0;
+
+    std::uint32_t triggerCount             = 0;
+    std::uint32_t pendingTriggerEventCount = 0;
 };
 
 // Closest ray hit. The normal always faces the ray origin (opposes direction).
@@ -319,6 +338,58 @@ struct SweepHit
     Vec3   point;
     Vec3   normal;
     double distance = 0.0;
+};
+
+// A trigger volume: a non-solid shape region that reports which bodies enter
+// or leave it. Triggers participate in no contact solving; they are evaluated
+// once per step against the solid bodies (static, kinematic, and dynamic
+// alike). A trigger is either fixed in world space or attached to a body and
+// follows that body's transform every step.
+struct TriggerDescription
+{
+    // Any solid shape (planes are rejected); defined around the trigger
+    // origin in the trigger's local frame.
+    ShapeDescription shape;
+
+    // World placement for unattached triggers (normalized on entry).
+    RigidTransform transform;
+
+    // When set to a valid body, the trigger follows that body every step and
+    // `transform` above is interpreted as the body-local offset pose;
+    // `copyTriggerDescription` echoes it through `transform` regardless.
+    BodyHandle attachedBody = invalidBody;
+
+    // Collision filter with the same two-way rule as bodies:
+    // (trigger.categoryBits & body.maskBits) != 0 and
+    // (body.categoryBits & trigger.maskBits) != 0.
+    std::uint32_t categoryBits = 1u;
+    std::uint32_t maskBits     = 0xFFFFFFFFu;
+
+    bool enabled = true;
+
+    // Opaque caller value echoed by copyTriggerDescription.
+    std::uint64_t userTag = 0;
+};
+
+// Overlap transition kinds reported for one trigger/body pair. Enter fires
+// when the pair starts overlapping between two consecutive evaluations; Exit
+// fires when it stops overlapping (also when either side is destroyed while
+// overlapping).
+enum class TriggerEventKind : std::uint32_t
+{
+    Enter = 0,
+    Exit
+};
+
+// One trigger/body overlap transition. Events accumulate in a per-world
+// queue; consumers poll them with triggerEventCount / copyTriggerEvents and
+// drain with clearTriggerEvents.
+struct TriggerEvent
+{
+    TriggerEventKind kind = TriggerEventKind::Enter;
+
+    TriggerHandle trigger = invalidTrigger;
+    BodyHandle    body    = invalidBody;
 };
 
 // The "physics_rigid" capability. Calls are main-thread only unless the
@@ -434,6 +505,39 @@ struct PhysicsRigidCapability
     // finite vector) and reports the first contact. Radius must be positive.
     bool (*sphereCast)(void *self, WorldHandle world, const double start[3], const double delta[3], double radius,
         SweepHit *outHit);
+
+    // ---- ABI 4 additions ----------------------------------------------------
+
+    // Creates a trigger volume in the world (planes rejected; attached-body
+    // handles are validated). Trigger handles are monotonic and never reused.
+    TriggerHandle (*createTrigger)(void *self, WorldHandle world, const TriggerDescription *description, PhysicsError *error);
+    void (*destroyTrigger)(void *self, WorldHandle world, TriggerHandle trigger);
+
+    // Creation-time description echo (shape, placement or body-local offset
+    // pose, filter bits, userTag).
+    bool (*copyTriggerDescription)(void *self, WorldHandle world, TriggerHandle trigger, TriggerDescription *outDescription);
+
+    // Moves an unattached trigger's world pose or an attached trigger's
+    // body-local offset pose; takes effect from the next evaluation.
+    bool (*setTriggerTransform)(void *self, WorldHandle world, TriggerHandle trigger, const RigidTransform *transform);
+    bool (*setTriggerEnabled)(void *self, WorldHandle world, TriggerHandle trigger, bool enabled);
+
+    // Pending overlap-event queue for the world. Events accumulate in
+    // evaluation order (trigger creation order, then body order inside each
+    // evaluation) and are never reordered; oldest events are dropped with the
+    // overflow flag set when the configured event budget is exceeded.
+    bool (*triggerEventCount)(void *self, WorldHandle world, std::uint32_t *outCount, bool *outOverflowed);
+    bool (*copyTriggerEvents)(void *self, WorldHandle world, std::uint32_t firstIndex, TriggerEvent *outEvents,
+        std::uint32_t capacity, std::uint32_t *outCopied);
+    bool (*clearTriggerEvents)(void *self, WorldHandle world);
+
+    // Bodies currently overlapping one trigger, ordered by body handle
+    // ascending (static, kinematic, and dynamic bodies alike; sleeping
+    // dynamics stay listed). copyTriggerOverlaps writes up to capacity
+    // handles and reports the required count through outRequired.
+    bool (*triggerOverlapCount)(void *self, WorldHandle world, TriggerHandle trigger, std::uint32_t *outCount);
+    bool (*copyTriggerOverlaps)(void *self, WorldHandle world, TriggerHandle trigger, BodyHandle *outBodies,
+        std::uint32_t capacity, std::uint32_t *outRequired);
 };
 
 } // namespace engine::physics_rigid

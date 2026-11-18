@@ -788,6 +788,29 @@ bool rfRefreshProbeGrid(RfPipelineState &state, const lumen_gi::LumenGiCapabilit
 namespace
 {
 
+// Trilinear footprint of one position: the eight surrounding lattice probes'
+// SH2 blocks and validities gathered into per-thread contiguous storage.
+// Hit shading evaluates these lookups for every traced ray (and the debug
+// views for every texel), and rays of one surface overwhelmingly share their
+// lattice cell, so gathering once per cell removes the scattered probe-array
+// loads from the per-ray path. The gathered values are the probes' own data
+// verbatim and the evaluation keeps the direct walk's corner order, weights,
+// and arithmetic, so results are identical. The cache identity pins the grid
+// version (the provider republishes on content change), the level descriptor,
+// and the base corner.
+struct CachedFootprint
+{
+    std::uint64_t version = 0;
+    glm::vec3     anchor{0.0f};
+    float         spacing = 0.0f;
+    glm::ivec3    dims{0};
+    std::uint32_t offset  = 0;
+    glm::ivec3    base{0};
+    bool          filled = false;
+    glm::vec3     sh2[8][9]{};
+    float         validity[8]{};
+};
+
 // Picks the lattice level for a world position (renderer semantics: level 0
 // inside its half-cell-extended bounds, level 1 everywhere else).
 const RfProbeLevel *probeLevelFor(const RfProbeGrid &grid, const glm::vec3 &position)
@@ -806,52 +829,74 @@ const RfProbeLevel *probeLevelFor(const RfProbeGrid &grid, const glm::vec3 &posi
     return insideLevel0 ? &grid.level0 : &grid.level1;
 }
 
-// Trilinear probe blend for one position: gathers the 8 surrounding lattice
-// probes of one level, weights them by the trilinear fractions and validity,
-// and renormalizes by the valid weight (the renderer's contract).
-struct ProbeBlend
+// Gathers (or replays from the cache) the footprint of `position` on `level`:
+// fills the fraction and the per-slot weights (lattice x validity) and the
+// weight sum, in the corner order the direct gather used. Returns false when
+// no probe of the footprint carries data.
+bool probeFootprint(const RfPipelineState &state, const RfProbeLevel &level, const glm::vec3 &position,
+    CachedFootprint &cache, float weights[8], float &weightSum)
 {
-    const lumen_gi::GiProbe *probes[8]{};
-    float                    weights[8]{};
-    std::uint32_t            count = 0;
-    float                    weightSum = 0.0f;
-};
-
-ProbeBlend probeBlendAt(const RfProbeGrid &grid, const RfProbeLevel &level, const glm::vec3 &position)
-{
-    ProbeBlend blend;
+    const RfProbeGrid &grid = state.probeGrid;
     const glm::vec3 cell     = (position - level.anchor) / level.spacing;
     const glm::ivec3 base    = glm::clamp(glm::ivec3(glm::floor(cell)), glm::ivec3(0), level.dims - glm::ivec3(2));
     const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
-    for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
+    if (!cache.filled || cache.version != grid.version || cache.base != base
+        || cache.spacing != level.spacing || cache.dims != level.dims || cache.offset != level.offset
+        || cache.anchor != level.anchor)
     {
-        for (int cornerY = 0; cornerY < 2; ++cornerY)
+        cache.version = grid.version;
+        cache.anchor  = level.anchor;
+        cache.spacing = level.spacing;
+        cache.dims    = level.dims;
+        cache.offset  = level.offset;
+        cache.base    = base;
+        for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
         {
-            for (int cornerX = 0; cornerX < 2; ++cornerX)
+            for (int cornerY = 0; cornerY < 2; ++cornerY)
             {
-                const glm::ivec3 corner = base + glm::ivec3(cornerX, cornerY, cornerZ);
-                const std::size_t probeIndex = static_cast<std::size_t>(level.offset)
-                    + static_cast<std::size_t>(corner.x + level.dims.x * (corner.y + level.dims.y * corner.z));
-                if (probeIndex >= grid.probes.size())
+                for (int cornerX = 0; cornerX < 2; ++cornerX)
                 {
-                    continue;
+                    const glm::ivec3 corner = base + glm::ivec3(cornerX, cornerY, cornerZ);
+                    const std::size_t probeIndex = static_cast<std::size_t>(level.offset)
+                        + static_cast<std::size_t>(corner.x + level.dims.x * (corner.y + level.dims.y * corner.z));
+                    const std::uint32_t slot = static_cast<std::uint32_t>(cornerZ * 4 + cornerY * 2 + cornerX);
+                    if (probeIndex >= grid.probes.size())
+                    {
+                        cache.validity[slot] = 0.0f;
+                        std::fill(std::begin(cache.sh2[slot]), std::end(cache.sh2[slot]), glm::vec3(0.0f));
+                        continue;
+                    }
+                    const lumen_gi::GiProbe &probe = grid.probes[probeIndex];
+                    for (std::uint32_t band = 0; band < 9; ++band)
+                    {
+                        cache.sh2[slot][band] = glm::vec3(probe.sh2[band][0], probe.sh2[band][1], probe.sh2[band][2]);
+                    }
+                    cache.validity[slot] = probe.validity;
                 }
-                const float latticeWeight = (cornerX != 0 ? fraction.x : 1.0f - fraction.x)
-                                          * (cornerY != 0 ? fraction.y : 1.0f - fraction.y)
-                                          * (cornerZ != 0 ? fraction.z : 1.0f - fraction.z);
-                const lumen_gi::GiProbe &probe = grid.probes[probeIndex];
-                if (probe.validity <= 0.0f)
-                {
-                    continue;
-                }
-                blend.probes[blend.count] = &probe;
-                blend.weights[blend.count] = latticeWeight * probe.validity;
-                blend.weightSum += latticeWeight * probe.validity;
-                ++blend.count;
             }
         }
+        cache.filled = true;
     }
-    return blend;
+    weightSum = 0.0f;
+    for (std::uint32_t slot = 0; slot < 8; ++slot)
+    {
+        const float latticeWeight
+            = (static_cast<float>(slot & 1u) * fraction.x + (1.0f - static_cast<float>(slot & 1u)) * (1.0f - fraction.x))
+              * (static_cast<float>((slot >> 1) & 1u) * fraction.y
+                  + (1.0f - static_cast<float>((slot >> 1) & 1u)) * (1.0f - fraction.y))
+              * (static_cast<float>((slot >> 2) & 1u) * fraction.z
+                  + (1.0f - static_cast<float>((slot >> 2) & 1u)) * (1.0f - fraction.z));
+        weights[slot] = latticeWeight * cache.validity[slot];
+        if (cache.validity[slot] > 0.0f)
+        {
+            weightSum += weights[slot];
+        }
+        else
+        {
+            weights[slot] = 0.0f;
+        }
+    }
+    return weightSum > 1.0e-6f;
 }
 
 } // namespace
@@ -866,19 +911,26 @@ bool rfProbeIrradiance(
     {
         return false;
     }
-    const ProbeBlend blend = probeBlendAt(grid, *level, position);
-    if (blend.count == 0 || blend.weightSum <= 1.0e-6f)
+    static thread_local CachedFootprint irradianceCache;
+    float    weights[8]   = {};
+    float    weightSum    = 0.0f;
+    if (!probeFootprint(state, *level, position, irradianceCache, weights, weightSum))
     {
         return false;
     }
+    const float normalArray[3] = {normal.x, normal.y, normal.z};
     float valid = 0.0f;
-    for (std::uint32_t index = 0; index < blend.count; ++index)
+    for (std::uint32_t slot = 0; slot < 8; ++slot)
     {
-        const lumen_gi::GiProbe &probe = *blend.probes[index];
+        if (weights[slot] <= 0.0f)
+        {
+            continue;
+        }
         glm::vec3 irradiance;
-        lumen_gi::evaluateProbeIrradiance(probe, glm::value_ptr(normal), glm::value_ptr(irradiance));
-        outIrradiance += irradiance * (blend.weights[index] / blend.weightSum);
-        valid += probe.validity * (blend.weights[index] / blend.weightSum);
+        lumen_gi::evaluateSh2Irradiance(&irradianceCache.sh2[slot][0].x, normalArray, glm::value_ptr(irradiance));
+        const float blend = weights[slot] / weightSum;
+        outIrradiance += irradiance * blend;
+        valid += irradianceCache.validity[slot] * blend;
     }
     return valid > 0.0f;
 }
@@ -893,19 +945,25 @@ bool rfProbeRadiance(
     {
         return false;
     }
-    const ProbeBlend blend = probeBlendAt(grid, *level, position);
-    if (blend.count == 0 || blend.weightSum <= 1.0e-6f)
+    static thread_local CachedFootprint radianceCache;
+    float    weights[8]   = {};
+    float    weightSum    = 0.0f;
+    if (!probeFootprint(state, *level, position, radianceCache, weights, weightSum))
     {
         return false;
     }
     float valid = 0.0f;
-    for (std::uint32_t index = 0; index < blend.count; ++index)
+    for (std::uint32_t slot = 0; slot < 8; ++slot)
     {
-        const lumen_gi::GiProbe &probe = *blend.probes[index];
+        if (weights[slot] <= 0.0f)
+        {
+            continue;
+        }
         glm::vec3 radiance;
-        evaluateSh2Radiance(&probe.sh2[0][0], direction, radiance);
-        outRadiance += radiance * (blend.weights[index] / blend.weightSum);
-        valid += probe.validity * (blend.weights[index] / blend.weightSum);
+        evaluateSh2Radiance(&radianceCache.sh2[slot][0].x, direction, radiance);
+        const float blend = weights[slot] / weightSum;
+        outRadiance += radiance * blend;
+        valid += radianceCache.validity[slot] * blend;
     }
     return valid > 0.0f;
 }

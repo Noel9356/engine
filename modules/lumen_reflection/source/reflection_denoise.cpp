@@ -67,7 +67,7 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
 
     // Luminance of this frame's raw field, once per texel (the spatial pass
     // and the bilateral pass both weight through it).
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -82,7 +82,7 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
             }
         });
 
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -182,6 +182,12 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
 void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
 {
     const std::size_t pixelCount = static_cast<std::size_t>(state.fieldWidth) * state.fieldHeight;
+    // The published field of the previous frame becomes this pass's history
+    // by swapping the buffers rather than copying them: this pass reassigns
+    // fieldFiltered wholesale below, so after the swap the old history buffer
+    // is scratch that the fill overwrites, and the reprojection reads the
+    // last published field through historyField at no copy cost.
+    state.historyField.swap(state.fieldFiltered);
     state.fieldFiltered.assign(pixelCount, glm::vec3(0.0f));
     state.scratchDisoccluded.assign(pixelCount, 0u);
 
@@ -190,7 +196,7 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
     const float strength = std::clamp(state.settings.temporalStrength, 0.0f, 0.95f);
     const float sigmaScale = std::max(state.settings.neighborhoodClampSigma, 0.0f);
 
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -211,32 +217,66 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
                     if (hasHistory)
                     {
                         // Reproject this texel's world position into the
-                        // previous frame's field.
+                        // previous frame's field and gather its history
+                        // BILINEARLY: the reprojected point rarely lands on a
+                        // texel center, so nearest-texel sampling re-read a
+                        // neighbor up to half a texel away and stepped the
+                        // accumulation across motion. Each footprint corner
+                        // carries its bilinear weight only when it passes the
+                        // same depth validation the nearest sample used, so
+                        // disocclusions and silhouette borders reject the
+                        // stale corners instead of blending across them.
                         const glm::vec4 clip
                             = state.historyViewProjection * glm::vec4(state.gbufferPosition[index], 1.0f);
                         if (clip.w > 0.05f)
                         {
-                            const float u = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(state.fieldWidth);
-                            const float v = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(state.fieldHeight);
-                            if (u >= 0.0f && u < static_cast<float>(state.fieldWidth) && v >= 0.0f
-                                && v < static_cast<float>(state.fieldHeight))
+                            const float u = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(state.fieldWidth) - 0.5f;
+                            const float v = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(state.fieldHeight) - 0.5f;
+                            if (u >= 0.0f && v >= 0.0f && u <= static_cast<float>(state.fieldWidth) - 1.0f
+                                && v <= static_cast<float>(state.fieldHeight) - 1.0f)
                             {
-                                const std::uint32_t hx = std::min(static_cast<std::uint32_t>(u), state.fieldWidth - 1u);
-                                const std::uint32_t hy = std::min(static_cast<std::uint32_t>(v), state.fieldHeight - 1u);
-                                const std::size_t   hIndex
-                                    = static_cast<std::size_t>(hy) * state.fieldWidth + hx;
-                                // Depth validation: the texel that occupies
-                                // this screen point now must be the one (or
-                                // the same plane) that occupied it last
-                                // frame, else the surface was revealed.
-                                const float historyDepth = state.historyDepth[hIndex];
+                                const float       floorU = std::floor(u);
+                                const float       floorV = std::floor(v);
+                                const float       fractionU = u - floorU;
+                                const float       fractionV = v - floorV;
+                                const std::uint32_t x0 = static_cast<std::uint32_t>(floorU);
+                                const std::uint32_t y0 = static_cast<std::uint32_t>(floorV);
+                                const std::uint32_t x1 = std::min(x0 + 1u, state.fieldWidth - 1u);
+                                const std::uint32_t y1 = std::min(y0 + 1u, state.fieldHeight - 1u);
                                 const float currentDepth = state.gbufferDepth[index];
-                                const bool depthMatch = !rfIsBackground(historyDepth)
-                                    && std::fabs(historyDepth - currentDepth)
-                                        < 0.1f * std::max(currentDepth, 1.0f);
-                                if (depthMatch)
+                                float       weightSum = 0.0f;
+                                glm::vec3   gathered(0.0f);
+                                for (std::uint32_t corner = 0; corner < 4; ++corner)
                                 {
-                                    history = state.historyField[hIndex];
+                                    const std::uint32_t hx = x0 + (corner & 1u);
+                                    const std::uint32_t hy = y0 + ((corner >> 1) & 1u);
+                                    const float bilinear = ((corner & 1u) != 0u ? fractionU : 1.0f - fractionU)
+                                        * (((corner >> 1) & 1u) != 0u ? fractionV : 1.0f - fractionV);
+                                    if (bilinear <= 0.0f)
+                                    {
+                                        continue;
+                                    }
+                                    const std::size_t hIndex
+                                        = static_cast<std::size_t>(hy) * state.fieldWidth + hx;
+                                    // Depth validation per corner: the texel
+                                    // that occupied this screen point last
+                                    // frame must be the one (or the same
+                                    // plane) that occupies it now, else the
+                                    // surface was revealed and the corner is
+                                    // rejected.
+                                    const float historyDepth = state.historyDepth[hIndex];
+                                    if (rfIsBackground(historyDepth)
+                                        || std::fabs(historyDepth - currentDepth)
+                                            >= 0.1f * std::max(currentDepth, 1.0f))
+                                    {
+                                        continue;
+                                    }
+                                    gathered += state.historyField[hIndex] * bilinear;
+                                    weightSum += bilinear;
+                                }
+                                if (weightSum > 1.0e-6f)
+                                {
+                                    history = gathered / weightSum;
                                     historyUsable = true;
                                 }
                             }
@@ -297,9 +337,9 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
             }
         });
 
-    // The published frame becomes the next history (depth of THIS frame is
-    // what the next reprojection validates against).
-    state.historyField = state.fieldFiltered;
+    // This frame's depth becomes what the next reprojection validates
+    // against (a copy: the raster pass reassigns gbufferDepth wholesale next
+    // frame, so the history must own its own buffer).
     state.historyDepth = state.gbufferDepth;
     state.historyViewProjection = state.viewProjection;
     state.historyWidth  = state.fieldWidth;
@@ -328,7 +368,7 @@ void rfbilateralFilter(RfPipelineState &state, TaskScheduler *scheduler)
 
     // Luminance of the filtered field the bilateral weights read (computed
     // once per texel instead of per neighbor pair).
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             for (std::size_t y = rowBegin; y < rowEnd; ++y)
@@ -343,7 +383,7 @@ void rfbilateralFilter(RfPipelineState &state, TaskScheduler *scheduler)
             }
         });
 
-    rfParallelRange(scheduler, state.fieldHeight, 1,
+    parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
             for (std::size_t y = rowBegin; y < rowEnd; ++y)

@@ -24,6 +24,9 @@ struct Shape
     double capsuleRadius     = 0.25;
     double capsuleHalfLength = 0.5;
 
+    double cylinderRadius     = 0.5;
+    double cylinderHalfHeight = 0.5;
+
     // Plane fields in world space; the body transform is ignored for planes.
     math::Vec3 planeNormal;
     double     planeOffset = 0.0;
@@ -87,6 +90,8 @@ bool rayCastSphere(const RigidTransform &transform, double radius, const math::V
 bool rayCastBox(const RigidTransform &transform, const double halfExtents[3], const math::Vec3 &origin,
     const math::Vec3 &direction, double maximumDistance, double &outDistance);
 bool rayCastCapsule(const RigidTransform &transform, double radius, double halfLength, const math::Vec3 &origin,
+    const math::Vec3 &direction, double maximumDistance, double &outDistance);
+bool rayCastCylinder(const RigidTransform &transform, double radius, double halfHeight, const math::Vec3 &origin,
     const math::Vec3 &direction, double maximumDistance, double &outDistance);
 bool rayCastPlane(const math::Vec3 &planeNormal, double planeOffset, const math::Vec3 &origin,
     const math::Vec3 &direction, double maximumDistance, double &outDistance);

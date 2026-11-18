@@ -78,6 +78,7 @@ namespace physics_fluid       = engine::physics_fluid;
 namespace physics_particles   = engine::physics_particles;
 namespace physics_foliage     = engine::physics_foliage;
 namespace physics_character   = engine::physics_character;
+namespace physics_scheduling  = engine::physics_scheduling;
 namespace renderer            = engine::renderer;
 namespace window              = engine::window;
 namespace camera              = engine::camera;
@@ -144,13 +145,13 @@ int main(int argc, char **argv)
     {
         requiredCapabilities = {"physics_rigid", "physics_articulated", "physics_cloth", "physics_fields",
             "physics_rope", "physics_water", "physics_fluid", "physics_particles", "physics_foliage",
-            "physics_character"};
+            "physics_character", "physics_scheduling"};
     }
     else
     {
         requiredCapabilities = {"window", "renderer", "camera", "pbr", "physics_rigid", "physics_articulated",
             "physics_cloth", "physics_fields", "physics_rope", "physics_water", "physics_fluid",
-            "physics_particles", "physics_foliage", "physics_character", "fur"};
+            "physics_particles", "physics_foliage", "physics_character", "physics_scheduling", "fur"};
     }
     if (options.fixedHz > 0.0)
     {
@@ -244,6 +245,12 @@ int main(int argc, char **argv)
             && dependencies.character->abi != physics_character::physicsCharacterCapabilityAbi)
         {
             dependencies.character = nullptr;
+        }
+        dependencies.scheduling = context.tryAcquireCapability<physics_scheduling::SchedulingCapability>();
+        if (dependencies.scheduling != nullptr
+            && dependencies.scheduling->abi != physics_scheduling::physicsSchedulingCapabilityAbi)
+        {
+            dependencies.scheduling = nullptr;
         }
     }
     const engine::fur::FurCapability *furCapability = context.tryAcquireCapability<engine::fur::FurCapability>();
@@ -371,6 +378,29 @@ int main(int argc, char **argv)
     }
     std::cout << "demo_physics_sandbox: scene '" << options.sceneName << "' built: " << scene.bodies.size()
               << " bodies, " << scene.figures.size() << " figures, " << scene.cloths.size() << " cloth sheets\n";
+
+    // Overlap trigger around the action zone: the scripted spawns, blasts,
+    // and the paddle sweep all cross it, so the stats line reports live
+    // enter/exit transitions from the trigger surface.
+    physics_rigid::TriggerHandle zoneTrigger = physics_rigid::invalidTrigger;
+    std::uint64_t                triggerEnters = 0;
+    std::uint64_t                triggerExits  = 0;
+    {
+        physics_rigid::TriggerDescription zoneDescription;
+        zoneDescription.shape.kind              = physics_rigid::ShapeKind::Box;
+        zoneDescription.shape.boxHalfExtents[0] = 2.5;
+        zoneDescription.shape.boxHalfExtents[1] = 1.5;
+        zoneDescription.shape.boxHalfExtents[2] = 2.5;
+        zoneDescription.transform.position      = physics_rigid::Vec3{0.0, 1.5, 0.0};
+        zoneDescription.userTag                 = 1; // the action zone
+        physics_rigid::PhysicsError triggerError = physics_rigid::PhysicsError::None;
+        zoneTrigger = dependencies.rigid->createTrigger(
+            dependencies.rigid->self, scene.world, &zoneDescription, &triggerError);
+        if (zoneTrigger != physics_rigid::invalidTrigger)
+        {
+            std::cout << "demo_physics_sandbox: action-zone trigger created (handle " << zoneTrigger << ")\n";
+        }
+    }
     for (std::size_t figureIndex = 0; figureIndex < scene.figures.size(); ++figureIndex)
     {
         physics_rigid::BodyHandle       rootLink = physics_rigid::invalidBody;
@@ -815,6 +845,38 @@ int main(int argc, char **argv)
                     }
                 }
                 demo::physics_sandbox::stepExtendedAfterRigid(dependencies, scene, simulatedSeconds, fixedDelta);
+                // Drain the trigger queue: transitions accumulate per step.
+                if (zoneTrigger != physics_rigid::invalidTrigger)
+                {
+                    std::uint32_t pendingEvents = 0;
+                    bool          overflowed    = false;
+                    if (dependencies.rigid->triggerEventCount(
+                            dependencies.rigid->self, scene.world, &pendingEvents, &overflowed) && pendingEvents > 0)
+                    {
+                        std::vector<physics_rigid::TriggerEvent> events(pendingEvents);
+                        std::uint32_t copied = 0;
+                        if (dependencies.rigid->copyTriggerEvents(
+                                dependencies.rigid->self, scene.world, 0, events.data(), pendingEvents, &copied))
+                        {
+                            for (const physics_rigid::TriggerEvent &event : events)
+                            {
+                                if (event.trigger != zoneTrigger)
+                                {
+                                    continue;
+                                }
+                                if (event.kind == physics_rigid::TriggerEventKind::Enter)
+                                {
+                                    ++triggerEnters;
+                                }
+                                else
+                                {
+                                    ++triggerExits;
+                                }
+                            }
+                        }
+                    }
+                    dependencies.rigid->clearTriggerEvents(dependencies.rigid->self, scene.world);
+                }
                 sandboxRenderer.recordFixedStep(dependencies, scene, dependencies.cloth);
                 sandboxRenderer.recordExtendedFixedStep(dependencies, scene, fixedDelta);
                 simulatedSeconds += fixedDelta;
@@ -854,36 +916,6 @@ int main(int argc, char **argv)
 
         sandboxRenderer.buildDrawCommands(scene, static_cast<float>(timing.interpolationAlpha));
         sandboxRenderer.buildExtendedDrawCommands(dependencies, scene, static_cast<float>(timing.interpolationAlpha));
-
-        // Fur wind bridge: the wind field sample at the fur ball's position
-        // drives the shell-fur sway (strength modulated by a slow gust so
-        // captures show the strands moving between frames).
-        if (scene.extended.furBall && dependencies.fields != nullptr
-            && scene.extended.windField != physics_fields::invalidWind)
-        {
-            physics_rigid::BodyState furBallState{};
-            if (dependencies.rigid->copyBodyState(
-                    dependencies.rigid->self, scene.world, scene.extended.furBallBody, &furBallState))
-            {
-                const double samplePoint[3] = {furBallState.transform.position.x,
-                    furBallState.transform.position.y,
-                    furBallState.transform.position.z};
-                double windVelocity[3] = {0.0, 0.0, 0.0};
-                if (dependencies.fields->sampleWindVelocity(
-                        dependencies.fields->self, scene.extended.windField, samplePoint, simulatedSeconds, windVelocity))
-                {
-                    const double speed = std::sqrt(windVelocity[0] * windVelocity[0]
-                                                   + windVelocity[1] * windVelocity[1]
-                                                   + windVelocity[2] * windVelocity[2]);
-                    const float windDirection[3] = {static_cast<float>(windVelocity[0]),
-                        static_cast<float>(windVelocity[1]),
-                        static_cast<float>(windVelocity[2])};
-                    const float sway = static_cast<float>(0.75 + 0.25 * std::sin(simulatedSeconds * 6.283185307179586 * 0.7));
-                    renderCapability.setFurWind(renderCapability.self, rendererHandle, windDirection,
-                        static_cast<float>(speed) * 0.010f * sway);
-                }
-            }
-        }
         frameTiming.markUploadDone();
 
         renderCapability.beginFrame(renderCapability.self, rendererHandle, &frameParameters);
@@ -901,7 +933,8 @@ int main(int argc, char **argv)
                 std::cout << "demo_physics_sandbox: frame " << frameIndex << " | bodies " << statistics.bodyCount
                           << " (awake " << statistics.awakeBodyCount << ", sleeping " << statistics.sleepingBodyCount
                           << "), contacts " << statistics.contactPairCount << " pairs / "
-                          << statistics.contactPointCount << " points, joints " << statistics.jointCount << ", step "
+                          << statistics.contactPointCount << " points, joints " << statistics.jointCount
+                          << ", triggers +" << triggerEnters << "/-" << triggerExits << ", step "
                           << statistics.lastStepMilliseconds << " ms, steps this frame " << stepsExecuted << "\n";
             }
             if (dependencies.cloth != nullptr && !scene.cloths.empty())

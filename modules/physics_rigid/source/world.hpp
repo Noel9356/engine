@@ -32,6 +32,19 @@ bool destroyBodyFromWorld(World &world, BodyHandle handle);
 // Removes one joint record.
 bool destroyJointFromWorld(World &world, JointHandle handle);
 
+// Validates a trigger description (solid shapes only, attached bodies must
+// exist); fills the trigger record. Returns false with the error code filled
+// on rejection.
+bool validateTriggerDescription(
+    const World &world, const TriggerDescription &description, Trigger &outTrigger, PhysicsError *error);
+
+// Removes one trigger record and drops its pending events.
+bool destroyTriggerFromWorld(World &world, TriggerHandle handle);
+
+// Evaluates every trigger once: composes attached poses, collects overlaps
+// in deterministic order, and appends enter/exit events to the world queue.
+void evaluateTriggers(World &world, std::vector<BodyHandle> &overlapScratch);
+
 // Refreshes a body's world-space AABB from its transform.
 void refreshBodyAabb(Body &body);
 
@@ -42,6 +55,7 @@ struct StepScratch
     std::vector<JointConstraint>                     jointConstraints;
     std::vector<std::pair<std::size_t, std::size_t>> pairs;
     std::vector<std::size_t>                         islandParent;
+    std::vector<BodyHandle>                          triggerOverlapScratch;
 };
 
 // One fixed simulation step: force integration, broadphase, narrowphase,

@@ -29,6 +29,11 @@ const char *giOptionsUsage() noexcept
            "  --orbit                  Sweep the camera on a circular path around the view\n"
            "                           target (hands-free dynamic-GI testing; deterministic\n"
            "                           under --frames).\n"
+           "  --spin                   Rotate one scene object around its own center every\n"
+           "                           frame (the interior occluder, the outdoor chrome\n"
+           "                           sphere): renderer, lumen_gi, and lumen_reflection\n"
+           "                           all receive the same per-frame model matrix, so the\n"
+           "                           dynamic-surface path runs without manual input.\n"
            "  --no-reflections         Skip the lumen_reflection module: the same scene\n"
            "                           renders without the indirect specular term (A/B\n"
            "                           against the default run).\n";
@@ -78,6 +83,10 @@ bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &op
         else if (argument == "--orbit")
         {
             options.orbit = true;
+        }
+        else if (argument == "--spin")
+        {
+            options.spin = true;
         }
         else if (argument == "--no-reflections")
         {

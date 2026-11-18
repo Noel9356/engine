@@ -32,43 +32,6 @@ namespace lumen_gi
 namespace
 {
 
-glm::vec3 toneMapColor(glm::vec3 color, float exposure, pbr::ToneMapping mapper)
-{
-    color *= exposure;
-    switch (mapper)
-    {
-    case pbr::ToneMapping::None:
-        break;
-    case pbr::ToneMapping::Reinhard:
-        color = color / (1.0f + color);
-        break;
-    case pbr::ToneMapping::AcesFilmic:
-    default:
-        color = glm::clamp((color * (2.51f * color + 0.03f)) / (color * (2.43f * color + 0.59f) + 0.14f), 0.0f, 1.0f);
-        break;
-    }
-    return color;
-}
-
-std::uint8_t toByte(float value)
-{
-    return static_cast<std::uint8_t>(std::min(1.0f, std::max(0.0f, value)) * 255.0f + 0.5f);
-}
-
-glm::vec3 gammaEncode(glm::vec3 color)
-{
-    return glm::pow(glm::max(color, glm::vec3(0.0f)), glm::vec3(1.0f / 2.2f));
-}
-
-void storePixel(std::vector<std::uint8_t> &rgb, std::size_t pixelIndex, const glm::vec3 &linearColor,
-    const GiEnvironmentSnapshot &environment)
-{
-    const glm::vec3 encoded = gammaEncode(toneMapColor(linearColor, environment.exposure, environment.toneMapping));
-    rgb[pixelIndex * 3 + 0]  = toByte(encoded.r);
-    rgb[pixelIndex * 3 + 1]  = toByte(encoded.g);
-    rgb[pixelIndex * 3 + 2]  = toByte(encoded.b);
-}
-
 bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgb)
 {
     // The shared util writer (engine::util::writePpmRgb) carries the overflow
@@ -120,7 +83,7 @@ void composeDebugView(
                     {
                         const glm::vec3 ray = viewRayDirection(constState, inverseViewProjection,
                             static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
-                        storePixel(outRgb, pixelIndex, snapshot.skyRadiance(ray), snapshot);
+                        storePixel(outRgb, pixelIndex, snapshot.skyRadiance(ray), snapshot.exposure, snapshot.toneMapping);
                         continue;
                     }
                     const glm::vec3 albedo   = constState.viewAlbedo[pixelIndex];
@@ -180,7 +143,7 @@ void composeDebugView(
                         break;
                     }
                     }
-                    storePixel(outRgb, pixelIndex, color, snapshot);
+                    storePixel(outRgb, pixelIndex, color, snapshot.exposure, snapshot.toneMapping);
                 }
             }
         });
@@ -266,7 +229,8 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                         }
                         sum += pathRadiance;
                     }
-                    storePixel(outRgb, static_cast<std::size_t>(y) * width + x, sum / static_cast<float>(samples), snapshot);
+                    storePixel(outRgb, static_cast<std::size_t>(y) * width + x, sum / static_cast<float>(samples), snapshot.exposure,
+        snapshot.toneMapping);
                 }
             }
         });

@@ -27,8 +27,10 @@
 // own debug views (final image, GI only, surface cache, probes, reference
 // path trace) and the lumen_reflection module's views (composite,
 // reflections only, resolve mask, reference) next to the screenshot for A/B
-// validation, and --no-reflections disables the reflection module for the
-// pre-hook image.
+// validation, --no-reflections disables the reflection module for the
+// pre-hook image, and --spin rotates one scene object every frame (the
+// interior occluder, the outdoor chrome sphere) so the dynamic-surface path
+// runs without manual input.
 
 #include <engine/application/application.hpp>
 #include "demo_harness.hpp"
@@ -61,6 +63,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -380,6 +383,59 @@ int main(int argc, char **argv)
         }
     }
 
+    // --spin: the object that rotates around its own center every frame
+    // (the interior occluder, the outdoor chrome sphere). Its per-frame model
+    // matrix goes to the renderer's draw command and, through
+    // updateSurfaceTransform, to the lumen_gi and lumen_reflection surfaces -
+    // the dynamic-surface path the modules document (moving instances carry
+    // their captured cards and re-light at the front of the queue). The
+    // rotation center is the object's vertex bounds center, so the mesh
+    // spins in place.
+    const SceneMesh *spinTarget = nullptr;
+    if (options.spin)
+    {
+        const char *spinName = options.viewName == "outdoor" ? "chrome sphere" : "occluder";
+        for (const SceneMesh &mesh : scene)
+        {
+            if (mesh.name == spinName)
+            {
+                spinTarget = &mesh;
+                break;
+            }
+        }
+        if (spinTarget != nullptr)
+        {
+            std::cout << "demo_lumen_gi: --spin rotates the '" << spinTarget->name
+                      << "' mesh every frame (renderer + GI + reflection transforms)\n";
+        }
+        else
+        {
+            std::cout << "demo_lumen_gi: --spin requested but no '" << spinName << "' mesh exists; ignoring\n";
+        }
+    }
+    glm::vec3  spinCenter(0.0f);
+    float      spinAngularStep = 0.05f;
+    std::size_t spinMeshIndex  = 0;
+    if (spinTarget != nullptr)
+    {
+        glm::vec3 boundsMin(std::numeric_limits<float>::max());
+        glm::vec3 boundsMax(-std::numeric_limits<float>::max());
+        for (const SceneVertex &vertex : spinTarget->vertices)
+        {
+            boundsMin = glm::min(boundsMin, vertex.position);
+            boundsMax = glm::max(boundsMax, vertex.position);
+        }
+        spinCenter = 0.5f * (boundsMin + boundsMax);
+        for (std::size_t index = 0; index < scene.size(); ++index)
+        {
+            if (&scene[index] == spinTarget)
+            {
+                spinMeshIndex = index;
+                break;
+            }
+        }
+    }
+
     // Run mode: --frames N pins an exact frame count (deterministic CI runs
     // and screenshot exports). Without it, a windowed backend runs
     // interactively until the OS window is closed or Escape is pressed;
@@ -540,6 +596,31 @@ int main(int argc, char **argv)
             const float target[3] = {orbitCenter.x, orbitCenter.y, orbitCenter.z};
             const float up[3]     = {0.0f, 1.0f, 0.0f};
             cameraCapability.setLookAt(cameraCapability.self, cameraHandle, eye, target, up);
+        }
+
+        // --spin advances the object's rotation by the same deterministic
+        // step under --frames (0.05 rad/frame, matching the --orbit step).
+        // The transform lives for the whole frame iteration: the draw command
+        // and both surface updates borrow its storage.
+        glm::mat4 spinTransform(1.0f);
+        if (spinTarget != nullptr)
+        {
+            const float angle = static_cast<float>(frameIndex) * spinAngularStep;
+            spinTransform = glm::translate(glm::mat4(1.0f), spinCenter)
+                * glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 1.0f, 0.0f))
+                * glm::translate(glm::mat4(1.0f), -spinCenter);
+            const float *spinMatrix = glm::value_ptr(spinTransform);
+            drawCommands[spinMeshIndex].modelMatrix = spinMatrix;
+            if (giCapability->updateSurfaceTransform != nullptr && scene[spinMeshIndex].giSurface != lumen_gi::invalidGiSurface)
+            {
+                giCapability->updateSurfaceTransform(giCapability->self, scene[spinMeshIndex].giSurface, spinMatrix);
+            }
+            if (options.reflections && reflectionCapability->updateSurfaceTransform != nullptr
+                && scene[spinMeshIndex].reflectionSurface != lumen_reflection::invalidReflectionSurface)
+            {
+                reflectionCapability->updateSurfaceTransform(
+                    reflectionCapability->self, scene[spinMeshIndex].reflectionSurface, spinMatrix);
+            }
         }
 
         cameraCapability.update(cameraCapability.self, cameraHandle, &cameraInput, cameraDeltaSeconds);

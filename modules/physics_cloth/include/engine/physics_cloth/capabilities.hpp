@@ -2,11 +2,14 @@
 //
 // XPBD cloth: a grid of particles held together by structural, shear, and
 // bending distance constraints, stepped with fixed-timestep substepping.
+// Constraints tear when stretched past a configurable strain tolerance, and
+// particles repel each other through a deterministic self-collision pass.
 // Cloth particles collide against a physics_rigid world's bodies and planes
 // through that module's sphere-overlap query, so cloth drapes over static
-// scenery and moving rigid bodies alike. Consumers acquire it via
-// ParticipantContext::acquireCapability<ClothCapability>(); the module
-// declares physics_rigid as a required capability.
+// scenery and moving rigid bodies alike, and the deformed surface is
+// sampleable through bilinear grid interpolation for rendering. Consumers
+// acquire it via ParticipantContext::acquireCapability<ClothCapability>();
+// the module declares physics_rigid as a required capability.
 
 #pragma once
 
@@ -19,7 +22,17 @@ namespace engine::physics_cloth
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsClothCapabilityAbi = 1u;
+//
+// ABI history:
+//   1 - initial surface (cloth grid creation with structural, shear, and
+//       bend constraints, pinning, dragging, wind, fixed-step stepping with
+//       internal XPBD substeps, and statistics).
+//   2 - appended ClothDescription.tearStrain,
+//       ClothDescription.selfCollisionRadius,
+//       ClothStatistics.brokenConstraintCount, and the sampleClothSurface
+//       entry point. Everything from ABI 1 keeps its slot and meaning;
+//       consumers check `abi >= 2` before touching the additions.
+inline constexpr std::uint32_t physicsClothCapabilityAbi = 2u;
 
 using ClothHandle = std::uint32_t;
 
@@ -75,6 +88,19 @@ struct ClothDescription
     std::uint32_t        pinnedCount     = 0;
 
     bool sleepingEnabled = true; // reserved for future sleep integration; cloth never sleeps
+
+    // ABI 2 additions (consumers check `abi >= 2` before touching them).
+
+    // Maximum tolerated stretch ratio beyond rest length before a distance
+    // constraint breaks permanently (structural, shear, and bend alike);
+    // a constraint breaks when its length exceeds restLength x (1 + this)
+    // while stretched. 0 disables tearing.
+    double tearStrain = 0.0;
+
+    // Self-collision sphere radius per particle (meters); particle pairs
+    // closer than twice this radius repel each other after the constraint
+    // iterations of every substep. 0 disables self-collision.
+    double selfCollisionRadius = 0.0;
 };
 
 struct ClothInfo
@@ -91,6 +117,10 @@ struct ClothStatistics
     std::uint64_t substepsExecuted     = 0;
     std::uint32_t lastContactCount     = 0;
     double        lastStepMilliseconds = 0.0;
+
+    // ABI 2: distance constraints torn since creation (0 when tearing is
+    // disabled); see ClothDescription.tearStrain.
+    std::uint32_t brokenConstraintCount = 0;
 };
 
 struct ClothParticleDrag
@@ -153,6 +183,15 @@ struct ClothCapability
     std::uint32_t (*simulate)(void *self, ClothHandle cloth, double elapsedSeconds);
 
     bool (*clothStatistics)(void *self, ClothHandle cloth, ClothStatistics *outStatistics);
+
+    // ABI 2: render-mesh sampling. Bilinear interpolation of the particle
+    // grid at normalized coordinates (u, v clamped into [0, 1]; u runs along
+    // the grid's first axis (columns), v along the second (rows)). outNormal
+    // comes from the cross product of the two grid-direction tangents (the
+    // central differences of the surrounding particles; +Y for degenerate
+    // cases). Returns false for unknown handles or non-finite results.
+    bool (*sampleClothSurface)(
+        void *self, ClothHandle cloth, double u, double v, double outPosition[3], double outNormal[3]);
 };
 
 } // namespace engine::physics_cloth

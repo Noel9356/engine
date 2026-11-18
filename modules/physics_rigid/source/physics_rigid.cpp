@@ -105,6 +105,8 @@ private:
         readPositiveLimit(context, "maximum_worlds", 4096, settings_.maximumWorlds);
         readPositiveLimit(context, "maximum_bodies", 10'000'000, settings_.maximumBodies);
         readPositiveLimit(context, "maximum_joints", 10'000'000, settings_.maximumJoints);
+        readPositiveLimit(context, "maximum_triggers", 100'000, settings_.maximumTriggers);
+        readPositiveLimit(context, "maximum_trigger_events", 1'000'000, settings_.maximumTriggerEvents);
         readPositiveLimit(context, "maximum_steps_per_simulate", 1000, settings_.maximumStepsPerSimulate);
     }
 
@@ -356,6 +358,8 @@ private:
         }
         description.shape.capsuleRadius     = body->shape.capsuleRadius;
         description.shape.capsuleHalfLength = body->shape.capsuleHalfLength;
+        description.shape.cylinderRadius    = body->shape.cylinderRadius;
+        description.shape.cylinderHalfHeight = body->shape.cylinderHalfHeight;
         description.shape.planeNormal[0]    = body->shape.planeNormal.x;
         description.shape.planeNormal[1]    = body->shape.planeNormal.y;
         description.shape.planeNormal[2]    = body->shape.planeNormal.z;
@@ -1064,6 +1068,230 @@ private:
         return sphereCastWorld(*world, startVector, deltaVector, radius, *outHit);
     }
 
+    // ---- trigger volume implementations ------------------------------------
+
+    Trigger *findTrigger(World &world, TriggerHandle handle)
+    {
+        const auto iterator = world.triggerIndexByHandle.find(handle);
+        return iterator != world.triggerIndexByHandle.end() ? &world.triggers[iterator->second] : nullptr;
+    }
+
+    TriggerHandle createTriggerImpl(WorldHandle worldHandle, const TriggerDescription *description, PhysicsError *error)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            setError(error, PhysicsError::InvalidHandle);
+            return invalidTrigger;
+        }
+        if (description == nullptr)
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidTrigger;
+        }
+        Trigger trigger;
+        if (!validateTriggerDescription(*world, *description, trigger, error))
+        {
+            return invalidTrigger;
+        }
+        if (nextTriggerHandle_ == invalidTrigger)
+        {
+            setError(error, PhysicsError::CapacityExceeded);
+            return invalidTrigger;
+        }
+        trigger.handle        = nextTriggerHandle_;
+        nextTriggerHandle_ = nextTriggerHandle_ == std::numeric_limits<TriggerHandle>::max()
+            ? invalidTrigger
+            : nextTriggerHandle_ + 1;
+        world->triggers.push_back(std::move(trigger));
+        world->triggerIndexByHandle.emplace(world->triggers.back().handle, world->triggers.size() - 1);
+        setError(error, PhysicsError::None);
+        return world->triggers.back().handle;
+    }
+
+    void destroyTriggerImpl(WorldHandle worldHandle, TriggerHandle handle)
+    {
+        World *world = findWorld(worldHandle);
+        if (world != nullptr)
+        {
+            destroyTriggerFromWorld(*world, handle);
+        }
+    }
+
+    bool copyTriggerDescriptionImpl(
+        WorldHandle worldHandle, TriggerHandle handle, TriggerDescription *outDescription)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outDescription == nullptr)
+        {
+            return false;
+        }
+        const Trigger *trigger = findTrigger(*world, handle);
+        if (trigger == nullptr)
+        {
+            return false;
+        }
+        TriggerDescription description;
+        description.shape.kind          = trigger->shape.kind;
+        description.shape.sphereRadius  = trigger->shape.sphereRadius;
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            description.shape.boxHalfExtents[axis] = trigger->shape.boxHalfExtents[axis];
+        }
+        description.shape.capsuleRadius      = trigger->shape.capsuleRadius;
+        description.shape.capsuleHalfLength  = trigger->shape.capsuleHalfLength;
+        description.shape.cylinderRadius     = trigger->shape.cylinderRadius;
+        description.shape.cylinderHalfHeight = trigger->shape.cylinderHalfHeight;
+        description.transform                = trigger->localTransform;
+        description.attachedBody             = trigger->attachedBody;
+        description.categoryBits             = trigger->categoryBits;
+        description.maskBits                 = trigger->maskBits;
+        description.enabled                  = trigger->enabled;
+        description.userTag                  = trigger->userTag;
+        *outDescription                      = description;
+        return true;
+    }
+
+    bool setTriggerTransformImpl(WorldHandle worldHandle, TriggerHandle handle, const RigidTransform *transform)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || transform == nullptr)
+        {
+            return false;
+        }
+        Trigger *trigger = findTrigger(*world, handle);
+        if (trigger == nullptr || !math::isFinite(transform->position))
+        {
+            return false;
+        }
+        const math::Quaternion rotation = math::normalize(transform->rotation);
+        if (math::dot(rotation, rotation) < 1.0e-12)
+        {
+            return false;
+        }
+        if (trigger->attachedBody != invalidBody)
+        {
+            trigger->localTransform.position = transform->position;
+            trigger->localTransform.rotation = rotation;
+        }
+        else
+        {
+            trigger->transform.position = transform->position;
+            trigger->transform.rotation = rotation;
+            computeShapeAabb(trigger->shape, trigger->transform, trigger->aabbMinimum, trigger->aabbMaximum);
+        }
+        return true;
+    }
+
+    bool setTriggerEnabledImpl(WorldHandle worldHandle, TriggerHandle handle, bool enabled)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        Trigger *trigger = findTrigger(*world, handle);
+        if (trigger == nullptr)
+        {
+            return false;
+        }
+        trigger->enabled = enabled;
+        return true;
+    }
+
+    bool triggerEventCountImpl(WorldHandle worldHandle, std::uint32_t *outCount, bool *outOverflowed)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outCount == nullptr)
+        {
+            return false;
+        }
+        *outCount = static_cast<std::uint32_t>(world->pendingTriggerEvents.size());
+        if (outOverflowed != nullptr)
+        {
+            *outOverflowed = world->triggerEventOverflow;
+        }
+        return true;
+    }
+
+    bool copyTriggerEventsImpl(WorldHandle worldHandle, std::uint32_t firstIndex, TriggerEvent *outEvents,
+        std::uint32_t capacity, std::uint32_t *outCopied)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || (outEvents == nullptr && capacity > 0))
+        {
+            return false;
+        }
+        const std::uint32_t pending = static_cast<std::uint32_t>(world->pendingTriggerEvents.size());
+        const std::uint32_t copied
+            = firstIndex < pending ? std::min(capacity, pending - firstIndex) : 0u;
+        for (std::uint32_t index = 0; index < copied; ++index)
+        {
+            outEvents[index] = world->pendingTriggerEvents[firstIndex + index];
+        }
+        if (outCopied != nullptr)
+        {
+            *outCopied = copied;
+        }
+        return true;
+    }
+
+    bool clearTriggerEventsImpl(WorldHandle worldHandle)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        world->pendingTriggerEvents.clear();
+        world->triggerEventOverflow = false;
+        return true;
+    }
+
+    bool triggerOverlapCountImpl(WorldHandle worldHandle, TriggerHandle handle, std::uint32_t *outCount)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outCount == nullptr)
+        {
+            return false;
+        }
+        const Trigger *trigger = findTrigger(*world, handle);
+        if (trigger == nullptr)
+        {
+            return false;
+        }
+        *outCount = static_cast<std::uint32_t>(trigger->overlapping.size());
+        return true;
+    }
+
+    bool copyTriggerOverlapsImpl(WorldHandle worldHandle, TriggerHandle handle, BodyHandle *outBodies,
+        std::uint32_t capacity, std::uint32_t *outRequired)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        const Trigger *trigger = findTrigger(*world, handle);
+        if (trigger == nullptr)
+        {
+            return false;
+        }
+        if (outRequired != nullptr)
+        {
+            *outRequired = static_cast<std::uint32_t>(trigger->overlapping.size());
+        }
+        if (outBodies == nullptr || capacity < trigger->overlapping.size())
+        {
+            return false;
+        }
+        for (std::size_t index = 0; index < trigger->overlapping.size(); ++index)
+        {
+            outBodies[index] = trigger->overlapping[index];
+        }
+        return true;
+    }
+
     static void wakeRecord(Body &body)
     {
         body.awake      = true;
@@ -1111,6 +1339,16 @@ private:
         ENGINE_PHYSICS_RIGID_BIND(setBodyContinuousCollision, setBodyContinuousCollisionImpl);
         ENGINE_PHYSICS_RIGID_BIND(setJointSpring, setJointSpringImpl);
         ENGINE_PHYSICS_RIGID_BIND(sphereCast, sphereCastImpl);
+        ENGINE_PHYSICS_RIGID_BIND(createTrigger, createTriggerImpl);
+        ENGINE_PHYSICS_RIGID_BIND(destroyTrigger, destroyTriggerImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyTriggerDescription, copyTriggerDescriptionImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setTriggerTransform, setTriggerTransformImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setTriggerEnabled, setTriggerEnabledImpl);
+        ENGINE_PHYSICS_RIGID_BIND(triggerEventCount, triggerEventCountImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyTriggerEvents, copyTriggerEventsImpl);
+        ENGINE_PHYSICS_RIGID_BIND(clearTriggerEvents, clearTriggerEventsImpl);
+        ENGINE_PHYSICS_RIGID_BIND(triggerOverlapCount, triggerOverlapCountImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyTriggerOverlaps, copyTriggerOverlapsImpl);
 #undef ENGINE_PHYSICS_RIGID_BIND
     }
 
@@ -1121,9 +1359,10 @@ private:
 
     std::vector<World>                           worlds_;
     std::unordered_map<WorldHandle, std::size_t> worldIndexByHandle_;
-    WorldHandle                                  nextWorldHandle_ = 1;
-    BodyHandle                                   nextBodyHandle_  = 1;
-    JointHandle                                  nextJointHandle_ = 1;
+    WorldHandle                                  nextWorldHandle_   = 1;
+    BodyHandle                                   nextBodyHandle_    = 1;
+    JointHandle                                  nextJointHandle_   = 1;
+    TriggerHandle                                nextTriggerHandle_ = 1;
 
     StepScratch scratch_;
 };
