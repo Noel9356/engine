@@ -1,0 +1,812 @@
+// physics_cloth module implementation.
+//
+// XPBD cloth over a physics_rigid world: particles integrate velocities,
+// constraints solve in Gauss-Seidel order with compliance-scaled corrections,
+// and particles resolve against the rigid world's bodies and planes through
+// the collideSphere query. Stepping happens in whole fixed steps with
+// internal substeps (the "small steps" XPBD schedule), so the simulation is
+// independent of frame rate.
+
+#include "records.hpp"
+#include <engine/kernel/module_api.hpp>
+#include <engine/kernel/participant_interface.hpp>
+#include <engine/kernel/participant_manifest.hpp>
+#include <engine/physics_cloth/capabilities.hpp>
+#include <engine/physics_rigid/capabilities.hpp>
+#include <engine/physics_rigid/math.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace engine::physics_cloth
+{
+namespace
+{
+
+namespace math = engine::physics_rigid::math;
+
+class ClothModule final : public ModuleInterface
+{
+public:
+    ClothModule()
+        : manifest_(makeManifest())
+    {
+        assignCapabilityPointers();
+    }
+
+    const ParticipantManifest &manifest() const override
+    {
+        return manifest_;
+    }
+
+    void construct(ParticipantContext &context) override
+    {
+        if (const auto value = context.configurationIntegerInSection("physics_cloth", "maximum_cloths");
+            value && *value > 0 && *value <= 4096)
+            settings_.maximumCloths = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationIntegerInSection("physics_cloth", "maximum_particles");
+            value && *value > 0 && *value <= 10'000'000)
+            settings_.maximumParticles = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationIntegerInSection("physics_cloth", "maximum_particles_per_cloth");
+            value && *value > 0 && *value <= 1'000'000)
+            settings_.maximumParticlesPerCloth = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationIntegerInSection("physics_cloth", "substeps_per_step");
+            value && *value > 0 && *value <= 64)
+            settings_.substepsPerStep = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationIntegerInSection("physics_cloth", "maximum_steps_per_simulate");
+            value && *value > 0 && *value <= 1000)
+            settings_.maximumStepsPerSimulate = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationFloatingInSection("physics_cloth", "fixed_rate_hz");
+            value && *value >= 1.0 && *value <= 1000.0 && std::isfinite(*value))
+            settings_.fixedRateHz = *value;
+
+        rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
+        if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
+        {
+            rigid_ = nullptr;
+        }
+    }
+
+    void start() override
+    {}
+
+    void stop() override
+    {
+        cloths_.clear();
+        clothIndexByHandle_.clear();
+        nextClothHandle_ = 1;
+        totalParticles_  = 0;
+    }
+
+    void *capabilityPointerFor(const std::string &name) override
+    {
+        return name == ClothCapability::capabilityName ? &capability_ : nullptr;
+    }
+
+private:
+    static ParticipantManifest makeManifest()
+    {
+        return ParticipantManifest{
+            .name                 = "physics_cloth",
+            .kind                 = ParticipantKind::EngineModule,
+            .version              = "0.1.0",
+            .providedCapabilities = {"physics_cloth"},
+            .requiredCapabilities = {"physics_rigid"}};
+    }
+
+    static void setError(ClothError *output, ClothError value) noexcept
+    {
+        if (output != nullptr)
+        {
+            *output = value;
+        }
+    }
+
+    ClothRecord *findCloth(ClothHandle handle)
+    {
+        const auto iterator = clothIndexByHandle_.find(handle);
+        return iterator != clothIndexByHandle_.end() ? &cloths_[iterator->second] : nullptr;
+    }
+
+    std::size_t particleIndex(const ClothRecord &cloth, std::uint32_t column, std::uint32_t row) const
+    {
+        return (static_cast<std::size_t>(row) * cloth.columns + column) * 3u;
+    }
+
+    // ---- XPBD stepping -----------------------------------------------------
+
+    void integrateSubstep(ClothRecord &cloth, double substepDelta)
+    {
+        const std::size_t particleCount = cloth.positions.size() / 3;
+        const double      dampingFactor = 1.0 / (1.0 + substepDelta * cloth.damping);
+        for (std::size_t particle = 0; particle < particleCount; ++particle)
+        {
+            const std::size_t offset = particle * 3;
+            if (cloth.pinned[particle] != 0u)
+            {
+                cloth.velocities[offset]            = 0.0;
+                cloth.velocities[offset + 1]        = 0.0;
+                cloth.velocities[offset + 2]        = 0.0;
+                cloth.positions[offset]             = cloth.pinPositions[offset];
+                cloth.positions[offset + 1]         = cloth.pinPositions[offset + 1];
+                cloth.positions[offset + 2]         = cloth.pinPositions[offset + 2];
+                cloth.previousPositions[offset]     = cloth.positions[offset];
+                cloth.previousPositions[offset + 1] = cloth.positions[offset + 1];
+                cloth.previousPositions[offset + 2] = cloth.positions[offset + 2];
+                continue;
+            }
+            cloth.previousPositions[offset]     = cloth.positions[offset];
+            cloth.previousPositions[offset + 1] = cloth.positions[offset + 1];
+            cloth.previousPositions[offset + 2] = cloth.positions[offset + 2];
+            cloth.velocities[offset] += (cloth.gravity[0] + cloth.windAcceleration[0]) * substepDelta;
+            cloth.velocities[offset + 1] += (cloth.gravity[1] + cloth.windAcceleration[1]) * substepDelta;
+            cloth.velocities[offset + 2] += (cloth.gravity[2] + cloth.windAcceleration[2]) * substepDelta;
+            cloth.velocities[offset] *= dampingFactor;
+            cloth.velocities[offset + 1] *= dampingFactor;
+            cloth.velocities[offset + 2] *= dampingFactor;
+
+            // Drag spring toward the grab target.
+            if (cloth.dragActive && particle == cloth.drag.particleIndex)
+            {
+                const double errorX  = dragTarget_[0] - cloth.positions[offset];
+                const double errorY  = dragTarget_[1] - cloth.positions[offset + 1];
+                const double errorZ  = dragTarget_[2] - cloth.positions[offset + 2];
+                double accelerationX = cloth.drag.stiffness * errorX - cloth.drag.damping * cloth.velocities[offset];
+                double accelerationY
+                    = cloth.drag.stiffness * errorY - cloth.drag.damping * cloth.velocities[offset + 1];
+                double accelerationZ
+                    = cloth.drag.stiffness * errorZ - cloth.drag.damping * cloth.velocities[offset + 2];
+                const double magnitude = std::sqrt(
+                    accelerationX * accelerationX + accelerationY * accelerationY + accelerationZ * accelerationZ);
+                if (magnitude > cloth.drag.maximumAcceleration)
+                {
+                    const double scale = cloth.drag.maximumAcceleration / magnitude;
+                    accelerationX *= scale;
+                    accelerationY *= scale;
+                    accelerationZ *= scale;
+                }
+                cloth.velocities[offset] += accelerationX * substepDelta;
+                cloth.velocities[offset + 1] += accelerationY * substepDelta;
+                cloth.velocities[offset + 2] += accelerationZ * substepDelta;
+            }
+
+            cloth.positions[offset] += cloth.velocities[offset] * substepDelta;
+            cloth.positions[offset + 1] += cloth.velocities[offset + 1] * substepDelta;
+            cloth.positions[offset + 2] += cloth.velocities[offset + 2] * substepDelta;
+        }
+    }
+
+    void solveConstraints(ClothRecord &cloth, double substepDelta)
+    {
+        const double inverseDeltaTimeSquared = 1.0 / (substepDelta * substepDelta);
+        for (DistanceConstraint &constraint : cloth.constraints)
+        {
+            const std::size_t offsetA = static_cast<std::size_t>(constraint.particleA) * 3;
+            const std::size_t offsetB = static_cast<std::size_t>(constraint.particleB) * 3;
+            const double      inverseMassA
+                = cloth.pinned[constraint.particleA] != 0u ? 0.0 : cloth.inverseMasses[constraint.particleA];
+            const double inverseMassB
+                = cloth.pinned[constraint.particleB] != 0u ? 0.0 : cloth.inverseMasses[constraint.particleB];
+            const double weightSum = inverseMassA + inverseMassB;
+            if (weightSum <= 0.0)
+            {
+                continue;
+            }
+            const double deltaX = cloth.positions[offsetB] - cloth.positions[offsetA];
+            const double deltaY = cloth.positions[offsetB + 1] - cloth.positions[offsetA + 1];
+            const double deltaZ = cloth.positions[offsetB + 2] - cloth.positions[offsetA + 2];
+            const double length = std::sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+            if (length <= 1.0e-12)
+            {
+                continue;
+            }
+            const double complianceScaled = constraint.compliance * inverseDeltaTimeSquared;
+            double       lambda           = (-length + constraint.restLength) / (weightSum + complianceScaled);
+            // XPBD accumulates lambda per constraint per substep; starting
+            // from zero each substep is equivalent for one iteration.
+            const double scaleX = deltaX / length * lambda;
+            const double scaleY = deltaY / length * lambda;
+            const double scaleZ = deltaZ / length * lambda;
+            cloth.positions[offsetA] -= inverseMassA * scaleX;
+            cloth.positions[offsetA + 1] -= inverseMassA * scaleY;
+            cloth.positions[offsetA + 2] -= inverseMassA * scaleZ;
+            cloth.positions[offsetB] += inverseMassB * scaleX;
+            cloth.positions[offsetB + 1] += inverseMassB * scaleY;
+            cloth.positions[offsetB + 2] += inverseMassB * scaleZ;
+        }
+    }
+
+    void resolveCollisions(ClothRecord &cloth)
+    {
+        if (rigid_ == nullptr)
+        {
+            return;
+        }
+        const std::size_t particleCount = cloth.positions.size() / 3;
+        for (std::size_t particle = 0; particle < particleCount; ++particle)
+        {
+            const std::size_t offset     = particle * 3;
+            cloth.contactFlags[particle] = 0u;
+            if (cloth.pinned[particle] != 0u)
+            {
+                continue;
+            }
+            double                            normal[3] = {0.0, 0.0, 0.0};
+            double                            depth     = 0.0;
+            engine::physics_rigid::BodyHandle body      = engine::physics_rigid::invalidBody;
+            if (!rigid_->collideSphere(
+                    rigid_->self, cloth.world, &cloth.positions[offset], cloth.particleRadius, normal, &depth, &body)
+                || depth <= 0.0)
+            {
+                continue;
+            }
+            cloth.contactFlags[particle]     = 1u;
+            cloth.contactNormals[offset]     = normal[0];
+            cloth.contactNormals[offset + 1] = normal[1];
+            cloth.contactNormals[offset + 2] = normal[2];
+            // Project the particle out of the obstacle along the push-out
+            // direction; velocity damping happens in the final velocity pass.
+            cloth.positions[offset] += normal[0] * depth;
+            cloth.positions[offset + 1] += normal[1] * depth;
+            cloth.positions[offset + 2] += normal[2] * depth;
+        }
+    }
+
+    void finalizeSubstepVelocities(ClothRecord &cloth, double substepDelta)
+    {
+        const std::size_t particleCount    = cloth.positions.size() / 3;
+        const double      inverseDeltaTime = 1.0 / substepDelta;
+        for (std::size_t particle = 0; particle < particleCount; ++particle)
+        {
+            const std::size_t offset = particle * 3;
+            if (cloth.pinned[particle] != 0u)
+            {
+                continue;
+            }
+            double velocityX = (cloth.positions[offset] - cloth.previousPositions[offset]) * inverseDeltaTime;
+            double velocityY = (cloth.positions[offset + 1] - cloth.previousPositions[offset + 1]) * inverseDeltaTime;
+            double velocityZ = (cloth.positions[offset + 2] - cloth.previousPositions[offset + 2]) * inverseDeltaTime;
+            if (cloth.contactFlags[particle] != 0u)
+            {
+                // Split into normal and tangential parts; the normal part is
+                // removed and the tangential part scales by the friction
+                // factor (the fraction of sliding velocity kept per substep).
+                const double normalX        = cloth.contactNormals[offset];
+                const double normalY        = cloth.contactNormals[offset + 1];
+                const double normalZ        = cloth.contactNormals[offset + 2];
+                const double normalVelocity = normalX * velocityX + normalY * velocityY + normalZ * velocityZ;
+                velocityX -= normalX * normalVelocity;
+                velocityY -= normalY * normalVelocity;
+                velocityZ -= normalZ * normalVelocity;
+                velocityX *= cloth.friction;
+                velocityY *= cloth.friction;
+                velocityZ *= cloth.friction;
+            }
+            cloth.velocities[offset]     = velocityX;
+            cloth.velocities[offset + 1] = velocityY;
+            cloth.velocities[offset + 2] = velocityZ;
+        }
+    }
+
+    bool stepCloth(ClothRecord &cloth, double fixedDeltaSeconds)
+    {
+        const auto stepStart = std::chrono::steady_clock::now();
+        if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > 0.1 || !std::isfinite(fixedDeltaSeconds))
+        {
+            return false;
+        }
+        const std::uint32_t substeps     = settings_.substepsPerStep;
+        const double        substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+        for (std::uint32_t substep = 0; substep < substeps; ++substep)
+        {
+            integrateSubstep(cloth, substepDelta);
+            solveConstraints(cloth, substepDelta);
+            resolveCollisions(cloth);
+            finalizeSubstepVelocities(cloth, substepDelta);
+        }
+        cloth.lastContactCount = static_cast<std::uint32_t>(
+            std::count(cloth.contactFlags.begin(), cloth.contactFlags.end(), std::uint8_t{1}));
+        bool finite = true;
+        for (const double value : cloth.positions)
+        {
+            if (!std::isfinite(value))
+            {
+                finite = false;
+                break;
+            }
+        }
+        if (!finite)
+        {
+            return false;
+        }
+        cloth.stepsSimulated += 1;
+        cloth.substepsExecuted += substeps;
+        const auto stepEnd         = std::chrono::steady_clock::now();
+        cloth.lastStepMilliseconds = std::chrono::duration<double, std::milli>(stepEnd - stepStart).count();
+        return true;
+    }
+
+    // ---- capability implementations ---------------------------------------
+
+    ClothHandle createClothImpl(
+        engine::physics_rigid::WorldHandle world, const ClothDescription *description, ClothError *error)
+    {
+        setError(error, ClothError::None);
+        if (rigid_ == nullptr)
+        {
+            setError(error, ClothError::SimulationFailure);
+            return invalidCloth;
+        }
+        if (description == nullptr || description->columns < 2 || description->rows < 2)
+        {
+            setError(error, ClothError::InvalidDescription);
+            return invalidCloth;
+        }
+        const std::size_t particleCount = static_cast<std::size_t>(description->columns) * description->rows;
+        if (particleCount > settings_.maximumParticlesPerCloth
+            || totalParticles_ + particleCount > settings_.maximumParticles
+            || cloths_.size() >= settings_.maximumCloths)
+        {
+            setError(error, ClothError::CapacityExceeded);
+            return invalidCloth;
+        }
+        if (!math::isFinite(description->transform.position) || !std::isfinite(description->spacing)
+            || description->spacing <= 0.0 || !std::isfinite(description->particleMass)
+            || description->particleMass <= 0.0 || !std::isfinite(description->stretchCompliance)
+            || description->stretchCompliance < 0.0 || !std::isfinite(description->shearCompliance)
+            || description->shearCompliance < 0.0 || !std::isfinite(description->bendCompliance)
+            || description->bendCompliance < 0.0 || !std::isfinite(description->damping) || description->damping < 0.0
+            || !std::isfinite(description->friction) || description->friction < 0.0 || description->friction > 1.0)
+        {
+            setError(error, ClothError::InvalidDescription);
+            return invalidCloth;
+        }
+
+        ClothRecord cloth;
+        cloth.world        = world;
+        cloth.columns      = description->columns;
+        cloth.rows         = description->rows;
+        cloth.spacing      = description->spacing;
+        cloth.particleMass = description->particleMass;
+        rigid_->copyWorldGravity(rigid_->self, world, cloth.gravity);
+        cloth.particleRadius
+            = description->particleRadius > 0.0 ? description->particleRadius : description->spacing * 0.25;
+        cloth.friction          = description->friction;
+        cloth.damping           = description->damping;
+        cloth.stretchCompliance = description->stretchCompliance;
+        cloth.shearCompliance   = description->shearCompliance;
+        cloth.bendCompliance    = description->bendCompliance;
+
+        cloth.positions.resize(particleCount * 3);
+        cloth.velocities.assign(particleCount * 3, 0.0);
+        cloth.previousPositions.resize(particleCount * 3);
+        cloth.inverseMasses.assign(particleCount, 1.0 / description->particleMass);
+        cloth.pinned.assign(particleCount, 0u);
+        cloth.pinPositions.resize(particleCount * 3);
+        cloth.contactFlags.assign(particleCount, 0u);
+        cloth.contactNormals.resize(particleCount * 3);
+
+        const math::Mat3 rotation = math::makeRotationMatrix(description->transform.rotation);
+        for (std::uint32_t row = 0; row < description->rows; ++row)
+        {
+            for (std::uint32_t column = 0; column < description->columns; ++column)
+            {
+                const std::size_t index = particleIndex(cloth, column, row);
+                const math::Vec3  local{
+                    static_cast<double>(column) * description->spacing,
+                    0.0,
+                    static_cast<double>(row) * description->spacing};
+                const math::Vec3 world = description->transform.position + math::multiplyMatrixVector(rotation, local);
+                cloth.positions[index] = world.x;
+                cloth.positions[index + 1]         = world.y;
+                cloth.positions[index + 2]         = world.z;
+                cloth.previousPositions[index]     = world.x;
+                cloth.previousPositions[index + 1] = world.y;
+                cloth.previousPositions[index + 2] = world.z;
+                cloth.pinPositions[index]          = world.x;
+                cloth.pinPositions[index + 1]      = world.y;
+                cloth.pinPositions[index + 2]      = world.z;
+            }
+        }
+
+        // Structural edges (grid neighbors), shear edges (diagonals), and
+        // bend edges (two apart along each axis).
+        const auto addConstraint = [&](std::uint32_t a, std::uint32_t b, double compliance)
+        {
+            DistanceConstraint constraint;
+            constraint.particleA      = a;
+            constraint.particleB      = b;
+            constraint.compliance     = compliance;
+            const std::size_t offsetA = static_cast<std::size_t>(a) * 3;
+            const std::size_t offsetB = static_cast<std::size_t>(b) * 3;
+            constraint.restLength
+                = std::sqrt(std::pow(cloth.positions[offsetB] - cloth.positions[offsetA], 2)
+                            + std::pow(cloth.positions[offsetB + 1] - cloth.positions[offsetA + 1], 2)
+                            + std::pow(cloth.positions[offsetB + 2] - cloth.positions[offsetA + 2], 2));
+            cloth.constraints.push_back(constraint);
+        };
+        for (std::uint32_t row = 0; row < description->rows; ++row)
+        {
+            for (std::uint32_t column = 0; column < description->columns; ++column)
+            {
+                const std::uint32_t index = static_cast<std::uint32_t>(particleIndex(cloth, column, row) / 3);
+                if (column + 1 < description->columns)
+                {
+                    addConstraint(index,
+                        static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row) / 3),
+                        description->stretchCompliance);
+                }
+                if (row + 1 < description->rows)
+                {
+                    addConstraint(index,
+                        static_cast<std::uint32_t>(particleIndex(cloth, column, row + 1) / 3),
+                        description->stretchCompliance);
+                }
+                if (column + 1 < description->columns && row + 1 < description->rows)
+                {
+                    addConstraint(index,
+                        static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row + 1) / 3),
+                        description->shearCompliance);
+                    addConstraint(static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row) / 3),
+                        static_cast<std::uint32_t>(particleIndex(cloth, column, row + 1) / 3),
+                        description->shearCompliance);
+                }
+                if (column + 2 < description->columns)
+                {
+                    addConstraint(index,
+                        static_cast<std::uint32_t>(particleIndex(cloth, column + 2, row) / 3),
+                        description->bendCompliance);
+                }
+                if (row + 2 < description->rows)
+                {
+                    addConstraint(index,
+                        static_cast<std::uint32_t>(particleIndex(cloth, column, row + 2) / 3),
+                        description->bendCompliance);
+                }
+            }
+        }
+
+        for (std::uint32_t pinnedIndex = 0; pinnedIndex < description->pinnedCount; ++pinnedIndex)
+        {
+            const std::uint32_t particle = description->pinnedParticles[pinnedIndex];
+            if (particle >= particleCount)
+            {
+                setError(error, ClothError::InvalidDescription);
+                return invalidCloth;
+            }
+            cloth.pinned[particle]        = 1u;
+            cloth.inverseMasses[particle] = 0.0;
+        }
+
+        if (nextClothHandle_ == invalidCloth)
+        {
+            setError(error, ClothError::CapacityExceeded);
+            return invalidCloth;
+        }
+        cloth.handle = nextClothHandle_;
+        nextClothHandle_
+            = nextClothHandle_ == std::numeric_limits<ClothHandle>::max() ? invalidCloth : nextClothHandle_ + 1;
+        totalParticles_ += particleCount;
+        cloths_.push_back(std::move(cloth));
+        clothIndexByHandle_.emplace(cloths_.back().handle, cloths_.size() - 1);
+        return cloths_.back().handle;
+    }
+
+    void destroyClothImpl(ClothHandle handle)
+    {
+        const auto iterator = clothIndexByHandle_.find(handle);
+        if (iterator == clothIndexByHandle_.end())
+        {
+            return;
+        }
+        totalParticles_ -= cloths_[iterator->second].positions.size() / 3;
+        const std::size_t index = iterator->second;
+        clothIndexByHandle_.erase(iterator);
+        if (index + 1 != cloths_.size())
+        {
+            std::swap(cloths_[index], cloths_.back());
+            clothIndexByHandle_[cloths_[index].handle] = index;
+        }
+        cloths_.pop_back();
+    }
+
+    bool clothInfoImpl(ClothHandle handle, ClothInfo *outInfo)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || outInfo == nullptr)
+        {
+            return false;
+        }
+        outInfo->columns         = cloth->columns;
+        outInfo->rows            = cloth->rows;
+        outInfo->particleCount   = static_cast<std::uint32_t>(cloth->positions.size() / 3);
+        outInfo->constraintCount = static_cast<std::uint32_t>(cloth->constraints.size());
+        return true;
+    }
+
+    bool copyParticlePositionsImpl(
+        ClothHandle handle, double *outPositions, std::uint32_t capacity, std::uint32_t *outRequired)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || outPositions == nullptr)
+        {
+            return false;
+        }
+        const std::uint32_t count = static_cast<std::uint32_t>(cloth->positions.size());
+        if (outRequired != nullptr)
+        {
+            *outRequired = count;
+        }
+        if (capacity < count)
+        {
+            return false;
+        }
+        std::copy(cloth->positions.begin(), cloth->positions.end(), outPositions);
+        return true;
+    }
+
+    bool copyParticleVelocitiesImpl(
+        ClothHandle handle, double *outVelocities, std::uint32_t capacity, std::uint32_t *outRequired)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || outVelocities == nullptr)
+        {
+            return false;
+        }
+        const std::uint32_t count = static_cast<std::uint32_t>(cloth->velocities.size());
+        if (outRequired != nullptr)
+        {
+            *outRequired = count;
+        }
+        if (capacity < count)
+        {
+            return false;
+        }
+        std::copy(cloth->velocities.begin(), cloth->velocities.end(), outVelocities);
+        return true;
+    }
+
+    bool setParticlePinnedImpl(ClothHandle handle, std::uint32_t particleIndex, bool pinned)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || particleIndex >= cloth->pinned.size())
+        {
+            return false;
+        }
+        const std::size_t offset = static_cast<std::size_t>(particleIndex) * 3;
+        if (pinned && cloth->pinned[particleIndex] == 0u)
+        {
+            cloth->pinned[particleIndex]        = 1u;
+            cloth->inverseMasses[particleIndex] = 0.0;
+            for (std::uint32_t axis = 0; axis < 3; ++axis)
+            {
+                cloth->pinPositions[offset + axis] = cloth->positions[offset + axis];
+            }
+        }
+        else if (!pinned && cloth->pinned[particleIndex] != 0u)
+        {
+            cloth->pinned[particleIndex]        = 0u;
+            cloth->inverseMasses[particleIndex] = cloth->particleMass > 0.0 ? 1.0 / cloth->particleMass : 1.0;
+        }
+        return true;
+    }
+
+    bool pinParticleToPositionImpl(ClothHandle handle, std::uint32_t particleIndex, const double position[3])
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || particleIndex >= cloth->pinned.size() || position == nullptr)
+        {
+            return false;
+        }
+        if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || !std::isfinite(position[2]))
+        {
+            return false;
+        }
+        cloth->pinned[particleIndex]        = 1u;
+        cloth->inverseMasses[particleIndex] = 0.0;
+        const std::size_t offset            = static_cast<std::size_t>(particleIndex) * 3;
+        cloth->pinPositions[offset]         = position[0];
+        cloth->pinPositions[offset + 1]     = position[1];
+        cloth->pinPositions[offset + 2]     = position[2];
+        return true;
+    }
+
+    bool isParticlePinnedImpl(ClothHandle handle, std::uint32_t particleIndex, bool *outPinned)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || particleIndex >= cloth->pinned.size() || outPinned == nullptr)
+        {
+            return false;
+        }
+        *outPinned = cloth->pinned[particleIndex] != 0u;
+        return true;
+    }
+
+    bool beginParticleDragImpl(ClothHandle handle, const ClothParticleDrag *drag)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || drag == nullptr || drag->particleIndex >= cloth->pinned.size())
+        {
+            return false;
+        }
+        if (!std::isfinite(drag->stiffness) || !std::isfinite(drag->damping)
+            || !std::isfinite(drag->maximumAcceleration) || drag->stiffness < 0.0 || drag->damping < 0.0
+            || drag->maximumAcceleration < 0.0)
+        {
+            return false;
+        }
+        cloth->drag       = *drag;
+        cloth->dragActive = true;
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            dragTarget_[axis] = cloth->positions[static_cast<std::size_t>(drag->particleIndex) * 3 + axis];
+        }
+        return true;
+    }
+
+    bool setParticleDragTargetImpl(ClothHandle handle, const double target[3])
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || !cloth->dragActive || target == nullptr)
+        {
+            return false;
+        }
+        if (!std::isfinite(target[0]) || !std::isfinite(target[1]) || !std::isfinite(target[2]))
+        {
+            return false;
+        }
+        dragTarget_[0] = target[0];
+        dragTarget_[1] = target[1];
+        dragTarget_[2] = target[2];
+        return true;
+    }
+
+    bool endParticleDragImpl(ClothHandle handle)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr)
+        {
+            return false;
+        }
+        cloth->dragActive = false;
+        return true;
+    }
+
+    bool setWindAccelerationImpl(ClothHandle handle, const double wind[3])
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || wind == nullptr)
+        {
+            return false;
+        }
+        if (!std::isfinite(wind[0]) || !std::isfinite(wind[1]) || !std::isfinite(wind[2]))
+        {
+            return false;
+        }
+        cloth->windAcceleration[0] = wind[0];
+        cloth->windAcceleration[1] = wind[1];
+        cloth->windAcceleration[2] = wind[2];
+        return true;
+    }
+
+    bool stepImpl(ClothHandle handle, double fixedDeltaSeconds)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr)
+        {
+            return false;
+        }
+        return stepCloth(*cloth, fixedDeltaSeconds);
+    }
+
+    std::uint32_t simulateImpl(ClothHandle handle, double elapsedSeconds)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || !std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+        {
+            return 0u;
+        }
+        const double fixedDelta = 1.0 / settings_.fixedRateHz;
+        cloth->simulatedTimeBudget += elapsedSeconds;
+        std::uint32_t executed = 0;
+        while (cloth->simulatedTimeBudget >= fixedDelta && executed < settings_.maximumStepsPerSimulate)
+        {
+            cloth->simulatedTimeBudget -= fixedDelta;
+            if (!stepCloth(*cloth, fixedDelta))
+            {
+                break;
+            }
+            ++executed;
+        }
+        if (executed == settings_.maximumStepsPerSimulate)
+        {
+            cloth->simulatedTimeBudget = 0.0;
+        }
+        return executed;
+    }
+
+    bool clothStatisticsImpl(ClothHandle handle, ClothStatistics *outStatistics)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || outStatistics == nullptr)
+        {
+            return false;
+        }
+        outStatistics->stepsSimulated       = cloth->stepsSimulated;
+        outStatistics->substepsExecuted     = cloth->substepsExecuted;
+        outStatistics->lastContactCount     = cloth->lastContactCount;
+        outStatistics->lastStepMilliseconds = cloth->lastStepMilliseconds;
+        return true;
+    }
+
+    void assignCapabilityPointers()
+    {
+        capability_.abi  = physicsClothCapabilityAbi;
+        capability_.self = this;
+#define ENGINE_PHYSICS_CLOTH_BIND(field, method)                                                                       \
+    capability_.field                                                                                                  \
+        = [](void *self, auto... args) -> decltype(auto) { return static_cast<ClothModule *>(self)->method(args...); }
+        ENGINE_PHYSICS_CLOTH_BIND(createCloth, createClothImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(destroyCloth, destroyClothImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(clothInfo, clothInfoImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(copyParticlePositions, copyParticlePositionsImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(copyParticleVelocities, copyParticleVelocitiesImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(setParticlePinned, setParticlePinnedImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(pinParticleToPosition, pinParticleToPositionImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(isParticlePinned, isParticlePinnedImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(beginParticleDrag, beginParticleDragImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(setParticleDragTarget, setParticleDragTargetImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(endParticleDrag, endParticleDragImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(setWindAcceleration, setWindAccelerationImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(step, stepImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(simulate, simulateImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(clothStatistics, clothStatisticsImpl);
+#undef ENGINE_PHYSICS_CLOTH_BIND
+    }
+
+    ParticipantManifest manifest_;
+    ClothCapability     capability_{};
+
+    engine::physics_rigid::PhysicsRigidCapability *rigid_ = nullptr;
+
+    ClothSettings settings_;
+
+    double dragTarget_[3] = {0.0, 0.0, 0.0};
+
+    std::vector<ClothRecord>                     cloths_;
+    std::unordered_map<ClothHandle, std::size_t> clothIndexByHandle_;
+    ClothHandle                                  nextClothHandle_ = 1;
+    std::size_t                                  totalParticles_  = 0;
+};
+
+} // namespace
+
+} // namespace engine::physics_cloth
+
+// Module entry point queried by the kernel after dlopen: one .so providing
+// the physics_cloth capability and requiring physics_rigid.
+extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQueryModuleEntryTable()
+{
+    static const char *const                    provided[] = {"physics_cloth"};
+    static const char *const                    required[] = {"physics_rigid"};
+    static const engine::EngineModuleEntryTable entry{
+        .abiVersion           = engine::engineModuleAbiVersion,
+        .moduleName           = "physics_cloth",
+        .moduleVersion        = "0.1.0",
+        .createModule         = []() -> engine::ModuleInterface         *{ return new engine::physics_cloth::ClothModule(); },
+        .providedCapabilities = provided,
+        .providedCapabilityCount = 1,
+        .requiredCapabilities    = required,
+        .requiredCapabilityCount = 1,
+        .optionalCapabilities    = nullptr,
+        .optionalCapabilityCount = 0,
+        .declaredPermissions     = nullptr,
+        .declaredPermissionCount = 0};
+    return &entry;
+}

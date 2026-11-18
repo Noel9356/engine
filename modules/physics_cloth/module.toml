@@ -1,0 +1,12 @@
+config_keys           = [
+    "physics_cloth.fixed_rate_hz",
+    "physics_cloth.maximum_cloths",
+    "physics_cloth.maximum_particles",
+    "physics_cloth.maximum_particles_per_cloth",
+    "physics_cloth.maximum_steps_per_simulate",
+    "physics_cloth.substeps_per_step",
+]
+name                  = "physics_cloth"
+provides              = ["physics_cloth"]
+requires              = ["physics_rigid"]
+version               = "0.1.0"

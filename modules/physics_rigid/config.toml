@@ -1,0 +1,23 @@
+[physics_rigid]
+angular_sleep_tolerance       = 0.14
+contact_margin                = 0.02
+contact_slop                  = 0.005
+joint_baumgarte_factor        = 0.2
+fixed_rate_hz                 = 60.0
+gravity                       = [0.0, -9.81, 0.0]
+linear_sleep_tolerance        = 0.08
+maximum_angular_velocity      = 200.0
+maximum_bodies                = 100000
+maximum_joints                = 50000
+maximum_linear_correction     = 0.4
+maximum_linear_velocity       = 500.0
+maximum_steps_per_simulate    = 8
+maximum_worlds                = 16
+restitution_velocity_threshold = 0.3
+solver_position_iterations    = 4
+solver_velocity_iterations    = 20
+substep_maximum_delta         = 0.008333333333333333
+position_correction_factor    = 0.4
+spatial_hash_cell_size        = 2.0
+time_to_sleep                 = 0.6
+warm_starting                 = true

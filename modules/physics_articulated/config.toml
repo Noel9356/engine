@@ -1,0 +1,5 @@
+[physics_articulated]
+maximum_drive_torque     = 10000.0
+maximum_drive_velocity   = 100.0
+maximum_figures          = 256
+maximum_links_per_figure = 128

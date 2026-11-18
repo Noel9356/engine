@@ -35,9 +35,9 @@
 #include <vulkan/vulkan_core.h>
 
 #if defined(_WIN32)
-#define VK_USE_PLATFORM_WIN32_KHR
+    #define VK_USE_PLATFORM_WIN32_KHR
 #elif defined(__linux__)
-#define VK_USE_PLATFORM_XLIB_KHR
+    #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
 #include "vulkan_backend.hpp"
@@ -66,8 +66,10 @@ namespace
 
 // Post-projection matrix mapping OpenGL-convention camera matrices onto
 // Vulkan clip space: flip Y and remap Z from [-1,1] to [0,1].
-constexpr glm::mat4 vulkanClipFixup(glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(0.0f, -1.0f, 0.0f, 0.0f),
-    glm::vec4(0.0f, 0.0f, 0.5f, 0.0f), glm::vec4(0.0f, 0.0f, 0.5f, 1.0f));
+constexpr glm::mat4 vulkanClipFixup(
+    glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(0.0f, -1.0f, 0.0f, 0.0f),
+    glm::vec4(0.0f, 0.0f, 0.5f, 0.0f), glm::vec4(0.0f, 0.0f, 0.5f, 1.0f)
+);
 
 bool sameEnvironment(const pbr::PbrEnvironment &left, const pbr::PbrEnvironment &right)
 {

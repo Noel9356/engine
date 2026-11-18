@@ -1,0 +1,23 @@
+engine_add_application(
+    demo_physics_sandbox
+    SOURCES
+    source/main.cpp
+    source/demo/sandbox_options.cpp
+    source/demo/sandbox_input.cpp
+    source/demo/sandbox_scene.cpp
+    source/demo/sandbox_render.cpp
+    source/demo/sandbox_selftest.cpp
+    ../common/demo_harness.cpp
+    INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../common"
+    CAPABILITIES
+    window
+    renderer
+    camera
+    pbr
+    physics_rigid
+    physics_articulated
+    physics_cloth
+    CONFIG_DIRECTORY
+    "${CMAKE_CURRENT_SOURCE_DIR}/config"
+)

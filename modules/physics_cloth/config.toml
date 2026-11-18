@@ -1,0 +1,7 @@
+[physics_cloth]
+fixed_rate_hz                = 60.0
+maximum_cloths               = 64
+maximum_particles            = 200000
+maximum_particles_per_cloth  = 65536
+maximum_steps_per_simulate   = 8
+substeps_per_step            = 8

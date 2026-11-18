@@ -1,0 +1,28 @@
+config_keys           = [
+    "physics_rigid.angular_sleep_tolerance",
+    "physics_rigid.joint_baumgarte_factor",
+    "physics_rigid.position_correction_factor",
+    "physics_rigid.contact_margin",
+    "physics_rigid.contact_slop",
+    "physics_rigid.fixed_rate_hz",
+    "physics_rigid.gravity",
+    "physics_rigid.linear_sleep_tolerance",
+    "physics_rigid.maximum_angular_velocity",
+    "physics_rigid.maximum_bodies",
+    "physics_rigid.maximum_joints",
+    "physics_rigid.maximum_linear_correction",
+    "physics_rigid.maximum_linear_velocity",
+    "physics_rigid.maximum_steps_per_simulate",
+    "physics_rigid.maximum_worlds",
+    "physics_rigid.restitution_velocity_threshold",
+    "physics_rigid.solver_position_iterations",
+    "physics_rigid.solver_velocity_iterations",
+    "physics_rigid.substep_maximum_delta",
+    "physics_rigid.spatial_hash_cell_size",
+    "physics_rigid.time_to_sleep",
+    "physics_rigid.warm_starting",
+]
+name                  = "physics_rigid"
+provides              = ["physics_rigid"]
+requires              = []
+version               = "0.1.0"

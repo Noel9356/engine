@@ -1,0 +1,936 @@
+// world.cpp - the fixed-step pipeline and query API. Every step runs the
+// same deterministic sequence: force integration, spatial-hash broadphase,
+// narrowphase with persistent-manifold warm starting, sequential impulse
+// iterations over contacts and joints, position integration, island-based
+// sleeping, and statistics. Queries walk all bodies with AABB prechecks so
+// they stay exact for any scene size the configured budgets allow.
+
+#include "world.hpp"
+
+#include "broadphase.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+
+namespace engine::physics_rigid
+{
+namespace
+{
+
+constexpr double kEpsilon          = 1.0e-9;
+constexpr double kMaximumStepDelta = 0.1;
+
+Body *findBody(World &world, BodyHandle handle)
+{
+    const auto iterator = world.bodyIndexByHandle.find(handle);
+    return iterator != world.bodyIndexByHandle.end() ? &world.bodies[iterator->second] : nullptr;
+}
+
+const Body *findBody(const World &world, BodyHandle handle)
+{
+    const auto iterator = world.bodyIndexByHandle.find(handle);
+    return iterator != world.bodyIndexByHandle.end() ? &world.bodies[iterator->second] : nullptr;
+}
+
+Joint *findJoint(World &world, JointHandle handle)
+{
+    const auto iterator = world.jointIndexByHandle.find(handle);
+    return iterator != world.jointIndexByHandle.end() ? &world.joints[iterator->second] : nullptr;
+}
+
+void clampVelocity(math::Vec3 &velocity, double maximumMagnitude)
+{
+    if (maximumMagnitude <= 0.0)
+    {
+        return;
+    }
+    const double magnitudeSquared = math::lengthSquared(velocity);
+    if (magnitudeSquared > maximumMagnitude * maximumMagnitude)
+    {
+        velocity = velocity * (maximumMagnitude / std::sqrt(magnitudeSquared));
+    }
+}
+
+void wakeBody(Body &body)
+{
+    body.awake      = true;
+    body.sleepTimer = 0.0;
+}
+
+// Island union-find with path halving.
+std::size_t islandFind(std::vector<std::size_t> &parent, std::size_t node)
+{
+    while (parent[node] != node)
+    {
+        parent[node] = parent[parent[node]];
+        node         = parent[node];
+    }
+    return node;
+}
+
+void islandUnion(std::vector<std::size_t> &parent, std::size_t left, std::size_t right)
+{
+    const std::size_t rootLeft  = islandFind(parent, left);
+    const std::size_t rootRight = islandFind(parent, right);
+    if (rootLeft != rootRight)
+    {
+        parent[rootLeft] = rootRight;
+    }
+}
+
+struct StateSnapshot
+{
+    std::vector<math::Vec3>       positions;
+    std::vector<math::Quaternion> rotations;
+    std::vector<math::Vec3>       linearVelocities;
+    std::vector<math::Vec3>       angularVelocities;
+
+    void capture(const World &world)
+    {
+        positions.resize(world.bodies.size());
+        rotations.resize(world.bodies.size());
+        linearVelocities.resize(world.bodies.size());
+        angularVelocities.resize(world.bodies.size());
+        for (std::size_t index = 0; index < world.bodies.size(); ++index)
+        {
+            positions[index]         = world.bodies[index].transform.position;
+            rotations[index]         = world.bodies[index].transform.rotation;
+            linearVelocities[index]  = world.bodies[index].linearVelocity;
+            angularVelocities[index] = world.bodies[index].angularVelocity;
+        }
+    }
+
+    void restore(World &world) const
+    {
+        for (std::size_t index = 0; index < world.bodies.size(); ++index)
+        {
+            world.bodies[index].transform.position = positions[index];
+            world.bodies[index].transform.rotation = rotations[index];
+            world.bodies[index].linearVelocity     = linearVelocities[index];
+            world.bodies[index].angularVelocity    = angularVelocities[index];
+        }
+    }
+};
+
+} // namespace
+
+void recomputeMassProperties(Body &body)
+{
+    if (body.kind != BodyKind::Dynamic)
+    {
+        body.mass                = 0.0;
+        body.inverseMass         = 0.0;
+        body.inertiaLocal        = math::Vec3{};
+        body.inverseInertiaLocal = math::Vec3{};
+        return;
+    }
+    double     mass = 0.0;
+    math::Vec3 inertia{};
+    const bool computed = body.densitySource > 0.0
+                            ? computeMassProperties(body.shape, body.densitySource, 0.0, mass, inertia)
+                            : computeMassProperties(body.shape, 0.0, body.explicitMassSource, mass, inertia);
+    if (!computed || !(mass > 0.0))
+    {
+        return; // keep the previous properties; creation validated them
+    }
+    body.mass                = mass;
+    body.inverseMass         = 1.0 / mass;
+    body.inertiaLocal        = inertia;
+    body.inverseInertiaLocal = math::Vec3{
+        inertia.x > 0.0 ? 1.0 / inertia.x : 0.0,
+        inertia.y > 0.0 ? 1.0 / inertia.y : 0.0,
+        inertia.z > 0.0 ? 1.0 / inertia.z : 0.0};
+}
+
+void refreshBodyAabb(Body &body)
+{
+    computeShapeAabb(body.shape, body.transform, body.aabbMinimum, body.aabbMaximum);
+}
+
+bool validateBodyDescription(const World &world, const SimulationSettings &settings, const BodyDescription &description,
+    Body &outBody, PhysicsError *error)
+{
+    const auto setFailure = [&](PhysicsError value)
+    {
+        if (error != nullptr)
+        {
+            *error = value;
+        }
+        return false;
+    };
+
+    if (world.bodies.size() >= settings.maximumBodies)
+    {
+        return setFailure(PhysicsError::CapacityExceeded);
+    }
+    Body body;
+    if (!makeShape(description.shape, body.shape))
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
+    if (body.shape.kind == ShapeKind::Plane && description.kind != BodyKind::Static)
+    {
+        return setFailure(PhysicsError::Unsupported);
+    }
+    if (!math::isFinite(description.transform.position))
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
+    body.transform.position = description.transform.position;
+    body.transform.rotation = math::normalize(description.transform.rotation);
+    if (math::dot(body.transform.rotation, body.transform.rotation) < 1.0e-12)
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
+    body.kind                 = description.kind;
+    body.material             = description.material;
+    body.material.friction    = std::clamp(body.material.friction, 0.0, 4.0);
+    body.material.restitution = std::clamp(body.material.restitution, 0.0, 1.0);
+    if (!std::isfinite(description.linearDamping) || description.linearDamping < 0.0
+        || !std::isfinite(description.angularDamping) || description.angularDamping < 0.0)
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
+    body.linearDamping   = description.linearDamping;
+    body.angularDamping  = description.angularDamping;
+    body.sleepingEnabled = description.sleepingEnabled;
+    body.gravityEnabled  = description.gravityEnabled;
+    body.categoryBits    = description.categoryBits != 0u ? description.categoryBits : 1u;
+    body.maskBits        = description.maskBits;
+    body.userTag         = description.userTag;
+    body.sleepTimer      = 0.0;
+
+    // Only dynamic bodies carry mass; static and kinematic bodies stay at
+    // zero inverse mass regardless of the description's density fields.
+    if (body.kind == BodyKind::Dynamic)
+    {
+        double     mass = 0.0;
+        math::Vec3 inertia{};
+        if (description.density > 0.0)
+        {
+            if (!std::isfinite(description.density)
+                || !computeMassProperties(body.shape, description.density, 0.0, mass, inertia))
+            {
+                return setFailure(PhysicsError::InvalidDescription);
+            }
+        }
+        else if (std::isfinite(description.mass) && description.mass > 0.0
+                 && computeMassProperties(body.shape, 0.0, description.mass, mass, inertia))
+        {
+            // explicit mass with shape-derived inertia
+        }
+        else
+        {
+            return setFailure(PhysicsError::InvalidDescription);
+        }
+        body.mass                = mass;
+        body.inverseMass         = mass > 0.0 ? 1.0 / mass : 0.0;
+        body.inertiaLocal        = inertia;
+        body.inverseInertiaLocal = math::Vec3{
+            inertia.x > 0.0 ? 1.0 / inertia.x : 0.0,
+            inertia.y > 0.0 ? 1.0 / inertia.y : 0.0,
+            inertia.z > 0.0 ? 1.0 / inertia.z : 0.0};
+        body.densitySource      = description.density > 0.0 ? description.density : 0.0;
+        body.explicitMassSource = description.density > 0.0 ? 0.0 : description.mass;
+    }
+    body.awake = body.kind != BodyKind::Static;
+
+    refreshBodyAabb(body);
+    outBody = body;
+    if (error != nullptr)
+    {
+        *error = PhysicsError::None;
+    }
+    return true;
+}
+
+// One integration pass at the given (already validated) delta: the whole
+// pipeline without statistics or substep bookkeeping.
+bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
+{
+    const SimulationSettings &settings = world.settings;
+    StepContext               context{fixedDeltaSeconds, 1.0 / fixedDeltaSeconds};
+
+    StateSnapshot snapshot;
+    snapshot.capture(world);
+
+    // Force and gravity integration for awake dynamic bodies.
+    for (Body &body : world.bodies)
+    {
+        if (body.kind != BodyKind::Dynamic || !body.awake)
+        {
+            continue;
+        }
+        if (body.gravityEnabled)
+        {
+            body.linearVelocity += world.gravity * fixedDeltaSeconds;
+        }
+        if (math::lengthSquared(body.forceAccumulator) > 0.0)
+        {
+            body.linearVelocity += body.forceAccumulator * (body.inverseMass * fixedDeltaSeconds);
+        }
+        if (math::lengthSquared(body.torqueAccumulator) > 0.0)
+        {
+            const math::Mat3 inverseInertia = computeWorldInverseInertia(body);
+            body.angularVelocity
+                += math::multiplyMatrixVector(inverseInertia, body.torqueAccumulator) * fixedDeltaSeconds;
+        }
+        if (body.linearDamping > 0.0)
+        {
+            body.linearVelocity *= 1.0 / (1.0 + fixedDeltaSeconds * body.linearDamping);
+        }
+        if (body.angularDamping > 0.0)
+        {
+            body.angularVelocity *= 1.0 / (1.0 + fixedDeltaSeconds * body.angularDamping);
+        }
+        clampVelocity(body.linearVelocity, settings.maximumLinearVelocity);
+        clampVelocity(body.angularVelocity, settings.maximumAngularVelocity);
+    }
+
+    // Kinematic bodies integrate their velocities without forces.
+    for (Body &body : world.bodies)
+    {
+        if (body.kind == BodyKind::Kinematic)
+        {
+            clampVelocity(body.linearVelocity, settings.maximumLinearVelocity);
+            clampVelocity(body.angularVelocity, settings.maximumAngularVelocity);
+        }
+    }
+
+    // Broadphase over solid bodies; planes join narrowphase separately.
+    collectBroadphasePairs(world, settings.spatialHashCellSize, scratch.pairs);
+    world.broadphasePairs = scratch.pairs;
+
+    // Narrowphase into the persistent manifold map.
+    for (const auto &pair : scratch.pairs)
+    {
+        Body           &bodyA = world.bodies[pair.first];
+        Body           &bodyB = world.bodies[pair.second];
+        ContactManifold fresh;
+        const bool      touching
+            = collideShapes(bodyA.shape, bodyA.transform, bodyB.shape, bodyB.transform, settings.contactMargin, fresh);
+        if (!touching)
+        {
+            continue;
+        }
+        const std::uint64_t pairKey   = makePairKey(bodyA.handle, bodyB.handle);
+        PersistedManifold  &persisted = world.manifolds[pairKey];
+
+        // Match fresh points to persisted points for impulse carry-over.
+        PersistedContactPoint carried[4];
+        std::uint32_t         carriedCount = persisted.pointCount;
+        for (std::uint32_t pointIndex = 0; pointIndex < carriedCount; ++pointIndex)
+        {
+            carried[pointIndex] = persisted.points[pointIndex];
+        }
+        persisted.pairKey        = pairKey;
+        persisted.bodyIndexA     = pair.first;
+        persisted.bodyIndexB     = pair.second;
+        persisted.normal         = fresh.normal;
+        persisted.ageSteps       = 0;
+        persisted.pointCount     = 0;
+        const double matchRadius = std::max(settings.contactSlop * 4.0, 0.02);
+        for (std::uint32_t freshIndex = 0; freshIndex < fresh.pointCount; ++freshIndex)
+        {
+            PersistedContactPoint target;
+            target.anchorA            = fresh.points[freshIndex].pointA;
+            target.anchorB            = fresh.points[freshIndex].pointB;
+            target.normalImpulse      = 0.0;
+            target.tangentImpulse1    = 0.0;
+            target.tangentImpulse2    = 0.0;
+            double       bestDistance = matchRadius;
+            std::int32_t bestCarried  = -1;
+            for (std::uint32_t candidateIndex = 0; candidateIndex < carriedCount; ++candidateIndex)
+            {
+                const double distanceA = math::lengthSquared(carried[candidateIndex].anchorA - target.anchorA);
+                const double distanceB = math::lengthSquared(carried[candidateIndex].anchorB - target.anchorB);
+                const double distance  = std::max(distanceA, distanceB);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestCarried  = static_cast<std::int32_t>(candidateIndex);
+                }
+            }
+            if (bestCarried >= 0)
+            {
+                target.normalImpulse   = carried[bestCarried].normalImpulse;
+                target.tangentImpulse1 = carried[bestCarried].tangentImpulse1;
+                target.tangentImpulse2 = carried[bestCarried].tangentImpulse2;
+                target.tangent1        = carried[bestCarried].tangent1;
+                target.tangent2        = carried[bestCarried].tangent2;
+                carried[bestCarried]   = carried[--carriedCount];
+            }
+            else
+            {
+                target.tangent1 = math::Vec3{};
+                target.tangent2 = math::Vec3{};
+            }
+            persisted.points[persisted.pointCount++] = target;
+        }
+    }
+
+    // Plane narrowphase: every solid body against every plane, merged into
+    // the same persistent-manifold store with canonical pair ordering.
+    for (const BodyHandle planeHandle : world.planeBodyHandles)
+    {
+        const auto planeIndexIterator = world.bodyIndexByHandle.find(planeHandle);
+        if (planeIndexIterator == world.bodyIndexByHandle.end())
+        {
+            continue;
+        }
+        const Body &planeBody = world.bodies[planeIndexIterator->second];
+        for (std::size_t bodyIndex = 0; bodyIndex < world.bodies.size(); ++bodyIndex)
+        {
+            Body &body = world.bodies[bodyIndex];
+            if (body.shape.kind == ShapeKind::Plane || body.kind == BodyKind::Static || !body.awake)
+            {
+                continue;
+            }
+            ContactManifold fresh;
+            if (!collidePlaneSolid(planeBody.shape.planeNormal,
+                    planeBody.shape.planeOffset,
+                    body.shape,
+                    body.transform,
+                    settings.contactMargin,
+                    fresh))
+            {
+                continue;
+            }
+            // The solver convention requires the manifold normal to point
+            // from body B toward body A of the canonical pair. When the plane
+            // takes the A slot (it is created first, so index 0), the
+            // collidePlaneSolid result - which reports plane-as-B normals -
+            // must flip; when the solid body takes the A slot the result
+            // already matches.
+            const std::size_t planeIndex = planeIndexIterator->second;
+            if (planeIndex < bodyIndex)
+            {
+                fresh.normal = fresh.normal * -1.0;
+                for (std::uint32_t pointIndex = 0; pointIndex < fresh.pointCount; ++pointIndex)
+                {
+                    std::swap(fresh.points[pointIndex].pointA, fresh.points[pointIndex].pointB);
+                }
+            }
+            const std::uint64_t pairKey   = makePairKey(planeBody.handle, body.handle);
+            PersistedManifold  &persisted = world.manifolds[pairKey];
+            persisted.pairKey             = pairKey;
+            persisted.bodyIndexA          = std::min(planeIndex, bodyIndex);
+            persisted.bodyIndexB          = std::max(planeIndex, bodyIndex);
+            persisted.normal              = fresh.normal;
+            persisted.ageSteps            = 0;
+            persisted.pointCount          = 0;
+            for (std::uint32_t pointIndex = 0; pointIndex < fresh.pointCount; ++pointIndex)
+            {
+                PersistedContactPoint target;
+                target.anchorA                           = fresh.points[pointIndex].pointA;
+                target.anchorB                           = fresh.points[pointIndex].pointB;
+                target.tangent1                          = math::Vec3{};
+                target.tangent2                          = math::Vec3{};
+                persisted.points[persisted.pointCount++] = target;
+            }
+        }
+    }
+
+    // Age and drop stale manifolds (pairs that separated).
+    for (auto manifoldIterator = world.manifolds.begin(); manifoldIterator != world.manifolds.end();)
+    {
+        PersistedManifold &persisted = manifoldIterator->second;
+        if (persisted.ageSteps == 0)
+        {
+            ++persisted.ageSteps;
+            ++manifoldIterator;
+        }
+        else
+        {
+            manifoldIterator = world.manifolds.erase(manifoldIterator);
+        }
+    }
+
+    // Constraint preparation and warm starting.
+    prepareContactConstraints(world, context, scratch.contacts);
+    prepareJointConstraints(world, context, scratch.jointConstraints);
+    warmStartContacts(world, scratch.contacts, settings.warmStarting);
+    warmStartJoints(world, scratch.jointConstraints, settings.warmStarting);
+
+    // Velocity iterations: contacts then joints, in fixed order.
+    for (std::uint32_t iteration = 0; iteration < settings.velocityIterations; ++iteration)
+    {
+        solveContactVelocityIteration(world, scratch.contacts, context);
+        solveJointVelocityIteration(world, scratch.jointConstraints, context);
+    }
+
+    // Position iterations remove the remaining contact penetration directly
+    // (split impulse scheme - no bias velocities, no bounce).
+    for (std::uint32_t iteration = 0; iteration < settings.positionIterations; ++iteration)
+    {
+        solveContactPositionIteration(world, scratch.contacts, context);
+    }
+
+    // Persist the solved tangent basis so next step's warm start applies the
+    // same frame, then integrate positions.
+    for (const ContactConstraint &constraint : scratch.contacts)
+    {
+        for (std::uint32_t pointIndex = 0; pointIndex < constraint.pointCount; ++pointIndex)
+        {
+            const ContactConstraint::Point &point = constraint.points[pointIndex];
+            point.persisted->tangent1             = point.tangent1;
+            point.persisted->tangent2             = point.tangent2;
+        }
+    }
+    for (Body &body : world.bodies)
+    {
+        if (body.kind == BodyKind::Static)
+        {
+            body.forceAccumulator  = math::Vec3{};
+            body.torqueAccumulator = math::Vec3{};
+            continue;
+        }
+        if (body.kind == BodyKind::Kinematic || body.awake)
+        {
+            body.transform.position += body.linearVelocity * fixedDeltaSeconds;
+            const math::Vec3       angular = body.angularVelocity * fixedDeltaSeconds;
+            const math::Quaternion delta{angular.x * 0.5, angular.y * 0.5, angular.z * 0.5, 0.0};
+            body.transform.rotation = math::normalize(body.transform.rotation + (delta * body.transform.rotation));
+            refreshBodyAabb(body);
+        }
+        body.forceAccumulator  = math::Vec3{};
+        body.torqueAccumulator = math::Vec3{};
+    }
+
+    // Non-finite guard: restore the pre-step snapshot on divergence.
+    bool finite = true;
+    for (const Body &body : world.bodies)
+    {
+        if (!math::isFinite(body.transform.position) || !math::isFinite(body.linearVelocity)
+            || !math::isFinite(body.angularVelocity) || !std::isfinite(body.transform.rotation.x)
+            || !std::isfinite(body.transform.rotation.y) || !std::isfinite(body.transform.rotation.z)
+            || !std::isfinite(body.transform.rotation.w))
+        {
+            finite = false;
+            break;
+        }
+    }
+    if (!finite)
+    {
+        snapshot.restore(world);
+        return false;
+    }
+
+    // Island-based sleeping over the contact and joint graphs.
+    scratch.islandParent.resize(world.bodies.size());
+    for (std::size_t index = 0; index < world.bodies.size(); ++index)
+    {
+        scratch.islandParent[index] = index;
+    }
+    for (const auto &pair : scratch.pairs)
+    {
+        const Body &bodyA = world.bodies[pair.first];
+        const Body &bodyB = world.bodies[pair.second];
+        if (bodyA.kind == BodyKind::Dynamic && bodyB.kind == BodyKind::Dynamic)
+        {
+            islandUnion(scratch.islandParent, pair.first, pair.second);
+        }
+    }
+    for (const Joint &joint : world.joints)
+    {
+        const auto iteratorA = world.bodyIndexByHandle.find(joint.description.bodyA);
+        const auto iteratorB = world.bodyIndexByHandle.find(joint.description.bodyB);
+        if (iteratorA == world.bodyIndexByHandle.end() || iteratorB == world.bodyIndexByHandle.end())
+        {
+            continue;
+        }
+        const Body &bodyA = world.bodies[iteratorA->second];
+        const Body &bodyB = world.bodies[iteratorB->second];
+        if (bodyA.kind == BodyKind::Dynamic && bodyB.kind == BodyKind::Dynamic)
+        {
+            islandUnion(scratch.islandParent, iteratorA->second, iteratorB->second);
+        }
+    }
+    // Sleep timers accumulate only when the whole island is below tolerance.
+    {
+        struct IslandMotion
+        {
+            bool allBelow = true;
+        };
+        std::unordered_map<std::size_t, IslandMotion> islandMotion;
+        for (std::size_t index = 0; index < world.bodies.size(); ++index)
+        {
+            const Body &body = world.bodies[index];
+            if (body.kind != BodyKind::Dynamic)
+            {
+                continue;
+            }
+            const std::size_t root     = islandFind(scratch.islandParent, index);
+            const bool        below    = math::lengthSquared(body.linearVelocity)
+                                           < settings.linearSleepTolerance * settings.linearSleepTolerance
+                                      && math::lengthSquared(body.angularVelocity)
+                                             < settings.angularSleepTolerance * settings.angularSleepTolerance;
+            const auto        iterator = islandMotion.find(root);
+            if (iterator == islandMotion.end())
+            {
+                islandMotion.emplace(root, IslandMotion{below});
+            }
+            else if (!below)
+            {
+                iterator->second.allBelow = false;
+            }
+        }
+        for (std::size_t index = 0; index < world.bodies.size(); ++index)
+        {
+            Body &body = world.bodies[index];
+            if (body.kind != BodyKind::Dynamic)
+            {
+                continue;
+            }
+            const std::size_t root     = islandFind(scratch.islandParent, index);
+            const auto        iterator = islandMotion.find(root);
+            if (iterator == islandMotion.end())
+            {
+                continue;
+            }
+            if (iterator->second.allBelow)
+            {
+                body.sleepTimer += fixedDeltaSeconds;
+                if (body.sleepingEnabled && body.sleepTimer >= settings.timeToSleep)
+                {
+                    body.awake           = false;
+                    body.linearVelocity  = math::Vec3{};
+                    body.angularVelocity = math::Vec3{};
+                }
+            }
+            else
+            {
+                body.sleepTimer = 0.0;
+                body.awake      = true;
+            }
+        }
+    }
+
+    // Clear stale manifolds left over from bodies destroyed this step.
+    for (auto manifoldIterator = world.manifolds.begin(); manifoldIterator != world.manifolds.end();)
+    {
+        if (world.bodyIndexByHandle.find(static_cast<BodyHandle>(manifoldIterator->second.pairKey >> 32))
+                == world.bodyIndexByHandle.end()
+            || world.bodyIndexByHandle.find(static_cast<BodyHandle>(manifoldIterator->second.pairKey & 0xFFFFFFFFull))
+                   == world.bodyIndexByHandle.end())
+        {
+            manifoldIterator = world.manifolds.erase(manifoldIterator);
+        }
+        else
+        {
+            ++manifoldIterator;
+        }
+    }
+
+    return true;
+}
+
+bool stepWorld(World &world, double fixedDeltaSeconds, StepScratch &scratch)
+{
+    const auto stepStart = std::chrono::steady_clock::now();
+    if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > kMaximumStepDelta || !std::isfinite(fixedDeltaSeconds))
+    {
+        return false;
+    }
+    // Canonical substepping: coarse caller deltas split into equal internal
+    // passes so integration runs on the same step everywhere (deterministic
+    // in the delta alone). A diverging substep fails the whole step.
+    std::uint32_t substeps = 1;
+    if (world.settings.substepMaximumDelta > 0.0 && fixedDeltaSeconds > world.settings.substepMaximumDelta)
+    {
+        const double rawCount = std::ceil(fixedDeltaSeconds / world.settings.substepMaximumDelta);
+        substeps              = static_cast<std::uint32_t>(std::min(rawCount, 16.0));
+    }
+    const double substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+    for (std::uint32_t substep = 0; substep < substeps; ++substep)
+    {
+        if (!stepPipeline(world, substepDelta, scratch))
+        {
+            return false;
+        }
+    }
+    world.stepsSimulated += 1;
+    world.lastStepMilliseconds
+        = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stepStart).count();
+    return true;
+}
+
+// Removes a body, its joints, and every manifold that references it; wakes
+// nothing (the caller wakes partners when a grabbed body disappears).
+bool destroyBodyFromWorld(World &world, BodyHandle handle)
+{
+    const auto iterator = world.bodyIndexByHandle.find(handle);
+    if (iterator == world.bodyIndexByHandle.end())
+    {
+        return false;
+    }
+    const std::size_t index = iterator->second;
+    world.bodyIndexByHandle.erase(iterator);
+    const BodyHandle movedHandle = world.bodies.back().handle;
+    if (index + 1 != world.bodies.size())
+    {
+        world.bodies[index]                  = world.bodies.back();
+        world.bodyIndexByHandle[movedHandle] = index;
+    }
+    world.bodies.pop_back();
+
+    for (std::size_t jointIndex = 0; jointIndex < world.joints.size();)
+    {
+        if (world.joints[jointIndex].description.bodyA == handle
+            || world.joints[jointIndex].description.bodyB == handle)
+        {
+            destroyJointFromWorld(world, world.joints[jointIndex].handle);
+            jointIndex = 0; // index map compaction invalidates positions; restart the scan
+            continue;
+        }
+        ++jointIndex;
+    }
+    for (auto manifoldIterator = world.manifolds.begin(); manifoldIterator != world.manifolds.end();)
+    {
+        const std::uint32_t keyA = static_cast<std::uint32_t>(manifoldIterator->second.pairKey >> 32);
+        const std::uint32_t keyB = static_cast<std::uint32_t>(manifoldIterator->second.pairKey & 0xFFFFFFFFull);
+        if (keyA == handle || keyB == handle)
+        {
+            manifoldIterator = world.manifolds.erase(manifoldIterator);
+        }
+        else
+        {
+            ++manifoldIterator;
+        }
+    }
+    for (std::size_t planeIndex = 0; planeIndex < world.planeBodyHandles.size(); ++planeIndex)
+    {
+        if (world.planeBodyHandles[planeIndex] == handle)
+        {
+            world.planeBodyHandles[planeIndex] = world.planeBodyHandles.back();
+            world.planeBodyHandles.pop_back();
+            break;
+        }
+    }
+    return true;
+}
+
+// Removes one joint record.
+bool destroyJointFromWorld(World &world, JointHandle handle)
+{
+    const auto iterator = world.jointIndexByHandle.find(handle);
+    if (iterator == world.jointIndexByHandle.end())
+    {
+        return false;
+    }
+    const std::size_t index = iterator->second;
+    world.jointIndexByHandle.erase(iterator);
+    if (index + 1 != world.joints.size())
+    {
+        world.joints[index]                                  = world.joints.back();
+        world.jointIndexByHandle[world.joints[index].handle] = index;
+    }
+    world.joints.pop_back();
+    return true;
+}
+
+bool rayCastWorld(
+    const World &world, const math::Vec3 &origin, const math::Vec3 &direction, double maximumDistance, RayHit &outHit)
+{
+    const double directionLength = math::length(direction);
+    if (directionLength <= kEpsilon || maximumDistance <= 0.0)
+    {
+        return false;
+    }
+    const math::Vec3 normalizedDirection = direction * (1.0 / directionLength);
+    const double     scaledMaximum       = maximumDistance * directionLength;
+    bool             hit                 = false;
+    double           bestDistance        = scaledMaximum;
+    RayHit           bestHit;
+    for (const Body &body : world.bodies)
+    {
+        if (body.shape.kind == ShapeKind::Plane)
+        {
+            double distance = 0.0;
+            if (rayCastPlane(
+                    body.shape.planeNormal, body.shape.planeOffset, origin, normalizedDirection, bestDistance, distance)
+                && distance < bestDistance)
+            {
+                bestDistance     = distance;
+                bestHit.body     = body.handle;
+                bestHit.distance = distance / directionLength;
+                bestHit.point    = origin + normalizedDirection * distance;
+                bestHit.normal   = body.shape.planeNormal
+                                 * (math::dot(body.shape.planeNormal, normalizedDirection) > 0.0 ? -1.0 : 1.0);
+                hit              = true;
+            }
+            continue;
+        }
+        double distance = 0.0;
+        bool   touches  = false;
+        switch (body.shape.kind)
+        {
+        case ShapeKind::Sphere:
+            touches = rayCastSphere(
+                body.transform, body.shape.sphereRadius, origin, normalizedDirection, bestDistance, distance);
+            break;
+        case ShapeKind::Box:
+            touches = rayCastBox(
+                body.transform, body.shape.boxHalfExtents, origin, normalizedDirection, bestDistance, distance);
+            break;
+        case ShapeKind::Capsule:
+            touches = rayCastCapsule(body.transform,
+                body.shape.capsuleRadius,
+                body.shape.capsuleHalfLength,
+                origin,
+                normalizedDirection,
+                bestDistance,
+                distance);
+            break;
+        case ShapeKind::Plane:
+        default:
+            break;
+        }
+        if (touches && distance < bestDistance)
+        {
+            bestDistance     = distance;
+            bestHit.body     = body.handle;
+            bestHit.distance = distance / directionLength;
+            bestHit.point    = origin + normalizedDirection * distance;
+            // Normal from the shape surface toward the ray origin.
+            const math::Vec3 surfaceDelta = bestHit.point - body.transform.position;
+            math::Vec3       candidate    = math::normalized(surfaceDelta);
+            if (body.shape.kind == ShapeKind::Box)
+            {
+                const math::Vec3 localPoint = math::inverseRotate(body.transform.rotation, surfaceDelta);
+                const double     components[3]
+                    = {std::abs(localPoint.x) / body.shape.boxHalfExtents[0],
+                        std::abs(localPoint.y) / body.shape.boxHalfExtents[1],
+                        std::abs(localPoint.z) / body.shape.boxHalfExtents[2]};
+                std::uint32_t faceAxis = components[0] > components[1] ? (components[0] > components[2] ? 0u : 2u)
+                                                                       : (components[1] > components[2] ? 1u : 2u);
+                math::Vec3    localNormal{};
+                (&localNormal.x)[faceAxis] = (&localPoint.x)[faceAxis] >= 0.0 ? 1.0 : -1.0;
+                candidate                  = math::rotate(body.transform.rotation, localNormal);
+            }
+            else if (body.shape.kind == ShapeKind::Capsule)
+            {
+                math::Vec3 endpointA;
+                math::Vec3 endpointB;
+                computeCapsuleSegment(body.shape, body.transform, endpointA, endpointB);
+                const math::Vec3 axis          = math::normalized(endpointB - endpointA);
+                const double     segmentLength = math::length(endpointB - endpointA);
+                const double projection = std::clamp(math::dot(bestHit.point - endpointA, axis), 0.0, segmentLength);
+                candidate               = math::normalized(bestHit.point - (endpointA + axis * projection));
+            }
+            bestHit.normal = math::dot(candidate, normalizedDirection) > 0.0 ? candidate * -1.0 : candidate;
+            hit            = true;
+        }
+    }
+    if (!hit)
+    {
+        return false;
+    }
+    outHit = bestHit;
+    return true;
+}
+
+bool collideSphereWorld(const World &world, const math::Vec3 &center, double radius, math::Vec3 &outNormal,
+    double &outDepth, BodyHandle &outBody)
+{
+    if (!(radius > 0.0) || !math::isFinite(center))
+    {
+        return false;
+    }
+    bool       hit       = false;
+    double     bestDepth = 0.0;
+    math::Vec3 bestNormal;
+    BodyHandle bestBody = invalidBody;
+    for (const Body &body : world.bodies)
+    {
+        math::Vec3 normal;
+        double     depth = 0.0;
+        if (body.shape.kind == ShapeKind::Plane)
+        {
+            if (collideSpherePlane(center, radius, body.shape.planeNormal, body.shape.planeOffset, normal, depth)
+                && depth > bestDepth)
+            {
+                bestDepth  = depth;
+                bestNormal = normal;
+                bestBody   = body.handle;
+                hit        = true;
+            }
+            continue;
+        }
+        if (collideSphereSolid(center, radius, body.shape, body.transform, normal, depth) && depth > bestDepth)
+        {
+            bestDepth  = depth;
+            bestNormal = normal;
+            bestBody   = body.handle;
+            hit        = true;
+        }
+    }
+    if (!hit)
+    {
+        return false;
+    }
+    outNormal = bestNormal;
+    outDepth  = bestDepth;
+    outBody   = bestBody;
+    return true;
+}
+
+void fillWorldStatistics(const World &world, WorldStatistics &outStatistics)
+{
+    WorldStatistics statistics;
+    statistics.bodyCount = static_cast<std::uint32_t>(world.bodies.size());
+    for (const Body &body : world.bodies)
+    {
+        if (body.kind == BodyKind::Static)
+        {
+            ++statistics.staticBodyCount;
+        }
+        else if (body.kind == BodyKind::Kinematic)
+        {
+            ++statistics.kinematicBodyCount;
+        }
+        if (body.kind == BodyKind::Dynamic)
+        {
+            if (body.awake)
+            {
+                ++statistics.awakeBodyCount;
+            }
+            else
+            {
+                ++statistics.sleepingBodyCount;
+            }
+        }
+    }
+    statistics.jointCount       = static_cast<std::uint32_t>(world.joints.size());
+    statistics.contactPairCount = static_cast<std::uint32_t>(world.manifolds.size());
+    for (const auto &entry : world.manifolds)
+    {
+        statistics.contactPointCount += entry.second.pointCount;
+    }
+    statistics.stepsSimulated       = world.stepsSimulated;
+    statistics.lastStepMilliseconds = world.lastStepMilliseconds;
+    outStatistics                   = statistics;
+}
+
+World *createWorld(std::vector<World> &worlds, std::unordered_map<WorldHandle, std::size_t> &indexByHandle,
+    WorldHandle &nextHandle, const SimulationSettings &settings, const WorldDescription &description)
+{
+    World world;
+    world.settings = settings;
+    world.gravity  = description.useConfiguredGravity ? settings.gravity : description.gravity;
+    if (nextHandle == invalidWorld)
+    {
+        return nullptr; // handle space exhausted
+    }
+    world.handle = nextHandle;
+    nextHandle   = nextHandle == std::numeric_limits<WorldHandle>::max() ? invalidWorld : nextHandle + 1;
+    worlds.push_back(std::move(world));
+    indexByHandle.emplace(worlds.back().handle, worlds.size() - 1);
+    return &worlds.back();
+}
+
+} // namespace engine::physics_rigid

@@ -1,0 +1,84 @@
+# demo_physics_sandbox: interactive rigid-body, articulated-body, and cloth
+# physics configuration.
+#
+# Headless by default (CI / screenshot runs): the window and renderer run on
+# their CPU backends and the demo exports PPM screenshots. For a windowed,
+# interactive run pass --set window.backend=glfw --set renderer.backend=vulkan
+# (or use config/profiles/windowed.toml). Simulation stepping is fixed-rate:
+# the [physics_rigid] and [physics_cloth] fixed_rate_hz keys drive the
+# FrameClock accumulator, and the demo renders interpolated poses between
+# steps, so results never depend on frame pacing.
+
+[engine]
+active_plugins             = []
+max_fps                 = 0
+max_frame_delta_seconds = 0.25
+max_outstanding_tasks   = 65536
+max_worker_count        = 16
+priority_aging_ms       = 250
+queue_source_fairness   = false
+worker_count            = 0
+
+[pbr]
+# Warm key light from the upper right so contact shadows read on the floor
+# and the cloth lattice gets rim separation. The headless renderer exports
+# LINEAR framebuffer values, so albedo x (ambient + sun x NdotL) is tuned to
+# land mid-tones for the demo palette; the hemispheric ambient keeps the sky
+# cool and the ground warm so up-facing and down-facing reads differ.
+ambient_intensity   = 0.14
+ambient_ground_color = [0.30, 0.26, 0.22]
+ambient_sky_color   = [0.52, 0.58, 0.68]
+sun_color           = [1.0, 0.95, 0.86]
+sun_direction       = [-0.45, 0.62, -0.64]
+sun_enabled         = true
+sun_intensity       = 2.4
+
+[physics_sandbox]
+# Scene tuning (the demo reads this section; physics solver tuning lives in
+# the modules' own sections).
+blast_impulse         = 260.0
+blast_radius          = 5.0
+fixed_rate_hz         = 60.0
+grab_damping          = 6.0
+grab_maximum_force    = 4000.0
+grab_stiffness        = 60.0
+gravity               = [0.0, -9.81, 0.0]
+ground_extent         = 40.0
+paddle_frequency      = 0.14
+paddle_speed          = 0.9
+paddle_span           = 6.0
+pendulum_frequency    = 0.25
+pendulum_swing        = 0.6
+spawn_ahead           = 3.0
+wind_strength         = 3.0
+
+[physics_rigid]
+# Solver defaults from the module config; the demo keeps the 60 Hz contract
+# (--fixed-hz overrides it for A/B captures and the V key cycles it live).
+baumgarte_factor           = 0.2
+contact_slop               = 0.005
+fixed_rate_hz              = 60.0
+solver_velocity_iterations = 20
+spatial_hash_cell_size     = 2.0
+warm_starting              = true
+
+[renderer]
+# Draw-command sorting is off for the same reason as the planet demo, and
+# back-face culling is disabled because the headless backend's per-mesh
+# winding vote misclassifies thin slabs viewed edge-on.
+back_face_culling = false
+backend     = "headless"
+clear_color = [0.1, 0.12, 0.16, 1.0]
+draw_sort_mode = "off"
+lod_enabled = false
+
+[trust]
+# The renderer acquires six capabilities (window + window.vulkan + pbr +
+# direct_lighting + lumen_gi + lumen_reflection), which the trust gate flags
+# as "broad"; first-party modules are trusted by name.
+trustModules = ["renderer"]
+
+[window]
+backend = "headless"
+height  = 540
+width   = 960

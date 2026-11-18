@@ -1,0 +1,1010 @@
+// physics_rigid module implementation.
+//
+// The module owns the handle-keyed worlds and exposes the
+// PhysicsRigidCapability function table. Simulation mechanics live in
+// dedicated translation units (math.hpp, shapes, broadphase, solver, world)
+// so this file stays focused on lifecycle, configuration, and capability
+// dispatch.
+
+#include "broadphase.hpp"
+#include "math.hpp"
+#include "records.hpp"
+#include "shapes.hpp"
+#include "solver.hpp"
+#include "world.hpp"
+#include <engine/kernel/module_api.hpp>
+#include <engine/kernel/participant_interface.hpp>
+#include <engine/kernel/participant_manifest.hpp>
+#include <engine/physics_rigid/capabilities.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace engine::physics_rigid
+{
+namespace
+{
+
+class PhysicsRigidModule final : public ModuleInterface
+{
+public:
+    PhysicsRigidModule()
+        : manifest_(makeManifest())
+    {
+        assignCapabilityPointers();
+    }
+
+    const ParticipantManifest &manifest() const override
+    {
+        return manifest_;
+    }
+
+    void construct(ParticipantContext &context) override
+    {
+        readLimits(context);
+        readSolverSettings(context);
+        readSleepSettings(context);
+        readSpaceSettings(context);
+
+        if (const auto gravity = context.configurationFloatingArrayInSection("physics_rigid", "gravity");
+            gravity.size() == 3)
+        {
+            settings_.gravity = math::Vec3{gravity[0], gravity[1], gravity[2]};
+            if (!math::isFinite(settings_.gravity))
+            {
+                settings_.gravity = math::Vec3{0.0, -9.81, 0.0};
+            }
+        }
+
+        worlds_.reserve(settings_.maximumWorlds);
+    }
+
+    void start() override
+    {}
+
+    void stop() override
+    {
+        worlds_.clear();
+        worldIndexByHandle_.clear();
+        nextWorldHandle_ = 1;
+    }
+
+    void *capabilityPointerFor(const std::string &name) override
+    {
+        return name == PhysicsRigidCapability::capabilityName ? &capability_ : nullptr;
+    }
+
+private:
+    static ParticipantManifest makeManifest()
+    {
+        return ParticipantManifest{
+            .name                 = "physics_rigid",
+            .kind                 = ParticipantKind::EngineModule,
+            .version              = "0.1.0",
+            .providedCapabilities = {"physics_rigid"}};
+    }
+
+    template <typename Target>
+    static void readPositiveLimit(ParticipantContext &context, const char *key, std::int64_t maximum, Target &target)
+    {
+        if (const auto value = context.configurationIntegerInSection("physics_rigid", key);
+            value && *value > 0 && *value <= maximum)
+        {
+            target = static_cast<Target>(*value);
+        }
+    }
+
+    void readLimits(ParticipantContext &context)
+    {
+        readPositiveLimit(context, "maximum_worlds", 4096, settings_.maximumWorlds);
+        readPositiveLimit(context, "maximum_bodies", 10'000'000, settings_.maximumBodies);
+        readPositiveLimit(context, "maximum_joints", 10'000'000, settings_.maximumJoints);
+        readPositiveLimit(context, "maximum_steps_per_simulate", 1000, settings_.maximumStepsPerSimulate);
+    }
+
+    void readSolverSettings(ParticipantContext &context)
+    {
+        readPositiveLimit(context, "solver_velocity_iterations", 1000, settings_.velocityIterations);
+        readPositiveLimit(context, "solver_position_iterations", 1000, settings_.positionIterations);
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "contact_slop");
+            value && *value > 0.0 && *value < 1.0 && std::isfinite(*value))
+            settings_.contactSlop = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "joint_baumgarte_factor");
+            value && *value > 0.0 && *value <= 1.0 && std::isfinite(*value))
+            settings_.jointBaumgarteFactor = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "position_correction_factor");
+            value && *value > 0.0 && *value <= 1.0 && std::isfinite(*value))
+            settings_.positionCorrectionFactor = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "maximum_linear_correction");
+            value && *value > 0.0 && *value < 10.0 && std::isfinite(*value))
+            settings_.maximumLinearCorrection = *value;
+        if (const auto value
+            = context.configurationFloatingInSection("physics_rigid", "restitution_velocity_threshold");
+            value && *value >= 0.0 && *value < 100.0 && std::isfinite(*value))
+            settings_.restitutionVelocityThreshold = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "maximum_linear_velocity");
+            value && *value >= 1.0 && std::isfinite(*value))
+            settings_.maximumLinearVelocity = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "maximum_angular_velocity");
+            value && *value >= 1.0 && std::isfinite(*value))
+            settings_.maximumAngularVelocity = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "fixed_rate_hz");
+            value && *value >= 1.0 && *value <= 1000.0 && std::isfinite(*value))
+            settings_.fixedRateHz = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "substep_maximum_delta");
+            value && *value >= 0.0 && *value <= 0.1 && std::isfinite(*value))
+            settings_.substepMaximumDelta = *value;
+        settings_.warmStarting = context.configurationBooleanInSection("physics_rigid", "warm_starting").value_or(true);
+    }
+
+    void readSleepSettings(ParticipantContext &context)
+    {
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "linear_sleep_tolerance");
+            value && *value > 0.0 && std::isfinite(*value))
+            settings_.linearSleepTolerance = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "angular_sleep_tolerance");
+            value && *value > 0.0 && std::isfinite(*value))
+            settings_.angularSleepTolerance = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "time_to_sleep");
+            value && *value >= 0.0 && *value <= 60.0 && std::isfinite(*value))
+            settings_.timeToSleep = *value;
+    }
+
+    void readSpaceSettings(ParticipantContext &context)
+    {
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "spatial_hash_cell_size");
+            value && *value > 1.0e-4 && *value <= 1.0e6 && std::isfinite(*value))
+            settings_.spatialHashCellSize = *value;
+    }
+
+    static void setError(PhysicsError *output, PhysicsError value) noexcept
+    {
+        if (output != nullptr)
+        {
+            *output = value;
+        }
+    }
+
+    World *findWorld(WorldHandle handle)
+    {
+        const auto iterator = worldIndexByHandle_.find(handle);
+        return iterator != worldIndexByHandle_.end() ? &worlds_[iterator->second] : nullptr;
+    }
+
+    // ---- capability implementations ---------------------------------------
+
+    WorldHandle createWorldImpl(const WorldDescription *description, PhysicsError *error)
+    {
+        setError(error, PhysicsError::None);
+        if (description == nullptr)
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidWorld;
+        }
+        if (worlds_.size() >= settings_.maximumWorlds)
+        {
+            setError(error, PhysicsError::CapacityExceeded);
+            return invalidWorld;
+        }
+        const WorldDescription validated
+            = description->useConfiguredGravity ? *description : WorldDescription{description->gravity, false};
+        if (!math::isFinite(validated.gravity))
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidWorld;
+        }
+        World *world = createWorld(worlds_, worldIndexByHandle_, nextWorldHandle_, settings_, validated);
+        if (world == nullptr)
+        {
+            setError(error, PhysicsError::CapacityExceeded);
+            return invalidWorld;
+        }
+        return world->handle;
+    }
+
+    void destroyWorldImpl(WorldHandle handle)
+    {
+        const auto iterator = worldIndexByHandle_.find(handle);
+        if (iterator == worldIndexByHandle_.end())
+        {
+            return;
+        }
+        const std::size_t index = iterator->second;
+        worldIndexByHandle_.erase(iterator);
+        if (index + 1 != worlds_.size())
+        {
+            std::swap(worlds_[index], worlds_.back());
+            worldIndexByHandle_[worlds_[index].handle] = index;
+        }
+        worlds_.pop_back();
+    }
+
+    bool setWorldGravityImpl(WorldHandle handle, const double gravity[3])
+    {
+        World *world = findWorld(handle);
+        if (world == nullptr || gravity == nullptr)
+        {
+            return false;
+        }
+        const math::Vec3 candidate{gravity[0], gravity[1], gravity[2]};
+        if (!math::isFinite(candidate))
+        {
+            return false;
+        }
+        world->gravity = candidate;
+        return true;
+    }
+
+    bool copyWorldGravityImpl(WorldHandle handle, double outGravity[3])
+    {
+        World *world = findWorld(handle);
+        if (world == nullptr || outGravity == nullptr)
+        {
+            return false;
+        }
+        outGravity[0] = world->gravity.x;
+        outGravity[1] = world->gravity.y;
+        outGravity[2] = world->gravity.z;
+        return true;
+    }
+
+    BodyHandle createBodyImpl(WorldHandle worldHandle, const BodyDescription *description, PhysicsError *error)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            setError(error, PhysicsError::InvalidHandle);
+            return invalidBody;
+        }
+        if (description == nullptr)
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidBody;
+        }
+        Body body;
+        if (!validateBodyDescription(*world, world->settings, *description, body, error))
+        {
+            return invalidBody;
+        }
+        if (nextBodyHandle_ == invalidBody)
+        {
+            setError(error, PhysicsError::CapacityExceeded);
+            return invalidBody;
+        }
+        body.handle     = nextBodyHandle_;
+        nextBodyHandle_ = nextBodyHandle_ == std::numeric_limits<BodyHandle>::max() ? invalidBody : nextBodyHandle_ + 1;
+        world->bodies.push_back(std::move(body));
+        world->bodyIndexByHandle.emplace(world->bodies.back().handle, world->bodies.size() - 1);
+        if (world->bodies.back().shape.kind == ShapeKind::Plane)
+        {
+            world->planeBodyHandles.push_back(world->bodies.back().handle);
+        }
+        setError(error, PhysicsError::None);
+        return world->bodies.back().handle;
+    }
+
+    void destroyBodyImpl(WorldHandle worldHandle, BodyHandle handle)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return;
+        }
+        destroyBodyFromWorld(*world, handle);
+    }
+
+    std::uint32_t bodyCountImpl(WorldHandle worldHandle)
+    {
+        World *world = findWorld(worldHandle);
+        return world != nullptr ? static_cast<std::uint32_t>(world->bodies.size()) : 0u;
+    }
+
+    bool copyBodyHandlesImpl(
+        WorldHandle worldHandle, BodyHandle *outHandles, std::uint32_t capacity, std::uint32_t *outRequired)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        if (outRequired != nullptr)
+        {
+            *outRequired = static_cast<std::uint32_t>(world->bodies.size());
+        }
+        if (outHandles == nullptr || capacity < world->bodies.size())
+        {
+            return false;
+        }
+        for (std::size_t index = 0; index < world->bodies.size(); ++index)
+        {
+            outHandles[index] = world->bodies[index].handle;
+        }
+        return true;
+    }
+
+    bool copyBodyDescriptionImpl(WorldHandle worldHandle, BodyHandle handle, BodyDescription *outDescription)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outDescription == nullptr)
+        {
+            return false;
+        }
+        const Body *body = [&]()
+        {
+            const auto iterator = world->bodyIndexByHandle.find(handle);
+            return iterator != world->bodyIndexByHandle.end() ? &world->bodies[iterator->second] : nullptr;
+        }();
+        if (body == nullptr)
+        {
+            return false;
+        }
+        BodyDescription description;
+        description.shape.kind         = body->shape.kind;
+        description.shape.sphereRadius = body->shape.sphereRadius;
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            description.shape.boxHalfExtents[axis] = body->shape.boxHalfExtents[axis];
+        }
+        description.shape.capsuleRadius     = body->shape.capsuleRadius;
+        description.shape.capsuleHalfLength = body->shape.capsuleHalfLength;
+        description.shape.planeNormal[0]    = body->shape.planeNormal.x;
+        description.shape.planeNormal[1]    = body->shape.planeNormal.y;
+        description.shape.planeNormal[2]    = body->shape.planeNormal.z;
+        description.shape.planeOffset       = body->shape.planeOffset;
+        description.transform               = body->transform;
+        description.kind                    = body->kind;
+        description.density                 = body->densitySource;
+        description.mass                    = body->densitySource > 0.0 ? 0.0 : body->explicitMassSource;
+        description.material                = body->material;
+        description.linearDamping           = body->linearDamping;
+        description.angularDamping          = body->angularDamping;
+        description.sleepingEnabled         = body->sleepingEnabled;
+        description.gravityEnabled          = body->gravityEnabled;
+        description.categoryBits            = body->categoryBits;
+        description.maskBits                = body->maskBits;
+        description.userTag                 = body->userTag;
+        *outDescription                     = description;
+        return true;
+    }
+
+    bool copyBodyStateImpl(WorldHandle worldHandle, BodyHandle handle, BodyState *outState)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outState == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        const Body &body          = world->bodies[iterator->second];
+        outState->transform       = body.transform;
+        outState->linearVelocity  = body.linearVelocity;
+        outState->angularVelocity = body.angularVelocity;
+        outState->awake           = body.awake || body.kind != BodyKind::Dynamic;
+        return true;
+    }
+
+    bool setBodyTransformImpl(WorldHandle worldHandle, BodyHandle handle, const RigidTransform *transform, bool wake)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || transform == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body &body = world->bodies[iterator->second];
+        if (!math::isFinite(transform->position))
+        {
+            return false;
+        }
+        const math::Quaternion rotation = math::normalize(transform->rotation);
+        if (math::dot(rotation, rotation) < 1.0e-12)
+        {
+            return false;
+        }
+        body.transform.position = transform->position;
+        body.transform.rotation = rotation;
+        refreshBodyAabb(body);
+        if (wake)
+        {
+            wakeRecord(body);
+        }
+        else if (!body.awake && body.kind == BodyKind::Dynamic)
+        {
+            body.linearVelocity  = math::Vec3{};
+            body.angularVelocity = math::Vec3{};
+        }
+        return true;
+    }
+
+    bool setBodyKindImpl(WorldHandle worldHandle, BodyHandle handle, BodyKind kind)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body &body = world->bodies[iterator->second];
+        if (body.shape.kind == ShapeKind::Plane && kind != BodyKind::Static)
+        {
+            return false;
+        }
+        body.kind = kind;
+        recomputeMassProperties(body);
+        wakeRecord(body);
+        return true;
+    }
+
+    bool setBodyLinearVelocityImpl(WorldHandle worldHandle, BodyHandle handle, const double velocity[3])
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || velocity == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body            &body = world->bodies[iterator->second];
+        const math::Vec3 candidate{velocity[0], velocity[1], velocity[2]};
+        if (!math::isFinite(candidate))
+        {
+            return false;
+        }
+        body.linearVelocity = candidate;
+        wakeRecord(body);
+        return true;
+    }
+
+    bool setBodyAngularVelocityImpl(WorldHandle worldHandle, BodyHandle handle, const double velocity[3])
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || velocity == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body            &body = world->bodies[iterator->second];
+        const math::Vec3 candidate{velocity[0], velocity[1], velocity[2]};
+        if (!math::isFinite(candidate))
+        {
+            return false;
+        }
+        body.angularVelocity = candidate;
+        wakeRecord(body);
+        return true;
+    }
+
+    bool setBodyMaterialImpl(WorldHandle worldHandle, BodyHandle handle, const MaterialDescription *material)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || material == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body &body = world->bodies[iterator->second];
+        if (!std::isfinite(material->friction) || !std::isfinite(material->restitution))
+        {
+            return false;
+        }
+        body.material.friction    = std::clamp(material->friction, 0.0, 4.0);
+        body.material.restitution = std::clamp(material->restitution, 0.0, 1.0);
+        return true;
+    }
+
+    bool setBodyAwakeImpl(WorldHandle worldHandle, BodyHandle handle, bool awake)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body &body = world->bodies[iterator->second];
+        if (awake)
+        {
+            wakeRecord(body);
+        }
+        else if (body.kind == BodyKind::Dynamic)
+        {
+            body.awake           = false;
+            body.linearVelocity  = math::Vec3{};
+            body.angularVelocity = math::Vec3{};
+        }
+        return true;
+    }
+
+    bool applyForceAtPointImpl(
+        WorldHandle worldHandle, BodyHandle handle, const double force[3], const double worldPoint[3])
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || force == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body            &body = world->bodies[iterator->second];
+        const math::Vec3 candidate{force[0], force[1], force[2]};
+        if (!math::isFinite(candidate))
+        {
+            return false;
+        }
+        if (body.kind != BodyKind::Dynamic)
+        {
+            return false;
+        }
+        wakeRecord(body);
+        body.forceAccumulator += candidate;
+        if (worldPoint != nullptr)
+        {
+            const math::Vec3 point{worldPoint[0], worldPoint[1], worldPoint[2]};
+            if (!math::isFinite(point))
+            {
+                return false;
+            }
+            body.torqueAccumulator += math::cross(point - body.transform.position, candidate);
+        }
+        return true;
+    }
+
+    bool applyTorqueImpl(WorldHandle worldHandle, BodyHandle handle, const double torque[3])
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || torque == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body            &body = world->bodies[iterator->second];
+        const math::Vec3 candidate{torque[0], torque[1], torque[2]};
+        if (!math::isFinite(candidate) || body.kind != BodyKind::Dynamic)
+        {
+            return false;
+        }
+        wakeRecord(body);
+        body.torqueAccumulator += candidate;
+        return true;
+    }
+
+    bool applyImpulseAtPointImpl(
+        WorldHandle worldHandle, BodyHandle handle, const double impulse[3], const double worldPoint[3])
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || impulse == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body            &body = world->bodies[iterator->second];
+        const math::Vec3 candidate{impulse[0], impulse[1], impulse[2]};
+        if (!math::isFinite(candidate) || body.kind != BodyKind::Dynamic)
+        {
+            return false;
+        }
+        wakeRecord(body);
+        body.linearVelocity += candidate * body.inverseMass;
+        if (worldPoint != nullptr)
+        {
+            const math::Vec3 point{worldPoint[0], worldPoint[1], worldPoint[2]};
+            if (!math::isFinite(point))
+            {
+                return false;
+            }
+            const math::Mat3 inverseInertia = computeWorldInverseInertia(body);
+            body.angularVelocity
+                += math::multiplyMatrixVector(inverseInertia, math::cross(point - body.transform.position, candidate));
+        }
+        return true;
+    }
+
+    bool applyAngularImpulseImpl(WorldHandle worldHandle, BodyHandle handle, const double impulse[3])
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || impulse == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        Body            &body = world->bodies[iterator->second];
+        const math::Vec3 candidate{impulse[0], impulse[1], impulse[2]};
+        if (!math::isFinite(candidate) || body.kind != BodyKind::Dynamic)
+        {
+            return false;
+        }
+        wakeRecord(body);
+        const math::Mat3 inverseInertia = computeWorldInverseInertia(body);
+        body.angularVelocity += math::multiplyMatrixVector(inverseInertia, candidate);
+        return true;
+    }
+
+    JointHandle createJointImpl(WorldHandle worldHandle, const JointDescription *description, PhysicsError *error)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            setError(error, PhysicsError::InvalidHandle);
+            return invalidJoint;
+        }
+        setError(error, PhysicsError::None);
+        if (description == nullptr)
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidJoint;
+        }
+        const auto bodyAIterator = world->bodyIndexByHandle.find(description->bodyA);
+        const auto bodyBIterator = world->bodyIndexByHandle.find(description->bodyB);
+        if (bodyAIterator == world->bodyIndexByHandle.end() || bodyBIterator == world->bodyIndexByHandle.end()
+            || description->bodyA == description->bodyB)
+        {
+            setError(error, PhysicsError::InvalidHandle);
+            return invalidJoint;
+        }
+        if (world->joints.size() >= world->settings.maximumJoints)
+        {
+            setError(error, PhysicsError::CapacityExceeded);
+            return invalidJoint;
+        }
+        if (!math::isFinite(description->anchorLocalA) || !math::isFinite(description->anchorLocalB)
+            || !std::isfinite(description->distance) || description->distance < 0.0)
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidJoint;
+        }
+        Joint joint;
+        joint.description = *description;
+        if (joint.description.kind == JointKind::Hinge)
+        {
+            const math::Vec3 axis{description->axisLocalA.x, description->axisLocalA.y, description->axisLocalA.z};
+            if (!math::isFinite(axis) || math::lengthSquared(axis) < 1.0e-12)
+            {
+                setError(error, PhysicsError::InvalidDescription);
+                return invalidJoint;
+            }
+            joint.axisLocalA = math::normalized(axis);
+        }
+        else
+        {
+            joint.axisLocalA = math::Vec3{0.0, 1.0, 0.0};
+        }
+        if (joint.description.limitsEnabled)
+        {
+            const bool hingeLimitsValid    = joint.description.kind == JointKind::Hinge
+                                          && std::isfinite(joint.description.limitLowerRadians)
+                                          && std::isfinite(joint.description.limitUpperRadians)
+                                          && joint.description.limitLowerRadians < joint.description.limitUpperRadians
+                                          && joint.description.limitLowerRadians > -3.14159265358979323846
+                                          && joint.description.limitUpperRadians < 3.14159265358979323846;
+            const bool ballLimitsValid     = joint.description.kind == JointKind::BallSocket
+                                          && std::isfinite(joint.description.coneHalfAngleRadians)
+                                          && std::isfinite(joint.description.twistHalfAngleRadians)
+                                          && joint.description.coneHalfAngleRadians > 0.0
+                                          && joint.description.coneHalfAngleRadians <= 3.14159265358979323846
+                                          && joint.description.twistHalfAngleRadians > 0.0
+                                          && joint.description.twistHalfAngleRadians <= 3.14159265358979323846;
+            const bool distanceOrUnlimited = !joint.description.limitsEnabled;
+            if (!distanceOrUnlimited && !hingeLimitsValid && !ballLimitsValid)
+            {
+                setError(error, PhysicsError::InvalidDescription);
+                return invalidJoint;
+            }
+        }
+        if (joint.description.motorEnabled
+            && (!std::isfinite(joint.description.motorTargetVelocity)
+                || !std::isfinite(joint.description.maximumMotorTorque) || joint.description.maximumMotorTorque < 0.0))
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidJoint;
+        }
+        Body &bodyA = world->bodies[bodyAIterator->second];
+        Body &bodyB = world->bodies[bodyBIterator->second];
+        joint.referenceRelativeRotation
+            = math::normalize(math::conjugate(bodyA.transform.rotation) * bodyB.transform.rotation);
+        if (joint.description.kind == JointKind::Distance)
+        {
+            const math::Vec3 anchorWorldA
+                = bodyA.transform.position + math::rotate(bodyA.transform.rotation, joint.description.anchorLocalA);
+            const math::Vec3 anchorWorldB
+                = bodyB.transform.position + math::rotate(bodyB.transform.rotation, joint.description.anchorLocalB);
+            joint.restLength = joint.description.distance > 0.0 ? joint.description.distance
+                                                                : math::length(anchorWorldB - anchorWorldA);
+        }
+        else
+        {
+            joint.restLength = 0.0;
+        }
+        wakeRecord(bodyA);
+        wakeRecord(bodyB);
+        if (nextJointHandle_ == invalidJoint)
+        {
+            setError(error, PhysicsError::CapacityExceeded);
+            return invalidJoint;
+        }
+        joint.handle = nextJointHandle_;
+        nextJointHandle_
+            = nextJointHandle_ == std::numeric_limits<JointHandle>::max() ? invalidJoint : nextJointHandle_ + 1;
+        world->joints.push_back(std::move(joint));
+        world->jointIndexByHandle.emplace(world->joints.back().handle, world->joints.size() - 1);
+        return world->joints.back().handle;
+    }
+
+    void destroyJointImpl(WorldHandle worldHandle, JointHandle handle)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return;
+        }
+        destroyJointFromWorld(*world, handle);
+    }
+
+    bool copyJointDescriptionImpl(WorldHandle worldHandle, JointHandle handle, JointDescription *outDescription)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outDescription == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->jointIndexByHandle.find(handle);
+        if (iterator == world->jointIndexByHandle.end())
+        {
+            return false;
+        }
+        *outDescription = world->joints[iterator->second].description;
+        return true;
+    }
+
+    bool setJointMotorImpl(
+        WorldHandle worldHandle, JointHandle handle, bool enabled, double targetVelocity, double maximumTorque)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->jointIndexByHandle.find(handle);
+        if (iterator == world->jointIndexByHandle.end())
+        {
+            return false;
+        }
+        Joint &joint = world->joints[iterator->second];
+        if (enabled && (!std::isfinite(targetVelocity) || !std::isfinite(maximumTorque) || maximumTorque < 0.0))
+        {
+            return false;
+        }
+        joint.description.motorEnabled        = enabled;
+        joint.description.motorTargetVelocity = targetVelocity;
+        joint.description.maximumMotorTorque  = maximumTorque;
+        const auto bodyAIterator              = world->bodyIndexByHandle.find(joint.description.bodyA);
+        const auto bodyBIterator              = world->bodyIndexByHandle.find(joint.description.bodyB);
+        if (bodyAIterator != world->bodyIndexByHandle.end())
+        {
+            wakeRecord(world->bodies[bodyAIterator->second]);
+        }
+        if (bodyBIterator != world->bodyIndexByHandle.end())
+        {
+            wakeRecord(world->bodies[bodyBIterator->second]);
+        }
+        return true;
+    }
+
+    bool stepImpl(WorldHandle worldHandle, double fixedDeltaSeconds)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        return stepWorld(*world, fixedDeltaSeconds, scratch_);
+    }
+
+    std::uint32_t simulateImpl(WorldHandle worldHandle, double elapsedSeconds)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || !std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+        {
+            return 0u;
+        }
+        const double fixedDelta = 1.0 / world->settings.fixedRateHz;
+        world->simulatedTimeBudget += elapsedSeconds;
+        std::uint32_t executed = 0;
+        while (world->simulatedTimeBudget >= fixedDelta && executed < world->settings.maximumStepsPerSimulate)
+        {
+            world->simulatedTimeBudget -= fixedDelta;
+            if (!stepWorld(*world, fixedDelta, scratch_))
+            {
+                break;
+            }
+            ++executed;
+        }
+        if (executed == world->settings.maximumStepsPerSimulate)
+        {
+            // Drop the backlog so a persistent deficit cannot accumulate.
+            world->simulatedTimeBudget = 0.0;
+        }
+        return executed;
+    }
+
+    bool rayCastImpl(WorldHandle worldHandle, const double origin[3], const double direction[3], double maximumDistance,
+        RayHit *outHit)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || origin == nullptr || direction == nullptr || outHit == nullptr)
+        {
+            return false;
+        }
+        return rayCastWorld(*world,
+            math::Vec3{origin[0], origin[1], origin[2]},
+            math::Vec3{direction[0], direction[1], direction[2]},
+            maximumDistance,
+            *outHit);
+    }
+
+    bool collideSphereImpl(WorldHandle worldHandle, const double center[3], double radius, double outNormal[3],
+        double *outDepth, BodyHandle *outBody)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || center == nullptr || outNormal == nullptr || outDepth == nullptr)
+        {
+            return false;
+        }
+        math::Vec3 normal;
+        double     depth = 0.0;
+        BodyHandle body  = invalidBody;
+        if (!collideSphereWorld(*world, math::Vec3{center[0], center[1], center[2]}, radius, normal, depth, body))
+        {
+            return false;
+        }
+        outNormal[0] = normal.x;
+        outNormal[1] = normal.y;
+        outNormal[2] = normal.z;
+        *outDepth    = depth;
+        if (outBody != nullptr)
+        {
+            *outBody = body;
+        }
+        return true;
+    }
+
+    bool worldStatisticsImpl(WorldHandle worldHandle, WorldStatistics *outStatistics)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outStatistics == nullptr)
+        {
+            return false;
+        }
+        fillWorldStatistics(*world, *outStatistics);
+        return true;
+    }
+
+    static void wakeRecord(Body &body)
+    {
+        body.awake      = true;
+        body.sleepTimer = 0.0;
+    }
+
+    void assignCapabilityPointers()
+    {
+        capability_.abi  = physicsRigidCapabilityAbi;
+        capability_.self = this;
+#define ENGINE_PHYSICS_RIGID_BIND(field, method)                                                                       \
+    capability_.field = [](void *self, auto... args) -> decltype(auto)                                                 \
+    { return static_cast<PhysicsRigidModule *>(self)->method(args...); }
+        ENGINE_PHYSICS_RIGID_BIND(createWorld, createWorldImpl);
+        ENGINE_PHYSICS_RIGID_BIND(destroyWorld, destroyWorldImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setWorldGravity, setWorldGravityImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyWorldGravity, copyWorldGravityImpl);
+        ENGINE_PHYSICS_RIGID_BIND(createBody, createBodyImpl);
+        ENGINE_PHYSICS_RIGID_BIND(destroyBody, destroyBodyImpl);
+        ENGINE_PHYSICS_RIGID_BIND(bodyCount, bodyCountImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyBodyHandles, copyBodyHandlesImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyBodyDescription, copyBodyDescriptionImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyBodyState, copyBodyStateImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyTransform, setBodyTransformImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyKind, setBodyKindImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyLinearVelocity, setBodyLinearVelocityImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyAngularVelocity, setBodyAngularVelocityImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyMaterial, setBodyMaterialImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyAwake, setBodyAwakeImpl);
+        ENGINE_PHYSICS_RIGID_BIND(applyForceAtPoint, applyForceAtPointImpl);
+        ENGINE_PHYSICS_RIGID_BIND(applyTorque, applyTorqueImpl);
+        ENGINE_PHYSICS_RIGID_BIND(applyImpulseAtPoint, applyImpulseAtPointImpl);
+        ENGINE_PHYSICS_RIGID_BIND(applyAngularImpulse, applyAngularImpulseImpl);
+        ENGINE_PHYSICS_RIGID_BIND(createJoint, createJointImpl);
+        ENGINE_PHYSICS_RIGID_BIND(destroyJoint, destroyJointImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyJointDescription, copyJointDescriptionImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setJointMotor, setJointMotorImpl);
+        ENGINE_PHYSICS_RIGID_BIND(step, stepImpl);
+        ENGINE_PHYSICS_RIGID_BIND(simulate, simulateImpl);
+        ENGINE_PHYSICS_RIGID_BIND(rayCast, rayCastImpl);
+        ENGINE_PHYSICS_RIGID_BIND(collideSphere, collideSphereImpl);
+        ENGINE_PHYSICS_RIGID_BIND(worldStatistics, worldStatisticsImpl);
+#undef ENGINE_PHYSICS_RIGID_BIND
+    }
+
+    ParticipantManifest    manifest_;
+    PhysicsRigidCapability capability_{};
+
+    SimulationSettings settings_;
+
+    std::vector<World>                           worlds_;
+    std::unordered_map<WorldHandle, std::size_t> worldIndexByHandle_;
+    WorldHandle                                  nextWorldHandle_ = 1;
+    BodyHandle                                   nextBodyHandle_  = 1;
+    JointHandle                                  nextJointHandle_ = 1;
+
+    StepScratch scratch_;
+};
+
+} // namespace
+
+} // namespace engine::physics_rigid
+
+// Module entry point queried by the kernel after dlopen: one .so providing
+// the physics_rigid capability; no required capabilities, no permissions.
+extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQueryModuleEntryTable()
+{
+    static const char *const                    provided[] = {"physics_rigid"};
+    static const engine::EngineModuleEntryTable entry{
+        .abiVersion    = engine::engineModuleAbiVersion,
+        .moduleName    = "physics_rigid",
+        .moduleVersion = "0.1.0",
+        .createModule  = []() -> engine::ModuleInterface  *{ return new engine::physics_rigid::PhysicsRigidModule(); },
+        .providedCapabilities    = provided,
+        .providedCapabilityCount = 1,
+        .requiredCapabilities    = nullptr,
+        .requiredCapabilityCount = 0,
+        .optionalCapabilities    = nullptr,
+        .optionalCapabilityCount = 0,
+        .declaredPermissions     = nullptr,
+        .declaredPermissionCount = 0};
+    return &entry;
+}

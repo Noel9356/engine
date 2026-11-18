@@ -301,7 +301,7 @@ list(
 
 option(
     ENGINE_BUILD_DEMO
-    "Build the demo applications present in this checkout"
+    "Build the demo apps (character customisation + GI test harness)"
     ON
 )
 set(ENGINE_MODULES
@@ -884,6 +884,7 @@ if(ENGINE_BUILD_DEMO)
             ITEMS
             character_customisation
             lumen_gi
+            physics_sandbox
             planet
     )
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/demos/${engineDemoDirectory}/CMakeLists.txt")

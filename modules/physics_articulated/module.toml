@@ -1,0 +1,10 @@
+config_keys           = [
+    "physics_articulated.maximum_drive_torque",
+    "physics_articulated.maximum_drive_velocity",
+    "physics_articulated.maximum_figures",
+    "physics_articulated.maximum_links_per_figure",
+]
+name                  = "physics_articulated"
+provides              = ["physics_articulated"]
+requires              = ["physics_rigid"]
+version               = "0.1.0"

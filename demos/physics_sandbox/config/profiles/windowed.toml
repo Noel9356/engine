@@ -1,0 +1,24 @@
+# Windowed profile for demo_physics_sandbox: switches the window and renderer
+# to their desktop backends for the interactive mode. Usage:
+#   demo_physics_sandbox --profile config/profiles/windowed.toml
+# (the demo's CMake config dir is copied into the runtime layout)
+#
+# Simulation pacing is untouched: physics stays on the fixed [physics_sandbox]
+# rate regardless of the presentation path.
+
+[pbr]
+ambient_intensity = 0.08
+sun_color         = [1.0, 0.95, 0.86]
+sun_direction     = [-0.45, 0.62, -0.64]
+sun_enabled       = true
+sun_intensity     = 2.8
+
+[renderer]
+backend     = "vulkan"
+clear_color = [0.1, 0.12, 0.16, 1.0]
+lod_enabled = false
+
+[window]
+backend = "glfw"
+height  = 720
+width   = 1280
