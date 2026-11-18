@@ -736,9 +736,14 @@ int main(int argc, char **argv)
             eye    = walkController->eye();
             target = walkController->target();
             const glm::dvec3 walkUp = walkController->up();
-            const float poseEye[3] = {static_cast<float>(eye.x), static_cast<float>(eye.y), static_cast<float>(eye.z)};
-            const float poseTarget[3] = {
-                static_cast<float>(target.x), static_cast<float>(target.y), static_cast<float>(target.z)};
+            // Camera-relative composition (see planet_demo_support.hpp): the
+            // pose is shifted by the f64 render origin before the f32 cast,
+            // so the camera and every model matrix compose eye-relative.
+            const glm::dvec3 poseShift = cameraRelativeShift(eye - planetCenter);
+            const float poseEye[3] = {static_cast<float>(eye.x - poseShift.x), static_cast<float>(eye.y - poseShift.y),
+                static_cast<float>(eye.z - poseShift.z)};
+            const float poseTarget[3] = {static_cast<float>(target.x - poseShift.x),
+                static_cast<float>(target.y - poseShift.y), static_cast<float>(target.z - poseShift.z)};
             const float poseUp[3] = {
                 static_cast<float>(walkUp.x), static_cast<float>(walkUp.y), static_cast<float>(walkUp.z)};
             cameraCapability.setLookAt(cameraCapability.self, cameraHandle, poseEye, poseTarget, poseUp);
@@ -767,9 +772,14 @@ int main(int argc, char **argv)
 
             const glm::dvec3 lookUp = macroView ? glm::dvec3(0.0, 1.0, 0.0)
                                                 : glm::normalize(eye - planetCenter);
-            const float poseEye[3] = {static_cast<float>(eye.x), static_cast<float>(eye.y), static_cast<float>(eye.z)};
-            const float poseTarget[3] = {
-                static_cast<float>(target.x), static_cast<float>(target.y), static_cast<float>(target.z)};
+            // Camera-relative composition (see planet_demo_support.hpp): the
+            // pose is shifted by the f64 render origin before the f32 cast,
+            // so the camera and every model matrix compose eye-relative.
+            const glm::dvec3 poseShift = cameraRelativeShift(eye - planetCenter);
+            const float poseEye[3] = {static_cast<float>(eye.x - poseShift.x), static_cast<float>(eye.y - poseShift.y),
+                static_cast<float>(eye.z - poseShift.z)};
+            const float poseTarget[3] = {static_cast<float>(target.x - poseShift.x),
+                static_cast<float>(target.y - poseShift.y), static_cast<float>(target.z - poseShift.z)};
             float poseUp[3] = {static_cast<float>(lookUp.x), static_cast<float>(lookUp.y), static_cast<float>(lookUp.z)};
             if (macroView
                 && glm::abs(glm::dot(glm::normalize(eye - planetCenter), glm::dvec3(0.0, 1.0, 0.0))) > 0.99)
@@ -799,7 +809,10 @@ int main(int argc, char **argv)
         // chunks at full speed instead of competing with rasterizer tile
         // tasks, so deep LOD views start their first RENDERED frame with the
         // visible set already complete (no black-hole screenshots).
-        const double eyeWorld[3] = {viewState.position[0], viewState.position[1], viewState.position[2]};
+        // The streamer follows the REAL eye (f64), not the camera-relative
+        // view state: the view state carries the shifted pose whenever
+        // camera-relative composition is active.
+        const double eyeWorld[3] = {eye.x, eye.y, eye.z};
         planetCapability->updatePlanet(planetCapability->self, planetHandle, eyeWorld);
         if (warmupRemaining > 0)
         {
@@ -874,7 +887,7 @@ int main(int argc, char **argv)
         const planet::Vec3 sunTint = planet::sunSkyTint(params, sunUpForSky, environment.sun.enabled);
 
         const glm::mat4 viewProjection = glm::make_mat4(viewState.projection) * glm::make_mat4(viewState.view);
-        chunkRenderer.rebuildDrawCommands(viewProjection, eyePlanetLocal, sunTint);
+        chunkRenderer.rebuildDrawCommands(viewProjection, eyePlanetLocal, sunTint, cameraRelativeShift(eyePlanetLocal));
         const auto &drawCommands = chunkRenderer.drawCommands();
         frameTiming.markUploadDone();
 

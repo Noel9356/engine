@@ -5,7 +5,7 @@
 // thread when the pool is starved) and hands the current visible chunk set to
 // consumers as borrowed views. One Planet instance renders one planet;
 // instances are cheap enough for tools to create several (the demo's
-// determinism self-test builds two).
+// determinism self-test builds three, plus a bare Planet for mask variants).
 //
 // Threading: update() / copyVisibleChunks() / sampling are MAIN THREAD only
 // (standard for capability calls); worker threads only ever touch the pure

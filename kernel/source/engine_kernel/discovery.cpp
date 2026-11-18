@@ -31,11 +31,11 @@ namespace engine
 std::vector<std::pair<const EngineKernel::ParticipantRecord *, std::string>> EngineKernel::applyPermissionPass()
 {
     std::vector<std::pair<const ParticipantRecord *, std::string>> denied;
-    for (const auto &denial : configurationStore.permissionDenials())
+    for (const auto &denial : configurationStore_.permissionDenials())
     {
         permissionSystem_.denyPermission(denial.first, denial.second);
     }
-    for (const ParticipantRecord &record : records)
+    for (const ParticipantRecord &record : records_)
     {
         const std::vector<std::string> grants = detail::effectivePermissions(record.manifest);
         permissionSystem_.declarePermissions(record.name, grants);
@@ -51,8 +51,8 @@ std::vector<std::pair<const EngineKernel::ParticipantRecord *, std::string>> Eng
 std::vector<ParticipantManifest> EngineKernel::participantManifests() const
 {
     std::vector<ParticipantManifest> manifests;
-    manifests.reserve(records.size());
-    for (const ParticipantRecord &record : records)
+    manifests.reserve(records_.size());
+    for (const ParticipantRecord &record : records_)
     {
         manifests.push_back(record.manifest);
     }
@@ -61,7 +61,7 @@ std::vector<ParticipantManifest> EngineKernel::participantManifests() const
 
 EngineKernel::ParticipantRecord *EngineKernel::findRecord(const std::string &name)
 {
-    for (ParticipantRecord &candidate : records)
+    for (ParticipantRecord &candidate : records_)
     {
         if (candidate.name == name)
         {
@@ -82,7 +82,7 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
     }
 
     // A re-gather tears down any previous assembly first.
-    if (!records.empty() || !moduleLibraries.empty())
+    if (!records_.empty() || !moduleLibraries_.empty())
     {
         stop();
     }
@@ -95,7 +95,7 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
                 .name                 = detail::appContextName(),
                 .kind                 = ParticipantKind::Application,
                 .requiredCapabilities = applicationRequiredCapabilities}};
-        records.push_back(std::move(applicationRecord));
+        records_.push_back(std::move(applicationRecord));
         permissionSystem_.grantAllPermissions(detail::appContextName());
     }
 
@@ -109,7 +109,7 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
 
     computeDemandClosure();
 
-    for (const ModuleLibraryRecord &module : moduleLibraries)
+    for (const ModuleLibraryRecord &module : moduleLibraries_)
     {
         if (module.active)
         {
@@ -117,7 +117,7 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
         }
     }
 
-    if (!trustGate_->evaluate(report, enforceTrust, startupWarnings_, configurationStore))
+    if (!trustGate_->evaluate(report, enforceTrust, startupWarnings_, configurationStore_))
     {
         return false;
     }
@@ -136,14 +136,14 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
         appendDeclaredModuleRecords();
     }
 
-    // Duplicate participant names would alias in the graph and on the bus; refuse the run.
-    for (std::size_t outer = 0; outer < records.size(); ++outer)
+    // Duplicate participant names would alias in the graph and on the bus_; refuse the run.
+    for (std::size_t outer = 0; outer < records_.size(); ++outer)
     {
-        for (std::size_t inner = outer + 1; inner < records.size(); ++inner)
+        for (std::size_t inner = outer + 1; inner < records_.size(); ++inner)
         {
-            if (records[outer].name == records[inner].name)
+            if (records_[outer].name == records_[inner].name)
             {
-                report += "- participant name '" + records[outer].name
+                report += "- participant name '" + records_[outer].name
                         + "' is declared twice (a plugin id and a module name, or two plugins sharing an id); "
                           "participant names must be unique across the whole assembly.\n";
                 return false;
@@ -179,8 +179,8 @@ void EngineKernel::gatherPluginPackages(std::string &report)
     }
     else
     {
-        scanRoots.push_back(detail::resolveAgainstExecutableDirectory(configurationStore.pluginsDirectory()));
-        for (const std::string &extraDirectory : configurationStore.extraPluginsDirectories())
+        scanRoots.push_back(detail::resolveAgainstExecutableDirectory(configurationStore_.pluginsDirectory()));
+        for (const std::string &extraDirectory : configurationStore_.extraPluginsDirectories())
         {
             scanRoots.push_back(detail::resolveAgainstExecutableDirectory(extraDirectory));
         }
@@ -191,7 +191,7 @@ void EngineKernel::gatherPluginPackages(std::string &report)
     for (const std::filesystem::path &scanRoot : scanRoots)
     {
         for (DiscoveredPluginPackage &package :
-            discoverPluginPackages(scanRoot, configurationStore.disabledPlugins(), report))
+            discoverPluginPackages(scanRoot, configurationStore_.disabledPlugins(), report))
         {
             const auto previouslySeen = discoveredPackageRoots.find(package.manifest.id);
             if (previouslySeen != discoveredPackageRoots.end())
@@ -212,7 +212,7 @@ void EngineKernel::gatherPluginPackages(std::string &report)
     std::optional<std::vector<std::string>> activeSet = applicationActivePlugins;
     if (!activeSet)
     {
-        activeSet = configurationStore.activePlugins();
+        activeSet = configurationStore_.activePlugins();
     }
     if (activeSet)
     {
@@ -244,7 +244,7 @@ void EngineKernel::gatherPluginPackages(std::string &report)
         if (!package.defaultsFile.empty())
         {
             std::string defaultsError;
-            if (!configurationStore.mergeDefaultsFile(package.defaultsFile,
+            if (!configurationStore_.mergeDefaultsFile(package.defaultsFile,
                     ConfigProvenance::Layer::PluginDefaults,
                     pluginManifest.directory.filename().string(),
                     defaultsError))
@@ -263,7 +263,7 @@ void EngineKernel::gatherPluginPackages(std::string &report)
                 .manifest = detail::manifestFromPluginManifest(pluginManifest, ParticipantKind::NativePlugin)};
             trustGate_->appendPluginRiskWarning(pluginManifest, true, startupWarnings_);
             pendingNativePluginPackages_.push_back(package);
-            records.push_back(std::move(record));
+            records_.push_back(std::move(record));
         }
         else
         {
@@ -278,7 +278,7 @@ void EngineKernel::gatherPluginPackages(std::string &report)
                     .declaredPermissions  = pluginManifest.permissions,
                     .version              = pluginManifest.version}};
             trustGate_->appendPluginRiskWarning(pluginManifest, false, startupWarnings_);
-            records.push_back(std::move(record));
+            records_.push_back(std::move(record));
         }
     }
 }
@@ -290,15 +290,15 @@ void EngineKernel::computeDemandClosure()
 {
     CapabilityProviderIndex &index = *capabilityProviderIndex_;
     index.resetDemandedCapabilities();
-    for (ModuleLibraryRecord &module : moduleLibraries)
+    for (ModuleLibraryRecord &module : moduleLibraries_)
     {
         module.active = false;
     }
 
-    const std::vector<DependencyResolver::ProviderSelection> selections = configurationStore.providerSelections();
+    const std::vector<DependencyResolver::ProviderSelection> selections = configurationStore_.providerSelections();
 
     std::vector<std::string> worklist;
-    for (const ParticipantRecord &record : records)
+    for (const ParticipantRecord &record : records_)
     {
         for (const std::string &capabilityName : record.manifest.requiredCapabilities)
         {
@@ -324,14 +324,14 @@ void EngineKernel::computeDemandClosure()
         }
 
         std::vector<std::string> providerNames;
-        for (ModuleLibraryRecord &module : moduleLibraries)
+        for (ModuleLibraryRecord &module : moduleLibraries_)
         {
             if (providesCapability(capabilityName, module.descriptor.providedCapabilities))
             {
                 providerNames.push_back(module.descriptor.name);
             }
         }
-        for (const ParticipantRecord &record : records)
+        for (const ParticipantRecord &record : records_)
         {
             if (providesCapability(capabilityName, record.manifest.providedCapabilities))
             {
@@ -360,7 +360,7 @@ void EngineKernel::computeDemandClosure()
 
         for (const std::string &providerName : providerNames)
         {
-            for (ModuleLibraryRecord &module : moduleLibraries)
+            for (ModuleLibraryRecord &module : moduleLibraries_)
             {
                 if (module.descriptor.name != providerName || module.active)
                 {

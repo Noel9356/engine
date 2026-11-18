@@ -30,6 +30,21 @@ constexpr std::int64_t primeZ          = 0x5BCC226E9FA0BACBll;
 constexpr std::int64_t hashMultiplier  = 0x53A3F72DEEC546F5ll;
 constexpr std::int64_t seedFlip3D      = -0x52D547B2E96ED629ll;
 
+// The hash chains multiply and add full-width 64-bit values whose signed
+// results overflow (undefined behavior for signed integers); the chains run
+// through these unsigned wrappers instead - wrapping is well-defined for
+// unsigned and yields bit-identical results to the two's-complement values
+// the hash has always consumed.
+inline std::int64_t hashMultiply(std::int64_t a, std::int64_t b) noexcept
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) * static_cast<std::uint64_t>(b));
+}
+
+inline std::int64_t hashAdd(std::int64_t a, std::int64_t b) noexcept
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) + static_cast<std::uint64_t>(b));
+}
+
 constexpr double unskew2D   = -0.21132486540518713;
 
 constexpr double root3Over3             = 0.577350269189626;
@@ -127,7 +142,7 @@ const GradientTables &gradientTables()
 inline float grad3(std::int64_t seed, std::int64_t xrvp, std::int64_t yrvp, std::int64_t zrvp, float dx, float dy, float dz)
 {
     std::int64_t hash = (seed ^ xrvp) ^ (yrvp ^ zrvp);
-    hash *= hashMultiplier;
+    hash = hashMultiply(hash, hashMultiplier);
     hash ^= hash >> (64 - nGrads3DExponent + 2);
     const int gradientIndex = static_cast<int>(hash) & ((nGrads3D - 1) << 2);
     const auto &table       = gradientTables().gradients3D;
@@ -156,9 +171,9 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
     float az0 = static_cast<float>(zNSign) * -zri;
 
     // Prime pre-multiplication for the hash.
-    std::int64_t xrbp = static_cast<std::int64_t>(xrb) * primeX;
-    std::int64_t yrbp = static_cast<std::int64_t>(yrb) * primeY;
-    std::int64_t zrbp = static_cast<std::int64_t>(zrb) * primeZ;
+    std::int64_t xrbp = hashMultiply(static_cast<std::int64_t>(xrb), primeX);
+    std::int64_t yrbp = hashMultiply(static_cast<std::int64_t>(yrb), primeY);
+    std::int64_t zrbp = hashMultiply(static_cast<std::int64_t>(zrb), primeZ);
 
     // Two overlapping cubic lattices (BCC): pick an edge on each copy.
     float value = 0.0f;
@@ -179,7 +194,7 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
             {
                 b -= 1.0f;
                 value += (b * b) * (b * b)
-                       * grad3(seed, xrbp - static_cast<std::int64_t>(xNSign) * primeX, yrbp, zrbp,
+                       * grad3(seed, xrbp - hashMultiply(static_cast<std::int64_t>(xNSign), primeX), yrbp, zrbp,
                            xri + static_cast<float>(xNSign), yri, zri);
             }
         }
@@ -190,7 +205,7 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
             {
                 b -= 1.0f;
                 value += (b * b) * (b * b)
-                       * grad3(seed, xrbp, yrbp - static_cast<std::int64_t>(yNSign) * primeY, zrbp,
+                       * grad3(seed, xrbp, yrbp - hashMultiply(static_cast<std::int64_t>(yNSign), primeY), zrbp,
                            xri, yri + static_cast<float>(yNSign), zri);
             }
         }
@@ -201,7 +216,7 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
             {
                 b -= 1.0f;
                 value += (b * b) * (b * b)
-                       * grad3(seed, xrbp, yrbp, zrbp - static_cast<std::int64_t>(zNSign) * primeZ,
+                       * grad3(seed, xrbp, yrbp, zrbp - hashMultiply(static_cast<std::int64_t>(zNSign), primeZ),
                            xri, yri, zri + static_cast<float>(zNSign));
             }
         }
@@ -223,9 +238,9 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
 
         a += (0.75f - ax0) - (ay0 + az0);
 
-        xrbp += (static_cast<std::int64_t>(xNSign) >> 1) & primeX;
-        yrbp += (static_cast<std::int64_t>(yNSign) >> 1) & primeY;
-        zrbp += (static_cast<std::int64_t>(zNSign) >> 1) & primeZ;
+        xrbp = hashAdd(xrbp, (static_cast<std::int64_t>(xNSign) >> 1) & primeX);
+        yrbp = hashAdd(yrbp, (static_cast<std::int64_t>(yNSign) >> 1) & primeY);
+        zrbp = hashAdd(zrbp, (static_cast<std::int64_t>(zNSign) >> 1) & primeZ);
 
         xNSign = -xNSign;
         yNSign = -yNSign;

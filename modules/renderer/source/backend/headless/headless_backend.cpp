@@ -78,29 +78,22 @@ inline FurDisplacedVertex furDisplaceVertex(const glm::vec3 &position, const glm
     result.worldPosition = glm::vec3(world);
     return result;
 }
+
+// Bitwise matrix comparison for transform-cache keys. A conservative
+// mismatch (-0.0 vs 0.0 and NaN payloads) only costs a re-transform.
+bool transformMatricesEqual(const glm::mat4 &a, const glm::mat4 &b)
+{
+    return std::memcmp(&a, &b, sizeof(glm::mat4)) == 0;
+}
 } // namespace
 
 // CPU texture sampler: wrap or clamp UVs, then nearest or bilinear filter
-// against the requested mip level (level 0 = the base image). mipData holds
-// only the generated (downsampled) levels - level 0 reads pixelsRGB, level
-// N>=1 reads mipData[N-1]. Returns white when empty.
-glm::vec3 HeadlessTexture::sample(float u, float v, std::uint32_t mipLevel) const
+// against the base image. Returns white when empty.
+glm::vec3 HeadlessTexture::sample(float u, float v) const
 {
-    const float  *data;
-    std::uint32_t mipW, mipH;
-    if (mipLevel == 0 || mipData.empty() || mipLevel - 1u >= mipData.size())
-    {
-        data = pixelsRGB.data();
-        mipW = width;
-        mipH = height;
-    }
-    else
-    {
-        const std::uint32_t mipIndex = mipLevel - 1u;
-        data = mipData[mipIndex].data();
-        mipW = mipWidths[mipIndex];
-        mipH = mipHeights[mipIndex];
-    }
+    const float *data = pixelsRGB.data();
+    const std::uint32_t mipW = width;
+    const std::uint32_t mipH = height;
     if (mipW == 0 || mipH == 0 || data == nullptr)
         return glm::vec3(1.0f);
     if (mipW == 1 && mipH == 1)
@@ -153,7 +146,6 @@ glm::vec3 HeadlessTexture::sample(float u, float v, std::uint32_t mipLevel) cons
 // Alpha-channel sample over the RGBA8 upload copy: same wrap/clamp, same
 // nearest/bilinear filtering as sample() (mip level 0). The fur strand field
 // lives in the fur texture's alpha channel (see shaders/fur.frag), so the
-// headless fur path samples this instead of the RGB mip chain.
 float HeadlessTexture::sampleAlpha(float u, float v) const
 {
     if (width == 0 || height == 0 || pixels.size() < static_cast<std::size_t>(width) * height * 4)
@@ -409,41 +401,97 @@ void HeadlessBackend::endFrame()
     {
         // Resolve: framebufferWidth/Height are sample-space; each output pixel
         // averages its sampleScaleX x sampleScaleY block of encoded samples.
+        // The sample count of the supersampling grid is always a power of two,
+        // so the rounding average ((sum + half) / count) is exact as a shift;
+        // rows are split across workers when a scheduler is available (each
+        // band writes disjoint rows of the locked surface).
         const std::uint32_t outputRows    = std::min(framebufferHeight / sampleScaleY_, pixels.height);
         const std::uint32_t outputColumns = std::min(framebufferWidth / sampleScaleX_, pixels.width);
-        for (std::uint32_t y = 0; y < outputRows; ++y)
+        const std::uint32_t sampleCount   = sampleScaleX_ * sampleScaleY_;
+        std::uint32_t       sampleShift   = 0;
+        bool                sampleCountIsPowerOfTwo = false;
+        switch (sampleCount)
         {
-            std::uint8_t *destination
-                = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
-            for (std::uint32_t x = 0; x < outputColumns; ++x)
+        case 1u: sampleShift = 0u; sampleCountIsPowerOfTwo = true; break;
+        case 2u: sampleShift = 1u; sampleCountIsPowerOfTwo = true; break;
+        case 4u: sampleShift = 2u; sampleCountIsPowerOfTwo = true; break;
+        case 8u: sampleShift = 3u; sampleCountIsPowerOfTwo = true; break;
+        default: sampleCountIsPowerOfTwo = false; break;
+        }
+        const auto resolveRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd)
+        {
+            for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
             {
-                std::uint32_t accumulated[4] = {0, 0, 0, 0};
-                const std::uint8_t *sampleBase
-                    = color.data()
-                    + (static_cast<std::size_t>(y) * sampleScaleY_ * framebufferWidth
-                       + static_cast<std::size_t>(x) * sampleScaleX_)
-                        * 4;
-                for (std::uint32_t sampleY = 0; sampleY < sampleScaleY_; ++sampleY)
+                std::uint8_t *destination = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+                for (std::uint32_t x = 0; x < outputColumns; ++x)
                 {
-                    const std::uint8_t *sampleRow
-                        = sampleBase + static_cast<std::size_t>(sampleY) * framebufferWidth * 4;
-                    for (std::uint32_t sampleX = 0; sampleX < sampleScaleX_; ++sampleX)
+                    std::uint32_t accumulated[4] = {0, 0, 0, 0};
+                    const std::uint8_t *sampleBase
+                        = color.data()
+                        + (static_cast<std::size_t>(y) * sampleScaleY_ * framebufferWidth
+                           + static_cast<std::size_t>(x) * sampleScaleX_)
+                            * 4;
+                    for (std::uint32_t sampleY = 0; sampleY < sampleScaleY_; ++sampleY)
                     {
-                        const std::uint8_t *sample = sampleRow + static_cast<std::size_t>(sampleX) * 4;
-                        accumulated[0] += sample[0];
-                        accumulated[1] += sample[1];
-                        accumulated[2] += sample[2];
-                        accumulated[3] += sample[3];
+                        const std::uint8_t *sampleRow
+                            = sampleBase + static_cast<std::size_t>(sampleY) * framebufferWidth * 4;
+                        for (std::uint32_t sampleX = 0; sampleX < sampleScaleX_; ++sampleX)
+                        {
+                            const std::uint8_t *sample = sampleRow + static_cast<std::size_t>(sampleX) * 4;
+                            accumulated[0] += sample[0];
+                            accumulated[1] += sample[1];
+                            accumulated[2] += sample[2];
+                            accumulated[3] += sample[3];
+                        }
                     }
+                    if (sampleCountIsPowerOfTwo)
+                    {
+                        const std::uint32_t half = 1u << (sampleShift - 1u);
+                        destination[0] = static_cast<std::uint8_t>((accumulated[0] + half) >> sampleShift);
+                        destination[1] = static_cast<std::uint8_t>((accumulated[1] + half) >> sampleShift);
+                        destination[2] = static_cast<std::uint8_t>((accumulated[2] + half) >> sampleShift);
+                        destination[3] = static_cast<std::uint8_t>((accumulated[3] + half) >> sampleShift);
+                    }
+                    else
+                    {
+                        const std::uint32_t half = sampleCount / 2u;
+                        destination[0] = static_cast<std::uint8_t>((accumulated[0] + half) / sampleCount);
+                        destination[1] = static_cast<std::uint8_t>((accumulated[1] + half) / sampleCount);
+                        destination[2] = static_cast<std::uint8_t>((accumulated[2] + half) / sampleCount);
+                        destination[3] = static_cast<std::uint8_t>((accumulated[3] + half) / sampleCount);
+                    }
+                    destination += 4;
                 }
-                const std::uint32_t sampleCount = sampleScaleX_ * sampleScaleY_;
-                const std::uint32_t half        = sampleCount / 2u;
-                destination[0] = static_cast<std::uint8_t>((accumulated[0] + half) / sampleCount);
-                destination[1] = static_cast<std::uint8_t>((accumulated[1] + half) / sampleCount);
-                destination[2] = static_cast<std::uint8_t>((accumulated[2] + half) / sampleCount);
-                destination[3] = static_cast<std::uint8_t>((accumulated[3] + half) / sampleCount);
-                destination    += 4;
             }
+        };
+        const bool resolveInParallel = taskScheduler_ != nullptr && taskScheduler_->isRunning()
+            && parallelWorkerCount() >= 2u && outputRows >= 2u;
+        if (resolveInParallel)
+        {
+            const std::uint32_t workers    = parallelWorkerCount();
+            TaskGroup resolveGroup;
+            const std::uint32_t bandCount = workers;
+            const std::uint32_t bandWidth = (outputRows + bandCount - 1u) / bandCount;
+            for (std::uint32_t band = 1; band < bandCount; ++band)
+            {
+                const std::uint32_t begin = band * bandWidth;
+                const std::uint32_t end   = std::min(begin + bandWidth, outputRows);
+                if (begin >= end)
+                {
+                    break;
+                }
+                if (!taskScheduler_->schedule(resolveGroup, [this, &resolveRows, begin, end]()
+                        { resolveRows(begin, end); }))
+                {
+                    resolveRows(begin, end);
+                }
+            }
+            resolveRows(0u, std::min(bandWidth, outputRows));
+            resolveGroup.wait(*taskScheduler_);
+        }
+        else
+        {
+            resolveRows(0u, outputRows);
         }
     }
     window_->unlockSurfacePixels(window_->self, surface_);
@@ -508,7 +556,7 @@ bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &descripti
             // list, so quality drops 4x/16x/64x with no spatial coherence.
             mesh.lodIndices.push_back(mesh.indices);
             const std::size_t fullCount = mesh.indices.size();
-            const std::size_t strides[] = {4, 16, 64};
+            const std::size_t strides[] = {lodStrides_[0], lodStrides_[1], lodStrides_[2]};
             for (int level = 0; level < 3; ++level)
             {
                 const std::size_t triStride   = strides[level];
@@ -529,6 +577,10 @@ bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &descripti
             }
         }
 
+        mesh.handle = id;
+        // A re-creation under the same handle must not keep stale transforms
+        // against new geometry.
+        forgetTransformCache(id);
         meshes.emplace(id, std::move(mesh));
         reportError(error, RenderError::None);
         return true;
@@ -542,6 +594,7 @@ bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &descripti
 
 void HeadlessBackend::destroyMesh(MeshHandle mesh)
 {
+    forgetTransformCache(mesh);
     meshes.erase(mesh);
 }
 
@@ -572,40 +625,6 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                 texture.pixelsRGB[i * 3]     = static_cast<float>(description.pixels[i * 4]) * inv;
                 texture.pixelsRGB[i * 3 + 1] = static_cast<float>(description.pixels[i * 4 + 1]) * inv;
                 texture.pixelsRGB[i * 3 + 2] = static_cast<float>(description.pixels[i * 4 + 2]) * inv;
-            }
-            if (description.width > 1 && description.height > 1)
-            {
-                // mipData holds only the generated (downsampled) levels, not
-                // the base image - the sampler reads pixelsRGB for mip level 0
-                // directly, so duplicating it in mipData[0] was wasted memory
-                // (3 floats per pixel, e.g. ~12 MiB on a 1024x1024 texture).
-                // The first downsample reads from pixelsRGB; subsequent ones
-                // read from the previous mip in mipData.
-                const std::vector<float> *prev = &texture.pixelsRGB;
-                std::uint32_t             cw   = description.width, ch = description.height;
-                while (cw > 1 || ch > 1)
-                {
-                    const std::uint32_t nw = std::max(1u, cw / 2), nh = std::max(1u, ch / 2);
-                    std::vector<float>  nxt(static_cast<std::size_t>(nw) * nh * 3);
-                    for (std::uint32_t y = 0; y < nh; ++y)
-                        for (std::uint32_t x = 0; x < nw; ++x)
-                        {
-                            const std::uint32_t sx0 = x * 2, sy0 = y * 2, sx1 = std::min(sx0 + 1, cw - 1),
-                                                sy1 = std::min(sy0 + 1, ch - 1);
-                            for (int cc = 0; cc < 3; ++cc)
-                                nxt[(y * nw + x) * 3 + cc]
-                                    = ((*prev)[(sy0 * cw + sx0) * 3 + cc] + (*prev)[(sy0 * cw + sx1) * 3 + cc]
-                                          + (*prev)[(sy1 * cw + sx0) * 3 + cc] + (*prev)[(sy1 * cw + sx1) * 3 + cc])
-                                    * 0.25f;
-                        }
-                    texture.mipData.push_back(std::move(nxt));
-                    texture.mipWidths.push_back(nw);
-                    texture.mipHeights.push_back(nh);
-                    prev = &texture.mipData.back();
-                    cw = nw;
-                    ch = nh;
-                }
-                texture.mipLevelCount = static_cast<std::uint32_t>(texture.mipData.size()) + 1u; // +1 for the base level
             }
         }
         textures.emplace(id, std::move(texture));
@@ -763,7 +782,7 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
             {
                 const std::uint32_t vertexIndex = (*activeIndices)[index + corner];
                 cornerValid[corner]             = vertexIndex < setup.vertexCount;
-                cornerClip[corner]              = cornerValid[corner] ? transformedVertices_[vertexIndex].clip : glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+                cornerClip[corner]              = cornerValid[corner] ? setup.transformCache[vertexIndex].clip : glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
             }
             for (std::uint32_t corner = 0; corner < 3; ++corner)
             {
@@ -1429,8 +1448,80 @@ const HeadlessTexture *HeadlessBackend::mapFor(TextureHandle handle, const Headl
     return found != textures.end() ? &found->second : &neutral;
 }
 
+// Finds or creates this draw's transform-cache entry. Existing entries
+// refresh their LRU stamp and come back as-is; a new entry first evicts
+// least-recently-touched ones until it fits the budget, and a mesh larger
+// than the whole budget is never cached at all.
+HeadlessBackend::TransformCacheEntry *HeadlessBackend::transformCacheEntryFor(
+    const HeadlessMesh &mesh, std::size_t vertexCount)
+{
+    if (mesh.handle == invalidMesh)
+    {
+        return nullptr;
+    }
+    const MeshHandle handle = mesh.handle;
+    const auto       found  = transformCaches_.find(handle);
+    if (found != transformCaches_.end())
+    {
+        found->second.lastTouch = ++transformCacheClock_;
+        return &found->second;
+    }
+    const std::size_t entryBytes = vertexCount * sizeof(TransformedVertex);
+    if (entryBytes > transformCacheBudgetBytes_)
+    {
+        return nullptr;
+    }
+    while (transformCacheBytesUsed_ + entryBytes > transformCacheBudgetBytes_)
+    {
+        auto victim = transformCaches_.end();
+        for (auto it = transformCaches_.begin(); it != transformCaches_.end(); ++it)
+        {
+            if (victim == transformCaches_.end() || it->second.lastTouch < victim->second.lastTouch)
+            {
+                victim = it;
+            }
+        }
+        if (victim == transformCaches_.end())
+        {
+            break;
+        }
+        transformCacheBytesUsed_ -= victim->second.vertices.size() * sizeof(TransformedVertex);
+        transformCaches_.erase(victim);
+    }
+    if (transformCacheBytesUsed_ + entryBytes > transformCacheBudgetBytes_)
+    {
+        return nullptr;
+    }
+    try
+    {
+        TransformCacheEntry &entry = transformCaches_[handle];
+        entry.vertices.resize(vertexCount);
+        transformCacheBytesUsed_ += entryBytes;
+        entry.lastTouch   = ++transformCacheClock_;
+        entry.worldValid  = false;
+        entry.clipValid   = false;
+        return &entry;
+    }
+    catch (const std::bad_alloc &)
+    {
+        transformCaches_.erase(handle);
+        return nullptr;
+    }
+}
+
+void HeadlessBackend::forgetTransformCache(MeshHandle mesh)
+{
+    const auto found = transformCaches_.find(mesh);
+    if (found == transformCaches_.end())
+    {
+        return;
+    }
+    transformCacheBytesUsed_ -= found->second.vertices.size() * sizeof(TransformedVertex);
+    transformCaches_.erase(found);
+}
+
 // Gathers everything rasterizeTriangles needs. Order matters: frustum cull,
-// transform the vertices (through the generation-stamped cache when it fits
+// transform the vertices (through the persistent per-mesh cache when it fits
 // the budget), resolve textures to stand-ins, then probe a spread of the
 // mesh's triangles against their vertex normals to decide if back-face
 // culling is safe (only attempted when the whole mesh is in front of the
@@ -1510,100 +1601,146 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
         }
     }
 
-    const std::size_t vertexCount         = mesh.vertexCount();
-    std::uint32_t     transformGeneration = transformGeneration_ + 1;
-    // Per-vertex cache cost: the transformed data plus its generation stamp.
-    constexpr std::size_t transformCacheEntryBytes = sizeof(TransformedVertex) + sizeof(std::uint32_t);
-    const bool transformCacheWithinBudget          = transformCacheBudgetBytes_ >= transformCacheEntryBytes
-                                                  && vertexCount <= transformCacheBudgetBytes_ / transformCacheEntryBytes;
-    outSetup.vertexCount                           = vertexCount;
-    outSetup.useTransformCache                     = false;
-    if (triangleCount >= 2 && activeIndexCount > vertexCount && transformCacheWithinBudget)
+    const std::size_t vertexCount = mesh.vertexCount();
+    outSetup.vertexCount         = vertexCount;
+    outSetup.useTransformCache   = false;
+    outSetup.transformCache      = nullptr;
+    if (triangleCount >= 2 && activeIndexCount > vertexCount
+        && transformCacheBudgetBytes_ >= sizeof(TransformedVertex)
+        && vertexCount <= transformCacheBudgetBytes_ / sizeof(TransformedVertex))
     {
-        try
+        // Persistent per-mesh transform cache: the entry survives draws and
+        // frames, so a static model matrix under a static camera skips the
+        // vertex stage entirely, and a camera move reprojects the clip tier
+        // without re-running the model stage. Draws that cannot be cached
+        // keep the direct per-vertex path inside the rasterizers.
+        TransformCacheEntry *entry = transformCacheEntryFor(mesh, vertexCount);
+        if (entry != nullptr)
         {
-            if (transformedVertices_.size() < vertexCount)
+            // Fur clips through the raw view-projection (gravity lands in
+            // world space, after the model transform); regular draws clip
+            // through the combined view-projection of the local position.
+            const glm::mat4 clipMatrix = outSetup.fur ? outSetup.viewProjectionWorld : outSetup.viewProjection;
+            const bool worldKeyMatches = entry->worldValid
+                && transformMatricesEqual(entry->worldModel, outSetup.model) && entry->fur == outSetup.fur
+                && entry->worldUnlit == outSetup.unlit
+                && (!outSetup.fur
+                    || (entry->furLayerRatio == outSetup.furLayerRatio && entry->furHeight == outSetup.furHeight
+                        && entry->furGravity == outSetup.furGravity));
+            const bool clipKeyMatches = entry->clipValid && transformMatricesEqual(entry->clipMatrix, clipMatrix);
+            try
             {
-                transformedVertices_.resize(vertexCount);
-            }
-            if (transformedVertexStamps_.size() < vertexCount)
-            {
-                transformedVertexStamps_.resize(vertexCount, 0);
-            }
-            if (transformGeneration == 0)
-            {
-                std::fill(transformedVertexStamps_.begin(), transformedVertexStamps_.end(), 0);
-                transformGeneration = 1;
-            }
-            transformGeneration_         = transformGeneration;
-            outSetup.transformGeneration = transformGeneration;
-            outSetup.useTransformCache   = true;
-
-            const glm::mat4  &model             = outSetup.model;
-            const glm::mat4  &viewProjection    = outSetup.viewProjection;
-            const glm::mat3  &modelNormalMatrix = outSetup.modelNormalMatrix;
-            const bool        unlit             = outSetup.unlit;
-            const float      *posData           = mesh.positions.data();
-            const float      *nrmData           = mesh.normals.data();
-            const std::size_t hwWorkers         = parallelWorkerCount();
-            const bool        parallelizeTransform
-                = hwWorkers >= 2u && vertexCount >= 8192u && taskScheduler_ != nullptr && taskScheduler_->isRunning();
-            auto transformRange = [&](std::size_t vStart, std::size_t vEnd)
-            {
-                for (std::size_t v = vStart; v < vEnd; ++v)
+                if (worldKeyMatches && !clipKeyMatches)
                 {
-                    // Stamp guard: vertices already transformed this draw (or
-                    // this generation) are reused instead of recomputed.
-                    if (transformedVertexStamps_[v] == transformGeneration)
-                    {
-                        continue;
-                    }
-                    const glm::vec3 localPos3(posData[v * 3], posData[v * 3 + 1], posData[v * 3 + 2]);
-                    TransformedVertex &out = transformedVertices_[v];
+                    // World stage hit, clip tier miss (the camera moved):
+                    // reproject the stored stage. The per-vertex expressions
+                    // are the ones the full pass uses, so the values are
+                    // bit-identical to a full re-transform of the same draw.
+                    const float *const posData = mesh.positions.data();
                     if (outSetup.fur)
                     {
-                        // Shell-fur displacement (fur.vert mirror): outward
-                        // along the object-space normal, gravity droop in
-                        // world space, clip from the RAW view-projection.
-                        const FurDisplacedVertex displaced = furDisplaceVertex(localPos3,
-                            glm::make_vec3(nrmData + v * 3),
-                            outSetup.model,
-                            outSetup.viewProjectionWorld,
-                            outSetup.furLayerRatio,
-                            outSetup.furHeight,
-                            outSetup.furGravity);
-                        out.clip          = displaced.clip;
-                        out.worldPosition = displaced.worldPosition;
+                        for (std::size_t v = 0; v < vertexCount; ++v)
+                        {
+                            entry->vertices[v].clip
+                                = clipMatrix * glm::vec4(entry->vertices[v].worldPosition, 1.0f);
+                        }
                     }
                     else
                     {
-                        const glm::vec4 localPos(localPos3, 1.0f);
-                        out.clip          = viewProjection * localPos;
-                        out.worldPosition = glm::vec3(model * localPos);
+                        for (std::size_t v = 0; v < vertexCount; ++v)
+                        {
+                            const glm::vec4 localPos(
+                                posData[v * 3], posData[v * 3 + 1], posData[v * 3 + 2], 1.0f);
+                            entry->vertices[v].clip = clipMatrix * localPos;
+                        }
                     }
-                    if (!unlit)
-                    {
-                        const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + v * 3);
-                        const float     normalLengthSquared = glm::dot(normalRaw, normalRaw);
-                        out.worldNormal = normalLengthSquared > 0.0f && std::isfinite(normalLengthSquared)
-                                            ? normalRaw * glm::inversesqrt(normalLengthSquared)
-                                            : glm::vec3(0.0f, 1.0f, 0.0f);
-                    }
-                    transformedVertexStamps_[v] = transformGeneration;
+                    entry->clipMatrix = clipMatrix;
+                    entry->clipValid  = true;
                 }
-            };
-            if (parallelizeTransform)
-            {
-                taskScheduler_->parallelFor(vertexCount, 8192u, transformRange);
+                else if (!worldKeyMatches)
+                {
+                    // World stage miss: full transform, writing the persistent
+                    // entry (the original per-vertex expressions).
+                    entry->vertices.resize(vertexCount);
+                    const glm::mat4 &model             = outSetup.model;
+                    const glm::mat4 &viewProjection    = outSetup.viewProjection;
+                    const glm::mat3 &modelNormalMatrix = outSetup.modelNormalMatrix;
+                    const bool       unlit             = outSetup.unlit;
+                    const float     *posData           = mesh.positions.data();
+                    const float     *nrmData           = mesh.normals.data();
+                    const std::size_t hwWorkers     = parallelWorkerCount();
+                    const bool parallelizeTransform = hwWorkers >= 2u
+                        && vertexCount >= parallelTransformVertexThreshold_ && taskScheduler_ != nullptr
+                        && taskScheduler_->isRunning();
+                    auto transformRange = [&](std::size_t vStart, std::size_t vEnd)
+                    {
+                        for (std::size_t v = vStart; v < vEnd; ++v)
+                        {
+                            const glm::vec3 localPos3(posData[v * 3], posData[v * 3 + 1], posData[v * 3 + 2]);
+                            TransformedVertex &out = entry->vertices[v];
+                            if (outSetup.fur)
+                            {
+                                // Shell-fur displacement (fur.vert mirror): outward
+                                // along the object-space normal, gravity droop in
+                                // world space, clip from the RAW view-projection.
+                                const FurDisplacedVertex displaced = furDisplaceVertex(localPos3,
+                                    glm::make_vec3(nrmData + v * 3),
+                                    outSetup.model,
+                                    outSetup.viewProjectionWorld,
+                                    outSetup.furLayerRatio,
+                                    outSetup.furHeight,
+                                    outSetup.furGravity);
+                                out.clip          = displaced.clip;
+                                out.worldPosition = displaced.worldPosition;
+                            }
+                            else
+                            {
+                                const glm::vec4 localPos(localPos3, 1.0f);
+                                out.clip          = viewProjection * localPos;
+                                out.worldPosition = glm::vec3(model * localPos);
+                            }
+                            if (!unlit)
+                            {
+                                const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + v * 3);
+                                const float     normalLengthSquared = glm::dot(normalRaw, normalRaw);
+                                out.worldNormal = normalLengthSquared > 0.0f && std::isfinite(normalLengthSquared)
+                                                    ? normalRaw * glm::inversesqrt(normalLengthSquared)
+                                                    : glm::vec3(0.0f, 1.0f, 0.0f);
+                            }
+                        }
+                    };
+                    if (parallelizeTransform)
+                    {
+                        // Chunk size follows the threshold but stays bounded:
+                        // tiny chunks would spend the parallel win on task
+                        // bookkeeping, huge ones would not split small meshes.
+                        const std::uint32_t transformGrain = std::clamp(parallelTransformVertexThreshold_, 256u, 8192u);
+                        taskScheduler_->parallelFor(vertexCount, transformGrain, transformRange);
+                    }
+                    else
+                    {
+                        transformRange(0, vertexCount);
+                    }
+                    entry->worldModel    = outSetup.model;
+                    entry->worldUnlit    = outSetup.unlit;
+                    entry->fur           = outSetup.fur;
+                    entry->furLayerRatio = outSetup.furLayerRatio;
+                    entry->furHeight     = outSetup.furHeight;
+                    entry->furGravity    = outSetup.furGravity;
+                    entry->worldValid    = true;
+                    entry->clipMatrix    = clipMatrix;
+                    entry->clipValid     = true;
+                }
+                outSetup.useTransformCache = true;
+                outSetup.transformCache    = entry->vertices.data();
             }
-            else
+            catch (const std::bad_alloc &)
             {
-                transformRange(0, vertexCount);
+                entry->worldValid = false;
+                entry->clipValid  = false;
+                outSetup.useTransformCache = false;
+                outSetup.transformCache    = nullptr;
             }
-        }
-        catch (const std::bad_alloc &)
-        {
-            outSetup.useTransformCache = false;
         }
     }
 
@@ -1681,16 +1818,17 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
                     const std::uint32_t i2 = activeIndices[t * 3 + 2];
                     if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
                         continue;
-                    const glm::vec3 &wp0 = transformedVertices_[i0].worldPosition;
-                    const glm::vec3 &wp1 = transformedVertices_[i1].worldPosition;
-                    const glm::vec3 &wp2 = transformedVertices_[i2].worldPosition;
+                    const TransformedVertex *const cache = outSetup.transformCache;
+                    const glm::vec3 &wp0 = cache[i0].worldPosition;
+                    const glm::vec3 &wp1 = cache[i1].worldPosition;
+                    const glm::vec3 &wp2 = cache[i2].worldPosition;
                     const glm::vec3  faceNormal = glm::cross(wp1 - wp0, wp2 - wp0);
                     const float      fnLen2     = glm::dot(faceNormal, faceNormal);
                     if (fnLen2 < 1e-12f)
                         continue;
-                    const glm::vec3 &wn0 = transformedVertices_[i0].worldNormal;
-                    const glm::vec3 &wn1 = transformedVertices_[i1].worldNormal;
-                    const glm::vec3 &wn2 = transformedVertices_[i2].worldNormal;
+                    const glm::vec3 &wn0 = cache[i0].worldNormal;
+                    const glm::vec3 &wn1 = cache[i1].worldNormal;
+                    const glm::vec3 &wn2 = cache[i2].worldNormal;
                     const glm::vec3  avgNormal = wn0 + wn1 + wn2;
                     const float      anLen2    = glm::dot(avgNormal, avgNormal);
                     if (anLen2 < 1e-12f)
@@ -1781,6 +1919,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
     const float       frontSign          = setup.frontSign;
     const bool        useTransformCache  = setup.useTransformCache;
     const std::size_t vertexCount        = setup.vertexCount;
+    const TransformedVertex *const availableTransformCache = setup.transformCache;
     const float *const posData   = mesh.positions.data();
     const float *const nrmData   = mesh.normals.data();
     const float *const colorData = mesh.colors.data();
@@ -1826,7 +1965,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
             const std::uint32_t vertexIndex = index[corner];
             if (useTransformCache && vertexIndex < vertexCount)
             {
-                const TransformedVertex &transformed = transformedVertices_[vertexIndex];
+                const TransformedVertex &transformed = availableTransformCache[vertexIndex];
                 corners[corner].clip                 = transformed.clip;
                 corners[corner].worldPosition        = transformed.worldPosition;
                 corners[corner].worldNormal          = unlit ? glm::vec3(0.0f) : transformed.worldNormal;
@@ -2184,16 +2323,16 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 occlusion,
                                 directLights_.data(),
                                 static_cast<std::uint32_t>(directLights_.size()),
-                                probeGrid_.valid() ? &probeGrid_ : nullptr);
+                                preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr);
                             // Indirect specular (lumen_reflection field hook):
                             // the field texel this pixel projects into carries
                             // the expected GGX-lobe response of its material,
                             // so the add is the whole composite (linear space,
                             // before tone mapping - see shadeTrianglePixel's
                             // twin of this block).
-                            if (reflectionField_.valid())
+                            if (preparedReflectionField_.valid)
                             {
-                                shaded += sampleReflectionField(reflectionField_, interpolatedPosition);
+                                shaded += sampleReflectionField(preparedReflectionField_, interpolatedPosition);
                             }
                             }
                         }
@@ -2337,8 +2476,9 @@ std::size_t HeadlessBackend::prepareFanTriangles(
     const float *const  nrmData          = mesh.normals.data();
     const float *const  colorData        = mesh.colors.data();
     const float *const  uvData           = mesh.uvs.data();
-    // Cache data pointer hoisted with the rest (the cache is read-only here).
-    const TransformedVertex *const transformCache = transformedVertices_.data();
+    // Cache data pointer hoisted with the rest (the cache is read-only here;
+    // the per-mesh entry whose vertices this draw transforms through).
+    const TransformedVertex *const transformCache = setup.transformCache;
 
     const std::uint32_t *index = indexData + triangleIndex * 3;
 
@@ -2645,15 +2785,15 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             occlusion,
             lights,
             lightCount,
-            probeGrid_.valid() ? &probeGrid_ : nullptr);
+            preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr);
 
         // Indirect specular (lumen_reflection field hook): the field texel
         // this pixel projects into carries the expected GGX-lobe response of
         // its material, so the add is the whole composite. Linear space, per
         // the module's estimator contract; tone mapping happens below.
-        if (reflectionField_.valid())
+        if (preparedReflectionField_.valid)
         {
-            shaded += sampleReflectionField(reflectionField_, interpolatedPosition);
+            shaded += sampleReflectionField(preparedReflectionField_, interpolatedPosition);
         }
     }
 

@@ -28,19 +28,30 @@ std::vector<DiscoveredPluginPackage> discoverPluginPackages(
     const std::filesystem::path &pluginsDirectory, const std::vector<std::string> &disabledIds, std::string &report)
 {
     std::vector<DiscoveredPluginPackage> packages;
-    if (!std::filesystem::exists(pluginsDirectory) || !std::filesystem::is_directory(pluginsDirectory))
+    std::error_code                     scanError;
+    if (!std::filesystem::exists(pluginsDirectory, scanError) || scanError
+        || !std::filesystem::is_directory(pluginsDirectory, scanError) || scanError)
     {
         return packages;
     }
 
     std::vector<std::filesystem::path> packageDirectories;
-    for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(pluginsDirectory))
+    for (const std::filesystem::directory_entry &entry :
+        std::filesystem::directory_iterator(pluginsDirectory,
+            std::filesystem::directory_options::skip_permission_denied, scanError))
     {
-        if (!entry.is_directory())
+        if (scanError)
+        {
+            scanError.clear();
+            continue;
+        }
+        std::error_code entryError;
+        const bool      entryIsDirectory = entry.is_directory(entryError);
+        if (entryError || !entryIsDirectory)
         {
             continue;
         }
-        if (!std::filesystem::exists(entry.path() / PluginManifestLoader::manifestFileName))
+        if (!std::filesystem::exists(entry.path() / PluginManifestLoader::manifestFileName, entryError) || entryError)
         {
             report += "- directory '" + entry.path().string() + "' inside the plugins directory has no "
                     + std::string(PluginManifestLoader::manifestFileName)

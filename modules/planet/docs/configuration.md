@@ -27,7 +27,7 @@ The shipped defaults describe the showcase planet: radius 60 km, Earth-like reli
 | `max_concurrent_builds` | `16` | Chunk mesh builds in flight at once (the pool runs wide open; ground views select thousands of chunks). |
 | `max_new_builds_per_update` | `48` | Build requests issued per `updatePlanet` call. Requests are ordered by apparent size (chunk width over distance, the same quantity the LOD rule is built on), so the widest-on-screen unresolved chunks build first. |
 | `max_live_planets` | `16` | How many planets one module instance may keep alive at once (each owns a worker pool). `createPlanet` reports `CapacityReached` beyond the cap. |
-| `chunk_eviction_updates` | `240` | Updates a hidden mesh stays cached before eviction. |
+| `chunk_eviction_updates` | `240` | Updates a hidden mesh stays cached before eviction. The stamp-refresh and eviction scan follows this value whenever it is shorter than the default eight-update cadence, so thresholds below eight never age a visible chunk out between scans. |
 | `chunk_cache_capacity` | `16384` | Hard cap on cached chunk meshes (oldest evicted first). Must exceed the whole visible set on the deepest ground views (~9000 chunks at radius 60000) or ready meshes evict and rebuild in a churn loop. |
 
 ## Relief shaping (meters unless noted)

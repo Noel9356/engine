@@ -28,7 +28,7 @@ headless_band_split_triangles        = 4096
 # (headless_tile_parallel) has no entry here on purpose: its default adapts
 # to the machine (on from four logical processors, off below) and an
 # explicit line would pin it for every host.
-headless_transform_cache_mb          = 32
+headless_transform_cache_mb          = 256
 headless_batched_tile_rasterization  = true
 instance_batch_min_count             = 4
 instance_batching                    = true

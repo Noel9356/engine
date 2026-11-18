@@ -51,7 +51,11 @@ namespace renderer
 // Options forwarded from [renderer] configuration at renderer creation.
 struct HeadlessBackendOptions
 {
-    std::size_t transformCacheBudgetBytes = 32u * 1024u * 1024u; // cap for the vertex transform cache
+    // Cap for the per-mesh transform cache (see the cache entry comment by
+    // transformCaches_): the sum of all cached meshes' entries stays within
+    // this budget, least-recently-used entries evict when a new mesh does
+    // not fit.
+    std::size_t transformCacheBudgetBytes = 256u * 1024u * 1024u;
     bool        frustumCullingEnabled     = true;
     bool        backFaceCullingEnabled    = true;
 
@@ -96,6 +100,20 @@ struct HeadlessBackendOptions
     // at least this fraction of the framebuffer height (small far geometry
     // would spend more on the fork/join than it saves).
     float bandSplitMinimumScreenFraction = 0.125f;
+
+    // Meshes at or above this many vertices transform across workers when a
+    // scheduler is available (renderer.headless_parallel_transform_vertices).
+    std::uint32_t parallelTransformVertexThreshold = 8192;
+
+    // Screen tile edge for the tile-parallel paths (renderer.tile_pixels);
+    // kept a power of two so the tile grid aligns with the framebuffer.
+    std::uint32_t tilePixels = 64;
+
+    // Angular-size LOD cutoffs (renderer.lod_thresholds) and the triangle
+    // strides of the decimated chains (renderer.lod_strides); level 0 is
+    // always the full index list.
+    std::array<float, 4>         lodThresholds = {0.02f, 0.05f, 0.1f, 0.2f};
+    std::array<std::uint32_t, 3> lodStrides    = {4u, 16u, 64u};
 };
 
 // All entry points are main-thread only. drawMeshInstances is implemented as
@@ -117,7 +135,12 @@ public:
           window_(windowCapability),
           bandSplitTriangleThreshold_(options.bandSplitTriangleThreshold),
           bandSplitMinimumScreenFraction_(options.bandSplitMinimumScreenFraction),
-          lodMinTriangles_(options.lodMinTriangles)
+          lodMinTriangles_(options.lodMinTriangles),
+          parallelTransformVertexThreshold_(options.parallelTransformVertexThreshold),
+          tileWidth_(options.tilePixels),
+          tileHeight_(options.tilePixels),
+          lodThresholds_(options.lodThresholds),
+          lodStrides_(options.lodStrides)
     {
         // Supersampling grid from the requested sample count (see
         // HeadlessBackendOptions::msaaSamples); sampleScaleX_/Y_ stay 1 when
@@ -182,8 +205,8 @@ public:
     // Copies the borrowed lumen_gi probe-grid snapshot; the rasterizer's
     // pbrShade calls then sample it per pixel (validity-weighted trilinear
     // SH2 irradiance). An empty snapshot keeps the legacy hemispheric
-    // ambient. Level descriptors are built once here so per-pixel shading
-    // skips rebuilding them.
+    // ambient. The prepared view (level descriptors + bounds constants) is
+    // rebuilt here so per-pixel shading reads ready-made constants.
     void setProbeGrid(const GiProbeGrid &grid) override
     {
         probeGridProbes_.assign(grid.probes, grid.probes + grid.probeCount);
@@ -191,8 +214,11 @@ public:
         copied.header     = grid.header;
         copied.probeCount = grid.probeCount;
         copied.probes     = probeGridProbes_.empty() ? nullptr : probeGridProbes_.data();
-        buildProbeLevels(copied);
-        probeGrid_ = copied;
+        probeGrid_        = copied;
+        // Prepared once per snapshot: the level descriptors and the level-0
+        // bounds-test constants, so per-pixel shading stops rebuilding them
+        // for every shaded sample.
+        preparedProbeGrid_ = prepareGiProbeGrid(probeGrid_);
     }
 
     // Copies the borrowed lumen_reflection field; the rasterizer's pixel
@@ -217,6 +243,9 @@ public:
             reflectionField_.header = field.header;
             reflectionField_.radiance = reflectionRadiance_.data();
         }
+        // Prepared once per snapshot: the field's view-projection, so the
+        // per-pixel bilinear sample stops rebuilding the matrix.
+        preparedReflectionField_ = prepareReflectionField(reflectionField_);
     }
 
     void setEnvironment(const pbr::PbrEnvironment &environment) override
@@ -272,10 +301,11 @@ private:
     };
 
     // ---- tile-parallel path (opt-in; see HeadlessBackendOptions) ----
-    // Fixed screen-tile size: a tile's colour/depth working set stays
-    // cache-local, and exclusive ownership needs no per-pixel locks.
-    static constexpr std::uint32_t tileWidth_  = 64;
-    static constexpr std::uint32_t tileHeight_ = 64;
+    // Screen-tile edge in pixels (renderer.tile_pixels, a power of two):
+    // a tile's colour/depth working set stays cache-local, and exclusive
+    // ownership needs no per-pixel locks.
+    std::uint32_t tileWidth_  = 64;
+    std::uint32_t tileHeight_ = 64;
 
     // One fully shaded corner of a fan triangle (cache entry plus the
     // mesh-sourced varyings). No default member initializers: records are
@@ -332,8 +362,11 @@ private:
         // with writes off so the opaque passes drawn after them own the
         // silhouette interior.
         bool                   depthWrite              = true;
+        // Per-mesh transform-cache view for this draw: when non-null the
+        // geometry pipeline reads the transformed vertices from it instead
+        // of transforming per corner (see the .cpp's prepareRasterization).
         bool                   useTransformCache       = false;
-        std::uint32_t          transformGeneration     = 0;
+        const TransformedVertex *transformCache       = nullptr;
         std::size_t            vertexCount             = 0;
         // Shell-fur draws: when fur is true, vertices are displaced along
         // their object-space normals by (layer/layerCount) * furHeight before
@@ -510,7 +543,13 @@ private:
     float         bandSplitMinimumScreenFraction_ = 0.125f;
     std::size_t   pixelsPerLockGroup_             = 16;
     std::size_t   lodMinTriangles_                = 4096;
-    // LOD angular-size cutoffs (boundsRadius/dist): pick coarser LOD as the value shrinks.
+    // Vertex count at which the transform stage parallelizes (see
+    // prepareRasterization).
+    std::uint32_t parallelTransformVertexThreshold_ = 8192;
+    // Triangle strides of the decimated LOD chains (renderer.lod_strides).
+    std::array<std::uint32_t, 3> lodStrides_ = {4u, 16u, 64u};
+    // LOD angular-size cutoffs (boundsRadius/dist): pick coarser LOD as the value shrinks
+    // (renderer.lod_thresholds).
     std::array<float, 4> lodThresholds_ = {0.02f, 0.05f, 0.1f, 0.2f};
 
     pbr::PbrEnvironment              environment_{};
@@ -525,16 +564,21 @@ private:
     glm::vec3                        ambientGround_{0.0f};
     std::vector<PreparedDirectLight> directLights_;
 
-    // lumen_gi probe-grid hook: owned probe copy plus the view passed to
-    // pbrShade. Kept valid between frames; setProbeGrid replaces it wholesale.
+    // lumen_gi probe-grid hook: owned probe copy plus the prepared view
+    // passed to pbrShade. Kept valid between frames; setProbeGrid replaces
+    // both wholesale.
     GiProbeGrid                     probeGrid_{};
-    std::vector<lumen_gi::GiProbe> probeGridProbes_;
+    PreparedGiProbeGrid             preparedProbeGrid_{};
+    std::vector<lumen_gi::GiProbe> probeGridProbes_;  
 
     // lumen_reflection field hook: owned radiance copy plus the borrowed view
     // the pixel path samples. Kept valid between frames; setReflectionField
     // replaces it wholesale.
     std::vector<float>                 reflectionRadiance_;
     ReflectionField                    reflectionField_{};
+    // Prepared view of reflectionField_ (the field's own view-projection
+    // built once per snapshot); rebuilt by setReflectionField.
+    PreparedReflectionField            preparedReflectionField_{};
 
     std::uint32_t viewportWidth  = 0;
     std::uint32_t viewportHeight = 0;
@@ -589,11 +633,42 @@ private:
 
     std::unordered_map<MeshHandle, HeadlessMesh> meshes;
 
-    // Transform cache: vertices shaded for the current generation (stamp
-    // array lets draws reuse transforms across overlapping index ranges).
-    std::vector<TransformedVertex> transformedVertices_;
-    std::vector<std::uint32_t>     transformedVertexStamps_;
-    std::uint32_t                  transformGeneration_ = 0;
+    // ---- per-mesh transform cache -------------------------------------
+    // One entry per cached mesh, surviving draws and frames: the world
+    // stage (model transform + normal matrix) is keyed on the exact model
+    // matrix bits plus the draw kind (unlit, shell-fur layer parameters),
+    // and the clip stage is keyed separately on whichever matrix produced
+    // clip (the combined view-projection, or the raw one for fur). A static
+    // model matrix under a static camera hits both tiers; a camera move
+    // reprojects the clip tier without re-running the model stage; a moving
+    // or shapeshifting object simply misses and re-transforms. The total
+    // footprint is bounded by transformCacheBudgetBytes_ (raised entries
+    // evict least-recently-touched ones; a mesh larger than the whole
+    // budget is never cached and keeps the direct per-vertex path).
+    struct TransformCacheEntry
+    {
+        glm::mat4 worldModel{0.0f};
+        bool      worldValid     = false;
+        bool      worldUnlit     = false;
+        bool      fur            = false;
+        float     furLayerRatio  = 0.0f;
+        float     furHeight      = 0.0f;
+        float     furGravity     = 0.0f;
+        glm::mat4 clipMatrix{0.0f};
+        bool      clipValid      = false;
+        std::vector<TransformedVertex> vertices;
+        std::uint64_t                   lastTouch = 0;
+    };
+    std::unordered_map<MeshHandle, TransformCacheEntry> transformCaches_;
+    std::size_t   transformCacheBytesUsed_ = 0;
+    std::uint64_t transformCacheClock_     = 1;
+
+    // Finds or creates this draw's cache entry (nullptr when the mesh cannot
+    // be cached); existing entries only refresh their LRU stamp.
+    [[nodiscard]] TransformCacheEntry *transformCacheEntryFor(const HeadlessMesh &mesh, std::size_t vertexCount);
+
+    // Drops a mesh's entry (destroy, or re-creation under the same handle).
+    void forgetTransformCache(MeshHandle mesh);
 
     std::unordered_map<TextureHandle, HeadlessTexture> textures;
 

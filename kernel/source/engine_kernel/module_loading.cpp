@@ -122,10 +122,10 @@ void fillDescriptorFromEntryTable(const EngineModuleEntryTable &entry, ModuleDes
 // or a module.toml sidecar; libraries with neither stay undescribed.
 void EngineKernel::loadModuleLibraries(std::string &report)
 {
-    moduleLibraries.clear();
+    moduleLibraries_.clear();
     undescribedModuleLibraries_.clear();
 
-    std::filesystem::path       modulesDirectory = configurationStore.modulesDirectory();
+    std::filesystem::path       modulesDirectory = configurationStore_.modulesDirectory();
     const std::filesystem::path resolvedDirectory
         = modulesDirectory.is_absolute() ? modulesDirectory : executableDirectory() / modulesDirectory;
 
@@ -133,7 +133,7 @@ void EngineKernel::loadModuleLibraries(std::string &report)
     const auto collectLibraries = [&moduleLibraryPaths](const std::filesystem::directory_entry &entry)
     {
         std::error_code statError;
-        if (statError || !entry.is_regular_file())
+        if (!entry.is_regular_file(statError) || statError)
         {
             return;
         }
@@ -159,11 +159,12 @@ void EngineKernel::loadModuleLibraries(std::string &report)
         for (const std::filesystem::directory_entry &entry : module)
         {
             std::error_code statError;
+            const bool      entryIsDirectory = entry.is_directory(statError);
             if (statError)
             {
                 continue;
             }
-            if (entry.is_directory())
+            if (entryIsDirectory)
             {
                 subdirectories.push_back(entry.path());
             }
@@ -268,11 +269,11 @@ void EngineKernel::loadModuleLibraries(std::string &report)
             record.libraryPath   = libraryPath;
 
             // Two libraries claiming one module name would alias; the later (sorted) path is ignored.
-            if (std::find_if(moduleLibraries.begin(),
-                    moduleLibraries.end(),
+            if (std::find_if(moduleLibraries_.begin(),
+                    moduleLibraries_.end(),
                     [&record](const ModuleLibraryRecord &existing)
                     { return existing.descriptor.name == record.descriptor.name; })
-                != moduleLibraries.end())
+                != moduleLibraries_.end())
             {
                 report += "- module '" + record.descriptor.name
                         + "' is provided by more than one module library; '" + libraryPath.string()
@@ -280,7 +281,7 @@ void EngineKernel::loadModuleLibraries(std::string &report)
                 continue;
             }
 
-            moduleLibraries.push_back(std::move(record));
+            moduleLibraries_.push_back(std::move(record));
             continue;
         }
 
@@ -330,18 +331,18 @@ void EngineKernel::loadModuleLibraries(std::string &report)
         }
 
         // Two libraries claiming one module name would alias; the later (sorted) path is ignored.
-        if (std::find_if(moduleLibraries.begin(),
-                moduleLibraries.end(),
+        if (std::find_if(moduleLibraries_.begin(),
+                moduleLibraries_.end(),
                 [&record](const ModuleLibraryRecord &existing)
                 { return existing.descriptor.name == record.descriptor.name; })
-            != moduleLibraries.end())
+            != moduleLibraries_.end())
         {
             report += "- module '" + record.descriptor.name + "' is provided by more than one module library; '"
                     + libraryPath.string() + "' is ignored.\n";
             continue;
         }
 
-        moduleLibraries.push_back(std::move(record));
+        moduleLibraries_.push_back(std::move(record));
     }
 
     if (cacheChanged)
@@ -389,7 +390,7 @@ void EngineKernel::resolveUndescribedModuleLibraries(std::string &report, bool e
     }
 
     const TrustGate::ScanDecision decision
-        = trustGate_->decideScanConsent(scanAdvisories, configurationStore, startupWarnings_);
+        = trustGate_->decideScanConsent(scanAdvisories, configurationStore_, startupWarnings_);
     const std::vector<std::size_t> &approvedIndexes  = decision.approved;
     const std::vector<std::size_t> &undecidedIndexes = decision.undecided;
 
@@ -406,11 +407,11 @@ void EngineKernel::resolveUndescribedModuleLibraries(std::string &report, bool e
         {
             continue;
         }
-        if (std::find_if(moduleLibraries.begin(),
-                moduleLibraries.end(),
+        if (std::find_if(moduleLibraries_.begin(),
+                moduleLibraries_.end(),
                 [&record](const ModuleLibraryRecord &existing)
                 { return existing.descriptor.name == record.descriptor.name; })
-            != moduleLibraries.end())
+            != moduleLibraries_.end())
         {
             report += "- module '" + record.descriptor.name + "' is provided by more than one module library; '"
                     + record.libraryPath.string() + "' is ignored.\n";
@@ -418,7 +419,7 @@ void EngineKernel::resolveUndescribedModuleLibraries(std::string &report, bool e
         }
         descriptorCache.record(record.libraryPath, cacheEntry);
         cacheChanged = true;
-        moduleLibraries.push_back(std::move(record));
+        moduleLibraries_.push_back(std::move(record));
     }
     for (const std::size_t index : undecidedIndexes)
     {
@@ -463,7 +464,7 @@ bool EngineKernel::scanUndescribedModuleLibraryDescriptor(const UndescribedModul
     return true;
 }
 
-// Same discovery as the scan path, but keeps the library loaded and records its factory.
+// Same discovery as the scan path, but keeps the library loaded and records_ its factory.
 bool EngineKernel::loadModuleLibrary(ModuleLibraryRecord &module, std::string &report)
 {
     auto library = std::make_unique<DynamicLibrary>();
@@ -487,7 +488,7 @@ bool EngineKernel::loadModuleLibrary(ModuleLibraryRecord &module, std::string &r
 bool EngineKernel::instantiateActiveModules(std::string &report)
 {
     bool successful = true;
-    for (ModuleLibraryRecord &module : moduleLibraries)
+    for (ModuleLibraryRecord &module : moduleLibraries_)
     {
         if (!module.active)
         {
@@ -583,10 +584,10 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
             successful = false;
             continue;
         }
-        records.push_back(std::move(record));
+        records_.push_back(std::move(record));
     }
 
-    for (ModuleLibraryRecord &module : moduleLibraries)
+    for (ModuleLibraryRecord &module : moduleLibraries_)
     {
         if (!module.active && module.library)
         {
@@ -600,7 +601,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
 // (no factories run, no code loaded).
 void EngineKernel::appendDeclaredModuleRecords()
 {
-    for (const ModuleLibraryRecord &module : moduleLibraries)
+    for (const ModuleLibraryRecord &module : moduleLibraries_)
     {
         if (!module.active)
         {
@@ -616,7 +617,7 @@ void EngineKernel::appendDeclaredModuleRecords()
                 .requiredCapabilities = module.descriptor.requiredCapabilities,
                 .optionalCapabilities = module.descriptor.optionalCapabilities,
                 .requiredPermissions  = module.descriptor.declaredPermissions}};
-        records.push_back(std::move(record));
+        records_.push_back(std::move(record));
     }
 }
 
@@ -631,27 +632,27 @@ void EngineKernel::loadNativePluginLibraries(std::string &report)
         NativePluginLoad      load;
         if (!loadNativePluginEntry(package, load, report))
         {
-            auto recordIt = std::find_if(records.begin(),
-                records.end(),
+            auto recordIt = std::find_if(records_.begin(),
+                records_.end(),
                 [&pluginManifest](const ParticipantRecord &candidate)
                 {
                     return candidate.name == pluginManifest.id
                         && candidate.manifest.kind == ParticipantKind::NativePlugin;
                 });
-            if (recordIt != records.end())
+            if (recordIt != records_.end())
             {
-                records.erase(recordIt);
+                records_.erase(recordIt);
             }
             continue;
         }
-        auto recordIt = std::find_if(records.begin(),
-            records.end(),
+        auto recordIt = std::find_if(records_.begin(),
+            records_.end(),
             [&pluginManifest](const ParticipantRecord &candidate)
             {
                 return candidate.name == pluginManifest.id
                     && candidate.manifest.kind == ParticipantKind::NativePlugin;
             });
-        if (recordIt == records.end())
+        if (recordIt == records_.end())
         {
             report
                 += "- native plugin '" + pluginManifest.id + "' lost its participant record; the package is dropped.\n";
@@ -668,7 +669,7 @@ void EngineKernel::loadNativePluginLibraries(std::string &report)
                       "'provides'; declare the provided capabilities in plugin.toml (and only there) so the graph "
                       "and the validate dry run see them.\n";
             load.entryTable->destroyPlugin(load.pluginInstance);
-            records.erase(recordIt);
+            records_.erase(recordIt);
             continue;
         }
         if (compiledManifest.providedCapabilities.empty() && !pluginManifest.providedCapabilities.empty())
@@ -676,7 +677,7 @@ void EngineKernel::loadNativePluginLibraries(std::string &report)
             report += "- native plugin '" + pluginManifest.id + "' declares 'provides' in plugin.toml but its compiled "
                     + "manifest provides nothing; rebuild the plugin against this engine.\n";
             load.entryTable->destroyPlugin(load.pluginInstance);
-            records.erase(recordIt);
+            records_.erase(recordIt);
             continue;
         }
         record.library           = std::move(load.library);
@@ -702,7 +703,7 @@ EngineKernel::ParticipantRecord *EngineKernel::resolveScriptHost(
                 { return capabilityRequirementSatisfiedBy(capabilityName, candidate); });
     };
     std::vector<ParticipantRecord *> candidates;
-    for (ParticipantRecord &record : records)
+    for (ParticipantRecord &record : records_)
     {
         if (record.manifest.kind != ParticipantKind::EngineModule || !record.constructed)
         {
@@ -721,7 +722,7 @@ EngineKernel::ParticipantRecord *EngineKernel::resolveScriptHost(
     }
     if (candidates.size() > 1)
     {
-        const std::vector<DependencyResolver::ProviderSelection> selections = configurationStore.providerSelections();
+        const std::vector<DependencyResolver::ProviderSelection> selections = configurationStore_.providerSelections();
         const auto                                               selection  = std::find_if(selections.begin(),
             selections.end(),
             [&capabilityName](const DependencyResolver::ProviderSelection &candidate)

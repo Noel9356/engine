@@ -245,9 +245,11 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         return half * -1.0 + step * static_cast<double>(globalIndex);
     };
 
-    // Chunk-local origin for the float vertices: the node center. Consumers
-    // place chunks with a model matrix; floats stay small at any planet radius.
-    const Vec3 center{axisCoordinate(coord.x, n / 2), axisCoordinate(coord.y, n / 2), axisCoordinate(coord.z, n / 2)};
+    // Chunk-local origin for the float vertices: the node center through the
+    // one chunkCenterMeters expression, so placement and the vertex frame
+    // cannot drift apart. Consumers place chunks with a model matrix; floats
+    // stay small at any planet radius.
+    const Vec3 center = chunkCenterMeters(params, coord);
 
     // ---- water placement ---------------------------------------------------------
     // Nodes whose bounding sphere misses the sea shell have no water - and

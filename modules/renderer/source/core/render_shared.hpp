@@ -166,6 +166,34 @@ struct ReflectionField
     }
 };
 
+// The reflection field flattened for the pixel path: the field's own
+// view-projection built once per snapshot instead of per shaded sample, plus
+// the dimensions and radiance array the bilinear walk reads.
+struct PreparedReflectionField
+{
+    glm::mat4     viewProjection{0.0f};
+    std::uint32_t width  = 0;
+    std::uint32_t height = 0;
+    // Borrowed from the owning backend copy (valid for the frame; see
+    // ReflectionField's borrowed-view contract).
+    const float *radiance = nullptr;
+    bool         valid     = false;
+};
+
+inline PreparedReflectionField prepareReflectionField(const ReflectionField &field)
+{
+    PreparedReflectionField prepared;
+    if (field.valid())
+    {
+        prepared.viewProjection = glm::make_mat4(field.header.viewProjection);
+        prepared.width          = field.header.width;
+        prepared.height         = field.header.height;
+        prepared.radiance       = field.radiance;
+        prepared.valid          = true;
+    }
+    return prepared;
+}
+
 // Bilinear sample of the reflection field at a shaded point: the point is
 // projected through the field's own camera, and the four surrounding texels
 // are blended (the field is lower-resolution than the framebuffer by
@@ -177,36 +205,36 @@ struct ReflectionField
 // documented sample-gate contract of the field's texel layout. Returns
 // black when the point falls outside the field (behind the camera or off
 // its frustum).
-inline glm::vec3 sampleReflectionField(const ReflectionField &field, const glm::vec3 &worldPosition)
+inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, const glm::vec3 &worldPosition)
 {
-    if (!field.valid())
+    if (!field.valid)
     {
         return glm::vec3(0.0f);
     }
-    const glm::mat4 viewProjection = glm::make_mat4(field.header.viewProjection);
+    const glm::mat4 &viewProjection = field.viewProjection;
     const glm::vec4 clip = viewProjection * glm::vec4(worldPosition, 1.0f);
     if (clip.w <= 0.05f)
     {
         return glm::vec3(0.0f);
     }
-    const float u = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(field.header.width) - 0.5f;
-    const float v = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(field.header.height) - 0.5f;
-    if (u < 0.0f || v < 0.0f || u > static_cast<float>(field.header.width) - 1.0f
-        || v > static_cast<float>(field.header.height) - 1.0f)
+    const float u = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(field.width) - 0.5f;
+    const float v = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(field.height) - 0.5f;
+    if (u < 0.0f || v < 0.0f || u > static_cast<float>(field.width) - 1.0f
+        || v > static_cast<float>(field.height) - 1.0f)
     {
         return glm::vec3(0.0f);
     }
     const std::uint32_t x0 = static_cast<std::uint32_t>(std::floor(u));
     const std::uint32_t y0 = static_cast<std::uint32_t>(std::floor(v));
-    const std::uint32_t x1 = std::min(x0 + 1u, field.header.width - 1u);
-    const std::uint32_t y1 = std::min(y0 + 1u, field.header.height - 1u);
+    const std::uint32_t x1 = std::min(x0 + 1u, field.width - 1u);
+    const std::uint32_t y1 = std::min(y0 + 1u, field.height - 1u);
     const float       fx = u - static_cast<float>(x0);
     const float       fy = v - static_cast<float>(y0);
     const auto texelAt = [&field](std::uint32_t x, std::uint32_t y, bool &traced)
     {
         const float *texel
             = field.radiance
-              + (static_cast<std::size_t>(y) * field.header.width + x) * lumen_reflection::reflectionFieldTexelFloats;
+              + (static_cast<std::size_t>(y) * field.width + x) * lumen_reflection::reflectionFieldTexelFloats;
         // The trailing roughness is the sample gate: the module reports the
         // neutral value for every texel it never traced a response into, and
         // blending those in would smear background radiance across the
@@ -269,54 +297,66 @@ inline bool buildProbeLevels(GiProbeGrid &grid)
     return true;
 }
 
+// ---- prepared per-snapshot shading inputs ------------------------------------
+//
+// Per-pixel shading used to rebuild the probe-grid level descriptors (and the
+// reflection field's view-projection) for every shaded sample. These prepared
+// views copy the per-snapshot constants once (setProbeGrid / setReflectionField
+// time) so the pixel path spends its math on the actual probe walk and field
+// sample. The values and expression order are identical to the previous
+// per-pixel derivations; only where they are computed moved.
+
+// The probe grid flattened for the pixel path: both level descriptors plus
+// the level-0 bounds-test constants (the level pick's only per-snapshot
+// data) and the probe array the trilinear walk reads.
+struct PreparedGiProbeGrid
+{
+    GiProbeLevel level0{};
+    GiProbeLevel level1{};
+    glm::vec3    anchor0{0.0f};
+    glm::vec3    extent0{0.0f};
+    float        halfCell0 = 0.0f;
+    // Borrowed from the owning backend copy (valid for the frame; see
+    // GiProbeGrid's borrowed-view contract).
+    const lumen_gi::GiProbe *probes     = nullptr;
+    std::uint32_t            probeCount = 0;
+    bool                     valid      = false;
+};
+
+inline PreparedGiProbeGrid prepareGiProbeGrid(GiProbeGrid &grid)
+{
+    PreparedGiProbeGrid prepared;
+    prepared.probes     = grid.probes;
+    prepared.probeCount = grid.probeCount;
+    if (buildProbeLevels(grid))
+    {
+        prepared.level0    = grid.level0;
+        prepared.level1    = grid.level1;
+        prepared.anchor0   = grid.level0.anchor;
+        prepared.extent0   = glm::vec3(grid.level0.dims - 1) * grid.level0.spacing;
+        prepared.halfCell0 = grid.level0.spacing * 0.5f;
+        prepared.valid     = true;
+    }
+    return prepared;
+}
+
 // Picks the lattice level for a world position: level 0 inside its
 // half-cell-extended bounds, level 1 everywhere else (its trilinear lookup
 // clamps to the boundary probes, so distant geometry still receives the
-// coarse ambient). Returns false only when the snapshot cannot serve a
-// lookup at all. Uses the descriptors built by buildProbeLevels() when
-// present and falls back to building them locally otherwise.
-inline bool giProbeLevelFor(const GiProbeGrid &grid, const glm::vec3 &position, GiProbeLevel &outLevel)
+// coarse ambient). Returns false when the grid holds no usable levels.
+inline bool giProbeLevelFor(const PreparedGiProbeGrid &grid, const glm::vec3 &position, GiProbeLevel &outLevel)
 {
-    GiProbeLevel level0;
-    GiProbeLevel level1;
-    if (grid.levelsBuilt)
+    if (!grid.valid)
     {
-        level0 = grid.level0;
-        level1 = grid.level1;
+        return false;
     }
-    else
-    {
-        const lumen_gi::GiProbeHeader &header = grid.header;
-        if (header.level0Dimensions[0] < 2u || header.level1Dimensions[0] < 2u)
-        {
-            return false;
-        }
-        const std::uint32_t level0Count = header.level1ProbeOffset - header.level0ProbeOffset;
-        if (header.level0ProbeOffset >= grid.probeCount || level0Count == 0
-            || header.level1ProbeOffset >= grid.probeCount)
-        {
-            return false;
-        }
-        level0.anchor  = glm::make_vec3(grid.probes[header.level0ProbeOffset].position);
-        level0.dims    = glm::ivec3(static_cast<int>(header.level0Dimensions[0]),
-            static_cast<int>(header.level0Dimensions[1]), static_cast<int>(header.level0Dimensions[2]));
-        level0.spacing = header.level0Spacing;
-        level0.offset  = header.level0ProbeOffset;
-        level1.anchor  = glm::make_vec3(grid.probes[header.level1ProbeOffset].position);
-        level1.dims    = glm::ivec3(static_cast<int>(header.level1Dimensions[0]),
-            static_cast<int>(header.level1Dimensions[1]), static_cast<int>(header.level1Dimensions[2]));
-        level1.spacing = header.level1Spacing;
-        level1.offset  = header.level1ProbeOffset;
-    }
-
-    const glm::vec3 local        = position - level0.anchor;
-    const glm::vec3 extent0      = glm::vec3(level0.dims - 1) * level0.spacing;
-    const float     halfCell0    = level0.spacing * 0.5f;
-    const bool      insideLevel0 = glm::all(glm::bvec4(local.x >= -halfCell0, local.y >= -halfCell0,
-        local.z >= -halfCell0, true))
-                                && glm::all(glm::bvec4(local.x <= extent0.x + halfCell0, local.y <= extent0.y + halfCell0,
-                                    local.z <= extent0.z + halfCell0, true));
-    outLevel = insideLevel0 ? level0 : level1;
+    const glm::vec3 local        = position - grid.anchor0;
+    const bool      insideLevel0 = glm::all(glm::bvec4(local.x >= -grid.halfCell0, local.y >= -grid.halfCell0,
+        local.z >= -grid.halfCell0, true))
+                                && glm::all(glm::bvec4(local.x <= grid.extent0.x + grid.halfCell0,
+                                     local.y <= grid.extent0.y + grid.halfCell0,
+                                     local.z <= grid.extent0.z + grid.halfCell0, true));
+    outLevel = insideLevel0 ? grid.level0 : grid.level1;
     return true;
 }
 
@@ -353,8 +393,8 @@ inline glm::vec3 giEvaluateSh2Irradiance(const float sh2[27], const glm::vec3 &n
 // Returns false when the grid holds no valid probes along this footprint (the
 // caller keeps its legacy ambient); outWeight is the validity coverage of the
 // footprint in 0..1, used to blend GI against the hemispheric ambient.
-inline bool giProbeGridIrradiance(const GiProbeGrid &grid, const glm::vec3 &position, const glm::vec3 &normal,
-    glm::vec3 &outIrradiance, float &outWeight)
+inline bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid, const glm::vec3 &position,
+    const glm::vec3 &normal, glm::vec3 &outIrradiance, float &outWeight)
 {
     outIrradiance = glm::vec3(0.0f);
     outWeight     = 0.0f;
@@ -538,7 +578,8 @@ inline glm::vec3 furShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
 inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPosition, const glm::vec3 &cameraPosition,
     const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance, const glm::vec3 &ambientSky,
     const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic, float roughness, float ambientOcclusion,
-    const PreparedDirectLight *directLights, std::uint32_t directLightCount, const GiProbeGrid *giGrid = nullptr)
+    const PreparedDirectLight *directLights, std::uint32_t directLightCount,
+    const PreparedGiProbeGrid *giGrid = nullptr)
 {
     // Metallic surfaces carry almost no diffuse response. The hemispheric
     // ambient and the probe-grid GI are diffuse integrals, so they scale by
@@ -549,7 +590,7 @@ inline glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
     const glm::vec3 hemispheric = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * diffuseAlbedo
                                   * ambientOcclusion;
     glm::vec3       ambient     = hemispheric;
-    if (giGrid != nullptr && giGrid->valid())
+    if (giGrid != nullptr && giGrid->valid)
     {
         glm::vec3 giIrradiance(0.0f);
         float     giWeight         = 0.0f;

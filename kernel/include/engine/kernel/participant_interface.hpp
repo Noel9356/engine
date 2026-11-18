@@ -169,21 +169,30 @@ public:
         return profiler_;
     }
 
+    // Permission gate shared by the acquisition entry points: verifies the
+    // synthetic permission "capability.<name>" and reports a denied grant as
+    // ParticipantAccessError. Returns true when the call may resolve.
+    bool checkCapabilityPermission(const std::string &capabilityName) const
+    {
+        permissionScratch_.assign(capabilityPermissionPrefix);
+        permissionScratch_ += capabilityName;
+        if (permissionSystem_.isGranted(participantName_, permissionScratch_))
+        {
+            return true;
+        }
+        const std::string permissionName = permissionScratch_;
+        throw ParticipantAccessError("participant '" + participantName_
+                                     + "' was blocked by the permission system while acquiring '" + capabilityName
+                                     + "': the permission '" + permissionName
+                                     + "' was not granted. Declare the requirement in the manifest.");
+    }
+
     // Permission-checked capability acquisition: verifies the synthetic
     // permission "capability.<name>", then resolves through the kernel.
     // Throws ParticipantAccessError when the manifest never declared it.
     void *acquireCapability(const std::string &capabilityName) const
     {
-        permissionScratch_.assign(capabilityPermissionPrefix);
-        permissionScratch_ += capabilityName;
-        if (!permissionSystem_.isGranted(participantName_, permissionScratch_))
-        {
-            const std::string permissionName = permissionScratch_;
-            throw ParticipantAccessError("participant '" + participantName_
-                                         + "' was blocked by the permission system while acquiring '" + capabilityName
-                                         + "': the permission '" + permissionName
-                                         + "' was not granted. Declare the requirement in the manifest.");
-        }
+        checkCapabilityPermission(capabilityName);
         return capabilityResolver_.resolveCapabilityPointer(participantName_, participantKind_, capabilityName);
     }
 
@@ -198,16 +207,7 @@ public:
     // Same permission check, then every visible provider (extension model).
     std::vector<void *> acquireEachCapability(const std::string &capabilityName) const
     {
-        permissionScratch_.assign(capabilityPermissionPrefix);
-        permissionScratch_ += capabilityName;
-        if (!permissionSystem_.isGranted(participantName_, permissionScratch_))
-        {
-            const std::string permissionName = permissionScratch_;
-            throw ParticipantAccessError("participant '" + participantName_
-                                         + "' was blocked by the permission system while acquiring '" + capabilityName
-                                         + "': the permission '" + permissionName
-                                         + "' was not granted. Declare the requirement in the manifest.");
-        }
+        checkCapabilityPermission(capabilityName);
         return capabilityResolver_.resolveEachCapabilityPointer(participantName_, participantKind_, capabilityName);
     }
 

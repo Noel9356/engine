@@ -141,7 +141,7 @@ std::string scriptPluginContentHash(const PluginManifest &pluginManifest)
         for (const std::filesystem::directory_entry &entry : iterator)
         {
             std::error_code statError;
-            if (statError || !entry.is_regular_file(statError) || statError)
+            if (!entry.is_regular_file(statError) || statError)
             {
                 continue;
             }
@@ -178,10 +178,13 @@ std::string scriptPluginContentHash(const PluginManifest &pluginManifest)
         std::string readError;
         const std::string manifestBytes
             = readFileIntoString(pluginManifest.directory / PluginManifestLoader::manifestFileName, readError);
-        if (!manifestBytes.empty())
+        if (!readError.empty())
         {
-            feedText(manifestBytes);
+            // An unreadable manifest fails the hash computation instead of
+            // silently producing a digest that does not cover it.
+            return {};
         }
+        feedText(manifestBytes);
     }
     for (const HashedFile &file : files)
     {

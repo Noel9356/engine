@@ -31,6 +31,9 @@ namespace renderer
 // lists (every 4th/16th/64th triangle) generated at creation.
 struct HeadlessMesh
 {
+    // The owning renderer handle; lets the transform cache key its per-mesh
+    // entry without plumbing the handle through every draw entry point.
+    MeshHandle                 handle = invalidMesh;
     std::vector<float>         positions;
     std::vector<float>         normals;
     std::vector<float>         colors;
@@ -65,32 +68,25 @@ struct HeadlessMesh
     }
 };
 
-// CPU-side texture. pixels is the RGBA8 upload copy (unused by sampling);
-// pixelsRGB plus the mipData chain (bilinearly downsampled, halved each
-// level) are what the sampler reads.
+// CPU-side texture. pixels is the RGBA8 upload copy (read by sampleAlpha,
+// e.g. the fur strand field); pixelsRGB is what the color sampler reads.
 struct HeadlessTexture
 {
     std::uint32_t                   width  = 0;
     std::uint32_t                   height = 0;
     std::vector<std::uint8_t>       pixels;
     std::vector<float>              pixelsRGB;
-    std::uint32_t                   mipLevelCount = 1;
-    std::vector<std::vector<float>> mipData;
-    std::vector<std::uint32_t>      mipWidths;
-    std::vector<std::uint32_t>      mipHeights;
-
     TextureFilter  filter  = TextureFilter::Linear;
     TextureAddress address = TextureAddress::Repeat;
 
-    // Bilinear or nearest sample with repeat/clamp addressing. mipLevel 0 or
-    // an out-of-range level samples the base image; returns white when empty.
-    glm::vec3 sample(float u, float v, std::uint32_t mipLevel = 0) const;
+    // Bilinear or nearest sample with repeat/clamp addressing; returns white
+    // when empty.
+    glm::vec3 sample(float u, float v) const;
 
     // Alpha-channel sample from the RGBA8 upload copy, same addressing and
-    // filtering as sample() at mip level 0. The mip chain stores RGB only, so
-    // alpha always samples the base image - matching the fur pipeline, whose
-    // strand-field fetch (the fur texture's alpha) runs at mip 0 on the GPU
-    // side too. Returns 1 when empty.
+    // filtering as sample(). Alpha always samples the base image - matching
+    // the fur pipeline, whose strand-field fetch (the fur texture's alpha)
+    // runs at the base level on the GPU side too. Returns 1 when empty.
     float sampleAlpha(float u, float v) const;
 };
 

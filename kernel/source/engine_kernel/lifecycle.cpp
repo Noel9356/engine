@@ -31,7 +31,7 @@ namespace engine
 DependencyResolver::ResolutionResult EngineKernel::resolveGraph(
     const std::vector<ParticipantManifest> &manifests, std::string &report) const
 {
-    DependencyResolver                         resolver(manifests, configurationStore.providerSelections());
+    DependencyResolver                         resolver(manifests, configurationStore_.providerSelections());
     const DependencyResolver::ResolutionResult resolution = resolver.resolve();
     if (!resolution.successful)
     {
@@ -97,7 +97,7 @@ bool EngineKernel::validate(std::string &report)
         return false;
     }
 
-    for (const std::string &warning : configurationStore.unknownKeyWarnings())
+    for (const std::string &warning : configurationStore_.unknownKeyWarnings())
     {
         report += "warning: " + warning + "\n";
     }
@@ -149,14 +149,14 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
                 return false;
             }
             record->constructed = true;
-            participantStartOrder.push_back(record);
+            participantStartOrder_.push_back(record);
             continue;
         }
 
-        record->context             = std::make_unique<ParticipantContext>(bus,
+        record->context             = std::make_unique<ParticipantContext>(bus_,
             *this,
             permissionSystem_,
-            configurationStore,
+            configurationStore_,
             record->name,
             record->manifest.kind,
             &capabilityProviderIndex_->demandedCapabilities(),
@@ -201,7 +201,7 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
             }
         }
         record->constructed = true;
-        participantStartOrder.push_back(record);
+        participantStartOrder_.push_back(record);
 
         // Only fully constructed participants enter the provider index.
         capabilityProviderIndex_->addProvider(CapabilityProviderEntry{
@@ -248,43 +248,46 @@ bool EngineKernel::construct(std::string &report)
         // scheduler options; unset keys keep the current defaults.
         TaskSchedulerOptions options    = taskScheduler_.options();
         bool                 hasOptions = false;
-        if (const auto workers = configurationStore.integerAtPath("engine", "worker_count"); workers && *workers >= 0)
+        // Bounds duplicated from TaskSchedulerOptions::normalise are not
+        // re-clamped here; only the ranges normalise does not own (the
+        // outstanding-task cap, the aging ceiling) are bounded locally.
+        if (const auto workers = configurationStore_.integerAtPath("engine", "worker_count"); workers && *workers >= 0)
         {
-            options.workerCount = static_cast<std::uint32_t>(std::min<std::int64_t>(*workers, 256));
+            options.workerCount = static_cast<std::uint32_t>(*workers);
             hasOptions          = true;
         }
-        if (const auto maximum = configurationStore.integerAtPath("engine", "max_outstanding_tasks");
+        if (const auto maximum = configurationStore_.integerAtPath("engine", "max_outstanding_tasks");
             maximum && *maximum >= 0)
         {
             options.maxOutstandingTasks = static_cast<std::size_t>(std::min<std::int64_t>(*maximum, 10'000'000));
             hasOptions                  = true;
         }
-        if (const auto workerCap = configurationStore.integerAtPath("engine", "max_worker_count");
+        if (const auto workerCap = configurationStore_.integerAtPath("engine", "max_worker_count");
             workerCap && *workerCap > 0)
         {
-            options.maxWorkerCount = static_cast<std::uint32_t>(std::min<std::int64_t>(*workerCap, 256));
+            options.maxWorkerCount = static_cast<std::uint32_t>(*workerCap);
             hasOptions             = true;
         }
-        if (const auto aging = configurationStore.integerAtPath("engine", "priority_aging_ms"); aging && *aging >= 0)
+        if (const auto aging = configurationStore_.integerAtPath("engine", "priority_aging_ms"); aging && *aging >= 0)
         {
             options.priorityAgingThreshold = std::chrono::milliseconds(std::min<std::int64_t>(*aging, 600'000));
             hasOptions                     = true;
         }
-        if (const auto fairness = configurationStore.booleanAtPath("engine", "queue_source_fairness"); fairness)
+        if (const auto fairness = configurationStore_.booleanAtPath("engine", "queue_source_fairness"); fairness)
         {
             options.queueSourceFairness = *fairness;
             hasOptions                  = true;
         }
-        if (const auto spin = configurationStore.integerAtPath("engine", "worker_spin_before_park");
+        if (const auto spin = configurationStore_.integerAtPath("engine", "worker_spin_before_park");
             spin && *spin >= 0)
         {
-            options.workerSpinBeforePark = static_cast<std::uint32_t>(std::min<std::int64_t>(*spin, 4096));
+            options.workerSpinBeforePark = static_cast<std::uint32_t>(*spin);
             hasOptions                   = true;
         }
-        if (const auto idleSpin = configurationStore.integerAtPath("engine", "wait_idle_spin_iterations");
+        if (const auto idleSpin = configurationStore_.integerAtPath("engine", "wait_idle_spin_iterations");
             idleSpin && *idleSpin >= 0)
         {
-            options.waitIdleSpinIterations = static_cast<std::uint32_t>(std::min<std::int64_t>(*idleSpin, 4096));
+            options.waitIdleSpinIterations = static_cast<std::uint32_t>(*idleSpin);
             hasOptions                     = true;
         }
         if (hasOptions)
@@ -296,10 +299,16 @@ bool EngineKernel::construct(std::string &report)
         return true;
     }
 
-    // Records gathered by validate (no native code) must be rebuilt for a real construct.
+    // Records gathered by validate (no native code) must be rebuilt for a real
+    // construct. Only the gather state is dropped here: stopping the scheduler
+    // and releasing the bus channels would reject tasks and deferred publishes
+    // submitted by participant construct() until the start() below restarts
+    // them, and nothing constructed exists to tear down at this point.
     if (participantsGathered && !nativePluginLibrariesLoaded_)
     {
-        stop();
+        records_.clear();
+        participantStartOrder_.clear();
+        participantsGathered = false;
     }
 
     capabilityProviderIndex_->reset();
@@ -351,7 +360,7 @@ void EngineKernel::start()
     }
 
     taskScheduler_.start();
-    for (ParticipantRecord *recordPointer : participantStartOrder)
+    for (ParticipantRecord *recordPointer : participantStartOrder_)
     {
         ParticipantRecord &record = *recordPointer;
         if (!record.constructed || record.started)
@@ -369,13 +378,13 @@ void EngineKernel::start()
         record.started = true;
     }
     started = true;
-    bus.publish(EngineStartupCompletedEvent{});
+    bus_.publish(EngineStartupCompletedEvent{});
 }
 
-// Teardown in reverse start order: deferred bus events flush and the shutdown event
+// Teardown in reverse start order: deferred bus_ events flush and the shutdown event
 // publishes first (while the provider index is still populated, so handlers run
 // against a fully started engine and may still acquire capabilities), then the
-// index resets, participants stop and the scheduler/bus wind down. Idempotent
+// index resets, participants stop and the scheduler/bus_ wind down. Idempotent
 // and safe during unwinding.
 void EngineKernel::stop()
 {
@@ -383,8 +392,8 @@ void EngineKernel::stop()
     {
         try
         {
-            bus.flushDeferredEvents();
-            bus.publish(EngineShutdownStartedEvent{});
+            bus_.flushDeferredEvents();
+            bus_.publish(EngineShutdownStartedEvent{});
         }
         catch (const std::exception &error)
         {
@@ -398,7 +407,7 @@ void EngineKernel::stop()
     // "no active provider". The reset must still precede the teardown below:
     // the index caches raw ModuleInterface*/PluginInterface* pointers, plugins
     // are destroyed by pluginEntryTable->destroyPlugin and module instances
-    // (plus the .so files backing their vtables) only die when records.clear()
+    // (plus the .so files backing their vtables) only die when records_.clear()
     // unloads the libraries - entries kept past those points would be
     // use-after-free material. No participant code runs between this reset and
     // the last of those pointers going away.
@@ -406,7 +415,7 @@ void EngineKernel::stop()
 
     mainThreadTaskQueue_.clear();
 
-    for (auto iterator = participantStartOrder.rbegin(); iterator != participantStartOrder.rend(); ++iterator)
+    for (auto iterator = participantStartOrder_.rbegin(); iterator != participantStartOrder_.rend(); ++iterator)
     {
         ParticipantRecord &record = **iterator;
         if (record.started && record.moduleInstance != nullptr)
@@ -418,7 +427,7 @@ void EngineKernel::stop()
             record.pluginInstance->stop();
         }
     }
-    for (ParticipantRecord &record : records)
+    for (ParticipantRecord &record : records_)
     {
         if (record.pluginEntryTable != nullptr && record.pluginInstance != nullptr)
         {
@@ -433,14 +442,14 @@ void EngineKernel::stop()
 
     taskScheduler_.waitIdle();
     taskScheduler_.stop();
-    bus.releaseChannels();
+    bus_.releaseChannels();
 
-    records.clear();
-    participantStartOrder.clear();
+    records_.clear();
+    participantStartOrder_.clear();
     participantsGathered = false;
 }
 
-// Debug dump of participants and bus subscriptions; when nothing is constructed yet
+// Debug dump of participants and bus_ subscriptions; when nothing is constructed yet
 // it falls back to a fresh graph resolution (reporting resolution failures inline).
 std::string EngineKernel::participantGraphReport() const
 {
@@ -448,11 +457,11 @@ std::string EngineKernel::participantGraphReport() const
 
     std::vector<const ParticipantRecord *> orderedRecords;
     const char                            *orderSource = "start order";
-    if (!participantStartOrder.empty())
+    if (!participantStartOrder_.empty())
     {
-        orderedRecords.assign(participantStartOrder.begin(), participantStartOrder.end());
+        orderedRecords.assign(participantStartOrder_.begin(), participantStartOrder_.end());
     }
-    else if (!records.empty())
+    else if (!records_.empty())
     {
         std::string                                resolutionReport;
         const DependencyResolver::ResolutionResult resolution = resolveGraph(participantManifests(), resolutionReport);
@@ -461,13 +470,13 @@ std::string EngineKernel::participantGraphReport() const
         {
             for (const std::size_t manifestIndex : resolution.constructionOrder)
             {
-                orderedRecords.push_back(&records[manifestIndex]);
+                orderedRecords.push_back(&records_[manifestIndex]);
             }
         }
         else
         {
             orderSource = "declared order (graph resolution failed - see --validate)";
-            for (const ParticipantRecord &record : records)
+            for (const ParticipantRecord &record : records_)
             {
                 orderedRecords.push_back(&record);
             }
@@ -475,7 +484,7 @@ std::string EngineKernel::participantGraphReport() const
         }
     }
 
-    report += "participant graph (" + std::to_string(records.size()) + " participant(s), " + orderSource + "):\n";
+    report += "participant graph (" + std::to_string(records_.size()) + " participant(s), " + orderSource + "):\n";
     for (const ParticipantRecord *recordPointer : orderedRecords)
     {
         const ParticipantRecord &record = *recordPointer;
@@ -517,7 +526,7 @@ std::string EngineKernel::participantGraphReport() const
                 + "\n";
     }
 
-    const std::string subscriptions = bus.subscriptionReport();
+    const std::string subscriptions = bus_.subscriptionReport();
     if (!subscriptions.empty())
     {
         report += subscriptions;

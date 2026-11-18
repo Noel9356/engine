@@ -21,8 +21,8 @@
 // Without --frames the demo runs interactively until the window is closed or
 // Escape is pressed; headless runs (and --frames N) stop after a fixed count.
 //
-// Useful flags: --frames N renders exactly N frames (deterministic, unlike
-// the wall-clock --quit-after), --screenshot/--screenshot-frame export the
+// Useful flags: --frames N renders exactly N frames (deterministic),
+// --screenshot/--screenshot-frame export the
 // rendered frame, --export-debug additionally writes the lumen_gi module's
 // own debug views (final image, GI only, surface cache, probes, reference
 // path trace) and the lumen_reflection module's views (composite,

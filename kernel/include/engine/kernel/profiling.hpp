@@ -158,12 +158,18 @@ public:
 
     void record(std::uint64_t nanoseconds) noexcept
     {
-        buckets_[bucketFor(nanoseconds)].fetch_add(1, std::memory_order_relaxed);
+        // Zero clamps to 1 ns: bucketFor maps 0 to an out-of-range index
+        // (its exact buckets start at 1), and a public record(0) used to
+        // index past the array.
+        buckets_[bucketFor(nanoseconds == 0 ? 1u : nanoseconds)].fetch_add(1, std::memory_order_relaxed);
     }
 
-    // caller guarantees value >= 1 (record clamps 0 to 1).
+    // Caller guarantees value >= 1; a defensive zero still maps to the first
+    // exact bucket instead of wrapping the index.
     [[nodiscard]] static std::size_t bucketFor(std::uint64_t value) noexcept
     {
+        if (value == 0)
+            return 0u;
         if (value < kExactBuckets + 1)
             return static_cast<std::size_t>(value) - 1u; // exact buckets for 1..7 ns
         const std::uint32_t bitWidth = 64u - static_cast<std::uint32_t>(std::countl_zero(value));

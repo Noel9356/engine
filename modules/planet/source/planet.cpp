@@ -127,7 +127,14 @@ void Planet::update(const Vec3 &eyeLocal)
     // those inputs moved: a delivered build (the cache changed), a new
     // selection (visibility and masks changed), or the eviction cadence (the
     // stamps must stay fresh so eviction never ages a visible chunk out).
-    const bool evictionDue = updateCount_ % kEvictionScanInterval == 0;
+    // The stamp-refresh and eviction cadence follows the configured
+    // eviction age whenever it is shorter than the default scan interval: a
+    // threshold of 2..7 updates with an 8-update cadence could let a
+    // visible chunk's stamp age past the threshold between scans, evicting
+    // meshes the streamer is about to select again.
+    const std::uint32_t evictionScanInterval
+        = std::min<std::uint32_t>(kEvictionScanInterval, params_.chunkEvictionUpdates);
+    const bool evictionDue = updateCount_ % evictionScanInterval == 0;
     const bool visiblePassNeeded = selectionChanged || delivered > 0 || evictionDue;
 
     // One copy of the in-flight key set per visible pass: probing the copy is
@@ -540,3 +547,4 @@ void Planet::evictStaleMeshes()
 
 } // namespace planet
 } // namespace engine
+

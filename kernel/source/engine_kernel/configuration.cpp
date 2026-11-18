@@ -46,14 +46,14 @@ bool EngineKernel::loadConfiguration(std::string &report)
     }
 
     std::string loadError;
-    if (!configurationStore.loadFromFile(resolvedPath, loadError))
+    if (!configurationStore_.loadFromFile(resolvedPath, loadError))
     {
         report += "- " + loadError + "\n";
         return false;
     }
 
     // True when engine.toml itself carries [scene] (plugin scenes then lose).
-    assemblyDefinesScene = configurationStore.hasSection(ConfigurationStore::sceneSectionName);
+    assemblyDefinesScene = configurationStore_.hasSection(ConfigurationStore::sceneSectionName);
 
     if (!loadModuleDefaults(report))
     {
@@ -69,7 +69,7 @@ bool EngineKernel::loadConfiguration(std::string &report)
             return false;
         }
         std::string profileError;
-        if (!configurationStore.mergeProfileFile(profilePath, profileError))
+        if (!configurationStore_.mergeProfileFile(profilePath, profileError))
         {
             report += "- " + profileError + "\n";
             return false;
@@ -88,7 +88,7 @@ bool EngineKernel::loadModuleDefaults(std::string &report)
     for (const std::filesystem::path &defaultsFile : defaultsFiles)
     {
         std::string defaultsError;
-        if (!configurationStore.mergeDefaultsFile(defaultsFile,
+        if (!configurationStore_.mergeDefaultsFile(defaultsFile,
                 ConfigProvenance::Layer::ModuleDefaults,
                 defaultsFile.parent_path().filename().string(),
                 defaultsError))
@@ -100,6 +100,23 @@ bool EngineKernel::loadModuleDefaults(std::string &report)
     return true;
 }
 
+// Effective scene file for the current assembly state: the explicit one,
+// else the single plugin-claimed scene (multiple claims were rejected when
+// the configuration finished). Shared by the finish and reload paths so the
+// precedence rule lives in one place.
+std::filesystem::path EngineKernel::effectiveSceneFilePath() const
+{
+    if (!sceneFilePath.empty())
+    {
+        return detail::resolveAgainstExecutableDirectory(sceneFilePath);
+    }
+    if (!assemblyDefinesScene && pluginSceneClaims.size() == 1)
+    {
+        return pluginSceneClaims.front().sceneFile;
+    }
+    return {};
+}
+
 // Scene precedence: an explicit scene wins, then the single plugin-claimed
 // scene; multiple claims are ambiguous (error); plugin scenes under an
 // assembly scene become deferred warnings. Overrides apply last and the
@@ -108,7 +125,7 @@ bool EngineKernel::finishConfiguration(std::string &report)
 {
     if (!sceneFilePath.empty())
     {
-        const std::filesystem::path resolvedScenePath = detail::resolveAgainstExecutableDirectory(sceneFilePath);
+        const std::filesystem::path resolvedScenePath = effectiveSceneFilePath();
         if (!std::filesystem::exists(resolvedScenePath))
         {
             report += "- scene file '" + resolvedScenePath.string() + "' does not exist.\n";
@@ -116,7 +133,7 @@ bool EngineKernel::finishConfiguration(std::string &report)
         }
 
         std::string sceneError;
-        if (!configurationStore.applySceneFile(resolvedScenePath, sceneError))
+        if (!configurationStore_.applySceneFile(resolvedScenePath, sceneError))
         {
             report += "- " + sceneError + "\n";
             return false;
@@ -133,7 +150,7 @@ bool EngineKernel::finishConfiguration(std::string &report)
             return false;
         }
         std::string sceneError;
-        if (!configurationStore.applySceneFile(claim.sceneFile, sceneError))
+        if (!configurationStore_.applySceneFile(claim.sceneFile, sceneError))
         {
             report += "- " + sceneError + "\n";
             return false;
@@ -164,22 +181,22 @@ bool EngineKernel::finishConfiguration(std::string &report)
         }
     }
     std::string overridesError;
-    if (!configurationStore.applyCommandLineOverrides(overridesError))
+    if (!configurationStore_.applyCommandLineOverrides(overridesError))
     {
         report += "- " + overridesError + "\n";
         return false;
     }
 
-    // diagnostics.profiling_enabled (default on); the bus latency switch is
+    // diagnostics.profiling_enabled (default on); the bus_ latency switch is
     // sticky-on (once enabled it stays enabled).
-    profiler_.setEnabled(configurationStore
+    profiler_.setEnabled(configurationStore_
             .booleanValue(
                 ConfigurationStore::diagnosticsSectionName, ConfigurationStore::diagnosticsProfilingEnabledKey)
             .value_or(true));
 
-    bus.setLatencyRecordingEnabled(
-        bus.latencyRecordingEnabled()
-        || configurationStore
+    bus_.setLatencyRecordingEnabled(
+        bus_.latencyRecordingEnabled()
+        || configurationStore_
             .booleanValue(ConfigurationStore::diagnosticsSectionName, ConfigurationStore::diagnosticsLatencyReportKey)
             .value_or(false));
     return true;
@@ -194,7 +211,7 @@ bool EngineKernel::prepareParticipants(std::string &report, bool enforceTrust)
         return false;
     }
     std::string overridesError;
-    if (!configurationStore.applyCommandLineOverrides(overridesError))
+    if (!configurationStore_.applyCommandLineOverrides(overridesError))
     {
         report += "- " + overridesError + "\n";
         return false;
@@ -206,12 +223,12 @@ bool EngineKernel::prepareParticipants(std::string &report, bool enforceTrust)
 // reported but do not abort.
 bool EngineKernel::declareKnownKeyRegistry(std::string &report)
 {
-    configurationStore.declareAssemblyKnownKeys();
-    for (const ParticipantRecord &record : records)
+    configurationStore_.declareAssemblyKnownKeys();
+    for (const ParticipantRecord &record : records_)
     {
         for (const std::string &configKey : record.manifest.knownConfigKeys)
         {
-            if (!configurationStore.declareKnownConfigKey(configKey))
+            if (!configurationStore_.declareKnownConfigKey(configKey))
             {
                 report += "- " + describeComponentKind(record.manifest.kind) + " '" + record.name
                         + "' declares the malformed configuration key '" + configKey
@@ -274,15 +291,7 @@ bool EngineKernel::reloadConfiguration(std::string &report)
         }
     }
 
-    std::filesystem::path reloadScenePath;
-    if (!sceneFilePath.empty())
-    {
-        reloadScenePath = detail::resolveAgainstExecutableDirectory(sceneFilePath);
-    }
-    else if (!assemblyDefinesScene && pluginSceneClaims.size() == 1)
-    {
-        reloadScenePath = pluginSceneClaims.front().sceneFile;
-    }
+    const std::filesystem::path reloadScenePath = effectiveSceneFilePath();
     if (!reloadScenePath.empty() && !ConfigurationStore::fileParses(reloadScenePath, parseError))
     {
         report = "engine reload refused (the running configuration is untouched):\n- " + parseError + "\n";
@@ -291,12 +300,12 @@ bool EngineKernel::reloadConfiguration(std::string &report)
 
     // Flattened "type:value" text of every leaf before and after; the diff
     // drives the changed-keys report and the reload event.
-    const std::map<std::string, std::string> previousValues = configurationStore.flattenedValueReprs();
+    const std::map<std::string, std::string> previousValues = configurationStore_.flattenedValueReprs();
 
-    configurationStore.resetForReload();
+    configurationStore_.resetForReload();
     configurationLoaded = false;
     std::string reloadError;
-    if (!loadConfiguration(reloadError) || !configurationStore.applyCommandLineOverrides(reloadError))
+    if (!loadConfiguration(reloadError) || !configurationStore_.applyCommandLineOverrides(reloadError))
     {
         // The pre-parse pass validated every file, so a failure here means a
         // file changed (or was removed) between the pre-parse and the reload.
@@ -304,13 +313,13 @@ bool EngineKernel::reloadConfiguration(std::string &report)
         // same sources so the engine keeps running with a usable store
         // instead of an empty one.
         std::string restoreReport;
-        configurationStore.resetForReload();
+        configurationStore_.resetForReload();
         const bool restored = loadConfiguration(restoreReport)
-                           && configurationStore.applyCommandLineOverrides(restoreReport);
+                           && configurationStore_.applyCommandLineOverrides(restoreReport);
         for (const auto &[defaultsFile, source] : pluginDefaultsFiles)
         {
             if (restored
-                && !configurationStore.mergeDefaultsFile(
+                && !configurationStore_.mergeDefaultsFile(
                     defaultsFile, ConfigProvenance::Layer::PluginDefaults, source, restoreReport))
             {
                 break;
@@ -333,7 +342,7 @@ bool EngineKernel::reloadConfiguration(std::string &report)
     }
     for (const auto &[defaultsFile, source] : pluginDefaultsFiles)
     {
-        if (!configurationStore.mergeDefaultsFile(
+        if (!configurationStore_.mergeDefaultsFile(
                 defaultsFile, ConfigProvenance::Layer::PluginDefaults, source, reloadError))
         {
             report = "engine reload failed after the pre-parse pass (unexpected):\n- " + reloadError + "\n";
@@ -346,7 +355,7 @@ bool EngineKernel::reloadConfiguration(std::string &report)
         return false;
     }
 
-    const std::map<std::string, std::string> currentValues = configurationStore.flattenedValueReprs();
+    const std::map<std::string, std::string> currentValues = configurationStore_.flattenedValueReprs();
 
     // Denials may have changed; re-run the permission pass for the new
     // configuration.
@@ -412,12 +421,12 @@ bool EngineKernel::reloadConfiguration(std::string &report)
     }
     report += "\n";
 
-    for (const std::string &warning : configurationStore.unknownKeyWarnings())
+    for (const std::string &warning : configurationStore_.unknownKeyWarnings())
     {
         report += "warning: " + warning + "\n";
     }
 
-    bus.publish(ConfigurationReloadedEvent{.changedKeys = std::move(changedKeys)});
+    bus_.publish(ConfigurationReloadedEvent{.changedKeys = std::move(changedKeys)});
     return true;
 }
 

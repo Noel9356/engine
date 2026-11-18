@@ -478,14 +478,164 @@ private:
         batchedTileRasterizationEnabled_
             = context.configurationBooleanInSection("renderer", "headless_batched_tile_rasterization")
                   .value_or(true);
-        parallelTriangleThreshold_ = static_cast<std::uint32_t>(
-            context.configurationIntegerInSection("renderer", "parallel_triangle_threshold").value_or(4096));
-        pixelsPerLockGroup_ = static_cast<std::size_t>(
-            context.configurationIntegerInSection("renderer", "pixels_per_lock_group").value_or(16));
-        lodMinTriangles_ = static_cast<std::size_t>(
-            context.configurationIntegerInSection("renderer", "lod_min_triangles").value_or(4096));
-        bandSplitTriangleThreshold_ = static_cast<std::uint32_t>(
-            context.configurationIntegerInSection("renderer", "headless_band_split_triangles").value_or(4096));
+        if (const auto threshold = context.configurationIntegerInSection("renderer", "parallel_triangle_threshold");
+            threshold.has_value())
+        {
+            if (*threshold < 1 || *threshold > 1048576)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] parallel_triangle_threshold %lld to range 1..1048576\n",
+                    static_cast<long long>(*threshold));
+            }
+            parallelTriangleThreshold_
+                = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*threshold, 1, 1048576));
+        }
+        if (const auto lockGroup = context.configurationIntegerInSection("renderer", "pixels_per_lock_group");
+            lockGroup.has_value())
+        {
+            if (*lockGroup < 1 || *lockGroup > 4096)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] pixels_per_lock_group %lld to range 1..4096\n",
+                    static_cast<long long>(*lockGroup));
+            }
+            pixelsPerLockGroup_ = static_cast<std::size_t>(std::clamp<std::int64_t>(*lockGroup, 1, 4096));
+        }
+        if (const auto minimum = context.configurationIntegerInSection("renderer", "lod_min_triangles");
+            minimum.has_value())
+        {
+            if (*minimum < 0 || *minimum > 1048576)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] lod_min_triangles %lld to range 0..1048576\n",
+                    static_cast<long long>(*minimum));
+            }
+            lodMinTriangles_ = static_cast<std::size_t>(std::clamp<std::int64_t>(*minimum, 0, 1048576));
+        }
+        if (const auto bandTriangles = context.configurationIntegerInSection("renderer", "headless_band_split_triangles");
+            bandTriangles.has_value())
+        {
+            if (*bandTriangles < 0 || *bandTriangles > 1048576)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] headless_band_split_triangles %lld to range 0..1048576\n",
+                    static_cast<long long>(*bandTriangles));
+            }
+            bandSplitTriangleThreshold_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*bandTriangles, 0, 1048576));
+        }
+        // Vertex-stage parallelism: meshes at or above this many vertices
+        // transform across workers when a scheduler is available.
+        if (const auto parallelVertices
+            = context.configurationIntegerInSection("renderer", "headless_parallel_transform_vertices");
+            parallelVertices.has_value())
+        {
+            if (*parallelVertices < 64 || *parallelVertices > 1048576)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] headless_parallel_transform_vertices %lld to range "
+                    "64..1048576\n",
+                    static_cast<long long>(*parallelVertices));
+            }
+            parallelTransformVertexThreshold_
+                = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*parallelVertices, 64, 1048576));
+        }
+
+        // Screen tile edge in pixels for the tile-parallel paths; powers of
+        // two keep the tile grid aligned with the framebuffer.
+        if (const auto tileEdge = context.configurationIntegerInSection("renderer", "tile_pixels");
+            tileEdge.has_value())
+        {
+            const bool isPowerOfTwo = (*tileEdge & (*tileEdge - 1)) == 0;
+            if (!isPowerOfTwo || *tileEdge < 16 || *tileEdge > 256)
+            {
+                std::fprintf(stderr,
+                    "renderer module: clamping [renderer] tile_pixels %lld to a power of two in 16..256\n",
+                    static_cast<long long>(*tileEdge));
+            }
+            const std::int64_t bounded = std::clamp<std::int64_t>(*tileEdge, 16, 256);
+            const std::int64_t lowered = bounded > 128 ? 256 : (bounded > 64 ? 128 : (bounded > 32 ? 64 : (bounded > 16 ? 32 : 16)));
+            tilePixels_ = static_cast<std::uint32_t>(lowered);
+        }
+
+        // Angular-size LOD cutoffs (boundsRadius / distance): four strictly
+        // descending values in (0, 1]; coarser chains are picked as the
+        // apparent size drops below each cutoff.
+        if (const std::vector<double> thresholds
+            = context.configurationFloatingArrayInSection("renderer", "lod_thresholds");
+            !thresholds.empty())
+        {
+            bool usable = thresholds.size() == 4;
+            for (double cutoff : thresholds)
+            {
+                if (!std::isfinite(cutoff) || cutoff <= 0.0 || cutoff > 1.0)
+                {
+                    usable = false;
+                }
+            }
+            for (std::size_t index = 1; index < thresholds.size() && usable; ++index)
+            {
+                if (!(thresholds[index - 1] > thresholds[index]))
+                {
+                    usable = false;
+                }
+            }
+            if (!usable)
+            {
+                std::fprintf(stderr,
+                    "renderer module: ignoring [renderer] lod_thresholds (need four finite strictly descending "
+                    "values in (0, 1]); keeping the current cutoffs\n");
+            }
+            else
+            {
+                for (std::size_t index = 0; index < 4; ++index)
+                {
+                    lodThresholds_[index] = static_cast<float>(thresholds[index]);
+                }
+            }
+        }
+
+        // Triangle-stride LOD decimation (renderer.lod_strides): three
+        // strictly ascending strides in 2..1024; level 0 is always the full
+        // index list.
+        if (const std::vector<double> strides
+            = context.configurationFloatingArrayInSection("renderer", "lod_strides");
+            !strides.empty())
+        {
+            bool usable = strides.size() == 3;
+            for (double stride : strides)
+            {
+                if (!std::isfinite(stride) || stride < 2.0 || stride > 1024.0)
+                {
+                    usable = false;
+                }
+            }
+            for (std::size_t index = 1; index < strides.size() && usable; ++index)
+            {
+                if (!(strides[index - 1] < strides[index]))
+                {
+                    usable = false;
+                }
+            }
+            if (!usable)
+            {
+                std::fprintf(stderr,
+                    "renderer module: ignoring [renderer] lod_strides (need three strictly ascending values in "
+                    "2..1024); keeping the current strides\n");
+            }
+            else
+            {
+                for (std::size_t index = 0; index < 3; ++index)
+                {
+                    lodStrides_[index] = static_cast<std::uint32_t>(strides[index]);
+                }
+            }
+        }
+
+        // sRGB output target: the Vulkan surface pick and the shader's
+        // SRGB_OUTPUT specialization follow it; the headless target always
+        // writes UNORM with its fixed encode.
+        srgbOutput_ = context.configurationBooleanInSection("renderer", "srgb_output").value_or(srgbOutput_);
+
         if (const auto fraction = context.configurationFloatingInSection("renderer", "headless_band_split_min_screen_fraction");
             fraction.has_value())
         {
@@ -649,7 +799,7 @@ private:
             = discrete ? 128u * 1024u * 1024u : (gpu.gpuPresent ? 64u * 1024u * 1024u : 32u * 1024u * 1024u);
         memoryBudgetUpdateIntervalFrames_        = 120;
         headlessTransformCacheBudgetBytes_
-            = bigRam ? 32u * 1024u * 1024u : (lowRam ? 8u * 1024u * 1024u : 16u * 1024u * 1024u);
+            = bigRam ? 256u * 1024u * 1024u : (lowRam ? 64u * 1024u * 1024u : 128u * 1024u * 1024u);
         frustumCulling_                          = true;
         backFaceCulling_                         = true;
         lodEnabled_                              = true;
@@ -857,6 +1007,10 @@ private:
             headlessOptions.lodMinTriangles            = lodMinTriangles_;
             headlessOptions.bandSplitTriangleThreshold = bandSplitTriangleThreshold_;
             headlessOptions.bandSplitMinimumScreenFraction = bandSplitMinimumScreenFraction_;
+            headlessOptions.parallelTransformVertexThreshold = parallelTransformVertexThreshold_;
+            headlessOptions.tilePixels                 = tilePixels_;
+            headlessOptions.lodThresholds              = lodThresholds_;
+            headlessOptions.lodStrides                 = lodStrides_;
             return registerRenderer(Backend::Headless,
                 surface,
                 std::make_unique<HeadlessBackend>(surface, window_, headlessOptions),
@@ -1788,7 +1942,7 @@ private:
     std::size_t          pipelineCacheMaximumBytes_        = 64u * 1024u * 1024u;
     std::uint32_t        memoryBudgetUpdateIntervalFrames_ = 120;
     std::array<float, 4> configuredClearColor_              = {0.0f, 0.0f, 0.0f, 1.0f};
-    std::size_t          headlessTransformCacheBudgetBytes_ = 32u * 1024u * 1024u;
+    std::size_t          headlessTransformCacheBudgetBytes_ = 256u * 1024u * 1024u;
     bool                 frustumCulling_                    = true;
     bool                 backFaceCulling_                   = true;
     bool                 giIndirectLighting_                = true; // [renderer] gi_indirect_lighting
@@ -1807,6 +1961,10 @@ private:
     float                anisotropyLevel_                   = 1.0f;
     std::uint32_t        msaaSamples_                       = 4u;
     bool                 srgbOutput_                        = false;
+    // [renderer] srgb_output: consumed by the Vulkan surface pick and the
+    // SRGB_OUTPUT specialization; the headless target always writes UNORM
+    // with its fixed encode (see backends.md).
+
 
     // Headless rasterizer tuning, held as members so readConfiguration (with
     // or without auto_config) owns every derived value.
@@ -1817,6 +1975,10 @@ private:
     std::size_t    lodMinTriangles_            = 4096u;
     std::uint32_t  bandSplitTriangleThreshold_ = 4096u;
     float          bandSplitMinimumScreenFraction_ = 0.125f;
+    std::uint32_t  parallelTransformVertexThreshold_ = 8192u;
+    std::uint32_t  tilePixels_                 = 64u;
+    std::array<float, 4>        lodThresholds_ = {0.02f, 0.05f, 0.1f, 0.2f};
+    std::array<std::uint32_t, 3> lodStrides_   = {4u, 16u, 64u};
 
     RenderDrawSortMode drawSortMode_ = RenderDrawSortMode::MeshThenMaterial;
 

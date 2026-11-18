@@ -6,6 +6,7 @@
 #include <engine/kernel/executable_directory.hpp>
 
 #include <filesystem>
+#include <vector>
 
 #if defined(_WIN32)
 
@@ -32,8 +33,11 @@ std::filesystem::path executableDirectory()
 #if defined(_WIN32)
         wchar_t     modulePath[MAX_PATH] = {};
         const DWORD written              = ::GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-        if (written == 0)
+        if (written == 0 || written >= MAX_PATH)
         {
+            // written >= MAX_PATH means the buffer was too small and the
+            // path is truncated; both cases fall back rather than resolve
+            // configuration against a wrong directory.
             return std::filesystem::current_path();
         }
         return std::filesystem::path(modulePath).parent_path();

@@ -33,7 +33,7 @@ void EngineKernel::setConfigurationFile(const std::filesystem::path &configurati
 {
     configurationFilePath = configurationPath;
     configurationLoaded   = false;
-    configurationStore.reset();
+    configurationStore_.reset();
 
     participantsGathered = false;
 }
@@ -48,7 +48,7 @@ void EngineKernel::addConfigurationProfileFile(const std::filesystem::path &prof
 
     configurationProfileFilePaths.push_back(profilePath);
     configurationLoaded = false;
-    configurationStore.reset();
+    configurationStore_.reset();
     participantsGathered = false;
 }
 
@@ -56,13 +56,13 @@ void EngineKernel::setSceneFile(const std::filesystem::path &scenePath)
 {
     sceneFilePath       = scenePath;
     configurationLoaded = false;
-    configurationStore.reset();
+    configurationStore_.reset();
     participantsGathered = false;
 }
 
 bool EngineKernel::addCommandLineOverride(const std::string &assignment, std::string &error)
 {
-    return configurationStore.stageCommandLineOverride(assignment, error);
+    return configurationStore_.stageCommandLineOverride(assignment, error);
 }
 
 void EngineKernel::setPluginsDirectory(const std::filesystem::path &pluginsDirectory)
@@ -107,10 +107,10 @@ EngineKernel::~EngineKernel()
 std::unique_ptr<ParticipantContext> EngineKernel::createAppContext()
 {
     permissionSystem_.grantAllPermissions(detail::appContextName());
-    return std::make_unique<ParticipantContext>(bus,
+    return std::make_unique<ParticipantContext>(bus_,
         *this,
         permissionSystem_,
-        configurationStore,
+        configurationStore_,
         detail::appContextName(),
         ParticipantKind::Application,
         nullptr,

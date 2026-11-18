@@ -60,13 +60,29 @@ inline std::vector<std::filesystem::path> collectModuleDefaultsFiles()
     const std::filesystem::path defaultsDirectory
         = resolveAgainstExecutableDirectory(ConfigurationStore::moduleDefaultsDirectory);
     std::vector<std::filesystem::path> moduleDirectories;
-    if (!std::filesystem::exists(defaultsDirectory) || !std::filesystem::is_directory(defaultsDirectory))
+    std::error_code                     scanError;
+    if (!std::filesystem::exists(defaultsDirectory, scanError) || scanError
+        || !std::filesystem::is_directory(defaultsDirectory, scanError) || scanError)
     {
         return {};
     }
-    for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(defaultsDirectory))
+    for (const std::filesystem::directory_entry &entry :
+        std::filesystem::directory_iterator(defaultsDirectory,
+            std::filesystem::directory_options::skip_permission_denied, scanError))
     {
-        if (entry.is_directory() && std::filesystem::exists(entry.path() / ConfigurationStore::moduleDefaultsFileName))
+        if (scanError)
+        {
+            scanError.clear();
+            continue;
+        }
+        std::error_code entryError;
+        const bool      entryIsDirectory = entry.is_directory(entryError);
+        if (entryError || !entryIsDirectory)
+        {
+            continue;
+        }
+        if (!std::filesystem::exists(entry.path() / ConfigurationStore::moduleDefaultsFileName, entryError)
+            || entryError)
         {
             moduleDirectories.push_back(entry.path());
         }

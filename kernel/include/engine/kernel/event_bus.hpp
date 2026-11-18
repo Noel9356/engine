@@ -744,7 +744,12 @@ public:
         {
             channelHolder->flushDeferredChannel();
         }
-        for (const std::shared_ptr<WorkerQueueBase> &workerQueue : workerQueues)
+        std::vector<std::shared_ptr<WorkerQueueBase>> queuesToFlush;
+        {
+            std::lock_guard<std::mutex> lock(channelMutex);
+            queuesToFlush = workerQueues;
+        }
+        for (const std::shared_ptr<WorkerQueueBase> &workerQueue : queuesToFlush)
         {
             workerQueue->flush();
         }
@@ -763,7 +768,10 @@ public:
     {
         auto queue
             = std::make_shared<WorkerEventQueue<EventType>>(channel<EventType>(), &deferredPending, queueOptions);
-        workerQueues.push_back(queue);
+        {
+            std::lock_guard<std::mutex> lock(channelMutex);
+            workerQueues.push_back(queue);
+        }
         return queue;
     }
 
@@ -783,14 +791,19 @@ public:
     // all channels; handlers must not be invoked afterwards.
     void releaseChannels()
     {
-        for (const std::shared_ptr<WorkerQueueBase> &workerQueue : workerQueues)
+        std::vector<std::shared_ptr<WorkerQueueBase>> queuesToClose;
+        {
+            std::lock_guard<std::mutex> lock(channelMutex);
+            queuesToClose = std::move(workerQueues);
+            workerQueues.clear();
+        }
+        for (const std::shared_ptr<WorkerQueueBase> &workerQueue : queuesToClose)
         {
             workerQueue->closeQueue();
         }
         std::lock_guard<std::mutex> lock(channelMutex);
         channels.clear();
         channelOrder.clear();
-        workerQueues.clear();
         deferredPending.store(false, std::memory_order_relaxed);
     }
 

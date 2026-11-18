@@ -301,7 +301,7 @@ list(
 
 option(
     ENGINE_BUILD_DEMO
-    "Build the demo apps (character customisation + GI test harness)"
+    "Build the demo applications present in this checkout"
     ON
 )
 set(ENGINE_MODULES

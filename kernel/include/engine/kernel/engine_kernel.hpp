@@ -130,7 +130,7 @@ public:
 
     EventBus &eventBus()
     {
-        return bus;
+        return bus_;
     }
 
     MainThreadTaskQueue &taskQueue()
@@ -166,7 +166,7 @@ public:
     // defaults, overrides).
     const ConfigurationStore &configuration() const
     {
-        return configurationStore;
+        return configurationStore_;
     }
 
     // Non-fatal notes gathered while loading libraries/plugins (trust warnings,
@@ -228,6 +228,9 @@ private:
 
     // Scene resolution, staged overrides and diagnostics switches.
     bool finishConfiguration(std::string &report);
+    // Effective scene file for the current assembly state (explicit, else the
+    // single plugin-claimed scene); shared by finish and reload.
+    std::filesystem::path effectiveSceneFilePath() const;
 
     // Registers assembly + participant config keys for unknown-key warnings.
     bool declareKnownKeyRegistry(std::string &report);
@@ -236,10 +239,10 @@ private:
     // enforceTrust=true is the construct path.
     bool prepareParticipants(std::string &report, bool enforceTrust);
 
-    // Collects records from modules + plugins; enforceTrust selects dry-run vs
+    // Collects records_ from modules + plugins; enforceTrust selects dry-run vs
     // real loading.
     bool gatherParticipants(std::string &report, bool enforceTrust);
-    // Scans the plugin roots and creates plugin records (no native .so loads yet).
+    // Scans the plugin roots and creates plugin records_ (no native .so loads yet).
     void gatherPluginPackages(std::string &report);
 
     // Marks module libraries active when anything in the current (transitive)
@@ -264,7 +267,7 @@ private:
     // Creates instances and cross-checks compiled manifests vs descriptors.
     bool instantiateActiveModules(std::string &report);
 
-    // validate path: descriptor-only records, no instances.
+    // validate path: descriptor-only records_, no instances.
     void appendDeclaredModuleRecords();
 
     // Deferred native plugin loading (after the trust gate passes).
@@ -331,8 +334,8 @@ private:
     bool nativePluginLibrariesLoaded_ = false;
 
     // Core services; references are handed to every ParticipantContext.
-    ConfigurationStore configurationStore;
-    EventBus           bus;
+    ConfigurationStore configurationStore_;
+    EventBus           bus_;
     PermissionSystem   permissionSystem_;
 
     MainThreadTaskQueue mainThreadTaskQueue_;
@@ -344,12 +347,12 @@ private:
     std::unique_ptr<CapabilityProviderIndex> capabilityProviderIndex_;
 
     // Discovered module libraries (descriptor + hash) and live participants.
-    std::vector<ModuleLibraryRecord> moduleLibraries;
+    std::vector<ModuleLibraryRecord> moduleLibraries_;
 
-    std::vector<ParticipantRecord> records;
+    std::vector<ParticipantRecord> records_;
 
     // Construct order; stop() iterates it in reverse.
-    std::vector<ParticipantRecord *> participantStartOrder;
+    std::vector<ParticipantRecord *> participantStartOrder_;
     // Lifecycle flags; the setters above clear the ones they invalidate.
     bool configurationLoaded  = false;
     bool participantsGathered = false;

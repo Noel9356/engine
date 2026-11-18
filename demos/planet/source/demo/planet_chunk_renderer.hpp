@@ -45,7 +45,7 @@ public:
     // adds hazeColor * w). sunTint is the same tint the sky dome carries
     // this frame.
     void rebuildDrawCommands(const glm::mat4 &viewProjection, const glm::dvec3 &eyePlanetLocal,
-        const engine::planet::Vec3 &sunTint);
+        const engine::planet::Vec3 &sunTint, const glm::dvec3 &renderShift);
     void destroy();
 
     // Sky backdrop (see engine/planet/atmosphere.hpp): a static gradient
@@ -126,6 +126,10 @@ private:
         engine::renderer::MeshHandle water = engine::renderer::invalidMesh;
         glm::mat4 terrainTransform{1.0f};
         glm::mat4 waterTransform{1.0f};
+        // The same placement in f64 (planet-local + center), set whenever a
+        // transform is built: the camera-relative pass composes against it,
+        // so chunk placement never quantizes at planet scale.
+        glm::dvec3 placementCenter{0.0};
         bool terrainPlacementBuilt = false; // terrainTransform carries the chunk's placement
         bool waterPlacementBuilt = false;   // waterTransform carries the chunk's placement
         std::uint64_t lastSeenUpdate = 0;  // update that last listed this chunk as visible
@@ -148,6 +152,12 @@ private:
     engine::planet::PlanetGenerationParams params_{};
 
     std::map<engine::planet::ChunkKey, ChunkMeshHandles> uploadedMeshes_;
+
+    // Per-frame model matrices for the camera-relative pass. Sized exactly
+    // before the commands that point into them are emitted, so the pointers
+    // stay stable until the frame's draw consumes them.
+    std::vector<glm::mat4> frameChunkMatrices_;
+    std::vector<glm::mat4> frameBackdropMatrices_;
     std::vector<engine::planet::PlanetChunkView> visibleViews_; // reused every update
     std::uint64_t updateCounter_ = 0;
     // Draw commands retain pointers to materials until endFrame. Deques keep

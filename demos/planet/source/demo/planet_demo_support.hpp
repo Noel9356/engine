@@ -65,6 +65,21 @@ bool pickViewpoint(engine::planet::PlanetCapability &planetCapability, engine::p
     ProbePolicy policy, double eyeHeight, const engine::planet::Vec3 &sunDirection, Viewpoint &out);
 SelfTestResult runSelfTest(engine::planet::PlanetCapability &capability, void *capabilitySelf,
     const PlanetDemoOptions &options);
+// Camera-relative composition threshold: beyond this distance from the
+// planet's center the demo renders the world shifted by the f64 eye, so the
+// renderer's f32 pipeline only ever sees eye-relative coordinates (f32
+// quantization at planet scale would otherwise step chunk placement in
+// half-meter increments and tear terrain seams). Below the threshold the
+// shift is zero and the historical absolute frame is reproduced exactly.
+inline constexpr double kCameraRelativeOriginMeters = 1048576.0; // 2^20
+
+// The render-origin shift for this eye: the eye itself beyond the
+// threshold, the zero vector below it.
+inline glm::dvec3 cameraRelativeShift(const glm::dvec3 &eyePlanetLocal)
+{
+    return glm::length(eyePlanetLocal) > kCameraRelativeOriginMeters ? eyePlanetLocal : glm::dvec3(0.0);
+}
+
 std::array<engine::renderer::VertexAttribute, 4> canonicalAttributes();
 } // namespace demo::planet_demo
 

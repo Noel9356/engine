@@ -133,9 +133,10 @@ inline void setConformBit(ConformMask &mask, std::uint32_t face, int offsetU, in
 }
 
 // Built geometry for one chunk: terrain surface plus (optionally) a water
-// surface patch, both in planet-local coordinates (floats, chunk-local
-// offsets relative to nodeOrigin are resolved - vertices are absolute
-// planet-local positions cast to float at the end).
+// surface patch. Vertices are chunk-local offsets from the chunk center
+// (computed in double against the shared lattice, then cast to float); the
+// chunk's PlanetChunkView.centerMeters carries the planet-local placement
+// origin consumers translate by.
 struct ChunkMesh
 {
     std::vector<PlanetVertex>   terrainVertices;

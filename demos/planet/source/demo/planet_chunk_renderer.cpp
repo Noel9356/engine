@@ -606,20 +606,32 @@ void buildSunDiscMesh(std::vector<planet::PlanetVertex> &vertices, std::vector<s
     }
 }
 
-// Uploads a built shell mesh as a canonical renderer mesh.
-renderer::MeshHandle uploadShellMesh(renderer::RenderCapability &renderCapability, renderer::RendererHandle rendererHandle,
-    const std::vector<planet::PlanetVertex> &vertices, const std::vector<std::uint32_t> &indices)
+// The one description shape every upload in this file uses: canonical
+// attributes, 32-bit indices, the canonical vertex stride. The attribute
+// array is cached once (canonicalAttributes returns by value).
+renderer::MeshDescription canonicalMeshDescription(
+    const planet::PlanetVertex *vertices, std::uint32_t vertexCount, const std::uint32_t *indices, std::uint32_t indexCount)
 {
-    const auto attributes = canonicalAttributes();
+    static const auto attributes = canonicalAttributes();
     renderer::MeshDescription description;
-    description.vertices = vertices.data();
-    description.vertexCount = static_cast<std::uint32_t>(vertices.size());
-    description.indices = indices.data();
-    description.indexCount = static_cast<std::uint32_t>(indices.size());
+    description.vertices = vertices;
+    description.vertexCount = vertexCount;
+    description.indices = indices;
+    description.indexCount = indexCount;
     description.indexFormat = renderer::MeshIndexFormat::UInt32;
     description.vertexStrideBytes = kVertexStride;
     description.vertexAttributes = attributes.data();
     description.vertexAttributeCount = static_cast<std::uint32_t>(attributes.size());
+    return description;
+}
+
+// Uploads a built shell mesh as a canonical renderer mesh.
+renderer::MeshHandle uploadShellMesh(renderer::RenderCapability &renderCapability, renderer::RendererHandle rendererHandle,
+    const std::vector<planet::PlanetVertex> &vertices, const std::vector<std::uint32_t> &indices)
+{
+    const renderer::MeshDescription description = canonicalMeshDescription(
+        vertices.data(), static_cast<std::uint32_t>(vertices.size()), indices.data(),
+        static_cast<std::uint32_t>(indices.size()));
 
     renderer::RenderError error = renderer::RenderError::None;
     const renderer::MeshHandle handle
@@ -732,16 +744,8 @@ void PlanetChunkRenderer::updateVisibleChunks()
         }
         if (slot == renderer::invalidMesh && view.vertexCount > 0)
         {
-            const auto attributes = canonicalAttributes();
-            renderer::MeshDescription description;
-            description.vertices = view.vertices;
-            description.vertexCount = view.vertexCount;
-            description.indices = view.indices;
-            description.indexCount = view.indexCount;
-            description.indexFormat = renderer::MeshIndexFormat::UInt32;
-            description.vertexStrideBytes = kVertexStride;
-            description.vertexAttributes = attributes.data();
-            description.vertexAttributeCount = static_cast<std::uint32_t>(attributes.size());
+            const renderer::MeshDescription description
+                = canonicalMeshDescription(view.vertices, view.vertexCount, view.indices, view.indexCount);
 
             renderer::RenderError error = renderer::RenderError::None;
             slot = renderer_->createMesh(renderer_->self, rendererHandle_, &description, &error);
@@ -768,10 +772,12 @@ void PlanetChunkRenderer::updateVisibleChunks()
         {
             continue;
         }
+        const glm::dvec3 placementCenter(params_.centerMeters[0] + view.centerMeters.x,
+            params_.centerMeters[1] + view.centerMeters.y, params_.centerMeters[2] + view.centerMeters.z);
         const glm::mat4 transform = glm::translate(glm::mat4(1.0f),
-            glm::vec3(static_cast<float>(params_.centerMeters[0] + view.centerMeters.x),
-                static_cast<float>(params_.centerMeters[1] + view.centerMeters.y),
-                static_cast<float>(params_.centerMeters[2] + view.centerMeters.z)));
+            glm::vec3(static_cast<float>(placementCenter.x), static_cast<float>(placementCenter.y),
+                static_cast<float>(placementCenter.z)));
+        handles.placementCenter = placementCenter;
         if (wantTerrain)
         {
             handles.terrainTransform = transform;
@@ -799,7 +805,7 @@ void PlanetChunkRenderer::updateVisibleChunks()
 }
 
 void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, const glm::dvec3 &eyePlanetLocal,
-    const planet::Vec3 &sunTint)
+    const planet::Vec3 &sunTint, const glm::dvec3 &renderShift)
 {
     drawCommands_.clear();
     terrainMaterials_.clear();
@@ -821,11 +827,28 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     //      tinted with the dome.
     //   6. world-anchored cloud shell (macro views): lit geometry between
     //      the terrain and the dome's far rim.
+    // Camera-relative pass: every model matrix is composed in f64 against
+    // the render shift, so the f32 pipeline only sees eye-relative
+    // coordinates (a zero shift reproduces the historical absolute frame
+    // bit-for-bit - the compose is exact at small magnitudes).
+    const glm::dmat4 shiftToEye = glm::translate(glm::dmat4(1.0), -renderShift);
+    const auto composeShifted = [&shiftToEye](const glm::mat4 &absolute)
+    {
+        return glm::mat4(shiftToEye * glm::dmat4(absolute));
+    };
+    frameBackdropMatrices_.clear();
+    frameBackdropMatrices_.push_back(composeShifted(starDomeTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(atmosphereShellTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(skyDomeTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(sunDiscTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(skyCloudTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(cloudLayerTransform_));
+
     if (starDomeActive_ && starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty())
     {
         renderer::RenderDrawCommand command{};
         command.mesh = starDome_;
-        command.modelMatrix = glm::value_ptr(starDomeTransform_);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[0]);
         command.material = &starDomeMaterials_.front();
         drawCommands_.push_back(command);
     }
@@ -833,7 +856,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     {
         renderer::RenderDrawCommand command{};
         command.mesh = atmosphereShell_;
-        command.modelMatrix = glm::value_ptr(atmosphereShellTransform_);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[1]);
         command.material = &atmosphereShellMaterials_.front();
         drawCommands_.push_back(command);
     }
@@ -841,7 +864,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     {
         renderer::RenderDrawCommand command{};
         command.mesh = skyDome_;
-        command.modelMatrix = glm::value_ptr(skyDomeTransform_);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[2]);
         command.material = &skyDomeMaterials_.front();
         drawCommands_.push_back(command);
     }
@@ -849,7 +872,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     {
         renderer::RenderDrawCommand command{};
         command.mesh = sunDisc_;
-        command.modelMatrix = glm::value_ptr(sunDiscTransform_);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[3]);
         command.material = &sunDiscMaterials_.front();
         drawCommands_.push_back(command);
     }
@@ -857,7 +880,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     {
         renderer::RenderDrawCommand command{};
         command.mesh = skyCloudLayer_;
-        command.modelMatrix = glm::value_ptr(skyCloudTransform_);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[4]);
         command.material = &skyCloudMaterials_.front();
         drawCommands_.push_back(command);
     }
@@ -866,7 +889,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     {
         renderer::RenderDrawCommand command{};
         command.mesh = cloudLayer_;
-        command.modelMatrix = glm::value_ptr(cloudLayerTransform_);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[5]);
         command.material = &cloudLayerMaterials_.front();
         drawCommands_.push_back(command);
     }
@@ -902,6 +925,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     const planet::Vec3 eyeLocal{eyePlanetLocal.x, eyePlanetLocal.y, eyePlanetLocal.z};
 
     const glm::dvec3 planetCenter(params_.centerMeters[0], params_.centerMeters[1], params_.centerMeters[2]);
+    frameChunkMatrices_.clear();
     for (const auto &entry : uploadedMeshes_)
     {
         // Bounding sphere from the chunk key's octree depth: the node cube's
@@ -912,13 +936,12 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         std::uint32_t cellZ = 0;
         planet::unpackChunkKey(entry.first, depth, cellX, cellY, cellZ);
         const double nodeSize = planet::chunkSizeMeters(params_, depth);
-        // Placement center from whichever draw the chunk actually carries
-        // (all-water chunks have an empty terrain mesh and an untouched
-        // terrain transform).
-        const glm::mat4 &placement
-            = entry.second.terrain != renderer::invalidMesh ? entry.second.terrainTransform : entry.second.waterTransform;
-        const glm::dvec3 worldCenter = planetCenter
-            + glm::dvec3(placement[3][0], placement[3][1], placement[3][2]);
+        // Placement center in f64 (already planet-local + center): the
+        // shift-aware culling and the command matrix both compose against
+        // it, so chunk placement never quantizes at planet scale. The aerial
+        // perspective below keeps the REAL planet-local centers - the
+        // physics does not shift with the render origin.
+        const glm::dvec3 worldCenter = entry.second.placementCenter - renderShift;
         const double boundRadius = 0.5 * nodeSize * glm::sqrt(3.0);
         bool visible = true;
         for (const glm::dvec4 &plane : frustumPlanes)
@@ -933,6 +956,10 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         {
             continue;
         }
+        // The command matrix composes from the f64 center (the stored f32
+        // transform's translation is already planet-scale-quantized; the
+        // vertex payload itself is chunk-local and small either way).
+        frameChunkMatrices_.push_back(glm::mat4(glm::translate(glm::dmat4(1.0), worldCenter)));
 
         const planet::AerialPerspective haze
             = planet::aerialPerspective(params_, eyeLocal, planet::Vec3{worldCenter.x - planetCenter.x,
@@ -958,7 +985,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
 
             renderer::RenderDrawCommand command{};
             command.mesh = entry.second.terrain;
-            command.modelMatrix = glm::value_ptr(entry.second.terrainTransform);
+            command.modelMatrix = glm::value_ptr(frameChunkMatrices_.back());
             command.material = &terrainMaterials_.back();
             drawCommands_.push_back(command);
         }
@@ -976,7 +1003,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
 
             renderer::RenderDrawCommand command{};
             command.mesh = entry.second.water;
-            command.modelMatrix = glm::value_ptr(entry.second.waterTransform);
+            command.modelMatrix = glm::value_ptr(frameChunkMatrices_.back());
             command.material = &waterMaterials_.back();
             drawCommands_.push_back(command);
         }
@@ -1721,16 +1748,9 @@ void PlanetChunkRenderer::ensureSkyDome()
         }
     }
 
-    const auto attributes = canonicalAttributes();
-    renderer::MeshDescription description;
-    description.vertices = vertices.data();
-    description.vertexCount = static_cast<std::uint32_t>(vertices.size());
-    description.indices = indices.data();
-    description.indexCount = static_cast<std::uint32_t>(indices.size());
-    description.indexFormat = renderer::MeshIndexFormat::UInt32;
-    description.vertexStrideBytes = kVertexStride;
-    description.vertexAttributes = attributes.data();
-    description.vertexAttributeCount = static_cast<std::uint32_t>(attributes.size());
+    const renderer::MeshDescription description = canonicalMeshDescription(
+        vertices.data(), static_cast<std::uint32_t>(vertices.size()), indices.data(),
+        static_cast<std::uint32_t>(indices.size()));
 
     renderer::RenderError error = renderer::RenderError::None;
     skyDome_ = renderer_->createMesh(renderer_->self, rendererHandle_, &description, &error);
