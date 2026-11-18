@@ -6,9 +6,16 @@
 
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/physics_articulated/capabilities.hpp>
+#include <engine/physics_character/capabilities.hpp>
 #include <engine/physics_cloth/capabilities.hpp>
+#include <engine/physics_fields/capabilities.hpp>
+#include <engine/physics_foliage/capabilities.hpp>
+#include <engine/physics_fluid/capabilities.hpp>
+#include <engine/physics_particles/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/physics_rope/capabilities.hpp>
+#include <engine/physics_water/capabilities.hpp>
 
 #include <cstdint>
 #include <string>
@@ -34,6 +41,53 @@ struct SceneBody
     bool                              scripted = false; // created by the capture timeline (kept out of reset counting)
 };
 
+// Handles to the extended-module objects one scene may carry. Everything
+// here is owned by its module; the demo only keeps the ids.
+struct ExtendedHandles
+{
+    // physics_fields.
+    engine::physics_fields::WindHandle        windField        = engine::physics_fields::invalidWind;
+    engine::physics_fields::ForceVolumeHandle forceVolume      = engine::physics_fields::invalidForceVolume;
+
+    // physics_rope.
+    std::vector<engine::physics_rope::RopeHandle> ropes;
+
+    // physics_water: the ocean plus the bodies registered for buoyancy.
+    engine::physics_water::OceanHandle ocean = engine::physics_water::invalidOcean;
+    std::vector<engine::physics_rigid::BodyHandle> buoyantBodies;
+
+    // physics_fluid.
+    engine::physics_fluid::FluidHandle fluid = engine::physics_fluid::invalidFluid;
+
+    // physics_particles: one emitter per kind, in EmitterKind order
+    // (rain, snow, dust, fire); unused slots stay invalid.
+    engine::physics_particles::EmitterHandle emitters[4] = {engine::physics_particles::invalidEmitter,
+        engine::physics_particles::invalidEmitter,
+        engine::physics_particles::invalidEmitter,
+        engine::physics_particles::invalidEmitter};
+
+    // physics_foliage: the bend field plus a copy of the instance layout for
+    // the renderer (base positions, heights, seeds).
+    engine::physics_foliage::FieldHandle foliageField = engine::physics_foliage::invalidField;
+    std::vector<engine::physics_foliage::FoliageInstance> foliageInstances;
+
+    // physics_character.
+    engine::physics_character::CharacterHandle   character   = engine::physics_character::invalidCharacter;
+    engine::physics_character::JiggleChainHandle jiggleChain = engine::physics_character::invalidJiggleChain;
+    engine::physics_character::FootPlanterHandle footPlanter = engine::physics_character::invalidFootPlanter;
+    engine::physics_rigid::BodyHandle            characterTorsoBody = engine::physics_rigid::invalidBody;
+
+    // The jiggle chain layout the renderer replays (rest offsets per bone in
+    // the torso's frame).
+    std::uint32_t jiggleBoneCount      = 0;
+    double        jiggleOffsets[4][3] = {};
+
+    // The fur ball: a rigid sphere drawn through the renderer's shell-fur
+    // path with the fur module's texture; the wind field drives its sway.
+    bool                              furBall     = false;
+    engine::physics_rigid::BodyHandle furBallBody = engine::physics_rigid::invalidBody;
+};
+
 // Handles to everything the scene built inside the rigid world.
 struct SceneHandles
 {
@@ -42,6 +96,8 @@ struct SceneHandles
     std::vector<SceneBody>                                 bodies;
     std::vector<engine::physics_articulated::FigureHandle> figures;
     std::vector<engine::physics_cloth::ClothHandle>        cloths;
+
+    ExtendedHandles extended;
 
     // Link body handles of the grabbable chain figure (for stats).
     std::uint32_t chainLinkCount    = 0;
@@ -56,6 +112,13 @@ struct SceneDependencies
     engine::physics_rigid::PhysicsRigidCapability      *rigid        = nullptr;
     engine::physics_articulated::ArticulatedCapability *articulation = nullptr;
     engine::physics_cloth::ClothCapability             *cloth        = nullptr;
+    engine::physics_fields::FieldsCapability           *fields       = nullptr;
+    engine::physics_rope::RopeCapability               *rope         = nullptr;
+    engine::physics_water::WaterCapability             *water        = nullptr;
+    engine::physics_fluid::FluidCapability             *fluid        = nullptr;
+    engine::physics_particles::ParticlesCapability     *particles    = nullptr;
+    engine::physics_foliage::FoliageCapability         *foliage      = nullptr;
+    engine::physics_character::CharacterCapability     *character    = nullptr;
 };
 
 // Scene tuning read once from the [physics_sandbox] configuration section.

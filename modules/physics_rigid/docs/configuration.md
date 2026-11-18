@@ -8,6 +8,7 @@ Every value is read once in `construct()` and copied into each world at `createW
 | --- | --- | --- | --- | --- |
 | `physics_rigid.angular_sleep_tolerance` | number | > 0 | `0.14` | Angular speed (radians per second) below which an island member counts as motionless for sleeping. |
 | `physics_rigid.contact_margin` | number | [0, 0.1) | `0.02` | Speculative contact margin (meters): shapes within this distance count as touching, so resting contacts persist instead of detaching and re-impacting each step, and the velocity solve closes speculative gaps within the step (which removes impact-impulse overshoot). |
+| `physics_rigid.ccd_velocity_threshold` | number | [0, 1000] | `1.5` | Speed (meters per second) above which a continuous-collision-enabled body is swept from its pre-integration transform to the integrated one, so fast movers stop at thin geometry instead of tunneling; slower bodies integrate without the sweep. |
 | `physics_rigid.contact_slop` | number | (0, 1) | `0.005` | Penetration (meters) the position solver tolerates before correcting; resting bodies keep up to this much overlap so manifolds persist. |
 | `physics_rigid.fixed_rate_hz` | number | [1, 1000] | `60.0` | Fixed step rate (steps per second) used by `simulate`'s accumulator. `step` callers choose their own delta and must keep it constant. |
 | `physics_rigid.gravity` | number[3] | finite vector | `[0.0, -9.81, 0.0]` | Gravity acceleration adopted by worlds created with `WorldDescription.useConfiguredGravity` and the fallback for non-finite configured values. |

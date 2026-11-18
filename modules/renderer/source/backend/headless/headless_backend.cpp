@@ -250,10 +250,36 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
     std::uint8_t clearBytes[4] = {red, green, blue, alpha};
     std::uint32_t clearWord    = 0;
     std::memcpy(&clearWord, clearBytes, sizeof(clearWord));
-    std::fill(reinterpret_cast<std::uint32_t *>(color.data()),
-        reinterpret_cast<std::uint32_t *>(color.data() + color.size()),
-        clearWord);
-    std::fill(depth.begin(), depth.end(), 1.0f);
+    std::uint32_t *const colorWordsBegin = reinterpret_cast<std::uint32_t *>(color.data());
+    const std::size_t    pixelsPerRow    = framebufferWidth;
+    // The clear is a pure store sweep over disjoint row ranges, so it splits
+    // across the task scheduler exactly like the resolve in endFrame does;
+    // without a scheduler (or on single-worker hosts) it stays serial.
+    const bool clearInParallel = taskScheduler_ != nullptr && taskScheduler_->isRunning()
+        && parallelWorkerCount() >= 2u && framebufferHeight >= 2u;
+    if (clearInParallel)
+    {
+        const std::uint32_t clearWorkers = parallelWorkerCount();
+        const std::uint32_t clearGrain   = std::max<std::uint32_t>(
+            1u, static_cast<std::uint32_t>(framebufferHeight / (clearWorkers * 4u)));
+        float *const depthBegin = depth.data();
+        taskScheduler_->parallelFor(framebufferHeight,
+            clearGrain,
+            [this, colorWordsBegin, depthBegin, clearWord, pixelsPerRow](std::size_t rowBegin, std::size_t rowEnd)
+            {
+                std::fill(colorWordsBegin + rowBegin * pixelsPerRow,
+                    colorWordsBegin + rowEnd * pixelsPerRow,
+                    clearWord);
+                std::fill(depthBegin + rowBegin * pixelsPerRow, depthBegin + rowEnd * pixelsPerRow, 1.0f);
+            });
+    }
+    else
+    {
+        std::fill(colorWordsBegin,
+            reinterpret_cast<std::uint32_t *>(color.data() + color.size()),
+            clearWord);
+        std::fill(depth.begin(), depth.end(), 1.0f);
+    }
 
     std::fill(pixelLocks.begin(), pixelLocks.end(), 0);
 }
@@ -472,8 +498,17 @@ bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &descripti
         }
 
         mesh.handle = id;
-        // A re-creation under the same handle must not keep stale transforms
-        // against new geometry.
+        // A re-creation under an existing handle is rejected the same way the
+        // Vulkan backend rejects it: the caller owns the handle lifecycle, and
+        // silently keeping (or half-replacing) stale geometry would hide the
+        // mistake. Stale transform-cache state is still dropped so a failed
+        // call cannot leave cached transforms against new geometry.
+        if (meshes.find(id) != meshes.end())
+        {
+            forgetTransformCache(id);
+            reportError(error, RenderError::CreationFailed);
+            return false;
+        }
         forgetTransformCache(id);
         meshes.emplace(id, std::move(mesh));
         reportError(error, RenderError::None);
@@ -508,6 +543,15 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
         texture.height  = description.height;
         texture.filter  = description.filter;
         texture.address = description.address;
+        // Power-of-two extents let the sampler wrap repeat coordinates through
+        // an AND mask instead of a division/modulo pair (identical results;
+        // see HeadlessTexture::wrappedCoordinate). Clamp addressing keeps the
+        // masks empty so the clamp path is taken.
+        const bool pow2Width  = (description.width & (description.width - 1u)) == 0u;
+        const bool pow2Height = (description.height & (description.height - 1u)) == 0u;
+        texture.wrapMaskX  = pow2Width ? description.width - 1u : 0u;
+        texture.wrapMaskY  = pow2Height ? description.height - 1u : 0u;
+        texture.repeatPow2 = texture.address == TextureAddress::Repeat && pow2Width && pow2Height;
         texture.pixels.assign(description.pixels,
             description.pixels + static_cast<std::size_t>(description.width) * description.height * 4);
         {
@@ -1111,9 +1155,6 @@ void HeadlessBackend::drawFur(MeshHandle mesh, const float *modelMatrix, const M
         return;
     }
 
-    const std::size_t triCount = meshData.indices.size() / 3;
-    statistics_.trianglesSubmitted += static_cast<std::uint64_t>(triCount) * layerCount;
-
     for (std::uint32_t layer = 1; layer <= layerCount; ++layer)
     {
         RasterSetup setup;
@@ -1129,6 +1170,10 @@ void HeadlessBackend::drawFur(MeshHandle mesh, const float *modelMatrix, const M
         {
             return;
         }
+        // Submitted counts per layer whose triangles were actually handed to
+        // the rasterizer; a failed prepare aborts the stack without counting
+        // layers that never ran.
+        statistics_.trianglesSubmitted += setup.triangleCount;
         rasterizeTriangles(meshData, setup, 0, setup.triangleCount, false, nullptr);
         statistics_.trianglesRasterized += setup.triangleCount;
     }
@@ -1285,6 +1330,7 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
                     {channel(b.color, 0), channel(b.color, 8), channel(b.color, 16), channel(b.color, 24)},
                     {channel(c.color, 0), channel(c.color, 8), channel(c.color, 16), channel(c.color, 24)}};
 
+            bool wroteAnyPixel = false;
             for (std::int32_t y = top; y < bottom; ++y)
             {
                 for (std::int32_t x = left; x < right; ++x)
@@ -1322,10 +1368,17 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
                     const float destinationAlpha = static_cast<float>(destination[3]) / 255.0f;
                     destination[3]
                         = static_cast<std::uint8_t>(std::lround((alpha + destinationAlpha * (1.0f - alpha)) * 255.0f));
+                    wroteAnyPixel = true;
                 }
             }
+            // Submitted counts every processed triangle; rasterized only the
+            // ones that actually shaded at least one pixel, matching the mesh
+            // paths' semantics.
             ++statistics_.trianglesSubmitted;
-            ++statistics_.trianglesRasterized;
+            if (wroteAnyPixel)
+            {
+                ++statistics_.trianglesRasterized;
+            }
         }
     }
 }
@@ -1438,7 +1491,16 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.model             = glm::make_mat4(modelMatrix);
     outSetup.viewProjection    = viewProjection_ * outSetup.model;
     outSetup.viewProjectionWorld = viewProjection_;
-    outSetup.modelNormalMatrix = material.unlit ? glm::mat3(1.0f) : glm::mat3(outSetup.model);
+    // SAFETY: inverse-transpose normal transform, mirroring mesh.vert /
+    // fur.vert. mat3(model) is wrong for non-uniformly scaled models (sheared
+    // normals light incorrectly); the physically correct transform is
+    // transpose(inverse(mat3(model))). For uniformly scaled models (the common
+    // case) the result matches up to a scalar and the shading stage
+    // renormalizes, so only direction matters. Singular matrices surface as
+    // non-finite vertex normals, which the per-vertex fallback below replaces
+    // with the up vector.
+    outSetup.modelNormalMatrix = material.unlit ? glm::mat3(1.0f)
+                                                : glm::transpose(glm::inverse(glm::mat3(outSetup.model)));
     outSetup.unlit             = material.unlit;
     outSetup.depthWrite        = material.depthWrite;
     // Shell-fur state: the transform below displaces along the object-space
@@ -1484,14 +1546,9 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     {
         ensureWorldBounds();
         const glm::vec4 worldCenter(outSetup.boundsWorldCenter, 1.0f);
-        const float     worldRadius = outSetup.boundsWorldRadius;
-        for (const glm::vec4 &plane : frustumPlanes_)
+        if (sphereOutsideFrustum(frustumPlanes_.data(), worldCenter, outSetup.boundsWorldRadius))
         {
-            const float signedDistance = glm::dot(plane, worldCenter);
-            if (std::isfinite(signedDistance) && signedDistance < -worldRadius)
-            {
-                return false;
-            }
+            return false;
         }
     }
 
@@ -2809,21 +2866,19 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                 // Perspective-correct attributes are interpolated inside the
                 // shading kernel, which returns the tone-mapped linear color;
                 // the commit folds the sRGB encode and quantization into one
-                // packed word. The depth re-check below mirrors the previous
-                // write path exactly (the pre-shade test above is the
-                // early-out, this is the commit).
+                // packed word. The pre-shade depth test above is the early-out;
+                // the commit reuses it directly: within one record scan (and
+                // one tile) the calling thread is the only depth writer, so the
+                // pixel's depth still holds the value that test read.
                 const glm::vec3 shaded
                     = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC);
 
-                if (pixelDepth < depthBuffer[pixelIndex])
+                if (writeDepth)
                 {
-                    if (writeDepth)
-                    {
-                        depthBuffer[pixelIndex] = pixelDepth;
-                    }
-                    *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = encodeColorRgba(shaded);
-                    wrote                   = true;
+                    depthBuffer[pixelIndex] = pixelDepth;
                 }
+                *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = encodeColorRgba(shaded);
+                wrote                                                            = true;
             }
 
             weightA += weightADx;

@@ -1,0 +1,5 @@
+[physics_fields]
+air_density           = 1.225
+maximum_force_volumes = 256
+maximum_wind_fields   = 64
+wind_drag_scale       = 1.0

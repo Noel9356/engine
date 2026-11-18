@@ -1,0 +1,17 @@
+config_keys           = [
+    "physics_water.angular_drag_coefficient",
+    "physics_water.buoyancy_scale",
+    "physics_water.linear_drag_coefficient",
+    "physics_water.maximum_oceans",
+    "physics_water.maximum_registered_bodies",
+    "physics_water.maximum_ripples_per_ocean",
+    "physics_water.ripple_attenuation",
+    "physics_water.ripple_decay",
+    "physics_water.ripple_speed",
+    "physics_water.ripple_wavelength",
+    "physics_water.water_density",
+]
+name                  = "physics_water"
+provides              = ["physics_water"]
+requires              = ["physics_rigid"]
+version               = "0.1.0"

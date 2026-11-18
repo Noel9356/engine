@@ -1,0 +1,14 @@
+config_keys           = [
+    "physics_foliage.ambient_wind_direction",
+    "physics_foliage.ambient_wind_speed",
+    "physics_foliage.fixed_rate_hz",
+    "physics_foliage.maximum_fields",
+    "physics_foliage.maximum_instances",
+    "physics_foliage.maximum_instances_per_field",
+    "physics_foliage.maximum_steps_per_simulate",
+]
+name                  = "physics_foliage"
+provides              = ["physics_foliage"]
+requires              = ["physics_rigid"]
+optional_capabilities = ["physics_fields"]
+version               = "0.1.0"

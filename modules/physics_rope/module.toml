@@ -1,0 +1,12 @@
+config_keys           = [
+    "physics_rope.fixed_rate_hz",
+    "physics_rope.maximum_nodes",
+    "physics_rope.maximum_nodes_per_rope",
+    "physics_rope.maximum_ropes",
+    "physics_rope.maximum_steps_per_simulate",
+    "physics_rope.substeps_per_step",
+]
+name                  = "physics_rope"
+provides              = ["physics_rope"]
+requires              = ["physics_rigid"]
+version               = "0.1.0"

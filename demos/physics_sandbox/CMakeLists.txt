@@ -5,6 +5,7 @@ engine_add_application(
     source/demo/sandbox_options.cpp
     source/demo/sandbox_input.cpp
     source/demo/sandbox_scene.cpp
+    source/demo/sandbox_extended.cpp
     source/demo/sandbox_render.cpp
     source/demo/sandbox_selftest.cpp
     ../common/demo_harness.cpp
@@ -15,9 +16,17 @@ engine_add_application(
     renderer
     camera
     pbr
+    fur
     physics_rigid
     physics_articulated
     physics_cloth
+    physics_fields
+    physics_rope
+    physics_water
+    physics_fluid
+    physics_particles
+    physics_foliage
+    physics_character
     CONFIG_DIRECTORY
     "${CMAKE_CURRENT_SOURCE_DIR}/config"
 )

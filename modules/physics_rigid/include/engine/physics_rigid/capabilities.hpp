@@ -22,7 +22,22 @@ namespace engine::physics_rigid
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsRigidCapabilityAbi = 1u;
+//
+// ABI history:
+//   1 - initial surface (worlds, bodies, distance/ball-socket/hinge joints,
+//       rayCast, collideSphere, statistics).
+//   2 - appended MaterialDescription.rollingResistance,
+//       BodyDescription.continuousCollisionEnabled, JointKind::Prismatic and
+//       JointKind::Fixed, the Distance-joint spring fields, the SweepHit
+//       record, and the setBodyContinuousCollision / setJointSpring /
+//       sphereCast entry points. Everything from ABI 1 keeps its slot and
+//       meaning; consumers check `abi >= 2` before touching the additions.
+//   3 - appended BodyMassProperties with the copyBodyMassProperties entry
+//       point, and the rayCastIgnoring entry point (ground probes that must
+//       skip a controller's own rig). Everything from ABI 2 keeps its slot
+//       and meaning; consumers check `abi >= 3` before touching the
+//       additions.
+inline constexpr std::uint32_t physicsRigidCapabilityAbi = 3u;
 
 using WorldHandle = std::uint32_t;
 using BodyHandle  = std::uint32_t;
@@ -88,6 +103,12 @@ struct MaterialDescription
 {
     double friction    = 0.6; // Coulomb coefficient, clamped to [0, 4]
     double restitution = 0.0; // bounce factor, clamped to [0, 1]
+
+    // Rolling resistance coefficient (clamped to [0, 1]): the fraction of the
+    // contact normal load converted into a torque that opposes rolling about
+    // the contact tangents. Only curved shapes (spheres, capsules) roll, so
+    // only their contacts spend this budget; flat-faced shapes ignore it.
+    double rollingResistance = 0.0;
 };
 
 // Double-precision vector; positions and directions in world or local space
@@ -146,6 +167,14 @@ struct BodyDescription
     // Opaque caller value echoed by copyBodyDescription for application-side
     // bookkeeping (the module never interprets it).
     std::uint64_t userTag = 0;
+
+    // Continuous collision detection: when set, the body is swept from its
+    // pre-integration to its post-integration transform every substep and
+    // clamped at the first contact with non-dynamic geometry (static bodies,
+    // kinematic bodies, planes), so fast movers cannot tunnel through thin
+    // obstacles. Dynamic-vs-dynamic pairs stay on the speculative-contact
+    // margin path.
+    bool continuousCollisionEnabled = false;
 };
 
 // Runtime snapshot of one body: placement, velocities, and sleep state.
@@ -159,16 +188,32 @@ struct BodyState
     bool awake = true;
 };
 
+// Mass properties of one dynamic body: total mass and the principal-axis
+// inertia diagonal in the body's local frame (zero for static and kinematic
+// bodies). Controllers derive per-joint gain bounds from these.
+struct BodyMassProperties
+{
+    double mass = 0.0;
+    Vec3  inertiaLocal = {}; // principal-axis diagonal, body frame
+};
+
 // Joint kinds. A Distance joint keeps the two world-space anchor points at a
-// fixed distance. A BallSocket keeps them coincident, optionally limited by a
+// fixed distance, optionally through a frequency/damping spring instead of a
+// hard constraint. A BallSocket keeps them coincident, optionally limited by a
 // swing cone around the A-side axis and a twist range about it. A Hinge keeps
 // them coincident and removes swing entirely (rotation only about the hinge
-// axis), optionally with angle limits and a velocity motor.
+// axis), optionally with angle limits and a velocity motor. A Prismatic keeps
+// them coincident along the plane perpendicular to the A-side axis and lets
+// them slide only along that axis, with optional translation limits and a
+// linear velocity motor. A Fixed welds the two bodies into one rigid assembly
+// (all relative motion removed against the frame captured at creation).
 enum class JointKind : std::uint32_t
 {
     Distance = 0,
     BallSocket,
-    Hinge
+    Hinge,
+    Prismatic,
+    Fixed
 };
 
 struct JointDescription
@@ -203,10 +248,22 @@ struct JointDescription
     double twistHalfAngleRadians = 3.141592653589793;
 
     // Hinge motor: drives the relative angular velocity about the hinge axis
-    // toward motorTargetVelocity, never exceeding maximumMotorTorque.
+    // toward motorTargetVelocity, never exceeding maximumMotorTorque. The
+    // prismatic motor reuses the same fields as a linear drive: it tracks
+    // motorTargetVelocity along axisLocalA (meters per second) within the
+    // same torque budget interpreted as a maximum force.
     bool   motorEnabled        = false;
     double motorTargetVelocity = 0.0;
     double maximumMotorTorque  = 0.0;
+
+    // Distance-joint spring: when enabled, the distance is maintained by a
+    // frequency/damping spring (soft constraint) instead of a hard row.
+    // springFrequencyHz is the target oscillation frequency and
+    // springDampingRatio the dimensionless damping (0 = undamped, 1 = fully
+    // damped, > 1 = overdamped); 0 frequency falls back to the hard row.
+    bool   springEnabled       = false;
+    double springFrequencyHz   = 0.0;
+    double springDampingRatio  = 0.0;
 };
 
 struct WorldDescription
@@ -252,6 +309,18 @@ struct RayHit
     double distance = 0.0;
 };
 
+// Closest shape-cast (sweep) hit for a sphere moved from `start` to
+// `start + delta`. The normal faces back along the sweep (opposes delta); the
+// distance is the travelled length at the first contact.
+struct SweepHit
+{
+    BodyHandle body = invalidBody;
+
+    Vec3   point;
+    Vec3   normal;
+    double distance = 0.0;
+};
+
 // The "physics_rigid" capability. Calls are main-thread only unless the
 // consumer serializes them; the module takes no internal locks. `self` is the
 // first argument of every call. Unknown handles are reported through the
@@ -278,6 +347,8 @@ struct PhysicsRigidCapability
         void *self, WorldHandle world, BodyHandle *outHandles, std::uint32_t capacity, std::uint32_t *outRequired);
     bool (*copyBodyDescription)(void *self, WorldHandle world, BodyHandle body, BodyDescription *outDescription);
     bool (*copyBodyState)(void *self, WorldHandle world, BodyHandle body, BodyState *outState);
+    bool (*copyBodyMassProperties)(
+        void *self, WorldHandle world, BodyHandle body, BodyMassProperties *outMass);
 
     // Teleports a body and (optionally) wakes it. Zeroes velocities when the
     // body is asleep so a repositioned body does not keep stale momentum.
@@ -330,6 +401,12 @@ struct PhysicsRigidCapability
     bool (*rayCast)(void *self, WorldHandle world, const double origin[3], const double direction[3],
         double maximumDistance, RayHit *outHit);
 
+    // Closest ray hit that skips the listed bodies (a character controller
+    // probing the ground under its own rig); null/zero list casts against
+    // everything.
+    bool (*rayCastIgnoring)(void *self, WorldHandle world, const double origin[3], const double direction[3],
+        double maximumDistance, const BodyHandle *ignoredBodies, std::uint32_t ignoredBodyCount, RayHit *outHit);
+
     // Deepest-overlap sphere query against every body and plane. On hit,
     // writes the direction to move the sphere out of the obstacle (unit
     // normal), the penetration depth, and the responsible body (planes report
@@ -340,6 +417,23 @@ struct PhysicsRigidCapability
         double *outDepth, BodyHandle *outBody);
 
     bool (*worldStatistics)(void *self, WorldHandle world, WorldStatistics *outStatistics);
+
+    // ---- ABI 2 additions ----------------------------------------------------
+
+    // Enables or disables per-body continuous collision detection at runtime;
+    // accepted for any body kind (only dynamic bodies sweep).
+    bool (*setBodyContinuousCollision)(void *self, WorldHandle world, BodyHandle body, bool enabled);
+
+    // Re-tunes a Distance joint's spring at runtime (the same validation as
+    // creation applies; only Distance joints act on it).
+    bool (*setJointSpring)(
+        void *self, WorldHandle world, JointHandle joint, bool enabled, double frequencyHz, double dampingRatio);
+
+    // Closest-hit sphere sweep against every body and plane: moves a sphere
+    // of the given radius from start toward start + delta (delta may be any
+    // finite vector) and reports the first contact. Radius must be positive.
+    bool (*sphereCast)(void *self, WorldHandle world, const double start[3], const double delta[3], double radius,
+        SweepHit *outHit);
 };
 
 } // namespace engine::physics_rigid

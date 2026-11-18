@@ -404,8 +404,12 @@ bool boxBox(const RigidTransform &transformA, const double halfExtentsA[3], cons
     }
 
     // Sutherland-Hodgman clip of the incident polygon against the four side
-    // planes of the reference face.
-    math::Vec3    clipped[8];
+    // planes of the reference face. A convex polygon gains at most two
+    // vertices per clip plane, so four planes can grow the quad to twelve
+    // vertices before the manifold trim caps the contact count; the clip
+    // buffers are sized for that worst case.
+    constexpr std::uint32_t kClipCapacity = 16;
+    math::Vec3    clipped[kClipCapacity];
     std::uint32_t clippedCount = 4;
     for (std::uint32_t index = 0; index < 4; ++index)
     {
@@ -431,7 +435,7 @@ bool boxBox(const RigidTransform &transformA, const double halfExtentsA[3], cons
         {
             const math::Vec3 clipNormal = sideAxes[side] * sign;
             const double     clipExtent = sideExtents[side];
-            math::Vec3       output[8];
+            math::Vec3       output[kClipCapacity];
             std::uint32_t    outputCount = 0;
             for (std::uint32_t index = 0; index < clippedCount; ++index)
             {
@@ -1104,6 +1108,225 @@ bool collideSpherePlane(const math::Vec3 &center, double radius, const math::Vec
     }
     outNormal = planeNormal;
     outDepth  = radius - signedDistance;
+    return true;
+}
+
+double computeShapeBoundingRadius(const Shape &shape)
+{
+    switch (shape.kind)
+    {
+    case ShapeKind::Sphere:
+        return shape.sphereRadius;
+    case ShapeKind::Box:
+        return math::length(math::Vec3{shape.boxHalfExtents[0], shape.boxHalfExtents[1], shape.boxHalfExtents[2]});
+    case ShapeKind::Capsule:
+        return shape.capsuleHalfLength + shape.capsuleRadius;
+    case ShapeKind::Plane:
+    default:
+        return 0.0;
+    }
+}
+
+bool sweepSphereSolid(const math::Vec3 &start, double radius, const math::Vec3 &delta, const Shape &solidShape,
+    const RigidTransform &solidTransform, double &outDistance, math::Vec3 &outNormal)
+{
+    const double lengthSquared = math::lengthSquared(delta);
+    if (!(radius > 0.0) || lengthSquared <= kEpsilon)
+    {
+        return false;
+    }
+    const double length           = std::sqrt(lengthSquared);
+    const math::Vec3 direction    = delta * (1.0 / length);
+    double           bestDistance = -1.0;
+    math::Vec3       bestNormal;
+
+    switch (solidShape.kind)
+    {
+    case ShapeKind::Sphere: {
+        // Ray against the target sphere inflated by the query radius.
+        double distance = 0.0;
+        RigidTransform sphereTransform{};
+        sphereTransform.position = solidTransform.position;
+        if (rayCastSphere(sphereTransform, solidShape.sphereRadius + radius, start, direction, length, distance))
+        {
+            bestDistance = distance;
+            bestNormal   = math::normalized(start + direction * distance - solidTransform.position);
+        }
+        break;
+    }
+    case ShapeKind::Box: {
+        // Slab test against the box inflated by the query radius, in the
+        // box's local frame (conservative rounded-corner approximation).
+        const math::Vec3 localOrigin    = math::inverseRotate(solidTransform.rotation, start - solidTransform.position);
+        const math::Vec3 localDirection = math::inverseRotate(solidTransform.rotation, direction);
+        double           entry          = 0.0;
+        double           exit           = length;
+        std::uint32_t    entryAxis      = 0;
+        double           entrySign      = 0.0;
+        bool             hit            = true;
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            const double axisOrigin    = componentOf(localOrigin, axis);
+            const double axisDirection = componentOf(localDirection, axis);
+            const double extent        = solidShape.boxHalfExtents[axis] + radius;
+            if (std::abs(axisDirection) < kEpsilon)
+            {
+                if (axisOrigin < -extent || axisOrigin > extent)
+                {
+                    hit = false;
+                    break;
+                }
+                continue;
+            }
+            double near = (-extent - axisOrigin) / axisDirection;
+            double far  = (extent - axisOrigin) / axisDirection;
+            double sign = -1.0;
+            if (near > far)
+            {
+                std::swap(near, far);
+                sign = 1.0;
+            }
+            if (near > entry)
+            {
+                entry     = near;
+                entryAxis = axis;
+                entrySign = sign;
+            }
+            exit = std::min(exit, far);
+            if (entry > exit)
+            {
+                hit = false;
+                break;
+            }
+        }
+        if (hit && entry > 0.0 && entry <= length)
+        {
+            math::Vec3 localNormal{};
+            (&localNormal.x)[entryAxis] = entrySign;
+            bestDistance                = entry;
+            bestNormal                  = math::rotate(solidTransform.rotation, localNormal);
+        }
+        break;
+    }
+    case ShapeKind::Capsule: {
+        // Ray against the capsule inflated by the query radius: the two cap
+        // spheres and the (clipped) cylinder around the segment axis.
+        const math::Vec3 axis = math::rotate(solidTransform.rotation, math::Vec3{0.0, solidShape.capsuleHalfLength, 0.0});
+        double distance = 0.0;
+        RigidTransform capTransform{};
+        capTransform.position = solidTransform.position;
+        if (rayCastSphere(capTransform, solidShape.capsuleRadius + radius, start, direction, length, distance))
+        {
+            bestDistance = distance;
+            bestNormal   = math::normalized(start + direction * distance - solidTransform.position);
+        }
+        for (const double sign : {-1.0, 1.0})
+        {
+            RigidTransform endTransform{};
+            endTransform.position = solidTransform.position + axis * sign;
+            double endDistance    = 0.0;
+            if (rayCastSphere(endTransform, solidShape.capsuleRadius + radius, start, direction, length, endDistance)
+                && (bestDistance < 0.0 || endDistance < bestDistance))
+            {
+                bestDistance = endDistance;
+                bestNormal   = math::normalized(start + direction * endDistance - endTransform.position);
+            }
+        }
+        const math::Vec3 localOrigin    = math::inverseRotate(solidTransform.rotation, start - solidTransform.position);
+        const math::Vec3 localDirection = math::inverseRotate(solidTransform.rotation, direction);
+        const double     radialSquared  = localDirection.x * localDirection.x + localDirection.z * localDirection.z;
+        const double     inflated       = solidShape.capsuleRadius + radius;
+        if (radialSquared > kEpsilon)
+        {
+            const double b            = 2.0 * (localOrigin.x * localDirection.x + localOrigin.z * localDirection.z);
+            const double c            = localOrigin.x * localOrigin.x + localOrigin.z * localOrigin.z - inflated * inflated;
+            const double discriminant = b * b - 4.0 * radialSquared * c;
+            if (discriminant >= 0.0)
+            {
+                const double root = std::sqrt(discriminant);
+                for (const double t : {(-b - root) / (2.0 * radialSquared), (-b + root) / (2.0 * radialSquared)})
+                {
+                    if (t <= 0.0 || t > length || (bestDistance >= 0.0 && t >= bestDistance))
+                    {
+                        continue;
+                    }
+                    const double y = localOrigin.y + localDirection.y * t;
+                    if (std::abs(y) <= solidShape.capsuleHalfLength)
+                    {
+                        const math::Vec3 hitLocal{localOrigin.x + localDirection.x * t,
+                            y,
+                            localOrigin.z + localDirection.z * t};
+                        bestDistance = t;
+                        bestNormal   = math::rotate(solidTransform.rotation, math::normalized(hitLocal));
+                        break;
+                    }
+                }
+            }
+        }
+        break;
+    }
+    case ShapeKind::Plane:
+    default:
+        return false;
+    }
+
+    if (bestDistance <= 0.0)
+    {
+        return false;
+    }
+    // The normal faces back against the motion (the direction a body stops
+    // with), matching the ray-cast normal convention.
+    if (math::dot(bestNormal, direction) > 0.0)
+    {
+        bestNormal = bestNormal * -1.0;
+    }
+    outDistance = bestDistance;
+    outNormal   = bestNormal;
+    return true;
+}
+
+bool sweepSpherePlane(const math::Vec3 &start, double radius, const math::Vec3 &delta, const math::Vec3 &planeNormal,
+    double planeOffset, double &outDistance, math::Vec3 &outNormal)
+{
+    if (!(radius > 0.0))
+    {
+        return false;
+    }
+    const double length = math::length(delta);
+    if (length <= kEpsilon)
+    {
+        return false;
+    }
+    const double travel = math::dot(delta, planeNormal);
+    const double offset = math::dot(start, planeNormal) - planeOffset;
+    // First contact while moving: the sphere touches the half-space from the
+    // open side at signedDistance = radius, from the far side at -radius.
+    double     distance = -1.0;
+    math::Vec3 normal{};
+    if (travel < 0.0)
+    {
+        const double openTravel = (radius - offset) / travel;
+        if (openTravel > 0.0 && openTravel <= 1.0)
+        {
+            distance = openTravel * length;
+            normal   = planeNormal;
+        }
+    }
+    else if (travel > 0.0)
+    {
+        const double farTravel = (-radius - offset) / travel;
+        if (farTravel > 0.0 && farTravel <= 1.0)
+        {
+            distance = farTravel * length;
+            normal   = planeNormal * -1.0;
+        }
+    }
+    if (distance <= 0.0)
+    {
+        return false;
+    }
+    outDistance = distance;
+    outNormal   = normal;
     return true;
 }
 

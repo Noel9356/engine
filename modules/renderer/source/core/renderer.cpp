@@ -270,11 +270,26 @@ private:
         giIndirectLighting_               = true;
         reflectionIndirectSpecular_       = true;
         configuredClearColor_                    = {0.0f, 0.0f, 0.0f, 1.0f};
-        headlessTransformCacheBudgetBytes_       = 32u * 1024u * 1024u;
+        headlessTransformCacheBudgetBytes_       = 256u * 1024u * 1024u;
         frustumCulling_                          = true;
         backFaceCulling_                         = true;
         lodEnabled_                              = true;
         gpuTimestampsEnabled_                    = true;
+        headlessTileParallel_                    = false;
+        batchedTileRasterizationEnabled_         = true;
+        parallelTriangleThreshold_               = 4096u;
+        pixelsPerLockGroup_                      = 16u;
+        lodMinTriangles_                         = 4096u;
+        bandSplitTriangleThreshold_              = 4096u;
+        bandSplitMinimumScreenFraction_          = 0.125f;
+        parallelTransformVertexThreshold_        = 8192u;
+        tilePixels_                              = 64u;
+        maxBatchTileRecords_                     = 512u * 1024u;
+        lodThresholds_                           = {0.02f, 0.05f, 0.1f, 0.2f};
+        lodStrides_                              = {4u, 16u, 64u};
+        anisotropyLevel_                         = 1.0f;
+        msaaSamples_                             = 4u;
+        srgbOutput_                              = false;
         drawSortMode_                            = RenderDrawSortMode::MeshThenMaterial;
         drawSortEnabled_                         = true;
         drawSortMinimumCommands_                 = 2;
@@ -1940,8 +1955,9 @@ private:
 #endif
 
     // Current settings. Keep in mind these are the built-in defaults; the
-    // config file may override them at construct/reload time. srgb_output and
-    // z_prepass have no config readers yet - see configuration.md.
+    // config file may override them at construct/reload time. Every key a
+    // reader consumes is reset here first so a reload that removes a key
+    // restores the built-in default (see readConfiguration).
     bool                 autoConfigEnabled_ = false;
 
     ConfiguredBackend configuredBackend_ = ConfiguredBackend::Auto;

@@ -45,7 +45,8 @@ struct StepScratch
 };
 
 // One fixed simulation step: force integration, broadphase, narrowphase,
-// warm-started sequential impulse solving, position integration, sleeping.
+// warm-started sequential impulse solving, position integration, continuous
+// collision detection for CCD-enabled bodies, island-based sleeping.
 // Returns false (and leaves the world untouched) when the step would produce
 // non-finite state.
 bool stepWorld(World &world, double fixedDeltaSeconds, StepScratch &scratch);
@@ -53,6 +54,14 @@ bool stepWorld(World &world, double fixedDeltaSeconds, StepScratch &scratch);
 // Closest-hit ray cast; direction is normalized internally.
 bool rayCastWorld(
     const World &world, const math::Vec3 &origin, const math::Vec3 &direction, double maximumDistance, RayHit &outHit);
+// Closest hit that skips the listed bodies (a character controller probing
+// the ground under its own rig).
+bool rayCastWorldIgnoring(const World &world, const math::Vec3 &origin, const math::Vec3 &direction,
+    double maximumDistance, const BodyHandle *ignoredBodies, std::uint32_t ignoredBodyCount, RayHit &outHit);
+
+// Closest-hit sphere sweep against every body and plane: the query sphere
+// moves from start along delta and the first contact wins.
+bool sphereCastWorld(const World &world, const math::Vec3 &start, const math::Vec3 &delta, double radius, SweepHit &outHit);
 
 // Deepest sphere overlap against bodies and planes.
 bool collideSphereWorld(const World &world, const math::Vec3 &center, double radius, math::Vec3 &outNormal,

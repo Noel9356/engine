@@ -161,6 +161,9 @@ private:
         if (const auto value = context.configurationFloatingInSection("physics_rigid", "spatial_hash_cell_size");
             value && *value > 1.0e-4 && *value <= 1.0e6 && std::isfinite(*value))
             settings_.spatialHashCellSize = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "ccd_velocity_threshold");
+            value && *value >= 0.0 && *value <= 1000.0 && std::isfinite(*value))
+            settings_.ccdVelocityThreshold = *value;
     }
 
     static void setError(PhysicsError *output, PhysicsError value) noexcept
@@ -393,6 +396,28 @@ private:
         return true;
     }
 
+    // Mass properties of one body: total mass and the local-frame principal
+    // inertia diagonal (zeros for static and kinematic bodies).
+    bool copyBodyMassPropertiesImpl(
+        WorldHandle worldHandle, BodyHandle handle, BodyMassProperties *outMass)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || outMass == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        const Body &body = world->bodies[iterator->second];
+        *outMass         = BodyMassProperties{};
+        outMass->mass    = body.mass;
+        outMass->inertiaLocal = body.inertiaLocal;
+        return true;
+    }
+
     bool setBodyTransformImpl(WorldHandle worldHandle, BodyHandle handle, const RigidTransform *transform, bool wake)
     {
         World *world = findWorld(worldHandle);
@@ -512,12 +537,30 @@ private:
             return false;
         }
         Body &body = world->bodies[iterator->second];
-        if (!std::isfinite(material->friction) || !std::isfinite(material->restitution))
+        if (!std::isfinite(material->friction) || !std::isfinite(material->restitution)
+            || !std::isfinite(material->rollingResistance))
         {
             return false;
         }
-        body.material.friction    = std::clamp(material->friction, 0.0, 4.0);
-        body.material.restitution = std::clamp(material->restitution, 0.0, 1.0);
+        body.material.friction           = std::clamp(material->friction, 0.0, 4.0);
+        body.material.restitution        = std::clamp(material->restitution, 0.0, 1.0);
+        body.material.rollingResistance  = std::clamp(material->rollingResistance, 0.0, 1.0);
+        return true;
+    }
+
+    bool setBodyContinuousCollisionImpl(WorldHandle worldHandle, BodyHandle handle, bool enabled)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        world->bodies[iterator->second].continuousCollisionEnabled = enabled;
         return true;
     }
 
@@ -701,7 +744,7 @@ private:
         }
         Joint joint;
         joint.description = *description;
-        if (joint.description.kind == JointKind::Hinge)
+        if (joint.description.kind == JointKind::Hinge || joint.description.kind == JointKind::Prismatic)
         {
             const math::Vec3 axis{description->axisLocalA.x, description->axisLocalA.y, description->axisLocalA.z};
             if (!math::isFinite(axis) || math::lengthSquared(axis) < 1.0e-12)
@@ -730,8 +773,12 @@ private:
                                           && joint.description.coneHalfAngleRadians <= 3.14159265358979323846
                                           && joint.description.twistHalfAngleRadians > 0.0
                                           && joint.description.twistHalfAngleRadians <= 3.14159265358979323846;
+            const bool prismaticLimitsValid = joint.description.kind == JointKind::Prismatic
+                                           && std::isfinite(joint.description.limitLowerRadians)
+                                           && std::isfinite(joint.description.limitUpperRadians)
+                                           && joint.description.limitLowerRadians < joint.description.limitUpperRadians;
             const bool distanceOrUnlimited = !joint.description.limitsEnabled;
-            if (!distanceOrUnlimited && !hingeLimitsValid && !ballLimitsValid)
+            if (!distanceOrUnlimited && !hingeLimitsValid && !ballLimitsValid && !prismaticLimitsValid)
             {
                 setError(error, PhysicsError::InvalidDescription);
                 return invalidJoint;
@@ -740,6 +787,13 @@ private:
         if (joint.description.motorEnabled
             && (!std::isfinite(joint.description.motorTargetVelocity)
                 || !std::isfinite(joint.description.maximumMotorTorque) || joint.description.maximumMotorTorque < 0.0))
+        {
+            setError(error, PhysicsError::InvalidDescription);
+            return invalidJoint;
+        }
+        if (joint.description.springEnabled
+            && (!std::isfinite(joint.description.springFrequencyHz) || joint.description.springFrequencyHz < 0.0
+                || !std::isfinite(joint.description.springDampingRatio) || joint.description.springDampingRatio < 0.0))
         {
             setError(error, PhysicsError::InvalidDescription);
             return invalidJoint;
@@ -756,6 +810,15 @@ private:
                 = bodyB.transform.position + math::rotate(bodyB.transform.rotation, joint.description.anchorLocalB);
             joint.restLength = joint.description.distance > 0.0 ? joint.description.distance
                                                                 : math::length(anchorWorldB - anchorWorldA);
+        }
+        else if (joint.description.kind == JointKind::Prismatic)
+        {
+            const math::Vec3 anchorWorldA
+                = bodyA.transform.position + math::rotate(bodyA.transform.rotation, joint.description.anchorLocalA);
+            const math::Vec3 anchorWorldB
+                = bodyB.transform.position + math::rotate(bodyB.transform.rotation, joint.description.anchorLocalB);
+            const math::Vec3 axisWorld = math::rotate(bodyA.transform.rotation, joint.axisLocalA);
+            joint.sliderRestDistance   = math::dot(anchorWorldB - anchorWorldA, axisWorld);
         }
         else
         {
@@ -836,6 +899,47 @@ private:
         return true;
     }
 
+    bool setJointSpringImpl(
+        WorldHandle worldHandle, JointHandle handle, bool enabled, double frequencyHz, double dampingRatio)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return false;
+        }
+        const auto iterator = world->jointIndexByHandle.find(handle);
+        if (iterator == world->jointIndexByHandle.end())
+        {
+            return false;
+        }
+        Joint &joint = world->joints[iterator->second];
+        if (joint.description.kind != JointKind::Distance)
+        {
+            return false;
+        }
+        if (enabled
+            && (!std::isfinite(frequencyHz) || frequencyHz < 0.0 || !std::isfinite(dampingRatio)
+                || dampingRatio < 0.0))
+        {
+            return false;
+        }
+        joint.description.springEnabled      = enabled;
+        joint.description.springFrequencyHz  = frequencyHz;
+        joint.description.springDampingRatio = dampingRatio;
+        joint.distanceImpulse                = 0.0;
+        const auto bodyAIterator             = world->bodyIndexByHandle.find(joint.description.bodyA);
+        const auto bodyBIterator             = world->bodyIndexByHandle.find(joint.description.bodyB);
+        if (bodyAIterator != world->bodyIndexByHandle.end())
+        {
+            wakeRecord(world->bodies[bodyAIterator->second]);
+        }
+        if (bodyBIterator != world->bodyIndexByHandle.end())
+        {
+            wakeRecord(world->bodies[bodyBIterator->second]);
+        }
+        return true;
+    }
+
     bool stepImpl(WorldHandle worldHandle, double fixedDeltaSeconds)
     {
         World *world = findWorld(worldHandle);
@@ -888,6 +992,24 @@ private:
             *outHit);
     }
 
+    bool rayCastIgnoringImpl(WorldHandle worldHandle, const double origin[3], const double direction[3],
+        double maximumDistance, const BodyHandle *ignoredBodies, std::uint32_t ignoredBodyCount, RayHit *outHit)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || origin == nullptr || direction == nullptr || outHit == nullptr
+            || (ignoredBodyCount > 0 && ignoredBodies == nullptr))
+        {
+            return false;
+        }
+        return rayCastWorldIgnoring(*world,
+            math::Vec3{origin[0], origin[1], origin[2]},
+            math::Vec3{direction[0], direction[1], direction[2]},
+            maximumDistance,
+            ignoredBodies,
+            ignoredBodyCount,
+            *outHit);
+    }
+
     bool collideSphereImpl(WorldHandle worldHandle, const double center[3], double radius, double outNormal[3],
         double *outDepth, BodyHandle *outBody)
     {
@@ -925,6 +1047,23 @@ private:
         return true;
     }
 
+    bool sphereCastImpl(
+        WorldHandle worldHandle, const double start[3], const double delta[3], double radius, SweepHit *outHit)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || start == nullptr || delta == nullptr || outHit == nullptr)
+        {
+            return false;
+        }
+        const math::Vec3 startVector{start[0], start[1], start[2]};
+        const math::Vec3 deltaVector{delta[0], delta[1], delta[2]};
+        if (!math::isFinite(startVector) || !math::isFinite(deltaVector))
+        {
+            return false;
+        }
+        return sphereCastWorld(*world, startVector, deltaVector, radius, *outHit);
+    }
+
     static void wakeRecord(Body &body)
     {
         body.awake      = true;
@@ -948,6 +1087,7 @@ private:
         ENGINE_PHYSICS_RIGID_BIND(copyBodyHandles, copyBodyHandlesImpl);
         ENGINE_PHYSICS_RIGID_BIND(copyBodyDescription, copyBodyDescriptionImpl);
         ENGINE_PHYSICS_RIGID_BIND(copyBodyState, copyBodyStateImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyBodyMassProperties, copyBodyMassPropertiesImpl);
         ENGINE_PHYSICS_RIGID_BIND(setBodyTransform, setBodyTransformImpl);
         ENGINE_PHYSICS_RIGID_BIND(setBodyKind, setBodyKindImpl);
         ENGINE_PHYSICS_RIGID_BIND(setBodyLinearVelocity, setBodyLinearVelocityImpl);
@@ -965,8 +1105,12 @@ private:
         ENGINE_PHYSICS_RIGID_BIND(step, stepImpl);
         ENGINE_PHYSICS_RIGID_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_RIGID_BIND(rayCast, rayCastImpl);
+        ENGINE_PHYSICS_RIGID_BIND(rayCastIgnoring, rayCastIgnoringImpl);
         ENGINE_PHYSICS_RIGID_BIND(collideSphere, collideSphereImpl);
         ENGINE_PHYSICS_RIGID_BIND(worldStatistics, worldStatisticsImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyContinuousCollision, setBodyContinuousCollisionImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setJointSpring, setJointSpringImpl);
+        ENGINE_PHYSICS_RIGID_BIND(sphereCast, sphereCastImpl);
 #undef ENGINE_PHYSICS_RIGID_BIND
     }
 

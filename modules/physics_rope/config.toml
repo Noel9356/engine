@@ -1,0 +1,7 @@
+[physics_rope]
+fixed_rate_hz              = 60.0
+maximum_nodes              = 200000
+maximum_nodes_per_rope     = 4096
+maximum_ropes              = 256
+maximum_steps_per_simulate = 8
+substeps_per_step          = 8

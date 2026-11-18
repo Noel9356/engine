@@ -1,0 +1,10 @@
+config_keys           = [
+    "physics_fields.air_density",
+    "physics_fields.maximum_force_volumes",
+    "physics_fields.maximum_wind_fields",
+    "physics_fields.wind_drag_scale",
+]
+name                  = "physics_fields"
+provides              = ["physics_fields"]
+requires              = ["physics_rigid"]
+version               = "0.1.0"

@@ -1,0 +1,29 @@
+# physics_water configuration
+
+All keys live in the `[physics_water]` section. Defaults ship in `config.toml`; the application config (or a profile) may override them. `module.toml` mirrors every key under `config_keys` for documentation; the kernel validates known keys for engine sections and plugin manifests only, so unknown `[physics_water]` keys are silently accepted.
+
+Every value is read once in `construct()`; the module does not follow configuration reloads. Keys are listed alphabetically.
+
+| Key | Type | Valid range / values | Default | Effect |
+| --- | --- | --- | --- | --- |
+| `physics_water.angular_drag_coefficient` | number | [0, 100] | `3.0` | Angular damping scale for submerged bodies: torque = `coefficient x submergedFraction x mass x angularSpeed x 0.01`, opposing the spin. |
+| `physics_water.buoyancy_scale` | number | [0, 100] | `1.0` | Global multiplier on the displaced-volume term of the buoyancy force; `0` disables buoyancy while surface queries keep working. |
+| `physics_water.linear_drag_coefficient` | number | [0, 100] | `1.8` | Quadratic water drag coefficient: force = `0.5 x water_density x coefficient x dragArea x submergedFraction x speed^2` opposite the velocity. |
+| `physics_water.maximum_oceans` | integer | 1 - 4096 | `16` | Maximum concurrently existing oceans; `createOcean` reports `CapacityExceeded` beyond it. |
+| `physics_water.maximum_registered_bodies` | integer | 1 - 100000 | `4096` | Largest number of bodies one ocean accepts for buoyancy registration; `registerBody` reports `CapacityExceeded` beyond it. |
+| `physics_water.maximum_ripples_per_ocean` | integer | 1 - 4096 | `64` | Ripple slot count fixed per ocean at creation; `addRipple` recycles the oldest slot once the budget is full. |
+| `physics_water.ripple_attenuation` | number | [0, 100] | `0.35` | Ripple amplitude falloff per meter of ring radius (`exp(-radius x attenuation)`). |
+| `physics_water.ripple_decay` | number | (0, 100] | `1.2` | Exponential decay per second of ripple amplitude (`exp(-age x decay)`); ripples retire below a thousandth of their initial amplitude. |
+| `physics_water.ripple_speed` | number | (0, 100] | `4.0` | Ring front expansion speed in meters per second. |
+| `physics_water.ripple_wavelength` | number | (0.0001, 1000] | `1.6` | Ripple crest spacing in meters: the band width around the ring front and the cosine period of the ring. |
+| `physics_water.water_density` | number | (0, 20000] | `1000.0` | Water density in kilograms per cubic meter, the density factor of both the buoyancy force and the quadratic drag law. |
+
+## Out-of-range and invalid values
+
+Out-of-range numeric values, missing values, and non-finite values are ignored and the built-in default stays active. Budgets are enforced when oceans and registrations are created: `createOcean` reports `CapacityExceeded` beyond `maximum_oceans` and `registerBody` beyond `maximum_registered_bodies`; `maximum_ripples_per_ocean` fixes each ocean's slot array at creation, and `addRipple` recycles the oldest slot instead of failing when full. Lowering a configured limit affects new oceans; it does not evict existing ones. `stop()` releases all oceans and resets the handle and statistics counters.
+
+## Where the settings show up
+
+- The four force keys (`water_density`, `buoyancy_scale`, `linear_drag_coefficient`, `angular_drag_coefficient`) retune the entire buoyancy pass without touching any ocean description or registration; the default `1000.0` is fresh water in kilograms per cubic meter.
+- The ripple keys (`ripple_speed`, `ripple_decay`, `ripple_attenuation`, `ripple_wavelength`) parameterize every ring's expansion, decay, radial falloff, and crest spacing, including the retirement threshold `stepRipples` applies; see [overview.md](overview.md) for the ripple model.
+- The budget keys bound the per-ocean slot arrays and registration lists, and the live counts surface in `WaterStatistics` (`oceanCount`, `registeredBodies`, `activeRipples`).

@@ -1,0 +1,13 @@
+config_keys           = [
+    "physics_fluid.fixed_rate_hz",
+    "physics_fluid.maximum_fluids",
+    "physics_fluid.maximum_particles",
+    "physics_fluid.maximum_particles_per_fluid",
+    "physics_fluid.maximum_steps_per_simulate",
+    "physics_fluid.maximum_velocity",
+    "physics_fluid.substeps_per_step",
+]
+name                  = "physics_fluid"
+provides              = ["physics_fluid"]
+requires              = ["physics_rigid"]
+version               = "0.1.0"

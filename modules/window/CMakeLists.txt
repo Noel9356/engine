@@ -61,6 +61,18 @@ if(ENGINE_WINDOW_ENABLE_GLFW)
               FORCE
     )
 
+    option(
+        ENGINE_GLFW_ENABLE_X11
+        "Build GLFW with the X11 backend (requires the X11 and XRandR development headers)"
+        ON
+    )
+    set(GLFW_BUILD_X11
+        "${ENGINE_GLFW_ENABLE_X11}"
+        CACHE BOOL
+              ""
+              FORCE
+    )
+
     engine_fetch_dependency(
         glfw
         OWNER
@@ -116,6 +128,7 @@ if(ENGINE_WINDOW_ENABLE_GLFW
    AND UNIX
    AND NOT
        APPLE
+   AND ENGINE_GLFW_ENABLE_X11
 )
     find_package(
         X11
@@ -141,6 +154,16 @@ if(ENGINE_WINDOW_ENABLE_GLFW)
         engine_module_window
         PRIVATE ENGINE_WINDOW_BACKEND_GLFW=1
     )
+    if(UNIX
+       AND NOT
+           APPLE
+       AND ENGINE_GLFW_ENABLE_X11
+    )
+        target_compile_definitions(
+            engine_module_window
+            PRIVATE ENGINE_GLFW_NATIVE_X11=1
+        )
+    endif()
     target_link_libraries(
         engine_module_window
         PRIVATE glfw

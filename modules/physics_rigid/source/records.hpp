@@ -38,6 +38,15 @@ struct Body
     math::Vec3 inertiaLocal        = {}; // principal-axis inertia in the body frame
     math::Vec3 inverseInertiaLocal = {};
 
+    // Effective rolling radius for the rolling-resistance contact rows: the
+    // sphere radius, the capsule radius, or 0 for shapes that cannot roll
+    // (boxes, planes). Derived from the shape at creation.
+    double rollingRadius = 0.0;
+
+    // Continuous collision detection switch (mirrors BodyDescription; only
+    // dynamic bodies sweep).
+    bool continuousCollisionEnabled = false;
+
     // Mass source remembered for recomputation after kind changes: density
     // above zero wins over the explicit mass (mirrors BodyDescription).
     double densitySource      = 0.0;
@@ -77,13 +86,23 @@ struct Joint
     // offsets from this frame.
     math::Quaternion referenceRelativeRotation;
 
-    // Warm-start storage per constraint row.
+    // Warm-start storage per constraint row. Rows acting along different
+    // axes keep separate accumulators so warm starting never re-applies one
+    // row's impulse along another's axis.
     math::Vec3 ballSocketImpulse;       // three anchor rows
     double     antiSwingImpulse1 = 0.0; // hinge anti-swing rows
     double     antiSwingImpulse2 = 0.0;
-    double     limitImpulse      = 0.0; // hinge / ball-socket limit row
-    double     motorImpulse      = 0.0; // hinge motor row
-    double     distanceImpulse   = 0.0; // distance joint row
+    double     limitImpulse      = 0.0; // hinge limit row / ball-socket twist limit row
+    double     swingLimitImpulse = 0.0; // ball-socket cone (swing) limit row
+    double     motorImpulse      = 0.0; // hinge / prismatic motor row
+    double     distanceImpulse   = 0.0; // distance joint row (also the spring's accumulator)
+
+    // Prismatic translation limits and Fixed weld rows.
+    double sliderLimitImpulse         = 0.0;              // prismatic translation limit row
+    double sliderTranslationImpulse[2] = {0.0, 0.0};      // prismatic perpendicular anchor rows
+    double prismaticTwistImpulse      = 0.0;              // prismatic twist-lock row
+    double weldImpulses[3]            = {0.0, 0.0, 0.0};  // fixed joint angular rows
+    double sliderRestDistance         = 0.0;              // prismatic anchor separation along the axis at creation
 };
 
 // One world-space contact point carried between steps for warm starting.
@@ -159,6 +178,11 @@ struct SimulationSettings
     double linearSleepTolerance  = 0.08;
     double angularSleepTolerance = 0.14;
     double timeToSleep           = 0.6;
+
+    // Continuous collision detection: relative speed (meters per second)
+    // above which a CCD-enabled dynamic body is swept against non-dynamic
+    // geometry instead of relying on the speculative-contact margin alone.
+    double ccdVelocityThreshold = 1.5;
 
     double spatialHashCellSize = 2.0;
 

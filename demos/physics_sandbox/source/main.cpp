@@ -28,16 +28,25 @@
 #include <engine/application/frame_clock.hpp>
 #include <engine/application/frame_pacer.hpp>
 #include <engine/camera/capabilities.hpp>
+#include <engine/fur/capabilities.hpp>
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/physics_articulated/capabilities.hpp>
+#include <engine/physics_character/capabilities.hpp>
 #include <engine/physics_cloth/capabilities.hpp>
+#include <engine/physics_fields/capabilities.hpp>
+#include <engine/physics_foliage/capabilities.hpp>
+#include <engine/physics_fluid/capabilities.hpp>
+#include <engine/physics_particles/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/physics_rope/capabilities.hpp>
+#include <engine/physics_water/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
 
+#include "demo/sandbox_extended.hpp"
 #include "demo/sandbox_input.hpp"
 #include "demo/sandbox_options.hpp"
 #include "demo/sandbox_render.hpp"
@@ -62,6 +71,13 @@ using namespace engine;
 namespace physics_rigid       = engine::physics_rigid;
 namespace physics_articulated = engine::physics_articulated;
 namespace physics_cloth       = engine::physics_cloth;
+namespace physics_fields      = engine::physics_fields;
+namespace physics_rope        = engine::physics_rope;
+namespace physics_water       = engine::physics_water;
+namespace physics_fluid       = engine::physics_fluid;
+namespace physics_particles   = engine::physics_particles;
+namespace physics_foliage     = engine::physics_foliage;
+namespace physics_character   = engine::physics_character;
 namespace renderer            = engine::renderer;
 namespace window              = engine::window;
 namespace camera              = engine::camera;
@@ -126,17 +142,24 @@ int main(int argc, char **argv)
     std::vector<std::string> requiredCapabilities;
     if (options.selfTest)
     {
-        requiredCapabilities = {"physics_rigid", "physics_articulated", "physics_cloth"};
+        requiredCapabilities = {"physics_rigid", "physics_articulated", "physics_cloth", "physics_fields",
+            "physics_rope", "physics_water", "physics_fluid", "physics_particles", "physics_foliage",
+            "physics_character"};
     }
     else
     {
-        requiredCapabilities
-            = {"window", "renderer", "camera", "pbr", "physics_rigid", "physics_articulated", "physics_cloth"};
+        requiredCapabilities = {"window", "renderer", "camera", "pbr", "physics_rigid", "physics_articulated",
+            "physics_cloth", "physics_fields", "physics_rope", "physics_water", "physics_fluid",
+            "physics_particles", "physics_foliage", "physics_character", "fur"};
     }
     if (options.fixedHz > 0.0)
     {
         commandLine.configurationOverrides.push_back("physics_rigid.fixed_rate_hz=" + std::to_string(options.fixedHz));
         commandLine.configurationOverrides.push_back("physics_cloth.fixed_rate_hz=" + std::to_string(options.fixedHz));
+        commandLine.configurationOverrides.push_back("physics_rope.fixed_rate_hz=" + std::to_string(options.fixedHz));
+        commandLine.configurationOverrides.push_back("physics_fluid.fixed_rate_hz=" + std::to_string(options.fixedHz));
+        commandLine.configurationOverrides.push_back("physics_particles.fixed_rate_hz=" + std::to_string(options.fixedHz));
+        commandLine.configurationOverrides.push_back("physics_foliage.fixed_rate_hz=" + std::to_string(options.fixedHz));
     }
 
     engine::ApplicationHostOptions hostOptions = engine::makeApplicationHostOptions(commandLine, requiredCapabilities);
@@ -184,6 +207,50 @@ int main(int argc, char **argv)
             dependencies.cloth = nullptr;
         }
     }
+    {
+        dependencies.fields = context.tryAcquireCapability<physics_fields::FieldsCapability>();
+        if (dependencies.fields != nullptr && dependencies.fields->abi != physics_fields::physicsFieldsCapabilityAbi)
+        {
+            dependencies.fields = nullptr;
+        }
+        dependencies.rope = context.tryAcquireCapability<physics_rope::RopeCapability>();
+        if (dependencies.rope != nullptr && dependencies.rope->abi != physics_rope::physicsRopeCapabilityAbi)
+        {
+            dependencies.rope = nullptr;
+        }
+        dependencies.water = context.tryAcquireCapability<physics_water::WaterCapability>();
+        if (dependencies.water != nullptr && dependencies.water->abi != physics_water::physicsWaterCapabilityAbi)
+        {
+            dependencies.water = nullptr;
+        }
+        dependencies.fluid = context.tryAcquireCapability<physics_fluid::FluidCapability>();
+        if (dependencies.fluid != nullptr && dependencies.fluid->abi != physics_fluid::physicsFluidCapabilityAbi)
+        {
+            dependencies.fluid = nullptr;
+        }
+        dependencies.particles = context.tryAcquireCapability<physics_particles::ParticlesCapability>();
+        if (dependencies.particles != nullptr
+            && dependencies.particles->abi != physics_particles::physicsParticlesCapabilityAbi)
+        {
+            dependencies.particles = nullptr;
+        }
+        dependencies.foliage = context.tryAcquireCapability<physics_foliage::FoliageCapability>();
+        if (dependencies.foliage != nullptr && dependencies.foliage->abi != physics_foliage::physicsFoliageCapabilityAbi)
+        {
+            dependencies.foliage = nullptr;
+        }
+        dependencies.character = context.tryAcquireCapability<physics_character::CharacterCapability>();
+        if (dependencies.character != nullptr
+            && dependencies.character->abi != physics_character::physicsCharacterCapabilityAbi)
+        {
+            dependencies.character = nullptr;
+        }
+    }
+    const engine::fur::FurCapability *furCapability = context.tryAcquireCapability<engine::fur::FurCapability>();
+    if (furCapability != nullptr && furCapability->abi != engine::fur::furCapabilityAbi)
+    {
+        furCapability = nullptr;
+    }
     if (dependencies.rigid == nullptr)
     {
         std::cerr << "demo_physics_sandbox: the physics_rigid capability is unavailable or its ABI differs\n";
@@ -204,9 +271,13 @@ int main(int argc, char **argv)
         const demo::physics_sandbox::SelfTestResult test
             = demo::physics_sandbox::runSelfTest(dependencies, sceneConfig);
         std::cout << test.report;
-        std::cout << (test.pass ? "self-test: PASS\n" : "self-test: FAIL\n");
+        const demo::physics_sandbox::SelfTestResult extendedTest
+            = demo::physics_sandbox::runSelfTestExtended(dependencies, sceneConfig);
+        std::cout << extendedTest.report;
+        const bool allPass = test.pass && extendedTest.pass;
+        std::cout << (allPass ? "self-test: PASS\n" : "self-test: FAIL\n");
         host.stop();
-        return test.pass ? 0 : 1;
+        return allPass ? 0 : 1;
     }
 
     const std::int64_t maxFps = context.configurationIntegerInSection("engine", "max_fps").value_or(0);
@@ -331,6 +402,7 @@ int main(int argc, char **argv)
         return 1;
     }
     sandboxRenderer.syncScene(dependencies, scene, dependencies.cloth);
+    sandboxRenderer.prepareFur(renderCapability, rendererHandle, furCapability);
 
     // ---- warmup ------------------------------------------------------------------
     double simulatedSeconds = 0.0;
@@ -343,6 +415,8 @@ int main(int argc, char **argv)
             {
                 demo::physics_sandbox::updateScriptedTimeline(
                     dependencies, sceneConfig, scene, simulatedSeconds, fixedDelta);
+                demo::physics_sandbox::updateExtendedScriptedTimeline(
+                    dependencies, scene, simulatedSeconds, fixedDelta);
                 for (const physics_articulated::FigureHandle figure : scene.figures)
                 {
                     if (dependencies.articulation != nullptr)
@@ -351,6 +425,7 @@ int main(int argc, char **argv)
                     }
                 }
             }
+            demo::physics_sandbox::stepExtendedBeforeRigid(dependencies, scene, simulatedSeconds, fixedDelta);
             dependencies.rigid->step(dependencies.rigid->self, scene.world, fixedDelta);
             if (dependencies.cloth != nullptr)
             {
@@ -359,7 +434,9 @@ int main(int argc, char **argv)
                     dependencies.cloth->step(dependencies.cloth->self, cloth, fixedDelta);
                 }
             }
+            demo::physics_sandbox::stepExtendedAfterRigid(dependencies, scene, simulatedSeconds, fixedDelta);
             sandboxRenderer.recordFixedStep(dependencies, scene, dependencies.cloth);
+            sandboxRenderer.recordExtendedFixedStep(dependencies, scene, fixedDelta);
             simulatedSeconds += fixedDelta;
         }
         std::cout << "demo_physics_sandbox: warmup simulated " << simulatedSeconds << " s (" << warmupSteps
@@ -655,6 +732,8 @@ int main(int argc, char **argv)
                 {
                     demo::physics_sandbox::updateScriptedTimeline(
                         dependencies, sceneConfig, scene, simulatedSeconds, fixedDelta);
+                    demo::physics_sandbox::updateExtendedScriptedTimeline(
+                        dependencies, scene, simulatedSeconds, fixedDelta);
                 }
                 // Grab spring for rigid bodies: forces persist exactly one
                 // step, so re-apply each fixed update toward the current
@@ -726,6 +805,7 @@ int main(int argc, char **argv)
                         dependencies.articulation->updateDrives(dependencies.articulation->self, figure, fixedDelta);
                     }
                 }
+                demo::physics_sandbox::stepExtendedBeforeRigid(dependencies, scene, simulatedSeconds, fixedDelta);
                 dependencies.rigid->step(dependencies.rigid->self, scene.world, fixedDelta);
                 if (dependencies.cloth != nullptr)
                 {
@@ -734,7 +814,9 @@ int main(int argc, char **argv)
                         dependencies.cloth->step(dependencies.cloth->self, cloth, fixedDelta);
                     }
                 }
+                demo::physics_sandbox::stepExtendedAfterRigid(dependencies, scene, simulatedSeconds, fixedDelta);
                 sandboxRenderer.recordFixedStep(dependencies, scene, dependencies.cloth);
+                sandboxRenderer.recordExtendedFixedStep(dependencies, scene, fixedDelta);
                 simulatedSeconds += fixedDelta;
                 ++stepsExecuted;
             }
@@ -771,10 +853,42 @@ int main(int argc, char **argv)
         std::memcpy(frameParameters.clearColor, clearColor, sizeof(frameParameters.clearColor));
 
         sandboxRenderer.buildDrawCommands(scene, static_cast<float>(timing.interpolationAlpha));
+        sandboxRenderer.buildExtendedDrawCommands(dependencies, scene, static_cast<float>(timing.interpolationAlpha));
+
+        // Fur wind bridge: the wind field sample at the fur ball's position
+        // drives the shell-fur sway (strength modulated by a slow gust so
+        // captures show the strands moving between frames).
+        if (scene.extended.furBall && dependencies.fields != nullptr
+            && scene.extended.windField != physics_fields::invalidWind)
+        {
+            physics_rigid::BodyState furBallState{};
+            if (dependencies.rigid->copyBodyState(
+                    dependencies.rigid->self, scene.world, scene.extended.furBallBody, &furBallState))
+            {
+                const double samplePoint[3] = {furBallState.transform.position.x,
+                    furBallState.transform.position.y,
+                    furBallState.transform.position.z};
+                double windVelocity[3] = {0.0, 0.0, 0.0};
+                if (dependencies.fields->sampleWindVelocity(
+                        dependencies.fields->self, scene.extended.windField, samplePoint, simulatedSeconds, windVelocity))
+                {
+                    const double speed = std::sqrt(windVelocity[0] * windVelocity[0]
+                                                   + windVelocity[1] * windVelocity[1]
+                                                   + windVelocity[2] * windVelocity[2]);
+                    const float windDirection[3] = {static_cast<float>(windVelocity[0]),
+                        static_cast<float>(windVelocity[1]),
+                        static_cast<float>(windVelocity[2])};
+                    const float sway = static_cast<float>(0.75 + 0.25 * std::sin(simulatedSeconds * 6.283185307179586 * 0.7));
+                    renderCapability.setFurWind(renderCapability.self, rendererHandle, windDirection,
+                        static_cast<float>(speed) * 0.010f * sway);
+                }
+            }
+        }
         frameTiming.markUploadDone();
 
         renderCapability.beginFrame(renderCapability.self, rendererHandle, &frameParameters);
         sandboxRenderer.submit(renderCapability, rendererHandle);
+        sandboxRenderer.submitExtended(renderCapability, rendererHandle, dependencies, scene);
         renderCapability.endFrame(renderCapability.self, rendererHandle);
         frameTiming.markDrawDone();
 

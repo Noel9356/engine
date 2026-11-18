@@ -1,5 +1,6 @@
 config_keys           = [
     "physics_rigid.angular_sleep_tolerance",
+    "physics_rigid.ccd_velocity_threshold",
     "physics_rigid.joint_baumgarte_factor",
     "physics_rigid.position_correction_factor",
     "physics_rigid.contact_margin",

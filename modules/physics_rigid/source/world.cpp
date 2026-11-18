@@ -190,6 +190,7 @@ bool validateBodyDescription(const World &world, const SimulationSettings &setti
     body.material             = description.material;
     body.material.friction    = std::clamp(body.material.friction, 0.0, 4.0);
     body.material.restitution = std::clamp(body.material.restitution, 0.0, 1.0);
+    body.material.rollingResistance = std::clamp(body.material.rollingResistance, 0.0, 1.0);
     if (!std::isfinite(description.linearDamping) || description.linearDamping < 0.0
         || !std::isfinite(description.angularDamping) || description.angularDamping < 0.0)
     {
@@ -199,6 +200,7 @@ bool validateBodyDescription(const World &world, const SimulationSettings &setti
     body.angularDamping  = description.angularDamping;
     body.sleepingEnabled = description.sleepingEnabled;
     body.gravityEnabled  = description.gravityEnabled;
+    body.continuousCollisionEnabled = description.continuousCollisionEnabled;
     body.categoryBits    = description.categoryBits != 0u ? description.categoryBits : 1u;
     body.maskBits        = description.maskBits;
     body.userTag         = description.userTag;
@@ -238,6 +240,12 @@ bool validateBodyDescription(const World &world, const SimulationSettings &setti
         body.explicitMassSource = description.density > 0.0 ? 0.0 : description.mass;
     }
     body.awake = body.kind != BodyKind::Static;
+
+    // Rolling resistance acts on the curved shapes only; the effective radius
+    // is the contact distance from the rolling axis.
+    body.rollingRadius = body.shape.kind == ShapeKind::Sphere      ? body.shape.sphereRadius
+                         : body.shape.kind == ShapeKind::Capsule ? body.shape.capsuleRadius
+                                                                 : 0.0;
 
     refreshBodyAabb(body);
     outBody = body;
@@ -481,6 +489,28 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
             point.persisted->tangent2             = point.tangent2;
         }
     }
+
+    // Continuous collision detection: capture the pre-integration transforms
+    // of the CCD-enabled dynamic bodies so the post-integration sweep can
+    // clamp them at the first contact with non-dynamic geometry.
+    std::vector<math::Vec3> ccdPreviousPositions;
+    std::size_t             ccdBodyCount = 0;
+    for (const Body &body : world.bodies)
+    {
+        if (body.kind == BodyKind::Dynamic && body.awake && body.continuousCollisionEnabled)
+        {
+            ++ccdBodyCount;
+        }
+    }
+    ccdPreviousPositions.reserve(ccdBodyCount);
+    for (const Body &body : world.bodies)
+    {
+        if (body.kind == BodyKind::Dynamic && body.awake && body.continuousCollisionEnabled)
+        {
+            ccdPreviousPositions.push_back(body.transform.position);
+        }
+    }
+
     for (Body &body : world.bodies)
     {
         if (body.kind == BodyKind::Static)
@@ -499,6 +529,120 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
         }
         body.forceAccumulator  = math::Vec3{};
         body.torqueAccumulator = math::Vec3{};
+    }
+
+    // CCD sweep for the fast movers: the body's bounding-sphere proxy is cast
+    // from its pre-integration position to the integrated one against every
+    // static/kinematic solid body and plane; a hit clamps the position at the
+    // contact (minus the speculative margin) and cancels the approach speed
+    // with the body's restitution, so nothing tunnels through thin geometry.
+    {
+        std::size_t ccdIndex = 0;
+        for (Body &body : world.bodies)
+        {
+            if (body.kind != BodyKind::Dynamic || !body.awake || !body.continuousCollisionEnabled)
+            {
+                continue;
+            }
+            const math::Vec3 previousPosition = ccdPreviousPositions[ccdIndex++];
+            const math::Vec3 delta            = body.transform.position - previousPosition;
+            const double     travelled        = math::length(delta);
+            const double     proxyRadius      = computeShapeBoundingRadius(body.shape);
+            if (travelled <= settings.contactMargin || proxyRadius <= 0.0
+                || travelled < settings.ccdVelocityThreshold * fixedDeltaSeconds)
+            {
+                continue;
+            }
+            const math::Vec3 direction = delta * (1.0 / travelled);
+            math::Vec3       sweptMinimum{previousPosition.x - proxyRadius,
+                previousPosition.y - proxyRadius,
+                previousPosition.z - proxyRadius};
+            math::Vec3       sweptMaximum{previousPosition.x + proxyRadius,
+                previousPosition.y + proxyRadius,
+                previousPosition.z + proxyRadius};
+            for (std::uint32_t axis = 0; axis < 3; ++axis)
+            {
+                const double component = (&delta.x)[axis];
+                if (component > 0.0)
+                {
+                    (&sweptMaximum.x)[axis] += component;
+                }
+                else
+                {
+                    (&sweptMinimum.x)[axis] += component;
+                }
+            }
+
+            double     hitDistance = travelled;
+            math::Vec3 hitNormal;
+            bool       hit         = false;
+            for (const Body &obstacle : world.bodies)
+            {
+                if (&obstacle == &body || obstacle.kind == BodyKind::Dynamic || obstacle.shape.kind == ShapeKind::Plane)
+                {
+                    continue;
+                }
+                if (obstacle.aabbMinimum.x > sweptMaximum.x || obstacle.aabbMaximum.x < sweptMinimum.x
+                    || obstacle.aabbMinimum.y > sweptMaximum.y || obstacle.aabbMaximum.y < sweptMinimum.y
+                    || obstacle.aabbMinimum.z > sweptMaximum.z || obstacle.aabbMaximum.z < sweptMinimum.z)
+                {
+                    continue;
+                }
+                double     distance = 0.0;
+                math::Vec3 normal;
+                if (sweepSphereSolid(previousPosition,
+                        proxyRadius,
+                        delta,
+                        obstacle.shape,
+                        obstacle.transform,
+                        distance,
+                        normal)
+                    && distance < hitDistance)
+                {
+                    hitDistance = distance;
+                    hitNormal   = normal;
+                    hit         = true;
+                }
+            }
+            for (const BodyHandle planeHandle : world.planeBodyHandles)
+            {
+                const auto planeIterator = world.bodyIndexByHandle.find(planeHandle);
+                if (planeIterator == world.bodyIndexByHandle.end())
+                {
+                    continue;
+                }
+                const Body &planeBody = world.bodies[planeIterator->second];
+                double     distance   = 0.0;
+                math::Vec3 normal;
+                if (sweepSpherePlane(previousPosition,
+                        proxyRadius,
+                        delta,
+                        planeBody.shape.planeNormal,
+                        planeBody.shape.planeOffset,
+                        distance,
+                        normal)
+                    && distance < hitDistance)
+                {
+                    hitDistance = distance;
+                    hitNormal   = normal;
+                    hit         = true;
+                }
+            }
+            if (hit)
+            {
+                const double clampedTravel = std::max(hitDistance - settings.contactMargin, 0.0);
+                body.transform.position    = previousPosition + direction * clampedTravel;
+                const double approachSpeed = math::dot(body.linearVelocity, hitNormal);
+                if (approachSpeed < 0.0)
+                {
+                    const double restitutionSpeed = -approachSpeed > settings.restitutionVelocityThreshold
+                                                      ? -body.material.restitution * approachSpeed
+                                                      : 0.0;
+                    body.linearVelocity += hitNormal * (restitutionSpeed - approachSpeed);
+                }
+                refreshBodyAabb(body);
+            }
+        }
     }
 
     // Non-finite guard: restore the pre-step snapshot on divergence.
@@ -733,8 +877,8 @@ bool destroyJointFromWorld(World &world, JointHandle handle)
     return true;
 }
 
-bool rayCastWorld(
-    const World &world, const math::Vec3 &origin, const math::Vec3 &direction, double maximumDistance, RayHit &outHit)
+bool rayCastWorldIgnoring(const World &world, const math::Vec3 &origin, const math::Vec3 &direction,
+    double maximumDistance, const BodyHandle *ignoredBodies, std::uint32_t ignoredBodyCount, RayHit &outHit)
 {
     const double directionLength = math::length(direction);
     if (directionLength <= kEpsilon || maximumDistance <= 0.0)
@@ -748,6 +892,19 @@ bool rayCastWorld(
     RayHit           bestHit;
     for (const Body &body : world.bodies)
     {
+        bool skipBody = false;
+        for (std::uint32_t ignoredIndex = 0; ignoredIndex < ignoredBodyCount; ++ignoredIndex)
+        {
+            if (body.handle == ignoredBodies[ignoredIndex])
+            {
+                skipBody = true;
+                break;
+            }
+        }
+        if (skipBody)
+        {
+            continue;
+        }
         if (body.shape.kind == ShapeKind::Plane)
         {
             double distance = 0.0;
@@ -831,6 +988,65 @@ bool rayCastWorld(
         return false;
     }
     outHit = bestHit;
+    return true;
+}
+
+// Unfiltered closest hit: the plain ray cast against every body.
+bool rayCastWorld(
+    const World &world, const math::Vec3 &origin, const math::Vec3 &direction, double maximumDistance, RayHit &outHit)
+{
+    return rayCastWorldIgnoring(world, origin, direction, maximumDistance, nullptr, 0, outHit);
+}
+
+bool sphereCastWorld(const World &world, const math::Vec3 &start, const math::Vec3 &delta, double radius, SweepHit &outHit)
+{
+    if (!(radius > 0.0) || math::lengthSquared(delta) <= kEpsilon)
+    {
+        return false;
+    }
+    const double length = math::length(delta);
+    math::Vec3   direction = delta * (1.0 / length);
+    bool         hit       = false;
+    double       bestDistance = length;
+    math::Vec3   bestNormal;
+    BodyHandle   bestBody  = invalidBody;
+    for (const Body &body : world.bodies)
+    {
+        if (body.shape.kind == ShapeKind::Plane)
+        {
+            double     distance = 0.0;
+            math::Vec3 normal;
+            if (sweepSpherePlane(start, radius, delta, body.shape.planeNormal, body.shape.planeOffset, distance, normal)
+                && distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestNormal   = normal;
+                bestBody     = body.handle;
+                hit          = true;
+            }
+            continue;
+        }
+        double     distance = 0.0;
+        math::Vec3 normal;
+        if (sweepSphereSolid(start, radius, delta, body.shape, body.transform, distance, normal)
+            && distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestNormal   = normal;
+            bestBody     = body.handle;
+            hit          = true;
+        }
+    }
+    if (!hit)
+    {
+        return false;
+    }
+    SweepHit result;
+    result.body     = bestBody;
+    result.distance = bestDistance;
+    result.point    = start + direction * bestDistance;
+    result.normal   = bestNormal;
+    outHit          = result;
     return true;
 }
 

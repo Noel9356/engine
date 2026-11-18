@@ -4,8 +4,11 @@
 // from the physics capabilities' state copies.
 #pragma once
 
+#include <engine/fur/capabilities.hpp>
 #include <engine/physics_articulated/capabilities.hpp>
 #include <engine/physics_cloth/capabilities.hpp>
+#include <engine/physics_particles/capabilities.hpp>
+#include <engine/physics_foliage/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
 #include <engine/renderer/capabilities.hpp>
@@ -49,6 +52,12 @@ public:
 
     void destroyMeshes(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer);
 
+    // Generates the fur strand texture through the fur capability and
+    // uploads it; the fur ball's drawFur layer stack samples it. Safe to
+    // call when the fur capability is absent (the fur draw then skips).
+    void prepareFur(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer,
+        const engine::fur::FurCapability *furCapability);
+
     // Rebuilds the tracked-state bookkeeping after a scene (re)build.
     void syncScene(const SceneDependencies &dependencies, const SceneHandles &handles,
         const engine::physics_cloth::ClothCapability *clothCapability);
@@ -61,8 +70,24 @@ public:
     // Assembles the draw commands for the interpolated pose at alpha in [0,1).
     void buildDrawCommands(const SceneHandles &handles, float alpha);
 
+    // Extended-scene capture: rope nodes, fluid particles, particle states,
+    // foliage bends, water tiles, foot targets, and jiggle bones. Call after
+    // the fixed-update pass (no interpolation: the extended objects are
+    // drawn at their latest state).
+    void recordExtendedFixedStep(const SceneDependencies &dependencies, const SceneHandles &handles,
+        double fixedDeltaSeconds);
+
+    // Assembles the extended objects' instance matrices; call after
+    // buildDrawCommands and before submit.
+    void buildExtendedDrawCommands(const SceneDependencies &dependencies, const SceneHandles &handles, float alpha);
+
     // Submits the assembled commands between beginFrame/endFrame.
     void submit(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer);
+
+    // Submits the extended objects' instanced draws (and the fur layer
+    // stack) after submit().
+    void submitExtended(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer,
+        const SceneDependencies &dependencies, const SceneHandles &handles);
 
     std::uint32_t clothNodeInstanceCount() const
     {
@@ -91,6 +116,29 @@ private:
 
     std::vector<ClothRenderBuffers> clothBuffers_;
 
+    // Extended-scene capture and instance buffers.
+    struct RopeRenderBuffers
+    {
+        std::vector<double> positions;
+        std::uint32_t       nodeCount = 0;
+        double              nodeRadius = 0.07;
+    };
+    struct ParticleRenderBuffers
+    {
+        std::vector<engine::physics_particles::ParticleState> states;
+    };
+    struct FoliageRenderBuffers
+    {
+        std::vector<engine::physics_foliage::FoliageBend> bends;
+    };
+    std::vector<RopeRenderBuffers>     ropeBuffers_;
+    std::vector<double>                fluidPositions_;
+    std::array<ParticleRenderBuffers, 4> particleBuffers_;
+    FoliageRenderBuffers               foliageBends_;
+    bool                               foliageValid_ = false;
+    double                             waterClock_   = 0.0;
+    float                              submitAlpha_  = 0.0f;
+
     using Matrix16 = std::array<float, 16>;
 
     std::vector<Matrix16>                            modelMatrices_;
@@ -98,6 +146,20 @@ private:
     std::vector<engine::renderer::RenderDrawCommand> drawCommands_;
     std::vector<Matrix16>                            clothNodeMatrices_;
     std::vector<Matrix16>                            clothLinkMatrices_;
+
+    std::vector<Matrix16>                    waterTileMatrices_;
+    std::vector<Matrix16>                    ropeNodeMatrices_;
+    std::vector<Matrix16>                    ropeLinkMatrices_;
+    std::vector<Matrix16>                    fluidMatrices_;
+    std::vector<Matrix16>                    particleMatrices_[4];
+    std::vector<Matrix16>                    foliageMatrices_;
+    std::vector<Matrix16>                    footMatrices_;
+    std::vector<Matrix16>                    jiggleMatrices_;
+
+    engine::renderer::TextureHandle furTextureHandle_ = engine::renderer::invalidTexture;
+    bool                            furTextureReady_  = false;
+    engine::physics_rigid::BodyHandle furBallBodyHandle_ = engine::physics_rigid::invalidBody;
+    bool                            furBallActive_     = false;
 };
 
 } // namespace demo::physics_sandbox

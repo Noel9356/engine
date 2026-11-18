@@ -49,6 +49,10 @@ struct ContactConstraint
         double                 tangentMass1            = 0.0;
         double                 tangentMass2            = 0.0;
         double                 friction                = 0.0;
+        double                 rollingResistance       = 0.0; // torque budget coefficient (0 = off)
+        double                 rollingRadius           = 0.0; // effective contact radius of the rolling body
+        double                 rollingImpulse1         = 0.0; // per-step rolling-resistance accumulators
+        double                 rollingImpulse2         = 0.0;
         PersistedContactPoint *persisted               = nullptr; // impulse + tangent storage in the world
     };
 
@@ -77,6 +81,14 @@ struct JointConstraint
     double     currentLength = 0.0;
     double     distanceMass  = 0.0;
 
+    // Distance-joint spring (soft constraint, Box2D-style bias/gamma); zero
+    // gamma selects the hard row. The soft solve's effective mass folds the
+    // gamma term in (softMass = 1 / (1/m + gamma)), which is what keeps the
+    // implicit-damping scheme stable.
+    double springGamma    = 0.0;
+    double springBias     = 0.0;
+    double springSoftMass = 0.0;
+
     // Ball-socket / hinge anchor rows (orthonormal world basis).
     math::Vec3 anchorBasis[3];
     double     anchorMass[3] = {0.0, 0.0, 0.0};
@@ -90,6 +102,21 @@ struct JointConstraint
     math::Vec3 swingAxisWorld; // unit axis of the current swing tilt
     double     limitMass = 0.0;
     double     motorMass = 0.0;
+
+    // Prismatic: translation rows act on the two axes perpendicular to the
+    // slider axis (anchorBasis[0]/[1] with anchorBasis[2] = slider axis);
+    // swing is locked by anti-swing rows and twist by an extra row about the
+    // slider axis. Translation limits and the linear motor act along the axis.
+    math::Vec3 sliderAxisWorld;
+    double     sliderDisplacement = 0.0; // anchor separation along the axis, relative to creation
+    double     sliderMass         = 0.0; // translation limit row mass along the axis
+    double     twistMass          = 0.0; // twist-lock row mass about the axis
+
+    // Fixed weld: three angular rows on an orthonormal basis with the
+    // relative-frame error measured per row (world frame).
+    math::Vec3 weldBasis[3];
+    double     weldMass[3] = {0.0, 0.0, 0.0};
+    math::Vec3 weldError;
 };
 
 // World-frame inverse inertia tensor R * diag(1/I) * R^T; the zero matrix

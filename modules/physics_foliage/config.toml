@@ -1,0 +1,8 @@
+[physics_foliage]
+ambient_wind_direction     = [1.0, 0.0]
+ambient_wind_speed         = 0.0
+fixed_rate_hz              = 60.0
+maximum_fields             = 64
+maximum_instances          = 2000000
+maximum_instances_per_field = 500000
+maximum_steps_per_simulate = 8

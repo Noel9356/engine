@@ -1,0 +1,9 @@
+config_keys           = [
+    "physics_character.maximum_characters",
+    "physics_character.maximum_foot_planters",
+    "physics_character.maximum_jiggle_chains",
+]
+name                  = "physics_character"
+provides              = ["physics_character"]
+requires              = ["physics_rigid", "physics_articulated"]
+version               = "0.1.0"

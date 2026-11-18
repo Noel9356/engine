@@ -1,0 +1,96 @@
+# physics_character module
+
+physics_character provides character physics assembled from the physics_rigid and physics_articulated capabilities: a humanoid ragdoll template builder, active-ragdoll control (per-joint pose targets driven through direct torque PDs, a drive-strength blend, and an upright assist torque), jiggle chains for secondary motion, and a procedural two-foot planter with ground ray casts and a two-bone IK solve. The module owns no simulation state beyond control records; all bodies live in the caller's rigid world and the figure in the articulated module.
+
+## Capability
+
+The module provides the `physics_character` capability (ABI version constant `physicsCharacterCapabilityAbi = 2`, see `include/engine/physics_character/capabilities.hpp`) and requires the `physics_rigid` and `physics_articulated` capabilities; `construct()` acquires both with `tryAcquireCapability` and keeps them only when their `abi` fields match the required constants — `physicsRigidCapabilityAbi = 3` and `physicsArticulatedCapabilityAbi = 2` — so a mismatched pair leaves the creators reporting failure instead of calling across a stale table. Character, jiggle-chain, and foot-planter handles are `std::uint32_t` (`CharacterHandle`, `JiggleChainHandle`, `FootPlanterHandle`), start at 1, are never reused, and `0` (`invalidCharacter`, `invalidJiggleChain`, `invalidFootPlanter`) means "none". Positions and lengths are world-space meters, angles are radians, torques are newton-meters, velocities are meters per second, and quaternions are packed `x, y, z, w`.
+
+### Per-update contract
+
+The per-update entry points — `updateCharacter`, `updateFootPlanter`, and `updateJiggleChain` — accept fixed deltas in (0, 0.1] and are called once per fixed step by the consumer, typically `updateCharacter` before stepping the rigid world (its torques land in the next solve) and the planter and chain after the step, from the freshly copied root transform and velocity. The module steps nothing on its own; the rigid world's stepping drives everything.
+
+| Group | Functions | Purpose |
+| --- | --- | --- |
+| Ragdoll construction | `createHumanoidRagdoll(self, world, parameters, outError)` | Builds the humanoid template figure in the rigid world through the articulated capability; returns a `RagdollInfo` with the figure handle and the part count. |
+| Active ragdoll | `createCharacter(self, description, outError)`, `destroyCharacter(self, character)` | Wraps a figure — the humanoid template or any consumer-built figure — in a control record with mode, drive strength, upright assist, and per-link joint targets. |
+| Pose control | `setCharacterMode(self, character, mode)`, `setCharacterDriveStrength(self, character, strength)`, `setCharacterJointTarget(self, character, linkIndex, targetAngleRadians)`, `setCharacterJointGains(self, character, linkIndex, stiffness, damping, maximumTorque)` | The mode switch (Kinematic/Blended/Dynamic), the drive-strength blend in [0, 1], and the per-joint pose target and PD gains (the target angle is measured against the assembly frame; `linkIndex` refers to the child link, and the root link rejects targets). |
+| Control pass | `updateCharacter(self, character, fixedDeltaSeconds)` | Applies the pose-target torque PDs to the rigid bodies as equal-and-opposite pairs and the upright assist torque to the torso body (Kinematic and Blended modes only). |
+| Secondary motion | `createJiggleChain(self, description, outError)`, `destroyJiggleChain(self, chain)`, `updateJiggleChain(self, chain, root, rootVelocity, fixedDeltaSeconds)`, `copyChainBoneRotations(self, chain, outRotations, capacity, outRequired)` | Spring-damper bone chains for hair, tails, pouches, and antennas; `copyChainBoneRotations` writes per-bone world rotations packed `x, y, z, w` in chain order. |
+| Foot placement | `createFootPlanter(self, world, description, outError)`, `destroyFootPlanter(self, planter)`, `updateFootPlanter(self, planter, root, rootVelocity, fixedDeltaSeconds)`, `copyFootStates(self, planter, outStates, capacity, outRequired)` | Two-foot procedural placement against the rigid world with plant/replant stride logic and a two-bone IK solve; `copyFootStates` writes exactly two `FootState` entries, left then right. |
+| Statistics | `characterStatistics(self, outStatistics)` | Live character, jiggle-chain, and foot-planter counts. |
+
+**Error convention:** the creators fill the `CharacterError` out-parameter: `InvalidDescription` for null pointers, non-finite values, or non-positive scales, lengths, and masses (and when a required capability is missing), `InvalidHandle` for an unknown figure or a torso link without a rigid body, `CapacityExceeded` beyond the configured character, chain, or planter budgets (or when the articulated module rejects a figure), and `Unsupported` as the enum value documented for requests not applicable to a joint or link — such as a pose target on the root link, which `setCharacterJointTarget` reports through its `false` return. The boolean setters and per-update calls report failure through their `false` return: unknown handles, invalid gains or strengths, non-finite root transforms or velocities, or deltas outside (0, 0.1].
+
+## Simulation model
+
+**Humanoid ragdoll template.** `createHumanoidRagdoll` builds an eleven-link figure in fixed order — pelvis (root), torso, head, upper/left arm, lower/left arm, upper/right arm, lower/right arm, upper/left leg, lower/left leg, upper/right leg, lower/right leg — with box pelvis and torso, a sphere head, and capsule limbs. The waist and neck are limited ball-sockets (cone/twist half-angles 0.4/0.4 and 0.6/0.6 radians), the shoulders and hips are ball-sockets with wide cones (1.2/0.5 and 1.1/0.5 radians), and the elbows and knees are limited hinges about the template's X axis (elbows −2.0..0.1 radians, knees −2.2..0.05). Each part carries a proportional mass fraction — pelvis 0.14, torso 0.28, head 0.08, upper arm 0.03, lower arm 0.02, upper leg 0.10, lower leg 0.06 — and `totalMass` is distributed by these fractions relative to their sum, so the parameter behaves as a total mass even though the fractions do not add up to one; the defaults (a pelvis one meter up, 75 kg, 0.6 friction, sleeping enabled) describe a 1.8-meter human at scale 1.0. `scale` multiplies every half-extent, radius, offset, and joint anchor, `friction` goes into every part's material, self-collision is disabled, and `rootAnchored = true` builds the figure with a static root — an anchored mannequin or training dummy whose limbs the drives pose while the root holds its placement, in contrast to the fully dynamic ragdoll built when it is false. `sleepingEnabled` is forwarded to the figure.
+
+**Active-ragdoll control.** A `CharacterDescription` binds the world, the figure, the torso link index, and the upright torque budget; the record starts in `Blended` mode with full drive strength. `CharacterMode` sets the semantics: `Kinematic` tracks the pose targets at full strength; `Blended` scales every drive by the drive strength, so a fall that drains the strength destabilizes into a ragdoll; `Dynamic` disables the drives and the upright assist entirely (a free ragdoll). `updateCharacter` runs the control pass when the mode is not `Dynamic` and the strength is non-zero: for every enabled joint target it fetches the joint reference (parent and child bodies, joint axis, assembly-frame relative rotation, joint kind) plus both body states, composes the target rotation as the assembly frame rotated by `targetAngleRadians` about the joint axis, and applies a direct torque PD — hinges get the twist error projected onto the axis, ball-sockets get the full three-axis rotation-vector error — as an equal-and-opposite torque pair on the child and parent bodies, like a muscle across the joint. Gains and the torque clamp are scaled by the drive strength, and the gains are additionally bounded by the child limb's inertia about the joint axis (damping capped at `1.6 × I / dt`, stiffness at `damping² / (4 I)`), so heavy limbs keep the caller's gains while light limbs get them scaled down and the discrete torque PD stays stable at any gain the caller picks. The upright assist then applies a torque that rotates the torso's up vector toward the world up — self-limiting through the tilt sine carried in the cross-product magnitude, scaled by `uprightTorque × driveStrength` — on the torso link's rigid body.
+
+**Jiggle chains.** A jiggle chain is a parent-relative bone stack: each bone hangs from the previous bone's frame at its rest offset and carries a 3D angular offset (a rotation vector in the parent bone frame) integrated by a spring-damper toward rest. The excitation comes from the root's acceleration — derived by finite-differencing the `rootVelocity` passed to each `updateJiggleChain` call — and from gravity scaled by `gravityInfluence`: the virtual force at the bone tip produces a torque about the bone origin, normalized by the lever-arm squared, that the spring fights. The angular offset is clamped to `maximumAngleRadians`, with the angular velocity halved when the clamp trips, and `copyChainBoneRotations` publishes each bone's world rotation (parent frame composed with the spring offset) packed `x, y, z, w` in chain order.
+
+**Procedural foot placement.** The planter owns two feet (left then right). Per update it computes each foot's desired point as the root position plus the rotated foot offset plus velocity times `leadTime`, probes the ground by casting straight down from `rayCastUp` above the desired point over a ray of length `rayCastUp × 2` through the rigid module — using `rayCastIgnoring` with the planter's ignored-bodies list when one is configured (typically the character's own link bodies, so a cast through a leg reaches the ground instead of the limb) and plain `rayCast` otherwise — and plants the foot at the hit point when it is not planted. A planted foot replants when the desired point strides more than `strideThreshold` away horizontally, when the ground rises more than `maxStepHeight` above the planted point, or when the desired point falls more than `strideThreshold` below it (the ground disappeared, a ledge). A two-bone IK solve from the hip anchor (placed by the root transform) to the planted foot yields the knee bend angle (law of cosines, clamped non-negative), the knee direction (the root's forward vector), and the hip drop needed when the foot is beyond the leg's reach; `FootState` carries `planted`, `footPosition` (raised by `footRadius`), `footNormal`, `kneeDirection`, `kneeBendRadians`, and `hipDropMeters`.
+
+## Provided / required / optional capabilities
+
+From `module.toml` and the entry table at the bottom of `source/physics_character.cpp` (they agree):
+
+- **Provided:** `physics_character`.
+- **Required:** `physics_rigid`, `physics_articulated` — both acquired in `construct()` and verified against `physicsRigidCapabilityAbi = 3` and `physicsArticulatedCapabilityAbi = 2`; the creators report failure while either capability is missing.
+- **Optional:** none.
+- **Declared permissions:** none.
+
+## Architecture
+
+| File | Purpose |
+| --- | --- |
+| `module.toml` | Module descriptor: name, version, provided capability, required capabilities, declared `config_keys`. |
+| `config.toml` | Default values for the `[physics_character]` configuration section (see `configuration.md`). |
+| `CMakeLists.txt` | Builds `engine_module_physics_character` (a `.so` under `runtime/modules/physics_character/`) and copies `module.toml` next to it. |
+| `include/engine/physics_character/capabilities.hpp` | Public capability types: ABI constant, handles, ragdoll parameters, character/jiggle/planter descriptions, foot state, statistics, capability struct. |
+| `source/physics_character.cpp` | Module class (lifecycle, configuration, humanoid template construction, active-ragdoll control pass, jiggle integration, foot placement, capability binding), internal records, and entry table. |
+| `include/engine/physics_rigid/capabilities.hpp` | The required rigid capability's public surface: body states and mass properties, torque application, and the ray casts the planter probes with. |
+| `include/engine/physics_articulated/capabilities.hpp` | The required articulated capability's public surface: figure creation, joint references, and link body handles. |
+
+## How it works
+
+**Creation.** `createHumanoidRagdoll` validates the parameters (finite position, rotation, scale, mass, and friction; positive scale and mass), fills an articulated `FigureDescription` from the template table scaled by the parameters, and hands it to the articulated module; a rejected figure surfaces as `CapacityExceeded`. `createCharacter` validates the figure through `figureInfo`, bounds the torso link index, resolves the torso link's rigid body through `linkBodyHandle`, and sizes the per-link joint-target array from the figure's link count — any figure works, not only the humanoid template; targets start disabled with the record's default gains (stiffness 120, damping 14, maximumTorque 60). `createJiggleChain` validates the bone count (1–256), the spring ranges, and every rest offset (finite, non-zero length) and copies them; `createFootPlanter` validates the leg lengths, foot radius, stride and step ranges, and the ignored-bodies list, which the record owns as a copy.
+
+**Per-update control path.** `updateCharacter` runs the pose PDs and the upright assist described above and returns `false` for unknown characters, invalid worlds, or deltas outside (0, 0.1]; `updateFootPlanter` and `updateJiggleChain` validate the root transform and velocity and the delta the same way. The planter's ray casts and every torque application go through the rigid capability on the world recorded at creation, and `characterStatistics` reports the live counts of all three record kinds.
+
+**Interaction with the required modules.** The module owns no bodies and no solver state: the ragdoll's links are rigid bodies created by the articulated module inside the caller's world, pose and upright torques are applied with the rigid module's `applyTorque`, and ground probes use its ray casts. Destroying a character, chain, or planter removes only the control record — figures, bodies, and worlds stay owned by the modules that created them.
+
+## Threading and lifetime
+
+Calls are main-thread only and the module takes no internal locks; serialize them from one thread and call the per-update passes within one fixed update, `updateCharacter` before the rigid step and the planter and chain after it so they read freshly integrated body states (the physics sandbox demo drives them in exactly this order). Records live in per-kind vectors with handle-to-index maps, and every destroy is a swap-with-back removal that refreshes the statistics counters. Handles are monotonic and never reused, and `stop()` clears all three record sets, resets the handle counters, and zeroes the statistics.
+
+A consumer builds an anchored mannequin, drives its pose, and steps it per fixed update:
+
+```cpp
+engine::physics_character::CharacterCapability &characterCapability =
+    context.acquireCapability<engine::physics_character::CharacterCapability>();
+if (characterCapability.abi != engine::physics_character::physicsCharacterCapabilityAbi)
+{
+    return;
+}
+engine::physics_character::RagdollParameters parameters{};
+parameters.position[1]  = 0.95;
+parameters.totalMass    = 72.0;
+parameters.rootAnchored = true; // anchored mannequin: the drives pose the limbs
+const engine::physics_character::RagdollInfo ragdoll = characterCapability.createHumanoidRagdoll(
+    characterCapability.self, world, &parameters, nullptr);
+
+engine::physics_character::CharacterDescription characterDescription{};
+characterDescription.figure        = ragdoll.figure;
+characterDescription.world         = world;
+characterDescription.uprightTorque = 260.0;
+const engine::physics_character::CharacterHandle character = characterCapability.createCharacter(
+    characterCapability.self, &characterDescription, nullptr);
+characterCapability.setCharacterMode(
+    characterCapability.self, character, engine::physics_character::CharacterMode::Kinematic);
+characterCapability.setCharacterJointTarget(characterCapability.self, character, 7, 0.0);
+characterCapability.setCharacterJointGains(characterCapability.self, character, 7, 2600.0, 90.0, 220.0);
+// per fixed step, before stepping the rigid world:
+characterCapability.updateCharacter(characterCapability.self, character, fixedDeltaSeconds);
+```

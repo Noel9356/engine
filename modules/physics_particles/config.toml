@@ -1,0 +1,6 @@
+[physics_particles]
+fixed_rate_hz               = 60.0
+maximum_emitters            = 128
+maximum_particles           = 1000000
+maximum_particles_per_emitter = 100000
+maximum_steps_per_simulate  = 8

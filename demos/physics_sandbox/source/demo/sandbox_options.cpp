@@ -87,9 +87,12 @@ bool parseSandboxOptions(const std::vector<std::string> &arguments, SandboxOptio
             {
                 return false;
             }
-            if (*text != "showcase" && *text != "stacks" && *text != "cloth")
+            if (*text != "showcase" && *text != "stacks" && *text != "cloth" && *text != "fields"
+                && *text != "rope" && *text != "water" && *text != "fluid" && *text != "particles"
+                && *text != "foliage" && *text != "character")
             {
-                outError = "unknown layout '" + *text + "' (showcase, stacks, cloth)";
+                outError = "unknown layout '" + *text
+                           + "' (showcase, stacks, cloth, fields, rope, water, fluid, particles, foliage, character)";
                 return false;
             }
             options.sceneName = *text;

@@ -57,6 +57,23 @@ inline constexpr std::uint32_t maxGiProbes = 2u * 9u * 9u * 9u;
 // (position.xyz + validity) + 7x vec4 (the 27 SH2 floats plus one pad).
 inline constexpr std::uint32_t giProbeRecordVec4s = 8u;
 
+// Gribb-Hartmann frustum rejection for a world-space bounding sphere: true
+// when the sphere lies fully behind any one of the four side planes, so the
+// draw cannot touch the viewport. Both backends cull with this (the planes
+// are extracted once per camera), so the rejection rule is defined once.
+inline bool sphereOutsideFrustum(const glm::vec4 frustumPlanes[4], const glm::vec4 &worldCenter, float worldRadius)
+{
+    for (std::uint32_t plane = 0; plane < 4; ++plane)
+    {
+        const float signedDistance = glm::dot(frustumPlanes[plane], worldCenter);
+        if (std::isfinite(signedDistance) && signedDistance < -worldRadius)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Sun + hemisphere ambient + ACES tone mapping, used whenever the pbr
 // capability is absent.
 inline pbr::PbrEnvironment defaultEnvironment()

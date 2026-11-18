@@ -1,0 +1,8 @@
+[physics_fluid]
+fixed_rate_hz              = 60.0
+maximum_fluids             = 16
+maximum_particles          = 500000
+maximum_particles_per_fluid = 50000
+maximum_steps_per_simulate = 8
+maximum_velocity           = 30.0
+substeps_per_step          = 4

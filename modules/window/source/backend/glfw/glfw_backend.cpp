@@ -11,7 +11,7 @@
 #define GLFW_INCLUDE_NONE
 #if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
-#elif defined(__linux__)
+#elif defined(ENGINE_GLFW_NATIVE_X11)
 #define GLFW_EXPOSE_NATIVE_X11
 #endif
 #include <GLFW/glfw3.h>
@@ -822,7 +822,7 @@ bool GlfwWindowBackend::cursorPosition(const WindowRecord &record, double *outX,
 
 const char *const *GlfwWindowBackend::requiredInstanceExtensions(std::uint32_t *outCount) const
 {
-#if defined(_WIN32) || defined(__linux__)
+#if defined(_WIN32) || defined(ENGINE_GLFW_NATIVE_X11)
     if (initialized)
     {
 #if defined(_WIN32)
@@ -854,9 +854,14 @@ bool GlfwWindowBackend::nativeSurfaceHandles(const WindowRecord &record, NativeW
 
     outHandles->win32Hwnd      = glfwGetWin32Window(glfwWindow);
     outHandles->win32Hinstance = GetModuleHandleW(nullptr);
-#elif defined(__linux__)
+#elif defined(ENGINE_GLFW_NATIVE_X11)
     outHandles->x11Window  = reinterpret_cast<void *>(static_cast<std::uintptr_t>(glfwGetX11Window(glfwWindow)));
     outHandles->x11Display = reinterpret_cast<void *>(glfwGetX11Display());
+#else
+    // GLFW was built without the X11 platform (ENGINE_GLFW_ENABLE_X11=OFF); the
+    // GLFW window has no native surface to expose, so the renderer falls back
+    // to its surface-less presentation path.
+    return false;
 #endif
     return true;
 }

@@ -4,7 +4,7 @@ physics_articulated provides articulated-body figures: trees of rigid links conn
 
 ## Capability
 
-The module provides the `physics_articulated` capability (ABI version constant `physicsArticulatedCapabilityAbi = 1`, see `include/engine/physics_articulated/capabilities.hpp`) and requires the `physics_rigid` capability; the kernel constructs the rigid core first and grants the capability permission from the manifest's `requires` list. Figure handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidFigure`) means "none". Angles are signed radians measured against the figure's assembly pose (the transforms the links carried at `createFigure`).
+The module provides the `physics_articulated` capability (ABI version constant `physicsArticulatedCapabilityAbi = 2`, see `include/engine/physics_articulated/capabilities.hpp`) and requires the `physics_rigid` capability; the kernel constructs the rigid core first and grants the capability permission from the manifest's `requires` list. Figure handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidFigure`) means "none". Angles are signed radians measured against the figure's assembly pose (the transforms the links carried at `createFigure`).
 
 | Group | Functions | Purpose |
 | --- | --- | --- |
@@ -12,6 +12,7 @@ The module provides the `physics_articulated` capability (ABI version constant `
 | Inspection | `figureInfo`, `figureStatistics`, `copyLinkBodyHandles`, `linkBodyHandle` | Link and joint counts, active drive count, the reserved collision category bit, and the rigid body handle of each link (for rendering, grabbing, and force application through the rigid capability). |
 | Drives | `setJointDrive(figure, linkIndex, drive)`, `copyJointDrive`, `updateDrives(figure, fixedDeltaSeconds)` | Per-joint PD control: `updateDrives` measures each driven joint's angle relative to the assembly frame, derives a velocity target from the stiffness and damping gains (clamped to the drive's velocity limit), and pushes it into the rigid hinge motor with the drive's torque budget. Call once per fixed step. |
 | Measurement | `copyJointState(figure, linkIndex, outState)` | Signed joint angle relative to the assembly frame: hinge twist for hinge joints, swing and twist for ball-socket joints. |
+| Joint reference | `copyJointReference(figure, linkIndex, outReference)` | The assembly reference one joint: parent and child rigid body handles, the twist/hinge axis in the parent's local frame, the relative rotation captured at figure creation, and the joint kind - everything a controller needs to build its own pose drives on top of the built-in twist drives. The root link has no joint and reports `Unsupported`. |
 
 **Error convention:** creation functions fill the `ArticulatedError` out-parameter (`InvalidDescription`, `CapacityExceeded`, `Unsupported`); the remaining calls return `false` for unknown figures, out-of-range link indices, or inapplicable requests (for example a drive on a parentless root link). A figure whose bodies or joints fail mid-creation is rolled back completely: the world never keeps a partial figure.
 
@@ -52,7 +53,7 @@ From `module.toml` and the entry table at the bottom of `source/physics_articula
 
 **Drive update.** `updateDrives` iterates the figure's links in assembly order (deterministic), reads each driven joint's description and the two body states from the rigid capability, decomposes the relative rotation with a swing-twist split about the hinge axis, and applies the PD law. The derived velocity target lands in the rigid joint's motor, so the next rigid step executes it with the solver's torque budget. Consumers that pause their simulation simply stop calling `updateDrives`; the motors keep their last targets until retuned or disabled.
 
-**Measurement.** `copyJointState` reports the same decomposition the drives use: signed twist about the hinge axis (hinge joints) or swing magnitude plus twist (ball-socket joints), each relative to the assembly frame. Recording a figure's pose over time therefore reads through one call per joint per step.
+**Measurement.** `copyJointState` reports the same decomposition the drives use: signed twist about the hinge axis (hinge joints) or swing magnitude plus twist (ball-socket joints), each relative to the assembly frame. Recording a figure's pose over time therefore reads through one call per joint per step. `copyJointReference` exposes the stored assembly reference itself (parent/child body pair, parent-frame axis, reference rotation, joint kind) so consumers that control pose themselves - the physics_character module's torque-based pose tracking, for example - measure the same error the built-in drives do without duplicating the bookkeeping.
 
 ## Threading and lifetime
 

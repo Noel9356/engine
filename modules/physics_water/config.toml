@@ -1,0 +1,12 @@
+[physics_water]
+angular_drag_coefficient  = 3.0
+buoyancy_scale            = 1.0
+linear_drag_coefficient   = 1.8
+maximum_oceans            = 16
+maximum_registered_bodies = 4096
+maximum_ripples_per_ocean = 64
+ripple_attenuation        = 0.35
+ripple_decay              = 1.2
+ripple_speed              = 4.0
+ripple_wavelength         = 1.6
+water_density             = 1000.0

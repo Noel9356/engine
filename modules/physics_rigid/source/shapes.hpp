@@ -91,6 +91,21 @@ bool rayCastCapsule(const RigidTransform &transform, double radius, double halfL
 bool rayCastPlane(const math::Vec3 &planeNormal, double planeOffset, const math::Vec3 &origin,
     const math::Vec3 &direction, double maximumDistance, double &outDistance);
 
+// Bounding sphere radius of a solid shape (0 for planes): the conservative
+// sweep proxy radius used by continuous collision detection and sphere casts.
+double computeShapeBoundingRadius(const Shape &shape);
+
+// Sphere sweeps (linear shape casts). A sphere of the given radius moves from
+// `start` along `delta` (the sweep is clipped to that segment); on contact the
+// functions write the travelled distance in (0, length(delta)] and the world
+// contact normal facing back against the motion. The box sweep tests the box
+// inflated by the query radius (a conservative rounded-corner approximation),
+// so a sweep may stop slightly before grazing a corner but never tunnels.
+bool sweepSphereSolid(const math::Vec3 &start, double radius, const math::Vec3 &delta, const Shape &solidShape,
+    const RigidTransform &solidTransform, double &outDistance, math::Vec3 &outNormal);
+bool sweepSpherePlane(const math::Vec3 &start, double radius, const math::Vec3 &delta, const math::Vec3 &planeNormal,
+    double planeOffset, double &outDistance, math::Vec3 &outNormal);
+
 // Deepest sphere-overlap resolution against one solid shape: writes the push
 // direction (away from the shape, toward the query center) and penetration
 // depth when they overlap. For planes use collideSpherePlane below.

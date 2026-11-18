@@ -1,0 +1,11 @@
+config_keys           = [
+    "physics_particles.fixed_rate_hz",
+    "physics_particles.maximum_emitters",
+    "physics_particles.maximum_particles",
+    "physics_particles.maximum_particles_per_emitter",
+    "physics_particles.maximum_steps_per_simulate",
+]
+name                  = "physics_particles"
+provides              = ["physics_particles"]
+requires              = ["physics_rigid"]
+version               = "0.1.0"

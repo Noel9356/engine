@@ -39,6 +39,18 @@ instance_batching                    = true
 instance_stream_mb                   = 4
 lod_enabled                          = true
 lod_min_triangles                    = 4096
+lod_strides                           = [4.0, 16.0, 64.0]
+# Angular-size LOD cutoffs (boundsRadius / distance): four strictly descending
+# values in (0, 1]; coarser chains are picked as the apparent size drops below
+# each cutoff.
+lod_thresholds                        = [0.02, 0.05, 0.1, 0.2]
+# Vertex stage parallelism threshold and the screen tile edge of the
+# tile-parallel paths (see docs/configuration.md).
+headless_parallel_transform_vertices  = 8192
+tile_pixels                           = 64
+# sRGB output target (Vulkan surface pick + shader specialization); the
+# headless target always writes UNORM with its fixed encode.
+srgb_output                           = false
 max_frames_in_flight                 = 3
 max_material_sets_per_renderer       = 256
 max_pending_uploads                  = 64

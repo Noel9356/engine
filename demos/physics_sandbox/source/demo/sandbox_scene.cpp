@@ -3,6 +3,8 @@
 // holds no simulation state of its own; the physics modules own everything.
 #include "sandbox_scene.hpp"
 
+#include "sandbox_extended.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -415,6 +417,20 @@ bool buildScene(const SceneDependencies &dependencies, const SceneConfig &config
     {
         addClothSheet(dependencies, outHandles, true);
     }
+    else if (
+        sceneName == "fields" || sceneName == "rope" || sceneName == "water" || sceneName == "fluid"
+        || sceneName == "particles" || sceneName == "foliage" || sceneName == "character")
+    {
+        // Extended scenes build their own scenery through the extended
+        // modules; the shared static scenery stays available to them.
+        std::string extendedReport;
+        if (!buildExtendedScene(dependencies, config, sceneName, outHandles, extendedReport))
+        {
+            outReport += extendedReport;
+            return false;
+        }
+        outReport += extendedReport;
+    }
     else // showcase
     {
         addBoxStack(dependencies, outHandles);
@@ -445,6 +461,8 @@ void destroyScene(const SceneDependencies &dependencies, SceneHandles &handles)
         handles = SceneHandles{};
         return;
     }
+    // Extended-module objects first: they reference the world's bodies.
+    destroyExtendedScene(dependencies, handles);
     handles.bodies.clear();
     handles.figures.clear();
     handles.cloths.clear();
@@ -576,8 +594,10 @@ void updateScriptedTimeline(const SceneDependencies &dependencies, const SceneCo
         const double center[3] = {-3.2, 1.6, 2.4};
         applyBlast(dependencies, config, handles, center);
     }
+    // The chain kick belongs to the showcase scene's hanging chain; scenes
+    // without it (chainLinkCount == 0) keep their figures untouched.
     if (!chainKicked_ && simulatedSeconds >= kChainKickAt && dependencies.articulation != nullptr
-        && !handles.figures.empty())
+        && handles.chainLinkCount > 0 && !handles.figures.empty())
     {
         chainKicked_                                                = true;
         const engine::physics_articulated::FigureHandle chainFigure = handles.figures[0];
@@ -603,8 +623,9 @@ void updateScriptedTimeline(const SceneDependencies &dependencies, const SceneCo
     }
 
     // The pendulum figure's drives trace a deterministic sine wave so
-    // captures show active articulation control.
-    if (dependencies.articulation != nullptr && handles.figures.size() > 1)
+    // captures show active articulation control; the wave belongs to the
+    // pendulum figure only (scenes without one keep their figures free).
+    if (dependencies.articulation != nullptr && handles.pendulumLinkCount > 0 && handles.figures.size() > 1)
     {
         const engine::physics_articulated::FigureHandle pendulumFigure = handles.figures[1];
         const double                                    target

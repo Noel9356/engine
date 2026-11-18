@@ -18,4 +18,10 @@ struct SelfTestResult
 
 SelfTestResult runSelfTest(const SceneDependencies &dependencies, const SceneConfig &config);
 
+// The extended-modules battery (rope, fluid, particles, foliage, water,
+// fields-driven CCD and rolling resistance, joints, character). Called after
+// the core battery when the extended capabilities are available; each test
+// guards on its own capability, so a partial module set reports fewer lines.
+SelfTestResult runSelfTestExtended(const SceneDependencies &dependencies, const SceneConfig &config);
+
 } // namespace demo::physics_sandbox

@@ -610,6 +610,40 @@ private:
         return link.referenceRelativeRotation;
     }
 
+    // Assembly reference of one joint: the parent/child body pair, the
+    // twist/hinge axis in the parent's frame, and the relative rotation
+    // captured at figure creation.
+    bool copyJointReferenceImpl(FigureHandle handle, std::uint32_t linkIndex, FigureJointReference *outReference)
+    {
+        FigureRecord *figure = findFigure(handle);
+        if (figure == nullptr || outReference == nullptr || linkIndex >= figure->links.size())
+        {
+            return false;
+        }
+        const LinkRecord &link = figure->links[linkIndex];
+        if (link.parentIndex < 0 || link.joint == engine::physics_rigid::invalidJoint)
+        {
+            setError(nullptr, ArticulatedError::Unsupported);
+            return false;
+        }
+        const LinkRecord &parent = figure->links[static_cast<std::uint32_t>(link.parentIndex)];
+        *outReference            = FigureJointReference{};
+        outReference->parentBody = parent.body;
+        outReference->childBody  = link.body;
+        outReference->axisLocalParent[0] = link.hingeAxisLocalParent.x;
+        outReference->axisLocalParent[1] = link.hingeAxisLocalParent.y;
+        outReference->axisLocalParent[2] = link.hingeAxisLocalParent.z;
+        const engine::physics_rigid::Quaternion reference = referenceRelativeRotationOf(link);
+        outReference->referenceRelativeRotation[0] = reference.x;
+        outReference->referenceRelativeRotation[1] = reference.y;
+        outReference->referenceRelativeRotation[2] = reference.z;
+        outReference->referenceRelativeRotation[3] = reference.w;
+        outReference->kind = link.jointToParent == ArticulatedJointKind::Hinge
+                                ? engine::physics_rigid::JointKind::Hinge
+                                : engine::physics_rigid::JointKind::BallSocket;
+        return true;
+    }
+
     void assignCapabilityPointers()
     {
         capability_.abi  = physicsArticulatedCapabilityAbi;
@@ -627,6 +661,7 @@ private:
         ENGINE_PHYSICS_ARTICULATED_BIND(copyJointDrive, copyJointDriveImpl);
         ENGINE_PHYSICS_ARTICULATED_BIND(updateDrives, updateDrivesImpl);
         ENGINE_PHYSICS_ARTICULATED_BIND(copyJointState, copyJointStateImpl);
+        ENGINE_PHYSICS_ARTICULATED_BIND(copyJointReference, copyJointReferenceImpl);
 #undef ENGINE_PHYSICS_ARTICULATED_BIND
     }
 

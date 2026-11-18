@@ -81,6 +81,15 @@ struct HeadlessTexture
     TextureFilter  filter  = TextureFilter::Linear;
     TextureAddress address = TextureAddress::Repeat;
 
+    // Power-of-two extents switch the sampler's repeat addressing from a
+    // division/modulo pair to an AND mask (same result for any int32 texel
+    // coordinate; see wrappedCoordinate). Set by createTexture; the 1x1
+    // stand-ins leave them at their defaults, which the early-out never
+    // reaches.
+    std::uint32_t wrapMaskX = 0;
+    std::uint32_t wrapMaskY = 0;
+    bool          repeatPow2 = false;
+
     // Bilinear or nearest sample with repeat/clamp addressing; returns white
     // when empty. Defined inline in the header: the rasterizer calls it per
     // covered pixel, and an out-of-line definition compiles to a real call
@@ -110,8 +119,8 @@ struct HeadlessTexture
         { return data + (static_cast<std::size_t>(y) * mipW + x) * 3; };
         if (filter == TextureFilter::Nearest)
         {
-            const auto x = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), mipW);
-            const auto y = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), mipH);
+            const auto x = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), mipW, wrapMaskX);
+            const auto y = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), mipH, wrapMaskY);
             const float *p = pixelAt(x, y);
             return glm::vec3(p[0], p[1], p[2]);
         }
@@ -119,8 +128,8 @@ struct HeadlessTexture
         const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
         const float         fx  = texelX - static_cast<float>(x0i);
         const float         fy  = texelY - static_cast<float>(y0i);
-        const std::uint32_t x0 = wrappedCoordinate(x0i, mipW), x1 = wrappedCoordinate(x0i + 1, mipW);
-        const std::uint32_t y0 = wrappedCoordinate(y0i, mipH), y1 = wrappedCoordinate(y0i + 1, mipH);
+        const std::uint32_t x0 = wrappedCoordinate(x0i, mipW, wrapMaskX), x1 = wrappedCoordinate(x0i + 1, mipW, wrapMaskX);
+        const std::uint32_t y0 = wrappedCoordinate(y0i, mipH, wrapMaskY), y1 = wrappedCoordinate(y0i + 1, mipH, wrapMaskY);
         const float        *p00 = pixelAt(x0, y0), *p10 = pixelAt(x1, y0), *p01 = pixelAt(x0, y1), *p11 = pixelAt(x1, y1);
         const float         omx = 1.0f - fx, omy = 1.0f - fy;
         const float         w00 = omx * omy, w10 = fx * omy, w01 = omx * fy, w11 = fx * fy;
@@ -155,16 +164,16 @@ struct HeadlessTexture
         { return static_cast<float>(pixels[(static_cast<std::size_t>(y) * width + x) * 4 + 3]) / 255.0f; };
         if (filter == TextureFilter::Nearest)
         {
-            const auto x = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), width);
-            const auto y = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), height);
+            const auto x = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelX + 0.5f)), width, wrapMaskX);
+            const auto y = wrappedCoordinate(static_cast<std::int32_t>(std::floor(texelY + 0.5f)), height, wrapMaskY);
             return alphaAt(x, y);
         }
         const auto          x0i = static_cast<std::int32_t>(std::floor(texelX));
         const auto          y0i = static_cast<std::int32_t>(std::floor(texelY));
         const float         fx  = texelX - static_cast<float>(x0i);
         const float         fy  = texelY - static_cast<float>(y0i);
-        const std::uint32_t x0 = wrappedCoordinate(x0i, width), x1 = wrappedCoordinate(x0i + 1, width);
-        const std::uint32_t y0 = wrappedCoordinate(y0i, height), y1 = wrappedCoordinate(y0i + 1, height);
+        const std::uint32_t x0 = wrappedCoordinate(x0i, width, wrapMaskX), x1 = wrappedCoordinate(x0i + 1, width, wrapMaskX);
+        const std::uint32_t y0 = wrappedCoordinate(y0i, height, wrapMaskY), y1 = wrappedCoordinate(y0i + 1, height, wrapMaskY);
         const float a00 = alphaAt(x0, y0), a10 = alphaAt(x1, y0), a01 = alphaAt(x0, y1), a11 = alphaAt(x1, y1);
         const float omx = 1.0f - fx, omy = 1.0f - fy;
         return a00 * omx * omy + a10 * fx * omy + a01 * omx * fy + a11 * fx * fy;
@@ -174,12 +183,18 @@ private:
     // Maps one texel coordinate onto the texture under this sampler's
     // addressing: repeat wraps the coordinate into [0, extent), clamp pins
     // it to the edge. Shared by the color and alpha samplers so both walk
-    // coordinates identically.
-    [[nodiscard]] std::uint32_t wrappedCoordinate(std::int32_t coordinate, std::uint32_t extent) const
+    // coordinates identically. Power-of-two repeats wrap through the mask
+    // (identical result to the modulo for any int32 coordinate, negative
+    // included, in two's complement).
+    [[nodiscard]] std::uint32_t wrappedCoordinate(std::int32_t coordinate, std::uint32_t extent, std::uint32_t pow2Mask) const
     {
         const std::int32_t limit = static_cast<std::int32_t>(extent);
         if (address == TextureAddress::Repeat)
         {
+            if (pow2Mask != 0u)
+            {
+                return static_cast<std::uint32_t>(coordinate) & pow2Mask;
+            }
             const std::int32_t wrapped = coordinate % limit;
             return static_cast<std::uint32_t>(wrapped < 0 ? wrapped + limit : wrapped);
         }

@@ -139,6 +139,20 @@ void makeAnchorBasis(const math::Vec3 &direction, math::Vec3 basis[3])
     basis[1]        = math::cross(basis[2], basis[0]);
 }
 
+// Rotation vector of a unit quaternion: the axis-angle representation packed
+// into a 3-vector (the angular error measure for the fixed joint's weld rows).
+math::Vec3 rotationVector(const math::Quaternion &rotation)
+{
+    const double vectorNorm = std::sqrt(rotation.x * rotation.x + rotation.y * rotation.y + rotation.z * rotation.z);
+    if (vectorNorm < 1.0e-12)
+    {
+        return math::Vec3{};
+    }
+    const double angle = 2.0 * std::atan2(vectorNorm, rotation.w);
+    const double scale = angle / vectorNorm;
+    return math::Vec3{rotation.x * scale, rotation.y * scale, rotation.z * scale};
+}
+
 void prepareContactConstraints(World &world, const StepContext &context, std::vector<ContactConstraint> &outConstraints)
 {
     outConstraints.clear();
@@ -193,6 +207,17 @@ void prepareContactConstraints(World &world, const StepContext &context, std::ve
             point.localAnchorA = math::inverseRotate(bodyA.transform.rotation, point.rA);
             point.localAnchorB = math::inverseRotate(bodyB.transform.rotation, point.rB);
 
+            // Rolling resistance budget: either material can drive it (the
+            // larger coefficient wins, so a rolling-resistant object resists
+            // rolling on any surface), spent as angular impulse at the
+            // contact radius. Only curved shapes carry a rolling radius, so
+            // flat contacts never allocate a budget.
+            if (bodyA.rollingRadius > 0.0 || bodyB.rollingRadius > 0.0)
+            {
+                point.rollingResistance = std::max(bodyA.material.rollingResistance, bodyB.material.rollingResistance);
+                point.rollingRadius     = std::max(bodyA.rollingRadius, bodyB.rollingRadius);
+            }
+
             // The velocity solve targets restitution plus the speculative
             // gap: a positive separation must close within this step, which
             // stops approaching bodies before they touch and removes impact
@@ -235,11 +260,12 @@ void prepareContactConstraints(World &world, const StepContext &context, std::ve
 
 void prepareJointConstraints(World &world, const StepContext &context, std::vector<JointConstraint> &outConstraints)
 {
-    (void)context;
-    (void)world;
+    // The scratch vector persists across steps and worlds; stale entries
+    // would index the previous world's joints after a destroy/create cycle.
+    outConstraints.clear();
     for (std::size_t jointIndex = 0; jointIndex < world.joints.size(); ++jointIndex)
     {
-        const Joint &joint         = world.joints[jointIndex];
+        Joint &joint               = world.joints[jointIndex];
         const auto   bodyAIterator = world.bodyIndexByHandle.find(joint.description.bodyA);
         const auto   bodyBIterator = world.bodyIndexByHandle.find(joint.description.bodyB);
         if (bodyAIterator == world.bodyIndexByHandle.end() || bodyBIterator == world.bodyIndexByHandle.end())
@@ -256,6 +282,10 @@ void prepareJointConstraints(World &world, const StepContext &context, std::vect
         }
 
         JointConstraint constraint;
+        // Limit rows restart every step (no warm start): clear their
+        // accumulators so stale impulses never leak into a new solve.
+        joint.limitImpulse      = 0.0;
+        joint.swingLimitImpulse = 0.0;
         constraint.bodyIndexA      = indexA;
         constraint.bodyIndexB      = indexB;
         constraint.jointIndex      = jointIndex;
@@ -288,6 +318,96 @@ void prepareJointConstraints(World &world, const StepContext &context, std::vect
                 constraint.inverseMassA,
                 constraint.inverseMassB,
                 constraint.distanceAxisWorld);
+
+            // Soft-constraint parameters for the spring mode: stiffness from
+            // the target frequency, damping from the dimensionless ratio
+            // (the Box2D soft-constraint form; gamma carries the dt factors
+            // so the bias stays frame-rate independent).
+            if (joint.description.springEnabled && joint.description.springFrequencyHz > 0.0)
+            {
+                const double omega    = 2.0 * 3.14159265358979323846 * joint.description.springFrequencyHz;
+                const double stiffness = constraint.distanceMass * omega * omega;
+                const double damping   = 2.0 * constraint.distanceMass * joint.description.springDampingRatio * omega;
+                const double gammaDenominator
+                    = context.deltaTime * (damping + context.deltaTime * stiffness);
+                constraint.springGamma   = gammaDenominator > 1.0e-12 ? 1.0 / gammaDenominator : 0.0;
+                const double lengthError = constraint.currentLength - joint.restLength;
+                constraint.springBias    = lengthError * context.deltaTime * stiffness * constraint.springGamma;
+                constraint.springSoftMass = constraint.distanceMass > 0.0
+                                                ? 1.0 / (1.0 / constraint.distanceMass + constraint.springGamma)
+                                                : 0.0;
+            }
+        }
+        else if (constraint.kind == JointKind::Prismatic)
+        {
+            // Translation is free only along the slider axis: perpendicular
+            // anchor rows, anti-swing rows, and a twist-lock row remove the
+            // other five degrees of freedom; limits and the motor act along
+            // the axis itself.
+            constraint.sliderAxisWorld = math::rotate(bodyA.transform.rotation, joint.axisLocalA);
+            makeAnchorBasis(constraint.sliderAxisWorld, constraint.anchorBasis);
+            for (std::uint32_t axisIndex = 0; axisIndex < 2; ++axisIndex)
+            {
+                constraint.anchorMass[axisIndex] = effectiveMass(constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    constraint.inverseMassA,
+                    constraint.inverseMassB,
+                    constraint.anchorBasis[axisIndex]);
+                constraint.antiSwingBasis[axisIndex] = constraint.anchorBasis[axisIndex];
+                constraint.antiSwingMass[axisIndex]  = effectiveAngularMass(
+                    constraint.inverseInertiaA, constraint.inverseInertiaB, constraint.anchorBasis[axisIndex]);
+            }
+            constraint.anchorMass[2] = 0.0;
+            constraint.sliderDisplacement
+                = math::dot(anchorWorldB - anchorWorldA, constraint.sliderAxisWorld) - joint.sliderRestDistance;
+            constraint.twistAngle = math::twistAngleRadians(relativeRotation, joint.axisLocalA);
+            constraint.swingAngle = math::swingAngleRadians(relativeRotation, joint.axisLocalA);
+            {
+                const math::Quaternion twist = math::twistComponent(relativeRotation, joint.axisLocalA);
+                const math::Quaternion swing = math::conjugate(twist) * relativeRotation;
+                const math::Vec3       swingLocal{swing.x, swing.y, swing.z};
+                constraint.swingAxisWorld = math::lengthSquared(swingLocal) > 1.0e-12
+                                              ? math::rotate(bodyA.transform.rotation, math::normalized(swingLocal))
+                                              : math::Vec3{0.0, 1.0, 0.0};
+            }
+            constraint.sliderMass = effectiveMass(constraint.inverseInertiaA,
+                constraint.inverseInertiaB,
+                constraint.rA,
+                constraint.rB,
+                constraint.inverseMassA,
+                constraint.inverseMassB,
+                constraint.sliderAxisWorld);
+            constraint.twistMass = effectiveAngularMass(
+                constraint.inverseInertiaA, constraint.inverseInertiaB, constraint.sliderAxisWorld);
+            constraint.motorMass = constraint.sliderMass;
+        }
+        else if (constraint.kind == JointKind::Fixed)
+        {
+            // Weld: full anchor coincidence plus three angular rows holding
+            // the relative frame captured at creation.
+            makeAnchorBasis(anchorWorldB - anchorWorldA, constraint.anchorBasis);
+            for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
+            {
+                constraint.anchorMass[axisIndex] = effectiveMass(constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    constraint.inverseMassA,
+                    constraint.inverseMassB,
+                    constraint.anchorBasis[axisIndex]);
+            }
+            constraint.hingeAxisWorld = math::rotate(bodyA.transform.rotation, joint.axisLocalA);
+            makeAnchorBasis(constraint.hingeAxisWorld, constraint.weldBasis);
+            for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
+            {
+                constraint.weldMass[axisIndex] = effectiveAngularMass(
+                    constraint.inverseInertiaA, constraint.inverseInertiaB, constraint.weldBasis[axisIndex]);
+            }
+            const math::Quaternion frameDelta
+                = math::conjugate(joint.referenceRelativeRotation) * relativeRotation;
+            constraint.weldError = math::rotate(bodyA.transform.rotation, rotationVector(frameDelta));
         }
         else
         {
@@ -338,6 +458,7 @@ void prepareJointConstraints(World &world, const StepContext &context, std::vect
     }
 }
 
+
 void warmStartContacts(World &world, std::vector<ContactConstraint> &constraints, bool warmStarting)
 {
     if (!warmStarting)
@@ -383,6 +504,68 @@ void warmStartJoints(World &world, std::vector<JointConstraint> &constraints, bo
                 constraint.rB,
                 constraint.distanceAxisWorld * joint.distanceImpulse);
             break;
+        case JointKind::Prismatic:
+            for (std::uint32_t axisIndex = 0; axisIndex < 2; ++axisIndex)
+            {
+                applyPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    constraint.anchorBasis[axisIndex] * joint.sliderTranslationImpulse[axisIndex]);
+                applyAngularPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.antiSwingBasis[axisIndex],
+                    axisIndex == 0 ? joint.antiSwingImpulse1 : joint.antiSwingImpulse2);
+            }
+            applyAngularPairImpulse(bodyA,
+                bodyB,
+                constraint.inverseInertiaA,
+                constraint.inverseInertiaB,
+                constraint.sliderAxisWorld,
+                joint.prismaticTwistImpulse);
+            if (joint.description.limitsEnabled)
+            {
+                applyPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    constraint.sliderAxisWorld * joint.sliderLimitImpulse);
+            }
+            if (joint.description.motorEnabled)
+            {
+                applyPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    constraint.sliderAxisWorld * joint.motorImpulse);
+            }
+            break;
+        case JointKind::Fixed:
+            applyPairImpulse(bodyA,
+                bodyB,
+                constraint.inverseInertiaA,
+                constraint.inverseInertiaB,
+                constraint.rA,
+                constraint.rB,
+                joint.ballSocketImpulse);
+            for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
+            {
+                applyAngularPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.weldBasis[axisIndex],
+                    joint.weldImpulses[axisIndex]);
+            }
+            break;
         case JointKind::BallSocket:
         case JointKind::Hinge: {
             applyPairImpulse(bodyA,
@@ -406,15 +589,11 @@ void warmStartJoints(World &world, std::vector<JointConstraint> &constraints, bo
                     constraint.inverseInertiaB,
                     constraint.antiSwingBasis[1],
                     joint.antiSwingImpulse2);
-                if (joint.description.limitsEnabled)
-                {
-                    applyAngularPairImpulse(bodyA,
-                        bodyB,
-                        constraint.inverseInertiaA,
-                        constraint.inverseInertiaB,
-                        constraint.hingeAxisWorld,
-                        joint.limitImpulse);
-                }
+                // Limit rows are not warm started: their impulses are
+                // discontinuous at the boundary and their axes rotate with
+                // the bodies, so re-applying a stale limit impulse pumps
+                // energy into chattering joints. The solve recomputes them
+                // from scratch each step.
                 if (joint.description.motorEnabled)
                 {
                     applyAngularPairImpulse(bodyA,
@@ -424,23 +603,6 @@ void warmStartJoints(World &world, std::vector<JointConstraint> &constraints, bo
                         constraint.hingeAxisWorld,
                         joint.motorImpulse);
                 }
-            }
-            else if (joint.description.limitsEnabled)
-            {
-                // Ball-socket limits: the limit impulse resists swing and
-                // twist violations along their measured axes.
-                applyAngularPairImpulse(bodyA,
-                    bodyB,
-                    constraint.inverseInertiaA,
-                    constraint.inverseInertiaB,
-                    constraint.swingAxisWorld,
-                    joint.limitImpulse);
-                applyAngularPairImpulse(bodyA,
-                    bodyB,
-                    constraint.inverseInertiaA,
-                    constraint.inverseInertiaB,
-                    constraint.hingeAxisWorld,
-                    joint.limitImpulse);
             }
             break;
         }
@@ -506,6 +668,46 @@ void solveContactVelocityIteration(
                     point.rB,
                     tangent * impulseLambda);
             }
+
+            // Rolling resistance: two angular rows about the contact tangents
+            // resist the relative spin that rolls one body over the other.
+            // The per-step accumulator is clamped by the normal-load budget
+            // (coefficient x normal impulse x contact radius), so the torque
+            // scales with the load like physical rolling resistance and
+            // never injects energy.
+            if (point.rollingResistance > 0.0 && point.rollingRadius > 0.0)
+            {
+                const double budget = point.rollingResistance * persisted.normalImpulse * point.rollingRadius;
+                if (budget > 0.0)
+                {
+                    for (std::uint32_t tangentIndex = 0; tangentIndex < 2; ++tangentIndex)
+                    {
+                        const math::Vec3 &axis = tangentIndex == 0 ? point.tangent1 : point.tangent2;
+                        const double angularMass
+                            = effectiveAngularMass(constraint.inverseInertiaA, constraint.inverseInertiaB, axis);
+                        if (angularMass == 0.0)
+                        {
+                            continue;
+                        }
+                        const double rollingSpeed
+                            = math::dot(bodyB.angularVelocity - bodyA.angularVelocity, axis);
+                        double &accumulatedRolling
+                            = tangentIndex == 0 ? point.rollingImpulse1 : point.rollingImpulse2;
+                        // The impulse opposes the relative spin (the same
+                        // sign convention as the angular friction rows).
+                        const double newTotal
+                            = std::clamp(accumulatedRolling - rollingSpeed * angularMass, -budget, budget);
+                        const double impulseLambda = newTotal - accumulatedRolling;
+                        accumulatedRolling         = newTotal;
+                        applyAngularPairImpulse(bodyA,
+                            bodyB,
+                            constraint.inverseInertiaA,
+                            constraint.inverseInertiaB,
+                            axis,
+                            impulseLambda);
+                    }
+                }
+            }
         }
     }
 }
@@ -524,14 +726,30 @@ void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &con
         {
             const math::Vec3 relativeVelocity = velocityAt(bodyA, constraint.rA) - velocityAt(bodyB, constraint.rB);
             const double     axisSpeed        = math::dot(relativeVelocity, constraint.distanceAxisWorld);
-            const double     lengthError      = constraint.currentLength - joint.restLength;
-            const double     bias
-                = -(settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(lengthError, -0.2, 0.2);
-            double impulseLambda = constraint.distanceMass > 0.0 ? -(axisSpeed + bias) * constraint.distanceMass : 0.0;
-            const double oldImpulse = joint.distanceImpulse;
-            const double newImpulse = oldImpulse + impulseLambda;
-            joint.distanceImpulse   = newImpulse;
-            impulseLambda           = newImpulse - oldImpulse;
+            double           impulseLambda    = 0.0;
+            if (constraint.springGamma > 0.0)
+            {
+                // Spring mode: a soft constraint with bias (position error
+                // through the stiffness) and gamma (the accumulated impulse
+                // softening); pulls and pushes without a sign clamp. The
+                // engine's pair impulse runs opposite to the reference form
+                // this scheme derives from, so the bias and gamma terms
+                // enter with flipped signs relative to it.
+                impulseLambda = -constraint.springSoftMass
+                                * (axisSpeed - constraint.springBias + constraint.springGamma * joint.distanceImpulse);
+                joint.distanceImpulse += impulseLambda;
+            }
+            else
+            {
+                const double lengthError = constraint.currentLength - joint.restLength;
+                const double bias        = -(settings.jointBaumgarteFactor * inverseDeltaTime)
+                                    * std::clamp(lengthError, -0.2, 0.2);
+                impulseLambda = constraint.distanceMass > 0.0 ? -(axisSpeed + bias) * constraint.distanceMass : 0.0;
+                const double oldImpulse = joint.distanceImpulse;
+                const double newImpulse = oldImpulse + impulseLambda;
+                joint.distanceImpulse   = newImpulse;
+                impulseLambda           = newImpulse - oldImpulse;
+            }
             applyPairImpulse(bodyA,
                 bodyB,
                 constraint.inverseInertiaA,
@@ -539,6 +757,195 @@ void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &con
                 constraint.rA,
                 constraint.rB,
                 constraint.distanceAxisWorld * impulseLambda);
+            continue;
+        }
+
+        if (constraint.kind == JointKind::Prismatic)
+        {
+            // Perpendicular anchor rows: the two axes orthogonal to the
+            // slider axis hold the anchors coincident across them.
+            const math::Vec3 anchorError
+                = (bodyB.transform.position + math::rotate(bodyB.transform.rotation, joint.description.anchorLocalB))
+                - (bodyA.transform.position + math::rotate(bodyA.transform.rotation, joint.description.anchorLocalA));
+            for (std::uint32_t axisIndex = 0; axisIndex < 2; ++axisIndex)
+            {
+                const math::Vec3 &axis = constraint.anchorBasis[axisIndex];
+                if (constraint.anchorMass[axisIndex] == 0.0)
+                {
+                    continue;
+                }
+                const math::Vec3 relativeVelocity = velocityAt(bodyA, constraint.rA) - velocityAt(bodyB, constraint.rB);
+                const double     axisSpeed        = math::dot(relativeVelocity, axis);
+                const double     error            = math::dot(anchorError, axis);
+                const double bias = -(settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(error, -0.2, 0.2);
+                double       impulseLambda = -(axisSpeed + bias) * constraint.anchorMass[axisIndex];
+                double      &accumulatedImpulse = joint.sliderTranslationImpulse[axisIndex];
+                const double oldImpulse         = accumulatedImpulse;
+                accumulatedImpulse              = oldImpulse + impulseLambda;
+                impulseLambda                   = accumulatedImpulse - oldImpulse;
+                applyPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    axis * impulseLambda);
+            }
+
+            // Anti-swing rows: zero the relative angular velocity across the
+            // two axes orthogonal to the slider axis, with Baumgarte bias
+            // driving the measured swing tilt back to zero.
+            for (std::uint32_t axisIndex = 0; axisIndex < 2; ++axisIndex)
+            {
+                const math::Vec3 &axis = constraint.antiSwingBasis[axisIndex];
+                if (constraint.antiSwingMass[axisIndex] == 0.0)
+                {
+                    continue;
+                }
+                const double swingComponent = math::dot(constraint.swingAxisWorld, axis) * constraint.swingAngle;
+                const double relativeSpeed  = math::dot(bodyB.angularVelocity - bodyA.angularVelocity, axis);
+                const double bias
+                    = (settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(swingComponent, -0.2, 0.2);
+                double       impulseLambda      = -(relativeSpeed + bias) * constraint.antiSwingMass[axisIndex];
+                double      &accumulatedImpulse = axisIndex == 0 ? joint.antiSwingImpulse1 : joint.antiSwingImpulse2;
+                const double oldImpulse         = accumulatedImpulse;
+                accumulatedImpulse              = oldImpulse + impulseLambda;
+                impulseLambda                   = accumulatedImpulse - oldImpulse;
+                applyAngularPairImpulse(
+                    bodyA, bodyB, constraint.inverseInertiaA, constraint.inverseInertiaB, axis, impulseLambda);
+            }
+
+            // Twist lock about the slider axis (a prismatic removes twist,
+            // unlike a hinge which keeps it).
+            if (constraint.twistMass > 0.0)
+            {
+                const double relativeSpeed
+                    = math::dot(bodyB.angularVelocity - bodyA.angularVelocity, constraint.sliderAxisWorld);
+                const double bias = (settings.jointBaumgarteFactor * inverseDeltaTime)
+                                  * std::clamp(constraint.twistAngle, -0.2, 0.2);
+                const double impulseLambda     = -(relativeSpeed + bias) * constraint.twistMass;
+                const double oldImpulse        = joint.prismaticTwistImpulse;
+                joint.prismaticTwistImpulse    = oldImpulse + impulseLambda;
+                applyAngularPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.sliderAxisWorld,
+                    joint.prismaticTwistImpulse - oldImpulse);
+            }
+
+            // Translation limits along the slider axis (meters, measured
+            // against the anchor separation captured at creation).
+            if (joint.description.limitsEnabled && constraint.sliderMass > 0.0)
+            {
+                const double lower = joint.description.limitLowerRadians;
+                const double upper = joint.description.limitUpperRadians;
+                if (constraint.sliderDisplacement < lower || constraint.sliderDisplacement > upper)
+                {
+                    const double violation = constraint.sliderDisplacement < lower ? constraint.sliderDisplacement - lower
+                                                                                   : constraint.sliderDisplacement - upper;
+                    const math::Vec3 relativeVelocity = velocityAt(bodyA, constraint.rA) - velocityAt(bodyB, constraint.rB);
+                    const double     axisSpeed        = math::dot(relativeVelocity, constraint.sliderAxisWorld);
+                    const double bias = -(settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(violation, -0.2, 0.2);
+                    double impulseLambda = -(axisSpeed + bias) * constraint.sliderMass;
+                    impulseLambda        = constraint.sliderDisplacement < lower ? std::min(impulseLambda, 0.0)
+                                                                                 : std::max(impulseLambda, 0.0);
+                    const double oldImpulse = joint.sliderLimitImpulse;
+                    joint.sliderLimitImpulse = oldImpulse + impulseLambda;
+                    applyPairImpulse(bodyA,
+                        bodyB,
+                        constraint.inverseInertiaA,
+                        constraint.inverseInertiaB,
+                        constraint.rA,
+                        constraint.rB,
+                        constraint.sliderAxisWorld * (joint.sliderLimitImpulse - oldImpulse));
+                }
+                else
+                {
+                    joint.sliderLimitImpulse = 0.0;
+                }
+            }
+
+            // Linear motor: tracks the target sliding velocity along the
+            // axis within the force budget. The displacement rate along the
+            // axis is the negative of axisSpeed (the axis runs A toward B),
+            // so tracking motorTargetVelocity means driving axisSpeed
+            // toward -motorTargetVelocity; a positive speedError therefore
+            // demands a negative impulse lambda on the pair impulse.
+            if (joint.description.motorEnabled && constraint.motorMass > 0.0)
+            {
+                const math::Vec3 relativeVelocity = velocityAt(bodyA, constraint.rA) - velocityAt(bodyB, constraint.rB);
+                const double     axisSpeed        = math::dot(relativeVelocity, constraint.sliderAxisWorld);
+                const double     speedError       = axisSpeed + joint.description.motorTargetVelocity;
+                double           impulseLambda    = -constraint.motorMass * speedError;
+                const double     maximumImpulse   = joint.description.maximumMotorTorque * context.deltaTime;
+                const double     oldImpulse       = joint.motorImpulse;
+                const double     newImpulse       = std::clamp(oldImpulse + impulseLambda, -maximumImpulse, maximumImpulse);
+                impulseLambda                    = newImpulse - oldImpulse;
+                joint.motorImpulse               = newImpulse;
+                applyPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    constraint.sliderAxisWorld * impulseLambda);
+            }
+            continue;
+        }
+
+        if (constraint.kind == JointKind::Fixed)
+        {
+            // Anchor coincidence rows (all three axes).
+            const math::Vec3 anchorError
+                = (bodyB.transform.position + math::rotate(bodyB.transform.rotation, joint.description.anchorLocalB))
+                - (bodyA.transform.position + math::rotate(bodyA.transform.rotation, joint.description.anchorLocalA));
+            for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
+            {
+                const math::Vec3 &axis = constraint.anchorBasis[axisIndex];
+                if (constraint.anchorMass[axisIndex] == 0.0)
+                {
+                    continue;
+                }
+                const math::Vec3 relativeVelocity = velocityAt(bodyA, constraint.rA) - velocityAt(bodyB, constraint.rB);
+                const double     axisSpeed        = math::dot(relativeVelocity, axis);
+                const double     error            = math::dot(anchorError, axis);
+                const double bias = -(settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(error, -0.2, 0.2);
+                double       impulseLambda = -(axisSpeed + bias) * constraint.anchorMass[axisIndex];
+                math::Vec3   rowImpulse    = axis * impulseLambda;
+                joint.ballSocketImpulse += rowImpulse;
+                applyPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.rA,
+                    constraint.rB,
+                    rowImpulse);
+            }
+
+            // Weld rows: zero the relative angular velocity on an orthonormal
+            // basis and drive the measured frame error back to zero.
+            for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
+            {
+                const math::Vec3 &axis = constraint.weldBasis[axisIndex];
+                if (constraint.weldMass[axisIndex] == 0.0)
+                {
+                    continue;
+                }
+                const double errorComponent = math::dot(constraint.weldError, axis);
+                const double relativeSpeed  = math::dot(bodyB.angularVelocity - bodyA.angularVelocity, axis);
+                const double bias
+                    = (settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(errorComponent, -0.2, 0.2);
+                const double impulseLambda  = -(relativeSpeed + bias) * constraint.weldMass[axisIndex];
+                const double oldImpulse     = joint.weldImpulses[axisIndex];
+                joint.weldImpulses[axisIndex] = oldImpulse + impulseLambda;
+                applyAngularPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    axis,
+                    joint.weldImpulses[axisIndex] - oldImpulse);
+            }
             continue;
         }
 
@@ -668,15 +1075,21 @@ void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &con
                         = (settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(coneViolation, 0.0, 0.2);
                     double impulseLambda    = -(relativeSpeed + bias) * constraint.limitMass;
                     impulseLambda           = std::min(impulseLambda, 0.0);
-                    const double oldImpulse = joint.limitImpulse;
-                    joint.limitImpulse      = oldImpulse + impulseLambda;
-                    impulseLambda           = joint.limitImpulse - oldImpulse;
+                    const double oldImpulse = joint.swingLimitImpulse;
+                    joint.swingLimitImpulse = oldImpulse + impulseLambda;
+                    impulseLambda           = joint.swingLimitImpulse - oldImpulse;
                     applyAngularPairImpulse(bodyA,
                         bodyB,
                         constraint.inverseInertiaA,
                         constraint.inverseInertiaB,
                         constraint.swingAxisWorld,
                         impulseLambda);
+                }
+                else
+                {
+                    // Back inside the cone: drop the stale impulse so warm
+                    // starting cannot re-apply it.
+                    joint.swingLimitImpulse = 0.0;
                 }
                 const double twistHalf = joint.description.twistHalfAngleRadians;
                 if (constraint.twistAngle < -twistHalf || constraint.twistAngle > twistHalf)
@@ -688,8 +1101,12 @@ void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &con
                     const double bias
                         = (settings.jointBaumgarteFactor * inverseDeltaTime) * std::clamp(violation, -0.2, 0.2);
                     double impulseLambda    = -(relativeSpeed + bias) * constraint.limitMass;
-                    impulseLambda           = constraint.twistAngle > twistHalf ? std::max(impulseLambda, 0.0)
-                                                                                : std::min(impulseLambda, 0.0);
+                    // The measured twist angle grows with the relative speed
+                    // about the twist axis, so a positive impulse widens a
+                    // positive violation: the resisting impulse is negative
+                    // past the upper bound and positive below the lower one.
+                    impulseLambda           = constraint.twistAngle > twistHalf ? std::min(impulseLambda, 0.0)
+                                                                                : std::max(impulseLambda, 0.0);
                     const double oldImpulse = joint.limitImpulse;
                     joint.limitImpulse      = oldImpulse + impulseLambda;
                     impulseLambda           = joint.limitImpulse - oldImpulse;
@@ -699,6 +1116,10 @@ void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &con
                         constraint.inverseInertiaB,
                         constraint.hingeAxisWorld,
                         impulseLambda);
+                }
+                else
+                {
+                    joint.limitImpulse = 0.0;
                 }
             }
         }

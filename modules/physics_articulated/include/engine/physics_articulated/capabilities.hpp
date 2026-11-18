@@ -23,7 +23,7 @@ namespace engine::physics_articulated
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsArticulatedCapabilityAbi = 1u;
+inline constexpr std::uint32_t physicsArticulatedCapabilityAbi = 2u;
 
 using FigureHandle = std::uint32_t;
 
@@ -131,6 +131,21 @@ struct FigureJointState
     double twistRadians = 0.0;
 };
 
+// Assembly reference of one joint (what controllers need to build their own
+// pose drives on top of the built-in one): both rigid body handles, the
+// twist/hinge axis in the parent's local frame, the relative rotation
+// captured at figure creation, and the joint kind.
+struct FigureJointReference
+{
+    engine::physics_rigid::BodyHandle parentBody = engine::physics_rigid::invalidBody;
+    engine::physics_rigid::BodyHandle childBody  = engine::physics_rigid::invalidBody;
+
+    double axisLocalParent[3]          = {0.0, 1.0, 0.0};
+    double referenceRelativeRotation[4] = {0.0, 0.0, 0.0, 1.0}; // x,y,z,w
+
+    engine::physics_rigid::JointKind kind = engine::physics_rigid::JointKind::BallSocket;
+};
+
 struct ArticulatedFigureStatistics
 {
     std::uint32_t linkCount        = 0;
@@ -176,6 +191,11 @@ struct ArticulatedCapability
 
     // Measured joint state relative to the assembly frame.
     bool (*copyJointState)(void *self, FigureHandle figure, std::uint32_t linkIndex, FigureJointState *outState);
+
+    // Assembly reference of one joint (the root link has no joint and
+    // reports Unsupported).
+    bool (*copyJointReference)(
+        void *self, FigureHandle figure, std::uint32_t linkIndex, FigureJointReference *outReference);
 };
 
 } // namespace engine::physics_articulated

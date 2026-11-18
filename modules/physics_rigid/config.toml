@@ -1,5 +1,6 @@
 [physics_rigid]
 angular_sleep_tolerance       = 0.14
+ccd_velocity_threshold        = 1.5
 contact_margin                = 0.02
 contact_slop                  = 0.005
 joint_baumgarte_factor        = 0.2

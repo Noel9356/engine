@@ -18,6 +18,7 @@
 #include "ui_frag_gen.hpp"
 #include "ui_vert_gen.hpp"
 
+#include <engine/direct_lighting/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/renderer/mesh.hpp>
 
@@ -424,7 +425,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
     // identical, so one builder lambda stamps both.
     const auto createMeshPipeline = [&](bool depthWriteEnable, VkPipeline &outPipeline) -> bool
     {
-        static const std::uint32_t            specData[2]    = {32u, srgbOutput_ ? 1u : 0u}; // MAX_LIGHTS, SRGB_OUT
+        static const std::uint32_t            specData[2]    = {static_cast<std::uint32_t>(direct_lighting::maxDirectLights), srgbOutput_ ? 1u : 0u}; // MAX_LIGHTS, SRGB_OUT
         static const VkSpecializationMapEntry specEntries[2] = {
             {0, 0, sizeof(std::uint32_t)},
             {6, sizeof(std::uint32_t), sizeof(std::uint32_t)},
@@ -761,7 +762,7 @@ bool VulkanPipeline::buildFurPipeline(VkDevice device, char *resultScratch, std:
 
     // Same specialization contract as the mesh pipeline: MAX_LIGHTS
     // (constant_id 0) and SRGB_OUTPUT (constant_id 6) on the fragment stage.
-    static const std::uint32_t            specData[2]    = {32u, srgbOutput_ ? 1u : 0u};
+    static const std::uint32_t            specData[2]    = {static_cast<std::uint32_t>(direct_lighting::maxDirectLights), srgbOutput_ ? 1u : 0u};
     static const VkSpecializationMapEntry specEntries[2] = {
         {0, 0, sizeof(std::uint32_t)},
         {6, sizeof(std::uint32_t), sizeof(std::uint32_t)},
