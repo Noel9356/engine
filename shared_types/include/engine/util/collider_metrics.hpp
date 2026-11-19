@@ -190,4 +190,22 @@ inline void appendColliderSamplePoints(const engine::physics_rigid::ShapeDescrip
     }
 }
 
+// Mass of one solid shape under a body description: the explicit mass wins
+// when it is positive, otherwise the shape volume carries the density. The
+// mass field of the description mirrors the rigid module's own mass source
+// rule (density above zero wins over the explicit mass), so batched-force
+// consumers (buoyancy, wind drag) read one consistent mass per body.
+inline double colliderMass(const engine::physics_rigid::BodyDescription &description)
+{
+    if (description.mass > 0.0 && description.density <= 0.0)
+    {
+        return description.mass;
+    }
+    if (description.density > 0.0)
+    {
+        return description.density * colliderVolume(description.shape);
+    }
+    return description.mass > 0.0 ? description.mass : 0.0;
+}
+
 } // namespace engine::util

@@ -92,6 +92,7 @@ using Quaternion     = ::engine::physics_rigid::Quaternion;
 using RigidTransform = ::engine::physics_rigid::RigidTransform;
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kTwoPi = 6.28318530717958647692;
 
 // Component access by axis index (0 = x, 1 = y, 2 = z), for the axis-driven
 // loops the shapes and solver run. Out-of-range axes clamp to z. The mutable

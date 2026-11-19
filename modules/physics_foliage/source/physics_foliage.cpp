@@ -12,6 +12,8 @@
 // Per-instance wind samples amortize over a configurable stride so large
 // fields do not call the wind capability once per instance per step.
 
+#include "records.hpp"
+
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -22,7 +24,6 @@
 #include <engine/util/step_accumulator.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -47,6 +48,23 @@ public:
     const ParticipantManifest &manifest() const override
     {
         return manifest_;
+    }
+
+
+    // Refreshes the pre-normalized ambient breeze velocity after a direction
+    // or speed change.
+    void normalizeAmbientWind()
+    {
+        const double length = std::sqrt(ambientWindDirection_[0] * ambientWindDirection_[0]
+                                        + ambientWindDirection_[1] * ambientWindDirection_[1]);
+        if (length < 1.0e-9)
+        {
+            ambientWindVelocity_[0] = 0.0;
+            ambientWindVelocity_[1] = 0.0;
+            return;
+        }
+        ambientWindVelocity_[0] = ambientWindDirection_[0] / length * ambientWindSpeed_;
+        ambientWindVelocity_[1] = ambientWindDirection_[1] / length * ambientWindSpeed_;
     }
 
     void construct(ParticipantContext &context) override
@@ -75,6 +93,7 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_foliage", "ambient_wind_speed");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
             ambientWindSpeed_ = *value;
+        normalizeAmbientWind();
         if (const auto value = context.configurationFloatingInSection("physics_foliage", "sway_amplitude");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
             settings_.swayAmplitude = *value;
@@ -129,43 +148,7 @@ private:
         engine::util::setModuleError(output, value);
     }
 
-    struct InstanceState
-    {
-        FoliageInstance description{};
 
-        // Bend state: horizontal displacement of the tip (x, z) with its
-        // velocity, integrated by the spring-damper.
-        double bend[2]         = {0.0, 0.0};
-        double bendVelocity[2] = {0.0, 0.0};
-
-        // Amortized wind sample: refreshed when the instance's sample slot
-        // comes due (stride-spread by instance index); the cached velocity
-        // drives the bend target between refreshes.
-        double cachedWind[3] = {0.0, 0.0, 0.0};
-        bool   windCached    = false;
-    };
-
-    struct FieldRecord
-    {
-        FieldHandle handle = invalidField;
-
-        std::uint32_t windFieldHandle = 0; // physics_fields wind handle, 0 = ambient breeze
-
-        FoliageFieldDescription description{};
-
-        std::vector<InstanceState> instances;
-
-        double swayClock = 0.0;
-
-        std::uint64_t disturbanceTotal = 0;
-
-        // Simulation LOD: importance-driven fidelity band and staggered
-        // cadence (the phase derives from the registration ordinal).
-        double                           importance = 1.0;
-        engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-        engine::util::SimulationCadence  cadence{};
-        std::uint64_t                    lodSkippedSteps = 0;
-    };
 
     FieldRecord *findField(FieldHandle handle)
     {
@@ -174,25 +157,19 @@ private:
     }
 
     // Wind velocity sample for one instance: the bound wind field when
-    // available, else the ambient breeze.
+    // available, else the ambient breeze. A dead or unknown wind-field
+    // handle (the fields module may have destroyed it) falls back to the
+    // ambient breeze instead of freezing the last cached sample forever.
     bool sampleWindAt(const FieldRecord &field, const double position[3], double outVelocity[3]) const
     {
-        if (fields_ != nullptr && field.windFieldHandle != 0)
+        if (fields_ != nullptr && field.windFieldHandle != 0
+            && fields_->sampleWindVelocity(fields_->self, field.windFieldHandle, position, field.swayClock, outVelocity))
         {
-            return fields_->sampleWindVelocity(fields_->self, field.windFieldHandle, position, field.swayClock, outVelocity);
-        }
-        const double length = std::sqrt(ambientWindDirection_[0] * ambientWindDirection_[0]
-                                        + ambientWindDirection_[1] * ambientWindDirection_[1]);
-        if (length < 1.0e-9)
-        {
-            outVelocity[0] = 0.0;
-            outVelocity[1] = 0.0;
-            outVelocity[2] = 0.0;
             return true;
         }
-        outVelocity[0] = ambientWindDirection_[0] / length * ambientWindSpeed_;
+        outVelocity[0] = ambientWindVelocity_[0];
         outVelocity[1] = 0.0;
-        outVelocity[2] = ambientWindDirection_[1] / length * ambientWindSpeed_;
+        outVelocity[2] = ambientWindVelocity_[2];
         return true;
     }
 
@@ -535,27 +512,6 @@ private:
 #undef ENGINE_PHYSICS_FOLIAGE_BIND
     }
 
-    struct FoliageSettings
-    {
-        double        fixedRateHz               = 60.0;
-        std::uint32_t maximumStepsPerSimulate   = 8;
-        std::uint32_t maximumFields             = 64;
-        std::uint32_t maximumInstances          = 2000000;
-        std::uint32_t maximumInstancesPerField  = 500000;
-
-        // Sway amplitude factor (meters per second of target oscillation at
-        // full wind speed and bend scale).
-        double swayAmplitude = 0.15;
-
-        // Wind sample stride: instance wind samples refresh every Nth step
-        // (phase-spread by instance index); 1 samples every step.
-        std::uint32_t windSampleStride = 1;
-
-        // Simulation LOD: fields below the Full band update on a staggered
-        // cadence; the per-band interval says how many fixed steps one due
-        // step covers (0 freezes that band, which is the Cached default).
-        engine::util::SimulationLodSettings lod{};
-    };
 
     ParticipantManifest manifest_;
     FoliageCapability   capability_{};
@@ -566,6 +522,9 @@ private:
 
     FoliageStatistics statistics_{};
 
+    // Ambient breeze velocity (normalized direction x speed), normalized
+    // once here instead of per instance per step.
+    double ambientWindVelocity_[2] = {0.0, 0.0};
     double ambientWindDirection_[2] = {1.0, 0.0};
     double ambientWindSpeed_        = 0.0;
 
@@ -589,7 +548,7 @@ private:
 } // namespace engine::physics_foliage
 
 // Module entry point queried by the kernel after dlopen: one .so providing
-// the physics_foliage capability, requiring physics_rigid, and optionally
+// the physics_foliage capability, declaring no requirements, and optionally
 // using physics_fields for wind sampling.
 extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQueryModuleEntryTable()
 {

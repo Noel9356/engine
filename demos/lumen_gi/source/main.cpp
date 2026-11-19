@@ -297,8 +297,8 @@ int main(int argc, char **argv)
     windowCapability.getFramebufferSize(windowCapability.self, windowHandle, &framebufferWidth, &framebufferHeight);
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
-        framebufferWidth  = 640;
-        framebufferHeight = 360;
+        framebufferWidth  = 1920;
+        framebufferHeight = 1080;
     }
     renderCapability.setViewport(renderCapability.self, rendererHandle, framebufferWidth, framebufferHeight);
 

@@ -4,6 +4,8 @@
 #pragma once
 
 #include <engine/physics_cloth/capabilities.hpp>
+#include <engine/physics_rigid/capabilities.hpp>
+#include <engine/util/particle_spatial_hash.hpp>
 #include <engine/util/simulation_lod.hpp>
 #include <engine/util/step_accumulator.hpp>
 
@@ -21,6 +23,13 @@ struct DistanceConstraint
     double        restLength = 0.0;
     double        compliance = 0.0;
     bool          broken     = false; // torn constraint; skipped from then on
+
+    // XPBD Lagrange multiplier accumulator for the current substep. It resets
+    // when each substep begins and accumulates across the solver iterations,
+    // so repeated passes soften the constraint through the compliance term
+    // exactly as the XPBD formulation prescribes instead of re-solving from
+    // scratch every pass.
+    double lambda = 0.0;
 };
 
 // One quad of the cloth grid (four particle indices in row-major order),
@@ -33,13 +42,6 @@ struct ClothFace
     std::uint32_t particleB = 0;
     std::uint32_t particleC = 0;
     std::uint32_t particleD = 0;
-};
-
-// One (cell id, particle) pair for the self-collision spatial hash.
-struct SelfCollisionEntry
-{
-    std::uint64_t cellId   = 0;
-    std::uint32_t particle = 0;
 };
 
 // One live cloth.
@@ -80,7 +82,7 @@ struct ClothRecord
     double tearStrain          = 0.0; // stretch ratio beyond rest that permanently breaks a constraint (0 = off)
     double selfCollisionRadius = 0.0; // self-collision sphere radius per particle (0 = off)
 
-    double windAcceleration[3] = {0.0, 0.0, 0.0};
+    double windVelocity[3] = {0.0, 0.0, 0.0};
 
     // When true the wind vector acts as a far-field wind velocity for the
     // per-face drag-and-lift model; when false it is a uniform per-particle
@@ -124,13 +126,10 @@ struct ClothRecord
     std::vector<double> preStepPositions;
     std::vector<double> preStepVelocities;
 
-    // Self-collision scratch (rebuilt per substep while enabled; reused so
-    // stepping stays allocation-free after the first pass): the sorted (cell
-    // id, particle) pairs, the unique ascending cell ids, and each bucket's
-    // start offset into the sorted pairs.
-    std::vector<SelfCollisionEntry> selfCollisionEntries;
-    std::vector<std::uint64_t>      selfCollisionCells;
-    std::vector<std::uint32_t>      selfCollisionCellStarts;
+    // Self-collision spatial hash: the shared sorted-bucket structure rebuilt
+    // per substep while enabled (reused buffers; a warmed-up record rebuilds
+    // without allocating).
+    engine::util::ParticleSpatialHash selfCollisionHash;
 };
 
 // Module-wide budgets read from the [physics_cloth] section.

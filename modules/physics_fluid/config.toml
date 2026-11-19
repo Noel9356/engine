@@ -12,6 +12,7 @@ lod_procedural_threshold     = 0.25
 lod_simplified_threshold     = 0.5
 fixed_rate_hz              = 60.0
 maximum_fluids             = 16
+maximum_neighbors_per_particle = 128
 maximum_particles          = 500000
 maximum_particles_per_fluid = 50000
 maximum_steps_per_simulate = 8

@@ -317,8 +317,8 @@ int main(int argc, char **argv)
     windowCapability.getFramebufferSize(windowCapability.self, windowHandle, &framebufferWidth, &framebufferHeight);
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
-        framebufferWidth  = 960;
-        framebufferHeight = 540;
+        framebufferWidth  = 1920;
+        framebufferHeight = 1080;
     }
     renderCapability.setViewport(renderCapability.self, renderer::invalidRenderer, framebufferWidth, framebufferHeight);
 
@@ -943,6 +943,7 @@ int main(int argc, char **argv)
         const std::uint64_t framesRendered = frameIndex + 1;
         if (options.statsEveryFrames != 0 && framesRendered % options.statsEveryFrames == 0)
         {
+
             physics_rigid::WorldStatistics statistics{};
             if (dependencies.rigid->worldStatistics(dependencies.rigid->self, scene.world, &statistics))
             {

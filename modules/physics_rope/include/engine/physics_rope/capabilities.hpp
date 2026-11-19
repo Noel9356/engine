@@ -163,7 +163,8 @@ struct RopeCapability
     // position (or unpins it); pinNodeToPosition pins at an explicit world
     // point; attachNodeToBody follows the body's local anchor each substep
     // and detachNode releases any pin or attachment. Attached nodes carry no
-    // mass (the rigid body drives them).
+    // mass (the rigid body drives them). setNodePinned(false) releases
+    // whatever held the node (pin or body attachment) back to Free.
     bool (*setNodePinned)(void *self, RopeHandle rope, std::uint32_t nodeIndex, bool pinned);
     bool (*pinNodeToPosition)(void *self, RopeHandle rope, std::uint32_t nodeIndex, const double position[3]);
     bool (*attachNodeToBody)(void *self, RopeHandle rope, std::uint32_t nodeIndex,
@@ -190,12 +191,13 @@ struct RopeCapability
 
     // Per-segment tension readout (ABI 2): one value per segment (segments
     // = nodeCount - 1) for the most recent completed step, in force units —
-    // tension_i is the step's summed per-substep |lambda| for segment i
-    // divided by fixedDeltaSeconds^2 (lambda carries mass-times-length
-    // units, so the division yields newtons). Zero before the first
-    // completed step; broken segments stop accumulating once released. Same
-    // copy-with-capacity idiom as copyNodePositions: outRequired receives
-    // `segments`, and capacity below that returns false without copying.
+    // tension_i is the segment's peak per-substep |lambda| of the step
+    // divided by the substep delta squared (lambda carries mass-times-length
+    // units, so the division yields newtons at the solve's own time scale).
+    // Zero before the first completed step; broken segments stop
+    // accumulating once released. Same copy-with-capacity idiom as
+    // copyNodePositions: outRequired receives `segments`, and capacity
+    // below that returns false without copying.
     bool (*copyRopeTension)(
         void *self, RopeHandle rope, double *outTension, std::uint32_t capacity, std::uint32_t *outRequired);
 
@@ -212,9 +214,10 @@ struct RopeCapability
     // Simulation LOD: writes the rope's importance score in [0, 1]. The
     // module maps the score onto the five fidelity bands (Cached, Animation,
     // Procedural, Simplified, Full) with demotion hysteresis; bands below
-    // Full keep the rope's fixed step size and reduce the internal XPBD
-    // substep count instead, and Cached ropes freeze until the score rises
-    // again. Non-finite scores resolve to Cached.
+    // Full reduce the internal XPBD substep count, a due step at a reduced
+    // cadence integrates the accumulated fixed deltas in one pass (so the
+    // rope keeps advancing at wall time), and Cached ropes freeze until the
+    // score rises again. Non-finite scores resolve to Cached.
     bool (*setRopeImportance)(void *self, RopeHandle rope, double importance);
 };
 

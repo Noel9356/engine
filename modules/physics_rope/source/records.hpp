@@ -128,7 +128,12 @@ struct RopeSettings
     // Velocity clamp applied to the derived per-substep node velocities.
     double maximumVelocity = 30.0;
 
-    // Simulation LOD: fidelity bands keep the fixed step size and reduce the
+    // Simulation LOD: fidelity bands reduce the internal substep count
+    // (Full = substepsPerStep, Simplified = half, Procedural = quarter,
+    // Animation = one); a due step at interval N integrates N fixed deltas
+    // in one pass, so a reduced-cadence rope keeps advancing at wall time
+    // (the interval table says how many fixed steps each band updates on; 0
+    // freezes that band, which is the Cached default).
     // internal substep count instead (Full = substepsPerStep, Simplified =
     // half, Procedural = quarter, Animation = one); the interval table says
     // how many fixed steps each band updates on (0 freezes that band, which

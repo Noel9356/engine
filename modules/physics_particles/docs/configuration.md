@@ -24,6 +24,8 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_particles.maximum_particles` | integer | 1 - 10000000 | `1000000` | Module-wide particle budget across all emitters; each emitter's own pool is additionally bounded by `maximum_particles_per_emitter`. |
 | `physics_particles.maximum_particles_per_emitter` | integer | 1 - 1000000 | `100000` | Largest pool one emitter may hold; `createEmitter` and `setEmitterDescription` reject descriptions above it and spawn growth stops there. |
 | `physics_particles.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped. |
+| `physics_particles.maximum_velocity` | number | (0, 10000] | `30.0` | Stability clamp in meters per second: every step rescales any faster particle's velocity down to this magnitude, preserving direction. |
+| `physics_particles.snow_slide_friction` | number | [0, 4] | `0.2` | Coulomb friction coefficient of settled snow: the retained horizontal velocity decelerates at `coefficient x |g|` per second of contact, so drifted landings slide for a moment before stopping (0 stops instantly). |
 
 ## Out-of-range and invalid values
 

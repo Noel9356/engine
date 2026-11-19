@@ -10,6 +10,8 @@
 // consumer's fixed update, so water physics composes deterministically with
 // every other force source.
 
+#include "records.hpp"
+
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -34,117 +36,6 @@ namespace
 {
 
 namespace math = engine::physics_rigid::math;
-
-constexpr double kGravityForWaves = 9.81; // deep-water dispersion reference gravity
-
-constexpr int    kGerstnerIterations    = 4;    // fixed inverse-iteration count for the displaced height
-
-struct PreparedWave
-{
-    math::Vec3 direction;           // unit, XZ plane
-    double     waveNumber           = 0.0;  // k = 2*pi / wavelength
-    double     amplitude            = 0.0;
-    double     horizontalAmplitude  = 0.0;  // Q * amplitude: Gerstner horizontal crest displacement (meters)
-    double     omega                = 0.0;  // deep-water dispersion: omega = sqrt(g * k)
-};
-
-struct Ripple
-{
-    bool   active    = false;
-    double centerX   = 0.0;
-    double centerZ   = 0.0;
-    double age       = 0.0;
-    double strength  = 0.0; // initial ring amplitude (meters)
-};
-
-// Per-registration wake bookkeeping, kept parallel to the ocean's
-// registeredBodies vector: the body's last seen position and the horizontal
-// distance travelled since its last emitted wake ripple.
-struct WakeState
-{
-    double lastPositionX     = 0.0;
-    double lastPositionZ     = 0.0;
-    double travelledDistance = 0.0; // meters since the last wake ripple
-};
-struct OceanRecord
-{
-    OceanHandle handle = invalidOcean;
-
-    engine::physics_rigid::WorldHandle world = engine::physics_rigid::invalidWorld;
-
-    OceanDescription description{};
-
-    // Effective uniform current (meters per second); the y component is
-    // always 0. Re-derived from the description on create and on
-    // setOceanDescription unless the consumer set an explicit current
-    // through setCurrentVelocity (which setOceanDescription then keeps).
-    math::Vec3 currentVelocity{};
-    bool       currentExplicit = false;
-
-    // Simulated time of this ocean: the ripple pass advances it by the
-    // interval-scaled step delta, so the wake submersion gate samples the
-    // wave surface at the ocean's own clock even when the consumer never
-    // calls applyBuoyancy.
-    double simulatedTime = 0.0;
-
-    std::vector<PreparedWave> waves;
-
-    std::vector<Ripple> ripples;
-
-    // Ascending body-handle order; wakeStates and bodyVolumes stay
-    // index-parallel to it. bodyVolumes caches each registered body's shape
-    // volume (shapes are immutable per body handle; a negative value marks
-    // "not yet computed"), so the buoyancy pass does not re-derive it from
-    // the description every step.
-    std::vector<engine::physics_rigid::BodyHandle> registeredBodies;
-
-    std::vector<WakeState> wakeStates;
-    std::vector<double>    bodyVolumes;
-
-    // Gravity magnitude of this ocean's rigid world, captured at creation
-    // (the buoyancy pass pushes opposite to it).
-    double gravityMagnitude = 9.81;
-
-    // Simulation LOD: importance-driven fidelity band shared by the two
-    // passes, each with its own staggered cadence (the phases derive from
-    // the registration ordinal). A due ripple pass ages the ripples by the
-    // interval delta; a due buoyancy pass scales its forces by the
-    // interval, so the impulse per wall time matches the full-rate
-    // schedule.
-    double                           importance = 1.0;
-    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence  rippleCadence{};
-    engine::util::SimulationCadence  buoyancyCadence{};
-    std::uint64_t                    lodSkippedSteps = 0;
-};
-
-struct WaterSettings
-{
-    std::uint32_t maximumOceans           = 16;
-    std::uint32_t maximumRipplesPerOcean  = 64;
-    std::uint32_t maximumRegisteredBodies = 4096;
-    double        waterDensity            = 1000.0; // kilograms per cubic meter
-    double        rippleSpeed             = 4.0;    // ring expansion (meters per second)
-    double        rippleDecay             = 1.2;    // exponential decay per second
-    double        rippleAttenuation       = 0.35;   // amplitude falloff per meter of radius
-    double        rippleWavelength        = 1.6;    // ring crest spacing (meters)
-    double        buoyancyScale           = 1.0;    // global buoyancy multiplier
-    double        quadraticDragCoefficient = 1.8;   // quadratic water drag per square meter of drag area
-    double        angularDragCoefficient  = 3.0;    // angular damping torque per (rad/s) of submerged body
-    double        wakeSpeedThreshold      = 1.2;    // minimum horizontal speed for wake emission (meters per second)
-    double        wakeSpacingMeters       = 1.5;    // travelled distance between wake ripples (meters)
-    double        wakeStrengthScale       = 0.35;   // wake ripple amplitude per (meter per second) of speed
-    double        wakeSubmergedFraction   = 0.95;   // bodies at or above this submersion emit no wakes
-
-    // A ripple retires when its exponential envelope decays below this
-    // amplitude fraction of its initial strength.
-    double        rippleRetireEnvelope    = 1.0e-3;
-
-    // Simulation LOD: oceans below the Full band run their passes on a
-    // staggered cadence; the per-band interval says how many fixed steps one
-    // due pass covers (0 freezes that band, which is the Cached default).
-    engine::util::SimulationLodSettings lod{};
-};
 
 class WaterModule final : public ModuleInterface
 {
@@ -210,6 +101,15 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_water", "ripple_retire_envelope");
             value && *value > 0.0 && *value < 1.0 && std::isfinite(*value))
             settings_.rippleRetireEnvelope = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_water", "wave_gravity");
+            value && *value > 0.1 && *value <= 100.0 && std::isfinite(*value))
+            settings_.waveGravity = *value;
+        if (const auto value = context.configurationIntegerInSection("physics_water", "gerstner_iterations");
+            value && *value >= 1 && *value <= 32)
+            settings_.gerstnerIterations = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationFloatingInSection("physics_water", "normal_sample_epsilon");
+            value && *value > 1.0e-6 && *value <= 1.0 && std::isfinite(*value))
+            settings_.normalSampleEpsilon = *value;
 
         readLodSettings(context);
 
@@ -255,6 +155,33 @@ private:
     static void setError(WaterError *output, WaterError value) noexcept
     {
         engine::util::setModuleError(output, value);
+    }
+
+    // Refreshes the module-wide registration count: the statistic reports
+    // every ocean's registrations together, not whichever ocean was touched
+    // last.
+    void refreshRegisteredBodyStatistics()
+    {
+        std::size_t total = 0;
+        for (const OceanRecord &ocean : oceans_)
+        {
+            total += ocean.registeredBodies.size();
+        }
+        statistics_.registeredBodies = static_cast<std::uint32_t>(total);
+    }
+
+    // Refreshes the module-wide active-ripple count the same way.
+    void refreshActiveRippleStatistics()
+    {
+        std::size_t active = 0;
+        for (const OceanRecord &ocean : oceans_)
+        {
+            for (const Ripple &ripple : ocean.ripples)
+            {
+                active += ripple.active ? 1u : 0u;
+            }
+        }
+        statistics_.activeRipples = static_cast<std::uint32_t>(active);
     }
 
     bool setOceanImportanceImpl(OceanHandle handle, double importance)
@@ -333,7 +260,7 @@ private:
             prepared.horizontalAmplitude = steepness > 0.0 && candidate.amplitude > 0.0
                                                ? steepness / (prepared.waveNumber * waveCount)
                                                : 0.0;
-            prepared.omega = std::sqrt(kGravityForWaves * prepared.waveNumber);
+            prepared.omega = std::sqrt(settings_.waveGravity * prepared.waveNumber);
             ocean.waves.push_back(prepared);
         }
     }
@@ -369,7 +296,7 @@ private:
     {
         double seedX = x;
         double seedZ = z;
-        for (int iteration = 0; iteration < kGerstnerIterations; ++iteration)
+        for (std::uint32_t iteration = 0; iteration < settings_.gerstnerIterations; ++iteration)
         {
             const math::Vec3 displaced = displacedPosition(ocean, seedX, seedZ, timeSeconds);
             seedX += x - displaced.x;
@@ -468,16 +395,19 @@ private:
         ocean.ripples.assign(settings_.maximumRipplesPerOcean, Ripple{});
         prepareWaves(ocean);
         // The buoyancy pass pushes opposite to this ocean's world gravity;
-        // capture the magnitude once per ocean so worlds with different
-        // gravity settings stay independent.
+        // capturing the magnitude doubles as the world-handle validation: a
+        // world the rigid module does not know is rejected instead of
+        // silently falling back to the default gravity.
         double gravity[3] = {0.0, -9.81, 0.0};
-        if (rigid_->copyWorldGravity(rigid_->self, world, gravity))
+        if (!rigid_->copyWorldGravity(rigid_->self, world, gravity))
         {
-            ocean.gravityMagnitude = std::abs(gravity[1]) > 1.0e-6 ? std::abs(gravity[1])
-                                                                    : std::sqrt(gravity[0] * gravity[0]
-                                                                                + gravity[1] * gravity[1]
-                                                                                + gravity[2] * gravity[2]);
+            setError(error, WaterError::InvalidHandle);
+            return invalidOcean;
         }
+        ocean.gravityMagnitude = std::abs(gravity[1]) > 1.0e-6 ? std::abs(gravity[1])
+                                                               : std::sqrt(gravity[0] * gravity[0]
+                                                                           + gravity[1] * gravity[1]
+                                                                           + gravity[2] * gravity[2]);
         // Simulation LOD: the stagger phase derives from the registration
         // ordinal, so oceans sharing an interval spread their passes across
         // steps.
@@ -506,6 +436,8 @@ private:
         }
         oceans_.pop_back();
         statistics_.oceanCount = static_cast<std::uint32_t>(oceans_.size());
+        refreshRegisteredBodyStatistics();
+        refreshActiveRippleStatistics();
     }
 
     bool setOceanDescriptionImpl(OceanHandle handle, const OceanDescription *description)
@@ -534,7 +466,7 @@ private:
         {
             return false;
         }
-        const double epsilon  = 0.05;
+        const double epsilon  = settings_.normalSampleEpsilon;
         const double height   = surfaceHeight(*ocean, x, z, timeSeconds);
         const double heightX0 = surfaceHeight(*ocean, x - epsilon, z, timeSeconds);
         const double heightX1 = surfaceHeight(*ocean, x + epsilon, z, timeSeconds);
@@ -651,7 +583,7 @@ private:
             {
                 ocean.bodyVolumes.erase(ocean.bodyVolumes.begin() + static_cast<std::ptrdiff_t>(position));
             }
-            statistics_.registeredBodies = static_cast<std::uint32_t>(ocean.registeredBodies.size());
+            refreshRegisteredBodyStatistics();
         }
         for (std::size_t index = 0; index < ocean.registeredBodies.size(); ++index)
         {
@@ -726,7 +658,8 @@ private:
                 ++active;
             }
         }
-        statistics_.activeRipples = active;
+        (void)active; // per-ocean count folded into the aggregate below
+        refreshActiveRippleStatistics();
         return true;
     }
 
@@ -764,7 +697,10 @@ private:
         wake.lastPositionX = state.transform.position.x;
         wake.lastPositionZ = state.transform.position.z;
         ocean->wakeStates.insert(ocean->wakeStates.begin() + position, wake);
-        statistics_.registeredBodies = static_cast<std::uint32_t>(ocean->registeredBodies.size());
+        // The volume cache stays index-parallel: a fresh slot starts without
+        // a cached volume (-1 recomputes it on the next buoyancy pass).
+        ocean->bodyVolumes.insert(ocean->bodyVolumes.begin() + position, -1.0);
+        refreshRegisteredBodyStatistics();
         return true;
     }
 
@@ -783,7 +719,11 @@ private:
         const auto position = static_cast<std::ptrdiff_t>(entry - ocean->registeredBodies.begin());
         ocean->registeredBodies.erase(entry);
         ocean->wakeStates.erase(ocean->wakeStates.begin() + position);
-        statistics_.registeredBodies = static_cast<std::uint32_t>(ocean->registeredBodies.size());
+        if (position < static_cast<std::ptrdiff_t>(ocean->bodyVolumes.size()))
+        {
+            ocean->bodyVolumes.erase(ocean->bodyVolumes.begin() + position);
+        }
+        refreshRegisteredBodyStatistics();
         return true;
     }
 
@@ -810,6 +750,11 @@ private:
         collectSamplePoints(state, description, samplePoints_);
         if (samplePoints_.empty())
         {
+            // A shape without sample points reports nothing submerged: the
+            // outputs stay defined (zeros) so a failed query never leaves
+            // uninitialized values behind.
+            *outFraction = 0.0;
+            *outDepth    = 0.0;
             return false;
         }
         std::uint32_t below = 0;
@@ -833,7 +778,7 @@ private:
     {
         OceanRecord *ocean = findOcean(handle);
         if (ocean == nullptr || rigid_ == nullptr || !std::isfinite(timeSeconds) || !std::isfinite(fixedDeltaSeconds)
-            || fixedDeltaSeconds <= 0.0)
+            || fixedDeltaSeconds <= 0.0 || fixedDeltaSeconds > 0.1)
         {
             return false;
         }
@@ -876,8 +821,7 @@ private:
                                               + static_cast<std::ptrdiff_t>(index));
                 ocean->wakeStates.erase(ocean->wakeStates.begin() + static_cast<std::ptrdiff_t>(index));
                 ocean->bodyVolumes.erase(ocean->bodyVolumes.begin() + static_cast<std::ptrdiff_t>(index));
-                statistics_.registeredBodies
-                    = static_cast<std::uint32_t>(ocean->registeredBodies.size());
+                refreshRegisteredBodyStatistics();
                 continue;
             }
             const engine::physics_rigid::BodyState &state = buoyancyStates_[index];

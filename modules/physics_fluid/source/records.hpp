@@ -6,6 +6,7 @@
 
 #include <engine/physics_fluid/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
+#include <engine/util/particle_spatial_hash.hpp>
 #include <engine/util/simulation_lod.hpp>
 #include <engine/util/step_accumulator.hpp>
 
@@ -29,13 +30,12 @@ struct FluidRecord
     std::vector<double> pressures;  // per particle
     std::vector<double> accelerations; // x,y,z per particle (per substep)
 
-    // Spatial hash scratch rebuilt per substep: cell start offsets into the
-    // sorted particle index list, plus the ordered cell ids and counts.
-    std::vector<std::uint32_t> cellBuckets;
-    std::vector<std::uint32_t> sortedIndices;
-    std::vector<std::uint64_t> hashCellIds;
-    std::vector<std::uint32_t> hashCellCounts;
-    double hashCellSize = 0.0;
+    // Spatial hash rebuilt per substep through the shared sorted-bucket
+    // structure, plus the per-particle candidate scratch the neighbor cache
+    // fills from (reused buffers; a warmed-up record rebuilds without
+    // allocating).
+    engine::util::ParticleSpatialHash particleHash;
+    std::vector<std::uint32_t>        neighborCandidates;
 
     // Per-substep neighbor cache shared by the density and force passes:
     // positions do not change between them, so the neighbor lists collect
@@ -43,6 +43,11 @@ struct FluidRecord
     std::vector<std::uint32_t> neighborStarts;  // per particle: start into neighborIndices
     std::vector<std::uint32_t> neighborCounts;  // per particle
     std::vector<std::uint32_t> neighborIndices; // flat neighbor ids
+
+    // Reused scratch for the batched sphere-overlap queries against the
+    // rigid world (one batch per substep).
+    std::vector<engine::physics_rigid::SphereOverlapQuery>  collisionQueries;
+    std::vector<engine::physics_rigid::SphereOverlapResult> collisionResults;
 
     double gravity[3] = {0.0, -9.81, 0.0}; // read from the rigid world at creation
 
@@ -78,15 +83,21 @@ struct FluidSettings
     std::uint32_t maximumParticlesPerFluid = 50000;
     double        maximumVelocity         = 30.0; // stability clamp (meters per second)
 
+    // Neighbor budget per particle per substep: the SPH passes read at most
+    // this many neighbors, so a degenerately dense cluster cannot grow the
+    // per-particle neighbor lists (and the force pass) without bound.
+    std::uint32_t maximumNeighborsPerParticle = 128;
+
     // Bounds restitution: the velocity factor a particle keeps along the
     // axis it hits the bounds box on (a small bounce).
     double boundsRestitution = 0.3;
 
-    // Simulation LOD: fidelity bands keep the fixed step size and reduce the
-    // internal substep count instead (Full = substepsPerStep, Simplified =
-    // half, Procedural = quarter, Animation = one); the interval table says
-    // how many fixed steps each band updates on (0 freezes that band, which
-    // is the Cached default).
+    // Simulation LOD: fidelity bands reduce the internal substep count
+    // (Full = substepsPerStep, Simplified = half, Procedural = quarter,
+    // Animation = one); a due step at interval N integrates N fixed deltas
+    // in one pass, so a reduced-cadence fluid keeps advancing at wall time
+    // (the interval table says how many fixed steps each band updates on; 0
+    // freezes that band, which is the Cached default).
     engine::util::SimulationLodSettings lod{};
 };
 

@@ -1,7 +1,7 @@
 config_keys           = [
     "physics_water.angular_drag_coefficient",
     "physics_water.buoyancy_scale",
-    "physics_water.quadratic_drag_coefficient",
+    "physics_water.gerstner_iterations",
     "physics_water.lod_animation_threshold",
     "physics_water.lod_demotion_margin",
     "physics_water.lod_enabled",
@@ -15,6 +15,8 @@ config_keys           = [
     "physics_water.maximum_oceans",
     "physics_water.maximum_registered_bodies",
     "physics_water.maximum_ripples_per_ocean",
+    "physics_water.normal_sample_epsilon",
+    "physics_water.quadratic_drag_coefficient",
     "physics_water.ripple_attenuation",
     "physics_water.ripple_decay",
     "physics_water.ripple_retire_envelope",
@@ -25,6 +27,7 @@ config_keys           = [
     "physics_water.wake_strength_scale",
     "physics_water.wake_submerged_fraction",
     "physics_water.water_density",
+    "physics_water.wave_gravity",
 ]
 name                  = "physics_water"
 provides              = ["physics_water"]

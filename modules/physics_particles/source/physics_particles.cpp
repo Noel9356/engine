@@ -8,6 +8,8 @@
 // acceleration, optionally collide with the rigid world through the batched
 // sphere-overlap query, and recycle their pool slots FIFO.
 
+#include "records.hpp"
+
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -45,75 +47,6 @@ double hashFraction(std::uint64_t seed)
     return static_cast<double>(seed >> 11) / static_cast<double>(1ull << 53);
 }
 
-struct SlotState
-{
-    double position[3]  = {0.0, 0.0, 0.0};
-    double velocity[3]  = {0.0, 0.0, 0.0};
-    double age          = 0.0;
-    double lifetime     = 1.0;
-    double size         = 0.1;
-    double baseSize     = 0.1;
-    double swayPhase    = 0.0;
-    double jitter[3]    = {0.0, 0.0, 0.0};
-    double spawnPosition[3] = {0.0, 0.0, 0.0}; // spawn anchor for the insect wander
-    bool   settled      = false; // snow resting on geometry
-    double settledTime  = 0.0;   // total settle seconds (leaves' brief settle)
-    std::uint32_t seed  = 0;
-    bool   alive        = false;
-};
-
-struct EmitterRecord
-{
-    EmitterHandle handle = invalidEmitter;
-
-    engine::physics_rigid::WorldHandle world = engine::physics_rigid::invalidWorld;
-
-    EmitterDescription description{};
-
-    std::vector<SlotState> slots;
-    std::uint32_t          spawnCursor = 0; // FIFO recycling cursor
-    double                 spawnDebt   = 0.0; // fractional particle accumulation
-    std::uint64_t          generationCounter = 0; // per-slot hash generation
-    double                 swayClock  = 0.0; // global emitter clock for sway/flicker phases
-
-    double gravity[3] = {0.0, -9.81, 0.0}; // read from the rigid world at creation
-
-    double windAcceleration[3] = {0.0, 0.0, 0.0};
-
-    std::uint64_t spawnedTotal = 0;
-    std::uint64_t expiredTotal = 0;
-
-    // Simulation LOD: the importance-driven fidelity band and the staggered
-    // update cadence. The phase derives from the registration ordinal so
-    // emitters sharing an interval spread their work across steps.
-    double                            importance = 1.0;
-    engine::util::SimulationFidelity  lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence   cadence{};
-
-    // Fixed-step budget bookkeeping for simulate().
-    engine::util::StepAccumulator accumulator;
-};
-
-struct ParticlesSettings
-{
-    double        fixedRateHz            = 60.0;
-    std::uint32_t maximumStepsPerSimulate = 8;
-    std::uint32_t maximumEmitters        = 128;
-    std::uint32_t maximumParticles       = 1000000;
-    std::uint32_t maximumParticlesPerEmitter = 100000;
-
-    // Simulation LOD: emitters below the Full band update on a staggered
-    // cadence; the per-band interval says how many fixed steps one due step
-    // covers (0 freezes the band's emitters). The whole block comes from the
-    // shared fidelity-ladder vocabulary.
-    engine::util::SimulationLodSettings lod{};
-
-    // Behavior tuning: the leaves' brief contact hold, and the insect
-    // wander controller's radius and steering gain.
-    double leafSettleSeconds   = 0.8;
-    double insectWanderRadius  = 1.5;
-    double insectSteerGain     = 8.0;
-};
 
 class ParticlesModule final : public ModuleInterface
 {
@@ -202,6 +135,12 @@ private:
         readPositive("leaf_settle_seconds", settings_.leafSettleSeconds, 60.0);
         readPositive("insect_wander_radius", settings_.insectWanderRadius, 1000.0);
         readPositive("insect_steer_gain", settings_.insectSteerGain, 1000.0);
+        // Snow slide friction is a Coulomb coefficient: zero (instant stop)
+        // is valid, so its read allows the closed lower bound.
+        if (const auto value = context.configurationFloatingInSection("physics_particles", "snow_slide_friction");
+            value && *value >= 0.0 && *value <= 4.0 && std::isfinite(*value))
+            settings_.snowSlideFriction = *value;
+        readPositive("maximum_velocity", settings_.maximumVelocity, 10'000.0);
     }
 
     static void setError(ParticlesError *output, ParticlesError value) noexcept
@@ -217,7 +156,8 @@ private:
 
     bool validateDescription(const EmitterDescription &description) const
     {
-        if (!std::isfinite(description.origin[0]) || !std::isfinite(description.origin[1])
+        if (description.maximumParticles == 0
+            || !std::isfinite(description.origin[0]) || !std::isfinite(description.origin[1])
             || !std::isfinite(description.origin[2]) || !std::isfinite(description.halfExtents[0])
             || !std::isfinite(description.halfExtents[1]) || !std::isfinite(description.halfExtents[2])
             || description.halfExtents[0] < 0.0 || description.halfExtents[1] < 0.0
@@ -266,7 +206,7 @@ private:
         const double sizeFraction = hashFraction(baseSeed + 0x4000ull);
         slot.baseSize = description.minimumSize + (description.maximumSize - description.minimumSize) * sizeFraction;
         slot.size     = slot.baseSize;
-        slot.swayPhase = hashFraction(baseSeed + 0x5000ull) * 6.283185307179586;
+        slot.swayPhase = hashFraction(baseSeed + 0x5000ull) * math::kTwoPi;
         slot.jitter[0] = hashFraction(baseSeed + 0x6000ull) * 2.0 - 1.0;
         slot.jitter[1] = hashFraction(baseSeed + 0x7000ull) * 2.0 - 1.0;
         slot.jitter[2] = hashFraction(baseSeed + 0x8000ull) * 2.0 - 1.0;
@@ -330,14 +270,42 @@ private:
             {
                 // Snow resting on geometry: keep it until its lifetime ends
                 // or the surface moves away (checked by the collision pass).
-                slot.velocity[0] = 0.0;
-                slot.velocity[1] = 0.0;
-                slot.velocity[2] = 0.0;
+                // Settled snow slides: a Coulomb friction coefficient
+                // (snow_slide_friction, 0.2 by default) decelerates the
+                // retained horizontal velocity at friction x |g|, so flakes
+                // that landed with drift keep creeping downhill for a moment
+                // instead of stopping on the spot.
                 if (description.kind == EmitterKind::Snow)
                 {
+                    const double gravityMagnitude = std::sqrt(emitter.gravity[0] * emitter.gravity[0]
+                        + emitter.gravity[1] * emitter.gravity[1]
+                        + emitter.gravity[2] * emitter.gravity[2]);
+                    const double deceleration = settings_.snowSlideFriction * gravityMagnitude;
+                    slot.velocity[1] = 0.0;
+                    const double slideSpeed = std::sqrt(slot.velocity[0] * slot.velocity[0]
+                        + slot.velocity[2] * slot.velocity[2]);
+                    if (slideSpeed <= deceleration * stepDeltaSeconds)
+                    {
+                        slot.velocity[0] = 0.0;
+                        slot.velocity[2] = 0.0;
+                    }
+                    else
+                    {
+                        const double retained = (slideSpeed - deceleration * stepDeltaSeconds) / slideSpeed;
+                        slot.velocity[0] *= retained;
+                        slot.velocity[2] *= retained;
+                        slot.position[0] += slot.velocity[0] * stepDeltaSeconds;
+                        slot.position[2] += slot.velocity[2] * stepDeltaSeconds;
+                    }
                     slot.size = slot.baseSize * (1.0 - 0.5 * slot.age / slot.lifetime);
                 }
                 else
+                {
+                    slot.velocity[0] = 0.0;
+                    slot.velocity[1] = 0.0;
+                    slot.velocity[2] = 0.0;
+                }
+                if (description.kind != EmitterKind::Snow)
                 {
                     // Leaves settle briefly on impact and then expire (they
                     // hold the contact for the configured settle window). The
@@ -361,7 +329,7 @@ private:
                 emitter.gravity[1] * description.gravityScale + emitter.windAcceleration[1],
                 emitter.gravity[2] * description.gravityScale + emitter.windAcceleration[2]};
             // Horizontal sway around the wind direction.
-            const double swayPhase = slot.swayPhase + emitter.swayClock * description.swayFrequency * 6.283185307179586;
+            const double swayPhase = slot.swayPhase + emitter.swayClock * description.swayFrequency * math::kTwoPi;
             acceleration[0] += std::cos(swayPhase) * description.swayAmplitude * slot.jitter[0];
             acceleration[2] += std::sin(swayPhase * 1.3 + slot.jitter[1]) * description.swayAmplitude * slot.jitter[2];
 
@@ -372,7 +340,7 @@ private:
             // small 1.5 meter wander radius around its spawn point.
             if (description.kind == EmitterKind::Insects)
             {
-                const double wanderPhase = emitter.swayClock * 3.141592653589793; // slow 0.5 Hz wander phase
+                const double wanderPhase = emitter.swayClock * math::kPi; // slow 0.5 Hz wander phase
                 double targetVelocity[3] = {
                     0.9 * std::sin(wanderPhase + slot.swayPhase + slot.jitter[0] * 2.4),
                     0.35 * std::sin(wanderPhase * 1.7 + slot.swayPhase * 2.0 + slot.jitter[1] * 3.1),
@@ -397,6 +365,24 @@ private:
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
                 slot.velocity[axis] = slot.velocity[axis] * dragFactor + acceleration[axis] * stepDeltaSeconds;
+            }
+            // Stability clamp: a mis-tuned steer gain or wind burst cannot
+            // integrate unbounded speeds; the clamp preserves direction.
+            {
+                const double speedSquared = slot.velocity[0] * slot.velocity[0]
+                    + slot.velocity[1] * slot.velocity[1]
+                    + slot.velocity[2] * slot.velocity[2];
+                const double maximum = settings_.maximumVelocity;
+                if (speedSquared > maximum * maximum)
+                {
+                    const double scale = maximum / std::sqrt(speedSquared);
+                    slot.velocity[0] *= scale;
+                    slot.velocity[1] *= scale;
+                    slot.velocity[2] *= scale;
+                }
+            }
+            for (std::uint32_t axis = 0; axis < 3; ++axis)
+            {
                 slot.position[axis] += slot.velocity[axis] * stepDeltaSeconds;
             }
 
@@ -635,6 +621,10 @@ private:
                 if (!emitter->slots[probe].alive)
                 {
                     slotIndex = probe;
+                    // Continue the next burst particle's search from here so
+                    // a burst scans the pool once overall instead of once per
+                    // particle.
+                    emitter->spawnCursor = (probe + 1) % static_cast<std::uint32_t>(emitter->slots.size());
                     break;
                 }
             }
@@ -666,7 +656,7 @@ private:
             SlotState &slot = emitter->slots[slotIndex];
             spawnSlot(*emitter, slot, static_cast<std::uint32_t>(slotIndex));
             const std::uint64_t burstSeed = emitter->generationCounter;
-            const double azimuth   = hashFraction(burstSeed + 0xA000ull) * 6.283185307179586;
+            const double azimuth   = hashFraction(burstSeed + 0xA000ull) * math::kTwoPi;
             const double elevation = (hashFraction(burstSeed + 0xB000ull) * 2.0 - 1.0);
             const double horizontal = std::sqrt(std::max(0.0, 1.0 - elevation * elevation));
             slot.position[0] = position[0];

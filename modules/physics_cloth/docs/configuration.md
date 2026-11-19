@@ -13,7 +13,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_cloth.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped. |
 | `physics_cloth.lod_animation_threshold` | number | (0, 1] | `0.1` | Fidelity-ladder boundary between Animation and Cached; scores below it freeze cloths. Must stay below `lod_procedural_threshold`. |
 | `physics_cloth.lod_demotion_margin` | number | [0, 1) | `0.8` | Demotion hysteresis fraction; a cloth keeps its band until its importance falls below the band's entry threshold times this margin. |
-| `physics_cloth.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: bands below Full keep the fixed step size and reduce the internal XPBD substep count instead. |
+| `physics_cloth.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: bands below Full reduce the internal XPBD substep count, and a due step integrates the accumulated fixed deltas in one pass, so the cloth keeps advancing at wall time. |
 | `physics_cloth.lod_full_threshold` | number | (0, 1] | `0.75` | Importance at or above which a cloth runs the Full band. Must stay above `lod_simplified_threshold`. |
 | `physics_cloth.lod_interval_animation` | integer | 0 - 65536 | `8` | Fixed steps between updates for Animation-band cloths; `0` freezes them. |
 | `physics_cloth.lod_interval_cached` | integer | 0 - 65536 | `0` | `0` freezes Cached-band cloths (the default). |

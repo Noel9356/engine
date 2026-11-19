@@ -179,9 +179,9 @@ private:
         {
             applyAerodynamicWind(cloth, substepDelta);
         }
-        const double windAccelerationX = cloth.aerodynamicWind ? 0.0 : cloth.windAcceleration[0];
-        const double windAccelerationY = cloth.aerodynamicWind ? 0.0 : cloth.windAcceleration[1];
-        const double windAccelerationZ = cloth.aerodynamicWind ? 0.0 : cloth.windAcceleration[2];
+        const double windVelocityX = cloth.aerodynamicWind ? 0.0 : cloth.windVelocity[0];
+        const double windVelocityY = cloth.aerodynamicWind ? 0.0 : cloth.windVelocity[1];
+        const double windVelocityZ = cloth.aerodynamicWind ? 0.0 : cloth.windVelocity[2];
         const std::size_t particleCount = cloth.positions.size() / 3;
         const double      dampingFactor = 1.0 / (1.0 + substepDelta * cloth.damping);
         for (std::size_t particle = 0; particle < particleCount; ++particle)
@@ -203,9 +203,9 @@ private:
             cloth.previousPositions[offset]     = cloth.positions[offset];
             cloth.previousPositions[offset + 1] = cloth.positions[offset + 1];
             cloth.previousPositions[offset + 2] = cloth.positions[offset + 2];
-            cloth.velocities[offset] += (cloth.gravity[0] + windAccelerationX) * substepDelta;
-            cloth.velocities[offset + 1] += (cloth.gravity[1] + windAccelerationY) * substepDelta;
-            cloth.velocities[offset + 2] += (cloth.gravity[2] + windAccelerationZ) * substepDelta;
+            cloth.velocities[offset] += (cloth.gravity[0] + windVelocityX) * substepDelta;
+            cloth.velocities[offset + 1] += (cloth.gravity[1] + windVelocityY) * substepDelta;
+            cloth.velocities[offset + 2] += (cloth.gravity[2] + windVelocityZ) * substepDelta;
             cloth.velocities[offset] *= dampingFactor;
             cloth.velocities[offset + 1] *= dampingFactor;
             cloth.velocities[offset + 2] *= dampingFactor;
@@ -262,117 +262,133 @@ private:
         }
         for (const ClothFace &face : cloth.faces)
         {
-            // Triangle (A, B, D) of the quad: one triangle per cell keeps the
-            // force O(cells); the neighboring cell's mirrored triangle covers
-            // the shared diagonal's other half.
-            const std::size_t   offsets[3]  = { static_cast<std::size_t>(face.particleA) * 3,
-                                                static_cast<std::size_t>(face.particleB) * 3,
-                                                static_cast<std::size_t>(face.particleD) * 3 };
-            const std::uint32_t particles[3] = { face.particleA, face.particleB, face.particleD };
-
-            // Face velocity: the average of the triangle's free particles.
-            double        faceVelocity[3] = { 0.0, 0.0, 0.0 };
-            std::uint32_t freeCount       = 0;
-            for (const std::size_t offset : offsets)
+            // Both triangles of the quad - (A, B, D) and (B, C, D) - receive
+            // the wind response, so the full quad surface contributes instead
+            // of one half per cell.
+            const std::uint32_t triangles[2][3] = { { face.particleA, face.particleB, face.particleD },
+                                                   { face.particleB, face.particleC, face.particleD } };
+            for (const auto &triangle : triangles)
             {
-                if (cloth.pinned[offset / 3] == 0u)
-                {
-                    faceVelocity[0] += cloth.velocities[offset];
-                    faceVelocity[1] += cloth.velocities[offset + 1];
-                    faceVelocity[2] += cloth.velocities[offset + 2];
-                    ++freeCount;
-                }
+                applyTriangleWindResponse(cloth, triangle, substepDelta);
             }
-            if (freeCount == 0)
+        }
+    }
+
+    // One triangle's aerodynamic response: the Baraff-Witkin scalar response
+    // (normal drag plus the two lift shares on the in-plane cross products)
+    // multiplied by the triangle area gives the triangle's force along its
+    // normal; the force splits evenly over the triangle's free particles, so
+    // pinned corners hand their share to the free ones and the total applied
+    // force is preserved.
+    void applyTriangleWindResponse(ClothRecord &cloth, const std::uint32_t (&particles)[3], double substepDelta)
+    {
+        const std::size_t offsets[3] = { static_cast<std::size_t>(particles[0]) * 3,
+                                         static_cast<std::size_t>(particles[1]) * 3,
+                                         static_cast<std::size_t>(particles[2]) * 3 };
+
+        // Face velocity: the average of the triangle's free particles.
+        double        faceVelocity[3] = { 0.0, 0.0, 0.0 };
+        std::uint32_t freeCount       = 0;
+        for (const std::size_t offset : offsets)
+        {
+            if (cloth.pinned[offset / 3] == 0u)
+            {
+                faceVelocity[0] += cloth.velocities[offset];
+                faceVelocity[1] += cloth.velocities[offset + 1];
+                faceVelocity[2] += cloth.velocities[offset + 2];
+                ++freeCount;
+            }
+        }
+        if (freeCount == 0)
+        {
+            return;
+        }
+        const double inverseFree = 1.0 / static_cast<double>(freeCount);
+        faceVelocity[0] *= inverseFree;
+        faceVelocity[1] *= inverseFree;
+        faceVelocity[2] *= inverseFree;
+
+        // Relative wind against the moving face. While the aerodynamic model
+        // is active the wind vector is a velocity (meters per second).
+        const double relative[3] = { cloth.windVelocity[0] - faceVelocity[0],
+                                     cloth.windVelocity[1] - faceVelocity[1],
+                                     cloth.windVelocity[2] - faceVelocity[2] };
+
+        // Triangle edges and normal from the CURRENT positions, so a
+        // crumpled face pushes along its crumpled normal.
+        const double edge1[3] = { cloth.positions[offsets[1]] - cloth.positions[offsets[0]],
+                                  cloth.positions[offsets[1] + 1] - cloth.positions[offsets[0] + 1],
+                                  cloth.positions[offsets[1] + 2] - cloth.positions[offsets[0] + 2] };
+        const double edge2[3] = { cloth.positions[offsets[2]] - cloth.positions[offsets[0]],
+                                  cloth.positions[offsets[2] + 1] - cloth.positions[offsets[0] + 1],
+                                  cloth.positions[offsets[2] + 2] - cloth.positions[offsets[0] + 2] };
+        const double normalX2 = edge1[1] * edge2[2] - edge1[2] * edge2[1];
+        const double normalY2 = edge1[2] * edge2[0] - edge1[0] * edge2[2];
+        const double normalZ2 = edge1[0] * edge2[1] - edge1[1] * edge2[0];
+        const double normalLength
+            = std::sqrt(normalX2 * normalX2 + normalY2 * normalY2 + normalZ2 * normalZ2);
+        if (!(normalLength > 1.0e-12) || !std::isfinite(normalLength))
+        {
+            return; // degenerate or non-finite face: no wind response
+        }
+        const double inverseNormalLength = 1.0 / normalLength;
+        const double area                 = 0.5 * normalLength;
+        const double normal[3]            = { normalX2 * inverseNormalLength,
+                                              normalY2 * inverseNormalLength,
+                                              normalZ2 * inverseNormalLength };
+
+        // In-plane unit tangents: e1 normalized, and normal x e1 (unit
+        // automatically, because both factors are unit and orthogonal).
+        const double edge1LengthSquared
+            = edge1[0] * edge1[0] + edge1[1] * edge1[1] + edge1[2] * edge1[2];
+        if (!(edge1LengthSquared > 1.0e-24) || !std::isfinite(edge1LengthSquared))
+        {
+            return;
+        }
+        const double edge1InverseLength = 1.0 / std::sqrt(edge1LengthSquared);
+        const double tangent1[3]         = { edge1[0] * edge1InverseLength,
+                                            edge1[1] * edge1InverseLength,
+                                            edge1[2] * edge1InverseLength };
+        const double tangent2[3]         = { normal[1] * tangent1[2] - normal[2] * tangent1[1],
+                                             normal[2] * tangent1[0] - normal[0] * tangent1[2],
+                                             normal[0] * tangent1[1] - normal[1] * tangent1[0] };
+
+        // Baraff-Witkin scalar response: normal drag a1 (n . v) plus the
+        // two lift shares a2/a3 evaluated on the in-plane projections of
+        // the cross products (n . (v x t1) and n . (v x t2)).
+        const double dotNV      = normal[0] * relative[0] + normal[1] * relative[1] + normal[2] * relative[2];
+        const double crossT1[3] = { relative[1] * tangent1[2] - relative[2] * tangent1[1],
+                                    relative[2] * tangent1[0] - relative[0] * tangent1[2],
+                                    relative[0] * tangent1[1] - relative[1] * tangent1[0] };
+        const double crossT2[3] = { relative[1] * tangent2[2] - relative[2] * tangent2[1],
+                                    relative[2] * tangent2[0] - relative[0] * tangent2[2],
+                                    relative[0] * tangent2[1] - relative[1] * tangent2[0] };
+        const double lift1      = normal[0] * crossT1[0] + normal[1] * crossT1[1] + normal[2] * crossT1[2];
+        const double lift2      = normal[0] * crossT2[0] + normal[1] * crossT2[1] + normal[2] * crossT2[2];
+        const double response   = settings_.windDragCoefficient * dotNV
+                                  + settings_.windLiftCoefficient * (lift1 + lift2);
+        if (response == 0.0)
+        {
+            return;
+        }
+
+        // Acceleration along the normal for each free particle: the
+        // triangle's force (response x area) splits over its free corners,
+        // and the area factor keeps the material response invariant under
+        // resolution changes (finer grids apply smaller per-triangle forces).
+        const double acceleration
+            = -response * area / (cloth.particleMass * static_cast<double>(freeCount));
+        for (std::uint32_t corner = 0; corner < 3; ++corner)
+        {
+            const std::uint32_t particleIndex = particles[corner];
+            if (cloth.pinned[particleIndex] != 0u)
             {
                 continue;
             }
-            const double inverseFree = 1.0 / static_cast<double>(freeCount);
-            faceVelocity[0] *= inverseFree;
-            faceVelocity[1] *= inverseFree;
-            faceVelocity[2] *= inverseFree;
-
-            // Relative wind against the moving face.
-            const double relative[3] = { cloth.windAcceleration[0] - faceVelocity[0],
-                                         cloth.windAcceleration[1] - faceVelocity[1],
-                                         cloth.windAcceleration[2] - faceVelocity[2] };
-
-            // Triangle edges and normal from the CURRENT positions, so a
-            // crumpled face pushes along its crumpled normal.
-            const double edge1[3] = { cloth.positions[offsets[1]] - cloth.positions[offsets[0]],
-                                      cloth.positions[offsets[1] + 1] - cloth.positions[offsets[0] + 1],
-                                      cloth.positions[offsets[1] + 2] - cloth.positions[offsets[0] + 2] };
-            const double edge2[3] = { cloth.positions[offsets[2]] - cloth.positions[offsets[0]],
-                                      cloth.positions[offsets[2] + 1] - cloth.positions[offsets[0] + 1],
-                                      cloth.positions[offsets[2] + 2] - cloth.positions[offsets[0] + 2] };
-            const double normalX2 = edge1[1] * edge2[2] - edge1[2] * edge2[1];
-            const double normalY2 = edge1[2] * edge2[0] - edge1[0] * edge2[2];
-            const double normalZ2 = edge1[0] * edge2[1] - edge1[1] * edge2[0];
-            const double normalLength
-                = std::sqrt(normalX2 * normalX2 + normalY2 * normalY2 + normalZ2 * normalZ2);
-            if (!(normalLength > 1.0e-12) || !std::isfinite(normalLength))
-            {
-                continue; // degenerate or non-finite face: no wind response
-            }
-            const double inverseNormalLength = 1.0 / normalLength;
-            const double area                = 0.5 * normalLength;
-            const double normal[3]           = { normalX2 * inverseNormalLength,
-                                                 normalY2 * inverseNormalLength,
-                                                 normalZ2 * inverseNormalLength };
-
-            // In-plane unit tangents: e1 normalized, and normal x e1 (unit
-            // automatically, because both factors are unit and orthogonal).
-            const double edge1LengthSquared
-                = edge1[0] * edge1[0] + edge1[1] * edge1[1] + edge1[2] * edge1[2];
-            if (!(edge1LengthSquared > 1.0e-24) || !std::isfinite(edge1LengthSquared))
-            {
-                continue;
-            }
-            const double edge1InverseLength = 1.0 / std::sqrt(edge1LengthSquared);
-            const double tangent1[3]        = { edge1[0] * edge1InverseLength,
-                                                edge1[1] * edge1InverseLength,
-                                                edge1[2] * edge1InverseLength };
-            const double tangent2[3]        = { normal[1] * tangent1[2] - normal[2] * tangent1[1],
-                                                normal[2] * tangent1[0] - normal[0] * tangent1[2],
-                                                normal[0] * tangent1[1] - normal[1] * tangent1[0] };
-
-            // Baraff-Witkin scalar response: normal drag a1 (n . v) plus the
-            // two lift shares a2/a3 evaluated on the in-plane projections of
-            // the cross products (n . (v x t1) and n . (v x t2)).
-            const double dotNV      = normal[0] * relative[0] + normal[1] * relative[1] + normal[2] * relative[2];
-            const double crossT1[3] = { relative[1] * tangent1[2] - relative[2] * tangent1[1],
-                                        relative[2] * tangent1[0] - relative[0] * tangent1[2],
-                                        relative[0] * tangent1[1] - relative[1] * tangent1[0] };
-            const double crossT2[3] = { relative[1] * tangent2[2] - relative[2] * tangent2[1],
-                                        relative[2] * tangent2[0] - relative[0] * tangent2[2],
-                                        relative[0] * tangent2[1] - relative[1] * tangent2[0] };
-            const double lift1      = normal[0] * crossT1[0] + normal[1] * crossT1[1] + normal[2] * crossT1[2];
-            const double lift2      = normal[0] * crossT2[0] + normal[1] * crossT2[1] + normal[2] * crossT2[2];
-            const double response   = settings_.windDragCoefficient * dotNV
-                                    + settings_.windLiftCoefficient * (lift1 + lift2);
-            if (response == 0.0)
-            {
-                continue;
-            }
-
-            // Acceleration along the normal, split evenly over the triangle's
-            // free particles: the scale carries the face area (resolution
-            // changes keep the same material response) and the per-particle
-            // mass share.
-            const double acceleration
-                = -response * area / (3.0 * cloth.particleMass * static_cast<double>(freeCount));
-            for (std::uint32_t corner = 0; corner < 3; ++corner)
-            {
-                const std::size_t particleIndex = particles[corner];
-                if (cloth.pinned[particleIndex] != 0u)
-                {
-                    continue;
-                }
-                const std::size_t offset = static_cast<std::size_t>(particleIndex) * 3;
-                cloth.velocities[offset] += normal[0] * acceleration * substepDelta;
-                cloth.velocities[offset + 1] += normal[1] * acceleration * substepDelta;
-                cloth.velocities[offset + 2] += normal[2] * acceleration * substepDelta;
-            }
+            const std::size_t offset = static_cast<std::size_t>(particleIndex) * 3;
+            cloth.velocities[offset] += normal[0] * acceleration * substepDelta;
+            cloth.velocities[offset + 1] += normal[1] * acceleration * substepDelta;
+            cloth.velocities[offset + 2] += normal[2] * acceleration * substepDelta;
         }
     }
 
@@ -416,13 +432,19 @@ private:
             {
                 continue;
             }
+            // XPBD delta-lambda: the correction divides by (weight sum +
+            // compliance / dt^2), and the multiplier accumulates across the
+            // substep's solver iterations, so repeated passes through the
+            // compliance term soften the constraint exactly as the XPBD
+            // formulation prescribes (the accumulator resets at substep
+            // start; one iteration reduces to plain XPBD).
             const double complianceScaled = constraint.compliance * inverseDeltaTimeSquared;
-            double       lambda           = (-length + constraint.restLength) / (weightSum + complianceScaled);
-            // XPBD accumulates lambda per constraint per substep; starting
-            // from zero each substep is equivalent for one iteration.
-            const double scaleX = deltaX / length * lambda;
-            const double scaleY = deltaY / length * lambda;
-            const double scaleZ = deltaZ / length * lambda;
+            const double deltaLambda
+                = (-length + constraint.restLength) / (weightSum + complianceScaled) - constraint.lambda;
+            constraint.lambda += deltaLambda;
+            const double scaleX = deltaX / length * deltaLambda;
+            const double scaleY = deltaY / length * deltaLambda;
+            const double scaleZ = deltaZ / length * deltaLambda;
             cloth.positions[offsetA] -= inverseMassA * scaleX;
             cloth.positions[offsetA + 1] -= inverseMassA * scaleY;
             cloth.positions[offsetA + 2] -= inverseMassA * scaleZ;
@@ -430,31 +452,6 @@ private:
             cloth.positions[offsetB + 1] += inverseMassB * scaleY;
             cloth.positions[offsetB + 2] += inverseMassB * scaleZ;
         }
-    }
-
-    // Cell coordinate for the self-collision hash: clamps the scaled
-    // position before the integer cast so huge or non-finite positions
-    // cannot overflow (the step's finite check rejects them afterwards; the
-    // hash stays well-defined meanwhile).
-    static std::int64_t selfCollisionCellCoordinate(double scaled)
-    {
-        if (!std::isfinite(scaled))
-        {
-            return 0;
-        }
-        constexpr double extent = 1.0e9;
-        scaled                  = std::min(std::max(scaled, -extent), extent);
-        return static_cast<std::int64_t>(std::floor(scaled));
-    }
-
-    // Bounds-free cell-id hash (the same primes the fluid module uses); two
-    // distinct cells colliding into one id merely merge their candidate
-    // lists, which the distance check tolerates deterministically.
-    static std::uint64_t selfCollisionCellId(std::int64_t cellX, std::int64_t cellY, std::int64_t cellZ)
-    {
-        return (static_cast<std::uint64_t>(cellX) * 73856093ull)
-               ^ (static_cast<std::uint64_t>(cellY) * 19349663ull)
-               ^ (static_cast<std::uint64_t>(cellZ) * 83492791ull);
     }
 
     // Repels particle pairs closer than twice the self-collision radius.
@@ -482,61 +479,35 @@ private:
         const double minimumDistanceSquared = minimumDistance * minimumDistance;
         const double cellSize               = minimumDistance; // cell edge >= 2 x radius
 
-        cloth.selfCollisionEntries.resize(particleCount);
-        for (std::size_t particle = 0; particle < particleCount; ++particle)
-        {
-            const std::size_t offset = particle * 3;
-            const std::int64_t cellX = selfCollisionCellCoordinate(cloth.positions[offset] / cellSize);
-            const std::int64_t cellY = selfCollisionCellCoordinate(cloth.positions[offset + 1] / cellSize);
-            const std::int64_t cellZ = selfCollisionCellCoordinate(cloth.positions[offset + 2] / cellSize);
-            cloth.selfCollisionEntries[particle].cellId   = selfCollisionCellId(cellX, cellY, cellZ);
-            cloth.selfCollisionEntries[particle].particle = static_cast<std::uint32_t>(particle);
-        }
-        std::sort(cloth.selfCollisionEntries.begin(), cloth.selfCollisionEntries.end(),
-            [](const SelfCollisionEntry &a, const SelfCollisionEntry &b)
-            { return a.cellId != b.cellId ? a.cellId < b.cellId : a.particle < b.particle; });
-
-        // Unique ascending cell ids and the start offset of each bucket;
-        // a bucket ends where the next one starts (the last runs to the end).
-        cloth.selfCollisionCells.clear();
-        cloth.selfCollisionCellStarts.clear();
-        for (std::size_t entry = 0; entry < particleCount; ++entry)
-        {
-            if (entry == 0 || cloth.selfCollisionEntries[entry].cellId != cloth.selfCollisionCells.back())
-            {
-                cloth.selfCollisionCells.push_back(cloth.selfCollisionEntries[entry].cellId);
-                cloth.selfCollisionCellStarts.push_back(static_cast<std::uint32_t>(entry));
-            }
-        }
+        cloth.selfCollisionHash.rebuild(cloth.positions.data(), particleCount, cellSize);
 
         for (std::uint32_t particle = 0; particle < particleCount; ++particle)
         {
-            const std::size_t  offsetI = static_cast<std::size_t>(particle) * 3;
-            const std::int64_t cellX   = selfCollisionCellCoordinate(cloth.positions[offsetI] / cellSize);
-            const std::int64_t cellY   = selfCollisionCellCoordinate(cloth.positions[offsetI + 1] / cellSize);
-            const std::int64_t cellZ   = selfCollisionCellCoordinate(cloth.positions[offsetI + 2] / cellSize);
+            const std::size_t offsetI = static_cast<std::size_t>(particle) * 3;
+            const std::int64_t cellX
+                = engine::util::ParticleSpatialHash::cellCoordinate(cloth.positions[offsetI] / cellSize);
+            const std::int64_t cellY
+                = engine::util::ParticleSpatialHash::cellCoordinate(cloth.positions[offsetI + 1] / cellSize);
+            const std::int64_t cellZ
+                = engine::util::ParticleSpatialHash::cellCoordinate(cloth.positions[offsetI + 2] / cellSize);
             for (std::int64_t offsetX = -1; offsetX <= 1; ++offsetX)
             {
                 for (std::int64_t offsetY = -1; offsetY <= 1; ++offsetY)
                 {
                     for (std::int64_t offsetZ = -1; offsetZ <= 1; ++offsetZ)
                     {
-                        const std::uint64_t neighborId
-                            = selfCollisionCellId(cellX + offsetX, cellY + offsetY, cellZ + offsetZ);
-                        const auto slot = std::lower_bound(
-                            cloth.selfCollisionCells.begin(), cloth.selfCollisionCells.end(), neighborId);
-                        if (slot == cloth.selfCollisionCells.end() || *slot != neighborId)
+                        const std::uint64_t neighborId = engine::util::ParticleSpatialHash::cellIdentifier(
+                            cellX + offsetX, cellY + offsetY, cellZ + offsetZ);
+                        std::uint32_t start = 0;
+                        std::uint32_t count = 0;
+                        if (!cloth.selfCollisionHash.findCell(neighborId, start, count))
                         {
                             continue;
                         }
-                        const std::size_t cellIndex  = static_cast<std::size_t>(slot - cloth.selfCollisionCells.begin());
-                        const std::uint32_t start    = cloth.selfCollisionCellStarts[cellIndex];
-                        const std::uint32_t end      = cellIndex + 1 < cloth.selfCollisionCellStarts.size()
-                                                          ? cloth.selfCollisionCellStarts[cellIndex + 1]
-                                                          : static_cast<std::uint32_t>(particleCount);
+                        const std::uint32_t end = start + count;
                         for (std::uint32_t entry = start; entry < end; ++entry)
                         {
-                            const std::uint32_t other = cloth.selfCollisionEntries[entry].particle;
+                            const std::uint32_t other = cloth.selfCollisionHash.entries[entry].particle;
                             if (other <= particle)
                             {
                                 continue; // each pair is handled once, with j > i
@@ -655,6 +626,12 @@ private:
         std::copy(cloth.velocities.begin(), cloth.velocities.end(), cloth.preStepVelocities.begin());
         for (std::uint32_t substep = 0; substep < substeps; ++substep)
         {
+            // XPBD accumulators reset at substep start (one solve per substep
+            // keeps zero accumulation; repeated solver iterations accumulate).
+            for (DistanceConstraint &constraint : cloth.constraints)
+            {
+                constraint.lambda = 0.0;
+            }
             integrateSubstep(cloth, substepDelta);
             // The constraint walk repeats solverIterations times per substep;
             // tearing is judged on the first pass only, so the breakage
@@ -767,7 +744,8 @@ private:
             setError(error, ClothError::CapacityExceeded);
             return invalidCloth;
         }
-        if (!math::isFinite(description->transform.position) || !std::isfinite(description->spacing)
+        if (!math::isFinite(description->transform.position) || !math::isFinite(description->transform.rotation)
+            || !std::isfinite(description->spacing)
             || description->spacing <= 0.0 || !std::isfinite(description->particleMass)
             || description->particleMass <= 0.0 || !std::isfinite(description->stretchCompliance)
             || description->stretchCompliance < 0.0 || !std::isfinite(description->shearCompliance)
@@ -775,7 +753,13 @@ private:
             || description->bendCompliance < 0.0 || !std::isfinite(description->damping) || description->damping < 0.0
             || !std::isfinite(description->friction) || description->friction < 0.0 || description->friction > 1.0
             || !std::isfinite(description->tearStrain) || description->tearStrain < 0.0
-            || !std::isfinite(description->selfCollisionRadius) || description->selfCollisionRadius < 0.0)
+            || !std::isfinite(description->selfCollisionRadius) || description->selfCollisionRadius < 0.0
+            // A positive particle radius must be finite; the fallback below
+            // derives one from the spacing otherwise.
+            || (description->particleRadius > 0.0 && !std::isfinite(description->particleRadius))
+            // A non-empty pin list needs the indices array; an empty list
+            // accepts a null pointer.
+            || (description->pinnedCount > 0 && description->pinnedParticles == nullptr))
         {
             setError(error, ClothError::InvalidDescription);
             return invalidCloth;
@@ -796,7 +780,9 @@ private:
             return invalidCloth;
         }
         cloth.particleRadius
-            = description->particleRadius > 0.0 ? description->particleRadius : description->spacing * 0.25;
+            = description->particleRadius > 0.0 && std::isfinite(description->particleRadius)
+                ? description->particleRadius
+                : description->spacing * 0.25;
         cloth.friction          = description->friction;
         cloth.damping           = description->damping;
         cloth.stretchCompliance = description->stretchCompliance;
@@ -1145,9 +1131,9 @@ private:
         }
         cloth->sleeping   = false;
         cloth->sleepTimer = 0.0;
-        cloth->windAcceleration[0] = wind[0];
-        cloth->windAcceleration[1] = wind[1];
-        cloth->windAcceleration[2] = wind[2];
+        cloth->windVelocity[0] = wind[0];
+        cloth->windVelocity[1] = wind[1];
+        cloth->windVelocity[2] = wind[2];
         return true;
     }
 
@@ -1211,19 +1197,19 @@ private:
         {
             return false;
         }
-        // Simulation LOD: resolve the band and the staggered cadence; a
-        // due step keeps the fixed delta and spends the band's substep
-        // budget (constrained systems never enlarge the step). Cached
-        // cloths freeze. Without lod_enabled every cloth runs Full every
-        // step.
-        if (engine::util::simulationLodResolvePass(cloth->lodBand,
-                cloth->cadence,
-                settings_.lod.thresholds,
-                settings_.lod.intervals,
-                settings_.lod.enabled,
-                cloth->importance,
-                &cloth->lodSkippedSteps)
-            == 0u)
+        // Simulation LOD: resolve the band and the staggered cadence. A due
+        // step integrates the accumulated fixed deltas (fixedDelta x interval)
+        // in one pass on the band's substep budget, so a reduced-cadence
+        // cloth keeps advancing at wall time. Cached cloths freeze. Without
+        // lod_enabled every cloth runs Full every step.
+        const std::uint32_t interval = engine::util::simulationLodResolvePass(cloth->lodBand,
+            cloth->cadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            cloth->importance,
+            &cloth->lodSkippedSteps);
+        if (interval == 0u)
         {
             return true;
         }
@@ -1241,11 +1227,12 @@ private:
             cloth->sleeping   = false;
             cloth->sleepTimer = 0.0;
         }
-        if (!stepCloth(*cloth, fixedDeltaSeconds, substepsForBand(cloth->lodBand)))
+        const double dueDelta = fixedDeltaSeconds * static_cast<double>(interval);
+        if (!stepCloth(*cloth, dueDelta, substepsForBand(cloth->lodBand)))
         {
             return false;
         }
-        updateSleepState(*cloth, fixedDeltaSeconds);
+        updateSleepState(*cloth, dueDelta);
         return true;
     }
 

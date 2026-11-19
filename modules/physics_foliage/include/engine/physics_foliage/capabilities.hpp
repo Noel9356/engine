@@ -10,8 +10,8 @@
 // physics_fields wind capability when its wind handle is bound and falls
 // back to a configured ambient breeze otherwise. Consumers acquire it via
 // ParticipantContext::acquireCapability<FoliageCapability>(); the module
-// declares physics_rigid as a required capability and physics_fields as an
-// optional one.
+// declares no required capabilities and treats physics_fields as its
+// optional wind provider (its wind handle is optional at every call site).
 
 #pragma once
 

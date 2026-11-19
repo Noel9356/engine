@@ -20,5 +20,5 @@ lod_enabled = false
 
 [window]
 backend = "glfw"
-height  = 720
-width   = 1280
+height  = 1080
+width   = 1920

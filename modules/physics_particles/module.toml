@@ -17,6 +17,8 @@ config_keys           = [
     "physics_particles.maximum_particles",
     "physics_particles.maximum_particles_per_emitter",
     "physics_particles.maximum_steps_per_simulate",
+    "physics_particles.maximum_velocity",
+    "physics_particles.snow_slide_friction",
 ]
 name                  = "physics_particles"
 provides              = ["physics_particles"]

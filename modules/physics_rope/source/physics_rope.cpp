@@ -1,7 +1,9 @@
 // physics_rope module implementation.
 //
 // Simulation LOD reduces the internal substep count for unimportant ropes
-// without touching the fixed step size; a diverged step rolls back to its
+// and integrates the accumulated fixed deltas in one pass at reduced
+// cadence, so fidelity never changes the wall-clock speed; a diverged step
+// rolls back to its
 // pre-step node state.
 //
 // XPBD rope chains over a physics_rigid world: nodes integrate velocities,
@@ -98,6 +100,7 @@ public:
         ropeIndexByHandle_.clear();
         nextRopeHandle_ = 1;
         totalNodes_     = 0;
+        registrationOrdinal_ = 0;
     }
 
     void *capabilityPointerFor(const std::string &name) override
@@ -253,7 +256,7 @@ private:
                 constraint.restLength,
                 constraint.compliance,
                 substepDelta);
-            rope.tensionAccumulator[index] += std::abs(lambda);
+            rope.tensionAccumulator[index] = std::max(rope.tensionAccumulator[index], std::abs(lambda));
         }
         for (const RopeRecord::BendConstraint &constraint : rope.bendConstraints)
         {
@@ -305,17 +308,20 @@ private:
             rope.contactFlags.data());
     }
 
-    void finalizeSubstepVelocities(RopeRecord &rope, double substepDelta)
+    // Friction retention for one contact substep: the capability documents
+    // the tangential velocity kept per SECOND of contact, so the per-substep
+    // multiplier is friction^(delta) - the same wall-clock contact time
+    // removes the same tangential speed at any step rate. Computed once per
+    // step like the cloth module does.
+    double frictionRetentionFor(RopeRecord &rope, double substepDelta) const
     {
-        const std::size_t nodeCount    = rope.positions.size() / 3;
+        return rope.friction > 0.0 ? std::pow(rope.friction, substepDelta) : 0.0;
+    }
+
+    void finalizeSubstepVelocities(RopeRecord &rope, double substepDelta, double frictionRetention)
+    {
+        const std::size_t nodeCount       = rope.positions.size() / 3;
         const double      inverseDeltaTime = 1.0 / substepDelta;
-        // Friction retention per contact substep: the capability documents
-        // the tangential velocity kept per SECOND of contact, so the
-        // per-substep multiplier is friction^(delta) - the same wall-clock
-        // contact time removes the same tangential speed at any step rate
-        // (a raw per-substep multiplier would not; the cloth module applies
-        // the identical conversion).
-        const double frictionRetention = rope.friction > 0.0 ? std::pow(rope.friction, substepDelta) : 0.0;
         for (std::size_t node = 0; node < nodeCount; ++node)
         {
             const std::size_t offset = node * 3;
@@ -347,8 +353,9 @@ private:
         const std::size_t   nodeCount    = rope.positions.size() / 3;
         rope.contactFlags.assign(nodeCount, 0u);
         rope.contactNormals.assign(nodeCount * 3, 0.0);
-        rope.tensionAccumulator.assign(rope.segments, 0.0); // fresh |lambda| sums for this step
+        rope.tensionAccumulator.assign(rope.segments, 0.0); // fresh per-substep |lambda| peaks for this step
         const double        substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+        const double        frictionRetention = frictionRetentionFor(rope, substepDelta);
         // Pre-step copies for the rollback path: a diverged step restores
         // this state and reports failure, so the caller sees an untouched
         // rope.
@@ -362,7 +369,7 @@ private:
             integrateSubstep(rope, substepDelta);
             solveConstraints(rope, substepDelta);
             resolveCollisions(rope);
-            finalizeSubstepVelocities(rope, substepDelta);
+            finalizeSubstepVelocities(rope, substepDelta, frictionRetention);
         }
         rope.lastContactCount = static_cast<std::uint32_t>(
             std::count(rope.contactFlags.begin(), rope.contactFlags.end(), std::uint8_t{1}));
@@ -391,10 +398,12 @@ private:
         }
         rope.stepsSimulated += 1;
         rope.substepsExecuted += substeps;
-        // Publish the tension readout: the step's accumulated |lambda| per
-        // segment converts to force units through the fixed delta squared,
-        // and the maximum rides along for the statistics.
-        const double inverseDeltaSquared = 1.0 / (fixedDeltaSeconds * fixedDeltaSeconds);
+        // Publish the tension readout: each segment's peak per-substep
+        // |lambda| converts to force units through the substep delta squared
+        // (lambda carries mass-times-length units, so the division yields
+        // newtons at the solve's own time scale), and the maximum rides
+        // along for the statistics.
+        const double inverseDeltaSquared = 1.0 / (substepDelta * substepDelta);
         double       maximumTension      = 0.0;
         for (std::size_t segment = 0; segment < rope.lastTension.size(); ++segment)
         {
@@ -745,10 +754,14 @@ private:
             rope->inverseMasses[nodeIndex]  = 0.0;
             rope->attachedBodies[nodeIndex] = engine::physics_rigid::invalidBody;
         }
-        else if (rope->attachments[nodeIndex] == NodeAttachment::Pinned)
+        else
         {
+            // Unpinning releases any pin or body attachment (the same
+            // release semantics as detachNode, symmetric with pinning
+            // superseding attachments).
             rope->attachments[nodeIndex]   = NodeAttachment::Free;
             rope->inverseMasses[nodeIndex] = rope->nodeMass > 0.0 ? 1.0 / rope->nodeMass : 0.0;
+            rope->attachedBodies[nodeIndex] = engine::physics_rigid::invalidBody;
         }
         return true;
     }
@@ -848,9 +861,9 @@ private:
         return true;
     }
 
-    // Internal substep count for one fidelity band: lower bands keep the
-    // fixed step size and cut the substep count instead (the small-steps
-    // XPBD schedule tolerates the coarser solve).
+    // Internal substep count for one fidelity band: lower bands reduce the
+    // substep budget (Full = substepsPerStep, Simplified = half, Procedural
+    // = quarter, Animation = one).
     std::uint32_t substepsForBand(engine::util::SimulationFidelity band) const
     {
         return engine::util::simulationLodSubstepsForBand(band, settings_.substepsPerStep);
@@ -863,23 +876,23 @@ private:
         {
             return false;
         }
-        // Simulation LOD: resolve the band and the staggered cadence; a
-        // due step keeps the fixed delta and spends the band's substep
-        // budget (constrained systems never enlarge the step). Cached
-        // ropes freeze. Without lod_enabled every rope runs Full every
-        // step.
-        if (engine::util::simulationLodResolvePass(rope->lodBand,
-                rope->cadence,
-                settings_.lod.thresholds,
-                settings_.lod.intervals,
-                settings_.lod.enabled,
-                rope->importance,
-                &rope->lodSkippedSteps)
-            == 0u)
+        // Simulation LOD: resolve the band and the staggered cadence. A due
+        // step integrates the accumulated fixed deltas (fixedDelta x interval)
+        // in one pass on the band's substep budget, so a reduced-cadence rope
+        // keeps advancing at wall time. Cached ropes freeze. Without
+        // lod_enabled every rope runs Full every step.
+        const std::uint32_t interval = engine::util::simulationLodResolvePass(rope->lodBand,
+            rope->cadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            rope->importance,
+            &rope->lodSkippedSteps);
+        if (interval == 0u)
         {
             return true;
         }
-        if (!stepRope(*rope, fixedDeltaSeconds, substepsForBand(rope->lodBand)))
+        if (!stepRope(*rope, fixedDeltaSeconds * static_cast<double>(interval), substepsForBand(rope->lodBand)))
         {
             return false;
         }

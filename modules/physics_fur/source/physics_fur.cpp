@@ -153,6 +153,13 @@ private:
         }
         ParticipantContext &context = *context_;
 
+        // Start from the built-in defaults on every read (including live
+        // reloads): a key removed from the configuration reverts to its
+        // default instead of keeping the previously overlaid value.
+        defaultPreset_      = FurPreset::Plush;
+        defaultTextureSize_ = 256u;
+        lodBands_           = LodBands{};
+
         defaultPreset_ = presetFromName(
             context.configurationStringInSection("physics_fur", "default_preset").value_or("plush"));
 
@@ -352,7 +359,6 @@ private:
     ParticipantContext *context_            = nullptr;
     SubscriptionToken   reloadSubscription_ = 0;
 
-    FurParameters defaultPresetParameters_ = presetTable(static_cast<std::uint32_t>(FurPreset::Plush));
     FurPreset     defaultPreset_           = FurPreset::Plush;
     std::uint32_t defaultTextureSize_      = 256u;
     LodBands      lodBands_{};

@@ -13,7 +13,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_rope.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped. |
 | `physics_rope.lod_animation_threshold` | number | (0, 1] | `0.1` | Fidelity-ladder boundary between Animation and Cached; scores below it freeze ropes. |
 | `physics_rope.lod_demotion_margin` | number | [0, 1) | `0.8` | Demotion hysteresis fraction. |
-| `physics_rope.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: bands below Full reduce the internal XPBD substep count instead of the fixed step size. |
+| `physics_rope.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: bands below Full reduce the internal XPBD substep count, and a due step integrates the accumulated fixed deltas in one pass, so the rope keeps advancing at wall time. |
 | `physics_rope.lod_full_threshold` | number | (0, 1] | `0.75` | Importance at or above which a rope runs the Full band. |
 | `physics_rope.lod_interval_animation` | integer | 0 - 65536 | `8` | Fixed steps between updates for Animation-band ropes; `0` freezes them. |
 | `physics_rope.lod_interval_cached` | integer | 0 - 65536 | `0` | `0` freezes Cached-band ropes (the default). |

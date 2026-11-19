@@ -7,6 +7,8 @@
 // the consumer's fixed update, so fields compose deterministically with any
 // other force source.
 
+#include "records.hpp"
+
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -31,6 +33,7 @@ namespace
 
 namespace math = engine::physics_rigid::math;
 
+// Shared-vector helpers for the flat double[3] samples the wind model reads.
 double dot3(const double a[3], const double b[3])
 {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -90,22 +93,6 @@ double valueNoise3(double x, double y, double z)
 // vocabulary (the same formulas the water module's buoyancy uses, covering
 // every solid shape including cylinders).
 
-struct WindFieldRecord
-{
-    WindHandle              handle = 0;
-    engine::physics_rigid::WorldHandle world = 0;
-    WindFieldDescription    description{};
-    double                  direction[3] = {1.0, 0.0, 0.0}; // normalized
-
-    // Simulation LOD: importance-driven fidelity band and staggered cadence
-    // (the phase derives from the registration ordinal). Due passes scale
-    // the applied force by the interval so the total impulse per wall time
-    // stays constant.
-    double                           importance = 1.0;
-    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence  cadence{};
-    std::uint64_t                    lodSkippedSteps = 0;
-};
 
 struct ForceVolumeRecord
 {
@@ -300,10 +287,9 @@ private:
     // Force-scaling mass of one body: the density-sourced shapes derive it
     // from the shared shape volume, the explicit-mass shapes carry their
     // description mass.
-    double bodyMass(const engine::physics_rigid::BodyDescription &description) const
+    static double bodyMass(const engine::physics_rigid::BodyDescription &description)
     {
-        return description.density > 0.0 ? description.density * engine::util::colliderVolume(description.shape)
-                                         : description.mass;
+        return engine::util::colliderMass(description);
     }
 
     // ---- wind field evaluation ----------------------------------------------
@@ -312,6 +298,8 @@ private:
         const
     {
         const WindFieldDescription &description = wind.description;
+        // Creation rejects non-positive wavelengths; the floor keeps a
+        // legacy record (one predating the validation) well-defined anyway.
         const double wavelength = description.turbulenceWavelength > 1.0e-6 ? description.turbulenceWavelength : 1.0;
 
         // Global gust cycle plus a traveling front sampled along the wind
@@ -365,7 +353,8 @@ private:
         if (!std::isfinite(description->direction[0]) || !std::isfinite(description->direction[1])
             || !std::isfinite(description->direction[2]) || !std::isfinite(description->baseSpeed)
             || !std::isfinite(description->gustStrength) || !std::isfinite(description->gustPeriodSeconds)
-            || !std::isfinite(description->turbulenceWavelength) || !std::isfinite(description->turbulenceStrength)
+            || !std::isfinite(description->turbulenceWavelength) || description->turbulenceWavelength <= 0.0
+            || !std::isfinite(description->turbulenceStrength)
             || description->baseSpeed < 0.0 || description->gustStrength < 0.0
             || description->gustStrength > 2.0 || description->gustPeriodSeconds < 0.0
             || description->turbulenceStrength < 0.0 || description->turbulenceStrength > 2.0)
@@ -467,7 +456,14 @@ private:
             return true;
         }
         const double forceScale = static_cast<double>(forceInterval);
-        collectDynamicBodies(wind->world, applyHandles_, applyStates_, applyDescriptions_);
+        const bool bodiesCollected = collectDynamicBodies(wind->world, applyHandles_, applyStates_, applyDescriptions_);
+        if (!bodiesCollected)
+        {
+            // The collection grew past this pass's capacity (the world gained
+            // bodies mid-step): apply nothing this pass rather than applying
+            // to a partial read.
+            return false;
+        }
         for (std::size_t index = 0; index < applyHandles_.size(); ++index)
         {
             const double samplePoint[3] = {applyStates_[index].transform.position.x,
@@ -651,7 +647,10 @@ private:
             const double passScale = static_cast<double>(forceInterval);
             if (volume.world != collectedWorld)
             {
-                collectDynamicBodies(volume.world, applyHandles_, applyStates_, applyDescriptions_);
+                if (!collectDynamicBodies(volume.world, applyHandles_, applyStates_, applyDescriptions_))
+                {
+                    continue; // the read could not resolve every body; skip the volume this pass
+                }
                 collectedWorld = volume.world;
             }
             for (std::size_t index = 0; index < applyHandles_.size(); ++index)
@@ -717,7 +716,10 @@ private:
         {
             return false;
         }
-        collectDynamicBodies(world, applyHandles_, applyStates_, applyDescriptions_);
+        if (!collectDynamicBodies(world, applyHandles_, applyStates_, applyDescriptions_))
+        {
+            return false; // the read could not resolve every body; apply nothing this pass
+        }
         for (std::size_t index = 0; index < applyHandles_.size(); ++index)
         {
             const engine::physics_rigid::BodyState &state = applyStates_[index];

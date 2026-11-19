@@ -413,10 +413,16 @@ void addFluidScene(const SceneDependencies &dependencies, const SceneConfig &con
     engine::physics_fluid::FluidDescription fluidDescription;
     fluidDescription.interactionRadius = 0.30;
     fluidDescription.particleRadius    = 0.10;
-    fluidDescription.particleMass      = 0.18;
+    // Kernel-consistent mass: at this block spacing (0.55 x the interaction
+    // radius) a 2.8 kg particle makes the SPH density estimate meet the 620
+    // kg/m^3 rest density, so the equation of state holds the block at its
+    // spawn volume instead of collapsing it; the viscosity stays inside the
+    // explicit-solve stability envelope at the substep rate while staying
+    // thin enough that the puddle flows across the tank within seconds.
+    fluidDescription.particleMass      = 2.8;
     fluidDescription.restDensity       = 620.0;
     fluidDescription.gasStiffness      = 7.0;
-    fluidDescription.viscosity         = 2.6;
+    fluidDescription.viscosity         = 0.15;
     fluidDescription.useBounds         = true;
     fluidDescription.boundsMinimum[0]  = -2.1;
     fluidDescription.boundsMinimum[1]  = 0.12;

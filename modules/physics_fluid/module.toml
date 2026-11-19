@@ -12,6 +12,7 @@ config_keys           = [
     "physics_fluid.lod_procedural_threshold",
     "physics_fluid.lod_simplified_threshold",
     "physics_fluid.maximum_fluids",
+    "physics_fluid.maximum_neighbors_per_particle",
     "physics_fluid.maximum_particles",
     "physics_fluid.maximum_particles_per_fluid",
     "physics_fluid.maximum_steps_per_simulate",

@@ -231,10 +231,10 @@ struct ClothCapability
     // Simulation LOD: writes the cloth's importance score in [0, 1]. The
     // module maps the score onto the five fidelity bands (Cached, Animation,
     // Procedural, Simplified, Full) with demotion hysteresis; bands below
-    // Full keep the cloth's fixed step size and reduce the internal XPBD
-    // substep count instead (the small-steps schedule tolerates the coarser
-    // solve), and Cached cloths freeze until the score rises again.
-    // Non-finite scores resolve to Cached.
+    // Full reduce the internal XPBD substep count, and a due step at a
+    // reduced cadence integrates the accumulated fixed deltas in one pass,
+    // so the cloth keeps advancing at wall time while Cached cloths freeze
+    // until the score rises again. Non-finite scores resolve to Cached.
     bool (*setClothImportance)(void *self, ClothHandle cloth, double importance);
 };
 

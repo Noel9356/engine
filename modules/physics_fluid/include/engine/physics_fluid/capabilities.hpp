@@ -53,7 +53,10 @@ struct FluidDescription
     // Collision radius of one particle against rigid geometry (meters).
     double particleRadius = 0.12;
 
-    double particleMass = 0.2; // kilograms
+    // Kernel-consistent default: at the recommended spawn spacing (about
+    // 0.55 x the interaction radius) this mass makes the density estimate
+    // meet restDensity, so a spawned block starts pressure-neutral.
+    double particleMass = 7.2; // kilograms
 
     // Rest density (kilograms per cubic meter) and gas stiffness k of the
     // equation of state p = k * (density - restDensity).
@@ -61,7 +64,9 @@ struct FluidDescription
     double gasStiffness = 8.0;
 
     // Dynamic viscosity coefficient of the Laplacian viscosity force.
-    double viscosity = 3.5;
+    // Viscosity inside the explicit-solve stability envelope at the default
+    // substep rate (larger values overshoot per substep and ring).
+    double viscosity = 0.5;
 
     // Global velocity damping per second (0 = none).
     double damping = 0.01;

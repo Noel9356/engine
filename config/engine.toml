@@ -32,10 +32,8 @@ trustPlugins = ["main_menu"]
 trustModules = ["renderer"]
 
 [window]
-# The shared default targets the CPU (headless) rasterizer, whose cost is
-# strictly per shaded pixel: 800x450 keeps interactive runs responsive on a
-# two-core machine. Demos that measure or screenshot at higher resolutions
-# override these in their own config or on the command line; raise the size
-# here for windowed runs on the Vulkan backend.
-height = 450
-width  = 800
+# The shared default resolution is 1920x1080 across every backend and demo:
+# captures and interactive runs share one presentation size, so screenshots
+# compare directly against what a windowed run shows.
+height = 1080
+width  = 1920

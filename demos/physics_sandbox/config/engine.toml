@@ -108,5 +108,5 @@ trustModules = ["renderer"]
 
 [window]
 backend = "headless"
-height  = 540
-width   = 960
+height  = 1080
+width   = 1920

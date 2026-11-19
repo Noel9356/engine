@@ -16,6 +16,7 @@
 #include <engine/physics_articulated/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -100,10 +101,7 @@ private:
 
     static void setError(ArticulatedError *output, ArticulatedError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     void releaseAllFigures()
@@ -312,9 +310,11 @@ private:
         nextFigureHandle_
             = nextFigureHandle_ == std::numeric_limits<FigureHandle>::max() ? invalidFigure : nextFigureHandle_ + 1;
         categoryPool_ |= categoryBit;
-        // Stagger phase from the registration ordinal: figures sharing a
-        // refresh interval spread their due steps evenly across the cadence.
-        figure.cadence.phase = static_cast<std::uint32_t>(figures_.size());
+        // Stagger phase from a monotonic registration ordinal (the vector's
+        // size can repeat after destroys, which would alias two figures'
+        // cadence phases): figures sharing a refresh interval spread their
+        // due steps evenly across the cadence.
+        figure.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         figures_.push_back(std::move(figure));
         figureIndexByHandle_.emplace(figures_.back().handle, figures_.size() - 1);
         figureOrder_.push_back(figures_.back().handle);
@@ -561,9 +561,14 @@ private:
 
             const engine::physics_rigid::Quaternion relativeRotation
                 = math::normalize(math::conjugate(parentState.transform.rotation) * childState.transform.rotation);
-            const engine::physics_rigid::Vec3 axisLocal = description.kind == engine::physics_rigid::JointKind::Hinge
-                                                            ? description.axisLocalA
-                                                            : engine::physics_rigid::Vec3{0.0, 1.0, 0.0};
+            // Twist axis: the joint's own axisLocalA for hinges and ball
+            // sockets alike - the rigid module's cone/twist limits measure
+            // about the same axis, so the drive and the reported state stay
+            // consistent with what the constraint enforces.
+            const engine::physics_rigid::Vec3 axisLocal = math::normalized(
+                description.kind == engine::physics_rigid::JointKind::Hinge
+                    ? description.axisLocalA
+                    : description.axisLocalA);
             const double assemblyTwist = math::twistAngleRadians(link.referenceRelativeRotation, axisLocal);
             const double currentTwist  = math::twistAngleRadians(relativeRotation, axisLocal);
             const double angle         = currentTwist - assemblyTwist;
@@ -623,11 +628,13 @@ private:
         }
         else
         {
-            const engine::physics_rigid::Vec3 axisLocal{0.0, 1.0, 0.0};
+            // The ball-socket's axisLocalA is the swing-cone axis the rigid
+            // joint's limits already use; twist and swing measure about it.
+            const engine::physics_rigid::Vec3 axisLocal = math::normalized(description.axisLocalA);
             outState->twistRadians
                 = math::twistAngleRadians(relativeRotation, axisLocal) - math::twistAngleRadians(assembly, axisLocal);
             outState->swingRadians
-                = math::swingAngleRadians(math::conjugate(assembly) * relativeRotation, math::Vec3{0.0, 1.0, 0.0});
+                = math::swingAngleRadians(math::conjugate(assembly) * relativeRotation, axisLocal);
             outState->angleRadians = outState->twistRadians;
         }
         return true;
@@ -703,6 +710,9 @@ private:
     std::vector<FigureRecord>                     figures_;
     std::unordered_map<FigureHandle, std::size_t> figureIndexByHandle_;
     std::vector<FigureHandle>                     figureOrder_;
+
+    // Registration ordinal for LOD stagger phases (monotonic; never reused).
+    std::uint64_t registrationOrdinal_ = 0;
     FigureHandle                                  nextFigureHandle_ = 1;
     std::uint32_t                                 categoryPool_     = 0;
 };

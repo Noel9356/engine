@@ -17,3 +17,5 @@ maximum_emitters            = 128
 maximum_particles           = 1000000
 maximum_particles_per_emitter = 100000
 maximum_steps_per_simulate  = 8
+maximum_velocity            = 30.0
+snow_slide_friction         = 0.2

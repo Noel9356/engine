@@ -7,6 +7,8 @@ Every value is read once in `construct()`; the module does not follow configurat
 | Key | Type | Valid range / values | Default | Effect |
 | --- | --- | --- | --- | --- |
 | `physics_water.angular_drag_coefficient` | number | [0, 100] | `3.0` | Angular damping scale for submerged bodies: torque = `coefficient x submergedFraction x mass x angularSpeed x 0.01`, opposing the spin. |
+| `physics_water.gerstner_iterations` | integer | 1 - 32 | `4` | Fixed-point iterations of the displaced-height inverse mapping: more iterations sharpen the height recovery of steep Gerstner surfaces at proportional query cost. |
+| `physics_water.normal_sample_epsilon` | number | (0, 1] | `0.05` | Central-difference offset in meters for the surface normal: small relative to the wave curvature, large enough to stay above the height function's own precision. |
 | `physics_water.buoyancy_scale` | number | [0, 100] | `1.0` | Global multiplier on the displaced-volume term of the buoyancy force; `0` disables buoyancy while surface queries keep working. |
 | `physics_water.quadratic_drag_coefficient` | number | [0, 100] | `1.8` | Quadratic water drag coefficient: force = `0.5 x water_density x coefficient x dragArea x submergedFraction x speed^2` opposite the velocity. |
 | `physics_water.maximum_oceans` | integer | 1 - 4096 | `16` | Maximum concurrently existing oceans; `createOcean` reports `CapacityExceeded` beyond it. |
@@ -31,6 +33,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_water.wake_spacing_meters` | number | (0, 1000] | `1.5` | Travelled horizontal distance one registered body accumulates between wake ripples in `stepRipples`; the accumulator resets each time a wake spawns, discarding any excess. |
 | `physics_water.wake_speed_threshold` | number | (0, 100] | `1.2` | Minimum horizontal speed in meters per second for a registered body to emit wake ripples. |
 | `physics_water.wake_strength_scale` | number | [0, 10] | `0.35` | Wake ripple amplitude per meter per second of body speed; `0` disables automatic wake emission. |
+| `physics_water.wave_gravity` | number | (0.1, 100] | `9.81` | Deep-water dispersion reference gravity `omega = sqrt(g x k)`: Earth's 9.81 by default, independent of the scene gravity the buoyancy pass reads per world. |
 | `physics_water.water_density` | number | (0, 20000] | `1000.0` | Water density in kilograms per cubic meter, the density factor of both the buoyancy force and the quadratic drag law. |
 
 ## Out-of-range and invalid values

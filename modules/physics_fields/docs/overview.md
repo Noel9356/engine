@@ -14,7 +14,7 @@ The module provides the `physics_fields` capability (ABI version constant `physi
 | Blasts | `applyRadialImpulse(world, position, impulseMagnitude, radius, upwardBias)` | One-shot radial impulse to every awake dynamic body of the given world within the radius. |
 | Statistics | `fieldsStatistics(outStatistics)` | Live wind and volume counts plus the cumulative drag and volume application counters. |
 
-**Error convention:** `createWindField` and `createForceVolume` fill the `FieldsError` out-parameter (`InvalidDescription` for null pointers — including an unavailable rigid capability — non-finite values, out-of-range strengths, a degenerate wind direction, or non-positive volume extents, `CapacityExceeded` beyond the configured wind or volume budgets). The boolean entry points (`sampleWindVelocity`, `applyWindDrag`, `setForceVolume`, `applyForceVolumes`, `applyRadialImpulse`) report unknown handles and invalid inputs through their `false` return; the `InvalidHandle` and `SimulationFailure` enum values name the unknown-handle and rejected-by-the-rigid-world cases for consumers that map failures onto the enum.
+**Error convention:** `createWindField` and `createForceVolume` fill the `FieldsError` out-parameter (`InvalidDescription` for null pointers — including an unavailable rigid capability — non-finite values, out-of-range strengths, a degenerate wind direction, a non-positive `turbulenceWavelength`, or non-positive volume extents, `CapacityExceeded` beyond the configured wind or volume budgets). The boolean entry points (`sampleWindVelocity`, `applyWindDrag`, `setForceVolume`, `applyForceVolumes`, `applyRadialImpulse`) report unknown handles and invalid inputs through their `false` return; the `InvalidHandle` and `SimulationFailure` enum values name the unknown-handle and rejected-by-the-rigid-world cases for consumers that map failures onto the enum.
 
 ## Simulation model
 
@@ -45,6 +45,7 @@ From `module.toml` and the entry table at the bottom of `source/physics_fields.c
 | `config.toml` | Default values for the `[physics_fields]` configuration section (see `configuration.md`). |
 | `CMakeLists.txt` | Builds `engine_module_physics_fields` (a `.so` under `runtime/modules/physics_fields/`) and copies `module.toml` next to it. |
 | `include/engine/physics_fields/capabilities.hpp` | Public capability types: ABI constant, wind and force-volume handles, wind field and force volume descriptions, statistics, capability struct. |
+| `source/records.hpp` | Wind field and force volume records and module settings. |
 | `source/physics_fields.cpp` | Module class (lifecycle, configuration, wind evaluation, drag and volume application, impulse blasts, capability binding) and entry table. |
 | `include/engine/physics_rigid/capabilities.hpp` | The rigid module's public capability surface: world and body handles, body state and description copies, and the `applyForceAtPoint` / `applyImpulseAtPoint` entry points every field force flows through. |
 

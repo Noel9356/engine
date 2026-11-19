@@ -8,6 +8,8 @@
 // solve. The module owns no simulation state beyond control records; all
 // forces and bodies live in the required capabilities.
 
+#include "records.hpp"
+
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
@@ -32,228 +34,9 @@ namespace
 {
 
 namespace math = engine::physics_rigid::math;
-
 // Humanoid template geometry at scale 1 (meters, pelvis origin). Part
 // order: pelvis (root), torso, head, upper arm L, lower arm L, upper arm R,
 // lower arm R, upper leg L, lower leg L, upper leg R, lower leg R.
-struct HumanoidPart
-{
-    std::int32_t parentIndex;
-    const char * name;
-
-    engine::physics_rigid::ShapeKind shapeKind;
-    double boxHalf[3];         // box
-    double capsuleRadius;      // capsule
-    double capsuleHalfLength;  // capsule
-    double sphereRadius;       // sphere
-
-    double relativePosition[3]; // in the parent's frame
-
-    // Joint to the parent.
-    bool   hinge;                 // false = ball-socket
-    double jointAnchorChild[3];
-    double jointAnchorParent[3];
-    double hingeAxis[3];
-    bool   limits;
-    double limitLower;
-    double limitUpper;
-    double coneHalfAngle;
-    double twistHalfAngle;
-
-    double massFraction;
-};
-
-const HumanoidPart kHumanoidParts[] = {
-    // pelvis
-    {-1, "pelvis", engine::physics_rigid::ShapeKind::Box, {0.14, 0.09, 0.10}, 0.0, 0.0, 0.0,
-        {0.0, 0.0, 0.0}, false, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, false, 0.0, 0.0, 0.0, 0.0, 0.14},
-    // torso (waist ball-socket)
-    {0, "torso", engine::physics_rigid::ShapeKind::Box, {0.16, 0.17, 0.10}, 0.0, 0.0, 0.0,
-        {0.0, 0.35, 0.0}, false, {0.0, -0.23, 0.0}, {0.0, 0.12, 0.0}, {0.0, 1.0, 0.0}, true, 0.0, 0.0, 0.4, 0.4, 0.28},
-    // head (neck ball-socket)
-    {1, "head", engine::physics_rigid::ShapeKind::Sphere, {0.0, 0.0, 0.0}, 0.0, 0.0, 0.10,
-        {0.0, 0.39, 0.0}, false, {0.0, -0.17, 0.0}, {0.0, 0.22, 0.0}, {0.0, 1.0, 0.0}, true, 0.0, 0.0, 0.6, 0.6, 0.08},
-    // upper arm L (shoulder ball-socket)
-    {1, "upper_arm_l", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.044, 0.11, 0.0,
-        {-0.23, -0.02, 0.0}, false, {0.0, 0.16, 0.0}, {-0.23, 0.14, 0.0}, {1.0, 0.0, 0.0}, true, 0.0, 0.0, 1.2, 0.5, 0.03},
-    // lower arm L (elbow hinge)
-    {3, "lower_arm_l", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.04, 0.105, 0.0,
-        {0.0, -0.315, 0.0}, true, {0.0, 0.155, 0.0}, {0.0, -0.16, 0.0}, {1.0, 0.0, 0.0}, true, -2.0, 0.1, 0.0, 0.0, 0.02},
-    // upper arm R
-    {1, "upper_arm_r", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.044, 0.11, 0.0,
-        {0.23, -0.02, 0.0}, false, {0.0, 0.16, 0.0}, {0.23, 0.14, 0.0}, {1.0, 0.0, 0.0}, true, 0.0, 0.0, 1.2, 0.5, 0.03},
-    // lower arm R (elbow hinge)
-    {5, "lower_arm_r", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.04, 0.105, 0.0,
-        {0.0, -0.315, 0.0}, true, {0.0, 0.155, 0.0}, {0.0, -0.16, 0.0}, {1.0, 0.0, 0.0}, true, -2.0, 0.1, 0.0, 0.0, 0.02},
-    // upper leg L (hip ball-socket)
-    {0, "upper_leg_l", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.06, 0.165, 0.0,
-        {-0.09, -0.315, 0.0}, false, {0.0, 0.225, 0.0}, {-0.09, -0.09, 0.0}, {1.0, 0.0, 0.0}, true, 0.0, 0.0, 1.1, 0.5, 0.10},
-    // lower leg L (knee hinge)
-    {7, "lower_leg_l", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.05, 0.152, 0.0,
-        {0.0, -0.427, 0.0}, true, {0.0, 0.202, 0.0}, {0.0, -0.225, 0.0}, {1.0, 0.0, 0.0}, true, -2.2, 0.05, 0.0, 0.0, 0.06},
-    // upper leg R
-    {0, "upper_leg_r", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.06, 0.165, 0.0,
-        {0.09, -0.315, 0.0}, false, {0.0, 0.225, 0.0}, {0.09, -0.09, 0.0}, {1.0, 0.0, 0.0}, true, 0.0, 0.0, 1.1, 0.5, 0.10},
-    // lower leg R (knee hinge)
-    {9, "lower_leg_r", engine::physics_rigid::ShapeKind::Capsule, {0.0, 0.0, 0.0}, 0.05, 0.152, 0.0,
-        {0.0, -0.427, 0.0}, true, {0.0, 0.202, 0.0}, {0.0, -0.225, 0.0}, {1.0, 0.0, 0.0}, true, -2.2, 0.05, 0.0, 0.0, 0.06},
-};
-
-constexpr std::uint32_t kHumanoidPartCount = sizeof(kHumanoidParts) / sizeof(kHumanoidParts[0]);
-constexpr double        kHumanoidMassFractionSum = 0.14 + 0.28 + 0.08 + 0.03 + 0.02 + 0.03 + 0.02 + 0.10 + 0.06 + 0.10 + 0.06;
-
-struct CharacterRecord
-{
-    CharacterHandle handle = invalidCharacter;
-
-    engine::physics_articulated::FigureHandle figure = engine::physics_articulated::invalidFigure;
-    engine::physics_rigid::WorldHandle        world  = engine::physics_rigid::invalidWorld;
-
-    std::uint32_t torsoLinkIndex = 1;
-    engine::physics_rigid::BodyHandle torsoBody = engine::physics_rigid::invalidBody;
-
-    CharacterMode mode            = CharacterMode::Blended;
-    double        driveStrength   = 1.0;
-    double        uprightTorque   = 220.0;
-
-    // Per-link pose targets and gains (physical animation).
-    struct JointTarget
-    {
-        bool   enabled            = false;
-        double targetAngleRadians = 0.0;
-        double stiffness          = 120.0;
-        double damping            = 14.0;
-        double maximumTorque      = 60.0;
-    };
-    std::vector<JointTarget> joints;
-
-    // Simulation LOD: the consumer-written importance score resolves the
-    // fidelity band; a due update scales its PD torques by the cadence
-    // interval (the impulse per wall time matches the full-rate schedule)
-    // and the Cached band stops driving entirely.
-    double                           importance = 1.0;
-    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence  cadence{};
-    std::uint64_t                    lodSkippedSteps = 0;
-};
-
-struct JiggleBoneState
-{
-    double offsetVector[3] = {0.0, 0.0, 0.0}; // rotation vector in the parent bone frame
-    double angularVelocity[3] = {0.0, 0.0, 0.0};
-};
-
-struct JiggleChainRecord
-{
-    JiggleChainHandle handle = invalidJiggleChain;
-
-    JiggleChainDescription description{};
-
-    std::vector<std::array<double, 3>> restOffsets; // validated copies
-    std::vector<JiggleBoneState>       bones;
-    std::vector<math::Quaternion>      worldRotations; // output cache
-
-    math::Vec3 previousRootVelocity{};
-    bool       hasPreviousVelocity = false;
-
-    // Simulation LOD: a due pass integrates interval x the caller's delta
-    // (a spring system, so the enlarged step keeps the wall-time pacing);
-    // the Cached band freezes the chain.
-    double                           importance = 1.0;
-    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence  cadence{};
-    std::uint64_t                    lodSkippedSteps = 0;
-};
-
-struct FootRuntime
-{
-    bool   planted = false;
-    math::Vec3 plantPosition{};
-    math::Vec3 plantNormal{0.0, 1.0, 0.0};
-    math::Vec3 kneeDirection{0.0, 0.0, 1.0};
-    double kneeBendRadians = 0.0;
-    double hipDropMeters   = 0.0;
-};
-
-struct FootPlanterRecord
-{
-    FootPlanterHandle handle = invalidFootPlanter;
-
-    engine::physics_rigid::WorldHandle world = engine::physics_rigid::invalidWorld;
-
-    FootPlanterDescription description{};
-
-    std::vector<engine::physics_rigid::BodyHandle> ignoredBodies; // owned copy of the description's list
-
-    FootRuntime feet[2];
-
-    // Simulation LOD: a due pass runs the ground probes; a skipped pass
-    // keeps the last planted feet, and the Cached band freezes them.
-    double                           importance = 1.0;
-    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence  cadence{};
-    std::uint64_t                    lodSkippedSteps = 0;
-};
-
-struct HandRuntime
-{
-    bool       hasTarget  = false; // setHandTarget overrides the root-local rest offset
-    math::Vec3 target{};
-    math::Vec3 handPosition{};
-    math::Vec3 elbowDirection{0.0, 0.0, -1.0};
-    double     elbowBendRadians = 0.0;
-    double     stretchMeters    = 0.0;
-    bool       withinReach      = false;
-};
-
-struct HandPlanterRecord
-{
-    HandPlanterHandle handle = invalidHandPlanter;
-
-    HandPlanterDescription description{};
-
-    HandRuntime hands[2];
-};
-
-struct LeanRecord
-{
-    LeanHandle handle = invalidLeanController;
-
-    LeanControllerDescription description{};
-
-    math::Quaternion leanRotation{0.0, 0.0, 0.0, 1.0};
-    double           leanAngleRadians = 0.0;
-    math::Vec3       leanAxis{1.0, 0.0, 0.0};
-    double           angularVelocity = 0.0;
-    math::Vec3       previousVelocity{};
-    bool             hasPreviousVelocity = false;
-
-    // Simulation LOD: a due pass integrates interval x the caller's delta;
-    // the Cached band holds the last lean.
-    double                           importance = 1.0;
-    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence  cadence{};
-    std::uint64_t                    lodSkippedSteps = 0;
-};
-
-struct CharacterSettings
-{
-    std::uint32_t maximumCharacters      = 32;
-    std::uint32_t maximumJiggleChains    = 256;
-    std::uint32_t maximumFootPlanters    = 64;
-    std::uint32_t maximumHandPlanters    = 64;
-    std::uint32_t maximumLeanControllers = 64;
-
-    // Secondary-motion gravity magnitude (meters per second squared): the
-    // jiggle chains' virtual force scales this by the chain's
-    // gravityInfluence factor. Configurable because a chain may ride a
-    // character whose world uses non-default gravity.
-    double jiggleGravityMagnitude = 9.81;
-
-    // Simulation LOD: the shared ladder plus the per-band update intervals
-    // (0 freezes that band, which is the Cached default).
-    engine::util::SimulationLodSettings lod{};
-};
 
 class CharacterModule final : public ModuleInterface
 {
@@ -514,6 +297,18 @@ private:
             setError(error, CharacterError::InvalidDescription);
             return invalidCharacter;
         }
+        // The character's world must be the figure's rigid world: probe it
+        // through the rigid capability so a mismatched handle is rejected at
+        // creation instead of silently skipping every joint drive and the
+        // upright assist on each update.
+        {
+            double worldGravity[3] = {0.0, -9.81, 0.0};
+            if (!rigid_->copyWorldGravity(rigid_->self, description->world, worldGravity))
+            {
+                setError(error, CharacterError::InvalidHandle);
+                return invalidCharacter;
+            }
+        }
         if (characters_.size() >= settings_.maximumCharacters)
         {
             setError(error, CharacterError::CapacityExceeded);
@@ -604,6 +399,8 @@ private:
         }
         if (linkIndex == 0)
         {
+            // The root link carries no joint; the Unsupported error is
+            // reserved exactly for this case.
             return false; // the root link has no joint
         }
         character->joints[linkIndex].enabled            = true;
@@ -620,6 +417,10 @@ private:
             || maximumTorque < 0.0)
         {
             return false;
+        }
+        if (linkIndex == 0)
+        {
+            return false; // the root link has no joint, like setCharacterJointTarget
         }
         character->joints[linkIndex].stiffness     = stiffness;
         character->joints[linkIndex].damping       = damping;
@@ -929,13 +730,19 @@ private:
             const double     leverArm     = std::max(math::length(offset), 1.0e-6);
             const math::Vec3 excitation   = torqueLocal * (1.0 / (leverArm * leverArm));
 
-            const double stiffness = chain->description.stiffness;
-            const double damping   = chain->description.damping;
+            // Semi-implicit Euler stability bounds for the spring: the
+            // discrete solve stays stable while h^2 k < 4 and h c < 2, so the
+            // gains clamp to safety fractions of those bounds (the same
+            // protection the foliage module applies to its bend springs).
+            // The clamps absorb the enlarged step of a reduced-cadence LOD
+            // pass, which would otherwise destabilize a lively chain.
+            const double stiffness = std::min(chain->description.stiffness, kSpringStiffnessStabilityFactor / (stepDeltaSeconds * stepDeltaSeconds));
+            const double damping   = std::min(chain->description.damping, kSpringDampingStabilityFactor / stepDeltaSeconds);
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
-                state.angularVelocity[axis] += (-stiffness * state.offsetVector[axis]
+                state.angularVelocity[axis] += (-stiffness * math::component(excitation, axis)
                                                     - damping * state.angularVelocity[axis]
-                                                    + (&excitation.x)[axis])
+                                                    - stiffness * state.offsetVector[axis])
                                                * stepDeltaSeconds;
                 state.offsetVector[axis] += state.angularVelocity[axis] * stepDeltaSeconds;
             }
@@ -955,12 +762,12 @@ private:
 
             // Compose the simulated frame: parent frame translated by the
             // rest offset and rotated by the spring offset.
-            const math::Vec3 angleSquaredVec{state.offsetVector[0], state.offsetVector[1], state.offsetVector[2]};
-            const double     angle = math::length(angleSquaredVec);
+            const math::Vec3 offsetAxisVector{state.offsetVector[0], state.offsetVector[1], state.offsetVector[2]};
+            const double     angle = math::length(offsetAxisVector);
             math::Quaternion offsetRotation{0.0, 0.0, 0.0, 1.0};
             if (angle > 1.0e-9)
             {
-                const math::Vec3 axisDirection = angleSquaredVec * (1.0 / angle);
+                const math::Vec3 axisDirection = offsetAxisVector * (1.0 / angle);
                 const double     halfSin       = std::sin(angle * 0.5);
                 offsetRotation = math::Quaternion{axisDirection.x * halfSin, axisDirection.y * halfSin,
                     axisDirection.z * halfSin, std::cos(angle * 0.5)};
@@ -972,7 +779,8 @@ private:
         for (const JiggleBoneState &state : chain->bones)
         {
             if (!std::isfinite(state.offsetVector[0]) || !std::isfinite(state.offsetVector[1])
-                || !std::isfinite(state.offsetVector[2]))
+                || !std::isfinite(state.offsetVector[2]) || !std::isfinite(state.angularVelocity[0])
+                || !std::isfinite(state.angularVelocity[1]) || !std::isfinite(state.angularVelocity[2]))
             {
                 finite = false;
                 break;
@@ -1206,17 +1014,25 @@ private:
 
             // Two-bone IK from the hip to the planted foot: the knee bends
             // toward the root's forward direction, and the hip drops when
-            // the foot is unreachable at full extension.
+            // the foot is unreachable at full extension. The knee bend is
+            // the general law-of-cosines exterior angle (the hip-interior
+            // plus foot-interior angles of the hip-foot-thigh triangle), so
+            // asymmetric leg bones solve exactly like the hand planter does
+            // for arms.
             const math::Vec3 footPoint = runtime.plantPosition + math::Vec3{0.0, description.footRadius, 0.0};
             const math::Vec3 hipToFoot = footPoint - hipWorld;
             const double distance      = math::length(hipToFoot);
             const double clamped       = std::clamp(distance, 1.0e-6, legReach - 1.0e-6);
-            const double cosHip        = (description.legUpperLength * description.legUpperLength + clamped * clamped
-                                     - description.legLowerLength * description.legLowerLength)
-                                 / (2.0 * description.legUpperLength * clamped);
-            const double hipAngle   = std::acos(std::clamp(cosHip, -1.0, 1.0));
-            const double kneeBend   = math::kPi - hipAngle * 2.0;
-            const double hipDrop    = distance > legReach ? distance - (legReach - description.footRadius) : 0.0;
+            const double upperLength   = description.legUpperLength;
+            const double lowerLength   = description.legLowerLength;
+            const double cosHip        = (upperLength * upperLength + clamped * clamped - lowerLength * lowerLength)
+                                 / (2.0 * upperLength * clamped);
+            const double cosFoot       = (clamped * clamped + lowerLength * lowerLength - upperLength * upperLength)
+                                 / (2.0 * clamped * lowerLength);
+            const double hipAngle      = std::acos(std::clamp(cosHip, -1.0, 1.0));
+            const double footAngle     = std::acos(std::clamp(cosFoot, -1.0, 1.0));
+            const double kneeBend      = hipAngle + footAngle;
+            const double hipDrop       = distance > legReach ? distance - legReach : 0.0;
 
             runtime.kneeDirection   = math::rotate(rootRotation, math::Vec3{0.0, 0.0, 1.0});
             runtime.kneeBendRadians = std::max(kneeBend, 0.0);
@@ -1568,9 +1384,14 @@ private:
                 lateralMagnitude * lean->description.accelerationGain, 0.0, lean->description.maximumLeanRadians);
         }
 
-        // Spring-damper scalar lean around the (possibly retargeted) axis.
-        lean->angularVelocity += (-lean->description.stiffness * (lean->leanAngleRadians - targetAngle)
-                                     - lean->description.damping * lean->angularVelocity)
+        // Spring-damper scalar lean around the (possibly retargeted) axis,
+        // with the same stability-bound clamps the jiggle chains apply.
+        const double leanStiffness = std::min(lean->description.stiffness,
+            kSpringStiffnessStabilityFactor / (stepDeltaSeconds * stepDeltaSeconds));
+        const double leanDamping   = std::min(lean->description.damping,
+            kSpringDampingStabilityFactor / stepDeltaSeconds);
+        lean->angularVelocity += (-leanStiffness * (lean->leanAngleRadians - targetAngle)
+                                     - leanDamping * lean->angularVelocity)
             * stepDeltaSeconds;
         lean->leanAngleRadians += lean->angularVelocity * stepDeltaSeconds;
         lean->leanAngleRadians = std::clamp(lean->leanAngleRadians, -lean->description.maximumLeanRadians,

@@ -15,6 +15,7 @@ add_library(
     engine_module_physics_fluid
     MODULE
     source/physics_fluid.cpp
+    source/sph_step.cpp
 )
 target_compile_definitions(
     engine_module_physics_fluid

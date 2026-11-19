@@ -1,6 +1,6 @@
 # physics_fur configuration
 
-All keys live in the `[physics_fur]` section of the module configuration (`runtime/config/modules/physics_fur/config.toml` holds the defaults); live reloads are picked up through ConfigurationReloadedEvent like every module. Invalid or out-of-range values are clamped or fall back to their defaults with a stderr warning.
+All keys live in the `[physics_fur]` section of the module configuration (`runtime/config/modules/physics_fur/config.toml` holds the defaults); live reloads are picked up through ConfigurationReloadedEvent like every module — every read starts from the built-in defaults and overlays the present keys, so a key removed from the configuration reverts to its default. Invalid or out-of-range values are clamped or fall back to their defaults with a stderr warning.
 
 | key | default | meaning |
 | --- | ------- | ------- |

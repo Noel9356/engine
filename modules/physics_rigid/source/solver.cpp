@@ -231,8 +231,6 @@ void prepareContactConstraints(World &world, const StepContext &context, std::ve
             point.speculativeTarget = point.separation > 0.0
                                         ? std::max(point.restitutionVelocity, -point.separation / context.deltaTime)
                                         : point.restitutionVelocity;
-            point.speculativeLowerImpulse
-                = point.separation > 0.0 ? -point.normalMass * point.separation / context.deltaTime : 0.0;
 
             point.normalMass   = effectiveMass(constraint.inverseInertiaA,
                 constraint.inverseInertiaB,
@@ -241,6 +239,13 @@ void prepareContactConstraints(World &world, const StepContext &context, std::ve
                 constraint.inverseMassA,
                 constraint.inverseMassB,
                 point.normal);
+
+            // The speculative row's accumulated-impulse floor follows from the
+            // normal effective mass, so it is derived after it: an attractive
+            // impulse may close the speculative gap, but never faster than the
+            // gap itself allows within the step.
+            point.speculativeLowerImpulse
+                = point.separation > 0.0 ? -point.normalMass * point.separation / context.deltaTime : 0.0;
             point.tangentMass1 = effectiveMass(constraint.inverseInertiaA,
                 constraint.inverseInertiaB,
                 point.rA,
