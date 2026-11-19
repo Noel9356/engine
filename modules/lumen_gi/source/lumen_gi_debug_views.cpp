@@ -125,13 +125,21 @@ void composeDebugView(
                             break;
                         }
                         // Sun and direct lights are separate terms: a shadowed
-                        // sun must not switch the other lights off.
+                        // sun must not switch the other lights off. Transparent
+                        // surfaces soften the shadow by their transmittance.
                         glm::vec3 irradiance(0.0f);
                         const float nDotL = glm::dot(normal, snapshot.sunDirection);
-                        if (hasSun && nDotL > 0.0f
-                            && (!constState.settings.sunShadows || !sunShadowed(constState, position, normal)))
+                        if (hasSun && nDotL > 0.0f)
                         {
-                            irradiance += sunRadiance * nDotL;
+                            if (!constState.settings.sunShadows)
+                            {
+                                irradiance += sunRadiance * nDotL;
+                            }
+                            else
+                            {
+                                irradiance += sunRadiance * nDotL
+                                    * sunShadowTransmittance(constState, position, normal);
+                            }
                         }
                         irradiance += directLightRadiance(constState, position, normal);
                         color += albedo * (irradiance * (1.0f / kPi));
@@ -199,6 +207,50 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                                 break; // inside geometry
                             }
                             const GiSurface &surface = constState.surfaces[hit.surfaceIndex];
+                            const float     opacity  = glm::clamp(surface.opacity, 0.0f, 1.0f);
+                            if (opacity < 1.0f)
+                            {
+                                // Transparent surface: the opacity share
+                                // scatters at the surface (emission + the
+                                // albedo-lit response), the rest transmits,
+                                // tinted by the albedo and bent by Snell's law
+                                // with the index ratio (the reference tracer
+                                // mirrors the cache's deterministic split).
+                                glm::vec3 hitAlbedo(0.0f);
+                                sampleSurfaceAlbedoLocal(constState, surface, hit.localPosition, hit.localNormal, hitAlbedo);
+                                if (glm::dot(hitAlbedo, hitAlbedo) <= 0.0f)
+                                {
+                                    hitAlbedo = surface.albedo;
+                                }
+                                glm::vec3 scattered = surface.unlit ? hitAlbedo : surface.emissive;
+                                if (!surface.unlit)
+                                {
+                                    glm::vec3 irradiance(0.0f);
+                                    const float nDotL = glm::dot(hit.normal, snapshot.sunDirection);
+                                    if (hasSun && nDotL > 0.0f)
+                                    {
+                                        irradiance += sunRadiance * nDotL
+                                            * sunShadowTransmittance(constState, hit.position, hit.normal);
+                                    }
+                                    irradiance += directLightRadiance(constState, hit.position, hit.normal);
+                                    scattered += hitAlbedo * (irradiance * (1.0f / kPi));
+                                }
+                                pathRadiance += throughput * opacity * scattered;
+                                if (opacity <= 0.0f || bounce == bounces)
+                                {
+                                    break;
+                                }
+                                throughput *= hit.backface ? glm::vec3(1.0f) : surface.albedo * (1.0f - opacity);
+                                glm::vec3 bent = glm::refract(direction, hit.normal,
+                                    hit.backface ? glm::max(surface.indexOfRefraction, 1.0f) : 1.0f / glm::max(surface.indexOfRefraction, 1.0f));
+                                if (glm::dot(bent, bent) < 1.0e-8f)
+                                {
+                                    bent = glm::reflect(direction, hit.normal);
+                                }
+                                direction = glm::normalize(bent);
+                                origin    = hit.position + direction * constState.settings.traceBias;
+                                continue;
+                            }
                             glm::vec3 hitAlbedo(0.0f);
                             sampleSurfaceAlbedoLocal(constState, surface, hit.localPosition, hit.localNormal, hitAlbedo);
                             if (glm::dot(hitAlbedo, hitAlbedo) <= 0.0f)
@@ -213,12 +265,14 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                             {
                                 break;
                             }
-                            // Next-event estimation: shadowed sun + direct lights.
+                            // Next-event estimation: shadowed sun + direct
+                            // lights; transparent surfaces soften the shadow.
                             glm::vec3 irradiance(0.0f);
                             const float nDotL = glm::dot(hit.normal, snapshot.sunDirection);
-                            if (hasSun && nDotL > 0.0f && !sunShadowed(constState, hit.position, hit.normal))
+                            if (hasSun && nDotL > 0.0f)
                             {
-                                irradiance += sunRadiance * nDotL;
+                                const float transmittance = sunShadowTransmittance(constState, hit.position, hit.normal);
+                                irradiance += sunRadiance * nDotL * transmittance;
                             }
                             irradiance += directLightRadiance(constState, hit.position, hit.normal);
                             pathRadiance += throughput * hitAlbedo * (irradiance * (1.0f / kPi));

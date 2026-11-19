@@ -219,6 +219,10 @@ struct PreparedReflectionField
     glm::mat4     viewProjection{0.0f};
     std::uint32_t width  = 0;
     std::uint32_t height = 0;
+    // The module's roughness band edge (roughness.max_trace): pixels
+    // rougher than this receive no specular environment response, so the
+    // field sample early-outs for them.
+    float         maxRoughness = 0.4f;
     // Borrowed from the owning backend copy (valid for the frame; see
     // ReflectionField's borrowed-view contract).
     const float *radiance = nullptr;
@@ -233,6 +237,7 @@ inline PreparedReflectionField prepareReflectionField(const ReflectionField &fie
         prepared.viewProjection = glm::make_mat4(field.header.viewProjection);
         prepared.width          = field.header.width;
         prepared.height         = field.header.height;
+        prepared.maxRoughness   = field.header.maxRoughness;
         prepared.radiance       = field.radiance;
         prepared.valid          = true;
     }
@@ -243,16 +248,35 @@ inline PreparedReflectionField prepareReflectionField(const ReflectionField &fie
 // projected through the field's own camera, and the four surrounding texels
 // are blended (the field is lower-resolution than the framebuffer by
 // design; the screen traces inside the module already accounted for the
-// geometry the pixel sees). Texels carrying the module's neutral roughness
-// (no traced response: background, unlit, above the traced roughness band)
-// are refused instead of blended, so the bilinear weights renormalize over
-// the remaining texels and a fully-refused neighborhood reads black - the
-// documented sample-gate contract of the field's texel layout. Returns
-// black when the point falls outside the field (behind the camera or off
-// its frustum).
-inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, const glm::vec3 &worldPosition)
+// geometry the pixel sees). `pixelRoughness` is the shaded pixel's clamped
+// roughness and gates the sample twice: a pixel rougher than the field's
+// maxRoughness band receives no specular environment response at all (its
+// surface never traced one, exactly like the module's own band rule), and
+// the four surrounding texels are refused when their surface roughness
+// leaves the pixel's band (lumen_reflection::reflectionFieldRoughnessBand)
+// or carries the neutral value (no traced response: background, unlit,
+// above the traced roughness band), so the bilinear weights renormalize
+// over the surviving texels and a fully-refused neighborhood reads black -
+// the documented sample-gate contract of the field's texel layout. The
+// band gate keeps one material's traced response from bleeding across a
+// silhouette onto a rougher neighbor's pixels (the field is
+// lower-resolution, so a reflective surface's texels unavoidably touch the
+// border of whatever sits behind it). Returns black when the point falls
+// outside the field (behind the camera or off its frustum).
+// outTraced reports whether any texel of the footprint survived the gates
+// (the pixel's material actually has a traced response there). Transmissive
+// draws use it to composite the traced response instead of alpha blending:
+// the field's transmitted share already carries what the surface shows of
+// the scene behind it, so blending the raw background in as well would
+// double it.
+inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, const glm::vec3 &worldPosition,
+    float pixelRoughness, bool *outTraced = nullptr)
 {
     if (!field.valid)
+    {
+        return glm::vec3(0.0f);
+    }
+    if (pixelRoughness > field.maxRoughness)
     {
         return glm::vec3(0.0f);
     }
@@ -275,7 +299,8 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
     const std::uint32_t y1 = std::min(y0 + 1u, field.height - 1u);
     const float       fx = u - static_cast<float>(x0);
     const float       fy = v - static_cast<float>(y0);
-    const auto texelAt = [&field](std::uint32_t x, std::uint32_t y, bool &traced)
+    float roughness00 = 1.0f, roughness10 = 1.0f, roughness01 = 1.0f, roughness11 = 1.0f;
+    const auto texelAt = [&field](std::uint32_t x, std::uint32_t y, bool &traced, float &texelRoughness)
     {
         const float *texel
             = field.radiance
@@ -285,14 +310,24 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
         // blending those in would smear background radiance across the
         // neighborhood (or resurrect a stale frame's field when the module
         // skipped an evaluate).
+        texelRoughness = texel[3];
         traced = texel[3] < lumen_reflection::reflectionFieldNeutralRoughness;
         return glm::vec3(texel[0], texel[1], texel[2]);
     };
-    bool        traced00 = false, traced10 = false, traced01 = false, traced11 = false;
-    const glm::vec3 t00 = texelAt(x0, y0, traced00);
-    const glm::vec3 t10 = texelAt(x1, y0, traced10);
-    const glm::vec3 t01 = texelAt(x0, y1, traced01);
-    const glm::vec3 t11 = texelAt(x1, y1, traced11);
+    bool traced00 = false, traced10 = false, traced01 = false, traced11 = false;
+    const glm::vec3 t00 = texelAt(x0, y0, traced00, roughness00);
+    const glm::vec3 t10 = texelAt(x1, y0, traced10, roughness10);
+    const glm::vec3 t01 = texelAt(x0, y1, traced01, roughness01);
+    const glm::vec3 t11 = texelAt(x1, y1, traced11, roughness11);
+    // Roughness-band gate on top of the traced/neutral gate: a texel traced
+    // for a different lobe than the pixel's belongs to another material
+    // (the module traced every texel in its own band, so the difference can
+    // only come from a silhouette neighbor).
+    const float band      = lumen_reflection::reflectionFieldRoughnessBand;
+    traced00 = traced00 && std::fabs(roughness00 - pixelRoughness) <= band;
+    traced10 = traced10 && std::fabs(roughness10 - pixelRoughness) <= band;
+    traced01 = traced01 && std::fabs(roughness01 - pixelRoughness) <= band;
+    traced11 = traced11 && std::fabs(roughness11 - pixelRoughness) <= band;
     // Refused texels drop out of the blend; the surviving weights
     // renormalize, and an empty neighborhood (all four refused) reads black.
     const float w00 = traced00 ? (1.0f - fx) * (1.0f - fy) : 0.0f;
@@ -302,7 +337,15 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
     const float weightSum = w00 + w10 + w01 + w11;
     if (weightSum <= 0.0f)
     {
+        if (outTraced != nullptr)
+        {
+            *outTraced = false;
+        }
         return glm::vec3(0.0f);
+    }
+    if (outTraced != nullptr)
+    {
+        *outTraced = true;
     }
     return (t00 * w00 + t10 * w10 + t01 * w01 + t11 * w11) / weightSum;
 }
@@ -676,14 +719,18 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance, const glm::vec3 &ambientSky,
     const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic, float roughness, float ambientOcclusion,
     const PreparedDirectLight *directLights, std::uint32_t directLightCount,
-    const PreparedGiProbeGrid *giGrid = nullptr)
+    const PreparedGiProbeGrid *giGrid = nullptr, float opacity = 1.0f)
 {
     // Metallic surfaces carry almost no diffuse response. The hemispheric
     // ambient and the probe-grid GI are diffuse integrals, so they scale by
     // (1 - metallic) exactly like the direct-lighting diffuse below
-    // (mesh.frag keeps the twin of this factor).
+    // (mesh.frag keeps the twin of this factor). Transparent surfaces
+    // scatter only the share they keep off the transmitted path, so their
+    // diffuse terms also scale by the opacity: the transmitted share lives
+    // in the reflection field (and in the alpha blend for surfaces outside
+    // the traced band), never in the surface's own diffuse response.
     metallic         = std::clamp(metallic, 0.0f, 1.0f);
-    const glm::vec3 diffuseAlbedo = albedo * (1.0f - metallic);
+    const glm::vec3 diffuseAlbedo = albedo * (1.0f - metallic) * glm::clamp(opacity, 0.0f, 1.0f);
     const glm::vec3 hemispheric = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * diffuseAlbedo
                                   * ambientOcclusion;
     glm::vec3       ambient     = hemispheric;
@@ -714,7 +761,7 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     const float     nDotV   = std::max(glm::dot(normal, view), 1.0e-4f);
     const glm::vec3 f0      = glm::mix(dielectricF0, albedo, metallic);
     const float     invPi   = 1.0f / glm::pi<float>();
-    const glm::vec3 diffuse = albedo * ((1.0f - metallic) * invPi);
+    const glm::vec3 diffuse = albedo * ((1.0f - metallic) * invPi) * glm::clamp(opacity, 0.0f, 1.0f);
 
     const float geomK = (roughness + 1.0f) * (roughness + 1.0f) * 0.125f;
 

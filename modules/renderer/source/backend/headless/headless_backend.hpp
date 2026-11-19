@@ -370,6 +370,11 @@ private:
         // with writes off so the opaque passes drawn after them own the
         // silhouette interior.
         bool                   depthWrite              = true;
+        // Transparent draws (material opacity below 1) alpha blend over the
+        // framebuffer with depth writes off; depth testing still applies so
+        // opaque geometry in front of the surface keeps occluding it.
+        bool                   transparent             = false;
+        float                  opacity                 = 1.0f;
         // Per-mesh transform-cache view for this draw: when non-null the
         // geometry pipeline reads the transformed vertices from it instead
         // of transforming per corner (see the .cpp's prepareRasterization).
@@ -475,7 +480,8 @@ private:
     // material maps, PBR, emissive, tone map + gamma. Const; the caller owns
     // the depth/colour write.
     ENGINE_RASTERIZER_INLINE glm::vec3 shadeTrianglePixel(const RasterSetup &setup, const TileBinRecord &record,
-        float weightA, float weightB, float inverseWA, float inverseWB, float inverseWC) const;
+        float weightA, float weightB, float inverseWA, float inverseWB, float inverseWC,
+        bool *outFieldTraced = nullptr) const;
 
     // Phase 1 (calling thread): geometry pipeline over every triangle, then
     // two-pass binning into screen tiles (per-tile lists keep ascending

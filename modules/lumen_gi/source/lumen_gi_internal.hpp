@@ -158,6 +158,10 @@ struct GiSettings
     // trace.bias_m). One bias behind every trace site keeps the acne/leak
     // trade-off a single tuning decision.
     float         traceBias                  = 0.02f;
+    // How many interfaces a gather/probe/shadow ray may cross through
+    // transparent or translucent surfaces (trace.max_transmission_segments).
+    // Rays past the budget treat the next opaque surface as blocking.
+    std::uint32_t maxTransmissionSegments      = 3;
     float         probeSpacing               = 2.0f;
     std::uint32_t probeDirectionResolution   = 32;
     std::uint32_t probeUpdatesPerFrame       = 64;
@@ -307,6 +311,10 @@ struct GiSurface
     glm::vec3         axisScale{1.0f};    // world length of each local axis
     glm::vec3         albedo{1.0f};
     glm::vec3         emissive{0.0f};
+    // Transmission pair (see GiSurfaceDescription): gather, probe, and
+    // shadow rays transmit through surfaces with opacity below 1.
+    float             opacity      = 1.0f;
+    float             indexOfRefraction = 1.5f;
     std::uint32_t     flagBits     = 0;
     bool              excluded     = false;
     bool              unlit        = false;
@@ -425,11 +433,14 @@ struct GiShadingHit
 // Closest hit against every non-excluded surface, carrying only the fields
 // the surface-cache shading needs (see GiShadingHit).
 GiShadingHit traceSceneShading(const GiPipelineState &state, const GiRay &ray);
+// Transmittance (0..1) of a shadow ray through the scene: transparent
+// surfaces multiply the remaining light by (1 - opacity) per covering hit
+// instead of blocking it; the first opaque surface (or an exhausted
+// transmission budget) blocks.
+float traceSceneTransmittance(const GiPipelineState &state, const GiRay &ray);
 
 // Closest-hit trace against every non-excluded surface; tMax limits the ray.
 GiHit traceScene(const GiPipelineState &state, const GiRay &ray);
-// Any-hit test used for shadows; returns true when geometry blocks the ray.
-bool traceSceneOccluded(const GiPipelineState &state, const GiRay &ray, std::uint32_t excludedSurface);
 
 // ---- probes ------------------------------------------------------------------------
 
@@ -723,7 +734,9 @@ bool exportDebugView(
 void projectRadianceToSh2(
     const float *basis, const glm::vec3 *radiance, const float *weights, std::size_t count, float *outSh2);
 glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal);
-bool sunShadowed(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal);
+// Shadow transmittance toward the sun (0..1): transparent surfaces soften
+// the shadow by their (1 - opacity) share instead of blocking it.
+float sunShadowTransmittance(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal);
 
 // Surface cache lookups at a point given in the surface's LOCAL space.
 void sampleSurfaceCacheLocal(const GiPipelineState &state, const GiSurface &surface, const glm::vec3 &localPosition,

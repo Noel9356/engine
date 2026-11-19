@@ -15,8 +15,9 @@ quality = 3
 # Reflection field resolution: 1/screen_scale of the viewport in each axis
 # (Lumen's reflection tracing runs below full resolution - a quarter ray per
 # pixel at its High tier - and the spatial/temporal filters reconstruct the
-# full-resolution response).
-screen_scale                = 4
+# full-resolution response; half of the viewport per axis keeps curved
+# reflectors smooth while a quarter reads blocky on them at typical sizes).
+screen_scale                = 2
 # Stochastic rays per field pixel per frame; the temporal accumulation is the
 # effective sample multiplier (a converged frame is hundreds of samples).
 rays_per_pixel              = 1
@@ -52,6 +53,11 @@ max_distance_m              = 50.0
 # Surface offset for reflection rays; same acne/leak knob as lumen_gi's
 # trace.bias_m.
 bias_m                      = 0.02
+# How many interfaces a ray chain may cross through transparent or
+# translucent surfaces (screen pass-throughs and refracted hops both count).
+# A chain that exhausts the budget is absorbed. Glass panes cost two hops
+# (entering and exiting the medium).
+max_transmission_segments   = 3
 
 [lumen_reflection.temporal]
 # Weight of the previous frame's reprojected response when the history is

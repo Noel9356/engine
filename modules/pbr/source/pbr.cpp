@@ -282,8 +282,13 @@ bool convertModelMaterialValues(
             static_cast<double>(options.minimumRoughness),
             1.0));
     result.material.unlit     = source.unlit || source.illuminationModel == 0u;
-    result.opacity            = std::clamp(source.opacity, 0.0f, 1.0f);
-    result.indexOfRefraction  = std::clamp(source.indexOfRefraction, 1.0e-4f, 1.0e4f);
+    // The transmission pair rides the converted material itself (renderer
+    // transparent pass + lumen_gi / lumen_reflection surfaces) and stays on
+    // the preserved scalars for consumers that read them from there.
+    result.opacity                    = std::clamp(source.opacity, 0.0f, 1.0f);
+    result.material.opacity           = result.opacity;
+    result.indexOfRefraction          = std::clamp(source.indexOfRefraction, 1.0e-4f, 1.0e4f);
+    result.material.indexOfRefraction = std::clamp(result.indexOfRefraction, 1.0f, 1.0e4f);
     result.shininess          = std::max(0.0f, source.shininess);
     result.sheen              = std::clamp(source.sheen, 0.0f, 1.0f);
     result.clearcoat          = std::clamp(source.clearcoat, 0.0f, 1.0f);

@@ -9,6 +9,16 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_fields.air_density` | number | (0, 100] | `1.225` | Air density in kilograms per cubic meter, the `density` factor of the quadratic wind drag law `0.5 x density x dragCoefficient x area x relativeSpeed x wind_drag_scale` applied by `applyWindDrag`. |
 | `physics_fields.maximum_force_volumes` | integer | 1 - 4096 | `256` | Maximum concurrently existing force volumes; `createForceVolume` reports `CapacityExceeded` beyond it. |
 | `physics_fields.maximum_wind_fields` | integer | 1 - 4096 | `64` | Maximum concurrently existing wind fields; `createWindField` reports `CapacityExceeded` beyond it. |
+| `physics_fields.lod_animation_threshold` | number | (0, 1] | `0.1` | Fidelity-ladder boundary between Animation and Cached; scores below it freeze fields. |
+| `physics_fields.lod_demotion_margin` | number | [0, 1) | `0.8` | Demotion hysteresis fraction. |
+| `physics_fields.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: fields below the Full band run their passes on a staggered cadence with interval-scaled forces. |
+| `physics_fields.lod_full_threshold` | number | (0, 1] | `0.75` | Importance at or above which a field runs the Full band. |
+| `physics_fields.lod_interval_animation` | integer | 0 - 65536 | `8` | Fixed steps between passes for Animation-band fields; `0` freezes them. |
+| `physics_fields.lod_interval_cached` | integer | 0 - 65536 | `0` | `0` freezes Cached-band fields (the default). |
+| `physics_fields.lod_interval_procedural` | integer | 0 - 65536 | `4` | Fixed steps between passes for Procedural-band fields. |
+| `physics_fields.lod_interval_simplified` | integer | 0 - 65536 | `2` | Fixed steps between passes for Simplified-band fields. |
+| `physics_fields.lod_procedural_threshold` | number | (0, 1] | `0.25` | Boundary between Simplified and Procedural. |
+| `physics_fields.lod_simplified_threshold` | number | (0, 1] | `0.5` | Boundary between Full and Simplified. |
 | `physics_fields.wind_drag_scale` | number | [0, 100] | `1.0` | Global multiplier on the wind drag force; `0` turns body drag off while `sampleWindVelocity` keeps sampling the field for effects. |
 
 ## Out-of-range and invalid values

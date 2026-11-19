@@ -1502,7 +1502,16 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.modelNormalMatrix = material.unlit ? glm::mat3(1.0f)
                                                 : glm::transpose(glm::inverse(glm::mat3(outSetup.model)));
     outSetup.unlit             = material.unlit;
-    outSetup.depthWrite        = material.depthWrite;
+    // Transparent draws alpha blend with depth writes off (the fur commit's
+    // rule, applied to whole meshes): the blend must see what the opaque
+    // scene behind the surface wrote, and co-transparent surfaces must not
+    // occlude each other. Depth testing still applies, so opaque geometry
+    // in front of the surface keeps occluding it. Consumers order their
+    // transparent draws after the opaque pass, far to near (the documented
+    // contract, same as the fur stack's).
+    outSetup.opacity           = glm::clamp(material.opacity, 0.0f, 1.0f);
+    outSetup.transparent       = outSetup.opacity < 1.0f;
+    outSetup.depthWrite        = material.depthWrite && !outSetup.transparent;
     // Shell-fur state: the transform below displaces along the object-space
     // normals once per layer; a fur draw stamps a fresh transform generation
     // so the cache (reused across triangles within the layer) never carries
@@ -2169,6 +2178,12 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         // the fur texture's alpha (strand height); the neutral
                         // stand-in reports 1 (a fur-less field stays opaque).
                         float furPixelAlpha = 1.0f;
+                        // The shaded pixel's reflection-field response flag
+                        // (transmissive commits read it; see the transparent
+                        // commit below). Reset per pixel because the shading
+                        // site only sets it when the field sample returned a
+                        // traced response.
+                        bool bandFieldTraced = false;
                         if (setup.fur)
                         {
                             // Jittered strand field (furStrandField <->
@@ -2274,7 +2289,8 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 occlusion,
                                 directLights_.data(),
                                 static_cast<std::uint32_t>(directLights_.size()),
-                                preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr);
+                                preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
+                                setup.opacity);
                             // Indirect specular (lumen_reflection field hook):
                             // the field texel this pixel projects into carries
                             // the expected GGX-lobe response of its material,
@@ -2283,7 +2299,8 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             // twin of this block).
                             if (preparedReflectionField_.valid)
                             {
-                                shaded += sampleReflectionField(preparedReflectionField_, interpolatedPosition);
+                                shaded += sampleReflectionField(
+                                    preparedReflectionField_, interpolatedPosition, roughness, &bandFieldTraced);
                             }
                             }
                         }
@@ -2319,6 +2336,42 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             pixel[1] = toByte(encoded.y * furPixelAlpha + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
                             pixel[2] = toByte(encoded.z * furPixelAlpha + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
                             pixel[3] = 255;
+                            rasterized = true;
+                            weightA += weightADx;
+                            weightB += weightBDx;
+                            pixelDepth += depthADx;
+                            continue;
+                        }
+
+                        if (setup.transparent)
+                        {
+                            std::uint8_t *pixel = colorBuffer + pixelIndex * 4;
+                            if (bandFieldTraced)
+                            {
+                                // Transmissive commit: the field's response
+                                // carries the interface's reflected share and
+                                // the refracted transmitted share, so the
+                                // shaded result commits directly (blending the
+                                // background in too would double it).
+                                *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
+                            }
+                            else
+                            {
+                                // No traced response (outside the traced
+                                // roughness band, or no reflection module):
+                                // the classic encoded-space alpha blend, with
+                                // the material's opacity as the blend factor
+                                // (the depth write is already off through the
+                                // setup; the pre-shade depth test above still
+                                // applied, so opaque geometry in front keeps
+                                // occluding).
+                                const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                                const float   oneMinus = 1.0f - setup.opacity;
+                                pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                                pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                                pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                                pixel[3] = 255;
+                            }
                             rasterized = true;
                             weightA += weightADx;
                             weightB += weightBDx;
@@ -2632,7 +2685,7 @@ void HeadlessBackend::fanPixelWindow(const TileBinRecord &record, std::uint32_t 
 // stores are restrict-qualified, so nothing inside the loop can clobber
 // them). Reading setup fields directly would re-load them per pixel.
 glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const TileBinRecord &record, float weightA,
-    float weightB, float inverseWA, float inverseWB, float inverseWC) const
+    float weightB, float inverseWA, float inverseWB, float inverseWC, bool *outFieldTraced) const
 {
     const RasterVertex &cornerA = record.corners[0];
     const RasterVertex &cornerB = record.corners[1];
@@ -2734,7 +2787,8 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             occlusion,
             lights,
             lightCount,
-            preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr);
+            preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
+            setup.opacity);
 
         // Indirect specular (lumen_reflection field hook): the field texel
         // this pixel projects into carries the expected GGX-lobe response of
@@ -2742,7 +2796,16 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         // the module's estimator contract; tone mapping happens below.
         if (preparedReflectionField_.valid)
         {
-            shaded += sampleReflectionField(preparedReflectionField_, interpolatedPosition);
+            bool fieldTraced = false;
+            shaded += sampleReflectionField(preparedReflectionField_, interpolatedPosition, roughness, &fieldTraced);
+            if (outFieldTraced != nullptr)
+            {
+                *outFieldTraced = fieldTraced;
+            }
+        }
+        else if (outFieldTraced != nullptr)
+        {
+            *outFieldTraced = false;
         }
     }
 
@@ -2832,6 +2895,9 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     const float depthADx  = weightADx * depthA + weightBDx * depthB - (weightADx + weightBDx) * depthC;
 
     bool wrote = false;
+    // The shaded pixel's reflection-field response flag (transmissive
+    // commits read it; see the transparent commit below).
+    bool fieldTraced = false;
     for (std::int32_t y = firstY; y <= lastY; ++y)
     {
         const float sampleY  = static_cast<float>(y) + 0.5f;
@@ -2871,14 +2937,52 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                 // one tile) the calling thread is the only depth writer, so the
                 // pixel's depth still holds the value that test read.
                 const glm::vec3 shaded
-                    = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC);
+                    = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC,
+                        &fieldTraced);
 
-                if (writeDepth)
+                if (setup.transparent)
                 {
-                    depthBuffer[pixelIndex] = pixelDepth;
+                    std::uint8_t *pixel = colorBuffer + pixelIndex * 4;
+                    if (fieldTraced)
+                    {
+                        // Transmissive commit: the reflection field's response
+                        // at this pixel already contains what the surface
+                        // shows of the scene behind it (the reflected share
+                        // off the interface plus the transmitted share
+                        // refracted through it), so the shaded result commits
+                        // directly - blending the raw background in as well
+                        // would show the scene behind twice. Depth writes stay
+                        // off: co-transmissive surfaces stack through the
+                        // field's chains, not through occlusion.
+                        *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
+                    }
+                    else
+                    {
+                        // No traced response here (the surface is outside the
+                        // traced roughness band, or the reflection module is
+                        // absent): the classic alpha blend over the
+                        // framebuffer. Tile ownership keeps the per-pixel
+                        // order equal to the submission order, so
+                        // co-transparent surfaces stack far-to-near exactly as
+                        // the sequential path blends them.
+                        const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                        const float     oneMinus = 1.0f - setup.opacity;
+                        pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                        pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                        pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                        pixel[3] = 255;
+                    }
+                    wrote = true;
                 }
-                *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = encodeColorRgba(shaded);
-                wrote                                                            = true;
+                else
+                {
+                    if (writeDepth)
+                    {
+                        depthBuffer[pixelIndex] = pixelDepth;
+                    }
+                    *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = encodeColorRgba(shaded);
+                    wrote                                                            = true;
+                }
             }
 
             weightA += weightADx;

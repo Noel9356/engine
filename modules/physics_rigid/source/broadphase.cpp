@@ -2,15 +2,18 @@
 // inserted into every hash cell its AABB touches; dynamic and kinematic
 // bodies then query their own cells for candidates. Sleeping pairs and
 // filter-rejected pairs are dropped before the AABB test, and the surviving
-// pairs are sorted so downstream stages stay deterministic.
+// pairs are sorted and deduplicated so downstream stages stay deterministic.
+//
+// The grid is rebuilt every step into caller-owned scratch vectors: one flat
+// array of (cell key, body index) entries sorted by key, plus the bucket
+// offsets the binary searches need. No per-step allocations happen once the
+// scratch capacities have warmed up.
 
 #include "broadphase.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace engine::physics_rigid
 {
@@ -48,6 +51,16 @@ bool collisionFilterAllows(const Body &a, const Body &b)
     return (a.categoryBits & b.maskBits) != 0u && (b.categoryBits & a.maskBits) != 0u;
 }
 
+// Sphere-AABB separation along the axes: the squared distance from the
+// sphere center to the box, zero when the center is inside.
+double sphereAabbDistanceSquared(const math::Vec3 &center, const math::Vec3 &minimum, const math::Vec3 &maximum)
+{
+    const double x = std::max(std::max(minimum.x - center.x, center.x - maximum.x), 0.0);
+    const double y = std::max(std::max(minimum.y - center.y, center.y - maximum.y), 0.0);
+    const double z = std::max(std::max(minimum.z - center.z, center.z - maximum.z), 0.0);
+    return x * x + y * y + z * z;
+}
+
 } // namespace
 
 bool aabbOverlaps(
@@ -57,22 +70,20 @@ bool aabbOverlaps(
         && minimumA.z <= maximumB.z && maximumA.z >= minimumB.z;
 }
 
-void collectBroadphasePairs(
-    const World &world, double cellSize, std::vector<std::pair<std::size_t, std::size_t>> &outPairs)
+void collectBroadphasePairs(const World &world, double cellSize, BroadphaseScratch &scratch,
+    std::vector<std::pair<std::size_t, std::size_t>> &outPairs)
 {
     outPairs.clear();
+    scratch.cellEntries.clear();
     if (cellSize <= 0.0 || world.bodies.empty())
     {
         return;
     }
     const double inverseCellSize = 1.0 / cellSize;
 
-    // Grid cells shared by the insert and query passes; the bucket vectors
-    // are reused across steps through clear().
-    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> grid;
-    grid.reserve(world.bodies.size() * 2);
-
-    // Insert every solid body (planes are unbounded and handled separately).
+    // Insert every solid body (planes are unbounded and handled separately)
+    // as one entry per touched cell, then sort the flat entry array by cell
+    // key so every cell's candidates form one contiguous bucket.
     for (std::size_t index = 0; index < world.bodies.size(); ++index)
     {
         const Body &body = world.bodies[index];
@@ -92,15 +103,24 @@ void collectBroadphasePairs(
             {
                 for (std::int64_t cellX = cellXStart; cellX <= cellXEnd; ++cellX)
                 {
-                    grid[makeCellKey(cellX, cellY, cellZ)].push_back(static_cast<std::uint32_t>(index));
+                    scratch.cellEntries.emplace_back(makeCellKey(cellX, cellY, cellZ), static_cast<std::uint32_t>(index));
                 }
             }
         }
     }
+    if (scratch.cellEntries.empty())
+    {
+        return;
+    }
+    std::sort(
+        scratch.cellEntries.begin(), scratch.cellEntries.end(), [](const BroadphaseEntry &a, const BroadphaseEntry &b)
+        {
+            return a.cellKey != b.cellKey ? a.cellKey < b.cellKey : a.bodyIndex < b.bodyIndex;
+        });
 
-    // Query: one probe per solid body, deduplicated pair keys.
-    std::unordered_set<std::uint64_t> seenPairs;
-    seenPairs.reserve(world.bodies.size() * 2);
+    // Query: one probe per non-static solid body. The sorted entry array
+    // makes every cell's candidates one contiguous run, located with a binary
+    // search and walked in body order.
     for (std::size_t index = 0; index < world.bodies.size(); ++index)
     {
         const Body &body = world.bodies[index];
@@ -120,14 +140,15 @@ void collectBroadphasePairs(
             {
                 for (std::int64_t cellX = cellXStart; cellX <= cellXEnd; ++cellX)
                 {
-                    const auto cellIterator = grid.find(makeCellKey(cellX, cellY, cellZ));
-                    if (cellIterator == grid.end())
+                    const std::uint64_t cellKey = makeCellKey(cellX, cellY, cellZ);
+                    auto entry                 = std::lower_bound(scratch.cellEntries.begin(),
+                        scratch.cellEntries.end(),
+                        cellKey,
+                        [](const BroadphaseEntry &candidate, std::uint64_t key) { return candidate.cellKey < key; });
+                    for (; entry != scratch.cellEntries.end() && entry->cellKey == cellKey; ++entry)
                     {
-                        continue;
-                    }
-                    for (const std::uint32_t candidateIndex : cellIterator->second)
-                    {
-                        if (static_cast<std::size_t>(candidateIndex) == index)
+                        const std::size_t candidateIndex = entry->bodyIndex;
+                        if (candidateIndex == index)
                         {
                             continue;
                         }
@@ -137,11 +158,6 @@ void collectBroadphasePairs(
                             continue;
                         }
                         if (!candidate.awake && !body.awake)
-                        {
-                            continue;
-                        }
-                        const std::uint64_t pairKey = makeBodyPairKey(index, candidateIndex);
-                        if (!seenPairs.insert(pairKey).second)
                         {
                             continue;
                         }
@@ -164,6 +180,17 @@ void collectBroadphasePairs(
     }
 
     std::sort(outPairs.begin(), outPairs.end());
+    outPairs.erase(std::unique(outPairs.begin(), outPairs.end()), outPairs.end());
+}
+
+bool sphereMayOverlapShape(
+    const math::Vec3 &center, double radius, const math::Vec3 &aabbMinimum, const math::Vec3 &aabbMaximum)
+{
+    if (!(radius > 0.0))
+    {
+        return false;
+    }
+    return sphereAabbDistanceSquared(center, aabbMinimum, aabbMaximum) <= radius * radius;
 }
 
 } // namespace engine::physics_rigid

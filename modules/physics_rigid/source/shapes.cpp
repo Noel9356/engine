@@ -55,17 +55,6 @@ bool validateShape(const ShapeDescription &description)
     }
 }
 
-// Component access by index for the POD Vec3/Quaternion vocabulary.
-inline double &componentOf(math::Vec3 &vector, std::uint32_t index)
-{
-    return (&vector.x)[index];
-}
-
-inline double componentOf(const math::Vec3 &vector, std::uint32_t index)
-{
-    return (&vector.x)[index];
-}
-
 // Closest point between the segments p1 + s * d1 (s in [0, 1]) and
 // p2 + t * d2 (t in [0, 1]); writes both points. For parallel segments the
 // first segment's start is used as the sample, which callers tolerate.
@@ -188,7 +177,7 @@ bool sphereBox(const RigidTransform &transformA, double radiusA, const RigidTran
             }
         }
         localNormal                           = math::Vec3{};
-        componentOf(localNormal, nearestAxis) = componentOf(local, nearestAxis) >= 0.0 ? 1.0 : -1.0;
+        math::component(localNormal, nearestAxis) = math::component(local, nearestAxis) >= 0.0 ? 1.0 : -1.0;
         depth                                 = radiusA + faceDistances[nearestAxis];
         closestPointLocal                     = localNormal * halfExtents[nearestAxis];
     }
@@ -391,16 +380,16 @@ bool boxBox(const RigidTransform &transformA, const double halfExtentsA[3], cons
     math::Vec3 incidentCorners[4];
     {
         const double faceOffset
-            = incidentExtents[incidentAxis] * (componentOf(incidentLocalAntiNormal, incidentAxis) >= 0.0 ? 1.0 : -1.0);
+            = incidentExtents[incidentAxis] * (math::component(incidentLocalAntiNormal, incidentAxis) >= 0.0 ? 1.0 : -1.0);
         std::uint32_t cornerIndex = 0;
         for (std::uint32_t edgeU = 0; edgeU < 2; ++edgeU)
         {
             for (std::uint32_t edgeV = 0; edgeV < 2; ++edgeV)
             {
                 math::Vec3 local{};
-                componentOf(local, incidentAxis)      = faceOffset;
-                componentOf(local, incidentTangent)   = incidentExtents[incidentTangent] * (edgeU == 0 ? 1.0 : -1.0);
-                componentOf(local, incidentBitangent) = incidentExtents[incidentBitangent] * (edgeV == 0 ? 1.0 : -1.0);
+                math::component(local, incidentAxis)      = faceOffset;
+                math::component(local, incidentTangent)   = incidentExtents[incidentTangent] * (edgeU == 0 ? 1.0 : -1.0);
+                math::component(local, incidentBitangent) = incidentExtents[incidentBitangent] * (edgeV == 0 ? 1.0 : -1.0);
                 incidentCorners[cornerIndex++]        = incidentCenter + math::rotate(incidentRotation, local);
             }
         }
@@ -422,13 +411,13 @@ bool boxBox(const RigidTransform &transformA, const double halfExtentsA[3], cons
         = {[&]()
             {
                 math::Vec3 axis{};
-                componentOf(axis, tangentAxis) = 1.0;
+                math::component(axis, tangentAxis) = 1.0;
                 return math::multiplyMatrixVector(referenceRotation, axis);
             }(),
             [&]()
             {
                 math::Vec3 axis{};
-                componentOf(axis, bitangentAxis) = 1.0;
+                math::component(axis, bitangentAxis) = 1.0;
                 return math::multiplyMatrixVector(referenceRotation, axis);
             }()};
     const double sideExtents[2] = {referenceExtents[tangentAxis], referenceExtents[bitangentAxis]};
@@ -830,7 +819,7 @@ bool boxCylinder(const RigidTransform &transformA, const double halfExtents[3], 
                 }
             }
             localNormal                           = math::Vec3{};
-            componentOf(localNormal, nearestAxis) = componentOf(local, nearestAxis) >= 0.0 ? 1.0 : -1.0;
+            math::component(localNormal, nearestAxis) = math::component(local, nearestAxis) >= 0.0 ? 1.0 : -1.0;
             depth                                 = faceDistances[nearestAxis];
             closestLocal                          = localNormal * halfExtents[nearestAxis];
         }
@@ -1174,7 +1163,7 @@ void computeShapeAabb(
         for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
         {
             const double axial       = components[axisIndex];
-            (&extent.x)[axisIndex] = shape.cylinderHalfHeight * std::abs(axial)
+            math::component(extent, axisIndex) = shape.cylinderHalfHeight * std::abs(axial)
                 + shape.cylinderRadius * std::sqrt(std::max(0.0, 1.0 - axial * axial));
         }
         outMinimum = transform.position - extent;
@@ -1449,8 +1438,8 @@ bool rayCastBox(const RigidTransform &transform, const double halfExtents[3], co
     double           exit           = maximumDistance;
     for (std::uint32_t axis = 0; axis < 3; ++axis)
     {
-        const double axisOrigin    = componentOf(localOrigin, axis);
-        const double axisDirection = componentOf(localDirection, axis);
+        const double axisOrigin    = math::component(localOrigin, axis);
+        const double axisDirection = math::component(localDirection, axis);
         const double extent        = halfExtents[axis];
         if (std::abs(axisDirection) < kEpsilon)
         {
@@ -1789,8 +1778,8 @@ bool sweepSphereSolid(const math::Vec3 &start, double radius, const math::Vec3 &
         bool             hit            = true;
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
-            const double axisOrigin    = componentOf(localOrigin, axis);
-            const double axisDirection = componentOf(localDirection, axis);
+            const double axisOrigin    = math::component(localOrigin, axis);
+            const double axisDirection = math::component(localDirection, axis);
             const double extent        = solidShape.boxHalfExtents[axis] + radius;
             if (std::abs(axisDirection) < kEpsilon)
             {
@@ -1825,7 +1814,7 @@ bool sweepSphereSolid(const math::Vec3 &start, double radius, const math::Vec3 &
         if (hit && entry > 0.0 && entry <= length)
         {
             math::Vec3 localNormal{};
-            (&localNormal.x)[entryAxis] = entrySign;
+            math::component(localNormal, entryAxis) = entrySign;
             bestDistance                = entry;
             bestNormal                  = math::rotate(solidTransform.rotation, localNormal);
         }

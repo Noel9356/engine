@@ -4,10 +4,12 @@
 // constraints solve in Gauss-Seidel order with compliance-scaled corrections,
 // constraints tear when stretched past their tolerance, overlapping particle
 // pairs repel each other through a deterministic spatial hash, and particles
-// resolve against the rigid world's bodies and planes through the
-// collideSphere query. Stepping happens in whole fixed steps with internal
+// resolve against the rigid world's bodies and planes through the batched
+// sphere-overlap query. Stepping happens in whole fixed steps with internal
 // substeps (the "small steps" XPBD schedule), so the simulation is
-// independent of frame rate.
+// independent of frame rate. Settled cloths stop integrating until an
+// interaction wakes them, and simulation LOD reduces the internal substep
+// count for unimportant cloths without touching the fixed step size.
 
 #include "records.hpp"
 #include <engine/kernel/module_api.hpp>
@@ -16,6 +18,9 @@
 #include <engine/physics_cloth/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
+#include <engine/util/simulation_lod.hpp>
+#include <engine/util/step_accumulator.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -67,6 +72,16 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_cloth", "fixed_rate_hz");
             value && *value >= 1.0 && *value <= 1000.0 && std::isfinite(*value))
             settings_.fixedRateHz = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_cloth", "maximum_velocity");
+            value && *value > 0.0 && *value <= 1000.0 && std::isfinite(*value))
+            settings_.maximumVelocity = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_cloth", "sleep_velocity_threshold");
+            value && *value > 0.0 && *value <= 100.0 && std::isfinite(*value))
+            settings_.sleepVelocityThreshold = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_cloth", "time_to_sleep");
+            value && *value >= 0.0 && *value <= 60.0 && std::isfinite(*value))
+            settings_.timeToSleep = *value;
+        readLodSettings(context);
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -102,12 +117,39 @@ private:
             .requiredCapabilities = {"physics_rigid"}};
     }
 
+    void readLodSettings(ParticipantContext &context)
+    {
+        settings_.lodEnabled = context.configurationBooleanInSection("physics_cloth", "lod_enabled").value_or(false);
+        const auto readThreshold = [this, &context](const char *key, double &target)
+        {
+            if (const auto value = context.configurationFloatingInSection("physics_cloth", key);
+                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
+                target = *value;
+        };
+        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
+        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
+        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
+        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
+        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
+        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
+        {
+            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
+        }
+        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
+        {
+            if (const auto value = context.configurationIntegerInSection("physics_cloth", key);
+                value && *value >= 0 && *value <= 65536)
+                target = static_cast<std::uint32_t>(*value);
+        };
+        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
+        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
+        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
+        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+    }
+
     static void setError(ClothError *output, ClothError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     ClothRecord *findCloth(ClothHandle handle)
@@ -386,6 +428,8 @@ private:
         }
     }
 
+    // Resolves every free particle against the rigid world in one batched
+    // sphere query per substep instead of one capability call per particle.
     void resolveCollisions(ClothRecord &cloth)
     {
         if (rigid_ == nullptr)
@@ -393,32 +437,49 @@ private:
             return;
         }
         const std::size_t particleCount = cloth.positions.size() / 3;
+        collisionSlotIndices_.clear();
+        collisionQueries_.clear();
         for (std::size_t particle = 0; particle < particleCount; ++particle)
         {
-            const std::size_t offset     = particle * 3;
             cloth.contactFlags[particle] = 0u;
             if (cloth.pinned[particle] != 0u)
             {
                 continue;
             }
-            double                            normal[3] = {0.0, 0.0, 0.0};
-            double                            depth     = 0.0;
-            engine::physics_rigid::BodyHandle body      = engine::physics_rigid::invalidBody;
-            if (!rigid_->collideSphere(
-                    rigid_->self, cloth.world, &cloth.positions[offset], cloth.particleRadius, normal, &depth, &body)
-                || depth <= 0.0)
+            engine::physics_rigid::SphereOverlapQuery query;
+            const std::size_t offset = particle * 3;
+            query.center[0] = cloth.positions[offset];
+            query.center[1] = cloth.positions[offset + 1];
+            query.center[2] = cloth.positions[offset + 2];
+            query.radius    = cloth.particleRadius;
+            collisionSlotIndices_.push_back(particle);
+            collisionQueries_.push_back(query);
+        }
+        if (collisionQueries_.empty())
+        {
+            return;
+        }
+        collisionResults_.resize(collisionQueries_.size());
+        rigid_->collideSpheres(rigid_->self, cloth.world, collisionQueries_.data(),
+            static_cast<std::uint32_t>(collisionQueries_.size()), collisionResults_.data());
+        for (std::size_t entry = 0; entry < collisionSlotIndices_.size(); ++entry)
+        {
+            const std::size_t particle = collisionSlotIndices_[entry];
+            const engine::physics_rigid::SphereOverlapResult &result = collisionResults_[entry];
+            if (!result.hit || result.depth <= 0.0)
             {
                 continue;
             }
+            const std::size_t offset = particle * 3;
             cloth.contactFlags[particle]     = 1u;
-            cloth.contactNormals[offset]     = normal[0];
-            cloth.contactNormals[offset + 1] = normal[1];
-            cloth.contactNormals[offset + 2] = normal[2];
+            cloth.contactNormals[offset]     = result.normal[0];
+            cloth.contactNormals[offset + 1] = result.normal[1];
+            cloth.contactNormals[offset + 2] = result.normal[2];
             // Project the particle out of the obstacle along the push-out
             // direction; velocity damping happens in the final velocity pass.
-            cloth.positions[offset] += normal[0] * depth;
-            cloth.positions[offset + 1] += normal[1] * depth;
-            cloth.positions[offset + 2] += normal[2] * depth;
+            cloth.positions[offset] += result.normal[0] * result.depth;
+            cloth.positions[offset + 1] += result.normal[1] * result.depth;
+            cloth.positions[offset + 2] += result.normal[2] * result.depth;
         }
     }
 
@@ -452,21 +513,37 @@ private:
                 velocityY *= cloth.friction;
                 velocityZ *= cloth.friction;
             }
+            // Clamp the derived velocity so solver noise cannot escalate
+            // into a diverging state (the value is module configuration).
+            const double speedSquared = velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ;
+            if (speedSquared > settings_.maximumVelocity * settings_.maximumVelocity)
+            {
+                const double scale = settings_.maximumVelocity / std::sqrt(speedSquared);
+                velocityX *= scale;
+                velocityY *= scale;
+                velocityZ *= scale;
+            }
             cloth.velocities[offset]     = velocityX;
             cloth.velocities[offset + 1] = velocityY;
             cloth.velocities[offset + 2] = velocityZ;
         }
     }
 
-    bool stepCloth(ClothRecord &cloth, double fixedDeltaSeconds)
+    bool stepCloth(ClothRecord &cloth, double fixedDeltaSeconds, std::uint32_t substeps)
     {
         const auto stepStart = std::chrono::steady_clock::now();
         if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > 0.1 || !std::isfinite(fixedDeltaSeconds))
         {
             return false;
         }
-        const std::uint32_t substeps     = settings_.substepsPerStep;
         const double        substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+        // Pre-step copies for the rollback path: a diverged step restores
+        // this state and reports failure, so the caller sees an untouched
+        // cloth.
+        cloth.preStepPositions.resize(cloth.positions.size());
+        cloth.preStepVelocities.resize(cloth.velocities.size());
+        std::copy(cloth.positions.begin(), cloth.positions.end(), cloth.preStepPositions.begin());
+        std::copy(cloth.velocities.begin(), cloth.velocities.end(), cloth.preStepVelocities.begin());
         for (std::uint32_t substep = 0; substep < substeps; ++substep)
         {
             integrateSubstep(cloth, substepDelta);
@@ -486,8 +563,19 @@ private:
                 break;
             }
         }
+        for (const double value : cloth.velocities)
+        {
+            if (!std::isfinite(value))
+            {
+                finite = false;
+                break;
+            }
+        }
         if (!finite)
         {
+            std::copy(cloth.preStepPositions.begin(), cloth.preStepPositions.end(), cloth.positions.begin());
+            std::copy(cloth.preStepVelocities.begin(), cloth.preStepVelocities.end(), cloth.velocities.begin());
+            cloth.sleepTimer = 0.0;
             return false;
         }
         cloth.stepsSimulated += 1;
@@ -495,6 +583,48 @@ private:
         const auto stepEnd         = std::chrono::steady_clock::now();
         cloth.lastStepMilliseconds = std::chrono::duration<double, std::milli>(stepEnd - stepStart).count();
         return true;
+    }
+
+    // Settled-cloth bookkeeping after an executed step: the sleep timer
+    // advances while every free particle stays below the threshold, and the
+    // cloth sleeps (velocities zeroed) after the configured quiet period.
+    void updateSleepState(ClothRecord &cloth, double fixedDeltaSeconds)
+    {
+        const double thresholdSquared = settings_.sleepVelocityThreshold * settings_.sleepVelocityThreshold;
+        bool quiet = true;
+        for (std::size_t particle = 0; particle < cloth.positions.size() / 3; ++particle)
+        {
+            if (cloth.pinned[particle] != 0u)
+            {
+                continue;
+            }
+            const std::size_t offset = particle * 3;
+            const double speedSquared = cloth.velocities[offset] * cloth.velocities[offset]
+                + cloth.velocities[offset + 1] * cloth.velocities[offset + 1]
+                + cloth.velocities[offset + 2] * cloth.velocities[offset + 2];
+            if (speedSquared >= thresholdSquared)
+            {
+                quiet = false;
+                break;
+            }
+        }
+        if (quiet)
+        {
+            cloth.sleepTimer += fixedDeltaSeconds;
+            if (cloth.sleepingEnabled && cloth.sleepTimer >= settings_.timeToSleep)
+            {
+                cloth.sleeping = true;
+                for (double &velocity : cloth.velocities)
+                {
+                    velocity = 0.0;
+                }
+            }
+        }
+        else
+        {
+            cloth.sleepTimer = 0.0;
+            cloth.sleeping   = false;
+        }
     }
 
     // ---- capability implementations ---------------------------------------
@@ -661,6 +791,11 @@ private:
         cloth.handle = nextClothHandle_;
         nextClothHandle_
             = nextClothHandle_ == std::numeric_limits<ClothHandle>::max() ? invalidCloth : nextClothHandle_ + 1;
+        // Simulation LOD: the stagger phase derives from the registration
+        // ordinal, so cloths sharing an interval spread their work across
+        // steps.
+        cloth.sleepingEnabled = description->sleepingEnabled;
+        cloth.cadence.phase   = static_cast<std::uint32_t>(registrationOrdinal_++);
         totalParticles_ += particleCount;
         cloths_.push_back(std::move(cloth));
         clothIndexByHandle_.emplace(cloths_.back().handle, cloths_.size() - 1);
@@ -749,9 +884,13 @@ private:
             return false;
         }
         const std::size_t offset = static_cast<std::size_t>(particleIndex) * 3;
+        cloth->sleeping          = false;
+        cloth->sleepTimer        = 0.0;
         if (pinned && cloth->pinned[particleIndex] == 0u)
         {
-            cloth->pinned[particleIndex]        = 1u;
+            cloth->sleeping   = false;
+        cloth->sleepTimer = 0.0;
+        cloth->pinned[particleIndex]        = 1u;
             cloth->inverseMasses[particleIndex] = 0.0;
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
@@ -812,6 +951,8 @@ private:
         }
         cloth->drag       = *drag;
         cloth->dragActive = true;
+        cloth->sleeping   = false;
+        cloth->sleepTimer = 0.0;
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
             dragTarget_[axis] = cloth->positions[static_cast<std::size_t>(drag->particleIndex) * 3 + axis];
@@ -858,10 +999,32 @@ private:
         {
             return false;
         }
+        cloth->sleeping   = false;
+        cloth->sleepTimer = 0.0;
         cloth->windAcceleration[0] = wind[0];
         cloth->windAcceleration[1] = wind[1];
         cloth->windAcceleration[2] = wind[2];
         return true;
+    }
+
+    // Internal substep count for one fidelity band: lower bands keep the
+    // fixed step size and cut the substep count instead (the small-steps
+    // XPBD schedule tolerates the coarser solve), and Cached freezes.
+    std::uint32_t substepsForBand(engine::util::SimulationFidelity band) const
+    {
+        switch (band)
+        {
+        case engine::util::SimulationFidelity::Full:
+            return settings_.substepsPerStep;
+        case engine::util::SimulationFidelity::Simplified:
+            return std::max(1u, settings_.substepsPerStep / 2u);
+        case engine::util::SimulationFidelity::Procedural:
+            return std::max(1u, settings_.substepsPerStep / 4u);
+        case engine::util::SimulationFidelity::Animation:
+        case engine::util::SimulationFidelity::Cached:
+        default:
+            return 1u;
+        }
     }
 
     bool stepImpl(ClothHandle handle, double fixedDeltaSeconds)
@@ -871,33 +1034,61 @@ private:
         {
             return false;
         }
-        return stepCloth(*cloth, fixedDeltaSeconds);
+        if (settings_.lodEnabled)
+        {
+            cloth->lodBand = engine::util::simulationFidelityForImportance(
+                settings_.lodThresholds, cloth->importance, cloth->lodBand);
+            const std::uint32_t interval
+                = settings_.lodIntervals[engine::util::simulationFidelityIndex(cloth->lodBand)];
+            if (interval == 0u)
+            {
+                // Cached band: hold the last state until the score rises.
+                cloth->cadence.interval = 1u;
+                cloth->lodSkippedSteps += 1;
+                return true;
+            }
+            cloth->cadence.interval = interval;
+            if (!engine::util::simulationCadenceAdvance(cloth->cadence))
+            {
+                cloth->lodSkippedSteps += 1;
+                return true;
+            }
+        }
+        // A settled cloth holds its state until drag, pin, or wind changes
+        // wake it (those setters clear the sleeping flag).
+        if (cloth->sleeping)
+        {
+            return true;
+        }
+        if (!stepCloth(*cloth, fixedDeltaSeconds, substepsForBand(cloth->lodBand)))
+        {
+            return false;
+        }
+        updateSleepState(*cloth, fixedDeltaSeconds);
+        return true;
     }
 
     std::uint32_t simulateImpl(ClothHandle handle, double elapsedSeconds)
     {
         ClothRecord *cloth = findCloth(handle);
-        if (cloth == nullptr || !std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+        if (cloth == nullptr)
         {
             return 0u;
         }
         const double fixedDelta = 1.0 / settings_.fixedRateHz;
-        cloth->simulatedTimeBudget += elapsedSeconds;
-        std::uint32_t executed = 0;
-        while (cloth->simulatedTimeBudget >= fixedDelta && executed < settings_.maximumStepsPerSimulate)
+        return cloth->accumulator.drain(fixedDelta, settings_.maximumStepsPerSimulate, elapsedSeconds,
+            [this, handle, fixedDelta]() { return stepImpl(handle, fixedDelta); });
+    }
+
+    bool setClothImportanceImpl(ClothHandle handle, double importance)
+    {
+        ClothRecord *cloth = findCloth(handle);
+        if (cloth == nullptr || !std::isfinite(importance))
         {
-            cloth->simulatedTimeBudget -= fixedDelta;
-            if (!stepCloth(*cloth, fixedDelta))
-            {
-                break;
-            }
-            ++executed;
+            return false;
         }
-        if (executed == settings_.maximumStepsPerSimulate)
-        {
-            cloth->simulatedTimeBudget = 0.0;
-        }
-        return executed;
+        cloth->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
     }
 
     bool clothStatisticsImpl(ClothHandle handle, ClothStatistics *outStatistics)
@@ -912,6 +1103,8 @@ private:
         outStatistics->lastContactCount      = cloth->lastContactCount;
         outStatistics->brokenConstraintCount = cloth->brokenConstraintCount;
         outStatistics->lastStepMilliseconds  = cloth->lastStepMilliseconds;
+        outStatistics->lodSkippedSteps       = cloth->lodSkippedSteps;
+        outStatistics->sleeping              = cloth->sleeping;
         return true;
     }
 
@@ -1016,6 +1209,7 @@ private:
         ENGINE_PHYSICS_CLOTH_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_CLOTH_BIND(clothStatistics, clothStatisticsImpl);
         ENGINE_PHYSICS_CLOTH_BIND(sampleClothSurface, sampleClothSurfaceImpl);
+        ENGINE_PHYSICS_CLOTH_BIND(setClothImportance, setClothImportanceImpl);
 #undef ENGINE_PHYSICS_CLOTH_BIND
     }
 
@@ -1032,6 +1226,14 @@ private:
     std::unordered_map<ClothHandle, std::size_t> clothIndexByHandle_;
     ClothHandle                                  nextClothHandle_ = 1;
     std::size_t                                  totalParticles_  = 0;
+
+    // Reused scratch for the batched sphere-overlap queries.
+    std::vector<std::size_t>                               collisionSlotIndices_;
+    std::vector<engine::physics_rigid::SphereOverlapQuery>  collisionQueries_;
+    std::vector<engine::physics_rigid::SphereOverlapResult> collisionResults_;
+
+    // Registration ordinal for LOD stagger phases.
+    std::uint64_t registrationOrdinal_ = 0;
 };
 
 } // namespace

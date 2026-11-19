@@ -1,7 +1,11 @@
 // Runtime mesh material (engine::renderer).
 //
 // GPU-facing PBR subset: base color, metallic-roughness, normal, occlusion
-// and emissive textures by TextureHandle plus their scalar factors.
+// and emissive textures by TextureHandle plus their scalar factors, and the
+// transmission pair (opacity, index of refraction) the transparent-draw path
+// and the lumen_gi / lumen_reflection surfaces evaluate with. Field order is
+// append-only: modules embed this struct by value in ABI surfaces (the pbr
+// module's ConvertedModelMaterial), so new fields go at the end.
 
 #pragma once
 
@@ -39,8 +43,22 @@ struct MeshMaterial
     // applies). Backdrop geometry drawn before the scene it surrounds - an
     // atmosphere shell, a sky dome - renders with depth writes off so the
     // later opaque passes overwrite it inside the silhouette while the shell
-    // survives around it.
+    // survives around it. Transparent draws (opacity below 1) also keep
+    // depth writes off so co-transmitted surfaces do not occlude each other.
     bool depthWrite = true;
+
+    // Fraction of light the surface keeps off the transmitted path (1 =
+    // opaque, 0 = fully transparent). Values below 1 route the draw into the
+    // transparent pass (alpha blended over the opaque scene, depth writes
+    // off) and register the surface as transmissive with the lumen_gi and
+    // lumen_reflection modules, whose rays pass through with this
+    // attenuation. The transmitted light is tinted by baseColor.
+    float opacity = 1.0f;
+
+    // Index of refraction of the surface's medium (glass 1.5, water 1.33);
+    // refractive rays bend by Snell's law with this ratio. 1 keeps the
+    // transmitted path unbent.
+    float indexOfRefraction = 1.5f;
 };
 
 } // namespace engine::renderer

@@ -1,5 +1,9 @@
 // physics_rope module implementation.
 //
+// Simulation LOD reduces the internal substep count for unimportant ropes
+// without touching the fixed step size; a diverged step rolls back to its
+// pre-step node state.
+//
 // XPBD rope chains over a physics_rigid world: nodes integrate velocities,
 // stretch and bending constraints solve in Gauss-Seidel order with
 // compliance-scaled corrections (accumulating a per-segment tension readout),
@@ -15,6 +19,9 @@
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
+#include <engine/util/simulation_lod.hpp>
+#include <engine/util/step_accumulator.hpp>
 #include <engine/physics_rope/capabilities.hpp>
 
 #include <algorithm>
@@ -67,6 +74,10 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_rope", "fixed_rate_hz");
             value && *value >= 1.0 && *value <= 1000.0 && std::isfinite(*value))
             settings_.fixedRateHz = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_rope", "maximum_velocity");
+            value && *value > 0.0 && *value <= 1000.0 && std::isfinite(*value))
+            settings_.maximumVelocity = *value;
+        readLodSettings(context);
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -102,12 +113,39 @@ private:
             .requiredCapabilities = {"physics_rigid"}};
     }
 
+    void readLodSettings(ParticipantContext &context)
+    {
+        settings_.lodEnabled = context.configurationBooleanInSection("physics_rope", "lod_enabled").value_or(false);
+        const auto readThreshold = [this, &context](const char *key, double &target)
+        {
+            if (const auto value = context.configurationFloatingInSection("physics_rope", key);
+                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
+                target = *value;
+        };
+        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
+        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
+        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
+        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
+        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
+        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
+        {
+            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
+        }
+        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
+        {
+            if (const auto value = context.configurationIntegerInSection("physics_rope", key);
+                value && *value >= 0 && *value <= 65536)
+                target = static_cast<std::uint32_t>(*value);
+        };
+        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
+        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
+        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
+        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+    }
+
     static void setError(RopeError *output, RopeError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     RopeRecord *findRope(RopeHandle handle)
@@ -294,6 +332,8 @@ private:
         rope.positions[offsetB + 2] += inverseMassB * scaleZ;
     }
 
+    // Resolves every free node against the rigid world in one batched
+    // sphere query per substep instead of one capability call per node.
     void resolveCollisions(RopeRecord &rope)
     {
         rope.lastContactCount = 0;
@@ -304,32 +344,52 @@ private:
         const std::size_t nodeCount = rope.positions.size() / 3;
         for (std::size_t node = 0; node < nodeCount; ++node)
         {
-            const std::size_t offset = node * 3;
+            rope.contactFlags[node] = 0u;
+        }
+        collisionSlotIndices_.clear();
+        collisionQueries_.clear();
+        for (std::size_t node = 0; node < nodeCount; ++node)
+        {
             if (rope.attachments[node] != NodeAttachment::Free)
             {
                 continue;
             }
-            double                            normal[3] = {0.0, 0.0, 0.0};
-            double                            depth     = 0.0;
-            engine::physics_rigid::BodyHandle body      = engine::physics_rigid::invalidBody;
-            if (!rigid_->collideSphere(
-                    rigid_->self, rope.world, &rope.positions[offset], rope.nodeRadius, normal, &depth, &body)
-                || depth <= 0.0)
+            engine::physics_rigid::SphereOverlapQuery query;
+            const std::size_t offset = node * 3;
+            query.center[0] = rope.positions[offset];
+            query.center[1] = rope.positions[offset + 1];
+            query.center[2] = rope.positions[offset + 2];
+            query.radius    = rope.nodeRadius;
+            collisionSlotIndices_.push_back(node);
+            collisionQueries_.push_back(query);
+        }
+        if (collisionQueries_.empty())
+        {
+            return;
+        }
+        collisionResults_.resize(collisionQueries_.size());
+        rigid_->collideSpheres(rigid_->self, rope.world, collisionQueries_.data(),
+            static_cast<std::uint32_t>(collisionQueries_.size()), collisionResults_.data());
+        for (std::size_t entry = 0; entry < collisionSlotIndices_.size(); ++entry)
+        {
+            const std::size_t node = collisionSlotIndices_[entry];
+            const engine::physics_rigid::SphereOverlapResult &result = collisionResults_[entry];
+            if (!result.hit || result.depth <= 0.0)
             {
                 continue;
             }
-            // Store the contact for the velocity pass through the pin slot
-            // scratch: contacts land in contactNormals_ keyed by node.
+            const std::size_t offset = node * 3;
+            // Contacts land in the node-keyed scratch the velocity pass reads.
             rope.lastContactCount += 1;
-            contactFlags_[node] = 1u;
-            contactNormals_[node * 3]     = normal[0];
-            contactNormals_[node * 3 + 1] = normal[1];
-            contactNormals_[node * 3 + 2] = normal[2];
+            rope.contactFlags[node] = 1u;
+            rope.contactNormals[offset]     = result.normal[0];
+            rope.contactNormals[offset + 1] = result.normal[1];
+            rope.contactNormals[offset + 2] = result.normal[2];
             // Project the node out of the obstacle along the push-out
             // direction; velocity damping happens in the final velocity pass.
-            rope.positions[offset] += normal[0] * depth;
-            rope.positions[offset + 1] += normal[1] * depth;
-            rope.positions[offset + 2] += normal[2] * depth;
+            rope.positions[offset] += result.normal[0] * result.depth;
+            rope.positions[offset + 1] += result.normal[1] * result.depth;
+            rope.positions[offset + 2] += result.normal[2] * result.depth;
         }
     }
 
@@ -347,14 +407,14 @@ private:
             double velocityX = (rope.positions[offset] - rope.previousPositions[offset]) * inverseDeltaTime;
             double velocityY = (rope.positions[offset + 1] - rope.previousPositions[offset + 1]) * inverseDeltaTime;
             double velocityZ = (rope.positions[offset + 2] - rope.previousPositions[offset + 2]) * inverseDeltaTime;
-            if (contactFlags_[node] != 0u)
+            if (rope.contactFlags[node] != 0u)
             {
                 // Split into normal and tangential parts; the normal part is
                 // removed and the tangential part scales by the friction
                 // factor (the fraction of sliding velocity kept per substep).
-                const double normalX        = contactNormals_[node * 3];
-                const double normalY        = contactNormals_[node * 3 + 1];
-                const double normalZ        = contactNormals_[node * 3 + 2];
+                const double normalX        = rope.contactNormals[offset];
+                const double normalY        = rope.contactNormals[offset + 1];
+                const double normalZ        = rope.contactNormals[offset + 2];
                 const double normalVelocity = normalX * velocityX + normalY * velocityY + normalZ * velocityZ;
                 velocityX -= normalX * normalVelocity;
                 velocityY -= normalY * normalVelocity;
@@ -363,13 +423,23 @@ private:
                 velocityY *= rope.friction;
                 velocityZ *= rope.friction;
             }
+            // Clamp the derived velocity so solver noise cannot escalate
+            // into a diverging state (the value is module configuration).
+            const double speedSquared = velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ;
+            if (speedSquared > settings_.maximumVelocity * settings_.maximumVelocity)
+            {
+                const double scale = settings_.maximumVelocity / std::sqrt(speedSquared);
+                velocityX *= scale;
+                velocityY *= scale;
+                velocityZ *= scale;
+            }
             rope.velocities[offset]     = velocityX;
             rope.velocities[offset + 1] = velocityY;
             rope.velocities[offset + 2] = velocityZ;
         }
     }
 
-    bool stepRope(RopeRecord &rope, double fixedDeltaSeconds)
+    bool stepRope(RopeRecord &rope, double fixedDeltaSeconds, std::uint32_t substeps)
     {
         const auto stepStart = std::chrono::steady_clock::now();
         if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > 0.1 || !std::isfinite(fixedDeltaSeconds))
@@ -377,11 +447,17 @@ private:
             return false;
         }
         const std::size_t   nodeCount    = rope.positions.size() / 3;
-        contactFlags_.assign(nodeCount, 0u);
-        contactNormals_.assign(nodeCount * 3, 0.0);
+        rope.contactFlags.assign(nodeCount, 0u);
+        rope.contactNormals.assign(nodeCount * 3, 0.0);
         rope.tensionAccumulator.assign(rope.segments, 0.0); // fresh |lambda| sums for this step
-        const std::uint32_t substeps     = settings_.substepsPerStep;
         const double        substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+        // Pre-step copies for the rollback path: a diverged step restores
+        // this state and reports failure, so the caller sees an untouched
+        // rope.
+        rope.preStepPositions.resize(rope.positions.size());
+        rope.preStepVelocities.resize(rope.velocities.size());
+        std::copy(rope.positions.begin(), rope.positions.end(), rope.preStepPositions.begin());
+        std::copy(rope.velocities.begin(), rope.velocities.end(), rope.preStepVelocities.begin());
         for (std::uint32_t substep = 0; substep < substeps; ++substep)
         {
             refreshAttachmentTargets(rope);
@@ -391,7 +467,7 @@ private:
             finalizeSubstepVelocities(rope, substepDelta);
         }
         rope.lastContactCount = static_cast<std::uint32_t>(
-            std::count(contactFlags_.begin(), contactFlags_.end(), std::uint8_t{1}));
+            std::count(rope.contactFlags.begin(), rope.contactFlags.end(), std::uint8_t{1}));
         bool finite = true;
         for (const double value : rope.positions)
         {
@@ -401,8 +477,18 @@ private:
                 break;
             }
         }
+        for (const double value : rope.velocities)
+        {
+            if (!std::isfinite(value))
+            {
+                finite = false;
+                break;
+            }
+        }
         if (!finite)
         {
+            std::copy(rope.preStepPositions.begin(), rope.preStepPositions.end(), rope.positions.begin());
+            std::copy(rope.preStepVelocities.begin(), rope.preStepVelocities.end(), rope.velocities.begin());
             return false;
         }
         rope.stepsSimulated += 1;
@@ -600,6 +686,10 @@ private:
 
         rope.previousPositions = rope.positions;
         totalNodes_ += nodeCount;
+        // Simulation LOD: the stagger phase derives from the registration
+        // ordinal, so ropes sharing an interval spread their work across
+        // steps.
+        rope.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         ropes_.push_back(std::move(rope));
         ropeIndexByHandle_.emplace(ropes_.back().handle, ropes_.size() - 1);
         return ropes_.back().handle;
@@ -843,6 +933,25 @@ private:
         return true;
     }
 
+    // Internal substep count for one fidelity band: lower bands keep the
+    // fixed step size and cut the substep count instead, and Cached freezes.
+    std::uint32_t substepsForBand(engine::util::SimulationFidelity band) const
+    {
+        switch (band)
+        {
+        case engine::util::SimulationFidelity::Full:
+            return settings_.substepsPerStep;
+        case engine::util::SimulationFidelity::Simplified:
+            return std::max(1u, settings_.substepsPerStep / 2u);
+        case engine::util::SimulationFidelity::Procedural:
+            return std::max(1u, settings_.substepsPerStep / 4u);
+        case engine::util::SimulationFidelity::Animation:
+        case engine::util::SimulationFidelity::Cached:
+        default:
+            return 1u;
+        }
+    }
+
     bool stepImpl(RopeHandle handle, double fixedDeltaSeconds)
     {
         RopeRecord *rope = findRope(handle);
@@ -850,33 +959,54 @@ private:
         {
             return false;
         }
-        return stepRope(*rope, fixedDeltaSeconds);
+        if (settings_.lodEnabled)
+        {
+            rope->lodBand = engine::util::simulationFidelityForImportance(
+                settings_.lodThresholds, rope->importance, rope->lodBand);
+            const std::uint32_t interval
+                = settings_.lodIntervals[engine::util::simulationFidelityIndex(rope->lodBand)];
+            if (interval == 0u)
+            {
+                // Cached band: hold the last state until the score rises.
+                rope->cadence.interval = 1u;
+                rope->lodSkippedSteps += 1;
+                return true;
+            }
+            rope->cadence.interval = interval;
+            if (!engine::util::simulationCadenceAdvance(rope->cadence))
+            {
+                rope->lodSkippedSteps += 1;
+                return true;
+            }
+        }
+        if (!stepRope(*rope, fixedDeltaSeconds, substepsForBand(rope->lodBand)))
+        {
+            return false;
+        }
+        return true;
     }
 
     std::uint32_t simulateImpl(RopeHandle handle, double elapsedSeconds)
     {
         RopeRecord *rope = findRope(handle);
-        if (rope == nullptr || !std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+        if (rope == nullptr)
         {
             return 0u;
         }
         const double fixedDelta = 1.0 / settings_.fixedRateHz;
-        rope->simulatedTimeBudget += elapsedSeconds;
-        std::uint32_t executed = 0;
-        while (rope->simulatedTimeBudget >= fixedDelta && executed < settings_.maximumStepsPerSimulate)
+        return rope->accumulator.drain(fixedDelta, settings_.maximumStepsPerSimulate, elapsedSeconds,
+            [this, handle, fixedDelta]() { return stepImpl(handle, fixedDelta); });
+    }
+
+    bool setRopeImportanceImpl(RopeHandle handle, double importance)
+    {
+        RopeRecord *rope = findRope(handle);
+        if (rope == nullptr || !std::isfinite(importance))
         {
-            rope->simulatedTimeBudget -= fixedDelta;
-            if (!stepRope(*rope, fixedDelta))
-            {
-                break;
-            }
-            ++executed;
+            return false;
         }
-        if (executed == settings_.maximumStepsPerSimulate)
-        {
-            rope->simulatedTimeBudget = 0.0;
-        }
-        return executed;
+        rope->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
     }
 
     bool ropeStatisticsImpl(RopeHandle handle, RopeStatistics *outStatistics)
@@ -892,6 +1022,7 @@ private:
         outStatistics->lastStepMilliseconds = rope->lastStepMilliseconds;
         outStatistics->brokenSegmentCount   = rope->brokenSegmentCount;
         outStatistics->maximumTension       = rope->maximumTension;
+        outStatistics->lodSkippedSteps      = rope->lodSkippedSteps;
         return true;
     }
 
@@ -916,6 +1047,7 @@ private:
         ENGINE_PHYSICS_ROPE_BIND(step, stepImpl);
         ENGINE_PHYSICS_ROPE_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_ROPE_BIND(ropeStatistics, ropeStatisticsImpl);
+        ENGINE_PHYSICS_ROPE_BIND(setRopeImportance, setRopeImportanceImpl);
         ENGINE_PHYSICS_ROPE_BIND(copyRopeTension, copyRopeTensionImpl);
         ENGINE_PHYSICS_ROPE_BIND(setRopeLength, setRopeLengthImpl);
 #undef ENGINE_PHYSICS_ROPE_BIND
@@ -934,8 +1066,13 @@ private:
     std::size_t                                 totalNodes_     = 0;
 
     // Per-substep collision scratch shared by the stepping path.
-    std::vector<std::uint8_t> contactFlags_;
-    std::vector<double>       contactNormals_;
+    // Reused scratch for the batched sphere-overlap queries.
+    std::vector<std::size_t>                               collisionSlotIndices_;
+    std::vector<engine::physics_rigid::SphereOverlapQuery>  collisionQueries_;
+    std::vector<engine::physics_rigid::SphereOverlapResult> collisionResults_;
+
+    // Registration ordinal for LOD stagger phases.
+    std::uint64_t registrationOrdinal_ = 0;
 };
 
 } // namespace

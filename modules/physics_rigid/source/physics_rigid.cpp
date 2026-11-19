@@ -16,6 +16,8 @@
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
+#include <engine/util/module_error.hpp>
+#include <engine/util/step_accumulator.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +32,44 @@ namespace engine::physics_rigid
 {
 namespace
 {
+
+// Fills a public shape description from the module's runtime shape record.
+void fillShapeDescription(const Shape &shape, ShapeDescription &outDescription)
+{
+    outDescription.kind                = shape.kind;
+    outDescription.sphereRadius        = shape.sphereRadius;
+    for (std::uint32_t axis = 0; axis < 3; ++axis)
+    {
+        outDescription.boxHalfExtents[axis] = shape.boxHalfExtents[axis];
+    }
+    outDescription.capsuleRadius       = shape.capsuleRadius;
+    outDescription.capsuleHalfLength   = shape.capsuleHalfLength;
+    outDescription.cylinderRadius      = shape.cylinderRadius;
+    outDescription.cylinderHalfHeight  = shape.cylinderHalfHeight;
+    outDescription.planeNormal[0]      = shape.planeNormal.x;
+    outDescription.planeNormal[1]      = shape.planeNormal.y;
+    outDescription.planeNormal[2]      = shape.planeNormal.z;
+    outDescription.planeOffset         = shape.planeOffset;
+}
+
+// Fills a public body description from the module's runtime body record.
+void fillBodyDescriptionFromRecord(const Body &body, BodyDescription &outDescription)
+{
+    fillShapeDescription(body.shape, outDescription.shape);
+    outDescription.transform                = body.transform;
+    outDescription.kind                     = body.kind;
+    outDescription.density                  = body.densitySource;
+    outDescription.mass                     = body.densitySource > 0.0 ? 0.0 : body.explicitMassSource;
+    outDescription.material                 = body.material;
+    outDescription.linearDamping            = body.linearDamping;
+    outDescription.angularDamping           = body.angularDamping;
+    outDescription.sleepingEnabled          = body.sleepingEnabled;
+    outDescription.gravityEnabled           = body.gravityEnabled;
+    outDescription.categoryBits             = body.categoryBits;
+    outDescription.maskBits                 = body.maskBits;
+    outDescription.userTag                  = body.userTag;
+    outDescription.continuousCollisionEnabled = body.continuousCollisionEnabled;
+}
 
 class PhysicsRigidModule final : public ModuleInterface
 {
@@ -108,6 +148,7 @@ private:
         readPositiveLimit(context, "maximum_triggers", 100'000, settings_.maximumTriggers);
         readPositiveLimit(context, "maximum_trigger_events", 1'000'000, settings_.maximumTriggerEvents);
         readPositiveLimit(context, "maximum_steps_per_simulate", 1000, settings_.maximumStepsPerSimulate);
+        readPositiveLimit(context, "maximum_substeps", 64, settings_.maximumSubsteps);
     }
 
     void readSolverSettings(ParticipantContext &context)
@@ -170,10 +211,7 @@ private:
 
     static void setError(PhysicsError *output, PhysicsError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     World *findWorld(WorldHandle handle)
@@ -350,33 +388,8 @@ private:
             return false;
         }
         BodyDescription description;
-        description.shape.kind         = body->shape.kind;
-        description.shape.sphereRadius = body->shape.sphereRadius;
-        for (std::uint32_t axis = 0; axis < 3; ++axis)
-        {
-            description.shape.boxHalfExtents[axis] = body->shape.boxHalfExtents[axis];
-        }
-        description.shape.capsuleRadius     = body->shape.capsuleRadius;
-        description.shape.capsuleHalfLength = body->shape.capsuleHalfLength;
-        description.shape.cylinderRadius    = body->shape.cylinderRadius;
-        description.shape.cylinderHalfHeight = body->shape.cylinderHalfHeight;
-        description.shape.planeNormal[0]    = body->shape.planeNormal.x;
-        description.shape.planeNormal[1]    = body->shape.planeNormal.y;
-        description.shape.planeNormal[2]    = body->shape.planeNormal.z;
-        description.shape.planeOffset       = body->shape.planeOffset;
-        description.transform               = body->transform;
-        description.kind                    = body->kind;
-        description.density                 = body->densitySource;
-        description.mass                    = body->densitySource > 0.0 ? 0.0 : body->explicitMassSource;
-        description.material                = body->material;
-        description.linearDamping           = body->linearDamping;
-        description.angularDamping          = body->angularDamping;
-        description.sleepingEnabled         = body->sleepingEnabled;
-        description.gravityEnabled          = body->gravityEnabled;
-        description.categoryBits            = body->categoryBits;
-        description.maskBits                = body->maskBits;
-        description.userTag                 = body->userTag;
-        *outDescription                     = description;
+        fillBodyDescriptionFromRecord(*body, description);
+        *outDescription = std::move(description);
         return true;
     }
 
@@ -957,28 +970,13 @@ private:
     std::uint32_t simulateImpl(WorldHandle worldHandle, double elapsedSeconds)
     {
         World *world = findWorld(worldHandle);
-        if (world == nullptr || !std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+        if (world == nullptr)
         {
             return 0u;
         }
         const double fixedDelta = 1.0 / world->settings.fixedRateHz;
-        world->simulatedTimeBudget += elapsedSeconds;
-        std::uint32_t executed = 0;
-        while (world->simulatedTimeBudget >= fixedDelta && executed < world->settings.maximumStepsPerSimulate)
-        {
-            world->simulatedTimeBudget -= fixedDelta;
-            if (!stepWorld(*world, fixedDelta, scratch_))
-            {
-                break;
-            }
-            ++executed;
-        }
-        if (executed == world->settings.maximumStepsPerSimulate)
-        {
-            // Drop the backlog so a persistent deficit cannot accumulate.
-            world->simulatedTimeBudget = 0.0;
-        }
-        return executed;
+        return world->accumulator.drain(fixedDelta, world->settings.maximumStepsPerSimulate, elapsedSeconds,
+            [this, world, fixedDelta]() { return stepWorld(*world, fixedDelta, scratch_); });
     }
 
     bool rayCastImpl(WorldHandle worldHandle, const double origin[3], const double direction[3], double maximumDistance,
@@ -1066,6 +1064,68 @@ private:
             return false;
         }
         return sphereCastWorld(*world, startVector, deltaVector, radius, *outHit);
+    }
+
+    // ---- batched query implementations (ABI 5) -----------------------------
+
+    std::uint32_t collideSpheresImpl(
+        WorldHandle worldHandle, const SphereOverlapQuery *queries, std::uint32_t queryCount, SphereOverlapResult *outResults)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr)
+        {
+            return 0u;
+        }
+        return collideSpheresWorld(*world, queries, queryCount, outResults);
+    }
+
+    template <typename OutRecord, typename Fill>
+    static std::uint32_t copyBodiesBatched(
+        World *world, const BodyHandle *bodies, std::uint32_t bodyCount, OutRecord *outRecords, Fill &&fillOne)
+    {
+        if (world == nullptr || bodies == nullptr || outRecords == nullptr)
+        {
+            return 0u;
+        }
+        std::uint32_t resolved = 0;
+        for (std::uint32_t index = 0; index < bodyCount; ++index)
+        {
+            const auto iterator = world->bodyIndexByHandle.find(bodies[index]);
+            if (iterator != world->bodyIndexByHandle.end())
+            {
+                fillOne(outRecords[index], world->bodies[iterator->second]);
+                ++resolved;
+            }
+        }
+        return resolved;
+    }
+
+    std::uint32_t copyBodyStatesImpl(
+        WorldHandle worldHandle, const BodyHandle *bodies, std::uint32_t bodyCount, BodyState *outStates)
+    {
+        return copyBodiesBatched(findWorld(worldHandle), bodies, bodyCount, outStates, [](BodyState &target, const Body &body)
+        {
+            BodyState state;
+            state.transform         = body.transform;
+            state.linearVelocity    = body.linearVelocity;
+            state.angularVelocity   = body.angularVelocity;
+            // The same awake semantics the single-body copy reports: static
+            // and kinematic bodies never sleep, so they always read awake.
+            state.awake             = body.awake || body.kind != BodyKind::Dynamic;
+            target                  = state;
+        });
+    }
+
+    std::uint32_t copyBodyDescriptionsImpl(WorldHandle worldHandle, const BodyHandle *bodies, std::uint32_t bodyCount,
+        BodyDescription *outDescriptions)
+    {
+        return copyBodiesBatched(
+            findWorld(worldHandle), bodies, bodyCount, outDescriptions, [](BodyDescription &target, const Body &body)
+            {
+                BodyDescription description;
+                fillBodyDescriptionFromRecord(body, description);
+                target = description;
+            });
     }
 
     // ---- trigger volume implementations ------------------------------------
@@ -1349,6 +1409,9 @@ private:
         ENGINE_PHYSICS_RIGID_BIND(clearTriggerEvents, clearTriggerEventsImpl);
         ENGINE_PHYSICS_RIGID_BIND(triggerOverlapCount, triggerOverlapCountImpl);
         ENGINE_PHYSICS_RIGID_BIND(copyTriggerOverlaps, copyTriggerOverlapsImpl);
+        ENGINE_PHYSICS_RIGID_BIND(collideSpheres, collideSpheresImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyBodyStates, copyBodyStatesImpl);
+        ENGINE_PHYSICS_RIGID_BIND(copyBodyDescriptions, copyBodyDescriptionsImpl);
 #undef ENGINE_PHYSICS_RIGID_BIND
     }
 

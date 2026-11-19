@@ -14,6 +14,7 @@ config_keys           = [
     "physics_rigid.maximum_linear_correction",
     "physics_rigid.maximum_linear_velocity",
     "physics_rigid.maximum_steps_per_simulate",
+    "physics_rigid.maximum_substeps",
     "physics_rigid.maximum_trigger_events",
     "physics_rigid.maximum_triggers",
     "physics_rigid.maximum_worlds",

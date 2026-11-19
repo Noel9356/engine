@@ -20,16 +20,18 @@ queue_source_fairness   = false
 worker_count            = 0
 
 [pbr]
-# Warm key light from the upper right so contact shadows read on the floor
-# and the cloth lattice gets rim separation. The headless renderer exports
-# LINEAR framebuffer values, so albedo x (ambient + sun x NdotL) is tuned to
-# land mid-tones for the demo palette; the hemispheric ambient keeps the sky
-# cool and the ground warm so up-facing and down-facing reads differ.
+# Warm key light from the upper right front - the default camera sits at
+# (15, 8, 15) looking at the origin, so a sun with positive x/z components
+# lights the faces it sees and contact shadows read on the floor. The
+# headless renderer exports LINEAR framebuffer values, so albedo x (ambient +
+# sun x NdotL) is tuned to land mid-tones for the demo palette; the
+# hemispheric ambient keeps the sky cool and the ground warm so up-facing and
+# down-facing reads differ.
 ambient_intensity   = 0.14
 ambient_ground_color = [0.30, 0.26, 0.22]
 ambient_sky_color   = [0.52, 0.58, 0.68]
 sun_color           = [1.0, 0.95, 0.86]
-sun_direction       = [-0.45, 0.62, -0.64]
+sun_direction       = [0.45, 0.62, 0.55]
 sun_enabled         = true
 sun_intensity       = 2.4
 
@@ -52,10 +54,16 @@ pendulum_swing        = 0.6
 spawn_ahead           = 3.0
 wind_strength         = 3.0
 
+[physics_particles]
+# Simulation LOD is on so ambient emitters can run below the Full band; the
+# demo's emitters default to importance 1.0 (Full, every step) and the
+# self-test drives a reduced-importance emitter through the bands.
+lod_enabled = true
+
 [physics_rigid]
 # Solver defaults from the module config; the demo keeps the 60 Hz contract
 # (--fixed-hz overrides it for A/B captures and the V key cycles it live).
-baumgarte_factor           = 0.2
+joint_baumgarte_factor     = 0.2
 contact_slop               = 0.005
 fixed_rate_hz              = 60.0
 solver_velocity_iterations = 20

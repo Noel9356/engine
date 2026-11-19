@@ -20,6 +20,7 @@ Every value is read once in `construct()` and copied into each world at `createW
 | `physics_rigid.maximum_linear_correction` | number | (0, 10) | `0.4` | Upper bound (meters for the position solver's per-iteration displacement, meters per second for joint bias velocities) so deep overlaps correct over several steps instead of popping. |
 | `physics_rigid.maximum_linear_velocity` | number | >= 1 | `500.0` | Linear speed clamp (meters per second) applied after integration as a tunneling safety net. |
 | `physics_rigid.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped instead of accumulating into a catch-up spiral. |
+| `physics_rigid.maximum_substeps` | integer | 1 - 64 | `16` | Cap on how many canonical substeps one step may split into when the delta exceeds `substep_maximum_delta`; a delta whose required count exceeds the bound integrates at a coarser canonical step instead of spending an unbounded pass count. |
 | `physics_rigid.maximum_trigger_events` | integer | 1 - 1000000 | `1024` | Bound on the per-world pending trigger-event queue; once full, the oldest event is dropped with the overflow flag set (visible through `triggerEventCount`) until the consumer drains the queue. |
 | `physics_rigid.maximum_triggers` | integer | 1 - 100000 | `256` | Largest trigger count accepted per world; `createTrigger` reports `CapacityExceeded` beyond it. |
 | `physics_rigid.maximum_worlds` | integer | 1 - 4096 | `16` | Maximum concurrently existing worlds. |

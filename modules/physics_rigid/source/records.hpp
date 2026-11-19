@@ -6,6 +6,7 @@
 
 #include "shapes.hpp"
 #include <engine/physics_rigid/capabilities.hpp>
+#include <engine/util/step_accumulator.hpp>
 
 #include <cstdint>
 #include <unordered_map>
@@ -179,8 +180,11 @@ struct SimulationSettings
     // Internal canonical substep target (seconds). A step whose delta exceeds
     // it is split into equal internal substeps, so callers at coarse rates
     // integrate on the same canonical step the fine rates use. Zero disables
-    // splitting.
-    double substepMaximumDelta = 1.0 / 120.0;
+    // splitting. maximumSubsteps bounds how many substeps one step may split
+    // into; a delta whose required count exceeds the bound integrates at a
+    // coarser canonical step instead of spending an unbounded pass count.
+    double        substepMaximumDelta = 1.0 / 120.0;
+    std::uint32_t maximumSubsteps    = 16;
 
     std::uint32_t velocityIterations = 20;
 
@@ -262,7 +266,8 @@ struct World
 
     std::vector<std::pair<std::size_t, std::size_t>> broadphasePairs;
 
-    double simulatedTimeBudget = 0.0;
+    // Fixed-step budget bookkeeping for simulate().
+    engine::util::StepAccumulator accumulator;
 
     std::uint64_t stepsSimulated       = 0;
     double        lastStepMilliseconds = 0.0;

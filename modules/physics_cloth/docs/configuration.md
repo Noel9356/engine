@@ -11,6 +11,19 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_cloth.maximum_particles` | integer | 1 - 10000000 | `200000` | Module-wide particle budget shared by all cloths. |
 | `physics_cloth.maximum_particles_per_cloth` | integer | 1 - 1000000 | `65536` | Largest particle count accepted by one `createCloth` call (a 256 x 256 grid fits). |
 | `physics_cloth.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped. |
+| `physics_cloth.lod_animation_threshold` | number | (0, 1] | `0.1` | Fidelity-ladder boundary between Animation and Cached; scores below it freeze cloths. Must stay below `lod_procedural_threshold`. |
+| `physics_cloth.lod_demotion_margin` | number | [0, 1) | `0.8` | Demotion hysteresis fraction; a cloth keeps its band until its importance falls below the band's entry threshold times this margin. |
+| `physics_cloth.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: bands below Full keep the fixed step size and reduce the internal XPBD substep count instead. |
+| `physics_cloth.lod_full_threshold` | number | (0, 1] | `0.75` | Importance at or above which a cloth runs the Full band. Must stay above `lod_simplified_threshold`. |
+| `physics_cloth.lod_interval_animation` | integer | 0 - 65536 | `8` | Fixed steps between updates for Animation-band cloths; `0` freezes them. |
+| `physics_cloth.lod_interval_cached` | integer | 0 - 65536 | `0` | `0` freezes Cached-band cloths (the default). |
+| `physics_cloth.lod_interval_procedural` | integer | 0 - 65536 | `4` | Fixed steps between updates for Procedural-band cloths. |
+| `physics_cloth.lod_interval_simplified` | integer | 0 - 65536 | `2` | Fixed steps between updates for Simplified-band cloths. |
+| `physics_cloth.lod_procedural_threshold` | number | (0, 1] | `0.25` | Boundary between Simplified and Procedural. |
+| `physics_cloth.lod_simplified_threshold` | number | (0, 1] | `0.5` | Boundary between Full and Simplified. |
+| `physics_cloth.maximum_velocity` | number | (0, 1000] | `30.0` | Clamp applied to the per-substep particle velocities (meters per second), keeping solver noise from escalating. |
+| `physics_cloth.sleep_velocity_threshold` | number | (0, 100] | `0.05` | A cloth whose free particles all stay below this speed (meters per second) accumulates quiet time toward the sleep state. |
+| `physics_cloth.time_to_sleep` | number | [0, 60] | `0.6` | Quiet time (seconds) after which a cloth with `sleepingEnabled` sleeps until a drag, pin, or wind change wakes it. |
 | `physics_cloth.substeps_per_step` | integer | 1 - 64 | `8` | XPBD substeps per fixed step. More substeps stiffen the effective solver at proportional cost; the compliance scaling keeps material behavior constant across values. |
 
 ## Out-of-range and invalid values

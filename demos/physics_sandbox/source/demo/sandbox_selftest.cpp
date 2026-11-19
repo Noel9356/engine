@@ -23,6 +23,17 @@
 //     the relative frame under impulse, and the distance spring stays soft.
 // 13. Character: the humanoid ragdoll builds, the drives run, the jiggle
 //     chain stays finite, and the foot planter plants on the ground.
+// Extended battery additions:
+// 21. Batched sphere queries: collideSpheres matches per-sphere collideSphere
+//     exactly for a mixed static/dynamic field (hit flags, normals, depths,
+//     and bodies).
+// 22. Cloth sleep: a settling sheet reaches the sleeping state, holds it
+//     while undisturbed, and wakes on a wind change.
+// 23. Particle simulation LOD: an emitter at Simplified importance skips
+//     about half the steps, a Cached emitter freezes, and Full runs every
+//     step again; emission totals stay rate-correct across the bands.
+// 24. Per-ocean gravity: two oceans over worlds with different gravity
+//     produce different buoyancy for identical bodies.
 #include "sandbox_selftest.hpp"
 
 #include <algorithm>
@@ -1407,6 +1418,346 @@ SelfTestResult runSelfTestExtended(const SceneDependencies &dependencies, const 
         const bool testPassed = reachClamps && reachHolds && leanTilts && pushMoves;
         report << (testPassed ? "PASS" : "FAIL") << ": character extensions - far-hand clamp " << reachClamps
                << ", near-hand reach " << reachHolds << ", lean tilt " << leanTilts << ", crate push " << pushMoves << "\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 21. batched sphere queries -----------------------------------------
+    if (dependencies.rigid != nullptr)
+    {
+        EXTENDED_TEST_MARKER("batched-queries")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+
+        // A mixed field: a ground plane, static boxes, kinematic movers, and
+        // dynamic spheres at varied positions so results exercise the
+        // deepest-overlap selection and the shape-bound pre-filter.
+        engine::physics_rigid::BodyDescription body;
+        body.shape.kind    = engine::physics_rigid::ShapeKind::Plane;
+        body.shape.planeOffset = 0.0;
+        body.kind          = engine::physics_rigid::BodyKind::Static;
+        dependencies.rigid->createBody(dependencies.rigid->self, world, &body, nullptr);
+        body.shape.kind = engine::physics_rigid::ShapeKind::Box;
+        body.shape.planeOffset = 0.0;
+        body.shape.boxHalfExtents[0] = 0.6;
+        body.shape.boxHalfExtents[1] = 0.6;
+        body.shape.boxHalfExtents[2] = 0.6;
+        for (std::uint32_t index = 0; index < 6; ++index)
+        {
+            body.kind              = index % 2 == 0 ? engine::physics_rigid::BodyKind::Static
+                                                    : engine::physics_rigid::BodyKind::Kinematic;
+            body.transform.position = engine::physics_rigid::Vec3{-2.5 + 1.0 * index, 0.6, 0.0};
+            dependencies.rigid->createBody(dependencies.rigid->self, world, &body, nullptr);
+        }
+        std::vector<engine::physics_rigid::SphereOverlapQuery> queries;
+        std::vector<engine::physics_rigid::SphereOverlapResult> single(64);
+        for (std::uint32_t index = 0; index < 64; ++index)
+        {
+            engine::physics_rigid::SphereOverlapQuery query;
+            const double x = -3.0 + 0.1 * index;
+            query.center[0] = x;
+            query.center[1] = index % 3 == 0 ? 0.3 : (index % 3 == 1 ? 0.55 : 1.4);
+            query.center[2] = 0.0;
+            query.radius    = 0.2 + 0.01 * (index % 4);
+            queries.push_back(query);
+            double normal[3] = {0.0, 0.0, 0.0};
+            double depth = 0.0;
+            engine::physics_rigid::BodyHandle bodyHit = engine::physics_rigid::invalidBody;
+            single[index].hit = dependencies.rigid->collideSphere(dependencies.rigid->self, world, query.center,
+                query.radius, normal, &depth, &bodyHit);
+            single[index].normal[0] = normal[0];
+            single[index].normal[1] = normal[1];
+            single[index].normal[2] = normal[2];
+            single[index].depth     = depth;
+            single[index].body      = bodyHit;
+        }
+        std::vector<engine::physics_rigid::SphereOverlapResult> batched(64, engine::physics_rigid::SphereOverlapResult{});
+        const std::uint32_t processed = dependencies.rigid->collideSpheres(dependencies.rigid->self, world,
+            queries.data(), static_cast<std::uint32_t>(queries.size()), batched.data());
+        bool matches = processed == queries.size();
+        for (std::size_t index = 0; index < queries.size() && matches; ++index)
+        {
+            const engine::physics_rigid::SphereOverlapResult &expected = single[index];
+            const engine::physics_rigid::SphereOverlapResult &actual   = batched[index];
+            matches = expected.hit == actual.hit && expected.body == actual.body
+                      && std::abs(expected.depth - actual.depth) <= 1.0e-12
+                      && std::abs(expected.normal[0] - actual.normal[0]) <= 1.0e-12
+                      && std::abs(expected.normal[1] - actual.normal[1]) <= 1.0e-12
+                      && std::abs(expected.normal[2] - actual.normal[2]) <= 1.0e-12;
+        }
+        // Batched body reads echo the same states the per-body copies give.
+        engine::physics_rigid::BodyHandle handles[8] = {};
+        const std::uint32_t handleCount = dependencies.rigid->bodyCount(dependencies.rigid->self, world);
+        engine::physics_rigid::BodyState statesBatched[8] = {};
+        std::uint32_t listed = 0;
+        bool batchedStates = false;
+        if (handleCount <= 8
+            && dependencies.rigid->copyBodyHandles(
+                dependencies.rigid->self, world, handles, handleCount, &listed)
+            && listed == handleCount)
+        {
+            const std::uint32_t resolved = dependencies.rigid->copyBodyStates(
+                dependencies.rigid->self, world, handles, handleCount, statesBatched);
+            batchedStates = resolved == handleCount;
+            for (std::uint32_t index = 0; index < handleCount && batchedStates; ++index)
+            {
+                engine::physics_rigid::BodyState individual{};
+                dependencies.rigid->copyBodyState(dependencies.rigid->self, world, handles[index], &individual);
+                const bool same = std::abs(individual.transform.position.x - statesBatched[index].transform.position.x)
+                                        <= 1.0e-12
+                                && std::abs(individual.transform.position.y - statesBatched[index].transform.position.y)
+                                        <= 1.0e-12
+                                && individual.awake == statesBatched[index].awake;
+                batchedStates = same;
+            }
+            // Batched description reads echo the same shapes the per-body copy
+            // gives: compare kind, radii, half extents, and position so a
+            // dropped shape kind (everything reading as the default sphere)
+            // cannot pass unnoticed.
+            if (batchedStates)
+            {
+                std::vector<engine::physics_rigid::BodyDescription> descriptionsBatched(
+                    handleCount, engine::physics_rigid::BodyDescription{});
+                const std::uint32_t descriptionsResolved = dependencies.rigid->copyBodyDescriptions(
+                    dependencies.rigid->self, world, handles, handleCount, descriptionsBatched.data());
+                batchedStates = descriptionsResolved == handleCount;
+                for (std::uint32_t index = 0; index < handleCount && batchedStates; ++index)
+                {
+                    engine::physics_rigid::BodyDescription individual{};
+                    batchedStates = dependencies.rigid->copyBodyDescription(
+                        dependencies.rigid->self, world, handles[index], &individual);
+                    const engine::physics_rigid::BodyDescription &batchedDescription = descriptionsBatched[index];
+                    const bool same = individual.kind == batchedDescription.kind
+                                      && individual.shape.kind == batchedDescription.shape.kind
+                                      && std::abs(individual.shape.sphereRadius - batchedDescription.shape.sphereRadius)
+                                             <= 1.0e-12
+                                      && std::abs(individual.shape.boxHalfExtents[0]
+                                              - batchedDescription.shape.boxHalfExtents[0])
+                                             <= 1.0e-12
+                                      && std::abs(individual.shape.boxHalfExtents[1]
+                                              - batchedDescription.shape.boxHalfExtents[1])
+                                             <= 1.0e-12
+                                      && std::abs(individual.shape.boxHalfExtents[2]
+                                              - batchedDescription.shape.boxHalfExtents[2])
+                                             <= 1.0e-12
+                                      && std::abs(individual.transform.position.x - batchedDescription.transform.position.x)
+                                             <= 1.0e-12
+                                      && std::abs(individual.transform.position.y - batchedDescription.transform.position.y)
+                                             <= 1.0e-12
+                                      && std::abs(individual.transform.position.z - batchedDescription.transform.position.z)
+                                             <= 1.0e-12
+                                      && individual.shape.kind != engine::physics_rigid::ShapeKind::Sphere;
+                    batchedStates = same;
+                }
+            }
+        }
+        else
+        {
+            batchedStates = handleCount > 8; // more bodies than the probe holds is fine
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool testPassed = matches && batchedStates;
+        report << (testPassed ? "PASS" : "FAIL") << ": batched queries - collideSpheres matches collideSphere "
+               << matches << ", batched body reads match per-body copies " << batchedStates << "\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 22. cloth settle, sleep, and wake ----------------------------------
+    if (dependencies.cloth != nullptr)
+    {
+        EXTENDED_TEST_MARKER("cloth-sleep")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        engine::physics_cloth::ClothDescription clothDescription;
+        clothDescription.columns = 8;
+        clothDescription.rows    = 8;
+        clothDescription.spacing = 0.2;
+        // A heavy-curtain damping so the pinned sheet settles well inside
+        // the test's step budget (the sleep thresholds are module config).
+        clothDescription.damping = 0.6;
+        clothDescription.transform.position = engine::physics_rigid::Vec3{-0.7, 1.2, 0.0};
+        std::uint32_t pinned[8];
+        for (std::uint32_t column = 0; column < 8; ++column)
+        {
+            pinned[column] = column;
+        }
+        clothDescription.pinnedParticles = pinned;
+        clothDescription.pinnedCount     = 8;
+        const engine::physics_cloth::ClothHandle cloth
+            = dependencies.cloth->createCloth(dependencies.cloth->self, world, &clothDescription, nullptr);
+        bool slept = false;
+        bool heldWhileQuiet = true;
+        bool wokeOnWind = false;
+        const double zeroWind[3] = {0.0, 0.0, 0.0};
+        const double gustWind[3] = {2.5, 0.0, 0.0};
+        if (cloth != engine::physics_cloth::invalidCloth)
+        {
+            // The pinned sheet swings down and settles over a few seconds
+            // of damping; the sleep velocity threshold is module config.
+            for (std::uint32_t step = 0; step < 1200 && !slept; ++step)
+            {
+                dependencies.cloth->step(dependencies.cloth->self, cloth, 1.0 / 60.0);
+                engine::physics_cloth::ClothStatistics statistics{};
+                if (dependencies.cloth->clothStatistics(dependencies.cloth->self, cloth, &statistics))
+                {
+                    slept = statistics.sleeping;
+                }
+            }
+            for (std::uint32_t step = 0; step < 30 && slept; ++step)
+            {
+                dependencies.cloth->step(dependencies.cloth->self, cloth, 1.0 / 60.0);
+                engine::physics_cloth::ClothStatistics statistics{};
+                if (dependencies.cloth->clothStatistics(dependencies.cloth->self, cloth, &statistics))
+                {
+                    heldWhileQuiet = heldWhileQuiet && statistics.sleeping;
+                }
+            }
+            dependencies.cloth->setWindAcceleration(dependencies.cloth->self, cloth, gustWind);
+            dependencies.cloth->step(dependencies.cloth->self, cloth, 1.0 / 60.0);
+            dependencies.cloth->setWindAcceleration(dependencies.cloth->self, cloth, zeroWind);
+            for (std::uint32_t step = 0; step < 10; ++step)
+            {
+                dependencies.cloth->step(dependencies.cloth->self, cloth, 1.0 / 60.0);
+            }
+            engine::physics_cloth::ClothStatistics statistics{};
+            if (dependencies.cloth->clothStatistics(dependencies.cloth->self, cloth, &statistics))
+            {
+                wokeOnWind = !statistics.sleeping;
+            }
+            dependencies.cloth->destroyCloth(dependencies.cloth->self, cloth);
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool testPassed = slept && heldWhileQuiet && wokeOnWind;
+        report << (testPassed ? "PASS" : "FAIL") << ": cloth sleep - settles to sleep " << slept
+               << ", holds while quiet " << heldWhileQuiet << ", wakes on wind " << wokeOnWind << "\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 23. particle simulation LOD -----------------------------------------
+    if (dependencies.particles != nullptr)
+    {
+        EXTENDED_TEST_MARKER("particle-lod")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        engine::physics_particles::EmitterDescription emitterDescription;
+        emitterDescription.kind            = engine::physics_particles::EmitterKind::Snow;
+        emitterDescription.maximumParticles = 512;
+        emitterDescription.emitRate        = 120.0;
+        const engine::physics_particles::EmitterHandle emitter = dependencies.particles->createEmitter(
+            dependencies.particles->self, world, &emitterDescription, nullptr);
+        bool staggered = false;
+        bool rateHolds = false;
+        bool frozen = false;
+        if (emitter != engine::physics_particles::invalidEmitter)
+        {
+            // Simplified band (importance 0.55 crosses out of Full through
+            // the hysteresis margin): about half the steps skip.
+            dependencies.particles->setEmitterImportance(dependencies.particles->self, emitter, 0.55);
+            const std::uint64_t skippedBefore = [&]
+            {
+                engine::physics_particles::ParticlesStatistics statistics{};
+                dependencies.particles->particlesStatistics(dependencies.particles->self, &statistics);
+                return statistics.lodSkippedSteps;
+            }();
+            for (std::uint32_t step = 0; step < 100; ++step)
+            {
+                dependencies.particles->step(dependencies.particles->self, emitter, 1.0 / 60.0);
+            }
+            engine::physics_particles::ParticlesStatistics statistics{};
+            dependencies.particles->particlesStatistics(dependencies.particles->self, &statistics);
+            const std::uint64_t skippedDuring = statistics.lodSkippedSteps - skippedBefore;
+            staggered = skippedDuring >= 44 && skippedDuring <= 56;
+            // Emission rate stays wall-time correct across the bands: about
+            // 100 steps at 60 Hz is 1.67 s, so roughly 200 snowflakes.
+            rateHolds = statistics.spawnedTotal >= 160 && statistics.spawnedTotal <= 240;
+
+            // Cached band (importance 0.05 with the default thresholds):
+            // every step skips.
+            dependencies.particles->setEmitterImportance(dependencies.particles->self, emitter, 0.05);
+            const std::uint64_t frozenBefore = statistics.lodSkippedSteps;
+            for (std::uint32_t step = 0; step < 10; ++step)
+            {
+                dependencies.particles->step(dependencies.particles->self, emitter, 1.0 / 60.0);
+            }
+            engine::physics_particles::ParticlesStatistics frozenStatistics{};
+            dependencies.particles->particlesStatistics(dependencies.particles->self, &frozenStatistics);
+            frozen = frozenStatistics.lodSkippedSteps - frozenBefore == 10u;
+
+            dependencies.particles->destroyEmitter(dependencies.particles->self, emitter);
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool testPassed = staggered && rateHolds && frozen;
+        report << (testPassed ? "PASS" : "FAIL") << ": particle LOD - staggered cadence " << staggered
+               << ", emission rate holds " << rateHolds << ", cached freezes " << frozen << "\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 24. per-ocean gravity ------------------------------------------------
+    if (dependencies.water != nullptr)
+    {
+        EXTENDED_TEST_MARKER("ocean-gravity")
+        engine::physics_rigid::WorldDescription worldDescriptionA;
+        const engine::physics_rigid::WorldHandle worldA
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescriptionA, nullptr);
+        engine::physics_rigid::WorldDescription worldDescriptionB;
+        const double heavyGravity[3] = {0.0, -30.0, 0.0};
+        worldDescriptionB.gravity = engine::physics_rigid::Vec3{heavyGravity[0], heavyGravity[1], heavyGravity[2]};
+        const engine::physics_rigid::WorldHandle worldB
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescriptionB, nullptr);
+        engine::physics_water::OceanHandle oceanA = engine::physics_water::invalidOcean;
+        engine::physics_water::OceanHandle oceanB = engine::physics_water::invalidOcean;
+        engine::physics_rigid::BodyHandle bodyA = engine::physics_rigid::invalidBody;
+        engine::physics_rigid::BodyHandle bodyB = engine::physics_rigid::invalidBody;
+        const auto buildFloatScene = [&](engine::physics_rigid::WorldHandle world, engine::physics_water::OceanHandle &outOcean,
+            engine::physics_rigid::BodyHandle &outBody)
+        {
+            engine::physics_water::OceanDescription oceanDescription;
+            outOcean = dependencies.water->createOcean(dependencies.water->self, world, &oceanDescription, nullptr);
+            engine::physics_rigid::BodyDescription body;
+            body.shape.kind         = engine::physics_rigid::ShapeKind::Sphere;
+            body.shape.sphereRadius = 0.4;
+            body.transform.position = engine::physics_rigid::Vec3{0.0, -1.0, 0.0};
+            body.density            = 400.0;
+            outBody = dependencies.rigid->createBody(dependencies.rigid->self, world, &body, nullptr);
+            if (outOcean == engine::physics_water::invalidOcean || outBody == engine::physics_rigid::invalidBody)
+            {
+                return false;
+            }
+            return dependencies.water->registerBody(dependencies.water->self, outOcean, outBody, nullptr);
+        };
+        const bool sceneA = buildFloatScene(worldA, oceanA, bodyA);
+        const bool sceneB = buildFloatScene(worldB, oceanB, bodyB);
+        // The heavy-gravity world's ocean pushes 30/9.81 times harder, so
+        // the submerged sphere rises faster under identical bodies.
+        auto riseOf = [&](engine::physics_rigid::WorldHandle world, engine::physics_rigid::BodyHandle body)
+        {
+            engine::physics_rigid::BodyState state{};
+            if (dependencies.rigid->copyBodyState(dependencies.rigid->self, world, body, &state))
+            {
+                return state.transform.position.y;
+            }
+            return -100.0;
+        };
+        // A short fully-submerged window: both spheres start a radius below
+        // the surface, and the heavy-gravity ocean pushes proportionally
+        // harder, so B climbs higher while neither has broken the surface.
+        for (std::uint32_t step = 0; step < 12 && sceneA && sceneB; ++step)
+        {
+            const double delta = 1.0 / 60.0;
+            dependencies.water->applyBuoyancy(dependencies.water->self, oceanA, step * delta, delta);
+            dependencies.rigid->step(dependencies.rigid->self, worldA, delta);
+            dependencies.water->applyBuoyancy(dependencies.water->self, oceanB, step * delta, delta);
+            dependencies.rigid->step(dependencies.rigid->self, worldB, delta);
+        }
+        const double riseA = sceneA ? riseOf(worldA, bodyA) : -100.0;
+        const double riseB = sceneB ? riseOf(worldB, bodyB) : -100.0;
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, worldA);
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, worldB);
+        const bool testPassed = sceneA && sceneB && riseB > riseA;
+        report << (testPassed ? "PASS" : "FAIL") << ": per-ocean gravity - heavy world rises faster (A " << riseA
+               << ", B " << riseB << ")\n";
         pass = pass && testPassed;
     }
 

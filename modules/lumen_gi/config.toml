@@ -57,6 +57,11 @@ max_distance_m              = 50.0
 # Surface offset for shadow, gather, and probe rays; one bias behind every
 # trace site so the acne/leak trade-off is a single tuning decision.
 bias_m                      = 0.02
+# How many interfaces a gather, probe, or shadow ray may cross through
+# transparent or translucent surfaces. Rays past the budget treat the next
+# opaque surface as blocking. A glass pane costs two crossings (entering and
+# exiting the medium).
+max_transmission_segments   = 3
 
 [lumen_gi.probes]
 spacing_m                   = 2.0

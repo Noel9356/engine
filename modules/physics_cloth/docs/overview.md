@@ -4,7 +4,7 @@ physics_cloth provides cloth simulation: XPBD particle grids held together by st
 
 ## Capability
 
-The module provides the `physics_cloth` capability (ABI version constant `physicsClothCapabilityAbi = 2`; the header's ABI history comment records what each bump appended, and the ABI-2 additions — tearing, self-collision, and surface sampling — require an `abi >= 2` check before use, while everything from ABI 1 keeps its slot and meaning) and requires the `physics_rigid` capability; the kernel constructs the rigid core first and grants the permission from the manifest's `requires` list. Cloth handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidCloth`) means "none". Positions and velocities are world-space meters and meters per second packed `x, y, z` per particle in row-major grid order.
+The module provides the `physics_cloth` capability (ABI version constant `physicsClothCapabilityAbi = 3`; the header's ABI history comment records what each bump appended, tearing, self-collision, and surface sampling arrived in ABI 2, and the simulation-LOD and sleep surfaces — `setClothImportance`, the `lodSkippedSteps` and `sleeping` statistics, and the implemented `sleepingEnabled` behavior — arrived in ABI 3; consumers check `abi >= 3` before touching those additions, while everything from ABI 2 keeps its slot and meaning) and requires the `physics_rigid` capability; the kernel constructs the rigid core first and grants the permission from the manifest's `requires` list. Cloth handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidCloth`) means "none". Positions and velocities are world-space meters and meters per second packed `x, y, z` per particle in row-major grid order.
 
 ### Frame-rate independence contract
 
@@ -66,6 +66,14 @@ From `module.toml` and the entry table at the bottom of `source/physics_cloth.cp
 **Surface sampling.** `sampleClothSurface` bilinearly interpolates the particle grid at normalized coordinates (`u` along columns, `v` along rows, clamped into [0, 1]) and returns the blended position plus a normal built from the cross product of the two grid-direction tangents — the central differences of the surrounding particles blended across the sampled cell, ordered so a flat grid faces +Y like the degenerate-case fallback. It returns false for unknown handles, non-finite coordinates, or non-finite results, so a renderer can light and skin the deformed cloth without copying particle arrays first.
 
 **Interaction with rigid bodies.** Cloth reads nothing from the rigid module beyond the world gravity and the `collideSphere` query, so any body kind works the same: static ground planes catch falling cloth, dynamic boxes pushed through a sheet deform it, and kinematic carriers drag it along. Rigid bodies never feel cloth back-reaction — cloth is one-way coupled by design (see configuration.md for the cost trade-off this represents).
+
+## Settled cloth and simulation LOD
+
+A cloth with `sleepingEnabled` (the description default) tracks the largest free-particle speed after every step: while every free particle stays below `sleep_velocity_threshold` the cloth accumulates quiet time, and after `time_to_sleep` seconds it sleeps — velocities zeroed, integration skipped — until a drag target, a pin change, or a wind acceleration wakes it. The `sleeping` flag rides the statistics so consumers can show or skip settled cloth.
+
+Simulation LOD gives every cloth an importance score (`setClothImportance`, ABI 3) that resolves through the five-band fidelity ladder with demotion hysteresis. Bands below Full keep the cloth's fixed step size — the small-steps XPBD schedule only tolerates so much per solve, and changing it would change the material — and reduce the internal substep count instead: Simplified runs half the configured substeps per step, Procedural a quarter, Animation one, and Cached freezes the cloth until the score rises again. With `lod_enabled` on, cloths also update on a staggered cadence (the phase comes from the registration ordinal, one due step every `lod_interval_*` steps); the statistics carry `lodSkippedSteps` so a consumer can watch the population settle.
+
+World collision resolves through one batched sphere-overlap query per substep against the rigid capability's `collideSpheres` surface instead of one call per particle, and a step whose state would turn non-finite rolls back to its pre-step snapshot and reports `SimulationFailure`, leaving the cloth untouched.
 
 ## Threading and lifetime
 

@@ -21,7 +21,15 @@ namespace engine::physics_fields
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsFieldsCapabilityAbi = 1u;
+// ABI history:
+//   1 - initial surface (wind fields with gust/turbulence evaluation, wind
+//       drag, force volumes, radial impulse blasts, statistics).
+//   2 - appended the simulation-LOD surface: the setWindFieldImportance /
+//       setForceVolumeImportance entry points and the
+//       FieldsStatistics.lodSkippedSteps counter. Everything from ABI 1
+//       keeps its slot and meaning; consumers check `abi >= 2` before
+//       touching the additions.
+inline constexpr std::uint32_t physicsFieldsCapabilityAbi = 2u;
 
 using WindHandle        = std::uint32_t;
 using ForceVolumeHandle = std::uint32_t;
@@ -110,6 +118,9 @@ struct FieldsStatistics
     std::uint32_t forceVolumeCount   = 0;
     std::uint64_t dragApplications   = 0; // bodies that received wind drag force
     std::uint64_t volumeApplications = 0; // bodies that received volume force
+
+    // ABI 2: field passes skipped through simulation LOD.
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_fields" capability. Calls are main-thread only; the module
@@ -166,6 +177,21 @@ struct FieldsCapability
         double impulseMagnitude, double radius, double upwardBias);
 
     bool (*fieldsStatistics)(void *self, FieldsStatistics *outStatistics);
+
+    // ---- ABI 2 additions -------------------------------------------------------
+
+    // Simulation LOD: writes a wind field's importance score in [0, 1]. The
+    // module maps the score onto the five fidelity bands (Cached, Animation,
+    // Procedural, Simplified, Full) with demotion hysteresis; fields below
+    // Full run their drag pass on a staggered cadence whose due steps scale
+    // the applied force by the interval (same total impulse per wall time),
+    // and Cached fields apply nothing until the score rises again.
+    // Non-finite scores resolve to Cached.
+    bool (*setWindFieldImportance)(void *self, WindHandle wind, double importance);
+
+    // Simulation LOD for force volumes, with the same band ladder and
+    // interval-scaled application as the wind fields.
+    bool (*setForceVolumeImportance)(void *self, ForceVolumeHandle volume, double importance);
 };
 
 } // namespace engine::physics_fields

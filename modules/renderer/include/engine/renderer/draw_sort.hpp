@@ -65,11 +65,17 @@ inline int compareRenderMaterialValues(const MeshMaterial &lhs, const MeshMateri
         return result;
     if ((result = compareInteger(lhs.unlit, rhs.unlit)) != 0)
         return result;
-    // Last: the depth-write flag. Equal materials only batch together when
-    // they also agree on depth writes - the two states bind different
-    // pipeline variants (and, in the rasterizer, different depth-commit
-    // behavior), so a run that mixed them would draw one of the two wrong.
-    return compareInteger(lhs.depthWrite, rhs.depthWrite);
+    // Last: the depth-write flag, then the transmission pair. Equal
+    // materials only batch together when they also agree on depth writes -
+    // the two states bind different pipeline variants (and, in the
+    // rasterizer, different depth-commit behavior) - and on opacity, whose
+    // value decides the opaque-vs-transparent commit path of the draw.
+    int depthResult = compareInteger(lhs.depthWrite, rhs.depthWrite);
+    if (depthResult != 0)
+        return depthResult;
+    if ((result = compareFloat(lhs.opacity, rhs.opacity)) != 0)
+        return result;
+    return compareFloat(lhs.indexOfRefraction, rhs.indexOfRefraction);
 }
 
 // The material a draw uses when its MeshMaterial* is null (identity PBR).

@@ -14,6 +14,9 @@
 #include <engine/physics_particles/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
+#include <engine/util/simulation_lod.hpp>
+#include <engine/util/step_accumulator.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -70,8 +73,8 @@ struct EmitterRecord
     std::vector<SlotState> slots;
     std::uint32_t          spawnCursor = 0; // FIFO recycling cursor
     double                 spawnDebt   = 0.0; // fractional particle accumulation
-    std::uint64_t          generationCounter_ = 0; // per-slot hash generation
-    double                 swayClock_  = 0.0; // global emitter clock for sway/flicker phases
+    std::uint64_t          generationCounter = 0; // per-slot hash generation
+    double                 swayClock  = 0.0; // global emitter clock for sway/flicker phases
 
     double gravity[3] = {0.0, -9.81, 0.0}; // read from the rigid world at creation
 
@@ -80,7 +83,15 @@ struct EmitterRecord
     std::uint64_t spawnedTotal = 0;
     std::uint64_t expiredTotal = 0;
 
-    double simulatedTimeBudget = 0.0;
+    // Simulation LOD: the importance-driven fidelity band and the staggered
+    // update cadence. The phase derives from the registration ordinal so
+    // emitters sharing an interval spread their work across steps.
+    double                            importance = 1.0;
+    engine::util::SimulationFidelity  lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence   cadence{};
+
+    // Fixed-step budget bookkeeping for simulate().
+    engine::util::StepAccumulator accumulator;
 };
 
 struct ParticlesSettings
@@ -90,6 +101,20 @@ struct ParticlesSettings
     std::uint32_t maximumEmitters        = 128;
     std::uint32_t maximumParticles       = 1000000;
     std::uint32_t maximumParticlesPerEmitter = 100000;
+
+    // Simulation LOD: emitters below the Full band update on a staggered
+    // cadence; the per-band interval says how many fixed steps one due step
+    // covers (0 freezes the band's emitters). The thresholds come from the
+    // shared fidelity-ladder vocabulary.
+    bool                              lodEnabled   = false;
+    engine::util::SimulationFidelityThresholds lodThresholds{};
+    std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
+
+    // Behavior tuning: the leaves' brief contact hold, and the insect
+    // wander controller's radius and steering gain.
+    double leafSettleSeconds   = 0.8;
+    double insectWanderRadius  = 1.5;
+    double insectSteerGain     = 8.0;
 };
 
 class ParticlesModule final : public ModuleInterface
@@ -124,6 +149,8 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_particles", "fixed_rate_hz");
             value && *value >= 1.0 && *value <= 1000.0 && std::isfinite(*value))
             settings_.fixedRateHz = *value;
+        readLodSettings(context);
+        readBehaviorSettings(context);
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -159,12 +186,52 @@ private:
             .requiredCapabilities = {"physics_rigid"}};
     }
 
+    void readLodSettings(ParticipantContext &context)
+    {
+        settings_.lodEnabled = context.configurationBooleanInSection("physics_particles", "lod_enabled").value_or(false);
+        const auto readThreshold = [this, &context](const char *key, double &target, double minimum, double maximum)
+        {
+            if (const auto value = context.configurationFloatingInSection("physics_particles", key);
+                value && *value >= minimum && *value <= maximum && std::isfinite(*value))
+                target = *value;
+        };
+        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold, 0.0, 1.0);
+        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold, 0.0, 1.0);
+        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold, 0.0, 1.0);
+        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold, 0.0, 1.0);
+        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin, 0.0, 1.0);
+        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
+        {
+            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
+        }
+        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
+        {
+            if (const auto value = context.configurationIntegerInSection("physics_particles", key);
+                value && *value >= 0 && *value <= 65536)
+                target = static_cast<std::uint32_t>(*value);
+        };
+        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
+        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
+        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
+        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+    }
+
+    void readBehaviorSettings(ParticipantContext &context)
+    {
+        const auto readPositive = [this, &context](const char *key, double &target, double maximum)
+        {
+            if (const auto value = context.configurationFloatingInSection("physics_particles", key);
+                value && *value > 0.0 && *value <= maximum && std::isfinite(*value))
+                target = *value;
+        };
+        readPositive("leaf_settle_seconds", settings_.leafSettleSeconds, 60.0);
+        readPositive("insect_wander_radius", settings_.insectWanderRadius, 1000.0);
+        readPositive("insect_steer_gain", settings_.insectSteerGain, 1000.0);
+    }
+
     static void setError(ParticlesError *output, ParticlesError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     EmitterRecord *findEmitter(EmitterHandle handle)
@@ -201,7 +268,7 @@ private:
     void spawnSlot(EmitterRecord &emitter, SlotState &slot, std::uint32_t slotIndex)
     {
         const EmitterDescription &description = emitter.description;
-        const std::uint64_t generation = ++emitter.generationCounter_;
+        const std::uint64_t generation = ++emitter.generationCounter;
         const std::uint64_t baseSeed   = generation * 0x9E3779B97F4A7C15ull + slotIndex;
         const std::uint32_t seed       = static_cast<std::uint32_t>(baseSeed ^ (baseSeed >> 32));
 
@@ -237,12 +304,15 @@ private:
         emitter.spawnedTotal += 1;
     }
 
-    void stepEmitter(EmitterRecord &emitter, double fixedDeltaSeconds)
+    void stepEmitter(EmitterRecord &emitter, double stepDeltaSeconds)
     {
         const EmitterDescription &description = emitter.description;
 
-        // Spawn from the emit rate plus recycle expired slots FIFO.
-        emitter.spawnDebt += description.emitRate * fixedDeltaSeconds;
+        // Spawn from the emit rate plus recycle expired slots FIFO. Under
+        // simulation LOD one due step covers interval x the caller's fixed
+        // delta, so the debt accrues against wall time and the emission rate
+        // stays exact.
+        emitter.spawnDebt += description.emitRate * stepDeltaSeconds;
         while (emitter.spawnDebt >= 1.0 && static_cast<std::uint32_t>(emitter.slots.size())
                                               < std::min(description.maximumParticles, settings_.maximumParticlesPerEmitter))
         {
@@ -263,14 +333,14 @@ private:
         }
 
         // Integrate.
-        const double dragFactor = std::exp(-description.airDrag * fixedDeltaSeconds);
+        const double dragFactor = std::exp(-description.airDrag * stepDeltaSeconds);
         for (SlotState &slot : emitter.slots)
         {
             if (!slot.alive)
             {
                 continue;
             }
-            slot.age += fixedDeltaSeconds;
+            slot.age += stepDeltaSeconds;
             if (slot.age >= slot.lifetime)
             {
                 slot.alive = false;
@@ -292,9 +362,9 @@ private:
                 else
                 {
                     // Leaves settle briefly on impact and then expire (they
-                    // hold the contact for 0.8 seconds at most).
-                    slot.settledTime += fixedDeltaSeconds;
-                    if (slot.settledTime >= 0.8)
+                    // hold the contact for the configured settle window).
+                    slot.settledTime += stepDeltaSeconds;
+                    if (slot.settledTime >= settings_.leafSettleSeconds)
                     {
                         slot.alive = false;
                         emitter.expiredTotal += 1;
@@ -310,7 +380,7 @@ private:
                 emitter.gravity[1] * description.gravityScale + emitter.windAcceleration[1],
                 emitter.gravity[2] * description.gravityScale + emitter.windAcceleration[2]};
             // Horizontal sway around the wind direction.
-            const double swayPhase = slot.swayPhase + emitter.swayClock_ * description.swayFrequency * 6.283185307179586;
+            const double swayPhase = slot.swayPhase + emitter.swayClock * description.swayFrequency * 6.283185307179586;
             acceleration[0] += std::cos(swayPhase) * description.swayAmplitude * slot.jitter[0];
             acceleration[2] += std::sin(swayPhase * 1.3 + slot.jitter[1]) * description.swayAmplitude * slot.jitter[2];
 
@@ -321,7 +391,7 @@ private:
             // small 1.5 meter wander radius around its spawn point.
             if (description.kind == EmitterKind::Insects)
             {
-                const double wanderPhase = emitter.swayClock_ * 3.141592653589793; // slow 0.5 Hz wander phase
+                const double wanderPhase = emitter.swayClock * 3.141592653589793; // slow 0.5 Hz wander phase
                 double targetVelocity[3] = {
                     0.9 * std::sin(wanderPhase + slot.swayPhase + slot.jitter[0] * 2.4),
                     0.35 * std::sin(wanderPhase * 1.7 + slot.swayPhase * 2.0 + slot.jitter[1] * 3.1),
@@ -330,30 +400,30 @@ private:
                 const double offsetY = slot.position[1] - slot.spawnPosition[1];
                 const double offsetZ = slot.position[2] - slot.spawnPosition[2];
                 const double wanderDistance = std::sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
-                if (wanderDistance > 1.5)
+                if (wanderDistance > settings_.insectWanderRadius)
                 {
-                    const double excess = (wanderDistance - 1.5) / wanderDistance;
+                    const double excess = (wanderDistance - settings_.insectWanderRadius) / wanderDistance;
                     targetVelocity[0] -= offsetX * excess * 2.5;
                     targetVelocity[1] -= offsetY * excess * 2.5;
                     targetVelocity[2] -= offsetZ * excess * 2.5;
                 }
                 for (std::uint32_t axis = 0; axis < 3; ++axis)
                 {
-                    acceleration[axis] = 8.0 * (targetVelocity[axis] - slot.velocity[axis]);
+                    acceleration[axis] = settings_.insectSteerGain * (targetVelocity[axis] - slot.velocity[axis]);
                 }
             }
 
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
-                slot.velocity[axis] = slot.velocity[axis] * dragFactor + acceleration[axis] * fixedDeltaSeconds;
-                slot.position[axis] += slot.velocity[axis] * fixedDeltaSeconds;
+                slot.velocity[axis] = slot.velocity[axis] * dragFactor + acceleration[axis] * stepDeltaSeconds;
+                slot.position[axis] += slot.velocity[axis] * stepDeltaSeconds;
             }
 
             // Fire flicker: size oscillates fast; smoke-free burn ends by
             // shrinking over the last third of the lifetime.
             if (description.kind == EmitterKind::Fire)
             {
-                const double flickerPhase = emitter.swayClock_ * 9.0 + slot.swayPhase * 7.0;
+                const double flickerPhase = emitter.swayClock * 9.0 + slot.swayPhase * 7.0;
                 const double flickerScale = 1.0 + description.flicker * 0.4 * std::sin(flickerPhase)
                                             + description.flicker * 0.2 * std::sin(flickerPhase * 2.7 + slot.jitter[0] * 3.0);
                 const double burnOut = slot.age > slot.lifetime * 0.66
@@ -384,46 +454,61 @@ private:
             }
         }
 
-        // World collision.
-        if (description.collideWithWorld && rigid_ != nullptr)
+        // World collision: one batched sphere query per step instead of one
+        // capability call per particle. Settled slots take part so a surface
+        // that moves away releases them back into free fall.
+        if (description.collideWithWorld && rigid_ != nullptr
+            && (description.kind != EmitterKind::Dust && description.kind != EmitterKind::Ash
+                && description.kind != EmitterKind::Pollen && description.kind != EmitterKind::Insects))
         {
-            for (SlotState &slot : emitter.slots)
+            sphereSlotIndices_.clear();
+            sphereQueries_.clear();
+            for (std::size_t slotIndex = 0; slotIndex < emitter.slots.size(); ++slotIndex)
             {
-                if (!slot.alive || slot.settled || description.kind == EmitterKind::Dust
-                    || description.kind == EmitterKind::Ash || description.kind == EmitterKind::Pollen
-                    || description.kind == EmitterKind::Insects)
+                const SlotState &slot = emitter.slots[slotIndex];
+                if (!slot.alive)
                 {
                     continue;
                 }
-                double                            normal[3] = {0.0, 0.0, 0.0};
-                double                            depth     = 0.0;
-                engine::physics_rigid::BodyHandle body      = engine::physics_rigid::invalidBody;
-                if (!rigid_->collideSphere(rigid_->self, emitter.world, slot.position, description.particleRadius,
-                        normal, &depth, &body)
-                    || depth <= 0.0)
+                engine::physics_rigid::SphereOverlapQuery query;
+                query.center[0] = slot.position[0];
+                query.center[1] = slot.position[1];
+                query.center[2] = slot.position[2];
+                query.radius    = description.particleRadius;
+                sphereSlotIndices_.push_back(slotIndex);
+                sphereQueries_.push_back(query);
+            }
+            if (!sphereQueries_.empty())
+            {
+                sphereResults_.resize(sphereQueries_.size());
+                rigid_->collideSpheres(rigid_->self, emitter.world, sphereQueries_.data(),
+                    static_cast<std::uint32_t>(sphereQueries_.size()), sphereResults_.data());
+                for (std::size_t entry = 0; entry < sphereSlotIndices_.size(); ++entry)
                 {
-                    if (slot.settled)
+                    SlotState &slot = emitter.slots[sphereSlotIndices_[entry]];
+                    const engine::physics_rigid::SphereOverlapResult &result = sphereResults_[entry];
+                    if (!result.hit || result.depth <= 0.0)
                     {
                         slot.settled = false;
+                        continue;
                     }
-                    continue;
-                }
-                slot.position[0] += normal[0] * depth;
-                slot.position[1] += normal[1] * depth;
-                slot.position[2] += normal[2] * depth;
-                if (description.kind == EmitterKind::Rain || description.kind == EmitterKind::Hail)
-                {
-                    slot.alive = false;
-                    emitter.expiredTotal += 1;
-                }
-                else
-                {
-                    slot.settled = true;
+                    slot.position[0] += result.normal[0] * result.depth;
+                    slot.position[1] += result.normal[1] * result.depth;
+                    slot.position[2] += result.normal[2] * result.depth;
+                    if (description.kind == EmitterKind::Rain || description.kind == EmitterKind::Hail)
+                    {
+                        slot.alive = false;
+                        emitter.expiredTotal += 1;
+                    }
+                    else
+                    {
+                        slot.settled = true;
+                    }
                 }
             }
         }
 
-        emitter.swayClock_ += fixedDeltaSeconds;
+        emitter.swayClock += stepDeltaSeconds;
     }
 
     // ---- capability implementations ---------------------------------------
@@ -569,7 +654,7 @@ private:
             }
             SlotState &slot = emitter->slots[slotIndex];
             spawnSlot(*emitter, slot, static_cast<std::uint32_t>(slotIndex));
-            const std::uint64_t burstSeed = emitter->generationCounter_;
+            const std::uint64_t burstSeed = emitter->generationCounter;
             const double azimuth   = hashFraction(burstSeed + 0xA000ull) * 6.283185307179586;
             const double elevation = (hashFraction(burstSeed + 0xB000ull) * 2.0 - 1.0);
             const double horizontal = std::sqrt(std::max(0.0, 1.0 - elevation * elevation));
@@ -635,43 +720,76 @@ private:
         {
             return false;
         }
-        stepEmitter(*emitter, fixedDeltaSeconds);
-        // Finite guard: a diverging emitter stops reporting alive particles.
-        for (const SlotState &slot : emitter->slots)
+        // Simulation LOD: resolve the fidelity band from the importance
+        // score, refresh the staggered cadence, and let one due step cover
+        // the whole interval of wall time. Cached emitters freeze. Without
+        // lod_enabled every emitter runs Full every step.
+        double stepDelta = fixedDeltaSeconds;
+        if (settings_.lodEnabled)
         {
-            if (!std::isfinite(slot.position[0]) || !std::isfinite(slot.position[1])
-                || !std::isfinite(slot.position[2]))
+            emitter->lodBand = engine::util::simulationFidelityForImportance(
+                settings_.lodThresholds, emitter->importance, emitter->lodBand);
+            const std::uint32_t interval
+                = settings_.lodIntervals[engine::util::simulationFidelityIndex(emitter->lodBand)];
+            if (interval == 0u)
             {
-                return false;
+                // Cached band: hold the last state until the score rises.
+                emitter->cadence.interval = 1u;
+                ++statistics_.lodSkippedSteps;
+                return true;
+            }
+            emitter->cadence.interval = interval;
+            if (!engine::util::simulationCadenceAdvance(emitter->cadence))
+            {
+                ++statistics_.lodSkippedSteps;
+                return true;
+            }
+            stepDelta = fixedDeltaSeconds * static_cast<double>(interval);
+        }
+        stepEmitter(*emitter, stepDelta);
+        // Finite guard: a diverging particle retires immediately instead of
+        // poisoning its pool; the step still reports the failure.
+        bool diverged = false;
+        for (SlotState &slot : emitter->slots)
+        {
+            if (!slot.alive)
+            {
+                continue;
+            }
+            const bool finite = std::isfinite(slot.position[0]) && std::isfinite(slot.position[1])
+                && std::isfinite(slot.position[2]) && std::isfinite(slot.velocity[0]) && std::isfinite(slot.velocity[1])
+                && std::isfinite(slot.velocity[2]);
+            if (!finite)
+            {
+                slot.alive = false;
+                emitter->expiredTotal += 1;
+                diverged = true;
             }
         }
-        return true;
+        return !diverged;
     }
 
     std::uint32_t simulateImpl(EmitterHandle handle, double elapsedSeconds)
     {
         EmitterRecord *emitter = findEmitter(handle);
-        if (emitter == nullptr || !std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+        if (emitter == nullptr)
         {
             return 0u;
         }
         const double fixedDelta = 1.0 / settings_.fixedRateHz;
-        emitter->simulatedTimeBudget += elapsedSeconds;
-        std::uint32_t executed = 0;
-        while (emitter->simulatedTimeBudget >= fixedDelta && executed < settings_.maximumStepsPerSimulate)
+        return emitter->accumulator.drain(fixedDelta, settings_.maximumStepsPerSimulate, elapsedSeconds,
+            [this, handle, fixedDelta]() { return stepImpl(handle, fixedDelta); });
+    }
+
+    bool setEmitterImportanceImpl(EmitterHandle handle, double importance)
+    {
+        EmitterRecord *emitter = findEmitter(handle);
+        if (emitter == nullptr || !std::isfinite(importance))
         {
-            emitter->simulatedTimeBudget -= fixedDelta;
-            if (!stepImpl(handle, fixedDelta))
-            {
-                break;
-            }
-            ++executed;
+            return false;
         }
-        if (executed == settings_.maximumStepsPerSimulate)
-        {
-            emitter->simulatedTimeBudget = 0.0;
-        }
-        return executed;
+        emitter->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
     }
 
     bool particlesStatisticsImpl(ParticlesStatistics *outStatistics)
@@ -718,6 +836,7 @@ private:
         ENGINE_PHYSICS_PARTICLES_BIND(step, stepImpl);
         ENGINE_PHYSICS_PARTICLES_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_PARTICLES_BIND(particlesStatistics, particlesStatisticsImpl);
+        ENGINE_PHYSICS_PARTICLES_BIND(setEmitterImportance, setEmitterImportanceImpl);
 #undef ENGINE_PHYSICS_PARTICLES_BIND
     }
 
@@ -733,6 +852,11 @@ private:
     std::vector<EmitterRecord>                     emitters_;
     std::unordered_map<EmitterHandle, std::size_t> emitterIndexByHandle_;
     EmitterHandle                                  nextEmitterHandle_ = 1;
+
+    // Reused scratch for the batched sphere-overlap queries.
+    std::vector<std::size_t>                             sphereSlotIndices_;
+    std::vector<engine::physics_rigid::SphereOverlapQuery>  sphereQueries_;
+    std::vector<engine::physics_rigid::SphereOverlapResult> sphereResults_;
 };
 
 } // namespace

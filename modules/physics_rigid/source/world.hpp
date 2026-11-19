@@ -4,11 +4,13 @@
 
 #pragma once
 
+#include "broadphase.hpp"
 #include "records.hpp"
 #include "solver.hpp"
 
 #include <chrono>
 #include <cstdint>
+#include <vector>
 
 namespace engine::physics_rigid
 {
@@ -48,6 +50,20 @@ void evaluateTriggers(World &world, std::vector<BodyHandle> &overlapScratch);
 // Refreshes a body's world-space AABB from its transform.
 void refreshBodyAabb(Body &body);
 
+// Pre-integration transforms of one pipeline pass, restored when the pass
+// diverges into non-finite state. Lives in the step scratch so the capture
+// reuses warmed-up buffers instead of allocating per substep.
+struct StateSnapshot
+{
+    std::vector<math::Vec3>       positions;
+    std::vector<math::Quaternion> rotations;
+    std::vector<math::Vec3>       linearVelocities;
+    std::vector<math::Vec3>       angularVelocities;
+
+    void capture(const World &world);
+    void restore(World &world) const;
+};
+
 // Scratches reused across steps to avoid per-step allocations.
 struct StepScratch
 {
@@ -56,6 +72,22 @@ struct StepScratch
     std::vector<std::pair<std::size_t, std::size_t>> pairs;
     std::vector<std::size_t>                         islandParent;
     std::vector<BodyHandle>                          triggerOverlapScratch;
+
+    // Broadphase grid entries, rebuilt every step.
+    BroadphaseScratch broadphase;
+
+    // Per-island "whole island below the sleep tolerance" flags, indexed by
+    // body index (a body index is also its union-find root slot), plus the
+    // list of roots the pass touched so the flags reset without clearing the
+    // whole array.
+    std::vector<std::uint8_t> islandBelowByRoot;
+    std::vector<std::size_t>  islandTouchedRoots;
+
+    // Pre-integration positions of the CCD-enabled dynamic bodies.
+    std::vector<math::Vec3> ccdPreviousPositions;
+
+    // Non-finite rollback snapshot.
+    StateSnapshot snapshot;
 };
 
 // One fixed simulation step: force integration, broadphase, narrowphase,
@@ -80,6 +112,13 @@ bool sphereCastWorld(const World &world, const math::Vec3 &start, const math::Ve
 // Deepest sphere overlap against bodies and planes.
 bool collideSphereWorld(const World &world, const math::Vec3 &center, double radius, math::Vec3 &outNormal,
     double &outDepth, BodyHandle &outBody);
+
+// Deepest sphere overlap for a batch of spheres in one pass: each query
+// resolves exactly as collideSphereWorld does, with the solid bodies
+// pre-filtered through their shape bounds. Results are written in input
+// order; the return value is the number of queries processed.
+std::uint32_t collideSpheresWorld(const World &world, const SphereOverlapQuery *queries, std::uint32_t queryCount,
+    SphereOverlapResult *outResults);
 
 // Fills the cumulative statistics record.
 void fillWorldStatistics(const World &world, WorldStatistics &outStatistics);

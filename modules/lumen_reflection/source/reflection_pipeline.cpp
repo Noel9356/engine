@@ -253,6 +253,8 @@ void rasterizeBand(RfPipelineState &state, const std::vector<RfScreenTriangle> &
                     * (geometry.colors[i0] * bary.x + geometry.colors[i1] * bary.y + geometry.colors[i2] * bary.z);
                 state.gbufferRoughness[pixelIndex]      = surface.roughness;
                 state.gbufferMetallic[pixelIndex]       = surface.metallic;
+                state.gbufferOpacity[pixelIndex]        = surface.opacity;
+                state.gbufferIor[pixelIndex]            = surface.indexOfRefraction;
                 state.gbufferEmissive[pixelIndex]       = surface.emissive;
                 state.gbufferUnlit[pixelIndex]          = static_cast<std::uint8_t>(surface.unlit ? 1u : 0u);
             }
@@ -276,6 +278,8 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler)
     state.gbufferAlbedo.assign(pixelCount, glm::vec3(0.0f));
     state.gbufferRoughness.assign(pixelCount, 1.0f);
     state.gbufferMetallic.assign(pixelCount, 0.0f);
+    state.gbufferOpacity.assign(pixelCount, 1.0f);
+    state.gbufferIor.assign(pixelCount, 1.0f);
     state.gbufferEmissive.assign(pixelCount, glm::vec3(0.0f));
     state.gbufferUnlit.assign(pixelCount, 0u);
     state.gbufferSurface.assign(pixelCount, noSurface);
@@ -353,11 +357,16 @@ void rfRasterizeGBuffer(RfPipelineState &state, TaskScheduler *scheduler)
 // Radiance a reflection ray sees when it lands on a surface (Lumen's hit
 // lighting): direct sun + direct lights (same formulas as the renderer's
 // shading), the lumen_gi probe-grid diffuse GI, emission, and the hemispheric
-// ambient fallback while the probe grid carries no data. View-dependent
-// specular at the hit is deliberately not evaluated - Lumen's cached scene
-// lighting carries diffuse lighting and emission only.
+// ambient fallback while the probe grid carries no data. The optional
+// specular block evaluates the surface's own view-dependent response from the
+// world radiance cache: the cache answers along the mirrored view direction,
+// Schlick-weighted by the surface's base reflectivity, for roughness inside
+// the traced band (Lumen's cached scene response for reflective hits; a
+// reflection ray landing on a mirror must see the mirror's room image, not
+// the near-black diffuse of a metal).
 glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal,
-    const glm::vec3 &albedo, const glm::vec3 &emissive)
+    const glm::vec3 &albedo, const glm::vec3 &emissive, const glm::vec3 &viewDirection, float roughness,
+    float metallic)
 {
     glm::vec3 result = emissive;
     const glm::vec3 diffuse = albedo * (1.0f / kPi);
@@ -376,10 +385,12 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
             const float bias = state.settings.traceBias
                 + state.settings.traceBias * std::fabs(glm::dot(normal, sunDirection));
             const RfRay shadowRay{position + normal * bias, sunDirection, state.settings.maxTraceDistance};
-            const RfHit blocked = rfTraceScene(state, shadowRay);
-            if (!blocked.hit)
+            // Transparent surfaces soften the shadow instead of blocking it
+            // (the same partial-occlusion rule lumen_gi's shadow rays use).
+            const float transmittance = rfShadowTransmittance(state, shadowRay.origin, sunDirection, shadowRay.tMax);
+            if (transmittance > 0.0f)
             {
-                result += diffuse * sunRadiance * nDotL;
+                result += diffuse * sunRadiance * nDotL * transmittance;
             }
         }
     }
@@ -438,12 +449,31 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
             * environment.ambientIntensity;
         result += diffuse * ambient;
     }
+
+    // Specular response of the hit's own material, answered by the world
+    // radiance cache along the mirrored view direction (the cache-band rule:
+    // roughness above Max Roughness To Trace carries no traced specular, and
+    // the zero view direction marks callers that did not ask for it).
+    if (roughness <= state.settings.roughMaxTrace && glm::dot(viewDirection, viewDirection) > 0.5f)
+    {
+        const glm::vec3 view = glm::normalize(viewDirection);
+        const glm::vec3 mirrorDirection = glm::reflect(-view, normal);
+        glm::vec3 radiance(0.0f);
+        if (rfProbeRadiance(state, position, mirrorDirection, radiance))
+        {
+            const float nDotV = glm::max(glm::dot(normal, view), 0.0f);
+            const glm::vec3 f0 = glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
+            result += (f0 + (glm::vec3(1.0f) - f0) * rfFresnelSchlickScalar(nDotV, 0.0f)) * radiance;
+        }
+    }
     return result;
 }
 
 // Radiance of a scene-traced hit (anti-leak: backface hits return nothing,
-// lumen_gi's rule). Unlit hits emit their albedo.
-glm::vec3 rfRadianceAtHit(const RfPipelineState &state, const RfHit &hit)
+// lumen_gi's rule). Unlit hits emit their albedo. `incomingDirection` is the
+// ray's travel direction: the hit's specular samples the cache along its
+// mirror (the exact view the chain arrives with).
+glm::vec3 rfRadianceAtHit(const RfPipelineState &state, const RfHit &hit, const glm::vec3 &incomingDirection)
 {
     if (!hit.hit || hit.backface)
     {
@@ -454,7 +484,47 @@ glm::vec3 rfRadianceAtHit(const RfPipelineState &state, const RfHit &hit)
     {
         return surface.albedo;
     }
-    return rfShadeHitPoint(state, hit.position, hit.normal, hit.albedo, surface.emissive);
+    return rfShadeHitPoint(state, hit.position, hit.normal, hit.albedo, surface.emissive, -incomingDirection,
+        surface.roughness, surface.metallic);
+}
+
+// Transmittance of a shadow ray through the scene: transparent surfaces
+// attenuate by (1 - opacity) per covering hit; the first opaque surface (or
+// an exhausted transmission budget) blocks the rest.
+float rfShadowTransmittance(const RfPipelineState &state, const glm::vec3 &position, const glm::vec3 &direction,
+    float maxDistance)
+{
+    float transmittance = 1.0f;
+    glm::vec3 origin = position;
+    float remaining = maxDistance;
+    const std::uint32_t budget = state.settings.maxTransmissionSegments + 1u;
+    for (std::uint32_t segment = 0; segment < budget; ++segment)
+    {
+        const RfRay ray{origin, direction, remaining};
+        const RfHit hit = rfTraceScene(state, ray);
+        if (!hit.hit)
+        {
+            return transmittance;
+        }
+        const RfSurface &surface = state.surfaces[hit.surfaceIndex];
+        if (surface.opacity >= 1.0f)
+        {
+            return 0.0f;
+        }
+        transmittance *= 1.0f - glm::clamp(surface.opacity, 0.0f, 1.0f);
+        if (transmittance <= 1.0e-4f)
+        {
+            return 0.0f;
+        }
+        const float step = hit.t + state.settings.traceBias;
+        origin = origin + direction * step;
+        remaining = remaining > step ? remaining - step : 0.0f;
+        if (remaining <= 0.0f)
+        {
+            return transmittance;
+        }
+    }
+    return 0.0f;
 }
 
 // ---- screen traces -------------------------------------------------------------------
@@ -473,6 +543,16 @@ struct ScreenTraceResult
 {
     bool        hit = false;
     std::size_t texel = 0;
+    // Transmission tint accumulated while the march passed through
+    // transparent GBuffer texels (white = none). Meaningful only when hit is
+    // set: a march that ends without an opaque hit discards its tint, because
+    // the fall-back scene trace re-hits those surfaces and applies their
+    // refraction (bending included) itself - tinting both tiers would
+    // attenuate the same pane twice.
+    glm::vec3   tint{1.0f};
+    // How many transparent texels the march passed through (the transmission
+    // segment count the statistics report for screen traces).
+    std::uint32_t passThroughs = 0;
 };
 
 ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec4 &clipOrigin, const glm::vec3 &origin,
@@ -506,6 +586,12 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec4 &cli
     const float     linear   = 2.0f * glm::dot(direction, relative);
     const float     constant = glm::dot(relative, relative);
 
+    // The transparent surface the march last passed through (and its texel):
+    // a step smaller than a texel can revisit the same texel across
+    // consecutive steps, and one glass body covers many texels - a ray
+    // crossing its own medium must attenuate once, not once per texel.
+    std::uint32_t lastTransparentSurface = noSurface;
+    std::size_t   lastTransparentTexel = std::numeric_limits<std::size_t>::max();
     for (std::uint32_t step = 1; step <= steps; ++step)
     {
         const float t = step * stepLength;
@@ -533,6 +619,24 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec4 &cli
         const float rayDepth = std::sqrt(t * t + linear * t + constant);
         if (rayDepth > storedDepth && rayDepth - storedDepth <= thickness)
         {
+            // A transparent texel transmits the ray instead of stopping it:
+            // the surface's tint (albedo x (1 - opacity)) attenuates the
+            // march, and it keeps searching for the opaque responder behind.
+            // The reflected share of the glass is not resolved here - the
+            // glass surface's own field texels carry it, and the renderer
+            // samples them at the glass's pixels.
+            if (state.gbufferOpacity[index] < 1.0f)
+            {
+                const std::uint32_t surface = state.gbufferSurface[index];
+                if (index != lastTransparentTexel && surface != lastTransparentSurface)
+                {
+                    lastTransparentTexel   = index;
+                    lastTransparentSurface = surface;
+                    result.tint *= state.gbufferAlbedo[index] * (1.0f - state.gbufferOpacity[index]);
+                    ++result.passThroughs;
+                }
+                continue;
+            }
             result.hit  = true;
             result.texel = index;
             return result;
@@ -613,36 +717,142 @@ glm::vec3 rfFresnelWeight(const glm::vec3 &view, const glm::vec3 &sampledDirecti
     return f0 + (glm::vec3(1.0f) - f0) * powered;
 }
 
-// One full reflection ray: screen trace tier, scene trace tier, skylight. A
-// screen hit defers its radiance - the texel it landed on is shaded by the
-// lazy pass that follows the ray pass, so `outScreenHitTexel` carries the hit
-// texel back to the caller and the returned radiance is zero for that tier.
-glm::vec3 resolveDedicatedRay(const RfPipelineState &state, const glm::vec4 &clipOrigin,
-    const glm::vec3 &position, const glm::vec3 &normal, const glm::vec3 &direction,
-    const glm::vec3 &fresnel, RfResolve &outResolve, std::uint32_t &outScreenHitTexel)
+// One ray chain through the tracing tiers with transmission (contract in
+// lumen_reflection_internal.hpp): screen traces
+// against the frame GBuffer first (transparent texels pass through with the
+// surface's attenuation), then scene traces against the BVHs where
+// transparent surfaces split the ray Fresnel-style - the stochastic pick
+// either reflects off the interface (resolving the reflection radiance
+// through a nested chain) or transmits through it (tinted by the surface's
+// albedo share, bent by Snell's law with the interface's index ratio, total
+// internal reflection respected, and rough lobes blurred for translucent
+// surfaces). The chain weight multiplies every terminal radiance, so the
+// stochastic picks are unbiased; a chain whose transmission budget runs out
+// stops tracing and the world radiance cache answers its transmittance share
+// along the would-be continuation. The caller's `weight` carries the
+// source-interface share (the Fresnel weight for a reflected lobe, the
+// transmitted share for a refraction lobe); `remainingSegments` bounds how
+// many more interfaces the chain may cross.
+RfChainResolve resolveRayChain(const RfPipelineState &state, const glm::vec4 &clipOrigin, const glm::vec3 &origin,
+    const glm::vec3 &direction, const glm::vec3 &weight, std::uint32_t remainingSegments, bool allowScreenTrace,
+    std::uint64_t &seed)
 {
-    const glm::vec3 rayOrigin = position + normal * state.settings.traceBias;
-    glm::vec3   radiance(0.0f);
-    if (state.settings.screenTracesEnabled)
+    RfChainResolve result;
+    result.tint = weight;
+    if (allowScreenTrace && state.settings.screenTracesEnabled)
     {
         const float screenDistance = std::max(state.settings.screenRayDistance, 0.05f);
-        ScreenTraceResult screen = screenTrace(state, clipOrigin, rayOrigin, direction, screenDistance);
+        ScreenTraceResult screen = screenTrace(state, clipOrigin, origin, direction, screenDistance);
         if (screen.hit)
         {
-            outResolve = RfResolve::ScreenTrace;
-            outScreenHitTexel = static_cast<std::uint32_t>(screen.texel);
-            return radiance; // resolved by the lazy shading pass
+            result.deferred  = true;
+            result.hitTexel  = static_cast<std::uint32_t>(screen.texel);
+            result.tint      = weight * screen.tint;
+            result.resolve   = RfResolve::ScreenTrace;
+            result.segments  = screen.passThroughs;
+            return result;
         }
     }
-    const RfRay ray{rayOrigin, direction, state.settings.maxTraceDistance};
+    const RfRay ray{origin, direction, state.settings.maxTraceDistance};
     const RfHit hit = rfTraceScene(state, ray);
-    if (hit.hit)
+    if (!hit.hit)
     {
-        outResolve = RfResolve::SceneTrace;
-        return rfRadianceAtHit(state, hit) * fresnel;
+        result.radiance = state.environment.skyRadiance(direction) * weight;
+        result.resolve  = RfResolve::Sky;
+        return result;
     }
-    outResolve = RfResolve::Sky;
-    return state.environment.skyRadiance(direction) * fresnel;
+    const RfSurface &surface = state.surfaces[hit.surfaceIndex];
+    if (surface.opacity >= 1.0f)
+    {
+        result.radiance = rfRadianceAtHit(state, hit, direction) * weight;
+        result.resolve  = RfResolve::SceneTrace;
+        return result;
+    }
+
+    // Transparent interface: one transmission segment, then the Fresnel
+    // split. The face normal faces the ray (rfTraceScene's contract), so
+    // `entering` distinguishes the outside -> medium crossing from the
+    // medium -> outside one and picks the index ratio accordingly. The
+    // refraction is computed before the budget check so an exhausted chain
+    // can still fall back to the cache along the direction the ray would
+    // continue with (refracted, or mirrored under total internal reflection)
+    // instead of reading black.
+    ++result.segments;
+    const bool    entering = !hit.backface;
+    const float   ior      = glm::max(surface.indexOfRefraction, 1.0f);
+    const float   n1       = entering ? 1.0f : ior;
+    const float   n2       = entering ? ior : 1.0f;
+    const float   cosI     = glm::clamp(glm::dot(-direction, hit.normal), 0.0f, 1.0f);
+    const float   fresnel  = rfFresnelSchlickScalar(cosI, rfDielectricF0FromIor(n1, n2));
+    const glm::vec3 transmitted = glm::refract(direction, hit.normal, n1 / n2);
+    if (remainingSegments == 0)
+    {
+        // Budget exhausted: the chain stops tracing, but the pixel keeps its
+        // transmittance share - the world radiance cache answers along the
+        // would-be continuation (the skylight when nothing covers the
+        // position), so deep glass chains fade toward the room instead of
+        // absorbing to black.
+        const glm::vec3 continuation = glm::dot(transmitted, transmitted) > 1.0e-8f
+            ? glm::normalize(transmitted)
+            : glm::reflect(direction, hit.normal);
+        glm::vec3 cached(0.0f);
+        if (!rfProbeRadiance(state, hit.position, continuation, cached))
+        {
+            cached = state.environment.skyRadiance(continuation);
+        }
+        result.radiance = cached * weight * (1.0f - fresnel)
+            * (entering ? surface.albedo : glm::vec3(1.0f));
+        result.resolve  = RfResolve::Cache;
+        return result;
+    }
+    const float   pick     = randomFloat(seed);
+    // Every transparent-interface branch consumes one segment of the
+    // remaining budget (opaque hits end the chain without consuming any), so
+    // mutually facing transparent surfaces cannot recurse without bound.
+    --remainingSegments;
+    if (pick < fresnel)
+    {
+        // Reflect off the interface: the stochastic pick divides the
+        // reflectance out of the weight (the estimator stays unbiased). The
+        // reflected path leaves the medium, so its nested chain may use the
+        // screen tier again.
+        const glm::vec3 reflectDirection = glm::reflect(direction, hit.normal);
+        const glm::vec4 reflectClip = state.viewProjection
+            * glm::vec4(hit.position + hit.normal * state.settings.traceBias, 1.0f);
+        return resolveRayChain(state, reflectClip, hit.position + hit.normal * state.settings.traceBias,
+            reflectDirection, weight, remainingSegments, true, seed);
+    }
+    // Transmit: bent by Snell's law; total internal reflection falls back to
+    // the reflect branch (a deterministic full reflect: no split ran, so the
+    // weight passes through unchanged). The albedo absorption applies once
+    // per medium traversal, at the ENTERING interface - the matching exit
+    // passes untinted, so a solid pane attenuates exactly one tint however
+    // many interfaces the bent path crosses inside it (and the source split
+    // of a transmitted ray already carried its own medium's tint).
+    const bool exitCrossing = hit.backface;
+    if (glm::dot(transmitted, transmitted) < 1.0e-8f)
+    {
+        const glm::vec4 reflectClip = state.viewProjection
+            * glm::vec4(hit.position + hit.normal * state.settings.traceBias, 1.0f);
+        return resolveRayChain(state, reflectClip, hit.position + hit.normal * state.settings.traceBias,
+            glm::reflect(direction, hit.normal), weight, remainingSegments, true, seed);
+    }
+    glm::vec3 transmittedDirection = glm::normalize(transmitted);
+    if (surface.roughness > kMinimumRoughness)
+    {
+        // Translucent surface: blur the transmitted lobe by the surface's
+        // roughness (the frosted-glass approximation).
+        const float alpha = surface.roughness * surface.roughness;
+        transmittedDirection = rfSampleGgxVndf(makeBasis(transmittedDirection), glm::vec3(0.0f, 0.0f, 1.0f), alpha, seed);
+    }
+    const glm::vec3 transmittedWeight = exitCrossing ? weight : weight * surface.albedo;
+    const glm::vec3 transmittedOrigin = hit.position + transmittedDirection * state.settings.traceBias;
+    const glm::vec4 transmittedClip = state.viewProjection * glm::vec4(transmittedOrigin, 1.0f);
+    // The transmitted path travels inside a medium: the screen march cannot
+    // reproduce the exit interface's bending, so the rest of the chain runs
+    // on scene traces only.
+    return resolveRayChain(state, transmittedClip, transmittedOrigin, transmittedDirection, transmittedWeight,
+        remainingSegments, false, seed);
 }
 
 void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
@@ -671,6 +881,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
     state.raysReusedCacheThisFrame.store(0, std::memory_order_relaxed);
     state.screenTraceHitsThisFrame.store(0, std::memory_order_relaxed);
     state.sceneTraceHitsThisFrame.store(0, std::memory_order_relaxed);
+    state.transmissionSegmentsThisFrame.store(0, std::memory_order_relaxed);
 
     const std::uint32_t raysPerPixel = std::max(state.settings.raysPerPixel, 1u);
     const float         rayBandMax  = std::min(state.settings.roughRayBandMax, state.settings.roughMaxTrace);
@@ -687,6 +898,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
             std::uint32_t reusedDone = 0;
             std::uint32_t screenHits = 0;
             std::uint32_t sceneHits  = 0;
+            std::uint32_t segments   = 0;
             for (std::size_t y = rowBegin; y < rowEnd; ++y)
             {
                 std::vector<RfScreenDeferred> &rowDeferred = state.screenDeferredRows[y];
@@ -722,17 +934,33 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                     const float alpha            = clampedRoughness * clampedRoughness;
 
                     // Per-texel constants shared by every ray of the texel:
-                    // the tangent frame, the Fresnel base reflectivity, and
-                    // the screen-trace origin's clip position.
+                    // the tangent frame, the Fresnel base reflectivity, the
+                    // screen-trace origin's clip position, and the texel's
+                    // transmission pair (a transparent surface splits every
+                    // ray into its reflected and transmitted shares).
                     const glm::mat3 basis     = makeBasis(normal);
                     const glm::vec3 localView = glm::normalize(glm::transpose(basis) * view);
-                    const glm::vec3 f0        = glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
+                    const float     texelOpacity = glm::clamp(state.gbufferOpacity[index], 0.0f, 1.0f);
+                    const float     texelIor     = glm::max(state.gbufferIor[index], 1.0f);
+                    const glm::vec3 f0        = texelOpacity < 1.0f
+                        ? glm::vec3(rfDielectricF0FromIor(1.0f, texelIor))
+                        : glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
                     const glm::vec3 rayOrigin = position + normal * state.settings.traceBias;
                     const glm::vec4 clipOrigin = state.viewProjection * glm::vec4(rayOrigin, 1.0f);
+                    // The transmitted share leaves through the refracted
+                    // direction (Snell with the air -> medium ratio); rough
+                    // surfaces blur it, frosted glass reads blurry instead of
+                    // clear.
+                    const glm::vec3 refractedView = texelOpacity < 1.0f
+                        ? glm::normalize(glm::refract(-view, normal, 1.0f / texelIor))
+                        : glm::vec3(0.0f);
+                    const bool transmits = texelOpacity < 1.0f
+                        && glm::dot(refractedView, refractedView) > 0.5f;
 
                     std::uint64_t seed = hashSeed(state.frameIndex * 7919ull + index * 104729ull);
                     glm::vec3    sum(0.0f);
                     RfResolve   resolve = RfResolve::None;
+                    std::uint32_t segmentsDone = 0;
                     for (std::uint32_t ray = 0; ray < raysPerPixel; ++ray)
                     {
                         const glm::vec3 direction = rfSampleGgxVndf(basis, localView, alpha, seed);
@@ -740,20 +968,39 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                         if (roughness < rayBandMax)
                         {
                             // Dedicated reflection ray through the tracing
-                            // tiers.
-                            RfResolve rayResolve = RfResolve::None;
-                            std::uint32_t screenHitTexel = 0;
-                            const glm::vec3 radiance = resolveDedicatedRay(
-                                state, clipOrigin, position, normal, direction, fresnel, rayResolve,
-                                screenHitTexel);
-                            if (rayResolve == RfResolve::ScreenTrace)
+                            // tiers. A transparent texel splits the ray into
+                            // its reflected and transmitted shares first
+                            // (rfSplitFirstSegment: the pick probability
+                            // carries the share, the branch weight stays
+                            // unbiased over nested media).
+                            glm::vec3 chainWeight(1.0f);
+                            glm::vec3 chainDirection(0.0f);
+                            glm::vec3 chainOrigin(0.0f);
+                            if (!rfSplitFirstSegment(transmits, fresnel, texelOpacity, albedo, refractedView,
+                                direction, clampedRoughness, alpha, makeBasis(refractedView), position, rayOrigin,
+                                state.settings.traceBias, chainDirection, chainOrigin, chainWeight, seed))
+                            {
+                                ++raysDone;
+                                continue; // absorbed share: no return
+                            }
+                            const glm::vec4 chainClipOrigin = chainOrigin == rayOrigin
+                                ? clipOrigin
+                                : state.viewProjection * glm::vec4(chainOrigin, 1.0f);
+                            // A transmitted first segment starts inside the
+                            // medium: scene traces only from there on.
+                            const bool chainAllowsScreenTrace = chainOrigin == rayOrigin;
+                            RfChainResolve chain = resolveRayChain(
+                                state, chainClipOrigin, chainOrigin, chainDirection, chainWeight,
+                                state.settings.maxTransmissionSegments, chainAllowsScreenTrace, seed);
+                            segmentsDone += chain.segments;
+                            if (chain.deferred)
                             {
                                 rowDeferred.push_back(
-                                    RfScreenDeferred{static_cast<std::uint32_t>(index), screenHitTexel, fresnel});
+                                    RfScreenDeferred{static_cast<std::uint32_t>(index), chain.hitTexel, chain.tint});
                             }
                             else
                             {
-                                sum += radiance;
+                                sum += chain.radiance;
                             }
                             ++raysDone;
                             // The resolve mask reports the tier of the texel's
@@ -762,13 +1009,13 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                             // rest may resolve elsewhere.
                             if (resolve == RfResolve::None)
                             {
-                                resolve = rayResolve;
+                                resolve = chain.resolve;
                             }
-                            if (rayResolve == RfResolve::ScreenTrace)
+                            if (chain.resolve == RfResolve::ScreenTrace)
                             {
                                 ++screenHits;
                             }
-                            else if (rayResolve == RfResolve::SceneTrace)
+                            else if (chain.resolve == RfResolve::SceneTrace)
                             {
                                 ++sceneHits;
                             }
@@ -777,14 +1024,34 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                         {
                             // Rough band: resample the world radiance cache
                             // (Lumen's radiance-cache reuse); the analytic sky
-                            // when no probe covers the position.
+                            // when no probe covers the position. A transparent
+                            // texel evaluates the reflected share off the
+                            // sampled lobe plus the transmitted share along
+                            // the refracted direction, tinted by its albedo.
                             glm::vec3 radiance(0.0f);
                             if (!rfProbeRadiance(state, rayOrigin, direction, radiance))
                             {
                                 radiance = state.environment.skyRadiance(direction);
                             }
-                            sum += radiance * fresnel;
-                            ++reusedDone;
+                            if (transmits)
+                            {
+                                glm::vec3 transmittedRadiance(0.0f);
+                                const glm::vec3 transmittedOrigin = position + refractedView * state.settings.traceBias;
+                                if (!rfProbeRadiance(state, transmittedOrigin, refractedView, transmittedRadiance))
+                                {
+                                    transmittedRadiance = state.environment.skyRadiance(refractedView);
+                                }
+                                const glm::vec3 transmittedShare
+                                    = (glm::vec3(1.0f) - fresnel) * (1.0f - texelOpacity) * albedo;
+                                sum += radiance * fresnel + transmittedRadiance * transmittedShare;
+                                ++reusedDone;
+                                ++segmentsDone;
+                            }
+                            else
+                            {
+                                sum += radiance * fresnel;
+                                ++reusedDone;
+                            }
                             resolve = RfResolve::Cache;
                         }
                     }
@@ -792,6 +1059,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                     state.fieldValid[index]  = 1u;
                     state.fieldRayCount[index] = static_cast<float>(raysPerPixel);
                     state.fieldResolve[index] = resolve;
+                    segments += segmentsDone;
                     ++pixelsDone;
                 }
             }
@@ -800,6 +1068,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
             state.raysReusedCacheThisFrame.fetch_add(reusedDone, std::memory_order_relaxed);
             state.screenTraceHitsThisFrame.fetch_add(screenHits, std::memory_order_relaxed);
             state.sceneTraceHitsThisFrame.fetch_add(sceneHits, std::memory_order_relaxed);
+            state.transmissionSegmentsThisFrame.fetch_add(segments, std::memory_order_relaxed);
         });
 
     // Mark the texels the screen rays landed on (a single-threaded walk over
@@ -832,16 +1101,26 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                         state.screenColor[index] = state.gbufferAlbedo[index];
                         continue;
                     }
+                    // The lazy shade answers with the texel's own response as
+                    // seen from the camera: the specular block samples the
+                    // cache along the camera's mirror (the landing rays come
+                    // from elsewhere, but the cache's directional blur makes
+                    // the camera mirror the right neighborhood).
                     state.screenColor[index] = rfShadeHitPoint(state,
                         state.gbufferPosition[index],
                         state.gbufferNormal[index],
                         state.gbufferAlbedo[index],
-                        state.gbufferEmissive[index]);
+                        state.gbufferEmissive[index],
+                        glm::normalize(state.cameraPosition - state.gbufferPosition[index]),
+                        state.gbufferRoughness[index],
+                        state.gbufferMetallic[index]);
                 }
             }
         });
 
-    // Pass 3 - apply the deferred screen-hit contributions.
+    // Pass 3 - apply the deferred screen-hit contributions. The deferred
+    // tint carries the chain's full weight (source-interface Fresnel or
+    // transmitted share, plus every transmission tint along the way).
     const float inverseRaysPerPixel = 1.0f / static_cast<float>(raysPerPixel);
     parallelRange(scheduler, state.fieldHeight, 1,
         [&](std::size_t rowBegin, std::size_t rowEnd)
@@ -851,7 +1130,7 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                 for (const RfScreenDeferred &deferred : state.screenDeferredRows[y])
                 {
                     state.fieldRaw[deferred.sourceTexel]
-                        += state.screenColor[deferred.hitTexel] * deferred.fresnel * inverseRaysPerPixel;
+                        += state.screenColor[deferred.hitTexel] * deferred.tint * inverseRaysPerPixel;
                 }
             }
         });

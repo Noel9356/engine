@@ -162,26 +162,56 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                             // as the per-frame pass hoists them.
                             const glm::mat3 basis     = makeBasis(normal);
                             const glm::vec3 localView = glm::normalize(glm::transpose(basis) * view);
-                            const glm::vec3 f0        = glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
+                            const float     texelOpacity = glm::clamp(state.gbufferOpacity[index], 0.0f, 1.0f);
+                            const float     texelIor     = glm::max(state.gbufferIor[index], 1.0f);
+                            const glm::vec3 f0        = texelOpacity < 1.0f
+                                ? glm::vec3(rfDielectricF0FromIor(1.0f, texelIor))
+                                : glm::mix(glm::vec3(kDielectricF0), albedo, metallic);
+                            const glm::vec3 rayOrigin = position + normal * state.settings.traceBias;
+                            const glm::vec4 clipOrigin = state.viewProjection * glm::vec4(rayOrigin, 1.0f);
+                            const glm::vec3 refractedView = texelOpacity < 1.0f
+                                ? glm::normalize(glm::refract(-view, normal, 1.0f / texelIor))
+                                : glm::vec3(0.0f);
+                            const bool transmits = texelOpacity < 1.0f
+                                && glm::dot(refractedView, refractedView) > 0.5f;
                             std::uint64_t seed = hashSeed(0x5EEDBEEFull + index * 2654435761ull);
                             glm::vec3    sum(0.0f);
                             for (std::uint32_t sample = 0; sample < samples; ++sample)
                             {
                                 const glm::vec3 direction = rfSampleGgxVndf(basis, localView, alpha, seed);
                                 const glm::vec3 fresnel  = rfFresnelWeight(view, direction, f0);
-                                const RfRay ray{position + normal * state.settings.traceBias, direction,
-                                    state.settings.maxTraceDistance};
-                                const RfHit hit = rfTraceScene(state, ray);
-                                glm::vec3    radiance(0.0f);
-                                if (hit.hit)
+                                glm::vec3 chainWeight(1.0f);
+                                glm::vec3 chainDirection(0.0f);
+                                glm::vec3 chainOrigin(0.0f);
+                                if (!rfSplitFirstSegment(transmits, fresnel, texelOpacity, albedo, refractedView,
+                                    direction, clampedRoughness, alpha, makeBasis(refractedView), position, rayOrigin,
+                                    state.settings.traceBias, chainDirection, chainOrigin, chainWeight, seed))
                                 {
-                                    radiance = rfRadianceAtHit(state, hit);
+                                    continue; // absorbed share
                                 }
-                                else
+                                const glm::vec4 chainClipOrigin = chainOrigin == rayOrigin
+                                    ? clipOrigin
+                                    : state.viewProjection * glm::vec4(chainOrigin, 1.0f);
+                                RfChainResolve chain = resolveRayChain(
+                                    state, chainClipOrigin, chainOrigin, chainDirection, chainWeight,
+                                    state.settings.maxTransmissionSegments, chainOrigin == rayOrigin, seed);
+                                // The reference brute-forces scene traces only
+                                // (no screen tier), so a deferred chain answer is
+                                // shaded right here (the texel's own response as
+                                // seen from the camera, specular included).
+                                if (chain.deferred)
                                 {
-                                    radiance = state.environment.skyRadiance(direction);
+                                    chain.radiance = rfShadeHitPoint(state,
+                                        state.gbufferPosition[chain.hitTexel],
+                                        state.gbufferNormal[chain.hitTexel],
+                                        state.gbufferAlbedo[chain.hitTexel],
+                                        state.gbufferEmissive[chain.hitTexel],
+                                        glm::normalize(state.cameraPosition
+                                            - state.gbufferPosition[chain.hitTexel]),
+                                        state.gbufferRoughness[chain.hitTexel],
+                                        state.gbufferMetallic[chain.hitTexel]) * chain.tint;
                                 }
-                                sum += radiance * fresnel;
+                                sum += chain.radiance;
                             }
                             color = sum / static_cast<float>(samples);
                         }

@@ -46,7 +46,15 @@ namespace engine::physics_rigid
 //       WorldStatistics trigger counters. Everything from ABI 3 keeps its
 //       slot and meaning; consumers check `abi >= 4` before touching the
 //       additions.
-inline constexpr std::uint32_t physicsRigidCapabilityAbi = 4u;
+//   5 - appended the batched query surface: the SphereOverlapQuery /
+//       SphereOverlapResult records with the collideSpheres entry point for
+//       consumers that resolve many spheres per step (particle pools, cloth
+//       and rope nodes, fluid particles), and the copyBodyStates /
+//       copyBodyDescriptions entry points for consumers that drive many
+//       bodies per step (force fields, buoyancy). Everything from ABI 4
+//       keeps its slot and meaning; consumers check `abi >= 5` before
+//       touching the additions.
+inline constexpr std::uint32_t physicsRigidCapabilityAbi = 5u;
 
 using WorldHandle  = std::uint32_t;
 using BodyHandle   = std::uint32_t;
@@ -392,6 +400,25 @@ struct TriggerEvent
     BodyHandle    body    = invalidBody;
 };
 
+// One sphere for the batched overlap query below.
+struct SphereOverlapQuery
+{
+    double center[3] = {0.0, 0.0, 0.0};
+    double radius    = 0.0;
+};
+
+// One batched overlap result, written in the input order of the queries.
+// The normal is the unit direction to move the sphere out of the obstacle
+// and the depth is the penetration distance, exactly as collideSphere
+// reports them for a single sphere.
+struct SphereOverlapResult
+{
+    bool       hit       = false;
+    double     normal[3] = {0.0, 0.0, 0.0};
+    double     depth     = 0.0;
+    BodyHandle body      = invalidBody;
+};
+
 // The "physics_rigid" capability. Calls are main-thread only unless the
 // consumer serializes them; the module takes no internal locks. `self` is the
 // first argument of every call. Unknown handles are reported through the
@@ -538,6 +565,26 @@ struct PhysicsRigidCapability
     bool (*triggerOverlapCount)(void *self, WorldHandle world, TriggerHandle trigger, std::uint32_t *outCount);
     bool (*copyTriggerOverlaps)(void *self, WorldHandle world, TriggerHandle trigger, BodyHandle *outBodies,
         std::uint32_t capacity, std::uint32_t *outRequired);
+
+    // ---- ABI 5 additions -------------------------------------------------------
+
+    // Deepest-overlap sphere query for a whole batch in one call: each query
+    // resolves exactly as collideSphere does for a single sphere, with the
+    // world's solid bodies pre-filtered through their shape bounds before
+    // the narrow-phase test. Null query or result arrays (with a non-zero
+    // count) process zero queries; the return value is the number of
+    // queries processed.
+    std::uint32_t (*collideSpheres)(void *self, WorldHandle world, const SphereOverlapQuery *queries,
+        std::uint32_t queryCount, SphereOverlapResult *outResults);
+
+    // Batched body reads: one call per world instead of one call per body
+    // for consumers that drive many bodies every step (force fields,
+    // buoyancy). Entries for unknown handles stay default-constructed; the
+    // return value reports how many entries resolved to a live body.
+    std::uint32_t (*copyBodyStates)(void *self, WorldHandle world, const BodyHandle *bodies, std::uint32_t bodyCount,
+        BodyState *outStates);
+    std::uint32_t (*copyBodyDescriptions)(void *self, WorldHandle world, const BodyHandle *bodies,
+        std::uint32_t bodyCount, BodyDescription *outDescriptions);
 };
 
 } // namespace engine::physics_rigid

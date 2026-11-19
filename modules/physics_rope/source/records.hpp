@@ -6,6 +6,8 @@
 
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rope/capabilities.hpp>
+#include <engine/util/simulation_lod.hpp>
+#include <engine/util/step_accumulator.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -87,8 +89,27 @@ struct RopeRecord
     std::uint64_t substepsExecuted = 0;
     std::uint32_t lastContactCount = 0;
     double        lastStepMilliseconds = 0.0;
+    std::uint64_t lodSkippedSteps  = 0;
 
-    double simulatedTimeBudget = 0.0; // accumulator budget used by simulate()
+    // Fixed-step budget bookkeeping for simulate().
+    engine::util::StepAccumulator accumulator;
+
+    // Simulation LOD: importance-driven fidelity band and staggered cadence
+    // (the phase derives from the registration ordinal).
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+
+    // Per-step contact scratch (one entry per node): 0 none, 1 contact, plus
+    // the push-out normal. Lives on the record so ropes of different sizes
+    // reuse their own warmed-up buffers.
+    std::vector<std::uint8_t> contactFlags;
+    std::vector<double>       contactNormals;
+
+    // Pre-step copies of the node state, restored when a step diverges into
+    // non-finite values (reused buffers; capture is one copy per step).
+    std::vector<double> preStepPositions;
+    std::vector<double> preStepVelocities;
 };
 
 struct RopeSettings
@@ -99,6 +120,18 @@ struct RopeSettings
     std::uint32_t maximumRopes        = 256;
     std::uint32_t maximumNodes        = 200000;
     std::uint32_t maximumNodesPerRope = 4096;
+
+    // Velocity clamp applied to the derived per-substep node velocities.
+    double maximumVelocity = 30.0;
+
+    // Simulation LOD: fidelity bands keep the fixed step size and reduce the
+    // internal substep count instead (Full = substepsPerStep, Simplified =
+    // half, Procedural = quarter, Animation = one); the interval table says
+    // how many fixed steps each band updates on (0 freezes that band, which
+    // is the Cached default).
+    bool                              lodEnabled   = false;
+    engine::util::SimulationFidelityThresholds lodThresholds{};
+    std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
 };
 
 } // namespace engine::physics_rope

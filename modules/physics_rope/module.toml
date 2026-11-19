@@ -1,9 +1,20 @@
 config_keys           = [
     "physics_rope.fixed_rate_hz",
+    "physics_rope.lod_animation_threshold",
+    "physics_rope.lod_demotion_margin",
+    "physics_rope.lod_enabled",
+    "physics_rope.lod_full_threshold",
+    "physics_rope.lod_interval_animation",
+    "physics_rope.lod_interval_cached",
+    "physics_rope.lod_interval_procedural",
+    "physics_rope.lod_interval_simplified",
+    "physics_rope.lod_procedural_threshold",
+    "physics_rope.lod_simplified_threshold",
     "physics_rope.maximum_nodes",
     "physics_rope.maximum_nodes_per_rope",
     "physics_rope.maximum_ropes",
     "physics_rope.maximum_steps_per_simulate",
+    "physics_rope.maximum_velocity",
     "physics_rope.substeps_per_step",
 ]
 name                  = "physics_rope"

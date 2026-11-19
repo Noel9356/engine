@@ -285,21 +285,18 @@ void addClothSheet(const SceneDependencies &dependencies, SceneHandles &handles,
     description.bendCompliance     = 0.0002;
     description.damping            = 0.05;
     description.friction           = 0.55;
-    description.transform.position = draped ? Vec3{-3.6, 3.2, -2.6} : Vec3{0.0, 4.6, 1.4};
+    // The draped sheet spawns parallel to the ramp's slope (the ramp pitches
+    // 0.30 rad about X, its top surface rising toward -z), 6 cm above the
+    // surface: its pinned first row sits just off the slope's mid line and
+    // the sheet lies down the ramp, hanging off the low edge.
+    description.transform.rotation = draped ? pitchQuaternion(0.30) : description.transform.rotation;
+    description.transform.position = draped ? Vec3{-3.4, 1.32, -1.5} : Vec3{0.0, 4.6, 1.4};
+    // Both sheets pin their whole first row: the draped sheet holds onto the
+    // slope this way, the free-hanging one stays a curtain.
     std::vector<std::uint32_t> pins;
-    if (draped)
+    for (std::uint32_t column = 0; column < description.columns; ++column)
     {
-        // Pin the sheet's first row ends so it slides onto the ramp beneath.
-        pins.push_back(0);
-        pins.push_back(description.columns - 1);
-    }
-    else
-    {
-        // Free-hanging sheet pinned along its whole top row.
-        for (std::uint32_t column = 0; column < description.columns; ++column)
-        {
-            pins.push_back(column);
-        }
+        pins.push_back(column);
     }
     description.pinnedParticles                    = pins.data();
     description.pinnedCount                        = static_cast<std::uint32_t>(pins.size());

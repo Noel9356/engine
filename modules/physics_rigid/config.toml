@@ -13,6 +13,7 @@ maximum_joints                = 50000
 maximum_linear_correction     = 0.4
 maximum_linear_velocity       = 500.0
 maximum_steps_per_simulate    = 8
+maximum_substeps              = 16
 maximum_trigger_events       = 1024
 maximum_triggers             = 256
 maximum_worlds                = 16

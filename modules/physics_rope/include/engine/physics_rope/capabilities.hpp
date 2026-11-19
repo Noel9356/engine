@@ -3,7 +3,8 @@
 // XPBD rope and cable simulation: a chain of particles held together by
 // stretch distance constraints and two-apart bending constraints, stepped
 // with fixed-timestep substepping. Ropes collide against a physics_rigid
-// world's bodies and planes through that module's sphere-overlap query, and
+// world's bodies and planes through that module's batched sphere-overlap
+// query, and
 // either end can be pinned to a world position or attached to a rigid body's
 // local anchor (cranes, cables, tow lines, chain links). Consumers acquire
 // it via ParticipantContext::acquireCapability<RopeCapability>(); the module
@@ -30,7 +31,11 @@ namespace engine::physics_rope
 //       and the copyRopeTension / setRopeLength entry points. Everything
 //       from ABI 1 keeps its slot and meaning; consumers check `abi >= 2`
 //       before touching the additions.
-inline constexpr std::uint32_t physicsRopeCapabilityAbi = 2u;
+//   3 - appended the simulation-LOD surface: the setRopeImportance entry
+//       point and the RopeStatistics.lodSkippedSteps counter. Everything
+//       from ABI 2 keeps its slot and meaning; consumers check `abi >= 3`
+//       before touching the additions.
+inline constexpr std::uint32_t physicsRopeCapabilityAbi = 3u;
 
 using RopeHandle = std::uint32_t;
 
@@ -43,7 +48,7 @@ enum class RopeError : std::uint32_t
     InvalidHandle,      // unknown rope handle or node index
     InvalidDescription, // null pointers, non-finite values, degenerate chain
     CapacityExceeded,   // configured rope or node budget exhausted
-    SimulationFailure   // non-finite state entered during a step; the rope is left unmodified
+    SimulationFailure   // non-finite state entered during a step; the step is rolled back to its start state
 };
 
 struct RopeDescription
@@ -124,6 +129,9 @@ struct RopeStatistics
     // most recent completed step.
     std::uint32_t brokenSegmentCount = 0;
     double        maximumTension     = 0.0;
+
+    // ABI 3: fixed steps this rope skipped through simulation LOD.
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_rope" capability. Calls are main-thread only; the module
@@ -198,6 +206,16 @@ struct RopeCapability
     // no sleep and XPBD has no warm start), nodes respond from the next step
     // on.
     bool (*setRopeLength)(void *self, RopeHandle rope, double length);
+
+    // ---- ABI 3 additions -------------------------------------------------------
+
+    // Simulation LOD: writes the rope's importance score in [0, 1]. The
+    // module maps the score onto the five fidelity bands (Cached, Animation,
+    // Procedural, Simplified, Full) with demotion hysteresis; bands below
+    // Full keep the rope's fixed step size and reduce the internal XPBD
+    // substep count instead, and Cached ropes freeze until the score rises
+    // again. Non-finite scores resolve to Cached.
+    bool (*setRopeImportance)(void *self, RopeHandle rope, double importance);
 };
 
 } // namespace engine::physics_rope

@@ -29,6 +29,7 @@ target_link_libraries(
     engine_module_physics_rigid
     PRIVATE engine_kernel
             engine_physics_rigid_capabilities
+            engine_util_types
 )
 set_target_properties(
     engine_module_physics_rigid

@@ -21,7 +21,7 @@ Every key of the `[lumen_reflection]` configuration section, in TOML path form. 
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
-| `lumen_reflection.screen_scale` | 1..64 | `4` | Field resolution divisor per axis: the field covers 1/screen_scale of the viewport's width and height. 4 matches Lumen's quarter-ray-per-pixel High tier relative to a full-resolution target. |
+| `lumen_reflection.screen_scale` | 1..64 | `2` | Field resolution divisor per axis: the field covers 1/screen_scale of the viewport's width and height. The default (half of the viewport per axis) keeps curved reflectors smooth at typical viewport sizes while staying well below full resolution, matching Lumen's sub-resolution reflection tracing; coarser divisors trade texel detail for CPU cost. |
 | `lumen_reflection.rays_per_pixel` | 1..64 | `1` | Stochastic rays per field texel per frame; the temporal accumulation is the effective sample multiplier (a converged frame is hundreds of samples). |
 | `lumen_reflection.screen_ray_distance_m` | 0.05..64 | `2.0` | Screen-trace length: screen traces resolve only what the frame GBuffer covers within this radius; longer rays hand the remainder to the scene trace (Lumen's short screen-ray budget). |
 
@@ -46,6 +46,7 @@ Every key of the `[lumen_reflection]` configuration section, in TOML path form. 
 | --- | --- | --- | --- |
 | `lumen_reflection.trace.max_distance_m` | 1..2000 | `50.0` | Scene-trace length for reflection rays (the same ceiling as lumen_gi's trace budget). |
 | `lumen_reflection.trace.bias_m` | 0.001..0.5 | `0.02` | Surface offset for reflection rays and their shadow rays; one bias behind every trace site, the same acne/leak knob as lumen_gi's `trace.bias_m`. |
+| `lumen_reflection.trace.max_transmission_segments` | 0..16 | `3` | How many interfaces a ray chain may cross through transparent or translucent surfaces (screen pass-throughs and refracted hops both count). A chain that exhausts the budget is absorbed; a glass pane costs two segments (entering and exiting the medium). |
 
 ## Temporal filter
 

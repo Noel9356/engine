@@ -4,7 +4,7 @@ physics_fields provides environmental and external force fields over a physics_r
 
 ## Capability
 
-The module provides the `physics_fields` capability (ABI version constant `physicsFieldsCapabilityAbi = 1`, see `include/engine/physics_fields/capabilities.hpp`) and requires the `physics_rigid` capability; the kernel constructs the rigid core first and grants the permission from the manifest's `requires` list. Wind and force-volume handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidWind`, `invalidForceVolume`) means "none". Positions are world-space meters, wind velocities meters per second, accelerations meters per second squared, and impulses newton-seconds; vectors are plain `double` triples packed `x, y, z`. The module owns no simulation loop of its own: the consumer calls the apply entry points once per fixed update, immediately before stepping the rigid world, and every force lands through the rigid capability's `applyForceAtPoint` or `applyImpulseAtPoint`.
+The module provides the `physics_fields` capability (ABI version constant `physicsFieldsCapabilityAbi = 2`, see `include/engine/physics_fields/capabilities.hpp`; the simulation-LOD surface — the importance setters for wind fields and force volumes and the `lodSkippedSteps` counter — arrived in ABI 2, and consumers check `abi >= 2` before touching those additions) and requires the `physics_rigid` capability; the kernel constructs the rigid core first and grants the permission from the manifest's `requires` list. Wind and force-volume handles are `std::uint32_t`, start at 1, are never reused, and `0` (`invalidWind`, `invalidForceVolume`) means "none". Positions are world-space meters, wind velocities meters per second, accelerations meters per second squared, and impulses newton-seconds; vectors are plain `double` triples packed `x, y, z`. The module owns no simulation loop of its own: the consumer calls the apply entry points once per fixed update, immediately before stepping the rigid world, and every force lands through the rigid capability's `applyForceAtPoint` or `applyImpulseAtPoint`.
 
 | Group | Functions | Purpose |
 | --- | --- | --- |
@@ -57,6 +57,10 @@ From `module.toml` and the entry table at the bottom of `source/physics_fields.c
 **Statistics.** `fieldsStatistics` copies the `FieldsStatistics` struct: the live `windFieldCount` and `forceVolumeCount` (maintained on create and destroy) and the cumulative `dragApplications` and `volumeApplications`.
 
 **Interaction with rigid bodies.** Fields read nothing from the rigid module beyond body enumeration and state copies, and write nothing back beyond forces and impulses, so any body kind works the same: only awake bodies are visited (static scenery stays put), dynamic boxes catch the wind, and kinematic carriers respond to volumes and blasts. Rigid integration stays the single source of motion — fields is a pure force producer, one-way coupled by design (see configuration.md for the cost trade-off this represents).
+
+## Simulation LOD and batched body reads
+
+Wind fields and force volumes each carry an importance score (`setWindFieldImportance` / `setForceVolumeImportance`, ABI 2) resolved through the five-band fidelity ladder with demotion hysteresis. With `lod_enabled` on, fields below the Full band run their application passes on a staggered cadence phase-spread by registration order: one due pass covers `lod_interval_*` fixed steps and applies roughly that multiple of the force, so the total impulse per wall time matches the full-rate schedule while the per-step query cost drops, and Cached fields apply nothing until the score rises again. The `lodSkippedSteps` statistic counts the skipped passes. The per-pass body scan reads the rigid world through the batched `copyBodyStates` / `copyBodyDescriptions` surface — two calls per pass instead of two per body — and continues to filter on the awake flag the copies report.
 
 ## Threading and lifetime
 

@@ -32,7 +32,13 @@ namespace engine::physics_cloth
 //       ClothStatistics.brokenConstraintCount, and the sampleClothSurface
 //       entry point. Everything from ABI 1 keeps its slot and meaning;
 //       consumers check `abi >= 2` before touching the additions.
-inline constexpr std::uint32_t physicsClothCapabilityAbi = 2u;
+//   3 - appended the simulation-LOD and sleep surfaces: the
+//       setClothImportance entry point, the ClothStatistics.lodSkippedSteps
+//       and ClothStatistics.sleeping counters, and the settled-cloth
+//       behavior of ClothDescription.sleepingEnabled. Everything from ABI 2
+//       keeps its slot and meaning; consumers check `abi >= 3` before
+//       touching the additions.
+inline constexpr std::uint32_t physicsClothCapabilityAbi = 3u;
 
 using ClothHandle = std::uint32_t;
 
@@ -45,7 +51,7 @@ enum class ClothError : std::uint32_t
     InvalidHandle,      // unknown cloth handle or particle index
     InvalidDescription, // null pointers, non-finite values, degenerate grid
     CapacityExceeded,   // configured cloth or particle budget exhausted
-    SimulationFailure   // non-finite state entered during a step; the cloth is left unmodified
+    SimulationFailure   // non-finite state entered during a step; the step is rolled back to its start state
 };
 
 struct ClothDescription
@@ -87,7 +93,11 @@ struct ClothDescription
     const std::uint32_t *pinnedParticles = nullptr;
     std::uint32_t        pinnedCount     = 0;
 
-    bool sleepingEnabled = true; // reserved for future sleep integration; cloth never sleeps
+    // Settled cloth: when enabled, a cloth whose free particles all stay
+    // below the module's configured sleep velocity for the configured time
+    // stops integrating (and wakes on drag, pin, or wind changes). Enabled
+    // by default; the thresholds are module configuration.
+    bool sleepingEnabled = true;
 
     // ABI 2 additions (consumers check `abi >= 2` before touching them).
 
@@ -121,6 +131,11 @@ struct ClothStatistics
     // ABI 2: distance constraints torn since creation (0 when tearing is
     // disabled); see ClothDescription.tearStrain.
     std::uint32_t brokenConstraintCount = 0;
+
+    // ABI 3: fixed steps this cloth skipped through simulation LOD, and
+    // whether the cloth is currently settled (asleep).
+    std::uint64_t lodSkippedSteps = 0;
+    bool          sleeping        = false;
 };
 
 struct ClothParticleDrag
@@ -192,6 +207,17 @@ struct ClothCapability
     // cases). Returns false for unknown handles or non-finite results.
     bool (*sampleClothSurface)(
         void *self, ClothHandle cloth, double u, double v, double outPosition[3], double outNormal[3]);
+
+    // ---- ABI 3 additions -------------------------------------------------------
+
+    // Simulation LOD: writes the cloth's importance score in [0, 1]. The
+    // module maps the score onto the five fidelity bands (Cached, Animation,
+    // Procedural, Simplified, Full) with demotion hysteresis; bands below
+    // Full keep the cloth's fixed step size and reduce the internal XPBD
+    // substep count instead (the small-steps schedule tolerates the coarser
+    // solve), and Cached cloths freeze until the score rises again.
+    // Non-finite scores resolve to Cached.
+    bool (*setClothImportance)(void *self, ClothHandle cloth, double importance);
 };
 
 } // namespace engine::physics_cloth

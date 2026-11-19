@@ -8,10 +8,13 @@
 // identical emitters produce identical results without random-number
 // state. Particles integrate per fixed step, respond to a uniform wind
 // acceleration (consumers can bridge a wind field's local sample), and
-// optionally collide against the rigid world through the sphere-overlap
-// query (rain and hail die on impact, snow settles, leaves settle briefly
-// before expiring, ash/pollen/insects pass through). Consumers acquire it
-// via ParticipantContext::acquireCapability
+// optionally collide against the rigid world through the batched
+// sphere-overlap query (rain and hail die on impact, snow settles, leaves
+// settle briefly before expiring, ash/pollen/insects pass through).
+// Simulation LOD: every emitter carries an importance score; emitters below
+// the Full fidelity band update on a staggered cadence whose due steps cover
+// the whole interval of wall time, and Cached emitters freeze. Consumers
+// acquire it via ParticipantContext::acquireCapability
 // <ParticlesCapability>(); the module declares physics_rigid as a required
 // capability.
 
@@ -35,7 +38,12 @@ namespace engine::physics_particles
 //       their deterministic behaviors. Everything from ABI 1 keeps its
 //       slot and meaning; consumers check `abi >= 2` before touching the
 //       additions.
-inline constexpr std::uint32_t physicsParticlesCapabilityAbi = 2u;
+//   3 - appended the simulation-LOD surface: the setEmitterImportance entry
+//       point (an importance score in [0, 1] that drives the emitter's
+//       fidelity band) and the ParticlesStatistics.lodSkippedSteps counter.
+//       Everything from ABI 2 keeps its slot and meaning; consumers check
+//       `abi >= 3` before touching the additions.
+inline constexpr std::uint32_t physicsParticlesCapabilityAbi = 3u;
 
 using EmitterHandle = std::uint32_t;
 
@@ -48,7 +56,7 @@ enum class ParticlesError : std::uint32_t
     InvalidHandle,      // unknown emitter handle or particle index
     InvalidDescription, // null pointers, non-finite values, negative extents
     CapacityExceeded,   // configured emitter or particle budget exhausted
-    SimulationFailure   // non-finite state entered during a step; the emitter is left unmodified
+    SimulationFailure   // non-finite state entered during a step; the diverging particles are retired
 };
 
 // Particle behavior classes. Rain falls fast and dies at the ground; snow
@@ -161,6 +169,11 @@ struct ParticlesStatistics
     std::uint64_t spawnedTotal   = 0;
     std::uint64_t expiredTotal   = 0;
     std::uint32_t aliveParticles = 0;
+
+    // Fixed steps emitters skipped through simulation LOD: emitters below
+    // the Full fidelity band update every Nth step, and this counter tracks
+    // the skipped emitter-steps across the module.
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_particles" capability. Calls are main-thread only; the
@@ -207,6 +220,18 @@ struct ParticlesCapability
     std::uint32_t (*simulate)(void *self, EmitterHandle emitter, double elapsedSeconds);
 
     bool (*particlesStatistics)(void *self, ParticlesStatistics *outStatistics);
+
+    // ---- ABI 3 additions -------------------------------------------------------
+
+    // Simulation LOD: writes the emitter's importance score in [0, 1]. The
+    // module maps the score onto the five fidelity bands (Cached, Animation,
+    // Procedural, Simplified, Full) with demotion hysteresis; emitters below
+    // Full update every Nth fixed step (the interval per band is module
+    // configuration) and one due step then covers the whole interval of wall
+    // time, so emission rate and lifetime pacing stay correct while the
+    // per-step cost drops. Cached emitters freeze until the score rises
+    // again. Non-finite scores resolve to Cached.
+    bool (*setEmitterImportance)(void *self, EmitterHandle emitter, double importance);
 };
 
 } // namespace engine::physics_particles

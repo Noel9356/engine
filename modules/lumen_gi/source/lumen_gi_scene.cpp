@@ -395,9 +395,42 @@ GiShadingHit traceSceneShading(const GiPipelineState &state, const GiRay &ray)
     return result;
 }
 
-bool traceSceneOccluded(const GiPipelineState &state, const GiRay &ray, std::uint32_t excludedSurface)
+// Transmittance of a shadow ray: transparent surfaces attenuate the
+// remaining light by (1 - opacity) per covering hit instead of blocking it;
+// the first opaque surface (or an exhausted transmission budget) blocks the
+// rest. Each continuation advances past the covering hit by the trace bias
+// so the same pane is not re-hit.
+float traceSceneTransmittance(const GiPipelineState &state, const GiRay &ray)
 {
-    return traceSurfaces<true>(state, ray, excludedSurface).hit;
+    float transmittance = 1.0f;
+    GiRay  remaining{ray.origin, ray.direction, ray.tMax};
+    const std::uint32_t budget = state.settings.maxTransmissionSegments + 1u;
+    for (std::uint32_t segment = 0; segment < budget; ++segment)
+    {
+        const SurfaceHit surfaceHit = traceSurfaces<false>(state, remaining, noSurface);
+        if (!surfaceHit.hit)
+        {
+            return transmittance;
+        }
+        const GiSurface &surface = state.surfaces[surfaceHit.surfaceIndex];
+        if (surface.opacity >= 1.0f)
+        {
+            return 0.0f;
+        }
+        transmittance *= 1.0f - glm::clamp(surface.opacity, 0.0f, 1.0f);
+        if (transmittance <= 1.0e-4f)
+        {
+            return 0.0f;
+        }
+        const float step = surfaceHit.t + state.settings.traceBias;
+        remaining.origin    = remaining.origin + remaining.direction * step;
+        remaining.tMax      = remaining.tMax > step ? remaining.tMax - step : 0.0f;
+        if (remaining.tMax <= 0.0f)
+        {
+            return transmittance;
+        }
+    }
+    return 0.0f;
 }
 
 // ---- geometry ingestion ----------------------------------------------------

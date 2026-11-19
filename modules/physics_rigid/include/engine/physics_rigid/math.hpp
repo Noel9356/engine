@@ -93,6 +93,20 @@ using RigidTransform = ::engine::physics_rigid::RigidTransform;
 
 constexpr double kPi = 3.14159265358979323846;
 
+// Component access by axis index (0 = x, 1 = y, 2 = z), for the axis-driven
+// loops the shapes and solver run. Out-of-range axes clamp to z. The mutable
+// overload writes one component without any pointer arithmetic between
+// members.
+inline double &component(Vec3 &vector, std::uint32_t axis)
+{
+    return axis == 0u ? vector.x : (axis == 1u ? vector.y : vector.z);
+}
+
+inline double component(const Vec3 &vector, std::uint32_t axis)
+{
+    return axis == 0u ? vector.x : (axis == 1u ? vector.y : vector.z);
+}
+
 inline double dot(const Vec3 &a, const Vec3 &b)
 {
     return a.x * b.x + a.y * b.y + a.z * b.z;
@@ -168,6 +182,25 @@ inline Vec3 rotate(const Quaternion &a, const Vec3 &v)
 inline Vec3 inverseRotate(const Quaternion &a, const Vec3 &v)
 {
     return rotate(conjugate(a), v);
+}
+
+
+// Rotation vector (axis-angle log map) of a quaternion: the rotation as a
+// 3-vector whose direction is the rotation axis and whose length is the
+// angle in radians. Small angles use the linearized form so the result is
+// continuous at identity; the input normalizes internally, so unnormalized
+// quaternions are accepted.
+inline Vec3 rotationVectorRadians(const Quaternion &rotation)
+{
+    const Quaternion normalized = normalize(rotation);
+    const double     sine       = std::sqrt(
+        normalized.x * normalized.x + normalized.y * normalized.y + normalized.z * normalized.z);
+    if (sine < 1.0e-9)
+    {
+        return Vec3{2.0 * normalized.x, 2.0 * normalized.y, 2.0 * normalized.z};
+    }
+    const double angle = 2.0 * std::atan2(sine, normalized.w);
+    return Vec3{normalized.x / sine, normalized.y / sine, normalized.z / sine} * angle;
 }
 
 // Column-major 3x3 rotation matrix stored row-of-columns: element (row,

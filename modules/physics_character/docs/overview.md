@@ -4,7 +4,7 @@ physics_character provides character physics assembled from the physics_rigid an
 
 ## Capability
 
-The module provides the `physics_character` capability (ABI version constant `physicsCharacterCapabilityAbi = 3`; the header's ABI history comment records what each bump appended, and the ABI-3 additions — the hand planter, the lean controller, and `applyCharacterPush` — require an `abi >= 3` check before use, while everything from ABI 2 keeps its slot and meaning) and requires the `physics_rigid` and `physics_articulated` capabilities; `construct()` acquires both with `tryAcquireCapability` and keeps them only when their `abi` fields match the required constants — `physicsRigidCapabilityAbi = 4` and `physicsArticulatedCapabilityAbi = 2` — so a mismatched pair leaves the creators reporting failure instead of calling across a stale table. Character, jiggle-chain, foot-planter, hand-planter, and lean-controller handles are `std::uint32_t` (`CharacterHandle`, `JiggleChainHandle`, `FootPlanterHandle`, `HandPlanterHandle`, `LeanHandle`), start at 1, are never reused, and `0` (`invalidCharacter`, `invalidJiggleChain`, `invalidFootPlanter`, `invalidHandPlanter`, `invalidLeanController`) means "none". Positions and lengths are world-space meters, angles are radians, torques are newton-meters, velocities are meters per second, and quaternions are packed `x, y, z, w`.
+The module provides the `physics_character` capability (ABI version constant `physicsCharacterCapabilityAbi = 3`; the header's ABI history comment records what each bump appended, and the ABI-3 additions — the hand planter, the lean controller, and `applyCharacterPush` — require an `abi >= 3` check before use, while everything from ABI 2 keeps its slot and meaning) and requires the `physics_rigid` and `physics_articulated` capabilities; `construct()` acquires both with `tryAcquireCapability` and keeps them only when their `abi` fields match the required constants — `physicsRigidCapabilityAbi = 5` and `physicsArticulatedCapabilityAbi = 2` — so a mismatched pair leaves the creators reporting failure instead of calling across a stale table. Character, jiggle-chain, foot-planter, hand-planter, and lean-controller handles are `std::uint32_t` (`CharacterHandle`, `JiggleChainHandle`, `FootPlanterHandle`, `HandPlanterHandle`, `LeanHandle`), start at 1, are never reused, and `0` (`invalidCharacter`, `invalidJiggleChain`, `invalidFootPlanter`, `invalidHandPlanter`, `invalidLeanController`) means "none". Positions and lengths are world-space meters, angles are radians, torques are newton-meters, velocities are meters per second, and quaternions are packed `x, y, z, w`.
 
 ### Per-update contract
 
@@ -46,7 +46,7 @@ The per-update entry points — `updateCharacter`, `updateFootPlanter`, `updateJ
 From `module.toml` and the entry table at the bottom of `source/physics_character.cpp` (they agree):
 
 - **Provided:** `physics_character`.
-- **Required:** `physics_rigid`, `physics_articulated` — both acquired in `construct()` and verified against `physicsRigidCapabilityAbi = 4` and `physicsArticulatedCapabilityAbi = 2`; the creators report failure while either capability is missing.
+- **Required:** `physics_rigid`, `physics_articulated` — both acquired in `construct()` and verified against `physicsRigidCapabilityAbi = 5` and `physicsArticulatedCapabilityAbi = 2`; the creators report failure while either capability is missing.
 - **Optional:** none.
 - **Declared permissions:** none.
 

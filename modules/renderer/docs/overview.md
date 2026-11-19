@@ -39,7 +39,7 @@ The snapshot can lag the latest `lumen_gi::evaluate()` by one frame: module upda
 
 The demo `demos/lumen_gi/` is a standalone harness for this hook: it registers deterministic interior/outdoor scenes into both the renderer and lumen_gi and exports screenshots plus the module's own debug views for A/B validation (`[renderer] gi_indirect_lighting = false` shows the pre-hook image).
 
-## lumen_reflection screen-space field (ABI 1 hook)
+## lumen_reflection screen-space field hook
 
 When the optional `lumen_reflection` capability is present and `[renderer] reflection_indirect_specular` is true (the default), `beginFrame` polls `copyField` for the module's field version and, on change, copies the snapshot and pushes it to the backend via `RenderBackend::setReflectionField` - the same version-gated pattern as the probe grid above. The field holds the expected GGX-lobe specular response per screen texel (see the module's overview.md), so the composite is a single add:
 
@@ -53,6 +53,10 @@ The demo `demos/lumen_gi/` exercises this hook with its reflective surfaces (a p
 Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
 
 Vulkan swapchains require surface support for color-attachment usage. PPM screenshot readback is enabled when the surface also supports transfer-source usage; otherwise rendering remains available and screenshot requests report a creation failure.
+
+## Transparent draws
+
+A material with `opacity` below 1 renders as a transparent draw: depth testing stays on (opaque geometry in front keeps occluding it) while depth writes turn off, so co-transmitted surfaces do not occlude each other and the composite follows submission order exactly like the shell-fur stack. The composite has two modes per pixel. Where the lumen_reflection field carries a traced response for the pixel's material (the same gate the field sample applies everywhere), the shaded result commits directly: the field's response already contains the interface's reflected share plus the transmitted share refracted through the medium, so blending the raw background in as well would show the scene behind twice. Where no traced response exists - the surface sits outside the traced roughness band, or the reflection module is absent - the draw alpha blends with the material's opacity over the framebuffer (the classic transparent pass, unbent). Consumers order their transparent draws after the opaque scene, far to near within the transparent group, the same contract the fur stack documents. The surface's own diffuse terms (direct, hemispheric, and probe-grid ambient) scale by the opacity: a transparent surface scatters only the share it keeps off the transmitted path. The pbr module's material conversion maps glTF/MTL opacity and index of refraction into these fields, so imported transmissive materials flow through unchanged.
 
 ## Architecture
 

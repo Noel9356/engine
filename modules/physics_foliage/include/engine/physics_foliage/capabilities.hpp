@@ -24,7 +24,16 @@ namespace engine::physics_foliage
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsFoliageCapabilityAbi = 1u;
+//
+// ABI history:
+//   1 - initial surface (field creation bound to a wind field or the ambient
+//       breeze, bend copies, radial disturbances, fixed-step stepping,
+//       statistics).
+//   2 - appended the simulation-LOD surface: the setFieldImportance entry
+//       point and the FoliageStatistics.lodSkippedSteps counter. Everything
+//       from ABI 1 keeps its slot and meaning; consumers check `abi >= 2`
+//       before touching the additions.
+inline constexpr std::uint32_t physicsFoliageCapabilityAbi = 2u;
 
 using FieldHandle = std::uint32_t;
 
@@ -37,7 +46,7 @@ enum class FoliageError : std::uint32_t
     InvalidHandle,      // unknown field handle or instance index
     InvalidDescription, // null pointers, non-finite values, non-positive sizes
     CapacityExceeded,   // configured field or instance budget exhausted
-    SimulationFailure   // non-finite state entered during a step; the field is left unmodified
+    SimulationFailure   // non-finite state entered during a step; the diverging instances reset their bend
 };
 
 // One deformable foliage instance. The base is planted at `position`; the
@@ -95,6 +104,9 @@ struct FoliageStatistics
     std::uint32_t fieldCount       = 0;
     std::uint32_t instanceCount    = 0;
     std::uint64_t disturbanceTotal = 0;
+
+    // ABI 2: field-steps skipped through simulation LOD.
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_foliage" capability. Calls are main-thread only; the module
@@ -135,6 +147,17 @@ struct FoliageCapability
     std::uint32_t (*simulate)(void *self, double elapsedSeconds);
 
     bool (*foliageStatistics)(void *self, FoliageStatistics *outStatistics);
+
+    // ---- ABI 2 additions -------------------------------------------------------
+
+    // Simulation LOD: writes the field's importance score in [0, 1]. The
+    // module maps the score onto the five fidelity bands (Cached, Animation,
+    // Procedural, Simplified, Full) with demotion hysteresis; fields below
+    // Full update on a staggered cadence whose due steps cover the whole
+    // interval of wall time (the spring gains clamp to the stability bound
+    // of the enlarged step), and Cached fields freeze until the score rises
+    // again. Non-finite scores resolve to Cached.
+    bool (*setFieldImportance)(void *self, FieldHandle field, double importance);
 };
 
 } // namespace engine::physics_foliage

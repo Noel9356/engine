@@ -21,6 +21,14 @@
 // Without --frames the demo runs interactively until the window is closed or
 // Escape is pressed; headless runs (and --frames N) stop after a fixed count.
 //
+// The interior scene adds transparent and translucent props (a clear glass
+// sphere, a frosted pane, a tinted ruby cube) that exercise the
+// transmission paths end to end: the renderer transparent pass,
+// lumen_reflection refracted ray chains, and lumen_gi pass-through
+// gathers, probe transmittance, and softened shadows. --self-test
+// validates the whole chain headlessly (module statistics, snapshot
+// versions, transmission counters, and the exported screenshot content).
+//
 // Useful flags: --frames N renders exactly N frames (deterministic),
 // --screenshot/--screenshot-frame export the
 // rendered frame, --export-debug additionally writes the lumen_gi module's
@@ -30,7 +38,11 @@
 // validation, --no-reflections disables the reflection module for the
 // pre-hook image, and --spin rotates one scene object every frame (the
 // interior occluder, the outdoor chrome sphere) so the dynamic-surface path
-// runs without manual input.
+// is exercised. Screenshot exports that should show the fully converged
+// lighting need enough frames for the radiance caches to settle: give a
+// stationary scene at least 150-300 frames (see the validation numbers in
+// modules/lumen_gi/docs/overview.md) instead of the 30-frame headless
+// default, whose indirect term is still sharpening.
 
 #include <engine/application/application.hpp>
 #include "demo_harness.hpp"
@@ -62,6 +74,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -100,6 +113,19 @@ int main(int argc, char **argv)
     {
         std::cerr << "demo_lumen_gi: " << commandLineError << "\n";
         return 2;
+    }
+    if (options.selfTest)
+    {
+        // Deterministic validation profile: the interior view (with its
+        // transparent/translucent props), a fixed frame count, and a
+        // screenshot at the last frame the checks below parse.
+        options.viewName        = "interior";
+        options.frames          = 24;
+        options.screenshotFrame = 23;
+        options.statsEveryFrames = 0;
+        options.reflections     = true;
+        options.screenshotPath  = "lumen_gi_selftest.ppm";
+        std::cout << "demo_lumen_gi: self-test run (interior, 24 frames)\n";
     }
 
     // Modules this harness needs: window + renderer draw the scene, camera
@@ -330,6 +356,8 @@ int main(int argc, char **argv)
                 surface.emissiveColor[axis] = mesh.giEmissive[axis];
             }
             surface.emissiveIntensity = mesh.giEmissiveIntensity;
+            surface.opacity           = mesh.material.opacity;
+            surface.indexOfRefraction = mesh.material.indexOfRefraction;
             surface.flagBits          = mesh.giFlagBits;
             lumen_gi::GiError giError = lumen_gi::GiError::None;
             mesh.giSurface            = giCapability->createSurface(giCapability->self, &surface, &giError);
@@ -365,6 +393,8 @@ int main(int argc, char **argv)
             reflectionSurface.emissiveIntensity = mesh.giEmissiveIntensity;
             reflectionSurface.roughness         = mesh.rfRoughness;
             reflectionSurface.metallic          = mesh.rfMetallic;
+            reflectionSurface.opacity           = mesh.material.opacity;
+            reflectionSurface.indexOfRefraction = mesh.material.indexOfRefraction;
             reflectionSurface.flagBits          = mesh.giFlagBits;
             lumen_reflection::ReflectionError reflectionError = lumen_reflection::ReflectionError::None;
             mesh.reflectionSurface = reflectionCapability->createSurface(
@@ -456,6 +486,14 @@ int main(int argc, char **argv)
 
     bool          screenshotTaken = false;
     std::uint64_t framesRendered  = 0;
+    // Self-test observation: per-frame maxima of the transmission counters,
+    // and the snapshot versions the modules published.
+    std::uint32_t selfTestMaxIndirectRays = 0;
+    std::uint32_t selfTestMaxProbeTraces = 0;
+    std::uint32_t selfTestMaxReflectionPixels = 0;
+    std::uint32_t selfTestMaxTransmissionSegments = 0;
+    std::uint64_t selfTestProbeVersion = 0;
+    std::uint64_t selfTestFieldVersion = 0;
     std::array<window::WindowEvent, 64> eventBuffer;
     bool   haveLastCursor = false;
     double lastCursorX    = 0.0;
@@ -787,6 +825,41 @@ int main(int argc, char **argv)
                 }
             }
         }
+        if (options.selfTest)
+        {
+            if (giCapability->statistics != nullptr)
+            {
+                lumen_gi::GiStatistics observed{};
+                if (giCapability->statistics(giCapability->self, &observed))
+                {
+                    selfTestMaxIndirectRays = std::max(selfTestMaxIndirectRays, observed.indirectRaysThisFrame);
+                    selfTestMaxProbeTraces = std::max(selfTestMaxProbeTraces, observed.probeTracesThisFrame);
+                }
+            }
+            if (options.reflections && reflectionCapability->statistics != nullptr)
+            {
+                lumen_reflection::ReflectionStatistics observed{};
+                if (reflectionCapability->statistics(reflectionCapability->self, &observed))
+                {
+                    selfTestMaxReflectionPixels = std::max(selfTestMaxReflectionPixels, observed.pixelsTracedThisFrame);
+                    selfTestMaxTransmissionSegments = std::max(selfTestMaxTransmissionSegments, observed.transmissionSegmentsThisFrame);
+                }
+            }
+            if (giCapability->copyProbes != nullptr)
+            {
+                lumen_gi::GiProbeHeader header{};
+                std::uint64_t version = 0;
+                giCapability->copyProbes(giCapability->self, nullptr, 0, &header, &version);
+                selfTestProbeVersion = std::max(selfTestProbeVersion, version);
+            }
+            if (options.reflections && reflectionCapability->copyField != nullptr)
+            {
+                lumen_reflection::ReflectionFieldHeader header{};
+                std::uint64_t version = 0;
+                reflectionCapability->copyField(reflectionCapability->self, nullptr, 0, &header, &version);
+                selfTestFieldVersion = std::max(selfTestFieldVersion, version);
+            }
+        }
         (void)framePacer.pace(&host.kernel().profiler());
     }
 
@@ -800,6 +873,71 @@ int main(int argc, char **argv)
                       << finalStatistics.surfaces << ", cards " << finalStatistics.cards << ", card texels "
                       << finalStatistics.cardTexels << ", total rays " << finalStatistics.totalRaysTraced << "\n";
         }
+    }
+
+    if (options.selfTest)
+    {
+        struct Check { const char *name; bool pass; };
+        // The exported screenshot must carry non-uniform content: parse the
+        // P6 file and look at the luminance spread.
+        bool screenshotContentOk = false;
+        {
+            std::ifstream screenshotFile(options.screenshotPath, std::ios::binary);
+            std::string   magic;
+            std::size_t   width = 0;
+            std::size_t   height = 0;
+            std::size_t   maximum = 0;
+            if (screenshotFile && (screenshotFile >> magic) && magic == "P6" && (screenshotFile >> width >> height >> maximum)
+                && screenshotFile.get() == '\n' && width > 0 && height > 0)
+            {
+                std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * height * 3);
+                screenshotFile.read(reinterpret_cast<char *>(pixels.data()),
+                    static_cast<std::streamsize>(pixels.size()));
+                if (screenshotFile.gcount() == static_cast<std::streamsize>(pixels.size()))
+                {
+                    float sum = 0.0f;
+                    float squaredSum = 0.0f;
+                    for (const unsigned char channel : pixels)
+                    {
+                        const float value = static_cast<float>(channel) / 255.0f;
+                        sum += value;
+                        squaredSum += value * value;
+                    }
+                    const float count = static_cast<float>(pixels.size());
+                    const float mean = sum / count;
+                    const float variance = squaredSum / count - mean * mean;
+                    screenshotContentOk = variance > 1.0e-4f && mean > 1.0e-3f;
+                }
+            }
+        }
+        lumen_gi::GiStatistics giTotals{};
+        bool giTotalsOk = giCapability->statistics != nullptr
+            && giCapability->statistics(giCapability->self, &giTotals) && giTotals.surfaces == scene.size()
+            && giTotals.totalRaysTraced > 0;
+        const Check checks[] = {
+            {"frames rendered", framesRendered == 24},
+            {"screenshot exported with content", screenshotTaken && screenshotContentOk},
+            {"gi surfaces + rays", giTotalsOk},
+            {"gi indirect gather rays ran", selfTestMaxIndirectRays > 0},
+            {"gi probe traces ran", selfTestMaxProbeTraces > 0},
+            {"gi probe snapshot published", selfTestProbeVersion > 0},
+            {"reflection pixels traced", selfTestMaxReflectionPixels > 0},
+            {"transmission segments walked", selfTestMaxTransmissionSegments > 0},
+            {"reflection field published", selfTestFieldVersion > 0},
+        };
+        bool allPass = true;
+        for (const Check &check : checks)
+        {
+            std::cout << "self-test: " << (check.pass ? "PASS " : "FAIL ") << check.name << "\n";
+            allPass = allPass && check.pass;
+        }
+        std::cout << (allPass ? "self-test: PASS\n" : "self-test: FAIL\n");
+        std::remove(options.screenshotPath.c_str());
+        renderCapability.destroyRenderer(renderCapability.self, rendererHandle);
+        windowCapability.destroyWindow(windowCapability.self, windowHandle);
+        cameraCapability.destroyCamera(cameraCapability.self, cameraHandle);
+        host.stop();
+        return allPass ? 0 : 1;
     }
 
     for (SceneMesh &mesh : scene)

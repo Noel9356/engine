@@ -241,8 +241,6 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
                                 const float       fractionV = v - floorV;
                                 const std::uint32_t x0 = static_cast<std::uint32_t>(floorU);
                                 const std::uint32_t y0 = static_cast<std::uint32_t>(floorV);
-                                const std::uint32_t x1 = std::min(x0 + 1u, state.fieldWidth - 1u);
-                                const std::uint32_t y1 = std::min(y0 + 1u, state.fieldHeight - 1u);
                                 const float currentDepth = state.gbufferDepth[index];
                                 float       weightSum = 0.0f;
                                 glm::vec3   gathered(0.0f);

@@ -87,41 +87,33 @@ void islandUnion(std::vector<std::size_t> &parent, std::size_t left, std::size_t
     }
 }
 
-struct StateSnapshot
-{
-    std::vector<math::Vec3>       positions;
-    std::vector<math::Quaternion> rotations;
-    std::vector<math::Vec3>       linearVelocities;
-    std::vector<math::Vec3>       angularVelocities;
-
-    void capture(const World &world)
-    {
-        positions.resize(world.bodies.size());
-        rotations.resize(world.bodies.size());
-        linearVelocities.resize(world.bodies.size());
-        angularVelocities.resize(world.bodies.size());
-        for (std::size_t index = 0; index < world.bodies.size(); ++index)
-        {
-            positions[index]         = world.bodies[index].transform.position;
-            rotations[index]         = world.bodies[index].transform.rotation;
-            linearVelocities[index]  = world.bodies[index].linearVelocity;
-            angularVelocities[index] = world.bodies[index].angularVelocity;
-        }
-    }
-
-    void restore(World &world) const
-    {
-        for (std::size_t index = 0; index < world.bodies.size(); ++index)
-        {
-            world.bodies[index].transform.position = positions[index];
-            world.bodies[index].transform.rotation = rotations[index];
-            world.bodies[index].linearVelocity     = linearVelocities[index];
-            world.bodies[index].angularVelocity    = angularVelocities[index];
-        }
-    }
-};
-
 } // namespace
+
+void StateSnapshot::capture(const World &world)
+{
+    positions.resize(world.bodies.size());
+    rotations.resize(world.bodies.size());
+    linearVelocities.resize(world.bodies.size());
+    angularVelocities.resize(world.bodies.size());
+    for (std::size_t index = 0; index < world.bodies.size(); ++index)
+    {
+        positions[index]         = world.bodies[index].transform.position;
+        rotations[index]         = world.bodies[index].transform.rotation;
+        linearVelocities[index]  = world.bodies[index].linearVelocity;
+        angularVelocities[index] = world.bodies[index].angularVelocity;
+    }
+}
+
+void StateSnapshot::restore(World &world) const
+{
+    for (std::size_t index = 0; index < world.bodies.size(); ++index)
+    {
+        world.bodies[index].transform.position = positions[index];
+        world.bodies[index].transform.rotation = rotations[index];
+        world.bodies[index].linearVelocity     = linearVelocities[index];
+        world.bodies[index].angularVelocity    = angularVelocities[index];
+    }
+}
 
 void recomputeMassProperties(Body &body)
 {
@@ -269,8 +261,7 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     const SimulationSettings &settings = world.settings;
     StepContext               context{fixedDeltaSeconds, 1.0 / fixedDeltaSeconds};
 
-    StateSnapshot snapshot;
-    snapshot.capture(world);
+    scratch.snapshot.capture(world);
 
     // Force and gravity integration for awake dynamic bodies.
     for (Body &body : world.bodies)
@@ -316,7 +307,7 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     }
 
     // Broadphase over solid bodies; planes join narrowphase separately.
-    collectBroadphasePairs(world, settings.spatialHashCellSize, scratch.pairs);
+    collectBroadphasePairs(world, settings.spatialHashCellSize, scratch.broadphase, scratch.pairs);
     world.broadphasePairs = scratch.pairs;
 
     // Narrowphase into the persistent manifold map.
@@ -499,16 +490,8 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     // Continuous collision detection: capture the pre-integration transforms
     // of the CCD-enabled dynamic bodies so the post-integration sweep can
     // clamp them at the first contact with non-dynamic geometry.
-    std::vector<math::Vec3> ccdPreviousPositions;
-    std::size_t             ccdBodyCount = 0;
-    for (const Body &body : world.bodies)
-    {
-        if (body.kind == BodyKind::Dynamic && body.awake && body.continuousCollisionEnabled)
-        {
-            ++ccdBodyCount;
-        }
-    }
-    ccdPreviousPositions.reserve(ccdBodyCount);
+    std::vector<math::Vec3> &ccdPreviousPositions = scratch.ccdPreviousPositions;
+    ccdPreviousPositions.clear();
     for (const Body &body : world.bodies)
     {
         if (body.kind == BodyKind::Dynamic && body.awake && body.continuousCollisionEnabled)
@@ -568,14 +551,14 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
                 previousPosition.z + proxyRadius};
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
-                const double component = (&delta.x)[axis];
-                if (component > 0.0)
+                const double componentValue = math::component(delta, axis);
+                if (componentValue > 0.0)
                 {
-                    (&sweptMaximum.x)[axis] += component;
+                    math::component(sweptMaximum, axis) += componentValue;
                 }
                 else
                 {
-                    (&sweptMinimum.x)[axis] += component;
+                    math::component(sweptMinimum, axis) += componentValue;
                 }
             }
 
@@ -666,7 +649,7 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     }
     if (!finite)
     {
-        snapshot.restore(world);
+        scratch.snapshot.restore(world);
         return false;
     }
 
@@ -707,12 +690,12 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
         }
     }
     // Sleep timers accumulate only when the whole island is below tolerance.
+    // The per-root flags live in scratch vectors indexed by body index (every
+    // body index is a union-find root slot), and the touched-roots list resets
+    // them without hashing or per-step allocations.
     {
-        struct IslandMotion
-        {
-            bool allBelow = true;
-        };
-        std::unordered_map<std::size_t, IslandMotion> islandMotion;
+        scratch.islandBelowByRoot.assign(world.bodies.size(), 0u); // 0 untouched, 1 all below, 2 any above
+        scratch.islandTouchedRoots.clear();
         for (std::size_t index = 0; index < world.bodies.size(); ++index)
         {
             const Body &body = world.bodies[index];
@@ -720,19 +703,19 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
             {
                 continue;
             }
-            const std::size_t root     = islandFind(scratch.islandParent, index);
-            const bool        below    = math::lengthSquared(body.linearVelocity)
-                                           < settings.linearSleepTolerance * settings.linearSleepTolerance
-                                      && math::lengthSquared(body.angularVelocity)
-                                             < settings.angularSleepTolerance * settings.angularSleepTolerance;
-            const auto        iterator = islandMotion.find(root);
-            if (iterator == islandMotion.end())
+            const std::size_t root = islandFind(scratch.islandParent, index);
+            const bool        below = math::lengthSquared(body.linearVelocity)
+                                      < settings.linearSleepTolerance * settings.linearSleepTolerance
+                                 && math::lengthSquared(body.angularVelocity)
+                                        < settings.angularSleepTolerance * settings.angularSleepTolerance;
+            const std::uint8_t flag = below ? 1u : 2u;
+            if (scratch.islandBelowByRoot[root] == 0u)
             {
-                islandMotion.emplace(root, IslandMotion{below});
+                scratch.islandTouchedRoots.push_back(root);
             }
-            else if (!below)
+            if (flag == 2u || scratch.islandBelowByRoot[root] == 0u)
             {
-                iterator->second.allBelow = false;
+                scratch.islandBelowByRoot[root] = flag;
             }
         }
         for (std::size_t index = 0; index < world.bodies.size(); ++index)
@@ -742,13 +725,9 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
             {
                 continue;
             }
-            const std::size_t root     = islandFind(scratch.islandParent, index);
-            const auto        iterator = islandMotion.find(root);
-            if (iterator == islandMotion.end())
-            {
-                continue;
-            }
-            if (iterator->second.allBelow)
+            const std::size_t root = islandFind(scratch.islandParent, index);
+            const bool        allBelow = scratch.islandBelowByRoot[root] == 1u;
+            if (allBelow)
             {
                 body.sleepTimer += fixedDeltaSeconds;
                 if (body.sleepingEnabled && body.sleepTimer >= settings.timeToSleep)
@@ -763,6 +742,10 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
                 body.sleepTimer = 0.0;
                 body.awake      = true;
             }
+        }
+        for (const std::size_t root : scratch.islandTouchedRoots)
+        {
+            scratch.islandBelowByRoot[root] = 0u;
         }
     }
 
@@ -794,12 +777,16 @@ bool stepWorld(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     }
     // Canonical substepping: coarse caller deltas split into equal internal
     // passes so integration runs on the same step everywhere (deterministic
-    // in the delta alone). A diverging substep fails the whole step.
+    // in the delta alone). A diverging substep fails the whole step. The
+    // substep count is bounded by the configured maximum, so a coarse delta
+    // beyond the bound integrates at a coarser canonical step instead of
+    // spending an unbounded pass count.
     std::uint32_t substeps = 1;
     if (world.settings.substepMaximumDelta > 0.0 && fixedDeltaSeconds > world.settings.substepMaximumDelta)
     {
         const double rawCount = std::ceil(fixedDeltaSeconds / world.settings.substepMaximumDelta);
-        substeps              = static_cast<std::uint32_t>(std::min(rawCount, 16.0));
+        const double bounded  = std::min(rawCount, static_cast<double>(std::max(world.settings.maximumSubsteps, 1u)));
+        substeps              = static_cast<std::uint32_t>(std::max(bounded, 1.0));
     }
     const double substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
     for (std::uint32_t substep = 0; substep < substeps; ++substep)
@@ -1212,7 +1199,8 @@ bool rayCastWorldIgnoring(const World &world, const math::Vec3 &origin, const ma
                 std::uint32_t faceAxis = components[0] > components[1] ? (components[0] > components[2] ? 0u : 2u)
                                                                        : (components[1] > components[2] ? 1u : 2u);
                 math::Vec3    localNormal{};
-                (&localNormal.x)[faceAxis] = (&localPoint.x)[faceAxis] >= 0.0 ? 1.0 : -1.0;
+                math::component(localNormal, faceAxis)
+                    = math::component(localPoint, faceAxis) >= 0.0 ? 1.0 : -1.0;
                 candidate                  = math::rotate(body.transform.rotation, localNormal);
             }
             else if (body.shape.kind == ShapeKind::Capsule)
@@ -1322,10 +1310,10 @@ bool collideSphereWorld(const World &world, const math::Vec3 &center, double rad
     BodyHandle bestBody = invalidBody;
     for (const Body &body : world.bodies)
     {
-        math::Vec3 normal;
-        double     depth = 0.0;
         if (body.shape.kind == ShapeKind::Plane)
         {
+            math::Vec3 normal;
+            double     depth = 0.0;
             if (collideSpherePlane(center, radius, body.shape.planeNormal, body.shape.planeOffset, normal, depth)
                 && depth > bestDepth)
             {
@@ -1336,6 +1324,15 @@ bool collideSphereWorld(const World &world, const math::Vec3 &center, double rad
             }
             continue;
         }
+        // The shape AABB is an exact world-space bound, so a sphere that
+        // overlaps the shape always passes this test; skipping it prunes the
+        // narrow-phase call for far bodies.
+        if (!sphereMayOverlapShape(center, radius, body.aabbMinimum, body.aabbMaximum))
+        {
+            continue;
+        }
+        math::Vec3 normal;
+        double     depth = 0.0;
         if (collideSphereSolid(center, radius, body.shape, body.transform, normal, depth) && depth > bestDepth)
         {
             bestDepth  = depth;
@@ -1352,6 +1349,37 @@ bool collideSphereWorld(const World &world, const math::Vec3 &center, double rad
     outDepth  = bestDepth;
     outBody   = bestBody;
     return true;
+}
+
+std::uint32_t collideSpheresWorld(const World &world, const SphereOverlapQuery *queries, std::uint32_t queryCount,
+    SphereOverlapResult *outResults)
+{
+    if (queries == nullptr || outResults == nullptr)
+    {
+        return 0u;
+    }
+    std::uint32_t processed = 0;
+    for (std::uint32_t index = 0; index < queryCount; ++index)
+    {
+        const SphereOverlapQuery &query = queries[index];
+        SphereOverlapResult       result;
+        math::Vec3                normal;
+        double                    depth = 0.0;
+        BodyHandle                body  = invalidBody;
+        if (collideSphereWorld(world, math::Vec3{query.center[0], query.center[1], query.center[2]}, query.radius,
+                normal, depth, body))
+        {
+            result.hit   = true;
+            result.normal[0] = normal.x;
+            result.normal[1] = normal.y;
+            result.normal[2] = normal.z;
+            result.depth = depth;
+            result.body  = body;
+        }
+        outResults[index] = result;
+        processed         = index + 1;
+    }
+    return processed;
 }
 
 void fillWorldStatistics(const World &world, WorldStatistics &outStatistics)

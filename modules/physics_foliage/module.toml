@@ -2,10 +2,22 @@ config_keys           = [
     "physics_foliage.ambient_wind_direction",
     "physics_foliage.ambient_wind_speed",
     "physics_foliage.fixed_rate_hz",
+    "physics_foliage.lod_animation_threshold",
+    "physics_foliage.lod_demotion_margin",
+    "physics_foliage.lod_enabled",
+    "physics_foliage.lod_full_threshold",
+    "physics_foliage.lod_interval_animation",
+    "physics_foliage.lod_interval_cached",
+    "physics_foliage.lod_interval_procedural",
+    "physics_foliage.lod_interval_simplified",
+    "physics_foliage.lod_procedural_threshold",
+    "physics_foliage.lod_simplified_threshold",
     "physics_foliage.maximum_fields",
     "physics_foliage.maximum_instances",
     "physics_foliage.maximum_instances_per_field",
     "physics_foliage.maximum_steps_per_simulate",
+    "physics_foliage.sway_amplitude",
+    "physics_foliage.wind_sample_stride",
 ]
 name                  = "physics_foliage"
 provides              = ["physics_foliage"]

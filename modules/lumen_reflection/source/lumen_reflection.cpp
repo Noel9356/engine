@@ -233,7 +233,7 @@ private:
         settings.maxSurfaces           = static_cast<std::uint32_t>(integer("scene.max_surfaces", 256, 1, 65536));
         settings.maxTrianglesPerSurface = static_cast<std::uint64_t>(
             integer("scene.max_triangles_per_surface", 200000, 3, 100000000));
-        settings.screenScale           = static_cast<std::uint32_t>(integer("screen_scale", 4, 1, 64));
+        settings.screenScale           = static_cast<std::uint32_t>(integer("screen_scale", 2, 1, 64));
         settings.raysPerPixel          = static_cast<std::uint32_t>(integer("rays_per_pixel", 1, 1, 64));
         settings.screenRayDistance     = static_cast<float>(floating("screen_ray_distance_m", 2.0, 0.05, 64.0));
         settings.roughRayBandMax       = static_cast<float>(floating("roughness.ray_band_max", 0.3, 0.0, 1.0));
@@ -250,6 +250,8 @@ private:
         settings.screenTraceMaxSteps   = static_cast<std::uint32_t>(integer("screen_trace.max_steps", 48, 4, 256));
         settings.screenTraceThickness  = static_cast<float>(floating("screen_trace.thickness_m", 0.5, 0.01, 8.0));
         settings.screenTracesEnabled   = boolean("screen_trace.enabled", true);
+        settings.maxTransmissionSegments = static_cast<std::uint32_t>(
+            integer("trace.max_transmission_segments", 3, 0, 16));
         settings.referenceSamples      = static_cast<std::uint32_t>(integer("debug.reference_samples", 16, 1, 4096));
         settings_                      = settings;
         // The capacity key is the documented registry bound.
@@ -315,6 +317,9 @@ private:
             * std::max(description.emissiveIntensity, 0.0f);
         surface.roughness = std::clamp(description.roughness, 0.0f, 1.0f);
         surface.metallic  = std::clamp(description.metallic, 0.0f, 1.0f);
+        surface.opacity   = std::clamp(std::isfinite(description.opacity) ? description.opacity : 1.0f, 0.0f, 1.0f);
+        surface.indexOfRefraction = std::clamp(
+            std::isfinite(description.indexOfRefraction) ? description.indexOfRefraction : 1.5f, 1.0f, 64.0f);
         surface.flagBits = description.flagBits;
         surface.excluded = (description.flagBits & reflectionSurfaceFlagExcluded) != 0u;
         surface.unlit    = (description.flagBits & reflectionSurfaceFlagUnlit) != 0u;
@@ -828,6 +833,8 @@ private:
         statistics.raysReusedCacheThisFrame = state_.raysReusedCacheThisFrame.load(std::memory_order_relaxed);
         statistics.screenTraceHitsThisFrame = state_.screenTraceHitsThisFrame.load(std::memory_order_relaxed);
         statistics.sceneTraceHitsThisFrame  = state_.sceneTraceHitsThisFrame.load(std::memory_order_relaxed);
+        statistics.transmissionSegmentsThisFrame
+            = state_.transmissionSegmentsThisFrame.load(std::memory_order_relaxed);
         statistics.totalRaysTraced          = state_.totalRaysTraced.load(std::memory_order_relaxed);
         statistics.framesSkippedStatic      = state_.framesSkippedStatic.load(std::memory_order_relaxed);
         statistics.lastEvaluateMilliseconds = lastEvaluateMilliseconds_;

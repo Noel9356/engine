@@ -37,7 +37,11 @@ namespace engine::physics_water
 //       wake_strength_scale configuration keys. Everything from ABI 1 keeps
 //       its slot and meaning; consumers check `abi >= 2` before touching the
 //       additions.
-inline constexpr std::uint32_t physicsWaterCapabilityAbi = 2u;
+//   3 - appended the simulation-LOD surface: the setOceanImportance entry
+//       point and the WaterStatistics.lodSkippedSteps counter. Everything
+//       from ABI 2 keeps its slot and meaning; consumers check `abi >= 3`
+//       before touching the additions.
+inline constexpr std::uint32_t physicsWaterCapabilityAbi = 3u;
 
 using OceanHandle = std::uint32_t;
 
@@ -97,6 +101,9 @@ struct WaterStatistics
     std::uint32_t registeredBodies = 0;
     std::uint32_t activeRipples    = 0;
     std::uint64_t buoyancyApplications = 0; // bodies the last buoyancy pass touched
+
+    // ABI 3: ocean passes skipped through simulation LOD.
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_water" capability. Calls are main-thread only; the module
@@ -180,6 +187,18 @@ struct WaterCapability
     // must be finite and the y component is forced to 0. Takes effect in the
     // next applyBuoyancy pass (current-relative drag).
     bool (*setCurrentVelocity)(void *self, OceanHandle ocean, const double current[3]);
+
+    // ---- ABI 3 additions -------------------------------------------------------
+
+    // Simulation LOD: writes the ocean's importance score in [0, 1]. The
+    // module maps the score onto the five fidelity bands (Cached, Animation,
+    // Procedural, Simplified, Full) with demotion hysteresis; oceans below
+    // Full run their ripple and buoyancy passes on a staggered cadence whose
+    // due steps cover the whole interval of wall time (ripple aging uses the
+    // interval delta and buoyancy forces scale with the interval, keeping
+    // the impulse per wall time constant), and Cached oceans freeze until
+    // the score rises again. Non-finite scores resolve to Cached.
+    bool (*setOceanImportance)(void *self, OceanHandle ocean, double importance);
 };
 
 } // namespace engine::physics_water

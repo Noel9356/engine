@@ -21,6 +21,7 @@ config_keys           = [
     "lumen_reflection.temporal.strength",
     "lumen_reflection.trace.bias_m",
     "lumen_reflection.trace.max_distance_m",
+    "lumen_reflection.trace.max_transmission_segments",
 ]
 name                  = "lumen_reflection"
 optional_capabilities = ["pbr", "direct_lighting", "lumen_gi"]

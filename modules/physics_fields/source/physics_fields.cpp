@@ -12,6 +12,9 @@
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/physics_fields/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
+#include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
+#include <engine/util/simulation_lod.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -25,7 +28,7 @@ namespace engine::physics_fields
 namespace
 {
 
-constexpr double kPi = 3.14159265358979323846;
+namespace math = engine::physics_rigid::math;
 
 double dot3(const double a[3], const double b[3])
 {
@@ -90,12 +93,12 @@ double shapeVolume(const engine::physics_rigid::ShapeDescription &shape)
     switch (shape.kind)
     {
     case ShapeKind::Sphere:
-        return (4.0 / 3.0) * kPi * shape.sphereRadius * shape.sphereRadius * shape.sphereRadius;
+        return (4.0 / 3.0) * math::kPi * shape.sphereRadius * shape.sphereRadius * shape.sphereRadius;
     case ShapeKind::Box:
         return 8.0 * shape.boxHalfExtents[0] * shape.boxHalfExtents[1] * shape.boxHalfExtents[2];
     case ShapeKind::Capsule: {
         const double r = shape.capsuleRadius;
-        return kPi * r * r * (2.0 * shape.capsuleHalfLength) + (4.0 / 3.0) * kPi * r * r * r;
+        return math::kPi * r * r * (2.0 * shape.capsuleHalfLength) + (4.0 / 3.0) * math::kPi * r * r * r;
     }
     case ShapeKind::Plane:
     default:
@@ -111,7 +114,7 @@ void shapeAerodynamics(const engine::physics_rigid::ShapeDescription &shape, dou
     switch (shape.kind)
     {
     case ShapeKind::Sphere:
-        outArea            = kPi * shape.sphereRadius * shape.sphereRadius;
+        outArea            = math::kPi * shape.sphereRadius * shape.sphereRadius;
         outDragCoefficient = 0.47;
         return;
     case ShapeKind::Box: {
@@ -124,7 +127,7 @@ void shapeAerodynamics(const engine::physics_rigid::ShapeDescription &shape, dou
     }
     case ShapeKind::Capsule: {
         const double r = shape.capsuleRadius;
-        outArea            = kPi * r * r + 2.0 * r * (2.0 * shape.capsuleHalfLength);
+        outArea            = math::kPi * r * r + 2.0 * r * (2.0 * shape.capsuleHalfLength);
         outDragCoefficient = 0.82;
         return;
     }
@@ -142,6 +145,15 @@ struct WindFieldRecord
     engine::physics_rigid::WorldHandle world = 0;
     WindFieldDescription    description{};
     double                  direction[3] = {1.0, 0.0, 0.0}; // normalized
+
+    // Simulation LOD: importance-driven fidelity band and staggered cadence
+    // (the phase derives from the registration ordinal). Due passes scale
+    // the applied force by the interval so the total impulse per wall time
+    // stays constant.
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+    std::uint64_t                    lodSkippedSteps = 0;
 };
 
 struct ForceVolumeRecord
@@ -149,6 +161,11 @@ struct ForceVolumeRecord
     ForceVolumeHandle       handle = 0;
     engine::physics_rigid::WorldHandle world = 0;
     ForceVolumeDescription  description{};
+
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+    std::uint64_t                    lodSkippedSteps = 0;
 };
 
 struct FieldsSettings
@@ -157,6 +174,14 @@ struct FieldsSettings
     std::uint32_t maximumForceVolumes = 256;
     double        airDensity          = 1.225; // kilograms per cubic meter
     double        windDragScale       = 1.0;   // global drag multiplier
+
+    // Simulation LOD: fields below the Full band run their passes on a
+    // staggered cadence; the per-band interval says how many fixed steps one
+    // due pass covers, and the applied force scales with it (0 freezes that
+    // band, which is the Cached default).
+    bool                              lodEnabled   = false;
+    engine::util::SimulationFidelityThresholds lodThresholds{};
+    std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
 };
 
 class FieldsModule final : public ModuleInterface
@@ -187,6 +212,8 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_fields", "wind_drag_scale");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
             settings_.windDragScale = *value;
+
+        readLodSettings(context);
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -225,12 +252,61 @@ private:
             .requiredCapabilities = {"physics_rigid"}};
     }
 
+    void readLodSettings(ParticipantContext &context)
+    {
+        settings_.lodEnabled = context.configurationBooleanInSection("physics_fields", "lod_enabled").value_or(false);
+        const auto readThreshold = [this, &context](const char *key, double &target)
+        {
+            if (const auto value = context.configurationFloatingInSection("physics_fields", key);
+                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
+                target = *value;
+        };
+        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
+        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
+        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
+        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
+        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
+        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
+        {
+            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
+        }
+        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
+        {
+            if (const auto value = context.configurationIntegerInSection("physics_fields", key);
+                value && *value >= 0 && *value <= 65536)
+                target = static_cast<std::uint32_t>(*value);
+        };
+        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
+        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
+        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
+        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+    }
+
     static void setError(FieldsError *output, FieldsError value) noexcept
     {
-        if (output != nullptr)
+        engine::util::setModuleError(output, value);
+    }
+
+    bool setWindFieldImportanceImpl(WindHandle handle, double importance)
+    {
+        WindFieldRecord *wind = findWind(handle);
+        if (wind == nullptr || !std::isfinite(importance))
         {
-            *output = value;
+            return false;
         }
+        wind->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
+    }
+
+    bool setForceVolumeImportanceImpl(ForceVolumeHandle handle, double importance)
+    {
+        ForceVolumeRecord *volume = findForceVolume(handle);
+        if (volume == nullptr || !std::isfinite(importance))
+        {
+            return false;
+        }
+        volume->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
     }
 
     WindFieldRecord *findWind(WindHandle handle)
@@ -269,20 +345,25 @@ private:
         {
             return false;
         }
+        // Batched reads: one call per world instead of two per body for the
+        // awake-body scan.
+        bodyStatesScratch_.resize(count);
+        bodyDescriptionsScratch_.resize(count);
+        const std::uint32_t resolvedStates = rigid_->copyBodyStates(rigid_->self, world, bodyHandles_.data(), count,
+            bodyStatesScratch_.data());
+        const std::uint32_t resolvedDescriptions = rigid_->copyBodyDescriptions(rigid_->self, world,
+            bodyHandles_.data(), count, bodyDescriptionsScratch_.data());
         for (std::uint32_t index = 0; index < count; ++index)
         {
-            engine::physics_rigid::BodyState state;
-            engine::physics_rigid::BodyDescription description;
-            if (!rigid_->copyBodyState(rigid_->self, world, bodyHandles_[index], &state)
-                || !rigid_->copyBodyDescription(rigid_->self, world, bodyHandles_[index], &description))
+            if (index >= resolvedStates || index >= resolvedDescriptions)
             {
-                continue;
+                break;
             }
-            if (state.awake)
+            if (bodyStatesScratch_[index].awake)
             {
                 outHandles.push_back(bodyHandles_[index]);
-                outStates.push_back(state);
-                outDescriptions.push_back(description);
+                outStates.push_back(bodyStatesScratch_[index]);
+                outDescriptions.push_back(bodyDescriptionsScratch_[index]);
             }
         }
         return true;
@@ -291,6 +372,36 @@ private:
     double bodyMass(const engine::physics_rigid::BodyDescription &description) const
     {
         return description.density > 0.0 ? description.density * shapeVolume(description.shape) : description.mass;
+    }
+
+    // Resolves one field's fidelity band and staggered cadence ahead of an
+    // application pass. Returns the force scale for the pass (0 = skip: the
+    // pass is not due, or the band froze), keeping the total impulse per
+    // wall time constant on a reduced cadence.
+    std::uint32_t lodIntervalAndScale(engine::util::SimulationFidelity &band, engine::util::SimulationCadence &cadence,
+        double importance, std::uint64_t &skipped, engine::util::SimulationFidelity &outBand)
+    {
+        if (!settings_.lodEnabled)
+        {
+            outBand = engine::util::SimulationFidelity::Full;
+            return 1u;
+        }
+        band = engine::util::simulationFidelityForImportance(settings_.lodThresholds, importance, band);
+        outBand = band;
+        const std::uint32_t interval = settings_.lodIntervals[engine::util::simulationFidelityIndex(band)];
+        if (interval == 0u)
+        {
+            cadence.interval = 1u;
+            skipped += 1;
+            return 0u;
+        }
+        cadence.interval = interval;
+        if (!engine::util::simulationCadenceAdvance(cadence))
+        {
+            skipped += 1;
+            return 0u;
+        }
+        return interval;
     }
 
     // ---- wind field evaluation ----------------------------------------------
@@ -304,7 +415,7 @@ private:
         // Global gust cycle plus a traveling front sampled along the wind
         // direction; the front moves downwind at the base speed.
         const double cyclePhase
-            = 2.0 * kPi * (description.gustPeriodSeconds > 1.0e-6 ? timeSeconds / description.gustPeriodSeconds : 0.0);
+            = 2.0 * math::kPi * (description.gustPeriodSeconds > 1.0e-6 ? timeSeconds / description.gustPeriodSeconds : 0.0);
         const double frontCoordinate
             = (dot3(position, wind.direction) - description.baseSpeed * timeSeconds) / wavelength;
         const double gust = description.gustStrength
@@ -375,6 +486,9 @@ private:
         {
             record.direction[axis] = description->direction[axis] / length;
         }
+        // Simulation LOD: the stagger phase derives from the registration
+        // ordinal.
+        record.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         winds_.push_back(record);
         windIndexByHandle_.emplace(record.handle, winds_.size() - 1);
         statistics_.windFieldCount = static_cast<std::uint32_t>(winds_.size());
@@ -416,12 +530,20 @@ private:
 
     bool applyWindDragImpl(WindHandle handle, double timeSeconds, double fixedDeltaSeconds)
     {
-        const WindFieldRecord *wind = findWind(handle);
+        WindFieldRecord *wind = findWind(handle);
         if (wind == nullptr || rigid_ == nullptr || !std::isfinite(timeSeconds) || !std::isfinite(fixedDeltaSeconds)
             || fixedDeltaSeconds <= 0.0)
         {
             return false;
         }
+        engine::util::SimulationFidelity band = engine::util::SimulationFidelity::Full;
+        const std::uint32_t forceInterval = lodIntervalAndScale(wind->lodBand, wind->cadence, wind->importance,
+            wind->lodSkippedSteps, band);
+        if (forceInterval == 0u)
+        {
+            return true;
+        }
+        const double forceScale = static_cast<double>(forceInterval);
         collectDynamicBodies(wind->world, applyHandles_, applyStates_, applyDescriptions_);
         for (std::size_t index = 0; index < applyHandles_.size(); ++index)
         {
@@ -445,7 +567,11 @@ private:
             {
                 continue;
             }
-            const double scale = 0.5 * settings_.airDensity * dragCoefficient * area * relativeSpeed * settings_.windDragScale;
+            // Interval-scaled force: a pass that covers N fixed steps
+            // applies roughly N times the drag so the impulse per wall time
+            // matches the full-rate schedule.
+            const double scale = 0.5 * settings_.airDensity * dragCoefficient * area * relativeSpeed * settings_.windDragScale
+                                 * forceScale;
             const double force[3] = {relative[0] * scale, relative[1] * scale, relative[2] * scale};
             const double centerPoint[3] = {applyStates_[index].transform.position.x,
                 applyStates_[index].transform.position.y,
@@ -495,6 +621,9 @@ private:
                                        : nextForceVolumeHandle_ + 1;
         record.world             = world;
         record.description       = *description;
+        // Simulation LOD: the stagger phase derives from the registration
+        // ordinal.
+        record.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         forceVolumes_.push_back(record);
         forceVolumeIndexByHandle_.emplace(record.handle, forceVolumes_.size() - 1);
         statistics_.forceVolumeCount = static_cast<std::uint32_t>(forceVolumes_.size());
@@ -547,12 +676,23 @@ private:
         {
             return false;
         }
-        for (const ForceVolumeRecord &volume : forceVolumes_)
+        for (ForceVolumeRecord &volume : forceVolumes_)
         {
             if (!volume.description.enabled)
             {
                 continue;
             }
+            engine::util::SimulationFidelity band = engine::util::SimulationFidelity::Full;
+            const std::uint32_t forceInterval = lodIntervalAndScale(volume.lodBand, volume.cadence,
+                volume.importance, volume.lodSkippedSteps, band);
+            if (forceInterval == 0u)
+            {
+                continue;
+            }
+            // Interval-scaled forces: a pass covering N fixed steps applies
+            // roughly N times the force so the impulse per wall time matches
+            // the full-rate schedule.
+            const double passScale = static_cast<double>(forceInterval);
             collectDynamicBodies(volume.world, applyHandles_, applyStates_, applyDescriptions_);
             for (std::size_t index = 0; index < applyHandles_.size(); ++index)
             {
@@ -599,7 +739,8 @@ private:
                 const double force[3] = {direction[0] * forceScale, direction[1] * forceScale, direction[2] * forceScale};
                 const double centerPoint[3] = {state.transform.position.x, state.transform.position.y,
                     state.transform.position.z};
-                if (rigid_->applyForceAtPoint(rigid_->self, volume.world, applyHandles_[index], force, centerPoint))
+                const double scaledForce[3] = {force[0] * passScale, force[1] * passScale, force[2] * passScale};
+                if (rigid_->applyForceAtPoint(rigid_->self, volume.world, applyHandles_[index], scaledForce, centerPoint))
                 {
                     ++statistics_.volumeApplications;
                 }
@@ -660,6 +801,15 @@ private:
         {
             return false;
         }
+        statistics_.lodSkippedSteps = 0;
+        for (const WindFieldRecord &wind : winds_)
+        {
+            statistics_.lodSkippedSteps += wind.lodSkippedSteps;
+        }
+        for (const ForceVolumeRecord &volume : forceVolumes_)
+        {
+            statistics_.lodSkippedSteps += volume.lodSkippedSteps;
+        }
         *outStatistics = statistics_;
         return true;
     }
@@ -681,6 +831,8 @@ private:
         ENGINE_PHYSICS_FIELDS_BIND(applyForceVolumes, applyForceVolumesImpl);
         ENGINE_PHYSICS_FIELDS_BIND(applyRadialImpulse, applyRadialImpulseImpl);
         ENGINE_PHYSICS_FIELDS_BIND(fieldsStatistics, fieldsStatisticsImpl);
+        ENGINE_PHYSICS_FIELDS_BIND(setWindFieldImportance, setWindFieldImportanceImpl);
+        ENGINE_PHYSICS_FIELDS_BIND(setForceVolumeImportance, setForceVolumeImportanceImpl);
 #undef ENGINE_PHYSICS_FIELDS_BIND
     }
 
@@ -705,6 +857,11 @@ private:
     std::vector<engine::physics_rigid::BodyState>        applyStates_;
     std::vector<engine::physics_rigid::BodyDescription>  applyDescriptions_;
     std::vector<engine::physics_rigid::BodyHandle>       bodyHandles_;
+    std::vector<engine::physics_rigid::BodyState>        bodyStatesScratch_;
+    std::vector<engine::physics_rigid::BodyDescription>  bodyDescriptionsScratch_;
+
+    // Registration ordinal for LOD stagger phases.
+    std::uint64_t registrationOrdinal_ = 0;
 };
 
 } // namespace

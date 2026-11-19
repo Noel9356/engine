@@ -34,6 +34,13 @@ struct GiDemoOptions
     // indirect specular term for A/B comparison. The module itself stays
     // loaded and its absence is silent.
     bool          reflections      = true;
+    // --self-test: short deterministic headless run (interior view, 24
+    // frames) followed by module-level checks: GI and reflection evaluates
+    // ran, the world radiance cache and the reflection field published
+    // snapshots, the transparent scene props produced transmission segments,
+    // and the exported screenshot carries non-uniform content. Exits 0 on
+    // pass, 1 on failure.
+    bool          selfTest         = false;
 };
 
 struct SceneVertex

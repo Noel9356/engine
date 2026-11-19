@@ -27,6 +27,7 @@ target_link_libraries(
             engine_physics_foliage_capabilities
             engine_physics_rigid_capabilities
             engine_physics_fields_capabilities
+            engine_util_types
 )
 set_target_properties(
     engine_module_physics_foliage

@@ -17,7 +17,13 @@ namespace pbr
 {
 
 // ABI version of PbrCapability; bump when any struct in this header changes.
-inline constexpr std::uint32_t pbrCapabilityAbi = 5u;
+// History: 5 -> 6 grew ConvertedModelMaterial's embedded renderer::MeshMaterial
+// by the transmission pair (opacity, indexOfRefraction) the renderer's
+// transparent pass and the lumen_gi / lumen_reflection surfaces evaluate with;
+// convertModelMaterial now maps the source material's opacity and index of
+// refraction into the converted material instead of only preserving them as
+// standalone scalars.
+inline constexpr std::uint32_t pbrCapabilityAbi = 6u;
 
 // Tone mapping operator applied to the HDR color before display: linear
 // passthrough, Reinhard (x / (1 + x)), or the ACES filmic curve.

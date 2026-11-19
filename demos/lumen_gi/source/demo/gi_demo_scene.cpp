@@ -81,7 +81,12 @@ void appendSphere(SceneMesh &mesh, const glm::vec3 &center, float radius, std::u
 // a polished-metal floor inlay (roughness 0.05 - the dedicated-ray band), a
 // chrome sphere on it (roughness 0.15 - dedicated rays), and a brushed-metal
 // back-wall panel (roughness 0.35 - the radiance-cache band between
-// ray_band_max and max_trace). The inlay is metallic on purpose: its F0 is
+// ray_band_max and max_trace). Three transparent/translucent props at the
+// end of the list exercise the transmission paths end to end: a clear glass
+// sphere (dedicated-band refraction through a solid), a frosted pane (the
+// radiance-cache band plus a glowing, soft-shadowing translucent body), and
+// a tinted ruby cube (colored transmission). The inlay is metallic on
+// purpose: its F0 is
 // the base color (0.72), so the mirrored room renders at full mirror
 // strength instead of the 4% a dark dielectric would bounce back - a
 // dielectric slab reads as a near-black rectangle at the camera's shallow
@@ -172,6 +177,10 @@ std::vector<SceneMesh> buildInteriorScene()
     // ceiling lamps, and the occluder back to the camera. Vertex colors stay
     // white so the 0.72 base color passes through both the renderer and the
     // reflection module's albedo (= base color x vertex color) untouched.
+    // The GI albedo follows the same metal rule the mirror floor documents: a
+    // metal carries almost no diffuse, so the world radiance cache must not
+    // treat the sphere as a white diffuse ball (its brightness reaches the
+    // room through the reflection field, not through the bounce lighting).
     SceneMesh chromeSphere;
     appendSphere(chromeSphere, {0.55f, 0.34f, -0.45f}, 0.34f, 48, 24);
     chromeSphere.material.baseColor[0] = 0.72f;
@@ -179,9 +188,9 @@ std::vector<SceneMesh> buildInteriorScene()
     chromeSphere.material.baseColor[2] = 0.75f;
     chromeSphere.material.roughnessFactor = 0.15f;
     chromeSphere.material.metallicFactor  = 1.0f;
-    chromeSphere.giAlbedo[0]           = 0.72f;
-    chromeSphere.giAlbedo[1]           = 0.73f;
-    chromeSphere.giAlbedo[2]           = 0.75f;
+    chromeSphere.giAlbedo[0]           = 0.05f;
+    chromeSphere.giAlbedo[1]           = 0.05f;
+    chromeSphere.giAlbedo[2]           = 0.055f;
     chromeSphere.rfRoughness           = 0.15f;
     chromeSphere.rfMetallic            = 1.0f;
     chromeSphere.name = "chrome sphere";
@@ -217,6 +226,76 @@ std::vector<SceneMesh> buildInteriorScene()
     lamps.giEmissive[2]             = 6.2f;
     lamps.name = "lamps";
     scene.push_back(std::move(lamps));
+
+    // Transparent and translucent props exercising the transmission paths of
+    // the renderer's transparent pass, lumen_reflection (refracted chains),
+    // and lumen_gi (pass-through gathers, probe transmittance, softened
+    // shadows). They are pushed last and drawn last: the renderer composites
+    // transparent draws after the opaque scene (far to near within the
+    // group), so the ordering here is the compositing order.
+    //
+    // Clear glass sphere: near-transparent dielectric whose refraction bends
+    // the room behind it (the reflection field's transmitted share traces
+    // through the medium with Snell's law). The GI albedo stays near zero
+    // like the other dielectric-and-metal surfaces: what the room receives
+    // from the sphere is its specular response, not a diffuse bounce.
+    SceneMesh glassSphere;
+    appendSphere(glassSphere, {-1.45f, 0.36f, -0.7f}, 0.36f, 48, 24);
+    glassSphere.material.baseColor[0] = 0.96f;
+    glassSphere.material.baseColor[1] = 0.98f;
+    glassSphere.material.baseColor[2] = 0.97f;
+    glassSphere.material.roughnessFactor = 0.06f;
+    glassSphere.material.metallicFactor  = 0.0f;
+    glassSphere.material.opacity           = 0.04f;
+    glassSphere.material.indexOfRefraction = 1.5f;
+    glassSphere.giAlbedo[0]           = 0.05f;
+    glassSphere.giAlbedo[1]           = 0.05f;
+    glassSphere.giAlbedo[2]           = 0.055f;
+    glassSphere.rfRoughness           = 0.06f;
+    glassSphere.rfMetallic            = 0.0f;
+    glassSphere.name = "glass sphere";
+    scene.push_back(std::move(glassSphere));
+
+    // Frosted pane: a translucent slab whose rough surface blurs everything
+    // behind it while its own body scatters lamp light (the GI albedo is
+    // deliberately high: a translucent pane glows with the light it
+    // scatters, and the shadow it casts stays soft).
+    SceneMesh frostedPane;
+    appendBox(frostedPane, {1.5f, 1.05f, -0.25f}, {0.02f, 0.5f, 0.4f});
+    frostedPane.material.baseColor[0] = 0.92f;
+    frostedPane.material.baseColor[1] = 0.88f;
+    frostedPane.material.baseColor[2] = 0.82f;
+    frostedPane.material.roughnessFactor = 0.3f;
+    frostedPane.material.metallicFactor  = 0.0f;
+    frostedPane.material.opacity           = 0.55f;
+    frostedPane.material.indexOfRefraction = 1.45f;
+    frostedPane.giAlbedo[0]           = 0.55f;
+    frostedPane.giAlbedo[1]           = 0.52f;
+    frostedPane.giAlbedo[2]           = 0.48f;
+    frostedPane.rfRoughness           = 0.3f;
+    frostedPane.rfMetallic            = 0.0f;
+    frostedPane.name = "frosted pane";
+    scene.push_back(std::move(frostedPane));
+
+    // Ruby glass cube: tinted transparent solid - the refraction through it
+    // picks up the color (the transmitted share is tinted by the base color),
+    // and it casts a faint red-tinted soft shadow.
+    SceneMesh rubyCube;
+    appendBox(rubyCube, {0.02f, 0.13f, -1.35f}, {0.13f, 0.13f, 0.13f});
+    rubyCube.material.baseColor[0] = 0.72f;
+    rubyCube.material.baseColor[1] = 0.08f;
+    rubyCube.material.baseColor[2] = 0.10f;
+    rubyCube.material.roughnessFactor = 0.05f;
+    rubyCube.material.metallicFactor  = 0.0f;
+    rubyCube.material.opacity           = 0.15f;
+    rubyCube.material.indexOfRefraction = 1.5f;
+    rubyCube.giAlbedo[0]           = 0.05f;
+    rubyCube.giAlbedo[1]           = 0.01f;
+    rubyCube.giAlbedo[2]           = 0.015f;
+    rubyCube.rfRoughness           = 0.05f;
+    rubyCube.rfMetallic            = 0.0f;
+    rubyCube.name = "ruby cube";
+    scene.push_back(std::move(rubyCube));
 
     return scene;
 }

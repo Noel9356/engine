@@ -6,7 +6,11 @@
 // velocity that springs back. Wind comes from the physics_fields capability
 // when a wind handle is bound, else from the configured ambient breeze.
 // Stepping happens in whole fixed steps, so results depend on the step
-// count only.
+// count only. Simulation LOD: every field carries an importance score;
+// fields below the Full fidelity band update on a staggered cadence whose
+// due steps cover the whole interval of wall time, and Cached fields freeze.
+// Per-instance wind samples amortize over a configurable stride so large
+// fields do not call the wind capability once per instance per step.
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -15,6 +19,9 @@
 #include <engine/physics_foliage/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
+#include <engine/util/simulation_lod.hpp>
+#include <engine/util/step_accumulator.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -72,6 +79,13 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_foliage", "ambient_wind_speed");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
             ambientWindSpeed_ = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_foliage", "sway_amplitude");
+            value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
+            settings_.swayAmplitude = *value;
+        if (const auto value = context.configurationIntegerInSection("physics_foliage", "wind_sample_stride");
+            value && *value >= 1 && *value <= 65536)
+            settings_.windSampleStride = static_cast<std::uint32_t>(*value);
+        readLodSettings(context);
 
         fields_ = context.tryAcquireCapability<engine::physics_fields::FieldsCapability>();
         if (fields_ != nullptr && fields_->abi != engine::physics_fields::physicsFieldsCapabilityAbi)
@@ -109,12 +123,39 @@ private:
             .optionalCapabilities = {"physics_fields"}};
     }
 
+    void readLodSettings(ParticipantContext &context)
+    {
+        settings_.lodEnabled = context.configurationBooleanInSection("physics_foliage", "lod_enabled").value_or(false);
+        const auto readThreshold = [this, &context](const char *key, double &target)
+        {
+            if (const auto value = context.configurationFloatingInSection("physics_foliage", key);
+                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
+                target = *value;
+        };
+        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
+        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
+        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
+        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
+        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
+        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
+        {
+            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
+        }
+        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
+        {
+            if (const auto value = context.configurationIntegerInSection("physics_foliage", key);
+                value && *value >= 0 && *value <= 65536)
+                target = static_cast<std::uint32_t>(*value);
+        };
+        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
+        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
+        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
+        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+    }
+
     static void setError(FoliageError *output, FoliageError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     struct InstanceState
@@ -125,6 +166,12 @@ private:
         // velocity, integrated by the spring-damper.
         double bend[2]         = {0.0, 0.0};
         double bendVelocity[2] = {0.0, 0.0};
+
+        // Amortized wind sample: refreshed when the instance's sample slot
+        // comes due (stride-spread by instance index); the cached velocity
+        // drives the bend target between refreshes.
+        double cachedWind[3] = {0.0, 0.0, 0.0};
+        bool   windCached    = false;
     };
 
     struct FieldRecord
@@ -140,6 +187,13 @@ private:
         double swayClock = 0.0;
 
         std::uint64_t disturbanceTotal = 0;
+
+        // Simulation LOD: importance-driven fidelity band and staggered
+        // cadence (the phase derives from the registration ordinal).
+        double                           importance = 1.0;
+        engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+        engine::util::SimulationCadence  cadence{};
+        std::uint64_t                    lodSkippedSteps = 0;
     };
 
     FieldRecord *findField(FieldHandle handle)
@@ -171,14 +225,25 @@ private:
         return true;
     }
 
-    void stepField(FieldRecord &field, double fixedDeltaSeconds)
+    void stepField(FieldRecord &field, double stepDeltaSeconds, std::uint64_t stepCounter)
     {
         // Per-instance spring-damper toward the wind target with the phase
-        // cycle; semi-implicit Euler at the fixed step.
-        for (InstanceState &instance : field.instances)
+        // cycle; semi-implicit Euler at the fixed step. Wind samples
+        // amortize over the configured stride: each instance refreshes its
+        // cached sample when (stepCounter + instance index) mod stride hits
+        // zero, so large fields spread the wind calls across steps while the
+        // bend target stays a bounded number of steps stale.
+        const std::uint32_t stride = settings_.windSampleStride;
+        for (std::size_t instanceIndex = 0; instanceIndex < field.instances.size(); ++instanceIndex)
         {
-            double windVelocity[3] = {0.0, 0.0, 0.0};
-            sampleWindAt(field, instance.description.position, windVelocity);
+            InstanceState &instance = field.instances[instanceIndex];
+            if (stride <= 1 || !instance.windCached
+                || (stepCounter + static_cast<std::uint64_t>(instanceIndex)) % stride == 0u)
+            {
+                sampleWindAt(field, instance.description.position, instance.cachedWind);
+                instance.windCached = true;
+            }
+            const double(&windVelocity)[3] = instance.cachedWind;
             const double windSpeedHorizontal
                 = std::sqrt(windVelocity[0] * windVelocity[0] + windVelocity[2] * windVelocity[2]);
 
@@ -193,7 +258,8 @@ private:
             const double phase = instance.description.phaseSeed
                                  + field.swayClock * field.description.swayFrequency * 6.283185307179586;
             const double swayMagnitude
-                = std::sin(phase) * 0.15 * windSpeedHorizontal * windFactor * instance.description.swayScale;
+                = std::sin(phase) * settings_.swayAmplitude * windSpeedHorizontal * windFactor
+                  * instance.description.swayScale;
 
             double target[2] = {0.0, 0.0};
             if (windSpeedHorizontal > 1.0e-9)
@@ -202,14 +268,20 @@ private:
                 target[1] = windVelocity[2] / windSpeedHorizontal * (targetMagnitude + swayMagnitude);
             }
 
-            const double stiffness = std::max(field.description.springStiffness, 1.0e-6);
-            const double damping   = std::max(field.description.springDamping, 0.0);
+            // Stability-aware spring gains: a LOD due step covers interval x
+            // the caller's delta, and semi-implicit Euler stays stable while
+            // h x damping < 2 and h^2 x stiffness < 4, so the gains clamp to
+            // that bound on enlarged steps (full-rate steps with the default
+            // configuration never reach it).
+            const double stiffness = std::min(std::max(field.description.springStiffness, 1.0e-6),
+                3.2 / (stepDeltaSeconds * stepDeltaSeconds));
+            const double damping   = std::min(std::max(field.description.springDamping, 0.0), 1.8 / stepDeltaSeconds);
             for (std::uint32_t axis = 0; axis < 2; ++axis)
             {
                 const double acceleration
                     = (target[axis] - instance.bend[axis]) * stiffness - instance.bendVelocity[axis] * damping;
-                instance.bendVelocity[axis] += acceleration * fixedDeltaSeconds;
-                instance.bend[axis] += instance.bendVelocity[axis] * fixedDeltaSeconds;
+                instance.bendVelocity[axis] += acceleration * stepDeltaSeconds;
+                instance.bend[axis] += instance.bendVelocity[axis] * stepDeltaSeconds;
             }
 
             // Clamp the bend to half the height: foliage bends, never folds.
@@ -222,7 +294,7 @@ private:
                 instance.bend[1] *= scale;
             }
         }
-        field.swayClock += fixedDeltaSeconds;
+        field.swayClock += stepDeltaSeconds;
     }
 
     // ---- capability implementations ---------------------------------------
@@ -282,6 +354,10 @@ private:
             field.instances[instance].description = description->instances[instance];
         }
         totalInstances_ += description->instanceCount;
+        // Simulation LOD: the stagger phase derives from the registration
+        // ordinal, so fields sharing an interval spread their work across
+        // steps.
+        field.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         fieldRecords_.push_back(std::move(field));
         fieldIndexByHandle_.emplace(fieldRecords_.back().handle, fieldRecords_.size() - 1);
         statistics_.fieldCount    = static_cast<std::uint32_t>(fieldRecords_.size());
@@ -394,43 +470,73 @@ private:
         {
             return false;
         }
+        bool diverged = false;
         for (FieldRecord &field : fieldRecords_)
         {
-            stepField(field, fixedDeltaSeconds);
-            for (const InstanceState &instance : field.instances)
+            // Simulation LOD: resolve the band, refresh the staggered
+            // cadence, and let one due step cover the whole interval of
+            // wall time. Cached fields freeze. Without lod_enabled every
+            // field runs Full every step.
+            if (settings_.lodEnabled)
             {
-                if (!std::isfinite(instance.bend[0]) || !std::isfinite(instance.bend[1]))
+                field.lodBand = engine::util::simulationFidelityForImportance(
+                    settings_.lodThresholds, field.importance, field.lodBand);
+                const std::uint32_t interval
+                    = settings_.lodIntervals[engine::util::simulationFidelityIndex(field.lodBand)];
+                if (interval == 0u)
                 {
-                    return false;
+                    field.cadence.interval = 1u;
+                    field.lodSkippedSteps += 1;
+                    continue;
+                }
+                field.cadence.interval = interval;
+                if (!engine::util::simulationCadenceAdvance(field.cadence))
+                {
+                    field.lodSkippedSteps += 1;
+                    continue;
+                }
+                const double stepDelta = fixedDeltaSeconds * static_cast<double>(interval);
+                stepField(field, stepDelta, field.cadence.stepCounter);
+            }
+            else
+            {
+                stepField(field, fixedDeltaSeconds, 0u);
+            }
+            for (InstanceState &instance : field.instances)
+            {
+                if (!std::isfinite(instance.bend[0]) || !std::isfinite(instance.bend[1])
+                    || !std::isfinite(instance.bendVelocity[0]) || !std::isfinite(instance.bendVelocity[1]))
+                {
+                    // A diverging bend resets to upright instead of
+                    // poisoning the field; the step still reports failure.
+                    instance.bend[0]         = 0.0;
+                    instance.bend[1]         = 0.0;
+                    instance.bendVelocity[0] = 0.0;
+                    instance.bendVelocity[1] = 0.0;
+                    instance.windCached      = false;
+                    diverged = true;
                 }
             }
         }
-        return true;
+        return !diverged;
     }
 
     std::uint32_t simulateImpl(double elapsedSeconds)
     {
-        if (!std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
-        {
-            return 0u;
-        }
         const double fixedDelta = 1.0 / settings_.fixedRateHz;
-        simulatedTimeBudget_ += elapsedSeconds;
-        std::uint32_t executed = 0;
-        while (simulatedTimeBudget_ >= fixedDelta && executed < settings_.maximumStepsPerSimulate)
+        return accumulator_.drain(fixedDelta, settings_.maximumStepsPerSimulate, elapsedSeconds,
+            [this, fixedDelta]() { return stepImpl(fixedDelta); });
+    }
+
+    bool setFieldImportanceImpl(FieldHandle handle, double importance)
+    {
+        FieldRecord *field = findField(handle);
+        if (field == nullptr || !std::isfinite(importance))
         {
-            simulatedTimeBudget_ -= fixedDelta;
-            if (!stepImpl(fixedDelta))
-            {
-                break;
-            }
-            ++executed;
+            return false;
         }
-        if (executed == settings_.maximumStepsPerSimulate)
-        {
-            simulatedTimeBudget_ = 0.0;
-        }
-        return executed;
+        field->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
     }
 
     bool foliageStatisticsImpl(FoliageStatistics *outStatistics)
@@ -438,6 +544,11 @@ private:
         if (outStatistics == nullptr)
         {
             return false;
+        }
+        statistics_.lodSkippedSteps = 0;
+        for (const FieldRecord &field : fieldRecords_)
+        {
+            statistics_.lodSkippedSteps += field.lodSkippedSteps;
         }
         *outStatistics = statistics_;
         return true;
@@ -457,6 +568,7 @@ private:
         ENGINE_PHYSICS_FOLIAGE_BIND(step, stepImpl);
         ENGINE_PHYSICS_FOLIAGE_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_FOLIAGE_BIND(foliageStatistics, foliageStatisticsImpl);
+        ENGINE_PHYSICS_FOLIAGE_BIND(setFieldImportance, setFieldImportanceImpl);
 #undef ENGINE_PHYSICS_FOLIAGE_BIND
     }
 
@@ -467,6 +579,21 @@ private:
         std::uint32_t maximumFields             = 64;
         std::uint32_t maximumInstances          = 2000000;
         std::uint32_t maximumInstancesPerField  = 500000;
+
+        // Sway amplitude factor (meters per second of target oscillation at
+        // full wind speed and bend scale).
+        double swayAmplitude = 0.15;
+
+        // Wind sample stride: instance wind samples refresh every Nth step
+        // (phase-spread by instance index); 1 samples every step.
+        std::uint32_t windSampleStride = 1;
+
+        // Simulation LOD: fields below the Full band update on a staggered
+        // cadence; the per-band interval says how many fixed steps one due
+        // step covers (0 freezes that band, which is the Cached default).
+        bool                              lodEnabled   = false;
+        engine::util::SimulationFidelityThresholds lodThresholds{};
+        std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
     };
 
     ParticipantManifest manifest_;
@@ -481,9 +608,12 @@ private:
     double ambientWindDirection_[2] = {1.0, 0.0};
     double ambientWindSpeed_        = 0.0;
 
-    double simulatedTimeBudget_ = 0.0;
+    engine::util::StepAccumulator accumulator_;
 
     std::size_t totalInstances_ = 0;
+
+    // Registration ordinal for LOD stagger phases.
+    std::uint64_t registrationOrdinal_ = 0;
 
     std::vector<FieldRecord>                       fieldRecords_;
     std::unordered_map<FieldHandle, std::size_t>   fieldIndexByHandle_;

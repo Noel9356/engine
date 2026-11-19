@@ -18,11 +18,6 @@ namespace engine::physics_rigid
 namespace
 {
 
-inline double componentAxis(const math::Vec3 &vector, std::uint32_t axis)
-{
-    return (&vector.x)[axis];
-}
-
 } // namespace
 
 // World-frame inverse inertia tensor R * diag(1/I) * R^T; the zero matrix
@@ -48,7 +43,7 @@ math::Mat3 computeWorldInverseInertia(const Body &body)
             double sum = 0.0;
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
-                sum += rotation.elements[row * 3 + axis] * componentAxis(body.inverseInertiaLocal, axis)
+                sum += rotation.elements[row * 3 + axis] * math::component(body.inverseInertiaLocal, axis)
                      * rotation.elements[column * 3 + axis];
             }
             inverseInertia.elements[row * 3 + column] = sum;
@@ -137,20 +132,6 @@ void makeAnchorBasis(const math::Vec3 &direction, math::Vec3 basis[3])
     math::Vec3 seed = std::abs(basis[2].x) < 0.9 ? math::Vec3{1.0, 0.0, 0.0} : math::Vec3{0.0, 1.0, 0.0};
     basis[0]        = math::normalized(math::cross(seed, basis[2]));
     basis[1]        = math::cross(basis[2], basis[0]);
-}
-
-// Rotation vector of a unit quaternion: the axis-angle representation packed
-// into a 3-vector (the angular error measure for the fixed joint's weld rows).
-math::Vec3 rotationVector(const math::Quaternion &rotation)
-{
-    const double vectorNorm = std::sqrt(rotation.x * rotation.x + rotation.y * rotation.y + rotation.z * rotation.z);
-    if (vectorNorm < 1.0e-12)
-    {
-        return math::Vec3{};
-    }
-    const double angle = 2.0 * std::atan2(vectorNorm, rotation.w);
-    const double scale = angle / vectorNorm;
-    return math::Vec3{rotation.x * scale, rotation.y * scale, rotation.z * scale};
 }
 
 void prepareContactConstraints(World &world, const StepContext &context, std::vector<ContactConstraint> &outConstraints)
@@ -407,7 +388,7 @@ void prepareJointConstraints(World &world, const StepContext &context, std::vect
             }
             const math::Quaternion frameDelta
                 = math::conjugate(joint.referenceRelativeRotation) * relativeRotation;
-            constraint.weldError = math::rotate(bodyA.transform.rotation, rotationVector(frameDelta));
+            constraint.weldError = math::rotate(bodyA.transform.rotation, math::rotationVectorRadians(frameDelta));
         }
         else
         {

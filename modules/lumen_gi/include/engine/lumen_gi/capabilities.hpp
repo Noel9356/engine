@@ -25,7 +25,12 @@ namespace lumen_gi
 // scene, and the environment were all unchanged and the caches converged).
 // 2 -> 3 added GiError::EvaluationFailed and GiStatistics::indirectRaysThisFrame,
 // and defined GiProbe::sh2 as irradiance-ready coefficients (see GiProbe).
-inline constexpr std::uint32_t lumenGiCapabilityAbi = 3u;
+// 3 -> 4 added GiSurfaceDescription's transmission pair (opacity,
+// indexOfRefraction): gather and probe rays transmit through surfaces with
+// opacity below 1 (attenuated by the (1 - opacity) share, tinted by the
+// albedo, bent once by Snell's law with the index ratio), and shadow rays
+// soften by the same transmittance instead of being blocked.
+inline constexpr std::uint32_t lumenGiCapabilityAbi = 4u;
 using GiSurfaceHandle                               = std::uint32_t;
 inline constexpr GiSurfaceHandle invalidGiSurface   = 0;
 
@@ -60,7 +65,10 @@ enum class GiError : std::uint32_t
 // the required positions it instead reads as tightly packed triplets.
 // transform is a column-major 4x4 model matrix. emissiveColor and
 // emissiveIntensity combine into the surface's emission; albedoColor tints
-// vertex colors (white when colors are absent).
+// vertex colors (white when colors are absent). opacity below 1 makes the
+// surface transmissive: gather, probe, and shadow rays pass through with
+// the (1 - opacity) share (tinted by albedoColor), bent by Snell's law with
+// indexOfRefraction (>= 1) at the entering interface.
 struct GiSurfaceDescription
 {
     const float         *positions           = nullptr;
@@ -78,6 +86,11 @@ struct GiSurfaceDescription
     float         albedoColor[3]    = {1.0f, 1.0f, 1.0f};
     float         emissiveColor[3]  = {0.0f, 0.0f, 0.0f};
     float         emissiveIntensity = 0.0f;
+    // Transmission pair: opacity in [0, 1] (1 = opaque; below 1 rays
+    // transmit the (1 - opacity) share, tinted by the albedo color), and the
+    // medium's index of refraction (>= 1) for the refracted continuation.
+    float         opacity           = 1.0f;
+    float         indexOfRefraction = 1.5f;
     std::uint32_t flagBits          = 0;
 };
 

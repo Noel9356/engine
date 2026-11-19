@@ -523,16 +523,15 @@ private:
             }
             engine::physics_rigid::BodyState parentState{};
             engine::physics_rigid::BodyState childState{};
-            const auto                       parentIterator = std::find_if(figure->links.begin(),
+            const bool parentLinkExists = std::any_of(figure->links.begin(),
                 figure->links.end(),
                 [&](const LinkRecord &candidate) { return candidate.body == description.bodyA; });
-            if (parentIterator == figure->links.end()
+            if (!parentLinkExists
                 || !rigid_->copyBodyState(rigid_->self, figure->world, description.bodyA, &parentState)
                 || !rigid_->copyBodyState(rigid_->self, figure->world, description.bodyB, &childState))
             {
                 continue;
             }
-            (void)parentIterator;
 
             const engine::physics_rigid::Quaternion relativeRotation
                 = math::normalize(math::conjugate(parentState.transform.rotation) * childState.transform.rotation);

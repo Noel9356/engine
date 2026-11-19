@@ -589,7 +589,7 @@ private:
         }
 
         // Angular-size LOD cutoffs (boundsRadius / distance): four strictly
-        // descending values in (0, 1]; coarser chains are picked as the
+        // ascending values in (0, 1]; coarser chains are picked as the
         // apparent size drops below each cutoff.
         if (const std::vector<double> thresholds
             = context.configurationFloatingArrayInSection("renderer", "lod_thresholds");
@@ -605,7 +605,7 @@ private:
             }
             for (std::size_t index = 1; index < thresholds.size() && usable; ++index)
             {
-                if (!(thresholds[index - 1] > thresholds[index]))
+                if (!(thresholds[index - 1] < thresholds[index]))
                 {
                     usable = false;
                 }
@@ -613,7 +613,7 @@ private:
             if (!usable)
             {
                 std::fprintf(stderr,
-                    "renderer module: ignoring [renderer] lod_thresholds (need four finite strictly descending "
+                    "renderer module: ignoring [renderer] lod_thresholds (need four finite strictly ascending "
                     "values in (0, 1]); keeping the current cutoffs\n");
             }
             else

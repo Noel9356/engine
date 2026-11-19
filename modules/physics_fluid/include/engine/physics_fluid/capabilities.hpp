@@ -20,7 +20,15 @@ namespace engine::physics_fluid
 
 // Increment when any public capability structure or function-table layout
 // changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsFluidCapabilityAbi = 1u;
+//
+// ABI history:
+//   1 - initial surface (fluid creation, particle append, state copies,
+//       fixed-step SPH stepping with internal substeps, statistics).
+//   2 - appended the simulation-LOD surface: the setFluidImportance entry
+//       point and the FluidStatistics.lodSkippedSteps counter. Everything
+//       from ABI 1 keeps its slot and meaning; consumers check `abi >= 2`
+//       before touching the additions.
+inline constexpr std::uint32_t physicsFluidCapabilityAbi = 2u;
 
 using FluidHandle = std::uint32_t;
 
@@ -33,7 +41,7 @@ enum class FluidError : std::uint32_t
     InvalidHandle,      // unknown fluid handle or particle index
     InvalidDescription, // null pointers, non-finite values, non-positive scales
     CapacityExceeded,   // configured fluid or particle budget exhausted
-    SimulationFailure   // non-finite state entered during a step; the fluid is left unmodified
+    SimulationFailure   // non-finite state entered during a step; the step is rolled back to its start state
 };
 
 struct FluidDescription
@@ -79,6 +87,9 @@ struct FluidStatistics
     std::uint32_t lastContactCount     = 0;
     double        lastAverageDensity   = 0.0;
     double        lastStepMilliseconds = 0.0;
+
+    // ABI 2: fixed steps this fluid skipped through simulation LOD.
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_fluid" capability. Calls are main-thread only; the module
@@ -122,6 +133,16 @@ struct FluidCapability
     std::uint32_t (*simulate)(void *self, FluidHandle fluid, double elapsedSeconds);
 
     bool (*fluidStatistics)(void *self, FluidHandle fluid, FluidStatistics *outStatistics);
+
+    // ---- ABI 2 additions -------------------------------------------------------
+
+    // Simulation LOD: writes the fluid's importance score in [0, 1]. The
+    // module maps the score onto the five fidelity bands (Cached, Animation,
+    // Procedural, Simplified, Full) with demotion hysteresis; bands below
+    // Full keep the fluid's fixed step size and reduce the internal SPH
+    // substep count instead, and Cached fluids freeze until the score rises
+    // again. Non-finite scores resolve to Cached.
+    bool (*setFluidImportance)(void *self, FluidHandle fluid, double importance);
 };
 
 } // namespace engine::physics_fluid

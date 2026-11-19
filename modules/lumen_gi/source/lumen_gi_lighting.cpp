@@ -32,10 +32,12 @@ namespace lumen_gi
 
 // ---- direct light evaluation ---------------------------------------------------
 
-// Shadow test toward the sun with a surface bias; rays that start inside
-// geometry are caught by the surface/backface handling of the caller. The
-// receiving surface is NOT excluded: a mesh must be able to shadow itself.
-bool sunShadowed(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal)
+// Shadow transmittance toward the sun with a surface bias; rays that start
+// inside geometry are caught by the surface/backface handling of the caller.
+// The receiving surface is NOT excluded: a mesh must be able to shadow
+// itself. Transparent surfaces soften the shadow by their (1 - opacity)
+// transmittance instead of blocking it (traceSceneTransmittance).
+float sunShadowTransmittance(const GiPipelineState &state, const glm::vec3 &position, const glm::vec3 &normal)
 {
     const glm::vec3 sunDirection = state.environment.sunDirection;
     // The bias grows with the grazing angle so grazing-lit surfaces keep
@@ -46,7 +48,7 @@ bool sunShadowed(const GiPipelineState &state, const glm::vec3 &position, const 
     const float bias = state.settings.traceBias
         + state.settings.traceBias * (1.0f - std::fabs(glm::dot(normal, sunDirection)));
     GiRay           ray{position + normal * bias, sunDirection, state.settings.maxTraceDistance};
-    return traceSceneOccluded(state, ray, noSurface);
+    return traceSceneTransmittance(state, ray);
 }
 
 // Directional/point/spot radiance arriving at position from the module's
@@ -75,11 +77,20 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
             const float nDotL = glm::dot(normal, direction);
             if (nDotL > 0.0f)
             {
-                if (shadows && traceSceneOccluded(state, GiRay{origin, direction, state.settings.maxTraceDistance}, noSurface))
+                if (shadows)
                 {
-                    continue;
+                    const float transmittance
+                        = traceSceneTransmittance(state, GiRay{origin, direction, state.settings.maxTraceDistance});
+                    if (transmittance <= 0.0f)
+                    {
+                        continue;
+                    }
+                    sum += color * intensity * nDotL * transmittance;
                 }
-                sum += color * intensity * nDotL;
+                else
+                {
+                    sum += color * intensity * nDotL;
+                }
             }
             continue;
         }
@@ -111,12 +122,18 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
             // Point-light shadow rays start at the same surface bias as the
             // other trace sites and are skipped entirely for very close
             // lights, where a shadow ray would immediately re-hit the
-            // receiver (trace.bias_m).
+            // receiver (trace.bias_m). Transparent surfaces soften the
+            // shadow by their transmittance.
             const float shadowMinimum = state.settings.traceBias * 3.0f;
-            if (distance > shadowMinimum
-                && traceSceneOccluded(state, GiRay{origin, direction, distance - shadowMinimum}, noSurface))
+            if (distance > shadowMinimum)
             {
-                continue;
+                const float transmittance
+                    = traceSceneTransmittance(state, GiRay{origin, direction, distance - shadowMinimum});
+                if (transmittance <= 0.0f)
+                {
+                    continue;
+                }
+                attenuation *= transmittance;
             }
         }
         sum += color * intensity * attenuation * nDotL;
@@ -505,9 +522,17 @@ void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit)
                 const float nDotL = glm::dot(normal, environment.sunDirection);
                 if (nDotL > 0.0f && hasSun)
                 {
-                    if (!state.settings.sunShadows || !sunShadowed(state, position, normal))
+                    if (!state.settings.sunShadows)
                     {
                         irradiance += sunRadiance * nDotL;
+                    }
+                    else
+                    {
+                        const float transmittance = sunShadowTransmittance(state, position, normal);
+                        if (transmittance > 0.0f)
+                        {
+                            irradiance += sunRadiance * nDotL * transmittance;
+                        }
                     }
                 }
                 irradiance += directLightRadiance(state, position, normal);
@@ -587,17 +612,62 @@ void gatherIndirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit,
                 // by construction, so the product is already unit length - no
                 // normalize (a sqrt plus three divisions per ray) needed.
                 const glm::vec3 direction = basis * cosineHemisphere(u, v);
-                GiRay           traceRay{origin, direction, state.settings.maxTraceDistance};
-                const GiShadingHit hit = traceSceneShading(state, traceRay);
                 ++rays;
-                if (!hit.hit)
+                // Transmission-aware gather: a transparent surface keeps its
+                // opacity share of the response and passes the rest through,
+                // tinted by its albedo, bent once by Snell's law with its
+                // index ratio (the entering interface; exits straighten the
+                // path back out). The split is deterministic, so the few-ray
+                // gather stays low-variance.
+                glm::vec3 weight(1.0f);
+                glm::vec3 rayOrigin    = origin;
+                glm::vec3 rayDirection = direction;
+                for (std::uint32_t segment = 0; segment <= state.settings.maxTransmissionSegments; ++segment)
                 {
-                    gather += state.environment.skyRadiance(direction);
-                    continue;
+                    const GiShadingHit hit = traceSceneShading(
+                        state, GiRay{rayOrigin, rayDirection, state.settings.maxTraceDistance});
+                    if (!hit.hit)
+                    {
+                        gather += weight * state.environment.skyRadiance(rayDirection);
+                        break;
+                    }
+                    const GiSurface &surface = state.surfaces[hit.surfaceIndex];
+                    const float      opacity = glm::clamp(surface.opacity, 0.0f, 1.0f);
+                    if (opacity >= 1.0f)
+                    {
+                        glm::vec3 hitRadiance(0.0f);
+                        radianceAtHit(state, hit, true, hitRadiance);
+                        gather += weight * hitRadiance;
+                        break;
+                    }
+                    glm::vec3 hitRadiance(0.0f);
+                    radianceAtHit(state, hit, true, hitRadiance);
+                    gather += weight * opacity * hitRadiance;
+                    if (opacity <= 0.0f || segment == state.settings.maxTransmissionSegments)
+                    {
+                        break; // nothing (or no budget) left to transmit
+                    }
+                    // The albedo absorption applies once per medium traversal,
+                    // at the entering interface; the matching exit passes
+                    // untinted.
+                    weight *= hit.backface ? glm::vec3(1.0f) : surface.albedo * (1.0f - opacity);
+                    // The gather works in world space; the shading hit carries
+                    // local-space position/normal, so transform them once for
+                    // the continuation.
+                    const glm::vec3 worldPosition = surface.localIsWorld
+                        ? hit.localPosition
+                        : surface.linear * hit.localPosition + surface.translation;
+                    const glm::vec3 worldNormal
+                        = glm::normalize(surface.normalMatrix * hit.localNormal);
+                    const float     ior = glm::max(surface.indexOfRefraction, 1.0f);
+                    glm::vec3 bent  = glm::refract(rayDirection, worldNormal, hit.backface ? ior : 1.0f / ior);
+                    if (glm::dot(bent, bent) < 1.0e-8f)
+                    {
+                        bent = glm::reflect(rayDirection, worldNormal); // total internal reflection
+                    }
+                    rayOrigin    = worldPosition + bent * state.settings.traceBias;
+                    rayDirection = bent;
                 }
-                glm::vec3 hitRadiance(0.0f);
-                radianceAtHit(state, hit, true, hitRadiance);
-                gather += hitRadiance;
             }
             // Cosine-weighted sampling: E = pi * mean(L_i), and the Lambertian
             // radiance is albedo / pi * E = albedo * mean(L_i).
@@ -689,38 +759,96 @@ void updateProbe(GiPipelineState &state, std::uint32_t levelIndex, std::uint32_t
     for (std::size_t texel = phase; texel < directionCount; texel += stride)
     {
         const glm::vec3 &direction = state.probeDirections[texel];
-        const GiShadingHit hit = traceSceneShading(
-            state, GiRay{traceOrigin + direction * traceBias, direction, state.settings.maxTraceDistance - traceBias});
         ++traced;
-        if (hit.hit && hit.backface && hit.t < closestBackfaceT)
+        glm::vec3 value(0.0f);
+        bool      terminatedByOpaqueBackface = false;
+        // Transmission-aware probe ray: transparent surfaces keep their
+        // opacity share of the response and pass the rest through, tinted by
+        // their albedo, bent once by Snell's law at the entering interface
+        // (exits straighten the path back out; total internal reflection
+        // mirrors). Transparent surfaces stay out of the relocation and
+        // validity accounting entirely - a glass pane must not mark the
+        // probe enclosed or push it off its plane - while the FIRST opaque
+        // hit along the chain provides the backface/front evidence, measured
+        // along the traveled path so a pane in front shifts the distances.
         {
-            closestBackfaceT          = hit.t;
-            closestBackfaceDirection = direction;
-            hasBackface               = true;
-        }
-        if (hit.hit && !hit.backface)
-        {
-            frontDirectionSum += direction;
-            if (hit.t < closestFrontT)
+            glm::vec3 weight(1.0f);
+            glm::vec3 rayOrigin    = traceOrigin + direction * traceBias;
+            glm::vec3 rayDirection = direction;
+            float     rayTMax      = state.settings.maxTraceDistance - traceBias;
+            float     traveled     = 0.0f;
+            for (std::uint32_t segment = 0; segment <= state.settings.maxTransmissionSegments; ++segment)
             {
-                closestFrontT          = hit.t;
-                closestFrontDirection = direction;
-                hasFront               = true;
+                const GiShadingHit hit = traceSceneShading(state, GiRay{rayOrigin, rayDirection, rayTMax});
+                if (!hit.hit)
+                {
+                    value += weight * state.environment.skyRadiance(rayDirection);
+                    break;
+                }
+                const GiSurface &surface = state.surfaces[hit.surfaceIndex];
+                const float      opacity = glm::clamp(surface.opacity, 0.0f, 1.0f);
+                if (opacity >= 1.0f)
+                {
+                    const float hitDistance = traveled + hit.t;
+                    if (hit.backface)
+                    {
+                        terminatedByOpaqueBackface = true;
+                        if (hitDistance < closestBackfaceT)
+                        {
+                            closestBackfaceT          = hitDistance;
+                            closestBackfaceDirection = rayDirection;
+                            hasBackface               = true;
+                        }
+                    }
+                    else
+                    {
+                        frontDirectionSum += direction;
+                        if (hitDistance < closestFrontT)
+                        {
+                            closestFrontT          = hitDistance;
+                            closestFrontDirection = direction;
+                            hasFront               = true;
+                        }
+                        glm::vec3 hitRadiance(0.0f);
+                        radianceAtHit(state, hit, true, hitRadiance);
+                        value += weight * hitRadiance;
+                    }
+                    break;
+                }
+                glm::vec3 hitRadiance(0.0f);
+                radianceAtHit(state, hit, true, hitRadiance);
+                value += weight * opacity * hitRadiance;
+                if (opacity <= 0.0f || segment == state.settings.maxTransmissionSegments)
+                {
+                    break; // nothing (or no budget) left to transmit
+                }
+                // The albedo absorption applies once per medium traversal, at
+                // the entering interface; the matching exit passes untinted.
+                weight *= hit.backface ? glm::vec3(1.0f) : surface.albedo * (1.0f - opacity);
+                // The probe loop works in world space; the shading hit
+                // carries local-space position/normal, so transform them once
+                // for the continuation.
+                const glm::vec3 worldPosition = surface.localIsWorld
+                    ? hit.localPosition
+                    : surface.linear * hit.localPosition + surface.translation;
+                const glm::vec3 worldNormal
+                    = glm::normalize(surface.normalMatrix * hit.localNormal);
+                const float     ior = glm::max(surface.indexOfRefraction, 1.0f);
+                glm::vec3 bent  = glm::refract(rayDirection, worldNormal, hit.backface ? ior : 1.0f / ior);
+                if (glm::dot(bent, bent) < 1.0e-8f)
+                {
+                    bent = glm::reflect(rayDirection, worldNormal);
+                }
+                traveled    += hit.t + state.settings.traceBias;
+                rayOrigin    = worldPosition + bent * state.settings.traceBias;
+                rayDirection = bent;
+                rayTMax      = state.settings.maxTraceDistance;
             }
         }
-        glm::vec3 value(0.0f);
-        if (!hit.hit)
-        {
-            value = state.environment.skyRadiance(direction);
-        }
-        else if (hit.backface)
+        if (terminatedByOpaqueBackface)
         {
             backfaceTexels.push_back(static_cast<std::uint32_t>(texel));
             continue;
-        }
-        else
-        {
-            radianceAtHit(state, hit, true, value);
         }
         frontSum += value;
         ++frontCount;

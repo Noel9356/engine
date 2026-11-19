@@ -36,7 +36,11 @@ const char *giOptionsUsage() noexcept
            "                           dynamic-surface path runs without manual input.\n"
            "  --no-reflections         Skip the lumen_reflection module: the same scene\n"
            "                           renders without the indirect specular term (A/B\n"
-           "                           against the default run).\n";
+           "                           against the default run).\n"
+           "  --self-test              Deterministic headless validation run: 24 interior\n"
+           "                           frames, then module statistics, snapshot versions,\n"
+           "                           transmission counters, and the exported screenshot\n"
+           "                           are checked (exit 0 = pass).\n";
 }
 
 bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &options, std::string &outError)
@@ -91,6 +95,10 @@ bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &op
         else if (argument == "--no-reflections")
         {
             options.reflections = false;
+        }
+        else if (argument == "--self-test")
+        {
+            options.selfTest = true;
         }
         else
         {

@@ -11,6 +11,17 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_fluid.maximum_particles` | integer | 1 - 10000000 | `500000` | Module-wide particle budget shared by all fluids. |
 | `physics_fluid.maximum_particles_per_fluid` | integer | 1 - 1000000 | `50000` | Largest particle count one fluid accepts (checked per `addParticles` call and in total). |
 | `physics_fluid.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped. |
+| `physics_fluid.bounds_restitution` | number | [0, 1] | `0.3` | Velocity factor a particle keeps along the axis it hits the bounds box on (a small bounce; `0` kills the axis velocity). |
+| `physics_fluid.lod_animation_threshold` | number | (0, 1] | `0.1` | Fidelity-ladder boundary between Animation and Cached; scores below it freeze fluids. |
+| `physics_fluid.lod_demotion_margin` | number | [0, 1) | `0.8` | Demotion hysteresis fraction. |
+| `physics_fluid.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: bands below Full reduce the internal SPH substep count instead of the fixed step size. |
+| `physics_fluid.lod_full_threshold` | number | (0, 1] | `0.75` | Importance at or above which a fluid runs the Full band. |
+| `physics_fluid.lod_interval_animation` | integer | 0 - 65536 | `8` | Fixed steps between updates for Animation-band fluids; `0` freezes them. |
+| `physics_fluid.lod_interval_cached` | integer | 0 - 65536 | `0` | `0` freezes Cached-band fluids (the default). |
+| `physics_fluid.lod_interval_procedural` | integer | 0 - 65536 | `4` | Fixed steps between updates for Procedural-band fluids. |
+| `physics_fluid.lod_interval_simplified` | integer | 0 - 65536 | `2` | Fixed steps between updates for Simplified-band fluids. |
+| `physics_fluid.lod_procedural_threshold` | number | (0, 1] | `0.25` | Boundary between Simplified and Procedural. |
+| `physics_fluid.lod_simplified_threshold` | number | (0, 1] | `0.5` | Boundary between Full and Simplified. |
 | `physics_fluid.maximum_velocity` | number | [1, 1000] | `30.0` | Stability clamp in meters per second: every substep rescales any faster particle's velocity down to this magnitude. |
 | `physics_fluid.substeps_per_step` | integer | 1 - 64 | `4` | SPH substeps per fixed step (spatial-hash rebuild, density, forces, integration, and collision run per substep). More substeps shorten the integration interval at proportional cost. |
 

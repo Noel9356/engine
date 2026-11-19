@@ -31,24 +31,6 @@ namespace
 
 namespace math = engine::physics_rigid::math;
 
-constexpr double kPi = 3.14159265358979323846;
-
-// Rotation vector (axis-angle log map) of a quaternion; small-angle linear
-// form near identity.
-math::Vec3 rotationVector(const math::Quaternion &rotation)
-{
-    const math::Quaternion normalized
-        = math::normalize(rotation);
-    const double sine = std::sqrt(
-        normalized.x * normalized.x + normalized.y * normalized.y + normalized.z * normalized.z);
-    if (sine < 1.0e-9)
-    {
-        return math::Vec3{2.0 * normalized.x, 2.0 * normalized.y, 2.0 * normalized.z};
-    }
-    const double angle = 2.0 * std::atan2(sine, normalized.w);
-    return math::Vec3{normalized.x / sine, normalized.y / sine, normalized.z / sine} * angle;
-}
-
 // Humanoid template geometry at scale 1 (meters, pelvis origin). Part
 // order: pelvis (root), torso, head, upper arm L, lower arm L, upper arm R,
 // lower arm R, upper leg L, lower leg L, upper leg R, lower leg R.
@@ -679,13 +661,13 @@ private:
                 if (reference.kind == engine::physics_rigid::JointKind::Hinge)
                 {
                     // One degree of freedom: the twist error about the axis.
-                    const double errorAngle = math::dot(rotationVector(frameError), axisLocal);
+                    const double errorAngle = math::dot(math::rotationVectorRadians(frameError), axisLocal);
                     const double omegaAngle = math::dot(omegaRelative, axisWorld);
                     torque                  = axisWorld * (stiffness * errorAngle - damping * omegaAngle);
                 }
                 else
                 {
-                    const math::Vec3 errorLocal = rotationVector(frameError);
+                    const math::Vec3 errorLocal = math::rotationVectorRadians(frameError);
                     const math::Vec3 errorWorld = math::rotate(parentState.transform.rotation, errorLocal);
                     torque                      = errorWorld * stiffness - omegaRelative * damping;
                 }
@@ -1096,7 +1078,7 @@ private:
                                      - description.legLowerLength * description.legLowerLength)
                                  / (2.0 * description.legUpperLength * clamped);
             const double hipAngle   = std::acos(std::clamp(cosHip, -1.0, 1.0));
-            const double kneeBend   = kPi - hipAngle * 2.0;
+            const double kneeBend   = math::kPi - hipAngle * 2.0;
             const double hipDrop    = distance > legReach ? distance - (legReach - description.footRadius) : 0.0;
 
             runtime.kneeDirection   = math::rotate(rootRotation, math::Vec3{0.0, 0.0, 1.0});
@@ -1274,7 +1256,7 @@ private:
                                         + description.armLowerLength * description.armLowerLength
                                         - clamped * clamped)
                 / (2.0 * description.armUpperLength * description.armLowerLength);
-            runtime.elbowBendRadians = std::max(kPi - std::acos(std::clamp(cosElbow, -1.0, 1.0)), 0.0);
+            runtime.elbowBendRadians = std::max(math::kPi - std::acos(std::clamp(cosElbow, -1.0, 1.0)), 0.0);
             runtime.elbowDirection   = elbowPoleWorld;
         }
         return true;

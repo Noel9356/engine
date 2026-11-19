@@ -1,12 +1,14 @@
 // physics_fluid module implementation.
 //
 // Smoothed-particle hydrodynamics over a physics_rigid world. Every substep
-// rebuilds the spatial hash, estimates densities with the poly6 kernel,
+// rebuilds the spatial hash, collects the neighbor lists once into a cache
+// shared by both passes, estimates densities with the poly6 kernel,
 // accumulates pressure (spiky gradient) and viscosity (Laplacian) forces,
 // integrates, and resolves particles against rigid geometry through the
-// collideSphere query plus the optional bounds box. Stepping happens in
-// whole fixed steps with internal substeps, so the simulation is independent
-// of frame rate.
+// batched sphere-overlap query plus the optional bounds box. Stepping
+// happens in whole fixed steps with internal substeps, so the simulation is
+// independent of frame rate; simulation LOD cuts the substep count for
+// unimportant fluids without touching the fixed step size.
 
 #include "records.hpp"
 #include <engine/kernel/module_api.hpp>
@@ -15,6 +17,9 @@
 #include <engine/physics_fluid/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
+#include <engine/util/simulation_lod.hpp>
+#include <engine/util/step_accumulator.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -32,8 +37,6 @@ namespace
 
 namespace math = engine::physics_rigid::math;
 
-constexpr double kPi = 3.14159265358979323846;
-
 // Poly6 kernel W(r, h) for 0 <= r <= h.
 inline double poly6Kernel(double rSquared, double h)
 {
@@ -43,7 +46,7 @@ inline double poly6Kernel(double rSquared, double h)
         return 0.0;
     }
     const double difference = hSquared - rSquared;
-    return 315.0 / (64.0 * kPi * hSquared * hSquared * hSquared) * difference * difference * difference;
+    return 315.0 / (64.0 * math::kPi * hSquared * hSquared * hSquared) * difference * difference * difference;
 }
 
 // Spiky kernel gradient magnitude factor: -45 / (pi h^6) * (h - r)^2, times
@@ -55,7 +58,7 @@ inline math::Vec3 spikyGradient(const math::Vec3 &direction, double r, double h)
         return math::Vec3{};
     }
     const double magnitude
-        = -45.0 / (kPi * h * h * h * h * h * h) * (h - r) * (h - r);
+        = -45.0 / (math::kPi * h * h * h * h * h * h) * (h - r) * (h - r);
     return direction * magnitude;
 }
 
@@ -66,7 +69,29 @@ inline double viscosityLaplacian(double r, double h)
     {
         return 0.0;
     }
-    return 45.0 / (kPi * h * h * h * h * h * h) * (h - r);
+    return 45.0 / (math::kPi * h * h * h * h * h * h) * (h - r);
+}
+
+// Builds the per-substep neighbor cache: one flat structure both SPH passes
+// read (positions do not change between the density and force passes, so the
+// neighbor lists collect once instead of twice per substep).
+void collectParticleNeighbors(const FluidRecord &fluid, std::uint32_t particleIndex,
+    std::vector<std::uint32_t> &outNeighbors);
+
+void buildNeighborCache(FluidRecord &fluid)
+{
+    const std::size_t particleCount = fluid.positions.size() / 3;
+    fluid.neighborStarts.assign(particleCount + 1, 0u);
+    fluid.neighborCounts.assign(particleCount, 0u);
+    fluid.neighborIndices.clear();
+    static thread_local std::vector<std::uint32_t> collected;
+    for (std::size_t particle = 0; particle < particleCount; ++particle)
+    {
+        collectParticleNeighbors(fluid, static_cast<std::uint32_t>(particle), collected);
+        fluid.neighborCounts[particle] = static_cast<std::uint32_t>(collected.size());
+        fluid.neighborStarts[particle + 1] = fluid.neighborStarts[particle] + fluid.neighborCounts[particle];
+        fluid.neighborIndices.insert(fluid.neighborIndices.end(), collected.begin(), collected.end());
+    }
 }
 
 void rebuildParticleHash(FluidRecord &fluid, double cellSize)
@@ -129,14 +154,14 @@ void rebuildParticleHash(FluidRecord &fluid, double cellSize)
     fluid.sortedIndices = std::move(sorted);
     fluid.cellBuckets   = cellStarts;
     // Remember the cell ordering for neighbor lookup.
-    fluid.hashCellIds_.assign(cellOrder.begin(), cellOrder.end());
-    fluid.hashCellCounts_.resize(cellOrder.size());
+    fluid.hashCellIds.assign(cellOrder.begin(), cellOrder.end());
+    fluid.hashCellCounts.resize(cellOrder.size());
     for (std::size_t index = 0; index < cellOrder.size(); ++index)
     {
         const std::uint32_t start = cellStarts[index];
         const std::uint32_t end
             = index + 1 < cellStarts.size() ? cellStarts[index + 1] : static_cast<std::uint32_t>(particleCount);
-        fluid.hashCellCounts_[index] = end - start;
+        fluid.hashCellCounts[index] = end - start;
     }
 }
 
@@ -145,7 +170,7 @@ void collectParticleNeighbors(const FluidRecord &fluid, std::uint32_t particleIn
 {
     outNeighbors.clear();
     const std::size_t particleCount = fluid.positions.size() / 3;
-    if (particleIndex >= particleCount || fluid.hashCellIds_.empty())
+    if (particleIndex >= particleCount || fluid.hashCellIds.empty())
     {
         return;
     }
@@ -166,14 +191,14 @@ void collectParticleNeighbors(const FluidRecord &fluid, std::uint32_t particleIn
                                          ^ (static_cast<std::uint64_t>(cy + oy) * 19349663ull)
                                          ^ (static_cast<std::uint64_t>(cz + oz) * 83492791ull);
                 const auto slot = std::lower_bound(
-                    fluid.hashCellIds_.begin(), fluid.hashCellIds_.end(), id);
-                if (slot == fluid.hashCellIds_.end() || *slot != id)
+                    fluid.hashCellIds.begin(), fluid.hashCellIds.end(), id);
+                if (slot == fluid.hashCellIds.end() || *slot != id)
                 {
                     continue;
                 }
-                const std::size_t cellIndex = static_cast<std::size_t>(slot - fluid.hashCellIds_.begin());
+                const std::size_t cellIndex = static_cast<std::size_t>(slot - fluid.hashCellIds.begin());
                 const std::uint32_t start   = fluid.cellBuckets[cellIndex];
-                const std::uint32_t count   = fluid.hashCellCounts_[cellIndex];
+                const std::uint32_t count   = fluid.hashCellCounts[cellIndex];
                 for (std::uint32_t entry = 0; entry < count; ++entry)
                 {
                     const std::uint32_t candidate = fluid.sortedIndices[start + entry];
@@ -224,6 +249,10 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_fluid", "maximum_velocity");
             value && *value >= 1.0 && *value <= 1000.0 && std::isfinite(*value))
             settings_.maximumVelocity = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_fluid", "bounds_restitution");
+            value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
+            settings_.boundsRestitution = *value;
+        readLodSettings(context);
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -259,12 +288,39 @@ private:
             .requiredCapabilities = {"physics_rigid"}};
     }
 
+    void readLodSettings(ParticipantContext &context)
+    {
+        settings_.lodEnabled = context.configurationBooleanInSection("physics_fluid", "lod_enabled").value_or(false);
+        const auto readThreshold = [this, &context](const char *key, double &target)
+        {
+            if (const auto value = context.configurationFloatingInSection("physics_fluid", key);
+                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
+                target = *value;
+        };
+        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
+        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
+        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
+        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
+        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
+        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
+        {
+            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
+        }
+        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
+        {
+            if (const auto value = context.configurationIntegerInSection("physics_fluid", key);
+                value && *value >= 0 && *value <= 65536)
+                target = static_cast<std::uint32_t>(*value);
+        };
+        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
+        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
+        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
+        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+    }
+
     static void setError(FluidError *output, FluidError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     FluidRecord *findFluid(FluidHandle handle)
@@ -281,13 +337,13 @@ private:
         const double      h             = fluid.description.interactionRadius;
         for (std::size_t particle = 0; particle < particleCount; ++particle)
         {
-            collectParticleNeighbors(fluid, static_cast<std::uint32_t>(particle), neighbors_);
             const double x = fluid.positions[particle * 3];
             const double y = fluid.positions[particle * 3 + 1];
             const double z = fluid.positions[particle * 3 + 2];
             double density = fluid.description.particleMass * poly6Kernel(0.0, h);
-            for (const std::uint32_t neighbor : neighbors_)
+            for (std::uint32_t slot = fluid.neighborStarts[particle]; slot < fluid.neighborStarts[particle + 1]; ++slot)
             {
+                const std::uint32_t neighbor = fluid.neighborIndices[slot];
                 const double deltaX = fluid.positions[static_cast<std::size_t>(neighbor) * 3] - x;
                 const double deltaY = fluid.positions[static_cast<std::size_t>(neighbor) * 3 + 1] - y;
                 const double deltaZ = fluid.positions[static_cast<std::size_t>(neighbor) * 3 + 2] - z;
@@ -304,15 +360,15 @@ private:
         const double      h             = fluid.description.interactionRadius;
         for (std::size_t particle = 0; particle < particleCount; ++particle)
         {
-            collectParticleNeighbors(fluid, static_cast<std::uint32_t>(particle), neighbors_);
             const math::Vec3 position
                 = math::Vec3{fluid.positions[particle * 3], fluid.positions[particle * 3 + 1], fluid.positions[particle * 3 + 2]};
             const math::Vec3 velocity = math::Vec3{
                 fluid.velocities[particle * 3], fluid.velocities[particle * 3 + 1], fluid.velocities[particle * 3 + 2]};
             math::Vec3 pressureForce;
             math::Vec3 viscosityForce;
-            for (const std::uint32_t neighbor : neighbors_)
+            for (std::uint32_t slot = fluid.neighborStarts[particle]; slot < fluid.neighborStarts[particle + 1]; ++slot)
             {
+                const std::uint32_t neighbor = fluid.neighborIndices[slot];
                 const std::size_t offset = static_cast<std::size_t>(neighbor) * 3;
                 const math::Vec3 delta   = position
                                          - math::Vec3{fluid.positions[offset], fluid.positions[offset + 1], fluid.positions[offset + 2]};
@@ -398,17 +454,19 @@ private:
                 if (fluid.positions[offset + axis] < minimum)
                 {
                     fluid.positions[offset + axis] = minimum;
-                    fluid.velocities[offset + axis] *= -0.3;
+                    fluid.velocities[offset + axis] *= -settings_.boundsRestitution;
                 }
                 else if (fluid.positions[offset + axis] > maximum)
                 {
                     fluid.positions[offset + axis] = maximum;
-                    fluid.velocities[offset + axis] *= -0.3;
+                    fluid.velocities[offset + axis] *= -settings_.boundsRestitution;
                 }
             }
         }
     }
 
+    // Resolves every particle against the rigid world in one batched sphere
+    // query per substep instead of one capability call per particle.
     void resolveCollisions(FluidRecord &fluid)
     {
         fluid.lastContactCount = 0;
@@ -417,48 +475,71 @@ private:
             return;
         }
         const std::size_t particleCount = fluid.positions.size() / 3;
+        collisionQueries_.clear();
+        collisionQueries_.reserve(particleCount);
         for (std::size_t particle = 0; particle < particleCount; ++particle)
         {
+            engine::physics_rigid::SphereOverlapQuery query;
             const std::size_t offset = particle * 3;
-            double                            normal[3] = {0.0, 0.0, 0.0};
-            double                            depth     = 0.0;
-            engine::physics_rigid::BodyHandle body      = engine::physics_rigid::invalidBody;
-            if (!rigid_->collideSphere(
-                    rigid_->self, fluid.world, &fluid.positions[offset], fluid.description.particleRadius, normal, &depth, &body)
-                || depth <= 0.0)
+            query.center[0] = fluid.positions[offset];
+            query.center[1] = fluid.positions[offset + 1];
+            query.center[2] = fluid.positions[offset + 2];
+            query.radius    = fluid.description.particleRadius;
+            collisionQueries_.push_back(query);
+        }
+        if (collisionQueries_.empty())
+        {
+            return;
+        }
+        collisionResults_.resize(collisionQueries_.size());
+        rigid_->collideSpheres(rigid_->self, fluid.world, collisionQueries_.data(),
+            static_cast<std::uint32_t>(collisionQueries_.size()), collisionResults_.data());
+        for (std::size_t particle = 0; particle < particleCount; ++particle)
+        {
+            const engine::physics_rigid::SphereOverlapResult &result = collisionResults_[particle];
+            if (!result.hit || result.depth <= 0.0)
             {
                 continue;
             }
+            const std::size_t offset = particle * 3;
             fluid.lastContactCount += 1;
             // Project the particle out along the push-out direction and
             // remove the approaching velocity part (inelastic contact).
-            fluid.positions[offset] += normal[0] * depth;
-            fluid.positions[offset + 1] += normal[1] * depth;
-            fluid.positions[offset + 2] += normal[2] * depth;
-            const double approach = normal[0] * fluid.velocities[offset] + normal[1] * fluid.velocities[offset + 1]
-                                    + normal[2] * fluid.velocities[offset + 2];
+            fluid.positions[offset] += result.normal[0] * result.depth;
+            fluid.positions[offset + 1] += result.normal[1] * result.depth;
+            fluid.positions[offset + 2] += result.normal[2] * result.depth;
+            const double approach = result.normal[0] * fluid.velocities[offset]
+                                    + result.normal[1] * fluid.velocities[offset + 1]
+                                    + result.normal[2] * fluid.velocities[offset + 2];
             if (approach < 0.0)
             {
-                fluid.velocities[offset] -= normal[0] * approach;
-                fluid.velocities[offset + 1] -= normal[1] * approach;
-                fluid.velocities[offset + 2] -= normal[2] * approach;
+                fluid.velocities[offset] -= result.normal[0] * approach;
+                fluid.velocities[offset + 1] -= result.normal[1] * approach;
+                fluid.velocities[offset + 2] -= result.normal[2] * approach;
             }
         }
     }
 
-    bool stepFluid(FluidRecord &fluid, double fixedDeltaSeconds)
+    bool stepFluid(FluidRecord &fluid, double fixedDeltaSeconds, std::uint32_t substeps)
     {
         const auto stepStart = std::chrono::steady_clock::now();
         if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > 0.1 || !std::isfinite(fixedDeltaSeconds))
         {
             return false;
         }
-        const std::uint32_t substeps     = settings_.substepsPerStep;
-        const double        substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+        const double        substepDelta  = fixedDeltaSeconds / static_cast<double>(substeps);
         const std::size_t   particleCount = fluid.positions.size() / 3;
+        // Pre-step copies for the rollback path: a diverged step restores
+        // this state and reports failure, so the caller sees an untouched
+        // fluid.
+        fluid.preStepPositions.resize(fluid.positions.size());
+        fluid.preStepVelocities.resize(fluid.velocities.size());
+        std::copy(fluid.positions.begin(), fluid.positions.end(), fluid.preStepPositions.begin());
+        std::copy(fluid.velocities.begin(), fluid.velocities.end(), fluid.preStepVelocities.begin());
         for (std::uint32_t substep = 0; substep < substeps; ++substep)
         {
             rebuildParticleHash(fluid, fluid.description.interactionRadius);
+            buildNeighborCache(fluid);
             computeDensities(fluid);
             accumulateForces(fluid);
             integrateSubstep(fluid, substepDelta);
@@ -480,8 +561,18 @@ private:
                 break;
             }
         }
+        for (const double value : fluid.velocities)
+        {
+            if (!std::isfinite(value))
+            {
+                finite = false;
+                break;
+            }
+        }
         if (!finite)
         {
+            std::copy(fluid.preStepPositions.begin(), fluid.preStepPositions.end(), fluid.positions.begin());
+            std::copy(fluid.preStepVelocities.begin(), fluid.preStepVelocities.end(), fluid.velocities.begin());
             return false;
         }
         fluid.stepsSimulated += 1;
@@ -542,6 +633,10 @@ private:
             fluid.gravity[1] = -9.81;
             fluid.gravity[2] = 0.0;
         }
+        // Simulation LOD: the stagger phase derives from the registration
+        // ordinal, so fluids sharing an interval spread their work across
+        // steps.
+        fluid.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         fluids_.push_back(std::move(fluid));
         fluidIndexByHandle_.emplace(fluids_.back().handle, fluids_.size() - 1);
         return fluids_.back().handle;
@@ -672,6 +767,25 @@ private:
         return true;
     }
 
+    // Internal substep count for one fidelity band: lower bands keep the
+    // fixed step size and cut the substep count instead, and Cached freezes.
+    std::uint32_t substepsForBand(engine::util::SimulationFidelity band) const
+    {
+        switch (band)
+        {
+        case engine::util::SimulationFidelity::Full:
+            return settings_.substepsPerStep;
+        case engine::util::SimulationFidelity::Simplified:
+            return std::max(1u, settings_.substepsPerStep / 2u);
+        case engine::util::SimulationFidelity::Procedural:
+            return std::max(1u, settings_.substepsPerStep / 4u);
+        case engine::util::SimulationFidelity::Animation:
+        case engine::util::SimulationFidelity::Cached:
+        default:
+            return 1u;
+        }
+    }
+
     bool stepImpl(FluidHandle handle, double fixedDeltaSeconds)
     {
         FluidRecord *fluid = findFluid(handle);
@@ -679,33 +793,50 @@ private:
         {
             return false;
         }
-        return stepFluid(*fluid, fixedDeltaSeconds);
+        if (settings_.lodEnabled)
+        {
+            fluid->lodBand = engine::util::simulationFidelityForImportance(
+                settings_.lodThresholds, fluid->importance, fluid->lodBand);
+            const std::uint32_t interval
+                = settings_.lodIntervals[engine::util::simulationFidelityIndex(fluid->lodBand)];
+            if (interval == 0u)
+            {
+                // Cached band: hold the last state until the score rises.
+                fluid->cadence.interval = 1u;
+                fluid->lodSkippedSteps += 1;
+                return true;
+            }
+            fluid->cadence.interval = interval;
+            if (!engine::util::simulationCadenceAdvance(fluid->cadence))
+            {
+                fluid->lodSkippedSteps += 1;
+                return true;
+            }
+        }
+        return stepFluid(*fluid, fixedDeltaSeconds, substepsForBand(fluid->lodBand));
     }
 
     std::uint32_t simulateImpl(FluidHandle handle, double elapsedSeconds)
     {
         FluidRecord *fluid = findFluid(handle);
-        if (fluid == nullptr || !std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+        if (fluid == nullptr)
         {
             return 0u;
         }
         const double fixedDelta = 1.0 / settings_.fixedRateHz;
-        fluid->simulatedTimeBudget += elapsedSeconds;
-        std::uint32_t executed = 0;
-        while (fluid->simulatedTimeBudget >= fixedDelta && executed < settings_.maximumStepsPerSimulate)
+        return fluid->accumulator.drain(fixedDelta, settings_.maximumStepsPerSimulate, elapsedSeconds,
+            [this, handle, fixedDelta]() { return stepImpl(handle, fixedDelta); });
+    }
+
+    bool setFluidImportanceImpl(FluidHandle handle, double importance)
+    {
+        FluidRecord *fluid = findFluid(handle);
+        if (fluid == nullptr || !std::isfinite(importance))
         {
-            fluid->simulatedTimeBudget -= fixedDelta;
-            if (!stepFluid(*fluid, fixedDelta))
-            {
-                break;
-            }
-            ++executed;
+            return false;
         }
-        if (executed == settings_.maximumStepsPerSimulate)
-        {
-            fluid->simulatedTimeBudget = 0.0;
-        }
-        return executed;
+        fluid->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
     }
 
     bool fluidStatisticsImpl(FluidHandle handle, FluidStatistics *outStatistics)
@@ -720,6 +851,7 @@ private:
         outStatistics->lastContactCount     = fluid->lastContactCount;
         outStatistics->lastAverageDensity   = fluid->lastAverageDensity;
         outStatistics->lastStepMilliseconds = fluid->lastStepMilliseconds;
+        outStatistics->lodSkippedSteps      = fluid->lodSkippedSteps;
         return true;
     }
 
@@ -739,6 +871,7 @@ private:
         ENGINE_PHYSICS_FLUID_BIND(step, stepImpl);
         ENGINE_PHYSICS_FLUID_BIND(simulate, simulateImpl);
         ENGINE_PHYSICS_FLUID_BIND(fluidStatistics, fluidStatisticsImpl);
+        ENGINE_PHYSICS_FLUID_BIND(setFluidImportance, setFluidImportanceImpl);
 #undef ENGINE_PHYSICS_FLUID_BIND
     }
 
@@ -756,6 +889,13 @@ private:
 
     // Per-substep neighbor scratch.
     std::vector<std::uint32_t> neighbors_;
+
+    // Reused scratch for the batched sphere-overlap queries.
+    std::vector<engine::physics_rigid::SphereOverlapQuery>  collisionQueries_;
+    std::vector<engine::physics_rigid::SphereOverlapResult> collisionResults_;
+
+    // Registration ordinal for LOD stagger phases.
+    std::uint64_t registrationOrdinal_ = 0;
 };
 
 } // namespace

@@ -13,6 +13,18 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_foliage.maximum_instances` | integer | 1 - 10000000 | `2000000` | Module-wide instance budget shared by all fields. |
 | `physics_foliage.maximum_instances_per_field` | integer | 1 - 1000000 | `500000` | Largest instance count accepted by one `createField` call. |
 | `physics_foliage.maximum_steps_per_simulate` | integer | 1 - 1000 | `8` | Cap on fixed steps executed by one `simulate` call; backlog beyond the cap is dropped and the accumulator resets. |
+| `physics_foliage.lod_animation_threshold` | number | (0, 1] | `0.1` | Fidelity-ladder boundary between Animation and Cached; scores below it freeze fields. |
+| `physics_foliage.lod_demotion_margin` | number | [0, 1) | `0.8` | Demotion hysteresis fraction. |
+| `physics_foliage.lod_enabled` | boolean | on/off | `false` | Simulation LOD master switch: fields below Full update on a staggered cadence whose due steps cover the whole interval of wall time. |
+| `physics_foliage.lod_full_threshold` | number | (0, 1] | `0.75` | Importance at or above which a field runs the Full band. |
+| `physics_foliage.lod_interval_animation` | integer | 0 - 65536 | `8` | Fixed steps one due step covers for Animation-band fields; `0` freezes them. |
+| `physics_foliage.lod_interval_cached` | integer | 0 - 65536 | `0` | `0` freezes Cached-band fields (the default). |
+| `physics_foliage.lod_interval_procedural` | integer | 0 - 65536 | `4` | Fixed steps one due step covers for Procedural-band fields. |
+| `physics_foliage.lod_interval_simplified` | integer | 0 - 65536 | `2` | Fixed steps one due step covers for Simplified-band fields. |
+| `physics_foliage.lod_procedural_threshold` | number | (0, 1] | `0.25` | Boundary between Simplified and Procedural. |
+| `physics_foliage.lod_simplified_threshold` | number | (0, 1] | `0.5` | Boundary between Full and Simplified. |
+| `physics_foliage.sway_amplitude` | number | [0, 100] | `0.15` | Sway amplitude factor (meters per second of target oscillation at full wind speed and bend scale). |
+| `physics_foliage.wind_sample_stride` | integer | 1 - 65536 | `1` | Instance wind samples refresh every Nth step, phase-spread by instance index; the cached sample drives the bend target between refreshes. `1` samples every step. |
 
 ## Out-of-range and invalid values
 

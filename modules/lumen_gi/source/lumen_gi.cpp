@@ -255,6 +255,8 @@ private:
             static_cast<float>(floating("lighting.indirect_temporal_blend", 0.85, 0.0, 0.99));
         settings.maxTraceDistance         = static_cast<float>(floating("trace.max_distance_m", 50.0, 1.0, 2000.0));
         settings.traceBias                = static_cast<float>(floating("trace.bias_m", 0.02, 0.001, 0.5));
+        settings.maxTransmissionSegments  = static_cast<std::uint32_t>(
+            integer("trace.max_transmission_segments", 3, 0, 16));
         settings.probeSpacing             = static_cast<float>(floating("probes.spacing_m", 2.0, 0.25, 32.0));
         settings.probeDirectionResolution = static_cast<std::uint32_t>(
             integer("probes.direction_resolution", 32,
@@ -398,6 +400,9 @@ private:
             glm::vec3(description.emissiveColor[0], description.emissiveColor[1], description.emissiveColor[2]),
             glm::vec3(0.0f))
             * std::max(description.emissiveIntensity, 0.0f);
+        surface.opacity   = std::clamp(std::isfinite(description.opacity) ? description.opacity : 1.0f, 0.0f, 1.0f);
+        surface.indexOfRefraction = std::clamp(
+            std::isfinite(description.indexOfRefraction) ? description.indexOfRefraction : 1.5f, 1.0f, 64.0f);
         surface.flagBits = description.flagBits;
         surface.excluded = (description.flagBits & giSurfaceFlagExcluded) != 0u;
         surface.unlit    = (description.flagBits & giSurfaceFlagUnlit) != 0u;
@@ -513,6 +518,11 @@ private:
             {
                 return false;
             }
+        }
+        if (!std::isfinite(description.opacity) || description.opacity < 0.0f || description.opacity > 1.0f
+            || !std::isfinite(description.indexOfRefraction) || description.indexOfRefraction < 1.0f)
+        {
+            return false;
         }
         return true;
     }

@@ -2,10 +2,11 @@
 //
 // Declares the POD types and function-pointer table consumers receive
 // through ParticipantContext::acquireCapability for the "lumen_reflection"
-// capability (ABI 1): a registry of reflection scene surfaces (mesh geometry
-// plus the PBR specular parameters reflections need), a camera-driven frame
-// evaluation that runs a Lumen-style reflection pipeline (screen-space
-// tracing first, then scene ray tracing, radiance-cache reuse for rough
+// capability: a registry of reflection scene surfaces (mesh geometry plus
+// the PBR specular and transmission parameters reflections need), a
+// camera-driven frame evaluation that runs a Lumen-style reflection
+// pipeline (screen-space tracing first, then scene ray tracing with
+// refraction through transmissive surfaces, radiance-cache reuse for rough
 // lobes, hit shading with the lumen_gi probe grid, spatial reuse, temporal
 // accumulation, and a variance-driven bilateral filter), a screen-space
 // reflection field snapshot copy API for renderers, statistics, and
@@ -28,7 +29,14 @@ namespace lumen_reflection
 // bilinear field sample on material similarity instead of blending the
 // field across surface boundaries (a rough wall texel must not darken the
 // mirror image texel beside it).
-inline constexpr std::uint32_t lumenReflectionCapabilityAbi = 2u;
+// ABI 3: ReflectionSurfaceDescription grew the transmission pair
+// (opacity, indexOfRefraction) so rays transmit through transparent and
+// translucent surfaces (screen traces pass through with the surface's
+// attenuation; scene traces refract by Snell's law with a Fresnel-weighted
+// reflect/transmit split), ReflectionStatistics reports the transmission
+// segments the frame walked, and reflectionFieldRoughnessBand publishes the
+// renderer-side bilinear gate's half-width.
+inline constexpr std::uint32_t lumenReflectionCapabilityAbi = 3u;
 using ReflectionSurfaceHandle                                = std::uint32_t;
 inline constexpr ReflectionSurfaceHandle invalidReflectionSurface = 0;
 
@@ -42,6 +50,14 @@ inline constexpr std::uint32_t reflectionFieldTexelFloats = 4u;
 // (background, unlit, or above the traced roughness band). A renderer's
 // field sample treats these texels as absent instead of blending them in.
 inline constexpr float reflectionFieldNeutralRoughness = 1.0f;
+// Half-width of the roughness band a renderer's bilinear field sample
+// accepts around the shaded pixel's own roughness: field texels whose
+// surface roughness differs from the pixel's by more than this were traced
+// for a different lobe, and blending them in would smear one material's
+// specular response across a neighboring material's silhouette. The value
+// matches the module's own spatial-reuse roughness gate so both sides
+// agree on what "same material" means.
+inline constexpr float reflectionFieldRoughnessBand = 0.15f;
 
 // ReflectionSurfaceDescription.flagBits values, sharing lumen_gi's semantics:
 // Unlit surfaces emit their albedo as radiance; Excluded surfaces are
@@ -94,6 +110,13 @@ struct ReflectionSurfaceDescription
     // Roughness 0 requests the sharpest mirror the pipeline supports.
     float         roughness         = 1.0f;
     float         metallic          = 0.0f;
+    // Transmission pair: opacity in [0, 1] (1 = opaque; below 1 the surface
+    // transmits the (1 - opacity) share of ray energy, tinted by the
+    // albedo color), and the medium's index of refraction (>= 1; refraction
+    // bends by Snell's law with this ratio, total internal reflection
+    // included). Opacity 1 surfaces never transmit.
+    float         opacity           = 1.0f;
+    float         indexOfRefraction = 1.5f;
     std::uint32_t flagBits          = 0;
 };
 
@@ -138,6 +161,11 @@ struct ReflectionStatistics
     std::uint32_t raysReusedCacheThisFrame   = 0;
     std::uint32_t screenTraceHitsThisFrame   = 0;
     std::uint32_t sceneTraceHitsThisFrame    = 0;
+    // Transmission segments the frame's ray chains walked: every hop a ray
+    // took through a transparent or translucent surface (screen pass-through
+    // and refracted scene hops both count), summed over the frame. Zero
+    // unless the scene registers surfaces with opacity below 1.
+    std::uint32_t transmissionSegmentsThisFrame = 0;
     std::uint64_t totalRaysTraced            = 0;
     std::uint32_t framesSkippedStatic        = 0;
     double        lastEvaluateMilliseconds   = 0.0;

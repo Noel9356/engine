@@ -1,4 +1,16 @@
 [physics_foliage]
+lod_animation_threshold      = 0.1
+lod_demotion_margin          = 0.8
+lod_enabled                  = false
+lod_full_threshold           = 0.75
+lod_interval_animation       = 8
+lod_interval_cached          = 0
+lod_interval_procedural      = 4
+lod_interval_simplified      = 2
+lod_procedural_threshold     = 0.25
+lod_simplified_threshold     = 0.5
+sway_amplitude               = 0.15
+wind_sample_stride           = 1
 ambient_wind_direction     = [1.0, 0.0]
 ambient_wind_speed         = 0.0
 fixed_rate_hz              = 60.0

@@ -47,6 +47,7 @@ config_keys           = [
     "lumen_gi.skip_unchanged_frames",
     "lumen_gi.trace.bias_m",
     "lumen_gi.trace.max_distance_m",
+    "lumen_gi.trace.max_transmission_segments",
 ]
 name                  = "lumen_gi"
 optional_capabilities = ["pbr", "direct_lighting"]
