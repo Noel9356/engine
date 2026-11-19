@@ -264,6 +264,8 @@ math::Quaternion nlerp(const math::Quaternion &from, const math::Quaternion &to,
 bool SandboxRenderer::createMeshes(
     renderer::RenderCapability &renderCapability, renderer::RendererHandle renderer, std::string &outReport)
 {
+    renderCapability_ = &renderCapability;
+    rendererHandle_   = renderer;
     std::vector<RenderVertex>  vertices;
     std::vector<std::uint32_t> indices;
     std::ostringstream         report;
@@ -300,6 +302,17 @@ bool SandboxRenderer::createMeshes(
 
 void SandboxRenderer::destroyMeshes(renderer::RenderCapability &renderCapability, renderer::RendererHandle renderer)
 {
+    for (ClothSurfaceRender &surface : clothSurfaces_)
+    {
+        if (surface.meshHandle != renderer::invalidMesh)
+        {
+            renderCapability.destroyMesh(renderCapability.self, renderer, surface.meshHandle);
+            surface.meshHandle = renderer::invalidMesh;
+        }
+    }
+    clothSurfaces_.clear();
+    renderCapability_ = nullptr;
+    rendererHandle_   = renderer::invalidRenderer;
     for (const renderer::MeshHandle handle : {cubeMesh_, sphereMesh_, capsuleMesh_, clothNodeMesh_})
     {
         if (handle != renderer::invalidMesh)
@@ -351,14 +364,15 @@ void SandboxRenderer::prepareFur(renderer::RenderCapability &renderCapability, r
     furTextureReady_  = furTextureHandle_ != renderer::invalidTexture;
 }
 
-void SandboxRenderer::syncScene(const SceneDependencies &dependencies, const SceneHandles &handles,
-    const engine::physics_cloth::ClothCapability *clothCapability)
+void SandboxRenderer::syncScene(engine::renderer::RenderCapability &renderCapability,
+    engine::renderer::RendererHandle renderer, const SceneDependencies &dependencies,
+    const SceneHandles &handles, const engine::physics_cloth::ClothCapability *clothCapability)
 {
     bodyStateIndex_.clear();
     bodyStates_.clear();
     bodyShapes_.clear();
     bodyKinds_.clear();
-    clothBuffers_.clear();
+    clothSurfaces_.clear();
 
     for (std::size_t index = 0; index < handles.bodies.size(); ++index)
     {
@@ -392,15 +406,80 @@ void SandboxRenderer::syncScene(const SceneDependencies &dependencies, const Sce
             {
                 continue;
             }
-            ClothRenderBuffers buffers;
-            buffers.columns    = info.columns;
-            buffers.rows       = info.rows;
-            buffers.nodeRadius = 0.045;
-            buffers.currentPositions.resize(static_cast<std::size_t>(info.particleCount) * 3);
-            buffers.previousPositions = buffers.currentPositions;
+            ClothSurfaceRender surface;
+            surface.columns = info.columns;
+            surface.rows    = info.rows;
+            surface.currentPositions.resize(static_cast<std::size_t>(info.particleCount) * 3);
+            surface.previousPositions = surface.currentPositions;
             clothCapability->copyParticlePositions(
-                clothCapability->self, clothHandle, buffers.currentPositions.data(), info.particleCount * 3u, nullptr);
-            clothBuffers_.push_back(buffers);
+                clothCapability->self, clothHandle, surface.currentPositions.data(), info.particleCount * 3u, nullptr);
+
+            // The cloth mesh: the particle grid IS the vertex grid (row-major,
+            // matching copyParticlePositions' packing), triangulated two
+            // triangles per quad, with uv running over the sheet. Vertex
+            // colors stay white so the material drives the fabric look; the
+            // identity model matrix puts the world-space vertices straight
+            // into the scene.
+            const std::size_t vertexCount = static_cast<std::size_t>(info.particleCount);
+            surface.vertexScratch.resize(vertexCount * renderer::meshVertexFloatCount);
+            surface.identityModel.assign(16, 0.0f);
+            surface.identityModel[0]  = 1.0f;
+            surface.identityModel[5]  = 1.0f;
+            surface.identityModel[10] = 1.0f;
+            surface.identityModel[15] = 1.0f;
+            for (std::uint32_t row = 0; row < surface.rows; ++row)
+            {
+                for (std::uint32_t column = 0; column < surface.columns; ++column)
+                {
+                    const std::size_t vertex = static_cast<std::size_t>(row) * surface.columns + column;
+                    const std::size_t offset = vertex * renderer::meshVertexFloatCount;
+                    const std::size_t positionOffset = vertex * 3;
+                    surface.vertexScratch[offset + 0] = static_cast<float>(surface.currentPositions[positionOffset + 0]);
+                    surface.vertexScratch[offset + 1] = static_cast<float>(surface.currentPositions[positionOffset + 1]);
+                    surface.vertexScratch[offset + 2] = static_cast<float>(surface.currentPositions[positionOffset + 2]);
+                    surface.vertexScratch[offset + 3] = 0.0f; // normal filled per frame
+                    surface.vertexScratch[offset + 4] = 1.0f;
+                    surface.vertexScratch[offset + 5] = 0.0f;
+                    surface.vertexScratch[offset + 6] = 1.0f; // white color
+                    surface.vertexScratch[offset + 7] = 1.0f;
+                    surface.vertexScratch[offset + 8] = 1.0f;
+                    surface.vertexScratch[offset + 9]
+                        = surface.columns > 1 ? static_cast<float>(column) / (surface.columns - 1) : 0.0f;
+                    surface.vertexScratch[offset + 10]
+                        = surface.rows > 1 ? static_cast<float>(row) / (surface.rows - 1) : 0.0f;
+                }
+            }
+            std::vector<std::uint32_t> indices;
+            indices.reserve((static_cast<std::size_t>(surface.rows) - 1) * (surface.columns - 1) * 6);
+            for (std::uint32_t row = 0; row + 1 < surface.rows; ++row)
+            {
+                for (std::uint32_t column = 0; column + 1 < surface.columns; ++column)
+                {
+                    const std::uint32_t topLeft     = row * surface.columns + column;
+                    const std::uint32_t topRight    = topLeft + 1;
+                    const std::uint32_t bottomLeft  = topLeft + surface.columns;
+                    const std::uint32_t bottomRight = bottomLeft + 1;
+                    // Two triangles per quad, wound so the rest pose (u along
+                    // columns, v along rows) faces the same way the surface
+                    // sampler's normals do.
+                    indices.push_back(topLeft);
+                    indices.push_back(bottomLeft);
+                    indices.push_back(topRight);
+                    indices.push_back(topRight);
+                    indices.push_back(bottomLeft);
+                    indices.push_back(bottomRight);
+                }
+            }
+            // The scratch already IS the canonical interleaved layout
+            // uploadMesh consumes (position, normal, color, uv - 11 floats).
+            surface.meshHandle = uploadMesh(renderCapability,
+                renderer,
+                reinterpret_cast<const std::vector<RenderVertex> &>(surface.vertexScratch),
+                indices);
+            if (surface.meshHandle != renderer::invalidMesh)
+            {
+                clothSurfaces_.push_back(std::move(surface));
+            }
         }
     }
 }
@@ -426,13 +505,13 @@ void SandboxRenderer::recordFixedStep(const SceneDependencies &dependencies, con
     }
     if (clothCapability != nullptr)
     {
-        for (std::size_t index = 0; index < handles.cloths.size() && index < clothBuffers_.size(); ++index)
+        for (std::size_t index = 0; index < handles.cloths.size() && index < clothSurfaces_.size(); ++index)
         {
-            ClothRenderBuffers &buffers = clothBuffers_[index];
-            buffers.previousPositions   = buffers.currentPositions;
-            const std::uint32_t floats  = static_cast<std::uint32_t>(buffers.currentPositions.size());
+            ClothSurfaceRender &surface = clothSurfaces_[index];
+            surface.previousPositions   = surface.currentPositions;
+            const std::uint32_t floats  = static_cast<std::uint32_t>(surface.currentPositions.size());
             clothCapability->copyParticlePositions(
-                clothCapability->self, handles.cloths[index], buffers.currentPositions.data(), floats, nullptr);
+                clothCapability->self, handles.cloths[index], surface.currentPositions.data(), floats, nullptr);
         }
     }
 }
@@ -441,8 +520,7 @@ void SandboxRenderer::buildDrawCommands(const SceneHandles &handles, float alpha
 {
     modelMatrices_.clear();
     materials_.clear();
-    clothNodeMatrices_.clear();
-    clothLinkMatrices_.clear();
+    submitAlpha_ = alpha;
 
     // Pass one: fill the matrix and material storage to its final size (no
     // reallocation while command pointers reference it).
@@ -510,69 +588,76 @@ void SandboxRenderer::buildDrawCommands(const SceneHandles &handles, float alpha
         drawCommands_.push_back(command);
     }
 
-    // Cloth renders as its particle lattice: one sphere node per particle
-    // plus one thin box per structural edge, all interpolated.
-    for (ClothRenderBuffers &buffers : clothBuffers_)
+    // The cloth sheets render as continuous surfaces: the particle grid IS
+    // the mesh vertex grid, so the frame path writes the interpolated
+    // positions plus the grid normals into the vertex scratch and hands the
+    // whole stream to the renderer's dynamic vertex update. One update and
+    // one draw per sheet replaces the per-particle node/link instance storm.
+    for (ClothSurfaceRender &surface : clothSurfaces_)
     {
-        const math::Vec3 nodeScale{buffers.nodeRadius, buffers.nodeRadius, buffers.nodeRadius};
-        const math::Vec3 linkScale{buffers.nodeRadius * 0.6, buffers.nodeRadius * 0.6, buffers.nodeRadius * 0.6};
-        auto             particleAt = [&](std::uint32_t column, std::uint32_t row, std::vector<double> &storage)
+        const std::size_t vertexCount = static_cast<std::size_t>(surface.columns) * surface.rows;
+        for (std::uint32_t row = 0; row < surface.rows; ++row)
         {
-            const std::size_t offset         = (static_cast<std::size_t>(row) * buffers.columns + column) * 3;
-            const std::size_t previousOffset = offset;
-            (void)previousOffset;
-            return math::Vec3{storage[offset], storage[offset + 1], storage[offset + 2]};
-        };
-        auto interpolatedParticle = [&](std::uint32_t column, std::uint32_t row)
-        {
-            const std::size_t offset = (static_cast<std::size_t>(row) * buffers.columns + column) * 3;
-            return math::Vec3{
-                buffers.previousPositions[offset]
-                    + (buffers.currentPositions[offset] - buffers.previousPositions[offset]) * alpha,
-                buffers.previousPositions[offset + 1]
-                    + (buffers.currentPositions[offset + 1] - buffers.previousPositions[offset + 1]) * alpha,
-                buffers.previousPositions[offset + 2]
-                    + (buffers.currentPositions[offset + 2] - buffers.previousPositions[offset + 2]) * alpha};
-        };
-        (void)particleAt;
-
-        for (std::uint32_t row = 0; row < buffers.rows; ++row)
-        {
-            for (std::uint32_t column = 0; column < buffers.columns; ++column)
+            for (std::uint32_t column = 0; column < surface.columns; ++column)
             {
-                const math::Vec3 position = interpolatedParticle(column, row);
-                clothNodeMatrices_.emplace_back();
-                composeModelMatrix(position, math::Quaternion{}, nodeScale, clothNodeMatrices_.back().data());
+                const std::size_t vertex = static_cast<std::size_t>(row) * surface.columns + column;
+                const std::size_t offset = vertex * renderer::meshVertexFloatCount;
+                auto positionAt = [&](std::uint32_t sampleColumn, std::uint32_t sampleRow, std::size_t axis)
+                {
+                    sampleColumn = std::min(sampleColumn, surface.columns - 1);
+                    sampleRow    = std::min(sampleRow, surface.rows - 1);
+                    const std::size_t sampleOffset
+                        = (static_cast<std::size_t>(sampleRow) * surface.columns + sampleColumn) * 3;
+                    const double previous = surface.previousPositions[sampleOffset + axis];
+                    const double current  = surface.currentPositions[sampleOffset + axis];
+                    return previous + (current - previous) * alpha;
+                };
+                double position[3] = {0.0, 0.0, 0.0};
+                double tangentU[3] = {0.0, 0.0, 0.0};
+                double tangentV[3] = {0.0, 0.0, 0.0};
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                {
+                    position[axis] = positionAt(column, row, axis);
+                    // Central differences with clamped boundary samples: the
+                    // same tangent construction the cloth surface sampler
+                    // uses, so rendered normals and query normals agree.
+                    tangentU[axis] = positionAt(column + 1, row, axis) - positionAt(column - 1, row, axis);
+                    tangentV[axis] = positionAt(column, row + 1, axis) - positionAt(column, row - 1, axis);
+                }
+                double normal[3] = {
+                    tangentV[1] * tangentU[2] - tangentV[2] * tangentU[1],
+                    tangentV[2] * tangentU[0] - tangentV[0] * tangentU[2],
+                    tangentV[0] * tangentU[1] - tangentV[1] * tangentU[0],
+                };
+                const double normalLength
+                    = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+                if (normalLength > 1.0e-12)
+                {
+                    normal[0] /= normalLength;
+                    normal[1] /= normalLength;
+                    normal[2] /= normalLength;
+                }
+                else
+                {
+                    normal[1] = 1.0; // degenerate face: rest-pose up fallback
+                }
+                surface.vertexScratch[offset + 0] = static_cast<float>(position[0]);
+                surface.vertexScratch[offset + 1] = static_cast<float>(position[1]);
+                surface.vertexScratch[offset + 2] = static_cast<float>(position[2]);
+                surface.vertexScratch[offset + 3] = static_cast<float>(normal[0]);
+                surface.vertexScratch[offset + 4] = static_cast<float>(normal[1]);
+                surface.vertexScratch[offset + 5] = static_cast<float>(normal[2]);
             }
         }
-        auto pushLink = [&](const math::Vec3 &from, const math::Vec3 &to)
+        if (renderCapability_ != nullptr && surface.meshHandle != renderer::invalidMesh)
         {
-            const math::Vec3 delta  = to - from;
-            const double     length = math::length(delta);
-            if (length <= 1.0e-9)
-            {
-                return;
-            }
-            const math::Vec3       direction = delta * (1.0 / length);
-            const math::Quaternion rotation  = math::makeRotationFromTo(math::Vec3{0.0, 1.0, 0.0}, direction);
-            const math::Vec3       center    = from + delta * 0.5;
-            clothLinkMatrices_.emplace_back();
-            composeModelMatrix(
-                center, rotation, math::Vec3{linkScale.x, length, linkScale.z}, clothLinkMatrices_.back().data());
-        };
-        for (std::uint32_t row = 0; row < buffers.rows; ++row)
-        {
-            for (std::uint32_t column = 0; column < buffers.columns; ++column)
-            {
-                if (column + 1 < buffers.columns)
-                {
-                    pushLink(interpolatedParticle(column, row), interpolatedParticle(column + 1, row));
-                }
-                if (row + 1 < buffers.rows)
-                {
-                    pushLink(interpolatedParticle(column, row), interpolatedParticle(column, row + 1));
-                }
-            }
+            renderer::RenderError updateError = renderer::RenderError::None;
+            renderCapability_->updateMeshVertices(renderCapability_->self,
+                rendererHandle_,
+                surface.meshHandle,
+                surface.vertexScratch.data(),
+                static_cast<std::uint32_t>(vertexCount),
+                &updateError);
         }
     }
 }
@@ -584,28 +669,28 @@ void SandboxRenderer::submit(renderer::RenderCapability &renderCapability, rende
         renderCapability.drawMeshes(
             renderCapability.self, renderer, drawCommands_.data(), static_cast<std::uint32_t>(drawCommands_.size()));
     }
+    // The cloth sheets draw after the batched scene commands: one drawMesh
+    // per sheet, double-sided with the fabric sheen so both sides of the
+    // deforming surface shade correctly (the lattice draw pair this replaces
+    // cost one instanced draw per particle plus one per structural edge).
     renderer::MeshMaterial clothMaterial;
     clothMaterial.baseColor[0]    = 0.30f;
     clothMaterial.baseColor[1]    = 0.66f;
     clothMaterial.baseColor[2]    = 0.78f;
-    clothMaterial.roughnessFactor = 0.6f;
-    if (!clothLinkMatrices_.empty())
+    clothMaterial.roughnessFactor = 0.85f;
+    clothMaterial.metallicFactor  = 0.0f;
+    clothMaterial.sheenFactor     = 0.55f;
+    clothMaterial.doubleSided     = true;
+    for (ClothSurfaceRender &surface : clothSurfaces_)
     {
-        renderCapability.drawMeshInstances(renderCapability.self,
-            renderer,
-            cubeMesh_,
-            clothLinkMatrices_.front().data(),
-            static_cast<std::uint32_t>(clothLinkMatrices_.size()),
-            &clothMaterial);
-    }
-    if (!clothNodeMatrices_.empty())
-    {
-        renderCapability.drawMeshInstances(renderCapability.self,
-            renderer,
-            clothNodeMesh_,
-            clothNodeMatrices_.front().data(),
-            static_cast<std::uint32_t>(clothNodeMatrices_.size()),
-            &clothMaterial);
+        if (surface.meshHandle != renderer::invalidMesh)
+        {
+            renderCapability.drawMesh(renderCapability.self,
+                renderer,
+                surface.meshHandle,
+                surface.identityModel.data(),
+                &clothMaterial);
+        }
     }
 }
 

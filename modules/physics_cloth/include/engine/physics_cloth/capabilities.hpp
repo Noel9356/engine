@@ -38,7 +38,15 @@ namespace engine::physics_cloth
 //       behavior of ClothDescription.sleepingEnabled. Everything from ABI 2
 //       keeps its slot and meaning; consumers check `abi >= 3` before
 //       touching the additions.
-inline constexpr std::uint32_t physicsClothCapabilityAbi = 3u;
+//   4 - appended ClothDescription.aerodynamicWind: when the flag is set the
+//       cloth's wind vector acts as a far-field wind velocity and the solver
+//       applies the per-face drag-and-lift model (the module's
+//       wind_drag_coefficient / wind_lift_coefficient configuration scales
+//       it) instead of the uniform per-particle acceleration; the default
+//       keeps the ABI 1-3 behavior. Everything from ABI 3 keeps its slot
+//       and meaning; consumers check `abi >= 4` before touching the
+//       addition.
+inline constexpr std::uint32_t physicsClothCapabilityAbi = 4u;
 
 using ClothHandle = std::uint32_t;
 
@@ -111,6 +119,16 @@ struct ClothDescription
     // closer than twice this radius repel each other after the constraint
     // iterations of every substep. 0 disables self-collision.
     double selfCollisionRadius = 0.0;
+
+    // ---- ABI 4 additions (consumers check `abi >= 4` before touching them).
+
+    // Aerodynamic wind: when false (the default) the cloth's wind vector is
+    // a uniform acceleration added to every particle; when true it is a
+    // far-field wind velocity (meters per second) and each grid face
+    // receives the per-face drag-and-lift response scaled by the module's
+    // wind_drag_coefficient / wind_lift_coefficient configuration, so the
+    // sheet catches the wind and flutters instead of sliding uniformly.
+    bool aerodynamicWind = false;
 };
 
 struct ClothInfo

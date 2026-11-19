@@ -417,13 +417,15 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             return false;
         }
     }
-    // The mesh pipeline exists in two depth-write variants: the default
-    // (writes depth, like every opaque pass) and a no-write twin for
-    // backdrop materials whose depthWrite flag is off (depth testing stays
-    // on; the shell must not poison the depth buffer the opaque passes
-    // draw into). Everything else - layout, shaders, culling, blend - is
-    // identical, so one builder lambda stamps both.
-    const auto createMeshPipeline = [&](bool depthWriteEnable, VkPipeline &outPipeline) -> bool
+    // The mesh pipeline exists in four variants: the default (writes depth,
+    // like every opaque pass), a no-write twin for backdrop materials whose
+    // depthWrite flag is off (depth testing stays on; the shell must not
+    // poison the depth buffer the opaque passes draw into), and a two-sided
+    // twin of each (cull mode NONE) for double-sided materials whose
+    // fragments may face either way (cloth sheets, flags, thin shells).
+    // Everything else - layout, shaders, blend - is identical, so one
+    // builder lambda stamps all four.
+    const auto createMeshPipeline = [&](bool depthWriteEnable, bool twoSided, VkPipeline &outPipeline) -> bool
     {
         static const std::uint32_t            specData[2]    = {static_cast<std::uint32_t>(direct_lighting::maxDirectLights), srgbOutput_ ? 1u : 0u}; // MAX_LIGHTS, SRGB_OUT
         static const VkSpecializationMapEntry specEntries[2] = {
@@ -493,7 +495,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .pScissors     = nullptr,
         };
 
-        const VkCullModeFlags cullMode = cullBackFaces_ ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+        const VkCullModeFlags cullMode = (cullBackFaces_ && !twoSided) ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
         const VkPipelineRasterizationStateCreateInfo rasterization{
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .pNext                   = nullptr,
@@ -656,13 +658,25 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
         }
         return true;
     };
-    if (!createMeshPipeline(true, pipeline_))
+    if (!createMeshPipeline(true, false, pipeline_))
     {
         vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
         vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
         return false;
     }
-    if (!createMeshPipeline(false, pipelineNoDepthWrite_))
+    if (!createMeshPipeline(false, false, pipelineNoDepthWrite_))
+    {
+        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
+        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
+        return false;
+    }
+    if (!createMeshPipeline(true, true, pipelineTwoSided_))
+    {
+        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
+        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
+        return false;
+    }
+    if (!createMeshPipeline(false, true, pipelineTwoSidedNoDepthWrite_))
     {
         vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
         vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
@@ -1202,6 +1216,16 @@ void VulkanPipeline::destroy(VkDevice device)
     {
         vkDestroyPipeline(device, pipelineNoDepthWrite_, nullptr);
         pipelineNoDepthWrite_ = VK_NULL_HANDLE;
+    }
+    if (pipelineTwoSided_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, pipelineTwoSided_, nullptr);
+        pipelineTwoSided_ = VK_NULL_HANDLE;
+    }
+    if (pipelineTwoSidedNoDepthWrite_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, pipelineTwoSidedNoDepthWrite_, nullptr);
+        pipelineTwoSidedNoDepthWrite_ = VK_NULL_HANDLE;
     }
     if (pipelineLayout_ != VK_NULL_HANDLE)
     {

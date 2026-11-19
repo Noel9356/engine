@@ -359,7 +359,8 @@ void VulkanResources::destroyMeshObject(VulkanMesh &mesh)
 bool VulkanResources::createMesh(MeshHandle id, const MeshDescription &description, RenderError *error)
 {
     VulkanMesh mesh;
-    mesh.indexCount = description.indexCount;
+    mesh.indexCount  = description.indexCount;
+    mesh.vertexBytes = static_cast<VkDeviceSize>(description.vertexCount) * meshVertexFloatCount * sizeof(float);
 
     const auto *vertices = static_cast<const float *>(description.vertices);
     float       minimum[3]
@@ -393,9 +394,8 @@ bool VulkanResources::createMesh(MeshHandle id, const MeshDescription &descripti
     mesh.boundsRadius = std::sqrt(radiusSquared);
     mesh.boundsValid  = std::isfinite(mesh.boundsRadius);
 
-    const VkDeviceSize vertexBytes
-        = static_cast<VkDeviceSize>(description.vertexCount) * meshVertexFloatCount * sizeof(float);
-    const VkDeviceSize indexBytes = static_cast<VkDeviceSize>(description.indexCount) * sizeof(std::uint32_t);
+    const VkDeviceSize vertexBytes = mesh.vertexBytes;
+    const VkDeviceSize indexBytes  = static_cast<VkDeviceSize>(description.indexCount) * sizeof(std::uint32_t);
     // Device-local buffers filled by the copy below (hence TRANSFER_DST usage);
     // VMA handles the sub-allocation.
     const bool vertexCreated = device_->createBuffer(vertexBytes,
@@ -460,6 +460,67 @@ void VulkanResources::destroyMesh(MeshHandle mesh)
 
     destroyMeshObject(found->second);
     meshes_.erase(found);
+}
+
+bool VulkanResources::prepareMeshVertexUpdate(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount,
+    VkBuffer *outVertexBuffer, VkDeviceSize *outVertexBytes, RenderError *error)
+{
+    const auto found = meshes_.find(mesh);
+    if (found == meshes_.end())
+    {
+        reportError(error, RenderError::InvalidMesh);
+        return false;
+    }
+    VulkanMesh &record = found->second;
+    const VkDeviceSize updateBytes
+        = static_cast<VkDeviceSize>(vertexCount) * meshVertexFloatCount * sizeof(float);
+    if (vertices == nullptr || vertexCount == 0 || updateBytes != record.vertexBytes)
+    {
+        // The update must cover the whole creation stream: a partial or
+        // oversized write would desynchronize the vertex layout the pipeline
+        // binds (or leave stale vertices behind the new tail).
+        reportError(error, RenderError::InvalidMesh);
+        return false;
+    }
+
+    // Refresh the bounding sphere from the new positions so draw-time
+    // frustum culling sees the simulated surface, not its rest pose.
+    const auto *positions = static_cast<const float *>(vertices);
+    float minimum[3]
+        = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    float maximum[3]
+        = {std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest()};
+    for (std::uint32_t index = 0; index < vertexCount; ++index)
+    {
+        const float *position = positions + static_cast<std::size_t>(index) * meshVertexFloatCount;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            minimum[axis] = std::min(minimum[axis], position[axis]);
+            maximum[axis] = std::max(maximum[axis], position[axis]);
+        }
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        record.boundsCenter[axis] = (minimum[axis] + maximum[axis]) * 0.5f;
+    }
+    float radiusSquared = 0.0f;
+    for (std::uint32_t index = 0; index < vertexCount; ++index)
+    {
+        const float *position = positions + static_cast<std::size_t>(index) * meshVertexFloatCount;
+        const float  x        = position[0] - record.boundsCenter[0];
+        const float  y        = position[1] - record.boundsCenter[1];
+        const float  z        = position[2] - record.boundsCenter[2];
+        radiusSquared         = std::max(radiusSquared, x * x + y * y + z * z);
+    }
+    record.boundsRadius = std::sqrt(radiusSquared);
+    record.boundsValid  = std::isfinite(record.boundsRadius);
+
+    *outVertexBuffer = record.vertexBuffer;
+    *outVertexBytes  = record.vertexBytes;
+    reportError(error, RenderError::None);
+    return true;
 }
 
 void VulkanResources::destroyTextureObject(VulkanTexture &texture)

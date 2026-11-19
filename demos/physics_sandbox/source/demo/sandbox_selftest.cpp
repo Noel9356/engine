@@ -1644,6 +1644,300 @@ SelfTestResult runSelfTestExtended(const SceneDependencies &dependencies, const 
         pass = pass && testPassed;
     }
 
+    // ---- 22b. cloth wake-on-contact, per-cloth drag targets, aerodynamic
+    // wind, and contact-friction rate independence ---------------------------
+    if (dependencies.cloth != nullptr && dependencies.rigid != nullptr
+        && dependencies.cloth->abi >= engine::physics_cloth::physicsClothCapabilityAbi)
+    {
+        EXTENDED_TEST_MARKER("cloth-extensions-2")
+
+        // (a) Wake-on-contact: a settled sheet must wake when an obstacle
+        // overlaps its resting surface, so moving rigid bodies cannot tunnel
+        // through sleeping cloth.
+        bool wokeOnContact = false;
+        bool sleptBeforeContact = false;
+        double dragDisplacementA = 0.0;
+        double dragDisplacementB = 0.0;
+        double aeroDeviation = 0.0;
+        double frictionDeviation = 0.0;
+        {
+            engine::physics_rigid::WorldDescription worldDescription;
+            const engine::physics_rigid::WorldHandle world
+                = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+            engine::physics_cloth::ClothDescription description{};
+            description.columns = 8;
+            description.rows    = 8;
+            description.spacing = 0.2;
+            // Heavy damping so the pinned curtain settles well inside the
+            // step budget (the sleep thresholds are module configuration).
+            description.damping = 0.6;
+            std::uint32_t pinned[8];
+            for (std::uint32_t column = 0; column < 8; ++column)
+            {
+                pinned[column] = column;
+            }
+            description.pinnedParticles = pinned;
+            description.pinnedCount     = 8;
+            const engine::physics_cloth::ClothHandle cloth
+                = dependencies.cloth->createCloth(dependencies.cloth->self, world, &description, nullptr);
+            if (cloth != engine::physics_cloth::invalidCloth)
+            {
+                for (std::uint32_t step = 0; step < 1200; ++step)
+                {
+                    dependencies.cloth->step(dependencies.cloth->self, cloth, 1.0 / 60.0);
+                    engine::physics_cloth::ClothStatistics statistics{};
+                    if (dependencies.cloth->clothStatistics(dependencies.cloth->self, cloth, &statistics))
+                    {
+                        if (statistics.sleeping)
+                        {
+                            break;
+                        }
+                    }
+                }
+                engine::physics_cloth::ClothStatistics statistics{};
+                dependencies.cloth->clothStatistics(dependencies.cloth->self, cloth, &statistics);
+                sleptBeforeContact = statistics.sleeping;
+                // A static box spawned overlapping the sheet's lower half.
+                const std::uint32_t particleCount = description.columns * description.rows;
+                std::vector<double> positions(static_cast<std::size_t>(particleCount) * 3, 0.0);
+                if (dependencies.cloth->copyParticlePositions(
+                        dependencies.cloth->self, cloth, positions.data(), particleCount * 3, nullptr)
+                    && sleptBeforeContact)
+                {
+                    const std::uint32_t probeParticle = particleCount - description.columns - 1;
+                    engine::physics_rigid::BodyDescription box;
+                    box.shape.kind              = engine::physics_rigid::ShapeKind::Box;
+                    box.shape.boxHalfExtents[0] = 0.3;
+                    box.shape.boxHalfExtents[1] = 0.3;
+                    box.shape.boxHalfExtents[2] = 0.3;
+                    box.transform.position      = engine::physics_rigid::Vec3{
+                        positions[probeParticle * 3 + 0], positions[probeParticle * 3 + 1],
+                        positions[probeParticle * 3 + 2]};
+                    box.kind = engine::physics_rigid::BodyKind::Static;
+                    dependencies.rigid->createBody(dependencies.rigid->self, world, &box, nullptr);
+                    dependencies.cloth->step(dependencies.cloth->self, cloth, 1.0 / 60.0);
+                    engine::physics_cloth::ClothStatistics afterContact{};
+                    dependencies.cloth->clothStatistics(dependencies.cloth->self, cloth, &afterContact);
+                    wokeOnContact = !afterContact.sleeping;
+                }
+                dependencies.cloth->destroyCloth(dependencies.cloth->self, cloth);
+            }
+            dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        }
+
+        // (b) Per-cloth drag targets: two simultaneously grabbed sheets must
+        // follow their own targets (a shared module-level target would pull
+        // both toward the same point).
+        bool dragTargetsIndependent = false;
+        {
+            engine::physics_rigid::WorldDescription worldDescription;
+            const engine::physics_rigid::WorldHandle world
+                = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+            std::uint32_t pinned[8];
+            for (std::uint32_t column = 0; column < 8; ++column)
+            {
+                pinned[column] = column;
+            }
+            engine::physics_cloth::ClothDescription description{};
+            description.columns            = 8;
+            description.rows               = 8;
+            description.spacing            = 0.2;
+            description.damping            = 0.3;
+            description.pinnedParticles    = pinned;
+            description.pinnedCount        = 8;
+            const engine::physics_cloth::ClothHandle clothA
+                = dependencies.cloth->createCloth(dependencies.cloth->self, world, &description, nullptr);
+            const engine::physics_cloth::ClothHandle clothB
+                = dependencies.cloth->createCloth(dependencies.cloth->self, world, &description, nullptr);
+            const std::uint32_t draggedParticle = 4 * 8 + 4;
+            if (clothA != engine::physics_cloth::invalidCloth && clothB != engine::physics_cloth::invalidCloth)
+            {
+                double startA[3] = {0.0, 0.0, 0.0};
+                double startB[3] = {0.0, 0.0, 0.0};
+                {
+                    std::vector<double> positions(static_cast<std::size_t>(64) * 3, 0.0);
+                    dependencies.cloth->copyParticlePositions(
+                        dependencies.cloth->self, clothA, positions.data(), 64 * 3, nullptr);
+                    for (std::uint32_t axis = 0; axis < 3; ++axis)
+                    {
+                        startA[axis] = positions[static_cast<std::size_t>(draggedParticle) * 3 + axis];
+                    }
+                    dependencies.cloth->copyParticlePositions(
+                        dependencies.cloth->self, clothB, positions.data(), 64 * 3, nullptr);
+                    for (std::uint32_t axis = 0; axis < 3; ++axis)
+                    {
+                        startB[axis] = positions[static_cast<std::size_t>(draggedParticle) * 3 + axis];
+                    }
+                }
+                engine::physics_cloth::ClothParticleDrag drag{};
+                drag.particleIndex = draggedParticle;
+                // Demo-grade spring: the XPBD velocity re-derivation makes a
+                // single-particle spring quasi-static (the kick redistributes
+                // across the whole sheet each substep), so the displacement
+                // per second is millimeters - the assertion below checks the
+                // DIRECTION each cloth moves, which is what per-cloth targets
+                // decide, not the magnitude.
+                drag.stiffness     = 400.0;
+                drag.damping       = 8.0;
+                dependencies.cloth->beginParticleDrag(dependencies.cloth->self, clothA, &drag);
+                dependencies.cloth->beginParticleDrag(dependencies.cloth->self, clothB, &drag);
+                const double targetA[3] = {startA[0] + 2.0, startA[1], startA[2]};
+                const double targetB[3] = {startB[0] - 2.0, startB[1], startB[2]};
+                dependencies.cloth->setParticleDragTarget(dependencies.cloth->self, clothA, targetA);
+                dependencies.cloth->setParticleDragTarget(dependencies.cloth->self, clothB, targetB);
+                for (std::uint32_t step = 0; step < 120; ++step)
+                {
+                    dependencies.cloth->step(dependencies.cloth->self, clothA, 1.0 / 60.0);
+                    dependencies.cloth->step(dependencies.cloth->self, clothB, 1.0 / 60.0);
+                }
+                std::vector<double> positions(static_cast<std::size_t>(64) * 3, 0.0);
+                dependencies.cloth->copyParticlePositions(
+                    dependencies.cloth->self, clothA, positions.data(), 64 * 3, nullptr);
+                const double endAX = positions[static_cast<std::size_t>(draggedParticle) * 3];
+                dependencies.cloth->copyParticlePositions(
+                    dependencies.cloth->self, clothB, positions.data(), 64 * 3, nullptr);
+                const double endBX = positions[static_cast<std::size_t>(draggedParticle) * 3];
+                dragDisplacementA      = endAX - startA[0];
+                dragDisplacementB      = endBX - startB[0];
+                dragTargetsIndependent = dragDisplacementA > 5.0e-3 && dragDisplacementB < -5.0e-3;
+                dependencies.cloth->endParticleDrag(dependencies.cloth->self, clothA);
+                dependencies.cloth->endParticleDrag(dependencies.cloth->self, clothB);
+                dependencies.cloth->destroyCloth(dependencies.cloth->self, clothA);
+                dependencies.cloth->destroyCloth(dependencies.cloth->self, clothB);
+            }
+            dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        }
+
+        // (c) Aerodynamic wind: two identical curtains, one with the
+        // per-face drag-and-lift flag and one with the uniform acceleration,
+        // must diverge under the same wind vector (the models are genuinely
+        // different) while both stay finite.
+        bool aeroModelsDiverge = false;
+        bool aeroStaysFinite   = false;
+        {
+            engine::physics_rigid::WorldDescription worldDescription;
+            const engine::physics_rigid::WorldHandle world
+                = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+            std::uint32_t pinned[8];
+            for (std::uint32_t column = 0; column < 8; ++column)
+            {
+                pinned[column] = column;
+            }
+            engine::physics_cloth::ClothDescription uniformDescription{};
+            uniformDescription.columns         = 8;
+            uniformDescription.rows            = 8;
+            uniformDescription.spacing         = 0.2;
+            uniformDescription.pinnedParticles = pinned;
+            uniformDescription.pinnedCount     = 8;
+            engine::physics_cloth::ClothDescription aeroDescription = uniformDescription;
+            aeroDescription.aerodynamicWind                        = true;
+            const engine::physics_cloth::ClothHandle uniformCloth
+                = dependencies.cloth->createCloth(dependencies.cloth->self, world, &uniformDescription, nullptr);
+            const engine::physics_cloth::ClothHandle aeroCloth
+                = dependencies.cloth->createCloth(dependencies.cloth->self, world, &aeroDescription, nullptr);
+            if (uniformCloth != engine::physics_cloth::invalidCloth && aeroCloth != engine::physics_cloth::invalidCloth)
+            {
+                const double wind[3] = {6.0, 0.0, 0.0};
+                dependencies.cloth->setWindAcceleration(dependencies.cloth->self, uniformCloth, wind);
+                dependencies.cloth->setWindAcceleration(dependencies.cloth->self, aeroCloth, wind);
+                const std::size_t particleCount = static_cast<std::size_t>(64);
+                std::vector<double> uniformPositions(particleCount * 3, 0.0);
+                std::vector<double> aeroPositions(particleCount * 3, 0.0);
+                for (std::uint32_t step = 0; step < 240; ++step)
+                {
+                    dependencies.cloth->step(dependencies.cloth->self, uniformCloth, 1.0 / 60.0);
+                    dependencies.cloth->step(dependencies.cloth->self, aeroCloth, 1.0 / 60.0);
+                }
+                dependencies.cloth->copyParticlePositions(
+                    dependencies.cloth->self, uniformCloth, uniformPositions.data(), 64 * 3, nullptr);
+                dependencies.cloth->copyParticlePositions(
+                    dependencies.cloth->self, aeroCloth, aeroPositions.data(), 64 * 3, nullptr);
+                double deviation = 0.0;
+                bool finite = true;
+                for (std::size_t entry = 0; entry < particleCount * 3; ++entry)
+                {
+                    deviation = std::max(deviation, std::abs(uniformPositions[entry] - aeroPositions[entry]));
+                    finite    = finite && std::isfinite(aeroPositions[entry]) && std::isfinite(uniformPositions[entry]);
+                }
+                aeroDeviation     = deviation;
+                aeroModelsDiverge = deviation > 0.02;
+                aeroStaysFinite   = finite;
+                dependencies.cloth->destroyCloth(dependencies.cloth->self, uniformCloth);
+                dependencies.cloth->destroyCloth(dependencies.cloth->self, aeroCloth);
+            }
+            dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        }
+
+        // (d) Contact friction is rate independent: a sheet draped over a
+        // plane and stepped 1.5 s at 30 and 120 Hz converges to the same
+        // resting shape (the documented per-second friction retention).
+        bool frictionRateIndependent = false;
+        {
+            auto drapeRun = [&](double fixedDelta)
+            {
+                engine::physics_rigid::WorldDescription worldDescription;
+                const engine::physics_rigid::WorldHandle world
+                    = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+                engine::physics_rigid::BodyDescription ground;
+                ground.shape.kind              = engine::physics_rigid::ShapeKind::Plane;
+                ground.shape.planeNormal[0]    = 0.0;
+                ground.shape.planeNormal[1]    = 1.0;
+                ground.shape.planeNormal[2]    = 0.0;
+                ground.shape.planeOffset       = 0.0;
+                ground.kind                    = engine::physics_rigid::BodyKind::Static;
+                dependencies.rigid->createBody(dependencies.rigid->self, world, &ground, nullptr);
+                std::uint32_t pinned[8];
+                for (std::uint32_t column = 0; column < 8; ++column)
+                {
+                    pinned[column] = column;
+                }
+                engine::physics_cloth::ClothDescription description{};
+                description.columns            = 8;
+                description.rows               = 8;
+                description.spacing            = 0.2;
+                description.pinnedParticles    = pinned;
+                description.pinnedCount        = 8;
+                description.transform.position = engine::physics_rigid::Vec3{0.0, 0.35, 0.0};
+                description.friction           = 0.55;
+                const engine::physics_cloth::ClothHandle cloth
+                    = dependencies.cloth->createCloth(dependencies.cloth->self, world, &description, nullptr);
+                std::vector<double> finalPositions(static_cast<std::size_t>(64) * 3, 0.0);
+                if (cloth != engine::physics_cloth::invalidCloth)
+                {
+                    const std::uint32_t steps = static_cast<std::uint32_t>(std::llround(1.5 / fixedDelta));
+                    for (std::uint32_t step = 0; step < steps; ++step)
+                    {
+                        dependencies.cloth->step(dependencies.cloth->self, cloth, fixedDelta);
+                    }
+                    dependencies.cloth->copyParticlePositions(
+                        dependencies.cloth->self, cloth, finalPositions.data(), 64 * 3, nullptr);
+                    dependencies.cloth->destroyCloth(dependencies.cloth->self, cloth);
+                }
+                dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+                return finalPositions;
+            };
+            const std::vector<double> at30  = drapeRun(1.0 / 30.0);
+            const std::vector<double> at120 = drapeRun(1.0 / 120.0);
+            double deviation = 0.0;
+            for (std::size_t entry = 0; entry < at30.size() && entry < at120.size(); ++entry)
+            {
+                deviation = std::max(deviation, std::abs(at30[entry] - at120[entry]));
+            }
+            frictionDeviation       = deviation;
+            frictionRateIndependent = deviation <= 1.5e-1;
+        }
+
+        const bool testPassed = sleptBeforeContact && wokeOnContact && dragTargetsIndependent && aeroModelsDiverge
+                                && aeroStaysFinite && frictionRateIndependent;
+        report << (testPassed ? "PASS" : "FAIL") << ": cloth extensions 2 - slept first " << sleptBeforeContact
+               << ", wakes on contact " << wokeOnContact << ", per-cloth drag targets " << dragTargetsIndependent
+               << " (A " << dragDisplacementA << ", B " << dragDisplacementB << ")"
+               << ", aero wind diverges " << aeroModelsDiverge << " (dev " << aeroDeviation << ")"
+               << ", aero finite " << aeroStaysFinite << ", friction rate independent " << frictionRateIndependent
+               << " (dev " << frictionDeviation << ")" << "\n";
+        pass = pass && testPassed;
+    }
+
     // ---- 23. particle simulation LOD -----------------------------------------
     if (dependencies.particles != nullptr)
     {

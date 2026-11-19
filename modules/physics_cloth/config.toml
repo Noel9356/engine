@@ -1,4 +1,5 @@
 [physics_cloth]
+fixed_rate_hz                = 60.0
 lod_animation_threshold      = 0.1
 lod_demotion_margin          = 0.8
 lod_enabled                  = false
@@ -9,9 +10,11 @@ lod_interval_procedural      = 4
 lod_interval_simplified      = 2
 lod_procedural_threshold     = 0.25
 lod_simplified_threshold     = 0.5
-fixed_rate_hz                = 60.0
 maximum_cloths               = 64
 maximum_particles            = 200000
 maximum_particles_per_cloth  = 65536
 maximum_steps_per_simulate   = 8
+solver_iterations            = 1
 substeps_per_step            = 8
+wind_drag_coefficient        = 1.5
+wind_lift_coefficient        = 0.2

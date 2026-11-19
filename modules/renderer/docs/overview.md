@@ -8,9 +8,9 @@ The module keeps no world-space scene state of its own: draws are per-frame comm
 
 | Capability | ABI | Header |
 | --- | --- | --- |
-| `renderer` | `renderCapabilityAbi = 13` | `modules/renderer/include/engine/renderer/capabilities.hpp` |
-| `renderer.vulkan` (secondary) | `renderCapabilityAbi = 13` (same constant) | same header |
-| `renderer.headless` (secondary) | `renderCapabilityAbi = 13` (same constant) | same header |
+| `renderer` | `renderCapabilityAbi = 14` | `modules/renderer/include/engine/renderer/capabilities.hpp` |
+| `renderer.vulkan` (secondary) | `renderCapabilityAbi = 14` (same constant) | same header |
+| `renderer.headless` (secondary) | `renderCapabilityAbi = 14` (same constant) | same header |
 
 The shared data types the capability references live in `shared_types/include/engine/renderer/` (`mesh.hpp`, `material.hpp`, `device_profile.hpp`) and in `modules/renderer/include/engine/renderer/` (`draw_sort.hpp`, `draw_batch.hpp`, `dynamic_resolution.hpp`).
 
@@ -60,8 +60,15 @@ Vulkan swapchains require surface support for color-attachment usage. PPM screen
 
 A material with `opacity` below 1 renders as a transparent draw: depth testing stays on (opaque geometry in front keeps occluding it) while depth writes turn off, so co-transmitted surfaces do not occlude each other and the composite follows submission order exactly like the shell-fur stack. The composite has two modes per pixel. Where the lumen_reflection field carries a traced response for the pixel's material (the same gate the field sample applies everywhere), the shaded result commits directly: the field's response already contains the interface's reflected share plus the transmitted share refracted through the medium, so blending the raw background in as well would show the scene behind twice. Where no traced response exists - the surface sits outside the traced roughness band, or the reflection module is absent - the draw alpha blends with the material's opacity over the framebuffer (the classic transparent pass, unbent). Consumers order their transparent draws after the opaque scene, far to near within the transparent group, the same contract the fur stack documents. The surface's own diffuse terms (direct, hemispheric, and probe-grid ambient) scale by the opacity: a transparent surface scatters only the share it keeps off the transmitted path. The pbr module's material conversion maps glTF/MTL opacity and index of refraction into these fields, so imported transmissive materials flow through unchanged.
 
-## Architecture
+## Cloth shading and dynamic geometry (ABI 14)
 
+Two material fields drive the fabric rendering path, and one appended entry point keeps simulated surfaces cheap to draw:
+
+- **`MeshMaterial.sheenFactor`** (0 = plain metallic-roughness PBR, unchanged default): values above 0 blend the GGX specular toward the Charlie sheen lobe (Estevez & Kulla 2017) with the Neubelt visibility term - the production cloth specular pair - and soften the direct-light terminator with the energy-conserving wrap-diffuse weight ((nDotL + w) / (1 + w)^2, w = 0.5 x sheenFactor), so fabric keeps a grazing-angle rim and light bleeds through the terminator the way thin cloth does. The sheen highlight is tinted toward the material's base color (60% toward white), so colored fabric shows a colored rim instead of a dielectric-gray one. Both backends implement the identical formula (the `shadeDirectLight` helper in `shaders/mesh.frag` and `pbrShade` in `pbr_shading.hpp`), applied to the sun and every direct light.
+- **`MeshMaterial.doubleSided`**: two-sided rendering for thin sheets. The draw skips back-face culling (a dedicated two-sided pipeline variant in the Vulkan backend - cull mode NONE with the same shaders - and the winding-vote path disabled in the headless rasterizer) and flips the shading normal toward the viewer on back-facing fragments before the tangent frame is built, the glTF `doubleSided` contract (back-face normals are reversed before lighting). Cloth sheets, flags, and curtains therefore shade correctly from both sides without a duplicated shell mesh.
+- **`updateMeshVertices(renderer, mesh, vertices, vertexCount)`**: replaces a mesh's whole vertex stream with the canonical interleaved layout (position, normal, color, uv - 11 floats per vertex) at the creation vertex count; the index buffer is untouched. This is the simulated-surface path: a cloth sheet's particle grid IS the mesh's vertex grid, so one update and one draw render the whole deforming sheet each frame - the consumer recomputes smooth per-particle normals from the simulated grid and hands the stream over, and the bounding sphere refreshes for frustum culling. The Vulkan backend streams updates through per-frame-slot staging buffers (a persistent-mapped transfer ring mirroring the instance-matrix ring's slot lifecycle, with the transfer-to-vertex-input barrier recorded in the same command buffer as the consuming draws); updates that arrive between frames park until the next `beginFrame` and record before any draw can bind the mesh. The headless backend rewrites its planar vertex arrays, recomputes bounds, and drops the mesh's cached transforms and winding votes. Callers must null-check the entry point (a module built before ABI 14 leaves it null).
+
+## Architecture
 | File | Role |
 | --- | --- |
 | `module.toml` / `config.toml` | Module descriptor (capabilities + declared config keys) and default values for the `[renderer]` section. |
@@ -106,7 +113,7 @@ A consumer creates a renderer per window surface and drives it frame by frame:
 1. `createRenderer(surface, &error)` - resolves the backend (see below), constructs it, and returns a `RendererHandle`.
 2. Optionally `createMesh`/`createTexture`/`createTextureFromFile` (also possible later).
 3. Per frame: `setViewport`, `setCamera`, then `beginFrame(renderer, frame)`.
-4. Record draws: `drawMesh`, `drawMeshes` (sorted/batched command list), `drawMeshInstances` (explicit instancing), `drawFur`/`drawFurInstances` (alpha-blended shell-fur layer stacks, ABI 13 - see the physics_fur module's overview), `drawOverlay` (UI triangles).
+4. Record draws: `drawMesh`, `drawMeshes` (sorted/batched command list), `drawMeshInstances` (explicit instancing), `drawFur`/`drawFurInstances` (alpha-blended shell-fur layer stacks, ABI 13 - see the physics_fur module's overview), `drawOverlay` (UI triangles); dynamic surfaces refresh their vertices first through `updateMeshVertices` (ABI 14 - the simulated-cloth path).
 5. `endFrame(renderer)` submits/presents (Vulkan) or blits (headless).
 6. `destroyRenderer`, `destroyMesh`, `destroyTexture` as needed.
 

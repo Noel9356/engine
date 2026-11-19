@@ -55,6 +55,25 @@ inline glm::vec3 pbrFresnelSchlick(float cosTheta, const glm::vec3 &f0)
     return f0 + (1.0f - f0) * fifthPower;
 }
 
+// Charlie sheen distribution (Estevez & Kulla 2017): the fabric lobe that
+// keeps a grazing-angle rim on cloth-like materials. The twin of
+// distributionCharlie in shaders/mesh.frag.
+inline float pbrDistributionCharlie(float nDotH, float roughness)
+{
+    const float invAlpha = 1.0f / roughness;
+    const float cos2h    = nDotH * nDotH;
+    const float sin2h    = glm::max(1.0f - cos2h, 0.0078125f); // 2^(-14/2), so sin2h^(1/alpha) stays finite
+    return (2.0f + invAlpha) * std::pow(sin2h, invAlpha * 0.5f) * (1.0f / (2.0f * glm::pi<float>()));
+}
+
+// Neubelt visibility (the Ready-at-Dawn cloth visibility term): the smooth
+// Ashikhmin approximation of the Smith geometry term with the microfacet
+// denominator folded in - the standard partner of the Charlie lobe.
+inline float pbrVisibilityNeubelt(float nDotV, float nDotL)
+{
+    return 1.0f / (4.0f * (nDotL + nDotV - nDotL * nDotV));
+}
+
 // Full CPU shading pass: hemispheric ambient (or the lumen_gi probe-grid
 // indirect term blended over it by probe validity), one directional sun, then
 // the prepared direct lights (range-faded point/spot attenuation with
@@ -65,7 +84,8 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     const glm::vec3 &cameraPosition, const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance,
     const glm::vec3 &ambientSky, const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic,
     float roughness, float ambientOcclusion, const PreparedDirectLight *directLights,
-    std::uint32_t directLightCount, const PreparedGiProbeGrid *giGrid = nullptr, float opacity = 1.0f)
+    std::uint32_t directLightCount, const PreparedGiProbeGrid *giGrid = nullptr, float opacity = 1.0f,
+    float sheenFactor = 0.0f)
 {
     // Metallic surfaces carry almost no diffuse response. The hemispheric
     // ambient and the probe-grid GI are diffuse integrals, so they scale by
@@ -108,6 +128,15 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     const glm::vec3 f0      = glm::mix(dielectricF0, albedo, metallic);
     const float     invPi   = 1.0f / glm::pi<float>();
     const glm::vec3 diffuse = albedo * ((1.0f - metallic) * invPi) * glm::clamp(opacity, 0.0f, 1.0f);
+    // Fabric (cloth) shading, the twin of shaders/mesh.frag's shadeDirectLight:
+    // sheenFactor > 0 blends the GGX specular toward the Charlie/Neubelt
+    // fabric lobe (sheen highlight tinted toward the base color) and replaces
+    // the plain nDotL diffuse weight with the energy-conserving wrap factor.
+    sheenFactor            = glm::clamp(sheenFactor, 0.0f, 1.0f);
+    const bool  clothShading = sheenFactor > 0.0f;
+    const float wrapWeight   = 0.5f * sheenFactor;
+    const float wrapDivisor  = (1.0f + wrapWeight) * (1.0f + wrapWeight);
+    const glm::vec3 sheenColor = glm::mix(glm::vec3(1.0f), albedo, 0.6f);
 
     const float geomK = (roughness + 1.0f) * (roughness + 1.0f) * 0.125f;
 
@@ -122,8 +151,17 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
         const glm::vec3 fTerm      = pbrFresnelSchlick(vDotH, f0);
 
         const float     invSpec  = 1.0f / (4.0f * nDotV * sunNDotL + 1.0e-5f);
-        const glm::vec3 specular = (dTerm * gTerm * invSpec) * fTerm;
-        result += (diffuse + specular) * sunRadiance * sunNDotL;
+        glm::vec3       specular = (dTerm * gTerm * invSpec) * fTerm;
+        float sunDiffuseWeight = sunNDotL;
+        if (clothShading)
+        {
+            const glm::vec3 sheenSpecular
+                = glm::vec3(pbrDistributionCharlie(nDotH, roughness) * pbrVisibilityNeubelt(nDotV, sunNDotL))
+                  * sheenColor;
+            specular         = glm::mix(specular, sheenSpecular, sheenFactor);
+            sunDiffuseWeight = glm::max((sunNDotL + wrapWeight) / wrapDivisor, 0.0f);
+        }
+        result += (diffuse + specular) * sunRadiance * sunDiffuseWeight;
     }
 
     const std::uint32_t lightCount = std::min(directLightCount, direct_lighting::maxDirectLights);
@@ -149,8 +187,17 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
         const float     gTerm    = pbrGeometrySmith(nDotV, localNDotL, geomK);
         const glm::vec3 fTerm    = pbrFresnelSchlick(vDotH, f0);
         const float     invSpec  = 1.0f / (4.0f * nDotV * localNDotL + 1.0e-5f);
-        const glm::vec3 specular = (dTerm * gTerm * invSpec) * fTerm;
-        result += (diffuse + specular) * light.radiance * attenuation * localNDotL;
+        glm::vec3       specular = (dTerm * gTerm * invSpec) * fTerm;
+        float lightDiffuseWeight = localNDotL;
+        if (clothShading)
+        {
+            const glm::vec3 sheenSpecular
+                = glm::vec3(pbrDistributionCharlie(nDotH, roughness) * pbrVisibilityNeubelt(nDotV, localNDotL))
+                  * sheenColor;
+            specular          = glm::mix(specular, sheenSpecular, sheenFactor);
+            lightDiffuseWeight = glm::max((localNDotL + wrapWeight) / wrapDivisor, 0.0f);
+        }
+        result += (diffuse + specular) * light.radiance * attenuation * lightDiffuseWeight;
     }
     return result;
 }

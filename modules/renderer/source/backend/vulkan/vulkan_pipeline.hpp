@@ -21,10 +21,11 @@ namespace renderer
 
 class VulkanDeviceContext;
 
-// Per-draw state pushed to both shader stages (112 bytes, matching the
+// Per-draw state pushed to both shader stages (128 bytes, matching the
 // push_constant block declared in shaders/mesh.vert / mesh.frag).
 // metallicRoughness packs (metallic, roughness, normalScale, occlusionStrength);
-// emissive packs (emissiveColor.rgb, unlit flag).
+// emissive packs (emissiveColor.rgb, unlit flag); cloth packs
+// (sheenFactor, doubleSided flag, unused, unused).
 struct PushConstants
 {
     float model[16]          = {};
@@ -33,11 +34,15 @@ struct PushConstants
     float metallicRoughness[4] = {0.0f, 1.0f, 1.0f, 1.0f};
 
     float emissive[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    float cloth[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 };
-static_assert(sizeof(PushConstants) == 112, "the shader's push_constant block is 112 bytes");
+static_assert(sizeof(PushConstants) == 128, "the shader's push_constant block is 128 bytes");
 
 // Per-draw state pushed to the fur pipeline's stages (128 bytes, matching
-// shaders/fur.vert / fur.frag: the mesh PushData block plus one fur vec4).
+// shaders/fur.vert / fur.frag: the mesh PushData block minus the cloth vec4
+// plus one fur vec4 - both fifth slots share the same 16 bytes at offset
+// 112, so the fur block stays at the 128-byte push-constant minimum).
 // On the fur pipeline metallicRoughness is reinterpreted as
 // (metallic, roughness, densityBoost, outerLayerFade) - fur shading never
 // reads the normal-map/occlusion factors (see fur.frag). fur packs
@@ -114,6 +119,19 @@ public:
     {
         return pipelineNoDepthWrite_;
     }
+    // Two-sided mesh pipeline variants (cull mode NONE): the variants bind
+    // when the material's doubleSided flag is on (cloth sheets, flags, thin
+    // shells), whose fragments may face either way and flip their shading
+    // normal in the fragment stage. Same shaders and layout as the
+    // front-face-culled mesh pipeline; each has its depth-write twin.
+    VkPipeline pipelineTwoSided() const
+    {
+        return pipelineTwoSided_;
+    }
+    VkPipeline pipelineTwoSidedNoDepthWrite() const
+    {
+        return pipelineTwoSidedNoDepthWrite_;
+    }
     VkPipelineLayout overlayPipelineLayout() const
     {
         return overlayPipelineLayout_;
@@ -170,6 +188,8 @@ private:
     VkPipelineLayout      pipelineLayout_        = VK_NULL_HANDLE;
     VkPipeline            pipeline_              = VK_NULL_HANDLE;
     VkPipeline            pipelineNoDepthWrite_  = VK_NULL_HANDLE;
+    VkPipeline            pipelineTwoSided_      = VK_NULL_HANDLE;
+    VkPipeline            pipelineTwoSidedNoDepthWrite_ = VK_NULL_HANDLE;
     VkPipelineLayout      furPipelineLayout_     = VK_NULL_HANDLE; // set layouts + 128-byte push constants
     VkPipeline            furPipeline_           = VK_NULL_HANDLE;
     VkPipelineLayout      overlayPipelineLayout_ = VK_NULL_HANDLE; // set 1 layout + 16-byte vertex push constants

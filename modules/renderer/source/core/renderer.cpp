@@ -513,6 +513,29 @@ private:
         record->backendInstance->destroyMesh(mesh);
     }
 
+    // Dynamic-geometry refresh (the cloth path): vertices is the canonical
+    // interleaved stream (11 floats per vertex - position, normal, color,
+    // uv - the layout every mesh is stored in regardless of the description
+    // it was created from) and must cover exactly the creation vertex count;
+    // the index buffer is untouched. The backend copies the source before
+    // returning and records the upload so the next draws bind the new data.
+    bool updateMeshVerticesImpl(RendererHandle renderer, MeshHandle mesh, const void *vertices,
+        std::uint32_t vertexCount, RenderError *error)
+    {
+        RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr)
+        {
+            reportError(error, RenderError::InvalidHandle);
+            return false;
+        }
+        if (mesh == invalidMesh || vertices == nullptr || vertexCount == 0)
+        {
+            reportError(error, RenderError::InvalidMesh);
+            return false;
+        }
+        return record->backendInstance->updateMeshVertices(mesh, vertices, vertexCount, error);
+    }
+
     void drawMeshImpl(RendererHandle renderer, MeshHandle mesh, const float *modelMatrix, const MeshMaterial *material)
     {
         RendererRecord *record = recordFor(renderer);
@@ -847,6 +870,10 @@ private:
         { return static_cast<RenderModule *>(self)->createMeshImpl(renderer, description, error); };
         renderCapability_.destroyMesh = [](void *self, RendererHandle renderer, MeshHandle mesh)
         { static_cast<RenderModule *>(self)->destroyMeshImpl(renderer, mesh); };
+        renderCapability_.updateMeshVertices = [](void *self, RendererHandle renderer, MeshHandle mesh,
+                                                    const void *vertices, std::uint32_t vertexCount,
+                                                    RenderError *error)
+        { return static_cast<RenderModule *>(self)->updateMeshVerticesImpl(renderer, mesh, vertices, vertexCount, error); };
         renderCapability_.drawMesh = [](void                *self,
                                          RendererHandle      renderer,
                                          MeshHandle          mesh,

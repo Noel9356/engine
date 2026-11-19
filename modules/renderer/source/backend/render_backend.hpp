@@ -15,6 +15,7 @@
 #include <engine/renderer/material.hpp>
 #include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
+#include "render_errors.hpp"
 
 #include <cstdint>
 
@@ -127,6 +128,24 @@ public:
     // upload; the description's memory is not referenced afterwards.
     virtual bool createMesh(MeshHandle id, const MeshDescription &description, RenderError *error) = 0;
     virtual void destroyMesh(MeshHandle mesh)                                                      = 0;
+
+    // Dynamic-geometry refresh (the cloth path): replaces a mesh's whole
+    // vertex stream with data laid out exactly like its creation description
+    // (same count, stride, and attribute table; the index buffer is
+    // untouched). Backends copy the source before returning; the new
+    // positions are visible to the draws of the frame that follows the
+    // update (same frame when called between beginFrame/endFrame). Default
+    // implementation reports Unsupported so a backend without dynamic
+    // updates stays interface-complete.
+    virtual bool updateMeshVertices(
+        MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error)
+    {
+        (void)mesh;
+        (void)vertices;
+        (void)vertexCount;
+        reportError(error, RenderError::Unsupported);
+        return false;
+    }
 
     virtual bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) = 0;
     virtual void destroyTexture(TextureHandle texture)                                                      = 0;

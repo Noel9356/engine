@@ -527,6 +527,90 @@ void HeadlessBackend::destroyMesh(MeshHandle mesh)
     meshes.erase(mesh);
 }
 
+// Dynamic-geometry refresh (the cloth path): replaces the whole vertex
+// stream from the canonical interleaved layout, recomputes the bounding
+// sphere, and drops every cache keyed on the old geometry (the transform
+// cache and the winding-vote memos). The index buffer and the decimated LOD
+// lists reference it unchanged, so they stay valid.
+bool HeadlessBackend::updateMeshVertices(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error)
+{
+    const auto found = meshes.find(mesh);
+    if (found == meshes.end())
+    {
+        reportError(error, RenderError::InvalidMesh);
+        return false;
+    }
+    HeadlessMesh      &record = found->second;
+    const std::size_t  count  = record.vertexCount();
+    if (vertices == nullptr || vertexCount == 0 || vertexCount != count)
+    {
+        // The update must cover the whole creation stream: a partial or
+        // oversized write would desynchronize the vertex layout (or leave
+        // stale vertices behind the new tail).
+        reportError(error, RenderError::InvalidMesh);
+        return false;
+    }
+    try
+    {
+        const auto *src = static_cast<const float *>(vertices);
+        record.positions.resize(count * 3);
+        record.normals.resize(count * 3);
+        record.colors.resize(count * 3);
+        record.uvs.resize(count * 2);
+        for (std::size_t v = 0; v < count; ++v)
+        {
+            const float *s                = src + v * meshVertexFloatCount;
+            record.positions[v * 3 + 0]   = s[0];
+            record.positions[v * 3 + 1]   = s[1];
+            record.positions[v * 3 + 2]   = s[2];
+            record.normals[v * 3 + 0]     = s[3];
+            record.normals[v * 3 + 1]     = s[4];
+            record.normals[v * 3 + 2]     = s[5];
+            record.colors[v * 3 + 0]      = s[6];
+            record.colors[v * 3 + 1]      = s[7];
+            record.colors[v * 3 + 2]      = s[8];
+            record.uvs[v * 2 + 0]         = s[9];
+            record.uvs[v * 2 + 1]         = s[10];
+        }
+
+        glm::vec3 minimum(std::numeric_limits<float>::max());
+        glm::vec3 maximum(std::numeric_limits<float>::lowest());
+        for (std::size_t v = 0; v < count; ++v)
+        {
+            const glm::vec3 p(record.positions[v * 3], record.positions[v * 3 + 1], record.positions[v * 3 + 2]);
+            minimum = glm::min(minimum, p);
+            maximum = glm::max(maximum, p);
+        }
+        record.boundsCenter   = (minimum + maximum) * 0.5f;
+        float radiusSquared   = 0.0f;
+        for (std::size_t v = 0; v < count; ++v)
+        {
+            const glm::vec3 delta = glm::vec3(record.positions[v * 3], record.positions[v * 3 + 1],
+                                      record.positions[v * 3 + 2])
+                                    - record.boundsCenter;
+            radiusSquared = std::max(radiusSquared, glm::dot(delta, delta));
+        }
+        record.boundsRadius = std::sqrt(radiusSquared);
+        record.boundsValid  = std::isfinite(record.boundsRadius);
+
+        // The geometry changed: cached world-space transforms and winding
+        // votes derived from the old positions are invalid from this call on.
+        forgetTransformCache(mesh);
+        for (HeadlessMesh::WindingVoteMemo &memo : record.windingVotes)
+        {
+            memo.sources.fill(nullptr);
+            memo.signs.fill(0.0f);
+        }
+        reportError(error, RenderError::None);
+        return true;
+    }
+    catch (const std::bad_alloc &)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+}
+
 // Stores the RGBA8 copy and builds the float mip chain (box-filtered
 // quarters) used by the sampler.
 bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &description, RenderError *error)
@@ -1716,6 +1800,8 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.normalScale             = material.normalScale;
     outSetup.occlusionStrength       = material.occlusionStrength;
     outSetup.emissiveColor           = glm::make_vec3(material.emissiveColor);
+    outSetup.sheenFactor             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
+    outSetup.doubleSided             = material.doubleSided;
     outSetup.hasBaseColorMap         = outSetup.baseColorMap != &neutralWhite_;
     outSetup.hasNormalMap            = outSetup.normalMap != &flatNormal_;
     outSetup.hasMetallicRoughnessMap = outSetup.metallicRoughnessMap != &neutralWhite_;
@@ -1735,8 +1821,11 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
 
     outSetup.enableBackFaceCull = false;
     outSetup.frontSign          = 0.0f;
-    if (backFaceCullingEnabled_ && !outSetup.unlit && outSetup.useTransformCache && cameraInitialized_
-        && mesh.boundsValid && triangleCount >= 4)
+    // Double-sided draws (cloth sheets, flags, thin shells) never cull: their
+    // fragments may face either way, and the pixel path flips normals toward
+    // the viewer instead (the mesh.frag twin of the glTF doubleSided rule).
+    if (backFaceCullingEnabled_ && !outSetup.doubleSided && !outSetup.unlit && outSetup.useTransformCache
+        && cameraInitialized_ && mesh.boundsValid && triangleCount >= 4)
     {
         ensureWorldBounds();
         const float cameraDist = glm::distance(cameraPosition_, outSetup.boundsWorldCenter);
@@ -2246,6 +2335,19 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             // construction and its per-pixel normalize (the
                             // common case for colored/vertex-lit parts).
                             glm::vec3 normal = geometryNormal;
+                            // Two-sided draws (cloth sheets, flags): flip the
+                            // normal toward the viewer on back-facing
+                            // fragments before the TBN is built - the mesh.frag
+                            // twin of the glTF doubleSided rule (back-face
+                            // normals are reversed before lighting).
+                            if (setup.doubleSided)
+                            {
+                                const glm::vec3 viewForFlip = glm::normalize(cameraPosition_ - interpolatedPosition);
+                                if (glm::dot(normal, viewForFlip) < 0.0f)
+                                {
+                                    normal = -normal;
+                                }
+                            }
                             if (hasNormalMap)
                             {
                                 const glm::vec3 normalMapSample
@@ -2253,9 +2355,13 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
                                     normalMapSample.y * normalScale,
                                     normalMapSample.z));
+                                // The (possibly flipped) oriented normal is the
+                                // TBN's third axis, exactly like mesh.frag builds
+                                // its tangent frame from the flipped geometry
+                                // normal on two-sided draws.
                                 const glm::mat3 tbn(
                                     tangentVector * tangentInverseMax, bitangentVector * tangentInverseMax,
-                                    geometryNormal);
+                                    normal);
                                 normal = glm::normalize(tbn * tangentNormal);
                             }
 
@@ -2290,7 +2396,8 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 directLights_.data(),
                                 static_cast<std::uint32_t>(directLights_.size()),
                                 preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
-                                setup.opacity);
+                                setup.opacity,
+                                setup.sheenFactor);
                             // Indirect specular (lumen_reflection field hook):
                             // the field texel this pixel projects into carries
                             // the expected GGX-lobe response of its material,
@@ -2749,13 +2856,26 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         // geometry normal: skip the TBN construction and its per-pixel
         // normalize (the common case for colored/vertex-lit parts).
         glm::vec3 normal = geometryNormal;
+        // Two-sided draws (cloth sheets, flags): flip the normal toward the
+        // viewer on back-facing fragments before the TBN is built - the
+        // mesh.frag twin of the glTF doubleSided rule.
+        if (setup.doubleSided)
+        {
+            const glm::vec3 viewForFlip = glm::normalize(cameraPosition - interpolatedPosition);
+            if (glm::dot(normal, viewForFlip) < 0.0f)
+            {
+                normal = -normal;
+            }
+        }
         if (hasNormalMap)
         {
             const glm::vec3 normalMapSample = normalMap->sample(interpolatedUv.x, interpolatedUv.y) * 2.0f - 1.0f;
             const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
                 normalMapSample.y * normalScale,
                 normalMapSample.z));
-            const glm::mat3 tbn(tangentScaled, bitangentScaled, geometryNormal);
+            // The (possibly flipped) oriented normal is the TBN's third
+            // axis, matching mesh.frag's flipped-geometry-normal frame.
+            const glm::mat3 tbn(tangentScaled, bitangentScaled, normal);
             normal = glm::normalize(tbn * tangentNormal);
         }
 
@@ -2788,7 +2908,8 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             lights,
             lightCount,
             preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
-            setup.opacity);
+            setup.opacity,
+            setup.sheenFactor);
 
         // Indirect specular (lumen_reflection field hook): the field texel
         // this pixel projects into carries the expected GGX-lobe response of

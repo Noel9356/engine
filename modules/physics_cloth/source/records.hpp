@@ -23,6 +23,18 @@ struct DistanceConstraint
     bool          broken     = false; // torn constraint; skipped from then on
 };
 
+// One quad of the cloth grid (four particle indices in row-major order),
+// walked per substep by the aerodynamic wind model. Faces are stored
+// explicitly so the wind walk is a flat, cache-friendly loop instead of a
+// per-cell index computation.
+struct ClothFace
+{
+    std::uint32_t particleA = 0;
+    std::uint32_t particleB = 0;
+    std::uint32_t particleC = 0;
+    std::uint32_t particleD = 0;
+};
+
 // One (cell id, particle) pair for the self-collision spatial hash.
 struct SelfCollisionEntry
 {
@@ -50,6 +62,10 @@ struct ClothRecord
 
     std::vector<DistanceConstraint> constraints;
 
+    // Grid quads (one entry per (row, column) cell), walked by the
+    // aerodynamic wind model; empty when that model is not in use.
+    std::vector<ClothFace> faces;
+
     double particleMass = 0.2;
 
     double gravity[3] = {0.0, -9.81, 0.0}; // read from the rigid world at creation
@@ -66,8 +82,14 @@ struct ClothRecord
 
     double windAcceleration[3] = {0.0, 0.0, 0.0};
 
+    // When true the wind vector acts as a far-field wind velocity for the
+    // per-face drag-and-lift model; when false it is a uniform per-particle
+    // acceleration (the ClothDescription.aerodynamicWind surface).
+    bool aerodynamicWind = false;
+
     ClothParticleDrag drag;
-    bool              dragActive = false;
+    double            dragTarget[3] = {0.0, 0.0, 0.0}; // per-cloth grab target (two cloths never share one)
+    bool              dragActive    = false;
 
     // Settled-cloth state: sleepTimer accumulates while every free particle
     // stays below the sleep velocity; sleeping cloths hold their state until
@@ -121,6 +143,18 @@ struct ClothSettings
     double        fixedRateHz             = 60.0;
     std::uint32_t substepsPerStep         = 8;
     std::uint32_t maximumStepsPerSimulate = 8;
+
+    // Constraint solve passes per XPBD substep (the Gauss-Seidel walk over
+    // the constraint list runs this many times per substep; 1 = the small
+    // steps schedule, where stiffness comes from the substep count).
+    std::uint32_t solverIterations = 1;
+
+    // Aerodynamic wind response coefficients (the per-cloth flag is the
+    // ClothDescription.aerodynamicWind surface): a1 scales the face drag
+    // along the face normal, a2 = a3 the two lift shares along the face's
+    // in-plane cross products (the Baraff-Witkin decomposition).
+    double windDragCoefficient = 1.5;
+    double windLiftCoefficient = 0.2;
 
     // Velocity clamp applied to the derived per-substep particle velocities;
     // keeps solver noise from escalating.

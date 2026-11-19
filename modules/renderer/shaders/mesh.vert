@@ -5,13 +5,16 @@
 // uv attribute; ABI 4 changed only the material, not the mesh):
 // position, normal, color, uv (3+3+3+2 floats, stride 44 bytes).
 //
-// Push constants carry the per-draw state (112 bytes, within the 128-byte
+// Push constants carry the per-draw state (128 bytes, within the 128-byte
 // minimum guarantee - mobile GPUs included):
 //   uModel             mat4   - object-to-world transform (column-major)
 //   uBaseColorFactor   vec4   - material color multiplier (rgb used)
 //   uMetallicRoughness vec4   - (metallicFactor, roughnessFactor,
 //                                normalScale, occlusionStrength)
 //   uEmissive          vec4   - (emissiveColor.rgb, unlit flag)
+//   uCloth             vec4   - (sheenFactor, doubleSided flag; fragment
+//                                stage consumes both, declared here so the
+//                                block layout matches shaders/mesh.frag)
 // The per-frame state comes from the uniform buffer bound at set 0, binding
 // 0 (view-projection with the Vulkan clip-space fixup pre-applied, camera
 // position, and the pbr module's lighting environment - see mesh.frag), so
@@ -34,6 +37,7 @@ layout(push_constant) uniform PushData
     vec4 uBaseColorFactor;
     vec4 uMetallicRoughness;
     vec4 uEmissive;
+    vec4 uCloth;
 } pushData;
 
 layout(std140, set = 0, binding = 0) uniform FrameData

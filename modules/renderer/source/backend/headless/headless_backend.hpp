@@ -280,6 +280,7 @@ public:
 
     bool createMesh(MeshHandle id, const MeshDescription &description, RenderError *error) override;
     void destroyMesh(MeshHandle mesh) override;
+    bool updateMeshVertices(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error) override;
 
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) override;
     void destroyTexture(TextureHandle texture) override;
@@ -412,6 +413,13 @@ private:
         float                  normalScale             = 1.0f;
         float                  occlusionStrength       = 1.0f;
         glm::vec3              emissiveColor           = glm::vec3(0.0f);
+        // Fabric (cloth) shading pair: sheenFactor > 0 blends the GGX
+        // specular toward the Charlie/Neubelt fabric lobe and softens the
+        // direct-light terminator with the wrap-diffuse weight; doubleSided
+        // skips back-face culling and flips back-facing normals toward the
+        // viewer (shaders/mesh.frag's uCloth pair).
+        float                  sheenFactor             = 0.0f;
+        bool                   doubleSided             = false;
         bool                   hasBaseColorMap         = false;
         bool                   hasNormalMap            = false;
         bool                   hasMetallicRoughnessMap = false;

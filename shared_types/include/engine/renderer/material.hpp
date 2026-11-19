@@ -1,11 +1,13 @@
 // Runtime mesh material (engine::renderer).
 //
 // GPU-facing PBR subset: base color, metallic-roughness, normal, occlusion
-// and emissive textures by TextureHandle plus their scalar factors, and the
+// and emissive textures by TextureHandle plus their scalar factors, the
 // transmission pair (opacity, index of refraction) the transparent-draw path
-// and the lumen_gi / lumen_reflection surfaces evaluate with. Field order is
-// append-only: modules embed this struct by value in ABI surfaces (the pbr
-// module's ConvertedModelMaterial), so new fields go at the end.
+// and the lumen_gi / lumen_reflection surfaces evaluate with, and the fabric
+// shading pair (sheen strength, double-sided rendering) the cloth path
+// evaluates with. Field order is append-only: modules embed this struct by
+// value in ABI surfaces (the pbr module's ConvertedModelMaterial), so new
+// fields go at the end.
 
 #pragma once
 
@@ -59,6 +61,20 @@ struct MeshMaterial
     // refractive rays bend by Snell's law with this ratio. 1 keeps the
     // transmitted path unbent.
     float indexOfRefraction = 1.5f;
+
+    // Fabric sheen strength in [0, 1] (0 = plain metallic-roughness PBR).
+    // Positive values blend the GGX specular lobe toward the Charlie sheen
+    // lobe (Estevez & Kulla 2017 with the Neubelt visibility term), soften
+    // the direct-light terminator with the energy-conserving wrap-diffuse
+    // factor, and tint the sheen highlight with the base color - the
+    // production cloth look for simulated fabric.
+    float sheenFactor = 0.0f;
+
+    // Two-sided rendering: back-face culling is skipped and the shading
+    // normal flips toward the viewer on the back side, so thin sheets
+    // (cloth, flags, curtains) light correctly from both sides without a
+    // duplicated shell mesh.
+    bool doubleSided = false;
 };
 
 } // namespace engine::renderer

@@ -285,6 +285,7 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
         reportError(error, RenderError::CreationFailed);
         return nullptr;
     }
+    backend->dynamicMeshStaging_.resize(backend->framesInFlight_);
     backend->resources_ = std::make_unique<VulkanResources>();
     if (!backend->resources_->create(*backend->device_,
             backend->framesInFlight_,
@@ -519,6 +520,7 @@ VulkanBackend::~VulkanBackend()
     flushPendingExport(false);
     destroyOverlayBuffers();
     destroyInstanceBuffers();
+    destroyDynamicMeshStaging();
     if (swapchain_ != nullptr)
     {
         swapchain_->destroyObjects();
@@ -870,6 +872,13 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     currentImageIndex_ = imageIndex;
     frameActive_       = true;
 
+    // The slot's previous command buffer completed during the slot wait, so
+    // staging buffers it referenced can die now; any vertex updates parked
+    // between frames record their copies before the render pass begins, so
+    // every draw this frame binds the freshest simulated geometry.
+    retireDynamicMeshStaging(frames_->currentFrame());
+    flushPendingMeshUpdates();
+
     hasLastPushConstants_       = false;
     lastBoundMesh_              = invalidMesh;
     lastBoundMaterialSet_       = VK_NULL_HANDLE;
@@ -984,6 +993,7 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline());
     lastBoundPipeline_  = BoundPipeline::Mesh;
     lastMeshDepthWrite_ = true;
+    lastMeshTwoSided_   = false;
 
     const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
     const VkRect2D   scissor{{0, 0}, {width, height}};
@@ -1014,23 +1024,34 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
     }
 
     VkCommandBuffer command = frames_->commandBuffer();
-    // The mesh pipeline has a depth-write twin for backdrop materials
-    // (depthWrite off): same shaders and layout, depth testing stays on, the
-    // depth buffer is left untouched so the opaque passes drawn later own
-    // the silhouette. Switching variants pushes its constants again, like a
-    // fur switch does.
+    // The mesh pipeline has three variant axes: a depth-write twin for
+    // backdrop materials (depthWrite off) and a two-sided twin for cloth
+    // materials (doubleSided on: cull mode NONE, the fragment stage flips
+    // back-facing normals). Same shaders and layout, depth testing stays on;
+    // switching variants pushes its constants again, like a fur switch does.
     const bool wantDepthWrite = material.depthWrite;
-    if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite)
+    const bool wantTwoSided   = material.doubleSided;
+    if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite
+        || lastMeshTwoSided_ != wantTwoSided)
     {
-        // A fur draw (or the other mesh variant) last bound a different
+        // A fur draw (or another mesh variant) last bound a different
         // pipeline; bind the variant this material needs. Push constants
         // must be pushed again: the fur path wrote 128 bytes through its own
         // layout, and relying on the stale first-112-bytes equality across
         // layout switches is not worth the branch savings.
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite());
+        VkPipeline pipelineVariant = VK_NULL_HANDLE;
+        if (wantTwoSided)
+        {
+            pipelineVariant = wantDepthWrite ? pipeline_->pipelineTwoSided() : pipeline_->pipelineTwoSidedNoDepthWrite();
+        }
+        else
+        {
+            pipelineVariant = wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite();
+        }
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineVariant);
         lastBoundPipeline_      = BoundPipeline::Mesh;
         lastMeshDepthWrite_     = wantDepthWrite;
+        lastMeshTwoSided_       = wantTwoSided;
         hasLastPushConstants_   = false;
     }
 
@@ -1073,6 +1094,8 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
     push.emissive[1]          = material.emissiveColor[1];
     push.emissive[2]          = material.emissiveColor[2];
     push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
+    push.cloth[0]             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
+    push.cloth[1]             = material.doubleSided ? 1.0f : 0.0f;
     if (!hasLastPushConstants_ || std::memcmp(&push, &lastPushConstants_, sizeof(PushConstants)) != 0)
     {
         vkCmdPushConstants(command,
@@ -1239,6 +1262,30 @@ void VulkanBackend::drawMeshInstances(
     if (visibleCount != 0)
     {
         VkCommandBuffer command = frames_->commandBuffer();
+        // Instanced draws select the mesh pipeline variant from the material
+        // exactly like drawMesh does (depth-write and two-sided twins), so a
+        // mixed draw list never binds a stale variant from a previous call.
+        const bool wantDepthWrite = material.depthWrite;
+        const bool wantTwoSided   = material.doubleSided;
+        if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite
+            || lastMeshTwoSided_ != wantTwoSided)
+        {
+            VkPipeline pipelineVariant = VK_NULL_HANDLE;
+            if (wantTwoSided)
+            {
+                pipelineVariant
+                    = wantDepthWrite ? pipeline_->pipelineTwoSided() : pipeline_->pipelineTwoSidedNoDepthWrite();
+            }
+            else
+            {
+                pipelineVariant = wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite();
+            }
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineVariant);
+            lastBoundPipeline_    = BoundPipeline::Mesh;
+            lastMeshDepthWrite_   = wantDepthWrite;
+            lastMeshTwoSided_     = wantTwoSided;
+            hasLastPushConstants_ = false;
+        }
         PushConstants   push;
         push.model[0]             = 1.0f;
         push.model[5]             = 1.0f;
@@ -1256,6 +1303,8 @@ void VulkanBackend::drawMeshInstances(
         push.emissive[1]          = material.emissiveColor[1];
         push.emissive[2]          = material.emissiveColor[2];
         push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
+        push.cloth[0]             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
+        push.cloth[1]             = material.doubleSided ? 1.0f : 0.0f;
         if (!hasLastPushConstants_ || std::memcmp(&push, &lastPushConstants_, sizeof(PushConstants)) != 0)
         {
             vkCmdPushConstants(command,
@@ -1748,6 +1797,229 @@ void VulkanBackend::destroyInstanceBuffers() noexcept
         buffer = {};
     }
     instanceBuffers_.clear();
+}
+
+// Grows (doubling from 64 KiB) the frame slot's persistent-mapped transfer
+// staging buffer when the incoming vertex stream no longer fits. Earlier
+// updates recorded this frame keep working: their bytes are carried over to
+// the new buffer at the same offsets, and the replaced buffer moves to the
+// retired list - its copies already reference it, so it is destroyed only
+// once the slot's next beginFrame proves those copies complete.
+bool VulkanBackend::ensureDynamicMeshStaging(std::uint32_t frameIndex, VkDeviceSize bytes)
+{
+    if (device_ == nullptr || frameIndex >= dynamicMeshStaging_.size() || bytes == 0)
+    {
+        return false;
+    }
+    DynamicMeshStaging &staging = dynamicMeshStaging_[frameIndex];
+    if (staging.capacity >= bytes && staging.buffer != VK_NULL_HANDLE && staging.mapping != nullptr)
+    {
+        return true;
+    }
+    VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, staging.capacity);
+    while (newCapacity < bytes)
+    {
+        newCapacity *= 2;
+    }
+    VkBuffer      newBuffer     = VK_NULL_HANDLE;
+    VmaAllocation newAllocation = nullptr;
+    void         *newMapping    = nullptr;
+    if (!device_->createBuffer(newCapacity,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            BufferMemoryIntent::HostSequentialWrite,
+            &newBuffer,
+            &newAllocation)
+        || !device_->mapAllocation(newAllocation, &newMapping))
+    {
+        if (newBuffer != VK_NULL_HANDLE)
+        {
+            device_->destroyBuffer(newBuffer, newAllocation);
+        }
+        return false;
+    }
+    if (staging.cursor != 0 && staging.mapping != nullptr)
+    {
+        std::memcpy(newMapping, staging.mapping, static_cast<std::size_t>(staging.cursor));
+        (void)device_->flushAllocation(newAllocation, 0, staging.cursor);
+    }
+    if (staging.buffer != VK_NULL_HANDLE)
+    {
+        if (staging.mapping != nullptr)
+        {
+            device_->unmapAllocation(staging.allocation);
+        }
+        try
+        {
+            staging.retired.push_back({staging.buffer, staging.allocation});
+        }
+        catch (const std::bad_alloc &)
+        {
+            // The grow itself succeeded; keep the old buffer alive by
+            // dropping it from the active slot instead of destroying it
+            // under recorded copies. It leaks until backend teardown, which
+            // is strictly safer than a use-after-destroy.
+        }
+    }
+    staging.buffer     = newBuffer;
+    staging.allocation = newAllocation;
+    staging.mapping    = newMapping;
+    staging.capacity   = newCapacity;
+    return true;
+}
+
+// Frees the staging buffers a growth step replaced on this frame slot. The
+// slot's command buffer completed during retirement (the beginFrame slot
+// wait), so no recorded copy can still reference them.
+void VulkanBackend::retireDynamicMeshStaging(std::uint32_t frameIndex)
+{
+    if (device_ == nullptr || frameIndex >= dynamicMeshStaging_.size())
+    {
+        return;
+    }
+    DynamicMeshStaging &staging = dynamicMeshStaging_[frameIndex];
+    for (const DynamicMeshStaging::RetiredBuffer &retired : staging.retired)
+    {
+        device_->destroyBuffer(retired.buffer, retired.allocation);
+    }
+    staging.retired.clear();
+    staging.cursor = 0; // the slot's command buffer restarted; the ring starts over
+}
+
+void VulkanBackend::destroyDynamicMeshStaging() noexcept
+{
+    if (device_ == nullptr)
+    {
+        return;
+    }
+    for (DynamicMeshStaging &staging : dynamicMeshStaging_)
+    {
+        if (staging.mapping != nullptr)
+        {
+            device_->unmapAllocation(staging.allocation);
+        }
+        if (staging.buffer != VK_NULL_HANDLE)
+        {
+            device_->destroyBuffer(staging.buffer, staging.allocation);
+        }
+        for (const DynamicMeshStaging::RetiredBuffer &retired : staging.retired)
+        {
+            device_->destroyBuffer(retired.buffer, retired.allocation);
+        }
+        staging.retired.clear();
+        staging = {};
+    }
+    dynamicMeshStaging_.clear();
+}
+
+// Streams one mesh's new vertex data through this frame slot's staging
+// buffer and records the device copy plus the transfer -> vertex-input
+// barrier into the frame's command buffer. Recording inside the consuming
+// frame keeps the copy, the barrier, and every draw that binds the mesh in
+// one submission ordered on the graphics queue - no cross-queue
+// synchronization and no pipeline drain on the update path.
+bool VulkanBackend::recordDynamicMeshUpdate(
+    MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error)
+{
+    if (!frameActive_ || device_ == nullptr || frames_ == nullptr || resources_ == nullptr)
+    {
+        reportError(error, RenderError::InvalidHandle);
+        return false;
+    }
+    VkBuffer     destination = VK_NULL_HANDLE;
+    VkDeviceSize vertexBytes  = 0;
+    if (!resources_->prepareMeshVertexUpdate(mesh, vertices, vertexCount, &destination, &vertexBytes, error))
+    {
+        return false;
+    }
+    const std::uint32_t frameIndex = frames_->currentFrame();
+    if (!ensureDynamicMeshStaging(frameIndex, vertexBytes))
+    {
+        std::fprintf(stderr, "renderer module: could not allocate dynamic mesh staging memory\n");
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+    DynamicMeshStaging &staging = dynamicMeshStaging_[frameIndex];
+    std::memcpy(static_cast<std::uint8_t *>(staging.mapping) + staging.cursor, vertices,
+        static_cast<std::size_t>(vertexBytes));
+    if (!device_->flushAllocation(staging.allocation, staging.cursor, vertexBytes))
+    {
+        std::fprintf(stderr, "renderer module: could not flush dynamic mesh staging memory\n");
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+    VkCommandBuffer command = frames_->commandBuffer();
+    const VkBufferCopy copy{staging.cursor, 0, vertexBytes};
+    vkCmdCopyBuffer(command, staging.buffer, destination, 1, &copy);
+    const VkBufferMemoryBarrier toVertexRead{
+        .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .pNext               = nullptr,
+        .srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask       = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer              = destination,
+        .offset              = 0,
+        .size                = vertexBytes,
+    };
+    vkCmdPipelineBarrier(command,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+        0,
+        0,
+        nullptr,
+        1,
+        &toVertexRead,
+        0,
+        nullptr);
+    staging.cursor += vertexBytes;
+    reportError(error, RenderError::None);
+    return true;
+}
+
+void VulkanBackend::flushPendingMeshUpdates()
+{
+    for (PendingMeshUpdate &update : pendingMeshUpdates_)
+    {
+        RenderError updateError = RenderError::None;
+        if (!recordDynamicMeshUpdate(update.mesh, update.data.data(), update.vertexCount, &updateError)
+            && updateError != RenderError::InvalidMesh)
+        {
+            std::fprintf(stderr, "renderer module: a deferred mesh vertex update failed to record\n");
+        }
+    }
+    pendingMeshUpdates_.clear();
+}
+
+bool VulkanBackend::updateMeshVertices(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error)
+{
+    if (mesh == invalidMesh || vertices == nullptr || vertexCount == 0)
+    {
+        reportError(error, RenderError::InvalidMesh);
+        return false;
+    }
+    if (frameActive_)
+    {
+        return recordDynamicMeshUpdate(mesh, vertices, vertexCount, error);
+    }
+    // Between frames: consume the source now (the caller's memory is only
+    // borrowed for this call) and record the copy at the start of the next
+    // frame, before any draw can bind the mesh.
+    try
+    {
+        PendingMeshUpdate update;
+        update.mesh        = mesh;
+        update.vertexCount = vertexCount;
+        update.data.resize(static_cast<std::size_t>(vertexCount) * meshVertexFloatCount * sizeof(float));
+        std::memcpy(update.data.data(), vertices, update.data.size());
+        pendingMeshUpdates_.push_back(std::move(update));
+        reportError(error, RenderError::None);
+        return true;
+    }
+    catch (const std::bad_alloc &)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
 }
 
 // Grows (doubling from 4 KiB) a persistent-mapped vertex/index pair when the

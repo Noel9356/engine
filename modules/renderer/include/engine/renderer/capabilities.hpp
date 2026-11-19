@@ -34,7 +34,13 @@ namespace renderer
 // [renderer] fur_enabled / fur_max_layers keys, and the alpha-blended fur
 // pipeline in both backends. Fur draws are transparent layers: submit them
 // AFTER the fur surface's opaque base mesh so the depth anchor exists.
-inline constexpr std::uint32_t renderCapabilityAbi = 13u;
+// 13 -> 14 adds the dynamic-geometry and fabric-shading surface: the
+// updateMeshVertices entry point appended at the end of RenderCapability
+// (existing field offsets unchanged; null-check before calling), the
+// MeshMaterial.sheenFactor / MeshMaterial.doubleSided pair driving the cloth
+// shading path (Charlie sheen lobe, wrap diffuse, two-sided rendering) in
+// both backends, and the two-sided pipeline variants in the Vulkan backend.
+inline constexpr std::uint32_t renderCapabilityAbi = 14u;
 
 // Renderer, mesh, and texture handles are module-assigned ids starting at 1;
 // handles are never reused and 0 always means "none".
@@ -342,6 +348,23 @@ struct RenderCapability
 
     void (*drawFurInstances)(void *self, RendererHandle renderer, MeshHandle mesh, const float *modelMatrices,
         std::uint32_t instanceCount, const MeshMaterial *material, const FurLayerParams *params);
+
+    // ---- ABI 14 additions -------------------------------------------------------
+
+    // Dynamic-geometry update: replaces the whole vertex stream of a mesh
+    // with `vertices` (a packed vertex array laid out exactly like the
+    // creation description - same attribute table, stride, and format).
+    // vertexCount must equal the creation count and the index buffer is
+    // untouched, so simulated surfaces (cloth sheets, ribbons) refresh their
+    // positions and normals every frame with one call and one draw. The
+    // bounding sphere is recomputed for frustum culling and every cached
+    // transform/winding state for the mesh is dropped. Returns false with
+    // RenderError::InvalidMesh when the mesh handle is unknown or the count
+    // or stride does not match creation. Callers must null-check the entry
+    // (a module built before ABI 14 leaves it null). Call between frames or
+    // before the draw that consumes the new data inside beginFrame/endFrame.
+    bool (*updateMeshVertices)(void *self, RendererHandle renderer, MeshHandle mesh, const void *vertices,
+        std::uint32_t vertexCount, RenderError *error);
 };
 
 // The "renderer.vulkan" secondary capability: Vulkan-specific introspection and

@@ -108,6 +108,7 @@ public:
 
     bool createMesh(MeshHandle id, const MeshDescription &description, RenderError *error) override;
     void destroyMesh(MeshHandle mesh) override;
+    bool updateMeshVertices(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error) override;
 
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) override;
     void destroyTexture(TextureHandle texture) override;
@@ -225,6 +226,48 @@ private:
     VkDeviceSize                instanceBufferCapacity_ = 4ull * 1024ull * 1024ull;
     std::vector<InstanceBuffer> instanceBuffers_; // one entry per frame in flight
 
+    // Dynamic-geometry staging (the cloth path): per-frame-slot host-visible
+    // transfer buffers the updateMeshVertices path streams new vertex data
+    // through, mirroring the instance ring's slot lifecycle - a slot's
+    // buffer is only reused after that slot's fence retires, so a copy
+    // recorded into one slot's command buffer can never race a later
+    // overwrite. Buffers replaced by a growth step stay alive on the
+    // retired list until the slot's next beginFrame (its recorded copies are
+    // provably complete by then). Updates that arrive between frames park in
+    // pendingMeshUpdates_ (full copies, the borrowed source is consumed
+    // before this returns) and flush at the start of the next beginFrame.
+    struct DynamicMeshStaging
+    {
+        VkBuffer      buffer     = VK_NULL_HANDLE;
+        VmaAllocation allocation = nullptr;
+        void         *mapping    = nullptr; // persistently mapped host memory
+        VkDeviceSize  capacity   = 0;       // bytes
+        VkDeviceSize  cursor     = 0;       // write offset for the next update, bytes
+        struct RetiredBuffer
+        {
+            VkBuffer      buffer     = VK_NULL_HANDLE;
+            VmaAllocation allocation = nullptr;
+        };
+        std::vector<RetiredBuffer> retired; // replaced buffers awaiting their slot's retirement
+    };
+    struct PendingMeshUpdate
+    {
+        MeshHandle                mesh       = invalidMesh;
+        std::uint32_t             vertexCount = 0;
+        std::vector<std::uint8_t> data; // canonical interleaved vertex stream
+    };
+    std::vector<DynamicMeshStaging> dynamicMeshStaging_; // one entry per frame in flight
+    std::vector<PendingMeshUpdate>  pendingMeshUpdates_; // updates that arrived between frames
+
+    bool ensureDynamicMeshStaging(std::uint32_t frameIndex, VkDeviceSize bytes);
+    void destroyDynamicMeshStaging() noexcept;
+    // Copies the update into the frame slot's staging buffer and records the
+    // device copy plus the transfer->vertex-input barrier into the frame's
+    // command buffer, so the draw that consumes the mesh sees the new data.
+    bool recordDynamicMeshUpdate(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error);
+    void flushPendingMeshUpdates();
+    void retireDynamicMeshStaging(std::uint32_t frameIndex); // frees buffers replaced last time the slot ran
+
     bool frameActive_ = false; // true between a successful beginFrame and endFrame; draw calls check it
 
     // Bind-state caches so repeated draws skip redundant vkCmd* calls.
@@ -233,9 +276,9 @@ private:
     // pipeline and every mesh draw binds the mesh pipeline back, pushing its
     // constants again (the two layouts have different push constant sizes,
     // so a pipeline switch invalidates the push cache). Within the mesh
-    // pipeline, lastMeshDepthWrite_ tracks the depth-write variant so
-    // materials toggle between the twins without rebinding when the flag
-    // holds steady.
+    // pipeline, lastMeshDepthWrite_ / lastMeshTwoSided_ track the depth-write
+    // and two-sided variants so materials toggle between the twins without
+    // rebinding while the flags hold steady.
     enum class BoundPipeline : std::uint8_t
     {
         Mesh,
@@ -247,6 +290,7 @@ private:
     bool            hasLastFurPushConstants_    = false;
     BoundPipeline   lastBoundPipeline_          = BoundPipeline::Mesh;
     bool            lastMeshDepthWrite_         = true;
+    bool            lastMeshTwoSided_           = false;
     MeshHandle      lastBoundMesh_              = invalidMesh;
     VkDescriptorSet lastBoundMaterialSet_       = VK_NULL_HANDLE;
     VkDeviceSize    lastBoundInstanceOffset_    = 0;

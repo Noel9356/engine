@@ -33,13 +33,21 @@ struct BodyRenderState
     engine::physics_rigid::RigidTransform previous;
 };
 
-struct ClothRenderBuffers
+// One simulated cloth sheet rendered as a continuous surface mesh: the
+// particle grid IS the mesh's vertex grid (same row-major order), so the
+// frame path refreshes the positions/normals through the renderer's dynamic
+// vertex update and draws the whole sheet with one call. The index buffer is
+// static (the grid topology never changes), and the vertex scratch carries
+// the canonical interleaved stream the update consumes.
+struct ClothSurfaceRender
 {
     std::vector<double> currentPositions;
     std::vector<double> previousPositions;
+    std::vector<float>  vertexScratch; // 11 floats per vertex: position, normal, color, uv
+    std::vector<float>  identityModel; // 16 floats, world-space vertices draw under identity
+    engine::renderer::MeshHandle meshHandle = engine::renderer::invalidMesh;
     std::uint32_t       columns    = 0;
     std::uint32_t       rows       = 0;
-    double              nodeRadius = 0.05;
 };
 
 class SandboxRenderer final
@@ -58,8 +66,11 @@ public:
     void prepareFur(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer,
         const engine::physics_fur::FurCapability *furCapability);
 
-    // Rebuilds the tracked-state bookkeeping after a scene (re)build.
-    void syncScene(const SceneDependencies &dependencies, const SceneHandles &handles,
+    // Rebuilds the tracked-state bookkeeping after a scene (re)build; the
+    // cloth surface meshes (one per cloth sheet) upload through the renderer
+    // capability here.
+    void syncScene(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer,
+        const SceneDependencies &dependencies, const SceneHandles &handles,
         const engine::physics_cloth::ClothCapability *clothCapability);
 
     // Copies one fixed step's end state: the previous "current" becomes the
@@ -89,13 +100,9 @@ public:
     void submitExtended(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer,
         const SceneDependencies &dependencies, const SceneHandles &handles);
 
-    std::uint32_t clothNodeInstanceCount() const
+    std::uint32_t clothSurfaceCount() const
     {
-        return clothNodeMatrices_.size();
-    }
-    std::uint32_t clothLinkInstanceCount() const
-    {
-        return clothLinkMatrices_.size();
+        return clothSurfaces_.size();
     }
 
 private:
@@ -109,12 +116,19 @@ private:
     engine::renderer::MeshHandle capsuleMesh_   = engine::renderer::invalidMesh;
     engine::renderer::MeshHandle clothNodeMesh_ = engine::renderer::invalidMesh;
 
+    // Renderer access for the cloth surface mesh lifecycle: createMeshes /
+    // destroyMeshes capture the capability + renderer they were called with,
+    // so the frame path (vertex updates) and scene rebuilds (mesh uploads)
+    // target the same renderer without widening every call signature.
+    engine::renderer::RenderCapability *renderCapability_ = nullptr;
+    engine::renderer::RendererHandle    rendererHandle_   = engine::renderer::invalidRenderer;
+
     std::unordered_map<engine::physics_rigid::BodyHandle, std::size_t> bodyStateIndex_;
     std::vector<BodyRenderState>                                       bodyStates_;
     std::vector<engine::physics_rigid::ShapeDescription>               bodyShapes_;
     std::vector<engine::physics_rigid::BodyKind>                       bodyKinds_;
 
-    std::vector<ClothRenderBuffers> clothBuffers_;
+    std::vector<ClothSurfaceRender> clothSurfaces_;
 
     // Extended-scene capture and instance buffers.
     struct RopeRenderBuffers
@@ -144,8 +158,6 @@ private:
     std::vector<Matrix16>                            modelMatrices_;
     std::vector<engine::renderer::MeshMaterial>      materials_;
     std::vector<engine::renderer::RenderDrawCommand> drawCommands_;
-    std::vector<Matrix16>                            clothNodeMatrices_;
-    std::vector<Matrix16>                            clothLinkMatrices_;
 
     std::vector<Matrix16>                    waterTileMatrices_;
     std::vector<Matrix16>                    ropeNodeMatrices_;

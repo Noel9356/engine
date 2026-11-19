@@ -23,8 +23,11 @@ Every value is read once in `construct()`; the module does not follow configurat
 | `physics_cloth.lod_simplified_threshold` | number | (0, 1] | `0.5` | Boundary between Full and Simplified. |
 | `physics_cloth.maximum_velocity` | number | (0, 1000] | `30.0` | Clamp applied to the per-substep particle velocities (meters per second), keeping solver noise from escalating. |
 | `physics_cloth.sleep_velocity_threshold` | number | (0, 100] | `0.05` | A cloth whose free particles all stay below this speed (meters per second) accumulates quiet time toward the sleep state. |
-| `physics_cloth.time_to_sleep` | number | [0, 60] | `0.6` | Quiet time (seconds) after which a cloth with `sleepingEnabled` sleeps until a drag, pin, or wind change wakes it. |
+| `physics_cloth.time_to_sleep` | number | [0, 60] | `0.6` | Quiet time (seconds) after which a cloth with `sleepingEnabled` sleeps until a drag, pin, or wind change — or an obstacle overlapping the resting surface — wakes it. |
+| `physics_cloth.solver_iterations` | integer | 1 - 16 | `1` | Constraint solve passes per XPBD substep. The default of 1 is the small-steps schedule (stiffness comes from the substep count); larger values repeat the Gauss-Seidel walk for stiffer solves at the same substep count. Tearing is judged on the first pass only. |
 | `physics_cloth.substeps_per_step` | integer | 1 - 64 | `8` | XPBD substeps per fixed step. More substeps stiffen the effective solver at proportional cost; the compliance scaling keeps material behavior constant across values. |
+| `physics_cloth.wind_drag_coefficient` | number | [0, 100] | `1.5` | Aerodynamic-wind drag scale (a1): the share of each face's relative wind velocity that pushes along the face normal. Applies to cloths created with `ClothDescription.aerodynamicWind`; the uniform model ignores it. |
+| `physics_cloth.wind_lift_coefficient` | number | [0, 100] | `0.2` | Aerodynamic-wind lift scale (a2 = a3): the two in-plane lift shares of the Baraff-Witkin per-face decomposition; this term is what turns a steady wind into flutter. Applies to cloths created with `ClothDescription.aerodynamicWind`. |
 
 ## Out-of-range and invalid values
 

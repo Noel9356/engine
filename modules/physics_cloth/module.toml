@@ -14,7 +14,10 @@ config_keys           = [
     "physics_cloth.maximum_particles",
     "physics_cloth.maximum_particles_per_cloth",
     "physics_cloth.maximum_steps_per_simulate",
+    "physics_cloth.solver_iterations",
     "physics_cloth.substeps_per_step",
+    "physics_cloth.wind_drag_coefficient",
+    "physics_cloth.wind_lift_coefficient",
 ]
 name                  = "physics_cloth"
 provides              = ["physics_cloth"]

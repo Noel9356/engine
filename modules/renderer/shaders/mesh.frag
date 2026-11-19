@@ -5,7 +5,10 @@ layout(early_fragment_tests) in;
 layout(constant_id = 0) const uint MAX_LIGHTS = 32u;
 layout(constant_id = 6) const int SRGB_OUTPUT = 0;
 // Fragment stage of the renderer module's Vulkan backend: the engine's PBR
-// shading model, metallic-roughness workflow.
+// shading model, metallic-roughness workflow, with the fabric (cloth) shading
+// path driven by the material's sheenFactor/doubleSided pair - the Charlie
+// sheen lobe (Estevez & Kulla 2017) with the Neubelt visibility term, the
+// energy-conserving wrap-diffuse terminator, and the two-sided normal flip.
 //
 // The lighting model must agree with the software rasterizer in
 // headless_backend.cpp - same formulas, same constants, same clamps - so
@@ -38,6 +41,7 @@ layout(push_constant) uniform PushData
     vec4 uBaseColorFactor;
     vec4 uMetallicRoughness; // x metallicFactor, y roughnessFactor, z normalScale, w occlusionStrength
     vec4 uEmissive;          // rgb emissiveColor, a unlit flag
+    vec4 uCloth;             // x sheenFactor, y doubleSided flag (1 = two-sided draw)
 } pushData;
 
 struct LightData
@@ -122,6 +126,62 @@ vec3 fresnelSchlick(
 )
 {
     return f0 + (1.0 - f0) * pow(1.0 - cosTheta, 5.0);
+}
+
+// Charlie sheen distribution (Estevez & Kulla 2017, "Production Friendly
+// Microfacet Sheen BRDF"): an exponentiated-sinusoid fabric lobe that keeps
+// the grazing-angle rim of velvet-like materials without the harsh
+// near-ndotl-1 transitions of the Ashikhmin velvet distribution.
+float distributionCharlie(float roughness, float nDotH)
+{
+    const float invAlpha = 1.0 / roughness;
+    const float cos2h    = nDotH * nDotH;
+    const float sin2h    = max(1.0 - cos2h, 0.0078125); // 2^(-14/2), so sin2h^(1/alpha) stays finite in fp16
+    return (2.0 + invAlpha) * pow(sin2h, invAlpha * 0.5) / (2.0 * PI);
+}
+
+// Neubelt visibility (the Ready-at-Dawn cloth visibility term): the smooth
+// Ashikhmin approximation of the Smith geometry term with the microfacet
+// denominator folded in - the standard partner of the Charlie lobe.
+float visibilityNeubelt(float nDotV, float nDotL)
+{
+    return 1.0 / (4.0 * (nDotL + nDotV - nDotL * nDotV));
+}
+
+// One direct light's contribution: the standard GGX specular blended toward
+// the Charlie/Neubelt fabric lobe by sheenFactor, with the energy-conserving
+// wrap-diffuse weight ((nDotL + w) / (1 + w)^2, w = 0.5 x sheenFactor)
+// replacing the plain nDotL diffuse weight when cloth shading is active.
+// The sheen highlight is tinted toward the fabric's base color, so colored
+// cloth shows a colored rim instead of the dielectric-gray GGX highlight.
+vec3 shadeDirectLight(vec3 normal, vec3 view, vec3 lightDirection, vec3 radiance, vec3 diffuse, vec3 f0,
+    vec3 baseColor, float roughness, float sheenFactor, float nDotV)
+{
+    const float nDotL = max(dot(normal, lightDirection), 0.0);
+    if (nDotL <= 0.0)
+    {
+        return vec3(0.0);
+    }
+    const vec3  halfVector = normalize(view + lightDirection);
+    const float nDotH      = max(dot(normal, halfVector), 0.0);
+    const float vDotH      = max(dot(view, halfVector), 0.0);
+
+    const float dTerm = distributionGGX(nDotH, roughness);
+    const float gTerm = geometrySmith(nDotV, nDotL, roughness);
+    const vec3  fTerm = fresnelSchlick(vDotH, f0);
+    vec3  specular    = (dTerm * gTerm * fTerm) / vec3(4.0 * nDotV * nDotL + 1e-5);
+    float diffuseWeight = nDotL;
+    if (sheenFactor > 0.0)
+    {
+        const float sheenD      = distributionCharlie(roughness, nDotH);
+        const float sheenV      = visibilityNeubelt(nDotV, nDotL);
+        const vec3  sheenColor  = mix(vec3(1.0), baseColor, 0.6);
+        const vec3  sheenSpec   = vec3(sheenD * sheenV) * sheenColor;
+        specular                = mix(specular, sheenSpec, sheenFactor);
+        const float wrap        = 0.5 * sheenFactor;
+        diffuseWeight           = max((nDotL + wrap) / ((1.0 + wrap) * (1.0 + wrap)), 0.0);
+    }
+    return (diffuse + specular) * radiance * diffuseWeight;
 }
 
 // The tangent frame for the normal map, derived from screen-space
@@ -275,6 +335,20 @@ void main()
 {
     const vec3 geometryNormal = normalize(vNormal);
 
+    // Two-sided draws (cloth, flags, thin sheets) skip back-face culling, so
+    // back-facing fragments arrive here with normals pointing away from the
+    // camera. Flipping the geometry normal toward the viewer before the
+    // tangent frame is built keeps both sides of the sheet lit identically
+    // (the glTF doubleSided contract: back-face normals are reversed before
+    // the lighting equation is evaluated).
+    const bool twoSided = pushData.uCloth.y > 0.5;
+    const vec3 view     = normalize(frameData.uCameraPos.xyz - vWorldPosition);
+    vec3 orientedNormal = geometryNormal;
+    if (twoSided && dot(orientedNormal, view) < 0.0)
+    {
+        orientedNormal = -orientedNormal;
+    }
+
     // ---- material assembly: the five maps times their factors
     const vec3  baseColor = vColor * pushData.uBaseColorFactor.rgb
                           * texture(uBaseColorTexture, vUv).rgb;
@@ -285,7 +359,7 @@ void main()
     // normal standing.
     const vec3  normalMapSample = texture(uNormalTexture, vUv).xyz * 2.0 - 1.0;
     const vec3  tangentNormal   = normalize(vec3(normalMapSample.xy * pushData.uMetallicRoughness.z, normalMapSample.z));
-    const mat3  tbn             = tangentFrame(geometryNormal, vWorldPosition, vUv);
+    const mat3  tbn             = tangentFrame(orientedNormal, vWorldPosition, vUv);
     const vec3  normal          = normalize(tbn * tangentNormal);
 
     // Metallic-roughness: map channels times factors (glTF convention).
@@ -298,23 +372,17 @@ void main()
     const float occlusion = 1.0 - pushData.uMetallicRoughness.w * (1.0 - texture(uOcclusionTexture, vUv).r);
 
     // Direct light: one directional sun.
-    const vec3  view           = normalize(frameData.uCameraPos.xyz - vWorldPosition);
+    const float sheenFactor = clamp(pushData.uCloth.x, 0.0, 1.0);
     const vec3  lightDirection = normalize(frameData.uSunDirection.xyz);
-    const vec3  halfVector     = normalize(view + lightDirection);
     const float nDotL = max(dot(normal, lightDirection), 0.0);
     const float nDotV = max(dot(normal, view), 1e-4);
-    const float nDotH = max(dot(normal, halfVector), 0.0);
-    const float vDotH = max(dot(view, halfVector), 0.0);
 
     const vec3  f0           = mix(vec3(0.04), baseColor, metallic);
     const vec3  sunRadiance  = frameData.uSunColor.rgb * frameData.uSunColor.a * frameData.uSunDirection.w;
+    const vec3  diffuse      = baseColor * (1.0 - metallic) / PI;
 
-    const float dTerm = distributionGGX(nDotH, roughness);
-    const float gTerm = geometrySmith(nDotV, nDotL, roughness);
-    const vec3  fTerm = fresnelSchlick(vDotH, f0);
-
-    const vec3 specular = (dTerm * gTerm * fTerm) / vec3(4.0 * nDotV * nDotL + 1e-5);
-    const vec3 diffuse  = baseColor * (1.0 - metallic) / PI;
+    const vec3 sunContribution = shadeDirectLight(
+        normal, view, lightDirection, sunRadiance, diffuse, f0, baseColor, roughness, sheenFactor, nDotV);
 
     // Hemispheric ambient: sky color for up-facing normals, ground bounce
     // for down-facing ones, blended by the world-space normal's y, scaled
@@ -345,7 +413,7 @@ void main()
         ambient = mix(hemispheric, giAmbient, giTrust);
     }
 
-    vec3 color = (diffuse + specular) * sunRadiance * nDotL + ambient;
+    vec3 color = sunContribution + ambient;
 
     // Dynamic direct lights. The loop bound uses MAX_LIGHTS (specialization
     // constant, default 32 = original). The active count breaks out early.
@@ -381,20 +449,13 @@ void main()
                 attenuation *= smoothstep(light.spotParameters.y, light.spotParameters.x, coneCosine);
             }
         }
-        const float lightNDotL = max(dot(normal, lightDirection), 0.0);
-        if (lightNDotL <= 0.0 || attenuation <= 0.0)
+        const vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.a * attenuation;
+        if (attenuation <= 0.0)
         {
             continue;
         }
-        const vec3 lightHalfVector = normalize(view + lightDirection);
-        const float lightNDotH = max(dot(normal, lightHalfVector), 0.0);
-        const float lightVDotH = max(dot(view, lightHalfVector), 0.0);
-        const float lightD = distributionGGX(lightNDotH, roughness);
-        const float lightG = geometrySmith(nDotV, lightNDotL, roughness);
-        const vec3 lightF = fresnelSchlick(lightVDotH, f0);
-        const vec3 lightSpecular = (lightD * lightG * lightF) / vec3(4.0 * nDotV * lightNDotL + 1e-5);
-        const vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.a * attenuation;
-        color += (diffuse + lightSpecular) * radiance * lightNDotL;
+        color += shadeDirectLight(
+            normal, view, lightDirection, radiance, diffuse, f0, baseColor, roughness, sheenFactor, nDotV);
     }
 
     // Unlit surfaces (sky dome, sun disc) skip shading and show their

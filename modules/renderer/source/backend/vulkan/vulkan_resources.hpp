@@ -108,6 +108,16 @@ public:
     bool createMesh(MeshHandle id, const MeshDescription &description, RenderError *error);
     void destroyMesh(MeshHandle mesh);
 
+    // Dynamic-geometry refresh: validates the new vertex stream against the
+    // mesh's creation layout (same vertex count, canonical 11-float stride),
+    // recomputes the bounding sphere from the new positions, and hands the
+    // destination buffer plus byte size to the caller, which records the
+    // copy (the frame-path copy the backend owns; see updateMeshVertices).
+    // Returns false with RenderError::InvalidMesh when the handle is unknown
+    // or the count does not match creation.
+    bool prepareMeshVertexUpdate(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount,
+        VkBuffer *outVertexBuffer, VkDeviceSize *outVertexBytes, RenderError *error);
+
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error);
     void destroyTexture(TextureHandle texture);
 
@@ -127,6 +137,7 @@ private:
         VkBuffer      indexBuffer      = VK_NULL_HANDLE;
         VmaAllocation indexAllocation  = nullptr;
         std::uint32_t indexCount       = 0;
+        VkDeviceSize  vertexBytes      = 0; // the creation vertex stream's size; updates must match
         float         boundsCenter[3]  = {}; // mesh-local bounding sphere
         float         boundsRadius     = 0.0f;
         bool          boundsValid      = false;

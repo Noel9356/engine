@@ -1,15 +1,21 @@
 // physics_cloth module implementation.
 //
 // XPBD cloth over a physics_rigid world: particles integrate velocities,
-// constraints solve in Gauss-Seidel order with compliance-scaled corrections,
-// constraints tear when stretched past their tolerance, overlapping particle
-// pairs repel each other through a deterministic spatial hash, and particles
-// resolve against the rigid world's bodies and planes through the batched
-// sphere-overlap query. Stepping happens in whole fixed steps with internal
-// substeps (the "small steps" XPBD schedule), so the simulation is
-// independent of frame rate. Settled cloths stop integrating until an
-// interaction wakes them, and simulation LOD reduces the internal substep
-// count for unimportant cloths without touching the fixed step size.
+// constraints solve in Gauss-Seidel order with compliance-scaled corrections
+// (one walk per substep by the "small steps" schedule, or solver_iterations
+// walks when configured), constraints tear when stretched past their
+// tolerance, overlapping particle pairs repel each other through a
+// deterministic spatial hash, and particles resolve against the rigid
+// world's bodies and planes through the batched sphere-overlap query. Wind
+// is either a uniform acceleration or, for cloths flagged aerodynamicWind, a
+// per-face drag-and-lift response against the far-field wind velocity.
+// Stepping happens in whole fixed steps with internal substeps, so the
+// simulation is independent of frame rate; contact friction retains the
+// documented share of tangential velocity per second of contact. Settled
+// cloths stop integrating until an interaction - or an obstacle overlapping
+// the resting surface - wakes them, and simulation LOD reduces the internal
+// substep count for unimportant cloths without touching the fixed step
+// size.
 
 #include "records.hpp"
 #include <engine/kernel/module_api.hpp>
@@ -82,6 +88,7 @@ public:
             value && *value >= 0.0 && *value <= 60.0 && std::isfinite(*value))
             settings_.timeToSleep = *value;
         readLodSettings(context);
+        readSolverSettings(context);
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -122,6 +129,19 @@ private:
         settings_.lod = engine::util::readSimulationLodSettings(context, "physics_cloth");
     }
 
+    void readSolverSettings(ParticipantContext &context)
+    {
+        if (const auto value = context.configurationIntegerInSection("physics_cloth", "solver_iterations");
+            value && *value > 0 && *value <= 16)
+            settings_.solverIterations = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationFloatingInSection("physics_cloth", "wind_drag_coefficient");
+            value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
+            settings_.windDragCoefficient = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_cloth", "wind_lift_coefficient");
+            value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
+            settings_.windLiftCoefficient = *value;
+    }
+
     static void setError(ClothError *output, ClothError value) noexcept
     {
         engine::util::setModuleError(output, value);
@@ -142,6 +162,14 @@ private:
 
     void integrateSubstep(ClothRecord &cloth, double substepDelta)
     {
+        // The aerodynamic wind acts as a force in the integrator: evaluated
+        // against the pre-integration velocities and merged into them before
+        // the position advance (uniform wind rides the per-particle loop
+        // below as a raw acceleration).
+        if (cloth.aerodynamicWind)
+        {
+            applyAerodynamicWind(cloth, substepDelta);
+        }
         const std::size_t particleCount = cloth.positions.size() / 3;
         const double      dampingFactor = 1.0 / (1.0 + substepDelta * cloth.damping);
         for (std::size_t particle = 0; particle < particleCount; ++particle)
@@ -170,12 +198,13 @@ private:
             cloth.velocities[offset + 1] *= dampingFactor;
             cloth.velocities[offset + 2] *= dampingFactor;
 
-            // Drag spring toward the grab target.
+            // Drag spring toward the grab target (one target per cloth: two
+            // grabbed cloths never interfere through module state).
             if (cloth.dragActive && particle == cloth.drag.particleIndex)
             {
-                const double errorX  = dragTarget_[0] - cloth.positions[offset];
-                const double errorY  = dragTarget_[1] - cloth.positions[offset + 1];
-                const double errorZ  = dragTarget_[2] - cloth.positions[offset + 2];
+                const double errorX  = cloth.dragTarget[0] - cloth.positions[offset];
+                const double errorY  = cloth.dragTarget[1] - cloth.positions[offset + 1];
+                const double errorZ  = cloth.dragTarget[2] - cloth.positions[offset + 2];
                 double accelerationX = cloth.drag.stiffness * errorX - cloth.drag.damping * cloth.velocities[offset];
                 double accelerationY
                     = cloth.drag.stiffness * errorY - cloth.drag.damping * cloth.velocities[offset + 1];
@@ -201,10 +230,142 @@ private:
         }
     }
 
-    void solveConstraints(ClothRecord &cloth, double substepDelta)
+    // Per-face aerodynamic wind (the Baraff-Witkin model): the per-cloth wind
+    // vector is the far-field wind velocity (meters per second), and each
+    // grid quad's triangle decomposes the face's relative velocity into a
+    // normal-drag share (a1) and two lift shares (a2, a3) evaluated on the
+    // triangle's in-plane cross products; the scalar response applies along
+    // the triangle normal, split evenly over the triangle's free particles.
+    // The wind pushes the surface and makes it flutter instead of sliding
+    // every particle uniformly. Deterministic: faces iterate in grid order,
+    // pinned particles receive no velocity, and degenerate (zero-area or
+    // non-finite) faces are skipped.
+    void applyAerodynamicWind(ClothRecord &cloth, double substepDelta)
+    {
+        if (cloth.faces.empty())
+        {
+            return;
+        }
+        for (const ClothFace &face : cloth.faces)
+        {
+            // Triangle (A, B, D) of the quad: one triangle per cell keeps the
+            // force O(cells); the neighboring cell's mirrored triangle covers
+            // the shared diagonal's other half.
+            const std::size_t   offsets[3]  = { static_cast<std::size_t>(face.particleA) * 3,
+                                                static_cast<std::size_t>(face.particleB) * 3,
+                                                static_cast<std::size_t>(face.particleD) * 3 };
+            const std::uint32_t particles[3] = { face.particleA, face.particleB, face.particleD };
+
+            // Face velocity: the average of the triangle's free particles.
+            double        faceVelocity[3] = { 0.0, 0.0, 0.0 };
+            std::uint32_t freeCount       = 0;
+            for (const std::size_t offset : offsets)
+            {
+                if (cloth.pinned[offset / 3] == 0u)
+                {
+                    faceVelocity[0] += cloth.velocities[offset];
+                    faceVelocity[1] += cloth.velocities[offset + 1];
+                    faceVelocity[2] += cloth.velocities[offset + 2];
+                    ++freeCount;
+                }
+            }
+            if (freeCount == 0)
+            {
+                continue;
+            }
+            const double inverseFree = 1.0 / static_cast<double>(freeCount);
+            faceVelocity[0] *= inverseFree;
+            faceVelocity[1] *= inverseFree;
+            faceVelocity[2] *= inverseFree;
+
+            // Relative wind against the moving face.
+            const double relative[3] = { cloth.windAcceleration[0] - faceVelocity[0],
+                                         cloth.windAcceleration[1] - faceVelocity[1],
+                                         cloth.windAcceleration[2] - faceVelocity[2] };
+
+            // Triangle edges and normal from the CURRENT positions, so a
+            // crumpled face pushes along its crumpled normal.
+            const double edge1[3] = { cloth.positions[offsets[1]] - cloth.positions[offsets[0]],
+                                      cloth.positions[offsets[1] + 1] - cloth.positions[offsets[0] + 1],
+                                      cloth.positions[offsets[1] + 2] - cloth.positions[offsets[0] + 2] };
+            const double edge2[3] = { cloth.positions[offsets[2]] - cloth.positions[offsets[0]],
+                                      cloth.positions[offsets[2] + 1] - cloth.positions[offsets[0] + 1],
+                                      cloth.positions[offsets[2] + 2] - cloth.positions[offsets[0] + 2] };
+            const double normalX2 = edge1[1] * edge2[2] - edge1[2] * edge2[1];
+            const double normalY2 = edge1[2] * edge2[0] - edge1[0] * edge2[2];
+            const double normalZ2 = edge1[0] * edge2[1] - edge1[1] * edge2[0];
+            const double normalLength
+                = std::sqrt(normalX2 * normalX2 + normalY2 * normalY2 + normalZ2 * normalZ2);
+            if (!(normalLength > 1.0e-12) || !std::isfinite(normalLength))
+            {
+                continue; // degenerate or non-finite face: no wind response
+            }
+            const double inverseNormalLength = 1.0 / normalLength;
+            const double area                = 0.5 * normalLength;
+            const double normal[3]           = { normalX2 * inverseNormalLength,
+                                                 normalY2 * inverseNormalLength,
+                                                 normalZ2 * inverseNormalLength };
+
+            // In-plane unit tangents: e1 normalized, and normal x e1 (unit
+            // automatically, because both factors are unit and orthogonal).
+            const double edge1LengthSquared
+                = edge1[0] * edge1[0] + edge1[1] * edge1[1] + edge1[2] * edge1[2];
+            if (!(edge1LengthSquared > 1.0e-24) || !std::isfinite(edge1LengthSquared))
+            {
+                continue;
+            }
+            const double edge1InverseLength = 1.0 / std::sqrt(edge1LengthSquared);
+            const double tangent1[3]        = { edge1[0] * edge1InverseLength,
+                                                edge1[1] * edge1InverseLength,
+                                                edge1[2] * edge1InverseLength };
+            const double tangent2[3]        = { normal[1] * tangent1[2] - normal[2] * tangent1[1],
+                                                normal[2] * tangent1[0] - normal[0] * tangent1[2],
+                                                normal[0] * tangent1[1] - normal[1] * tangent1[0] };
+
+            // Baraff-Witkin scalar response: normal drag a1 (n . v) plus the
+            // two lift shares a2/a3 evaluated on the in-plane projections of
+            // the cross products (n . (v x t1) and n . (v x t2)).
+            const double dotNV      = normal[0] * relative[0] + normal[1] * relative[1] + normal[2] * relative[2];
+            const double crossT1[3] = { relative[1] * tangent1[2] - relative[2] * tangent1[1],
+                                        relative[2] * tangent1[0] - relative[0] * tangent1[2],
+                                        relative[0] * tangent1[1] - relative[1] * tangent1[0] };
+            const double crossT2[3] = { relative[1] * tangent2[2] - relative[2] * tangent2[1],
+                                        relative[2] * tangent2[0] - relative[0] * tangent2[2],
+                                        relative[0] * tangent2[1] - relative[1] * tangent2[0] };
+            const double lift1      = normal[0] * crossT1[0] + normal[1] * crossT1[1] + normal[2] * crossT1[2];
+            const double lift2      = normal[0] * crossT2[0] + normal[1] * crossT2[1] + normal[2] * crossT2[2];
+            const double response   = settings_.windDragCoefficient * dotNV
+                                    + settings_.windLiftCoefficient * (lift1 + lift2);
+            if (response == 0.0)
+            {
+                continue;
+            }
+
+            // Acceleration along the normal, split evenly over the triangle's
+            // free particles: the scale carries the face area (resolution
+            // changes keep the same material response) and the per-particle
+            // mass share.
+            const double acceleration
+                = -response * area / (3.0 * cloth.particleMass * static_cast<double>(freeCount));
+            for (std::uint32_t corner = 0; corner < 3; ++corner)
+            {
+                const std::size_t particleIndex = particles[corner];
+                if (cloth.pinned[particleIndex] != 0u)
+                {
+                    continue;
+                }
+                const std::size_t offset = static_cast<std::size_t>(particleIndex) * 3;
+                cloth.velocities[offset] += normal[0] * acceleration * substepDelta;
+                cloth.velocities[offset + 1] += normal[1] * acceleration * substepDelta;
+                cloth.velocities[offset + 2] += normal[2] * acceleration * substepDelta;
+            }
+        }
+    }
+
+    void solveConstraints(ClothRecord &cloth, double substepDelta, bool tearingCheckEnabled)
     {
         const double inverseDeltaTimeSquared = 1.0 / (substepDelta * substepDelta);
-        const bool   tearingEnabled          = cloth.tearStrain > 0.0;
+        const bool   tearingEnabled          = tearingCheckEnabled && cloth.tearStrain > 0.0;
         const double stretchLimitFactor      = 1.0 + cloth.tearStrain;
         for (DistanceConstraint &constraint : cloth.constraints)
         {
@@ -458,7 +619,7 @@ private:
         }
     }
 
-    void finalizeSubstepVelocities(ClothRecord &cloth, double substepDelta)
+    void finalizeSubstepVelocities(ClothRecord &cloth, double substepDelta, double frictionRetention)
     {
         const std::size_t particleCount    = cloth.positions.size() / 3;
         const double      inverseDeltaTime = 1.0 / substepDelta;
@@ -476,7 +637,11 @@ private:
             {
                 // Split into normal and tangential parts; the normal part is
                 // removed and the tangential part scales by the friction
-                // factor (the fraction of sliding velocity kept per substep).
+                // retention. The retention is friction^(substep delta), the
+                // per-second "sliding velocity kept" factor the capability
+                // documents, applied per contact substep - so the same
+                // wall-clock contact time removes the same tangential speed
+                // at any step rate (a per-substep multiplier would not).
                 const double normalX        = cloth.contactNormals[offset];
                 const double normalY        = cloth.contactNormals[offset + 1];
                 const double normalZ        = cloth.contactNormals[offset + 2];
@@ -484,9 +649,9 @@ private:
                 velocityX -= normalX * normalVelocity;
                 velocityY -= normalY * normalVelocity;
                 velocityZ -= normalZ * normalVelocity;
-                velocityX *= cloth.friction;
-                velocityY *= cloth.friction;
-                velocityZ *= cloth.friction;
+                velocityX *= frictionRetention;
+                velocityY *= frictionRetention;
+                velocityZ *= frictionRetention;
             }
             // Clamp the derived velocity so solver noise cannot escalate
             // into a diverging state (the value is module configuration).
@@ -512,6 +677,10 @@ private:
             return false;
         }
         const double        substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+        // Friction retention per contact substep: the capability documents the
+        // tangential velocity kept per SECOND of contact, so the per-substep
+        // multiplier is friction^(delta) - rate-independent by construction.
+        const double frictionRetention = cloth.friction > 0.0 ? std::pow(cloth.friction, substepDelta) : 0.0;
         // Pre-step copies for the rollback path: a diverged step restores
         // this state and reports failure, so the caller sees an untouched
         // cloth.
@@ -522,10 +691,17 @@ private:
         for (std::uint32_t substep = 0; substep < substeps; ++substep)
         {
             integrateSubstep(cloth, substepDelta);
-            solveConstraints(cloth, substepDelta);
+            // The constraint walk repeats solverIterations times per substep;
+            // tearing is judged on the first pass only, so the breakage
+            // criterion stays the stretch at the substep's start (the
+            // small-steps schedule is the iterations = 1 default).
+            for (std::uint32_t iteration = 0; iteration < settings_.solverIterations; ++iteration)
+            {
+                solveConstraints(cloth, substepDelta, iteration == 0);
+            }
             resolveSelfCollisions(cloth);
             resolveCollisions(cloth);
-            finalizeSubstepVelocities(cloth, substepDelta);
+            finalizeSubstepVelocities(cloth, substepDelta, frictionRetention);
         }
         cloth.lastContactCount = static_cast<std::uint32_t>(
             std::count(cloth.contactFlags.begin(), cloth.contactFlags.end(), std::uint8_t{1}));
@@ -656,6 +832,7 @@ private:
         cloth.bendCompliance    = description->bendCompliance;
         cloth.tearStrain          = description->tearStrain;
         cloth.selfCollisionRadius = description->selfCollisionRadius;
+        cloth.aerodynamicWind     = description->aerodynamicWind;
 
         cloth.positions.resize(particleCount * 3);
         cloth.velocities.assign(particleCount * 3, 0.0);
@@ -705,6 +882,24 @@ private:
                             + std::pow(cloth.positions[offsetB + 2] - cloth.positions[offsetA + 2], 2));
             cloth.constraints.push_back(constraint);
         };
+        // Grid quads for the aerodynamic wind model: one entry per cell,
+        // stored in row-major order so the per-substep wind walk is a flat,
+        // deterministic loop. Built for every cloth (cheap: one quad per
+        // cell); the model consumes them only when configured.
+        cloth.faces.reserve((static_cast<std::size_t>(description->rows) - 1)
+                            * (static_cast<std::size_t>(description->columns) - 1));
+        for (std::uint32_t row = 0; row + 1 < description->rows; ++row)
+        {
+            for (std::uint32_t column = 0; column + 1 < description->columns; ++column)
+            {
+                ClothFace face;
+                face.particleA = static_cast<std::uint32_t>(particleIndex(cloth, column, row) / 3);
+                face.particleB = static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row) / 3);
+                face.particleC = static_cast<std::uint32_t>(particleIndex(cloth, column, row + 1) / 3);
+                face.particleD = static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row + 1) / 3);
+                cloth.faces.push_back(face);
+            }
+        }
         for (std::uint32_t row = 0; row < description->rows; ++row)
         {
             for (std::uint32_t column = 0; column < description->columns; ++column)
@@ -863,9 +1058,7 @@ private:
         cloth->sleepTimer        = 0.0;
         if (pinned && cloth->pinned[particleIndex] == 0u)
         {
-            cloth->sleeping   = false;
-        cloth->sleepTimer = 0.0;
-        cloth->pinned[particleIndex]        = 1u;
+            cloth->pinned[particleIndex]        = 1u;
             cloth->inverseMasses[particleIndex] = 0.0;
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
@@ -924,13 +1117,13 @@ private:
         {
             return false;
         }
-        cloth->drag       = *drag;
-        cloth->dragActive = true;
-        cloth->sleeping   = false;
-        cloth->sleepTimer = 0.0;
+        cloth->drag         = *drag;
+        cloth->dragActive   = true;
+        cloth->sleeping     = false;
+        cloth->sleepTimer   = 0.0;
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
-            dragTarget_[axis] = cloth->positions[static_cast<std::size_t>(drag->particleIndex) * 3 + axis];
+            cloth->dragTarget[axis] = cloth->positions[static_cast<std::size_t>(drag->particleIndex) * 3 + axis];
         }
         return true;
     }
@@ -946,9 +1139,9 @@ private:
         {
             return false;
         }
-        dragTarget_[0] = target[0];
-        dragTarget_[1] = target[1];
-        dragTarget_[2] = target[2];
+        cloth->dragTarget[0] = target[0];
+        cloth->dragTarget[1] = target[1];
+        cloth->dragTarget[2] = target[2];
         return true;
     }
 
@@ -990,6 +1183,51 @@ private:
         return engine::util::simulationLodSubstepsForBand(band, settings_.substepsPerStep);
     }
 
+    // Contact probe for sleeping cloths: resolves the same batched sphere
+    // query the live path uses but WITHOUT touching positions, and reports
+    // whether any obstacle overlaps the resting surface. Running one query
+    // per due step is the price of never letting a moving rigid body tunnel
+    // through settled cloth; the query is the module's cheapest surface
+    // (the rigid world's broadphase answers it without narrow-phase work).
+    bool clothSleepingContactWake(ClothRecord *cloth)
+    {
+        if (rigid_ == nullptr)
+        {
+            return false;
+        }
+        const std::size_t particleCount = cloth->positions.size() / 3;
+        collisionQueries_.clear();
+        for (std::size_t particle = 0; particle < particleCount; ++particle)
+        {
+            if (cloth->pinned[particle] != 0u)
+            {
+                continue;
+            }
+            engine::physics_rigid::SphereOverlapQuery query;
+            const std::size_t offset = particle * 3;
+            query.center[0]          = cloth->positions[offset];
+            query.center[1]          = cloth->positions[offset + 1];
+            query.center[2]          = cloth->positions[offset + 2];
+            query.radius             = cloth->particleRadius;
+            collisionQueries_.push_back(query);
+        }
+        if (collisionQueries_.empty())
+        {
+            return false;
+        }
+        collisionResults_.resize(collisionQueries_.size());
+        rigid_->collideSpheres(rigid_->self, cloth->world, collisionQueries_.data(),
+            static_cast<std::uint32_t>(collisionQueries_.size()), collisionResults_.data());
+        for (const engine::physics_rigid::SphereOverlapResult &result : collisionResults_)
+        {
+            if (result.hit && result.depth > 0.0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool stepImpl(ClothHandle handle, double fixedDeltaSeconds)
     {
         ClothRecord *cloth = findCloth(handle);
@@ -1014,10 +1252,18 @@ private:
             return true;
         }
         // A settled cloth holds its state until drag, pin, or wind changes
-        // wake it (those setters clear the sleeping flag).
+        // wake it (those setters clear the sleeping flag) - or until the
+        // collision probe below finds an obstacle overlapping the resting
+        // surface, so a moving body or a newly spawned box wakes the cloth
+        // instead of tunneling through it.
         if (cloth->sleeping)
         {
-            return true;
+            if (!clothSleepingContactWake(cloth))
+            {
+                return true;
+            }
+            cloth->sleeping   = false;
+            cloth->sleepTimer = 0.0;
         }
         if (!stepCloth(*cloth, fixedDeltaSeconds, substepsForBand(cloth->lodBand)))
         {
@@ -1178,8 +1424,6 @@ private:
     engine::physics_rigid::PhysicsRigidCapability *rigid_ = nullptr;
 
     ClothSettings settings_;
-
-    double dragTarget_[3] = {0.0, 0.0, 0.0};
 
     std::vector<ClothRecord>                     cloths_;
     std::unordered_map<ClothHandle, std::size_t> clothIndexByHandle_;

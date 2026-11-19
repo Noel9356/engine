@@ -4,7 +4,10 @@
 // physics_cloth modules: one rigid world holds static scenery, dynamic
 // primitives, an articulated chain and a drive-controlled pendulum figure,
 // and cloth sheets, all stepped on a fixed-timestep clock with render-side
-// interpolation.
+// interpolation. The cloth sheets render as continuous fabric surfaces: the
+// simulated particle grid doubles as the render mesh, refreshed each frame
+// through the renderer's dynamic vertex update and drawn double-sided with
+// the fabric sheen material.
 //
 // Interaction (windowed runs):
 //   Left mouse       grab and drag the body or cloth particle under the cursor
@@ -431,7 +434,7 @@ int main(int argc, char **argv)
         host.stop();
         return 1;
     }
-    sandboxRenderer.syncScene(dependencies, scene, dependencies.cloth);
+    sandboxRenderer.syncScene(renderCapability, rendererHandle, dependencies, scene, dependencies.cloth);
     sandboxRenderer.prepareFur(renderCapability, rendererHandle, furCapability);
 
     // ---- warmup ------------------------------------------------------------------
@@ -570,7 +573,7 @@ int main(int argc, char **argv)
                             : demo::physics_sandbox::PrimitiveKind::Capsule;
                     demo::physics_sandbox::spawnPrimitive(
                         dependencies, sceneConfig, scene, kind, posePosition, poseForward);
-                    sandboxRenderer.syncScene(dependencies, scene, dependencies.cloth);
+                    sandboxRenderer.syncScene(renderCapability, rendererHandle, dependencies, scene, dependencies.cloth);
                 }
                 break;
             }
@@ -601,7 +604,7 @@ int main(int argc, char **argv)
                     quitRequested = true;
                     break;
                 }
-                sandboxRenderer.syncScene(dependencies, scene, dependencies.cloth);
+                sandboxRenderer.syncScene(renderCapability, rendererHandle, dependencies, scene, dependencies.cloth);
                 grab             = GrabState{};
                 simulatedSeconds = 0.0;
                 std::cout << "demo_physics_sandbox: scene reset\n";

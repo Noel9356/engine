@@ -285,6 +285,11 @@ void addClothSheet(const SceneDependencies &dependencies, SceneHandles &handles,
     description.bendCompliance     = 0.0002;
     description.damping            = 0.05;
     description.friction           = 0.55;
+    // The sheets fly the aerodynamic flag: the wind toggle drives the
+    // per-face drag-and-lift model, so the fabric billows and flutters
+    // along its deformed normals instead of sliding every particle
+    // uniformly (the wind coefficients are module configuration).
+    description.aerodynamicWind    = true;
     // The draped sheet spawns parallel to the ramp's slope (the ramp pitches
     // 0.30 rad about X, its top surface rising toward -z), 6 cm above the
     // surface: its pinned first row sits just off the slope's mid line and
