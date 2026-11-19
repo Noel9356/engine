@@ -27,10 +27,12 @@ struct PlanetDemoOptions
     std::string screenshotPath;
     std::string frameTimesPath;
     std::uint64_t screenshotFrame = 0;
+    bool screenshotFrameSet = false; // --screenshot-frame appeared (0 is a valid index)
     std::uint32_t warmupFrames = 0;
     std::uint32_t statsEveryFrames = 30;
     bool orbit = false;
     bool caves = false;
+    bool chunkBorders = false;
     bool selfTest = false;
     bool benchmark = false;
 };

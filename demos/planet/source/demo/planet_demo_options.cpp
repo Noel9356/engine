@@ -16,7 +16,8 @@ const char *planetOptionsUsage() noexcept
            "  --radius <meters>         Planet radius override (0 keeps config).\n"
            "  --frames <n>              Render exactly n frames, then exit.\n"
            "  --screenshot <file.ppm>   Export the rendered frame as PPM.\n"
-           "  --screenshot-frame <n>    Frame index for --screenshot (default last).\n"
+           "  --screenshot-frame <n>    Frame index for --screenshot (default last rendered;\n"
+           "                            0 is a valid index).\n"
            "  --frame-times <file.csv>  Export per-frame timings as CSV (a percentile summary\n"
            "                            of the rendered frames is always printed).\n"
            "  --stats-every <n>         Print planet statistics every n frames.\n"
@@ -28,6 +29,8 @@ const char *planetOptionsUsage() noexcept
            "                            surface views: a short circle at the pose;\n"
            "                            walk: a deterministic forward walk).\n"
            "  --caves                   Enable the cave worm carving field.\n"
+           "  --chunk-borders           Highlight chunk borders (see the module's\n"
+           "                            debug_chunk_borders key).\n"
            "  --self-test               Run determinism/order-independence checks\n"
            "                            and exit (exit code 0 = pass).\n"
            "  --bench                   Benchmark the generation core (field sampling,\n"
@@ -77,6 +80,7 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
         else if (argument == "--screenshot-frame" && hasValue)
         {
             options.screenshotFrame = std::strtoull(arguments[++index].c_str(), nullptr, 10);
+            options.screenshotFrameSet = true;
         }
         else if (argument == "--stats-every" && hasValue)
         {
@@ -94,6 +98,10 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
         {
             options.caves = true;
         }
+        else if (argument == "--chunk-borders")
+        {
+            options.chunkBorders = true;
+        }
         else if (argument == "--self-test")
         {
             options.selfTest = true;
@@ -110,10 +118,5 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
     }
     return true;
 }
-
-// ---- deterministic view-direction search -----------------------------------------
-
-// Golden-spiral direction set: evenly spread sample directions over the
-// sphere, fixed for a given count (no noise, no runtime randomness).
 
 } // namespace demo::planet_demo

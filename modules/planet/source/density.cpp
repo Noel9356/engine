@@ -212,7 +212,19 @@ void DensityField::macroSampleAt(const Vec3 &surfacePoint, double lowPassCutoffM
         outMacro.provinceChemistry = smoothstep(-0.30, 0.45, provinceField);
         const double carbonateField = fbm(fbmSeeds_[streamProvinceCarbonate], radial,
             params_.derivedProvinceWavelengthMeters * 0.43, kProvinceFbm, lowPassCutoffMeters);
-        outMacro.provinceCarbonate = smoothstep(0.10, 0.72, carbonateField);
+        // Carbonate provinces follow the climate the way real limestone
+        // country does: platforms and their exposed reef tracts sit in warm
+        // lowlands (tropical shelves and karst plains), while cold or alpine
+        // country keeps the chemistry's shield/volcanic split whatever the
+        // raw field says. The gate rides the sea-level temperature this macro
+        // sample already carries, and an elevation band that runs from the
+        // shelf up to the mid slopes (scaled by the water and snow-line keys
+        // the climate already uses), so the pale limestone tint lands where
+        // geology puts it instead of painting random polar massifs white.
+        const double elevationMeters = radius - params_.derivedSeaRadiusMeters;
+        const double warmLowland = smoothstep(0.35, 0.65, sea.temperature01)
+            * (1.0 - smoothstep(params_.deepWaterMeters, 0.5 * params_.snowLineMeters, elevationMeters));
+        outMacro.provinceCarbonate = smoothstep(0.10, 0.72, carbonateField) * warmLowland;
     }
 }
 
@@ -415,14 +427,25 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
         // country). The riser spans terraceRiserFraction of each step - a
         // narrow riser keeps the step's wall genuinely cliff-like instead of
         // a long shoulder (the riser grade is the flank slope divided by the
-        // fraction; see params.hpp).
+        // fraction; see params.hpp). The quantization weight runs through a
+        // SHARPER, lower gate than the cliff mask itself: the mask ramps
+        // over the whole steepness band, and weighting the quantization by
+        // the raw mask turns every mesa flank into a ramp that only snaps
+        // into steps right at the crest lines. The terrace gate reaches
+        // full strength a quarter of the way into the band, so genuinely
+        // steep flanks quantize fully (crisp benches and risers) while open
+        // ground below the band stays unquantized - the mask shape stays
+        // untouched for the strata, overhang and detail weighting, which
+        // grade with the terrain's true steepness.
+        const double terraceGate = smoothstep(params_.cliffSteepnessLow,
+            params_.cliffSteepnessLow + 0.25 * (params_.cliffSteepnessHigh - params_.cliffSteepnessLow), cliffEnergy);
         const double u    = height / terraceStepMeters_;
         const double k    = std::floor(u);
         const double f    = u - k;
         const double halfRiser = 0.5 * params_.terraceRiserFraction;
         const double edge = smoothstep(0.5 - halfRiser, 0.5 + halfRiser, f);
         height            = mix(height, (k + edge) * terraceStepMeters_,
-            params_.terraceStrength * terraceBias * cliffMask * detailFade * coastalTaper);
+            params_.terraceStrength * terraceBias * terraceGate * detailFade * coastalTaper);
     }
 
     relief.heightMeters   = height;

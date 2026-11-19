@@ -10,6 +10,8 @@
 
 #include <engine/planet/fbm.hpp>
 
+#include "lattice_math.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -222,9 +224,11 @@ ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLo
 {
     const double nodeSize    = chunkSizeMeters(params_, coord.depth);
     const double halfSize    = 0.5 * nodeSize;
-    const Vec3   nodeCenter  = Vec3{-params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.x) + 0.5),
-        -params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.y) + 0.5),
-        -params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.z) + 0.5)};
+    // One lattice expression for every consumer of the node center (this
+    // probe pass, the horizon test, the build requests): chunkCenterMeters
+    // is the same expression the mesher pins the vertex frame with, so
+    // probe positions and mesh placement cannot drift apart at any depth.
+    const Vec3   nodeCenter  = chunkCenterMeters(params_, coord);
     const double boundRadius = boundRadii_[std::min<std::size_t>(coord.depth, boundRadii_.size() - 1)];
 
     // 1. Shell-band pruning: cubes fully inside the core or fully outside
@@ -471,15 +475,6 @@ void computeConformMaskImpl(const PlanetGenerationParams &params, const ChunkCoo
     const std::int64_t n          = static_cast<std::int64_t>(params.leafGridN);
     const std::int64_t coarseSpan = 2 * n; // a depth-(d-1) cell spans 2n fine grid steps
 
-    const auto floorDiv = [](std::int64_t value, std::int64_t divisor)
-    {
-        std::int64_t quotient = value / divisor;
-        if ((value % divisor) != 0 && ((value < 0) != (divisor < 0)))
-        {
-            --quotient;
-        }
-        return quotient;
-    };
 
     const std::int64_t chunkCoord[3] = {static_cast<std::int64_t>(coord.x), static_cast<std::int64_t>(coord.y),
         static_cast<std::int64_t>(coord.z)};
@@ -541,7 +536,7 @@ void computeConformMaskImpl(const PlanetGenerationParams &params, const ChunkCoo
         // Far-side cell index along the face axis. The chunk spans fine grid
         // steps [C*n, (C+1)*n); beyond the min face the covering depth-(d-1)
         // cell is floor((C*n - 1) / 2n), beyond the max face ((C+1)*n) / 2n.
-        const std::int64_t minFaceCell = floorDiv(chunkCoord[axis] * n - 1, coarseSpan);
+        const std::int64_t minFaceCell = detail::floorDiv(chunkCoord[axis] * n - 1, coarseSpan);
         const std::int64_t maxFaceCell = ((chunkCoord[axis] + 1) * n) / coarseSpan;
 
         for (std::uint32_t side = 0; side < 2; ++side)

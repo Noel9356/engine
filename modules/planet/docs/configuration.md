@@ -97,18 +97,18 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `detail_wavelength_meters` | `120.0` | Feature size of the detail layer's base octave. Keep the finest octave (base / 2^(octaves-1)) at 2.5+ voxel sizes or coarse LOD chunks alias it into lumps. |
 | `detail_plains_fraction` | `0.22` | Detail strength kept on flat ground (above ~0.3 boils plains into noise lumps). |
 | `detail_octaves` | `4` | fBm octaves of the detail layer. |
-| `terrace_strength` | `0.95` | 0 = smooth terrain, 1 = full plateaus (mesa country). Terracing is gated to genuinely steep country (cliff mask) inside the field, so open slopes never corduroy. |
+| `terrace_strength` | `0.95` | 0 = smooth terrain, 1 = full plateaus (mesa country). Terracing runs through a sharper, lower gate than the cliff mask itself (full strength a quarter of the way into the steepness band), so genuinely steep flanks quantize into crisp benches and risers while open ground below the band stays smooth; the cliff mask shape still grades the strata, overhang and detail weighting. |
 | `terrace_steps` | `9.0` | Approximate plateau count across the relief range (step height = total relief / steps; 9 steps over the showcase relief makes ~200 m benches). |
 | `terrace_riser_fraction` | `0.15` | Fraction of each terrace step the RISER spans. The riser's grade is the flank slope divided by this fraction, so small values build genuinely cliff-like faces: 0.15 turns a 0.35-grade flank into a ~60-degree rock wall (with strata and overhang ledges riding the same mask); 0.4 smears the step into a long shoulder. Below ~0.1 the riser thins under one voxel. |
 | `cliff_wavelength_meters` | `1400.0` | Scale of the cliff-mask variety modulation (spacing between mask-band variations). |
 | `cliff_steepness_low` | `0.42` | Cliff-mask gate over the terrain's steepness energy: where the mask opens (terracing/strata/overhangs begin). Lower widens terraced country, higher restricts it to the steepest flanks. |
 | `cliff_steepness_high` | `0.70` | Steepness energy where the mask saturates (full-strength terraces, strata and overhangs). Keep at least ~0.2 above `cliff_steepness_low`. |
-| `strata_gate_low` / `strata_gate_high` | `0.45` / `0.85` | Cliff-mask window where the strata banding gate opens / saturates (keeps banding off open slopes). |
+| `strata_gate_low` / `strata_gate_high` | `0.34` / `0.85` | Cliff-mask window where the strata banding gate opens / saturates (keeps banding off open slopes while letting the flanks the camera actually sees carry their beds). |
 | `cliff_sharpness` | `2.6` | Exponent concentrating the hill-flank term of the cliff mask. Higher narrows terraced hill country into tighter bands; the mountain-crest term is unaffected. |
 
 ## Geologic provinces
 
-A very-low-frequency field classifies every landmass region into layered sedimentary country (warm bedded tones, stronger strata and terraces), shield/volcanic country (cool gray tones, weaker strata) and pale carbonate patches (limestone). The geometry biases and the rock albedo read the same field, so cliff faces look and structure themselves as one geology.
+A very-low-frequency field classifies every landmass region into layered sedimentary country (warm bedded tones, stronger strata and terraces), shield/volcanic country (cool gray tones, weaker strata) and pale carbonate patches (limestone). The geometry biases and the rock albedo read the same field, so cliff faces look and structure themselves as one geology. The carbonate patches follow the climate the way real limestone country does - they only appear in warm lowlands (tropical shelves, exposed reef tracts and karst plains), gated by the sea-level temperature and an elevation band scaled from the deep-water and snow-line keys.
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -196,7 +196,7 @@ A very-low-frequency field classifies every landmass region into layered sedimen
 | `beach_wet_width_meters` | `6.0` | Swash band above the waterline that reads as wet sand (real beaches darken sharply where the last wave reached). 0 disables. |
 | `beach_wet_darkening` | `0.45` | How dark the wet band gets (0 = dry sand everywhere, 1 = near-black rim). |
 | `rock_slope_threshold` | `0.46` | Slope (1 - dot(normal, radial)) where bare rock takes over. Steep faces scrape soil and grass into bare rock; rolling hills stay green. |
-| `rock_strata_contrast` | `0.24` | Luminance banding of rock faces at the strata band spacing (sediment stripes). The band thickness follows a low-frequency warp (beds vary, and the gate's wide spread keeps most beds faint, so banded stretches read as geology rather than a periodic pattern) and the stripe fades out below two samples per bed at the chunk's vertex spacing, so coarse chunks never alias it into per-vertex speckle. 0 disables; keyed to `strata_band_meters`. |
+| `rock_strata_contrast` | `0.75` | Luminance banding of rock faces at the strata band spacing (sediment stripes). The band thickness follows a low-frequency warp (beds vary, and the gate's wide spread keeps most beds faint, so banded stretches read as geology rather than a periodic pattern) and the stripe fades out below two samples per bed at the chunk's vertex spacing, so coarse chunks never alias it into per-vertex speckle. 0 disables; keyed to `strata_band_meters`. |
 | `biome_blend_width` | `0.06` | Half-width of the biome color blend on the temperature/moisture axes. Biome colors interpolate between palette rows instead of hard-switching per vertex (hard switches smear into pale stains across triangles). |
 | `slope_blend_width` | `0.08` | Blend half-width around the rock slope threshold. |
 | `elevation_blend_fraction` | `0.12` | Snow-line and water-band color blends as a fraction of the band width. |
@@ -223,7 +223,7 @@ A kinematic, point-feet character controller lives in the module (`SurfaceWalker
 
 ## Sky backdrop
 
-The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon gradient keyed to the view direction's elevation above the local horizon, an altitude weight that fades the whole sky to space over `atmosphere_height_meters`, a sun-elevation tint (neutral through the day, warm gold through the low-sun band, deep blue at night), and an aerial-perspective sample for one sight line (the sun-tinted haze the air adds between the eye and a distant point - its weight grows exponentially with the sight-line length on a scale riding `atmosphere_height_meters` and fades out as the eye climbs into space, and its color is the horizon band under the same sun tint, so distant terrain melts into the sky behind it). All functions are pure and thread-safe, and the colors are linear RGB like the water colors, so a consumer can paint a sky dome, a frame clear color, or apply distance haze to their scene - the demo draws a gradient sphere around the walking eye, hands the horizon color to the renderer as the clear color, and fades its chunk draws toward the haze with distance (space views keep the atmosphere limb shell as their depth cue).
+The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon gradient keyed to the view direction's elevation above the local horizon, an altitude weight that fades the whole sky to space over `atmosphere_height_meters`, a sun-elevation tint (neutral through the day, warm gold through the low-sun band, deep blue at night), and an aerial-perspective sample for one sight line (the sun-tinted haze the air adds between the eye and a distant point - its weight grows exponentially with the sight-line length on a scale riding `atmosphere_height_meters` at `aerial_perspective_scale_fraction` of it, approaches `aerial_perspective_asymptote` at infinite distance, and fades out as the eye climbs into space, and its color is the horizon band under the same sun tint, so distant terrain melts into the sky behind it). All functions are pure and thread-safe, and the colors are linear RGB like the water colors, so a consumer can paint a sky dome, a frame clear color, or apply distance haze to their scene - the demo draws a gradient sphere around the walking eye, hands the horizon color to the renderer as the clear color, and fades its chunk draws toward the haze with distance (space views keep the atmosphere limb shell as their depth cue).
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -231,6 +231,8 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 | `atmosphere_height_meters` | `20000.0` | Eye altitude over which the sky fades to black (space). The sky is at full strength below 15% of this height. |
 | `atmosphere_zenith_color` | `[0.040, 0.130, 0.460]` | Linear RGB at the zenith. The defaults are chosen for the renderer's shared tone mapping (which brightens midtones), so the pre-tone-map values sit deeper and more saturated than the sky they finally display. |
 | `atmosphere_horizon_color` | `[0.220, 0.400, 0.780]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
+| `aerial_perspective_scale_fraction` | `0.70` | Sight-line distance (as a fraction of `atmosphere_height_meters`) at which the aerial-perspective haze saturates. Larger values keep the midground clear and let the far ridge dissolve gradually; smaller values haze the whole distance range over at once. |
+| `aerial_perspective_asymptote` | `0.62` | Haze weight the profile approaches at infinite distance. Keeps the farthest terrain faintly readable as terrain instead of fading fully into sky; `0` disables the aerial perspective entirely. |
 
 ## Clouds
 
@@ -264,6 +266,13 @@ The module exposes a seed-derived star field for the space backdrop (`atmosphere
 | `stars_enabled` | `true` | Master switch; `false` reports empty space everywhere. |
 | `stars_density` | `0.5` | Star spacing: `0` sparse skies, `1` dense skies (the lattice tightens quadratically). |
 | `stars_brightness` | `1.0` | Luminance multiplier of the whole field; the brightest stars saturate to white through the tone mapping. |
+
+## Debug
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `debug_chunk_borders` | `false` | Highlights chunk borders: terrain and water vertices within `debug_chunk_border_width_meters` of their own chunk's boundary planes carry a fixed accent color blended over their shaded color, so every rendered chunk reads as a lit grid cell on the surface. The overlay exposes selection density, LOD transitions and seam behavior on demand; it rides the vertex colors only, so geometry, normals and the determinism guarantees are untouched. |
+| `debug_chunk_border_width_meters` | `2.0` | Half-width of the tinted band along each boundary plane (the band fades from the full accent at the plane to nothing at this distance). Range [0.05, 1% of the radius]. |
 
 ## Usage notes
 

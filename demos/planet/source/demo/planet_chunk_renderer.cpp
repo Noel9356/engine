@@ -26,6 +26,19 @@ namespace demo::planet_demo
 namespace planet = engine::planet;
 namespace renderer = engine::renderer;
 
+// The one vertex-layout description every upload in this file (and the
+// self-test) uses; defined beside the upload helpers so the renderer-facing
+// layout lives with the renderer-facing code instead of in the test file.
+std::array<renderer::VertexAttribute, 4> canonicalAttributes()
+{
+    return {{
+        {renderer::VertexSemantic::Position, renderer::VertexFormat::Float32x3, 0},
+        {renderer::VertexSemantic::Normal, renderer::VertexFormat::Float32x3, 12},
+        {renderer::VertexSemantic::Color, renderer::VertexFormat::Float32x3, 24},
+        {renderer::VertexSemantic::TexCoord0, renderer::VertexFormat::Float32x2, 36},
+    }};
+}
+
 namespace
 {
 constexpr std::uint32_t kVertexStride = sizeof(planet::PlanetVertex);
@@ -753,8 +766,12 @@ void PlanetChunkRenderer::updateVisibleChunks()
             {
                 uploadedHash = view.meshHash;
             }
-            else
+            else if (uploadFailureReports_ < 8)
             {
+                // A backend that cannot upload would otherwise repeat this
+                // line every frame for every chunk; the first few reports
+                // carry the diagnosis, the rest are noise.
+                ++uploadFailureReports_;
                 std::cerr << "demo_planet: chunk mesh upload failed (error "
                           << static_cast<std::uint32_t>(error) << ")\n";
             }
@@ -837,6 +854,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         return glm::mat4(shiftToEye * glm::dmat4(absolute));
     };
     frameBackdropMatrices_.clear();
+    frameBackdropMatrices_.reserve(6);
     frameBackdropMatrices_.push_back(composeShifted(starDomeTransform_));
     frameBackdropMatrices_.push_back(composeShifted(atmosphereShellTransform_));
     frameBackdropMatrices_.push_back(composeShifted(skyDomeTransform_));
@@ -925,24 +943,30 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     const planet::Vec3 eyeLocal{eyePlanetLocal.x, eyePlanetLocal.y, eyePlanetLocal.z};
 
     const glm::dvec3 planetCenter(params_.centerMeters[0], params_.centerMeters[1], params_.centerMeters[2]);
-    frameChunkMatrices_.clear();
+    const glm::dvec3 eyeWorld = eyePlanetLocal + planetCenter;
+
+    // ---- pass 1: collect the surviving chunks ------------------------------
+    // Cull against the frustum (sphere-vs-plane; the bounding sphere comes
+    // from the chunk key's octree depth) and score each chunk by its squared
+    // distance to the eye. The map's own iteration order is depth-major, so
+    // the collect cannot emit directly.
+    frameVisibleDraws_.clear();
     for (const auto &entry : uploadedMeshes_)
     {
-        // Bounding sphere from the chunk key's octree depth: the node cube's
-        // circumradius around the placement center.
+        // Placement center in f64 (already planet-local + center): the
+        // shift-aware culling and the command matrix both compose against
+        // it, so chunk placement never quantizes at planet scale.
+        const glm::dvec3 localCenter = entry.second.placementCenter - planetCenter;
+        const double distanceSquared = glm::dot(localCenter - eyePlanetLocal, localCenter - eyePlanetLocal);
+
         std::uint32_t depth = 0;
         std::uint32_t cellX = 0;
         std::uint32_t cellY = 0;
         std::uint32_t cellZ = 0;
         planet::unpackChunkKey(entry.first, depth, cellX, cellY, cellZ);
-        const double nodeSize = planet::chunkSizeMeters(params_, depth);
-        // Placement center in f64 (already planet-local + center): the
-        // shift-aware culling and the command matrix both compose against
-        // it, so chunk placement never quantizes at planet scale. The aerial
-        // perspective below keeps the REAL planet-local centers - the
-        // physics does not shift with the render origin.
+        const double boundRadius = 0.5 * planet::chunkSizeMeters(params_, depth) * glm::sqrt(3.0);
+
         const glm::dvec3 worldCenter = entry.second.placementCenter - renderShift;
-        const double boundRadius = 0.5 * nodeSize * glm::sqrt(3.0);
         bool visible = true;
         for (const glm::dvec4 &plane : frustumPlanes)
         {
@@ -956,22 +980,58 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         {
             continue;
         }
+        frameVisibleDraws_.push_back(VisibleChunkDraw{&entry, distanceSquared});
+    }
+
+    // ---- pass 2: order near to far -----------------------------------------
+    // Opaque draws are order-independent for the final image (depth test and
+    // write decide the winner), but the rasterizer's per-sample depth
+    // early-out fires far more often when the near geometry lands first:
+    // the map's depth-major order hands the machine the far shells first,
+    // which is exactly backwards. The chunk key is the deterministic
+    // tie-break, so equal-distance chunks (concentric rings) keep a stable,
+    // reproducible order; the winner of an equal-depth z-fight is therefore
+    // a pure function of the scene, like every other frame.
+    std::sort(frameVisibleDraws_.begin(), frameVisibleDraws_.end(),
+        [](const VisibleChunkDraw &a, const VisibleChunkDraw &b)
+        {
+            if (a.distanceSquared != b.distanceSquared)
+            {
+                return a.distanceSquared < b.distanceSquared;
+            }
+            return a.entry->first < b.entry->first;
+        });
+
+    // ---- pass 3: emit (stable storage, then the commands pointing into it) -
+    // The per-frame matrix and material stores are sized BEFORE any command
+    // takes pointers into them: a growing vector reallocates and leaves
+    // earlier commands pointing at freed memory, which only "works" while
+    // the freed blocks still happen to hold their old bytes.
+    frameChunkMatrices_.clear();
+    frameChunkMatrices_.reserve(frameVisibleDraws_.size());
+    drawCommands_.reserve(drawCommands_.size() + 2u * frameVisibleDraws_.size());
+    for (const VisibleChunkDraw &draw : frameVisibleDraws_)
+    {
+        const ChunkMeshHandles &handles = draw.entry->second;
         // The command matrix composes from the f64 center (the stored f32
         // transform's translation is already planet-scale-quantized; the
         // vertex payload itself is chunk-local and small either way).
+        const glm::dvec3 worldCenter = handles.placementCenter - renderShift;
         frameChunkMatrices_.push_back(glm::mat4(glm::translate(glm::dmat4(1.0), worldCenter)));
 
+        // The aerial perspective keeps the REAL planet-local center - the
+        // physics does not shift with the render origin.
         const planet::AerialPerspective haze
-            = planet::aerialPerspective(params_, eyeLocal, planet::Vec3{worldCenter.x - planetCenter.x,
-                                                                    worldCenter.y - planetCenter.y,
-                                                                    worldCenter.z - planetCenter.z},
+            = planet::aerialPerspective(params_, eyeLocal, planet::Vec3{draw.entry->second.placementCenter.x - planetCenter.x,
+                                                                    draw.entry->second.placementCenter.y - planetCenter.y,
+                                                                    draw.entry->second.placementCenter.z - planetCenter.z},
                 sunTint);
         const float keepTerrain = static_cast<float>(1.0 - haze.weight);
         const float addHaze[3] = {static_cast<float>(haze.color.x * haze.weight),
             static_cast<float>(haze.color.y * haze.weight),
             static_cast<float>(haze.color.z * haze.weight)};
 
-        if (entry.second.terrain != renderer::invalidMesh)
+        if (handles.terrain != renderer::invalidMesh)
         {
             renderer::MeshMaterial material{};
             material.baseColor[0] = keepTerrain;
@@ -984,12 +1044,12 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             terrainMaterials_.push_back(material);
 
             renderer::RenderDrawCommand command{};
-            command.mesh = entry.second.terrain;
+            command.mesh = handles.terrain;
             command.modelMatrix = glm::value_ptr(frameChunkMatrices_.back());
             command.material = &terrainMaterials_.back();
             drawCommands_.push_back(command);
         }
-        if (entry.second.water != renderer::invalidMesh)
+        if (handles.water != renderer::invalidMesh)
         {
             renderer::MeshMaterial material{};
             material.baseColor[0] = keepTerrain;
@@ -1002,7 +1062,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             waterMaterials_.push_back(material);
 
             renderer::RenderDrawCommand command{};
-            command.mesh = entry.second.water;
+            command.mesh = handles.water;
             command.modelMatrix = glm::value_ptr(frameChunkMatrices_.back());
             command.material = &waterMaterials_.back();
             drawCommands_.push_back(command);
@@ -1545,8 +1605,12 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // sampled along the frame-rotated directions (from the planet center,
     // which for a standing eye differs from the eye-local sky direction by
     // well under the field's feature size).
-    constexpr std::uint32_t kSegments = 288;
-    constexpr std::uint32_t kBands = 144;
+    // Grid resolution: fine enough that the deck's contoured edges stay
+    // curved at eye level - the deck spans the whole upper hemisphere, and a
+    // standing camera resolves roughly one band per degree of elevation at
+    // 1920x1080, so the grid needs to stay below that pixel scale.
+    constexpr std::uint32_t kSegments = 384;
+    constexpr std::uint32_t kBands = 192;
     // The deck's coverage floor sits BELOW the visual cloud edge on purpose:
     // quads between the floor and the floor + haze width carry the thinning
     // fringe (their color fades from the sky gradient into the cloud tone),

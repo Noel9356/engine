@@ -222,7 +222,7 @@ strata_warp                 = 1.1
 # strata is additionally gated to genuinely terraced country: the cliff-mask
 # window below decides where the banding opens / saturates; open slopes keep
 # no corduroy banding at all.
-strata_gate_low             = 0.45
+strata_gate_low             = 0.34
 strata_gate_high            = 0.85
 
 # geologic provinces: a very-low-frequency field classifies every landmass
@@ -407,6 +407,15 @@ max_live_planets        = 16
 # blue). atmosphere_enabled = false leaves the sky to the consumer.
 atmosphere_enabled         = true
 atmosphere_height_meters   = 20000.0
+# Aerial perspective: how fast sight lines through the air haze over. The
+# scale fraction is the distance (as a fraction of atmosphere_height_meters)
+# at which the haze saturates - larger values keep the midground clear and
+# let the far ridge dissolve gradually; the asymptote caps the haze weight
+# at infinite distance, keeping the farthest terrain faintly readable as
+# terrain instead of fading fully into sky. Set the asymptote to 0 to see
+# the terrain without any aerial perspective.
+aerial_perspective_scale_fraction = 0.70
+aerial_perspective_asymptote      = 0.62
 atmosphere_zenith_color    = [0.040, 0.130, 0.460]
 atmosphere_horizon_color   = [0.220, 0.400, 0.780]
 
@@ -485,7 +494,7 @@ beach_wet_darkening        = 0.45
 rock_slope_threshold       = 0.46
 # luminance banding of rock faces at the strata band spacing (sediment
 # stripes); 0 disables.
-rock_strata_contrast       = 0.24
+rock_strata_contrast       = 0.75
 
 # biome color BLENDING (see docs/configuration.md): biome colors interpolate
 # between palette rows over these widths instead of hard-switching per vertex
@@ -510,3 +519,12 @@ biome_palette = [
     0.060, 0.100, 0.050,   0.260, 0.240, 0.170,   0.870, 0.900, 0.930,
     0.280, 0.250, 0.210,
 ]
+
+# Debug: chunk-border overlay. debug_chunk_borders = true tints terrain and
+# water vertices within debug_chunk_border_width_meters of their chunk's
+# boundary planes, so every rendered chunk lights up as a grid cell on the
+# surface - exposing selection density, LOD transitions and seam behavior
+# on demand. Geometry and determinism are untouched; the overlay rides the
+# vertex colors only.
+debug_chunk_borders          = false
+debug_chunk_border_width_meters = 2.0

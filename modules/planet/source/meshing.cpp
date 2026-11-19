@@ -11,6 +11,7 @@
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 #include "marching_cubes_tables.hpp"
+#include "lattice_math.hpp"
 
 #include <engine/planet/fbm.hpp>
 #include <engine/planet/flat_key_map.hpp>
@@ -21,6 +22,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -328,15 +330,6 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     const double ownCutoff    = step * params.lodBandLimitFactor;
     const double coarseCutoff = coord.depth > 0 ? coarseStep * params.lodBandLimitFactor : 0.0;
 
-    const auto floorDiv = [](std::int64_t value, std::int64_t divisor)
-    {
-        std::int64_t quotient = value / divisor;
-        if ((value % divisor) != 0 && ((value < 0) != (divisor < 0)))
-        {
-            --quotient;
-        }
-        return quotient;
-    };
 
     // Bilinear evaluation of the coarse lattice interpolant on one boundary
     // plane. (axis, maxSide) identify the plane; perpGlobalFine is the point's
@@ -516,8 +509,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 const std::int64_t apronV = globalV;
                 const std::int64_t apronChunkU = static_cast<std::int64_t>(axisU == 0 ? coord.x : axisU == 1 ? coord.y : coord.z);
                 const std::int64_t apronChunkV = static_cast<std::int64_t>(axisV == 0 ? coord.x : axisV == 1 ? coord.y : coord.z);
-                const int apronOffsetU = static_cast<int>(floorDiv(apronU, 2 * n) - apronChunkU / 2);
-                const int apronOffsetV = static_cast<int>(floorDiv(apronV, 2 * n) - apronChunkV / 2);
+                const int apronOffsetU = static_cast<int>(detail::floorDiv(apronU, 2 * n) - apronChunkU / 2);
+                const int apronOffsetV = static_cast<int>(detail::floorDiv(apronV, 2 * n) - apronChunkV / 2);
                 if (apronOffsetU >= -1 && apronOffsetU <= 1 && apronOffsetV >= -1 && apronOffsetV <= 1
                     && conformBit(conformMask, apronFace, apronOffsetU, apronOffsetV))
                 {
@@ -534,8 +527,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 // +-1 are the diagonal cells reached by apron overshoot.
                 const std::int64_t chunkU = static_cast<std::int64_t>(axisU == 0 ? coord.x : axisU == 1 ? coord.y : coord.z);
                 const std::int64_t chunkV = static_cast<std::int64_t>(axisV == 0 ? coord.x : axisV == 1 ? coord.y : coord.z);
-                const int offsetU = static_cast<int>(floorDiv(globalU, 2 * n) - chunkU / 2);
-                const int offsetV = static_cast<int>(floorDiv(globalV, 2 * n) - chunkV / 2);
+                const int offsetU = static_cast<int>(detail::floorDiv(globalU, 2 * n) - chunkU / 2);
+                const int offsetV = static_cast<int>(detail::floorDiv(globalV, 2 * n) - chunkV / 2);
                 if (offsetU < -1 || offsetU > 1 || offsetV < -1 || offsetV > 1)
                 {
                     continue; // outside the 3x3 ring (cannot happen for plane points)
@@ -555,8 +548,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             // - the fallthrough below does the same.
             const std::int64_t chunkU = static_cast<std::int64_t>(axisU == 0 ? coord.x : axisU == 1 ? coord.y : coord.z);
             const std::int64_t chunkV = static_cast<std::int64_t>(axisV == 0 ? coord.x : axisV == 1 ? coord.y : coord.z);
-            const int offsetU = static_cast<int>(floorDiv(globalU, 2 * n) - chunkU / 2);
-            const int offsetV = static_cast<int>(floorDiv(globalV, 2 * n) - chunkV / 2);
+            const int offsetU = static_cast<int>(detail::floorDiv(globalU, 2 * n) - chunkU / 2);
+            const int offsetV = static_cast<int>(detail::floorDiv(globalV, 2 * n) - chunkV / 2);
             if (offsetU >= -1 && offsetU <= 1 && offsetV >= -1 && offsetV <= 1
                 && conformBit(conformMask, face, offsetU, offsetV))
             {
@@ -594,6 +587,70 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         axisY[index] = axisCoordinate(coord.y, inner);
         axisZ[index] = axisCoordinate(coord.z, inner);
     }
+
+    // Debug chunk-border overlay (see the debug keys in params.hpp): a vertex
+    // within the configured half-width of its chunk's own boundary plane
+    // carries the accent color blended over its shaded color, so every
+    // rendered chunk reads as a lit grid cell. The weight is a pure function
+    // of the planet-local position against the chunk's lattice faces (the
+    // same axis tables the geometry uses), so a vertex shared by neighbor
+    // chunks gets the same tint from both sides and the overlay itself never
+    // breaks a seam. Geometry, normals and winding are untouched.
+    // The accent carries the chunk's LOD depth: coarse chunks read red,
+    // fine chunks read blue, so the overlay distinguishes a same-depth grid
+    // line from an LOD transition at a glance (the depth spans 0..
+    // derivedMaxDepth; the two endpoints sit far apart on the hue wheel from
+    // any terrain tone).
+    float debugBorderAccent[3] = {0.86f, 0.22f, 0.60f};
+    if (coord.depth > 0 && params.derivedMaxDepth > 0)
+    {
+        const double depthFraction = std::clamp(
+            static_cast<double>(coord.depth) / static_cast<double>(params.derivedMaxDepth), 0.0, 1.0);
+        const float coarse[3] = {1.0f, 0.28f, 0.12f};
+        const float fine[3]   = {0.24f, 0.45f, 1.0f};
+        for (std::uint32_t channel = 0; channel < 3; ++channel)
+        {
+            debugBorderAccent[channel] = static_cast<float>(
+                coarse[channel] + (fine[channel] - coarse[channel]) * depthFraction);
+        }
+    }
+    const double debugBorderWidth = params.debugChunkBorders ? std::max(0.05, params.debugChunkBorderWidthMeters) : 0.0;
+    // Padded index of the chunk's min/max faces: local index 0 and n.
+    const std::uint32_t faceMinIndex = 1u;
+    const std::uint32_t faceMaxIndex = n + 1u;
+    const auto chunkBorderWeight = [&](const Vec3 &point) -> double
+    {
+        if (debugBorderWidth <= 0.0)
+        {
+            return 0.0;
+        }
+        const double axes[3] = {point.x, point.y, point.z};
+        const std::array<double, 64 + 3> *axisTables[3] = {&axisX, &axisY, &axisZ};
+        double nearest = std::numeric_limits<double>::max();
+        for (std::uint32_t axis = 0; axis < 3; ++axis)
+        {
+            const std::array<double, 64 + 3> &table = *axisTables[axis];
+            const double toMin = std::abs(axes[axis] - table[faceMinIndex]);
+            const double toMax = std::abs(axes[axis] - table[faceMaxIndex]);
+            nearest = std::min(nearest, std::min(toMin, toMax));
+        }
+        return 1.0 - smoothstep(0.0, debugBorderWidth, nearest);
+    };
+    const auto applyDebugBorderTint = [&](float outColor[3], double weight)
+    {
+        if (weight <= 0.0)
+        {
+            return;
+        }
+        // 85% accent leaves 15% of the shaded surface, so the overlay stays
+        // readable on snow and water without erasing the terrain texture.
+        const double blend = 0.85 * weight;
+        for (std::uint32_t channel = 0; channel < 3; ++channel)
+        {
+            outColor[channel] = static_cast<float>(outColor[channel] + (debugBorderAccent[channel] - outColor[channel]) * blend);
+        }
+    };
+
     for (std::uint32_t pz = 0; pz < paddedN; ++pz)
     {
         for (std::uint32_t py = 0; py < paddedN; ++py)
@@ -774,8 +831,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             const std::int64_t chunkV = static_cast<std::int64_t>(axisV == 0 ? coord.x : axisV == 1 ? coord.y : coord.z);
             const std::int64_t globalUMin = chunkU * n + cell[axisU];
             const std::int64_t globalVMin = chunkV * n + cell[axisV];
-            const int offsetU = static_cast<int>(floorDiv(globalUMin, 2 * n) - chunkU / 2);
-            const int offsetV = static_cast<int>(floorDiv(globalVMin, 2 * n) - chunkV / 2);
+            const int offsetU = static_cast<int>(detail::floorDiv(globalUMin, 2 * n) - chunkU / 2);
+            const int offsetV = static_cast<int>(detail::floorDiv(globalVMin, 2 * n) - chunkV / 2);
             if (offsetU >= -1 && offsetU <= 1 && offsetV >= -1 && offsetV <= 1
                 && conformBit(conformMask, face, offsetU, offsetV))
             {
@@ -990,6 +1047,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         vertex.color[0]    = climate.color[0] * static_cast<float>(cloudShade);
         vertex.color[1]    = climate.color[1] * static_cast<float>(cloudShade);
         vertex.color[2]    = climate.color[2] * static_cast<float>(cloudShade);
+        applyDebugBorderTint(vertex.color, chunkBorderWeight(point));
         // Spherical mapping around the SPIN AXIS, not the world Y axis:
         // climate latitude already follows the axis, and the two disagree
         // when the axis is tilted. With the default upright axis the frame
@@ -1343,6 +1401,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 blended             = static_cast<float>(blended + (icy - blended) * iceWeight);
                 vertex.color[channel] = blended * static_cast<float>(cloudShade);
             }
+            applyDebugBorderTint(vertex.color, chunkBorderWeight(point));
             vertex.uv[0] = 0.0f;
             vertex.uv[1] = 0.0f;
 

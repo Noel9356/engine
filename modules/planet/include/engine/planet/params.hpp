@@ -318,7 +318,7 @@ struct PlanetGenerationParams
                                               // into nested ripple rings (visual artefact)
     // Cliff-mask window where the strata banding gate opens / saturates (the
     // gate keeps banding off open slopes - see strataAmplitudeMeters).
-    double strataGateLow  = 0.45;
+    double strataGateLow  = 0.34;
     double strataGateHigh = 0.85;
 
     // ---- geologic provinces -----------------------------------------------------
@@ -460,7 +460,7 @@ struct PlanetGenerationParams
     double rockSlopeThreshold = 0.46;       // slope (1 - up-dot-normal) where rock takes over;
                                             // steep faces scrape soil and grass into bare
                                             // rock while rolling hills stay green
-    double rockStrataContrast = 0.24;       // luminance banding on rock faces, keyed to the
+    double rockStrataContrast = 0.75;       // luminance banding on rock faces, keyed to the
                                             // strata band spacing (sediment layer stripes);
                                             // strong values read as dirt smears at grazing light
 
@@ -524,6 +524,15 @@ struct PlanetGenerationParams
     double atmosphereHeightMeters = 20000.0; // sky fades to space over this altitude
     float atmosphereZenithColor[3]  = {0.040f, 0.130f, 0.460f};
     float atmosphereHorizonColor[3] = {0.220f, 0.400f, 0.780f};
+    // Aerial perspective (see atmosphere.hpp): the haze weight along a sight
+    // line saturates exponentially with distance. The scale is the fraction
+    // of the air column at which it saturates - larger values keep the
+    // midground clear and let the far ridge dissolve gradually instead of
+    // the whole distance range hazing over at once. The asymptote caps the
+    // haze weight even at infinite distance, keeping the farthest terrain
+    // faintly readable as terrain instead of fading fully into sky.
+    double aerialPerspectiveScaleFraction = 0.70; // sight-line scale as a fraction of the air column
+    double aerialPerspectiveAsymptote     = 0.62; // haze weight the profile approaches at infinite distance
 
     // ---- water -----------------------------------------------------------------
     bool  waterEnabled        = true;
@@ -648,6 +657,16 @@ struct PlanetGenerationParams
     bool   starsEnabled    = true;
     double starsDensity    = 0.5;  // star spacing: 0 sparse, 1 dense skies
     double starsBrightness = 1.0;  // luminance multiplier of the whole field
+
+    // ---- debug ------------------------------------------------------------------
+    // Chunk-border overlay: tints terrain and water vertices that sit within
+    // debug_chunk_border_width_meters of their own chunk's boundary planes,
+    // so every rendered chunk lights up as a grid cell on the surface. The
+    // overlay rides the vertex colors only - geometry, normals, and the
+    // determinism guarantees are untouched, and a chunk built with the
+    // overlay on differs from one built without it only in its colors.
+    bool   debugChunkBorders          = false;
+    double debugChunkBorderWidthMeters = 2.0; // half-width of the tinted band along each boundary plane
 
     // ---- derived values (filled by validate(), read-only afterwards) -----------
     double derivedRootHalfMeters   = 0.0; // root cube half-size

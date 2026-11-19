@@ -216,7 +216,16 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         }
         tangent       = tangent * (1.0 / tangentLength);
         const planet::Vec3 bitangent = planet::cross(direction, tangent);
-        const double ringDistances[3] = {420.0, 840.0, 1440.0}; // meters
+        // Mountain policy rings pull in to a quarter-kilometer first hop:
+        // the cliff view's showcase is the terrace RISER and the strata beds
+        // riding it, and the angular LOD rule only resolves a step's wall
+        // and its banding well inside a few hundred meters - a wall the
+        // 420 m rings locate meshes coarse enough that its steps smooth
+        // into ramps and its beds average out. The nearer rings also gate
+        // the near-ground biome on what actually sits beside the camera.
+        const double flatRingDistances[3] = {420.0, 840.0, 1440.0}; // meters
+        const double mountainRingDistances[3] = {240.0, 420.0, 840.0}; // meters
+        const double *ringDistances = policy == ProbePolicy::Mountain ? mountainRingDistances : flatRingDistances;
         const std::size_t ringCount  = policy == ProbePolicy::Coastline ? 1u : 3u;
         std::size_t probesOk = 0;
         std::size_t probes   = 0;
@@ -226,8 +235,14 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         // rise found in ANY compass direction around the spot. The wall is
         // the showcase of the cliffs view, and searching the full compass
         // rose (not just the five camera yaws) finds walls the fan would
-        // have missed; the camera then aims at the stored axis.
+        // have missed; the camera then aims at the stored axis. The rings
+        // walk OUTWARD, and a wall found on a NEARER ring wins outright: the
+        // angular LOD rule only resolves terrace risers and strata bands at
+        // a few hundred meters, so a bigger but farther face would render as
+        // a smooth giant massif while a nearer qualifying wall keeps its
+        // benches and beds.
         double      bestWallScore = -1.0;
+        std::size_t bestWallRing  = 3;
         planet::Vec3 cliffWallTangent{};
         bool        hasCliffWall  = false;
         for (std::size_t ring = 0; ring < ringCount; ++ring)
@@ -297,9 +312,11 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                             && hopRelief.cliffFactor >= 0.5)
                         {
                             const double wallScore = hopRise * hopRelief.cliffFactor;
-                            if (wallScore > bestWallScore)
+                            const bool nearerRing = !hasCliffWall || ring < bestWallRing;
+                            if (nearerRing || (ring == bestWallRing && wallScore > bestWallScore))
                             {
                                 bestWallScore   = wallScore;
+                                bestWallRing    = ring;
                                 cliffWallTangent = probeAxis;
                                 hasCliffWall    = true;
                             }
@@ -479,8 +496,14 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         }
 
         // The tangent the camera will actually use; the sight fan below
-        // re-yaws it across the field of view.
-        const planet::Vec3 sightLookTangent = hasWaterward ? waterwardTangent : yawedTangents[bestYaw];
+        // re-yaws it across the field of view. Cliff views with a located
+        // wall aim AT the wall (the override at the best-tracking below),
+        // so the fan must verify the WALL tangent, not the sun-preference
+        // yaw: verifying a tangent the camera then discards let cliff views
+        // aim across unverified ground (a below-datum basin with a distant
+        // far shore reads as a coast view, not a cliff view).
+        const planet::Vec3 sightLookTangent = hasCliffWall ? cliffWallTangent
+            : (hasWaterward ? waterwardTangent : yawedTangents[bestYaw]);
         planet::Vec3 fanTangents[5];
         for (std::size_t yaw = 0; yaw < 5; ++yaw)
         {
@@ -541,12 +564,20 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 static constexpr double flatCapScale[6]   = {0.45, 0.6, 1.2, 2.0, 3.0, 4.0};
                 // Cliff-view caps tolerate whole terrace steps in the near
                 // fan: the quantized risers ARE the showcase, and a step is
-                // ~200 m tall on the showcase planet.
+                // ~200 m tall on the showcase planet. The UP side is
+                // generous; the DOWN side keeps the flat caps: a terrace
+                // bench may drop one step below the eye, but an arbitrarily
+                // deep descent (a valley basin, a below-datum sea) would aim
+                // the cliffs view across open water at a distant far shore,
+                // which is a coast view, not a cliff view.
                 static constexpr double cliffCapScale[6]  = {1.5, 2.2, 3.2, 5.0, 7.0, 10.0};
                 static constexpr double slopeTolerance    = 0.45; // meters of ground rise per meter of distance
-                const double capScale = policy == ProbePolicy::Mountain ? cliffCapScale[ring] : flatCapScale[ring];
-                const double cap      = capScale * eyeHeight + slopeTolerance * sightRingDistances[ring];
-                if (rise > cap || rise < -cap)
+                const bool cliffView = policy == ProbePolicy::Mountain;
+                const double upCapScale = cliffView ? cliffCapScale[ring] : flatCapScale[ring];
+                const double downCapScale = flatCapScale[ring];
+                const double upCap = upCapScale * eyeHeight + slopeTolerance * sightRingDistances[ring];
+                const double downCap = downCapScale * eyeHeight + slopeTolerance * sightRingDistances[ring];
+                if (rise > upCap || rise < -downCap)
                 {
                     sightClear = false;
                     failReason = "wall cap";

@@ -152,6 +152,16 @@ private:
     engine::planet::PlanetGenerationParams params_{};
 
     std::map<engine::planet::ChunkKey, ChunkMeshHandles> uploadedMeshes_;
+    // Per-frame scratch for the near-to-far chunk ordering (see
+    // rebuildDrawCommands): the frustum-surviving chunks with their squared
+    // eye distances, sorted before any command storage is emitted. Reused
+    // across frames like the matrix and material stores.
+    struct VisibleChunkDraw
+    {
+        const std::pair<const engine::planet::ChunkKey, ChunkMeshHandles> *entry = nullptr;
+        double distanceSquared = 0.0;
+    };
+    std::vector<VisibleChunkDraw> frameVisibleDraws_;
 
     // Per-frame model matrices for the camera-relative pass. Sized exactly
     // before the commands that point into them are emitted, so the pointers
@@ -160,6 +170,8 @@ private:
     std::vector<glm::mat4> frameBackdropMatrices_;
     std::vector<engine::planet::PlanetChunkView> visibleViews_; // reused every update
     std::uint64_t updateCounter_ = 0;
+    // Capped upload-failure reports (see updateVisibleChunks).
+    std::uint32_t uploadFailureReports_ = 0;
     // Draw commands retain pointers to materials until endFrame. Deques keep
     // references stable while the command list is being assembled.
     std::deque<engine::renderer::MeshMaterial> terrainMaterials_;

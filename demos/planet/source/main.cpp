@@ -20,7 +20,8 @@
 // build-only frames), --screenshot exports the rendered frame as PPM,
 // --self-test verifies chunk generation is deterministic and independent of
 // chunk build order and audits the walk controller, --stats-every prints
-// planet statistics cadence, --caves enables the cave worm carving.
+// planet statistics cadence, --caves enables the cave worm carving,
+// --chunk-borders highlights chunk borders on the surface.
 
 #include <engine/application/application.hpp>
 #include <engine/application/frame_pacer.hpp>
@@ -109,6 +110,12 @@ int main(int argc, char **argv)
         // planets from the configured template; there is no per-planet
         // post-creation knob for the cave field).
         hostOptions.configurationOverrides.push_back("planet.caves_enabled=true");
+    }
+    if (options.chunkBorders)
+    {
+        // Same staging as --caves: the overlay is baked into the chunk's
+        // vertex colors at build time, so it rides the configured template.
+        hostOptions.configurationOverrides.push_back("planet.debug_chunk_borders=true");
     }
     engine::ApplicationHost host;
     std::string             startupReport;
@@ -467,7 +474,13 @@ int main(int argc, char **argv)
         // the caps never saw fill the frame.
         const double eyeHeight = options.viewName == "cliffs" ? 140.0 : (options.viewName == "surface" ? 140.0 : 120.0);
         eye                    = position + up * eyeHeight;
-        const double lookAheadDistance = options.viewName == "cliffs" ? 700.0 : (options.viewName == "surface" ? 420.0 : 320.0);
+        // The cliffs view keeps its subject HALF the look-ahead of the other
+        // views: a terrace riser is a few tens of meters tall, and the
+        // angular LOD rule only resolves it (and the strata bands riding
+        // it) when the wall sits well inside a few hundred meters - at the
+        // other views' distance the wall's chunks mesh at voxels coarse
+        // enough to smooth the riser into a ramp.
+        const double lookAheadDistance = options.viewName == "cliffs" ? 380.0 : (options.viewName == "surface" ? 420.0 : 320.0);
         // Exact pitch aim below the local horizontal - no terrain
         // re-projection (when the ground ahead rises, a re-projected target
         // snaps onto the hillside wall and fills the frame with slope) and
@@ -477,8 +490,8 @@ int main(int argc, char **argv)
         // 320 m; surface ground at 420 m sits ~15.5 deg below a 140 m eye;
         // the cliffs view aims near level AT the terraced wall the picker
         // located (the wall rises ahead and fills the center frame).
-        const double aimPitchRadians = options.viewName == "cliffs" ? 0.08
-            : (options.viewName == "surface" ? 0.27 : 0.26); // 4.6 / 15.5 / 14.9 deg
+        const double aimPitchRadians = options.viewName == "cliffs" ? 0.12
+            : (options.viewName == "surface" ? 0.27 : 0.26); // 6.9 / 15.5 / 14.9 deg
         target = eye + (tangent * std::cos(aimPitchRadians) - up * std::sin(aimPitchRadians)) * lookAheadDistance;
         // Ground views sit close to the terrain: a near plane scaled from
         // the eye height (55-105 m) clipped everything inside it. 15 m keeps
@@ -614,8 +627,10 @@ int main(int argc, char **argv)
     // enough for the view's chunk population on the current machine.
     std::uint64_t warmupRemaining = options.warmupFrames;
     const double        frameDelta     = 1.0 / 30.0;
-    if (options.screenshotFrame == 0)
+    if (!options.screenshotFrameSet)
     {
+        // Without --screenshot-frame the capture lands on the last rendered
+        // frame (0 remains a valid explicit index through the boolean).
         options.screenshotFrame = totalFrames - 1;
     }
 
@@ -661,6 +676,13 @@ int main(int argc, char **argv)
     // ---- frame loop -------------------------------------------------------------------
     std::uint64_t framesRendered = 0;
     FrameTimingRecorder frameTiming;
+    if (!options.frameTimesPath.empty())
+    {
+        // Every completed frame rewrites the CSV atomically, so a run that is
+        // interrupted mid-measurement (process kill, machine shutdown) still
+        // keeps the timings of the frames it managed to render.
+        frameTiming.setAutoFlushPath(options.frameTimesPath);
+    }
     bool          screenshotTaken = false;
     double        orbitAngle      = 0.0;
     std::array<window::WindowEvent, 64> eventBuffer;

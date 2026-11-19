@@ -387,14 +387,4 @@ SelfTestResult runSelfTest(planet::PlanetCapability &capability, void *capabilit
     return result;
 }
 
-std::array<renderer::VertexAttribute, 4> canonicalAttributes()
-{
-    return {{
-        {renderer::VertexSemantic::Position, renderer::VertexFormat::Float32x3, 0},
-        {renderer::VertexSemantic::Normal, renderer::VertexFormat::Float32x3, 12},
-        {renderer::VertexSemantic::Color, renderer::VertexFormat::Float32x3, 24},
-        {renderer::VertexSemantic::TexCoord0, renderer::VertexFormat::Float32x2, 36},
-    }};
-}
-
 } // namespace demo::planet_demo

@@ -262,6 +262,10 @@ void setSwimSpeed(PlanetGenerationParams &params, double value) { params.swimSpe
 void setSwimWadeDepth(PlanetGenerationParams &params, double value) { params.swimWadeDepthMeters = value; }
 void setAtmosphereEnabled(PlanetGenerationParams &params, double value) { params.atmosphereEnabled = value != 0.0; }
 void setAtmosphereHeight(PlanetGenerationParams &params, double value) { params.atmosphereHeightMeters = value; }
+void setAerialPerspectiveScaleFraction(PlanetGenerationParams &params, double value) { params.aerialPerspectiveScaleFraction = value; }
+void setAerialPerspectiveAsymptote(PlanetGenerationParams &params, double value) { params.aerialPerspectiveAsymptote = value; }
+void setDebugChunkBorders(PlanetGenerationParams &params, double value) { params.debugChunkBorders = value != 0.0; }
+void setDebugChunkBorderWidth(PlanetGenerationParams &params, double value) { params.debugChunkBorderWidthMeters = value; }
 void setCliffSteepnessLow(PlanetGenerationParams &params, double value) { params.cliffSteepnessLow = value; }
 void setCliffSteepnessHigh(PlanetGenerationParams &params, double value) { params.cliffSteepnessHigh = value; }
 void setCliffSharpness(PlanetGenerationParams &params, double value) { params.cliffSharpness = value; }
@@ -479,6 +483,10 @@ constexpr SettingRow kSettingRows[] = {
     {"swim_wade_depth_meters",        SettingKind::Floating, setSwimWadeDepth},
     {"atmosphere_enabled",            SettingKind::Boolean,  setAtmosphereEnabled},
     {"atmosphere_height_meters",      SettingKind::Floating, setAtmosphereHeight},
+    {"aerial_perspective_scale_fraction", SettingKind::Floating, setAerialPerspectiveScaleFraction},
+    {"aerial_perspective_asymptote",  SettingKind::Floating, setAerialPerspectiveAsymptote},
+    {"debug_chunk_borders",           SettingKind::Boolean,  setDebugChunkBorders},
+    {"debug_chunk_border_width_meters", SettingKind::Floating, setDebugChunkBorderWidth},
 };
 
 // Reads the module's [planet] configuration section into one params struct.

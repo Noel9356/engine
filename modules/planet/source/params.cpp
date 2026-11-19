@@ -352,6 +352,11 @@ bool PlanetGenerationParams::validate(std::string &error)
     waterWaveWavelengthMeters = clampRange(waterWaveWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     waterWaveChopFraction     = clampRange(waterWaveChopFraction, 0.0, 1.0);
 
+    // ---- atmosphere (aerial perspective) / debug -----------------------------------
+    aerialPerspectiveScaleFraction = clampRange(aerialPerspectiveScaleFraction, 0.05, 4.0);
+    aerialPerspectiveAsymptote     = clampRange(aerialPerspectiveAsymptote, 0.0, 1.0);
+    debugChunkBorderWidthMeters    = clampRange(debugChunkBorderWidthMeters, 0.05, 0.01 * radiusMeters);
+
     // ---- derived values -------------------------------------------------------------
     const double relief = shellReliefMeters;
     derivedRootHalfMeters = radiusMeters * boundingFactor;
