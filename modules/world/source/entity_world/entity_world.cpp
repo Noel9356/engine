@@ -1079,19 +1079,68 @@ private:
                 replacement[parent].children.push_back(slot);
             }
         }
+        // Hierarchy-depth validation as one memoized pass: each walk up the
+        // parent chain records the depth of EVERY slot it visits, so the
+        // whole check costs O(aliveCount) instead of one full ancestor walk
+        // per slot (a crafted file could otherwise spend
+        // aliveCount x maximumHierarchyDepth pointer chases here).
+        std::vector<std::int32_t>  hierarchyDepth(slotCount, -1);
+        std::vector<std::uint32_t> chainMark(slotCount, 0u);
+        std::vector<std::uint32_t> chainScratch;
+        std::uint32_t              chainId = 0u;
         for (std::uint32_t slot = 0; slot < slotCount; ++slot)
         {
-            if (!occupied[slot])
+            if (!occupied[slot] || hierarchyDepth[slot] >= 0)
                 continue;
-            std::uint32_t ancestor = replacement[slot].parentSlot, depth = 0;
-            while (ancestor != std::numeric_limits<std::uint32_t>::max())
+            ++chainId;
+            chainScratch.clear();
+            std::uint32_t ancestor = slot;
+            // baseDepth: -1 when the chain ends at a root (the top slot has
+            // no ancestors), or the memoized depth of the slot the chain
+            // ends at (that slot's child has depth + 1).
+            std::int32_t baseDepth = -1;
+            while (true)
             {
-                if (++depth > loadedMaximumDepth || ancestor >= slotCount || !occupied[ancestor] || ancestor == slot)
+                if (ancestor >= slotCount || !occupied[ancestor])
                 {
                     setError(error, EntityWorldError::InvalidHierarchy);
                     return false;
                 }
-                ancestor = replacement[ancestor].parentSlot;
+                if (hierarchyDepth[ancestor] >= 0)
+                {
+                    baseDepth = hierarchyDepth[ancestor];
+                    break;
+                }
+                if (chainMark[ancestor] == chainId)
+                {
+                    // The walk revisited a slot of the current chain: a
+                    // parent cycle.
+                    setError(error, EntityWorldError::InvalidHierarchy);
+                    return false;
+                }
+                chainMark[ancestor] = chainId;
+                chainScratch.push_back(ancestor);
+                const std::uint32_t parent = replacement[ancestor].parentSlot;
+                if (parent == std::numeric_limits<std::uint32_t>::max())
+                {
+                    break;
+                }
+                ancestor = parent;
+            }
+            // chainScratch[i]'s parent is chainScratch[i + 1] (or the chain
+            // end), so its ancestor count is one more than that of its
+            // parent - exactly what the per-slot walk used to count.
+            const std::size_t chainLength = chainScratch.size();
+            for (std::size_t index = 0; index < chainLength; ++index)
+            {
+                const std::int32_t depth
+                    = baseDepth + 1 + static_cast<std::int32_t>(chainLength - 1u - index);
+                if (depth > static_cast<std::int32_t>(loadedMaximumDepth))
+                {
+                    setError(error, EntityWorldError::InvalidHierarchy);
+                    return false;
+                }
+                hierarchyDepth[chainScratch[index]] = depth;
             }
         }
         if (stream.peek() != std::char_traits<char>::eof())

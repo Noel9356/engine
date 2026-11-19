@@ -22,7 +22,7 @@ layout(constant_id = 6) const int SRGB_OUTPUT = 0;
 // tangent = the shell normal, since strands grow along it:
 //   specular = specColor * pow(sin(T,H), power), sin(T,H) = sqrt(1-(T.H)^2)
 // Parity contract: this file mirrors the CPU path furShade() in
-// source/core/render_shared.hpp EXACTLY - same formulas, same constants,
+// source/core/fur_shading.hpp EXACTLY - same formulas, same constants,
 // same clamps - like mesh.frag mirrors pbrShade. Changing either side
 // requires updating the rasterizer in headless_backend.cpp.
 //
@@ -97,7 +97,7 @@ const float rootShade  = 0.60;
 const float tipShade   = 1.05;
 
 // Kajiya-Kay anisotropic specular with the strand tangent (mirror of the
-// furShade() term in render_shared.hpp).
+// furShade() term in fur_shading.hpp).
 float kajiyaKaySpecular(vec3 tangent, vec3 view, vec3 lightDirection)
 {
     const vec3  halfVector = normalize(view + lightDirection);
@@ -107,7 +107,7 @@ float kajiyaKaySpecular(vec3 tangent, vec3 view, vec3 lightDirection)
 }
 
 // Per-layer strand-field jitter (mirror of furFieldJitter in
-// render_shared.hpp): a small uv-hash offset unique to each shell layer.
+// fur_shading.hpp): a small uv-hash offset unique to each shell layer.
 // Without it the consecutive shell layers crop the SAME field, and viewing
 // the stack anywhere near parallel to the layers shows the classic shell
 // banding - horizontal streaks tracing each layer's silhouette. The jitter

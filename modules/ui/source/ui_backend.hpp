@@ -111,7 +111,7 @@ UiContextRecord *findContext(UiModuleState &state, UiContextHandle handle) noexc
 bool             inFrame(const UiContextRecord *context) noexcept;
 void             makeCurrent(UiContextRecord &context) noexcept;
 void             clearDrawData(UiContextRecord &context) noexcept;
-bool             copyDrawData(UiContextRecord &context) noexcept;
+bool             copyDrawData(UiContextRecord &context);
 bool             resolveContextDescription(const UiContextDescription *description, UiContextDescription &resolved,
     const UiModuleState &state) noexcept;
 bool             validFrameDescription(const UiFrameDescription &description) noexcept;

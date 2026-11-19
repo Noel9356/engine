@@ -125,8 +125,11 @@ add_library(
     engine_module_renderer
     MODULE
     source/backend/headless/headless_backend.cpp
+    source/core/draw_scheduler.cpp
+    source/core/frame_inputs.cpp
     source/core/render_data.cpp
     source/core/renderer.cpp
+    source/core/renderer_settings.cpp
     source/backend/vulkan/vulkan_backend.cpp
     source/backend/vulkan/vulkan_device.cpp
     source/backend/vulkan/vulkan_frames.cpp

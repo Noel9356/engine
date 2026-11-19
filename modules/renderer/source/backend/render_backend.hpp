@@ -23,7 +23,7 @@ namespace engine
 namespace renderer
 {
 
-// Defined in render_shared.hpp (the borrowed lumen_gi probe-grid snapshot
+// Defined in gi_probe_sampling.hpp / reflection_field_sampling.hpp (the borrowed lumen_gi probe-grid snapshot
 // and lumen_reflection field snapshot passed to RenderBackend::setProbeGrid /
 // setReflectionField).
 struct GiProbeGrid;
@@ -57,7 +57,7 @@ public:
 
     // The lumen_gi probe-grid snapshot for the indirect-lighting hook. The
     // view is borrowed only for this call; backends copy what they need
-    // (headless: the CPU sampling path in render_shared.hpp; Vulkan: the
+    // (headless: the CPU sampling path in gi_probe_sampling.hpp; Vulkan: the
     // packed std430 probe storage buffer). An invalid/empty grid disables the
     // hook and keeps the legacy hemispheric ambient.
     virtual void setProbeGrid(const GiProbeGrid &grid) = 0;
@@ -114,7 +114,7 @@ public:
     // Shell-fur draws (see FurLayerParams in capabilities.hpp): layerCount
     // alpha-blended shell layers over the opaque base surface. Both backends
     // implement them; the headless rasterizer mirrors the fur pipeline's
-    // shading exactly (render_shared.hpp furShade <-> shaders/fur.frag).
+    // shading exactly (fur_shading.hpp furShade <-> shaders/fur.frag).
     virtual void drawFur(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material,
         const FurLayerParams &params) = 0;
     virtual void drawFurInstances(MeshHandle mesh, const float *modelMatrices, std::uint32_t instanceCount,

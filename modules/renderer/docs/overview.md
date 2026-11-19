@@ -1,6 +1,8 @@
 # renderer module
 
-The renderer module turns engine scene state into pixels. It provides a backend-agnostic `renderer` capability - renderers, meshes, textures, camera state, overlay drawing - and ships two backends behind that interface: a full Vulkan backend (device, swapchain, frame scheduling, PBR pipelines, staging uploads) and a headless software rasterizer that draws on the CPU and blits into the window surface. The capability layer in `renderer.cpp` owns configuration, resource normalization, draw sorting/batching, and environment integration; the backends only implement `RenderBackend`.
+The renderer module turns engine scene state into pixels. It provides a backend-agnostic `renderer` capability - renderers, meshes, textures, camera state, overlay drawing - and ships two backends behind that interface: a full Vulkan backend (device, swapchain, frame scheduling, PBR pipelines, staging uploads) and a headless software rasterizer that draws on the CPU and blits into the window surface. The capability layer in `renderer.cpp` orchestrates the module; its settings model (`renderer_settings.cpp`), version-gated lighting input feeds (`frame_inputs.cpp`), draw-list scheduler (`draw_scheduler.cpp`) and resource normalization (`render_data.cpp`) are the four concerns it routes to; the backends only implement `RenderBackend`.
+
+The module keeps no world-space scene state of its own: draws are per-frame command lists (borrowed pointers, valid for the call), and every lighting input it consumes is a bounded, camera-relative snapshot - the lumen_gi probe grid is a camera-centered clipmap the provider scrolls toroidally, the reflection field is screen-space, and the light set is a flat array. A renderer therefore places no upper bound on the world it draws; scenes orders of magnitude larger than any loading-screen-free budget (planetary scales and beyond) stream their geometry through the same frame command list, and moving or reshaping objects simply submit different matrices and meshes each frame.
 
 ## Capability
 
@@ -22,9 +24,9 @@ From `module.toml` (and identical in `makeManifest()` and in the module entry ta
 | --- | --- |
 | Provided | `renderer`, `renderer.vulkan`, `renderer.headless` |
 | Required | `window` |
-| Optional | `window.vulkan`, `pbr`, `direct_lighting`, `lumen_gi` |
+| Optional | `window.vulkan`, `pbr`, `direct_lighting`, `lumen_gi`, `lumen_reflection` |
 
-`window` supplies the surface a renderer draws into; `window.vulkan` (`VulkanSurfaceCapability`) supplies the native handles and instance extensions the Vulkan backend needs; `pbr` supplies the sun/ambient/tone- mapping environment (with a version counter so updates are pushed once) and `direct_lighting` supplies point/spot/directional lights; when absent, a built-in default environment is used and no direct lights are set. `lumen_gi` supplies the world-space radiance probe grid for the indirect-lighting hook (see below); when absent, the legacy hemispheric ambient is used unchanged. The entry table declares no permissions (`declaredPermissions = nullptr`).
+`window` supplies the surface a renderer draws into; `window.vulkan` (`VulkanSurfaceCapability`) supplies the native handles and instance extensions the Vulkan backend needs; `pbr` supplies the sun/ambient/tone-mapping environment (with a version counter so updates are pushed once) and `direct_lighting` supplies point/spot/directional lights; when absent, a built-in default environment is used and no direct lights are set. `lumen_gi` supplies the world-space radiance probe grid for the indirect-lighting hook (see below); when absent, the legacy hemispheric ambient is used unchanged. `lumen_reflection` supplies the screen-space reflection field for the indirect-specular hook; when absent, the pre-hook specular is kept. The entry table declares no permissions (`declaredPermissions = nullptr`).
 
 Because the renderer now acquires six capabilities in total, the kernel's trust gate classifies it as "broad"; the engine's own application configs trust it by name under `[trust]` (`trustModules = ["renderer"]`).
 
@@ -50,7 +52,7 @@ The snapshot can lag the latest `lumen_reflection::evaluate()` by one frame, exa
 
 The demo `demos/lumen_gi/` exercises this hook with its reflective surfaces (a polished-metal floor inlay, a chrome sphere, a brushed-metal wall panel indoors; a chrome sphere and a polished water-like slab outdoors): `--no-reflections` renders the same scene without the module for A/B validation. The demo always runs the module alongside lumen_gi in its default configuration and says so at startup.
 
-Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
+Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDERER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
 
 Vulkan swapchains require surface support for color-attachment usage. PPM screenshot readback is enabled when the surface also supports transfer-source usage; otherwise rendering remains available and screenshot requests report a creation failure.
 
@@ -67,19 +69,31 @@ A material with `opacity` below 1 renders as a transparent draw: depth testing s
 | `include/engine/renderer/draw_sort.hpp` | Total-order material comparison and draw-command sorting (sort modes for batching). |
 | `include/engine/renderer/draw_batch.hpp` | `RenderInstanceBatchCache`: folds draw commands into instanced batches plus a packed instance-matrix stream. |
 | `include/engine/renderer/dynamic_resolution.hpp` | `DynamicResolutionController` (render-scale stepping) and `AdaptiveQualityController` (quality-preset stepping) fed from frame timings. |
-| `source/core/renderer.cpp` | Module entry: `RenderModule` (ModuleInterface), capability binding, configuration, backend selection, draw sorting/batching, entry table. |
+| `source/core/renderer.cpp` | Module entry: `RenderModule` (ModuleInterface), capability binding, backend selection, and the entry table. |
+| `source/core/renderer_settings.hpp/.cpp` | `RendererSettings` (every `[renderer]` knob in one struct) and `readRendererSettings()`: the layered-configuration overlay with validated ranges plus the hardware-derived `auto_config` path. |
+| `source/core/frame_inputs.hpp/.cpp` | `FrameInputs`: the version-gated pushes of the pbr environment, direct lights, lumen_gi probe grid and lumen_reflection field into a backend. |
+| `source/core/draw_scheduler.hpp/.cpp` | `DrawScheduler`: draw-list sorting with the cached permutation, the backend batch submission, and the Vulkan instance fold. |
+| `source/core/render_errors.hpp` | The optional-error out-parameter convention shared by the module's entry points and helpers. |
+| `source/core/render_shared.hpp` | Umbrella for the focused shading headers plus the backend-neutral pieces: device/presentation enums, default environment, frustum rejection, sRGB/tone-map output encoders, and the PPM/error utilities. |
+| `source/core/direct_light_shading.hpp` | `PreparedDirectLight` and `resolveDirectLight()` - the per-point light resolution shared by the PBR and fur passes. |
+| `source/core/pbr_shading.hpp` | The CPU Cook-Torrance shading pass `pbrShade` (the reference twin of `shaders/mesh.frag`). |
+| `source/core/fur_shading.hpp` | The shell-fur shading helpers and `furShade` (the twin of `shaders/fur.frag`). |
+| `source/core/gi_probe_sampling.hpp` | The lumen_gi probe-grid snapshot types, prepared level descriptors, and the trilinear SH2 irradiance walk. |
+| `source/core/reflection_field_sampling.hpp` | The lumen_reflection field snapshot types and the bilinear roughness-band-gated sample. |
+| `source/core/shading_inline.hpp` | The hot-path inline marker shared by the per-pixel shading entries. |
 | `source/backend/render_backend.hpp` | `RenderBackend` - the abstract interface both backends implement. |
-| `source/core/render_shared.hpp` | Shared PBR math (must match the Vulkan shader), default environment, tone mapping, renderer error mapping, and device preference enum. |
 | `source/core/render_data.hpp/.cpp` | Mesh/texture normalization: attribute repacking, index validation, normal generation, pixel format conversion. |
 | `source/backend/headless/headless_types.hpp` | Headless backend data types: `HeadlessMesh` (planar SoA mesh copy with bounding sphere and LOD index chains) and `HeadlessTexture` (RGBA8 upload copy plus float-RGB mip chain) shared between the backend and its rasterizer. |
 | `source/backend/headless/headless_backend.hpp/.cpp` | Headless backend: CPU rasterizer with culling, LOD, transform cache, and task-scheduler parallelism. |
+| `source/backend/headless/tile_bins.hpp` | The tile-binning policy of the headless rasterizer's parallel paths (workers own disjoint tiles, so rasterization needs no per-pixel locks). |
 | `source/backend/vulkan/vulkan_backend.hpp/.cpp` | Vulkan backend: frame lifecycle, command recording, instance streaming, deferred destruction. |
 | `source/backend/vulkan/vulkan_device.hpp/.cpp` | `VulkanDeviceContext`: instance/surface/device/VMA bring-up, device profile, async staging-upload queue. |
+| `source/backend/vulkan/staging_pool.hpp` | Fence-recycled staging-allocation policy driving the device context's upload queue. |
 | `source/backend/vulkan/vulkan_frames.hpp/.cpp` | `VulkanFrameScheduler`: frames-in-flight slots, fences/semaphores, GPU timestamp queries. |
 | `source/backend/vulkan/vulkan_pipeline.hpp/.cpp` | `VulkanPipeline`: render pass, descriptor layouts, PBR mesh pipeline, overlay pipeline, disk-backed pipeline cache. |
 | `source/backend/vulkan/vulkan_resources.hpp/.cpp` | `VulkanResources`: frame uniform ring, mesh buffers, texture images/samplers, material descriptor-set cache with per-renderer capacity limits. |
 | `source/backend/vulkan/vulkan_swapchain.hpp/.cpp` | `VulkanSwapchain`: format/present-mode selection, image views, framebuffers, recreation, PPM readback. |
-| `shaders/mesh.vert`, `shaders/mesh.frag` | GLSL sources of the PBR pipeline (the fragment shader is the reference twin of the CPU shading in `source/core/render_shared.hpp`). |
+| `shaders/mesh.vert`, `shaders/mesh.frag` | GLSL sources of the PBR pipeline (the fragment shader is the reference twin of the CPU shading in `source/core/pbr_shading.hpp`). |
 | `shaders/ui.vert`, `shaders/ui.frag` | GLSL sources of the overlay pipeline. |
 | `shaders/*_gen.hpp` | SPIR-V arrays included by `source/backend/vulkan/vulkan_pipeline.cpp`; regenerated from the GLSL by `engine_module_compile_shaders` at build time. |
 
@@ -146,7 +160,7 @@ The headless backend's frame is the same shape minus the GPU: `beginFrame` (re)a
 Headless parallel rasterization has three execution structures:
 
 - **Default per-draw - band/triangle-range split.** Big draws split their triangle range across workers; few-triangle wide-coverage draws (floor, sky) split their projected row extent into bands. Workers share the framebuffer, so depth/colour writes take a per-pixel-group spin lock. A submission rejected by the scheduler (stopping, or the outstanding bound hit) runs inline on the calling thread instead of silently dropping that band/range's geometry.
-- **Per-draw tile-based split** (`[renderer] headless_tile_parallel`, default adaptive: on from four logical processors). One draw's triangles are binned into screen tiles of `[renderer] tile_pixels` edge (default 64) and each worker owns disjoint tiles exclusively, so no per-pixel locks exist. The binning pass (transform/clip/project of every triangle on the calling thread) makes this slower than the band/range split on low-core machines (measured ~+55% frame time on a 2-core host), which is why the default follows the processor count. Tile grids and flattened record lists use 32-bit indices, with allocation counts also bounded by the host's representable vector size; dimensions beyond the signed raster-coordinate range or bins beyond either limit use the sequential path. Triggers mirror the default paths exactly.
+- **Per-draw tile-based split** (`[renderer] headless_tile_parallel`, default adaptive: on from four logical processors). One draw's triangles are binned into screen tiles of `[renderer] headless_tile_pixels` edge (default 64) and each worker owns disjoint tiles exclusively, so no per-pixel locks exist. The binning pass (transform/clip/project of every triangle on the calling thread) makes this slower than the band/range split on low-core machines (measured ~+55% frame time on a 2-core host), which is why the default follows the processor count. Tile grids and flattened record lists use 32-bit indices, with allocation counts also bounded by the host's representable vector size; dimensions beyond the signed raster-coordinate range or bins beyond either limit use the sequential path. Triggers mirror the default paths exactly.
 - **Batched tile pass for whole draw lists** (`[renderer] headless_batched_tile_rasterization`, default on). `drawMeshes` hands its whole command list to `drawMeshBatch`, which prepares every item, bins all triangles in submission order and rasterizes the tiles across every worker (two or more). Per-tile record lists preserve submission order, so per-pixel triangle order - and therefore the image - equals the sequential per-draw replay; chunks of records keep the scratch bounded on very large frames, and items or situations the batch cannot take (single worker, oversized single draw, allocation failure) fall back to the per-draw paths with identical output. This is the structure that parallelizes many-small-draw scenes: no single draw reaches the per-draw thresholds, but the frame as a whole is large. Draw lists below two items, and the fur/overlay paths, always use the per-draw structures.
 
 ### Mesh and texture resource model

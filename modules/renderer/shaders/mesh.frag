@@ -166,7 +166,7 @@ vec3 toneMap(vec3 color, float mapperId)
 }
 
 // ---- lumen_gi probe-grid indirect lighting ----------------------------------
-// Mirrors the CPU path in source/render_shared.hpp exactly (same lattice
+// Mirrors the CPU path in source/core/gi_probe_sampling.hpp exactly (same lattice
 // walk, same SH2 convolution, same validity weighting), like every other
 // formula this shader shares with the software rasterizer.
 

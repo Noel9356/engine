@@ -8,7 +8,7 @@ Shell texturing (Lengyel et al. 2001, "Real-Time Fur over Arbitrary Surfaces", t
 
 The strand textures are generated here, deterministically, by `generateFurTexture`: guard hairs (coarse columns, per-strand lengths), an undercoat (finer half-offset columns that keep the root layers dense and fill the silhouette gaps the original paper addressed with fins), wispiness noise, and per-strand/texel albedo variation. Consumers upload the pixels with `renderer.createTexture` into a material's baseColorTexture slot.
 
-Lighting lives in the renderer's fur pipeline (half-Lambert diffuse + Kajiya-Kay anisotropic specular against the strand tangent; see `modules/renderer/shaders/fur.frag` and its CPU mirror `furShade` in `modules/renderer/source/core/render_shared.hpp`). This module deliberately does not duplicate that math.
+Lighting lives in the renderer's fur pipeline (half-Lambert diffuse + Kajiya-Kay anisotropic specular against the strand tangent; see `modules/renderer/shaders/fur.frag` and its CPU mirror `furShade` in `modules/renderer/source/core/fur_shading.hpp`). This module deliberately does not duplicate that math.
 
 ## Performance model
 

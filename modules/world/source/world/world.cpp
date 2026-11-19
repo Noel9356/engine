@@ -1223,6 +1223,35 @@ private:
             }
             catch (...)
             {
+                // The mirror rebuild's allocation failed after the inner
+                // load already replaced the entity-world population: drain
+                // that population with a stack-buffer chunk loop (no
+                // allocations) so the binding ends in the same empty state
+                // the mid-load rollback below produces, instead of a
+                // populated world without mirrors.
+                std::array<engine::entity_world::EntityHandle, 256> drainChunk{};
+                bool                                               anyDestroyed = true;
+                while (anyDestroyed)
+                {
+                    const std::uint32_t drained = module.entityWorldCapability_->copyEntities(
+                        module.entityWorldCapability_->self,
+                        binding->entityWorld,
+                        drainChunk.data(),
+                        static_cast<std::uint32_t>(drainChunk.size()),
+                        nullptr);
+                    if (drained == 0)
+                        break;
+                    anyDestroyed = false;
+                    for (std::uint32_t index = 0; index < drained; ++index)
+                    {
+                        anyDestroyed = anyDestroyed
+                            || module.entityWorldCapability_->destroyEntity(module.entityWorldCapability_->self,
+                                  binding->entityWorld,
+                                  drainChunk[index],
+                                  true,
+                                  nullptr);
+                    }
+                }
                 if (error)
                     *error = engine::entity_world::EntityWorldError::ResourceFailure;
                 return false;

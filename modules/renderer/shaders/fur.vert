@@ -25,7 +25,7 @@
 // base-color map; the fur strand field rides its ALPHA channel).
 //
 // Lighting-model parity: fur.frag mirrors the CPU path in
-// source/core/render_shared.hpp (furShade) the same way mesh.frag mirrors
+// source/core/fur_shading.hpp (furShade) the same way mesh.frag mirrors
 // pbrShade - changing either side requires updating the other.
 
 layout(location = 0) in vec3 aPosition;

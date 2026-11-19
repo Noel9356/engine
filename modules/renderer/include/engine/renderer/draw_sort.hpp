@@ -95,10 +95,13 @@ enum class RenderDrawSortMode : std::uint8_t
 };
 
 // FNV-1a over every input a sort depends on: command count, sort mode, each
-// command's mesh handle and the full material value tuple (the comparator
-// orders by material values, not by pointer identity). Two consecutive frames
-// with equal signatures produce the identical sort permutation, so callers can
-// cache it and skip re-sorting.
+// command's mesh handle and the full material value tuple - every field
+// compareRenderMaterialValues orders by, including the trailing
+// depth-write/opacity/index-of-refraction group, so two frames whose materials
+// differ only in those fields still produce different signatures (the
+// comparator orders by material values, not by pointer identity). Two
+// consecutive frames with equal signatures produce the identical sort
+// permutation, so callers can cache it and skip re-sorting.
 inline std::uint64_t renderDrawCommandSortSignature(
     std::span<const RenderDrawCommand> commands, RenderDrawSortMode mode) noexcept
 {
@@ -131,6 +134,8 @@ inline std::uint64_t renderDrawCommandSortSignature(
         mix(static_cast<std::uint64_t>(material.emissiveTexture));
         mix(static_cast<std::uint64_t>(material.unlit));
         mix(static_cast<std::uint64_t>(material.depthWrite));
+        mixFloat(material.opacity);
+        mixFloat(material.indexOfRefraction);
     }
     return hash;
 }

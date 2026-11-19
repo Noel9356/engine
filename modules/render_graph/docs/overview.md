@@ -77,7 +77,7 @@ Configurable through the `[render_graph]` section; every key is documented in [c
 - **Events published:** none.
 - **Events subscribed:** none (the module does not touch the event bus; it reads configuration once in `construct()`).
 - **Permissions declared:** none in the entry table; acquisition of the capability is gated by the implicit `capability.render_graph` permission.
-- **Consumers:** the demo application (`demos/character_customisation/source/main.cpp`) is a real consumer. It loads the module as part of its host options, acquires the capability optionally (with the `renderGraphCapabilityAbi` check), applies a device-tuned settings round (`settings` → render `deviceProfile` → `resolveProfile` → `setSettings`), `compile`s a fixed three-pass frame graph once (independent update passes for rocks, tori, and the wandering dragons, each writing a transient scratch resource), and `execute`s it every frame with callbacks dispatched by the original pass index. Any failure degrades to the same updates run inline on the main thread, so the demo keeps rendering without the capability.
+- **Consumers:** none in the current checkout. The capability is a free-standing planner: an application loads the module as part of its host options, acquires the capability optionally (with the `renderGraphCapabilityAbi` check), applies a device-tuned settings round (`settings` → render `deviceProfile` → `resolveProfile` → `setSettings`), `compile`s a frame graph once (passes writing transient scratch resources), and `execute`s it every frame with callbacks dispatched by the original pass index. Any failure should degrade to the same updates run inline on the main thread, so the application keeps rendering without the capability.
 
 Consumer example (real signatures):
 

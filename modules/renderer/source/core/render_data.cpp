@@ -9,6 +9,7 @@
 #include <engine/renderer/capabilities.hpp>
 #include <engine/renderer/mesh.hpp>
 #include "render_data.hpp"
+#include "render_errors.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,14 +25,6 @@ namespace renderer
 {
 namespace
 {
-
-void setError(RenderError *error, RenderError value)
-{
-    if (error != nullptr)
-    {
-        *error = value;
-    }
-}
 
 struct VertexAttributeView
 {
@@ -209,7 +202,7 @@ bool resolveIndices(const MeshDescription &source, PreparedMeshData &prepared)
 }
 
 // Accumulates per-triangle cross products into the normal slots, then
-// normalizes; degenerate normals fall back to +Y. Fails on out-of-range indices.
+// normalizes; degenerate normals fall back to +Z. Fails on out-of-range indices.
 bool generateNormals(std::vector<float> &vertices, const std::vector<std::uint32_t> &indices, std::uint32_t vertexCount)
 {
     for (std::size_t triangle = 0; triangle < indices.size(); triangle += 3)
@@ -338,7 +331,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
 
     if (source.vertices == nullptr || source.vertexCount == 0)
     {
-        setError(error, RenderError::InvalidMesh);
+        reportError(error, RenderError::InvalidMesh);
         return false;
     }
 
@@ -347,13 +340,13 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
     {
         if (source.vertexAttributes != nullptr || source.vertexAttributeCount != 0)
         {
-            setError(error, RenderError::InvalidMesh);
+            reportError(error, RenderError::InvalidMesh);
             return false;
         }
         const std::size_t floatCount = static_cast<std::size_t>(source.vertexCount) * meshVertexFloatCount;
         if (floatCount > prepared.vertices.max_size())
         {
-            setError(error, RenderError::InvalidMesh);
+            reportError(error, RenderError::InvalidMesh);
             return false;
         }
         const bool   aligned      = reinterpret_cast<std::uintptr_t>(source.vertices) % alignof(float) == 0;
@@ -368,7 +361,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
         {
             if (!std::isfinite(sourceFloats[i]))
             {
-                setError(error, RenderError::InvalidMesh);
+                reportError(error, RenderError::InvalidMesh);
                 prepared.vertices.clear();
                 return false;
             }
@@ -383,7 +376,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
         if (source.vertexAttributes == nullptr || source.vertexAttributeCount == 0
             || source.vertexCount > std::numeric_limits<std::size_t>::max() / source.vertexStrideBytes)
         {
-            setError(error, RenderError::InvalidMesh);
+            reportError(error, RenderError::InvalidMesh);
             return false;
         }
 
@@ -395,7 +388,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
             const VertexAttribute &attribute = source.vertexAttributes[i];
             if (static_cast<std::uint32_t>(attribute.semantic) > static_cast<std::uint32_t>(VertexSemantic::TexCoord0))
             {
-                setError(error, RenderError::InvalidMesh);
+                reportError(error, RenderError::InvalidMesh);
                 return false;
             }
             const std::size_t semanticIndex = static_cast<std::size_t>(attribute.semantic);
@@ -405,7 +398,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
                 || static_cast<std::uint64_t>(attribute.offsetBytes) + attributes[semanticIndex].byteSize
                        > source.vertexStrideBytes)
             {
-                setError(error, RenderError::InvalidMesh);
+                reportError(error, RenderError::InvalidMesh);
                 return false;
             }
             attributes[semanticIndex].attribute = &attribute;
@@ -415,14 +408,14 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
         hasNormalAttribute = hasNormal;
         if (!hasPosition)
         {
-            setError(error, RenderError::InvalidMesh);
+            reportError(error, RenderError::InvalidMesh);
             return false;
         }
 
         const std::size_t vertexFloatCount = static_cast<std::size_t>(source.vertexCount) * meshVertexFloatCount;
         if (vertexFloatCount > prepared.vertices.max_size())
         {
-            setError(error, RenderError::InvalidMesh);
+            reportError(error, RenderError::InvalidMesh);
             return false;
         }
         prepared.vertices.resize(vertexFloatCount);
@@ -458,7 +451,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
             if (!finite3(target) || (hasNormal && !finite3(target + 3)) || !std::isfinite(target[9])
                 || !std::isfinite(target[10]) || !finite3(target + 6))
             {
-                setError(error, RenderError::InvalidMesh);
+                reportError(error, RenderError::InvalidMesh);
                 prepared.vertices.clear();
                 return false;
             }
@@ -467,7 +460,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
 
     if (!resolveIndices(source, prepared))
     {
-        setError(error, RenderError::InvalidMesh);
+        reportError(error, RenderError::InvalidMesh);
         prepared.vertices.clear();
         prepared.indices.clear();
         prepared.sourceIndices = nullptr;
@@ -508,7 +501,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
         }
         else if (!generateNormals(prepared.vertices, prepared.indices, source.vertexCount))
         {
-            setError(error, RenderError::InvalidMesh);
+            reportError(error, RenderError::InvalidMesh);
             prepared.vertices.clear();
             prepared.indices.clear();
             return false;
@@ -516,7 +509,7 @@ bool prepareMeshData(const MeshDescription &source, PreparedMeshData &prepared, 
     }
 
     prepared.vertexCount = source.vertexCount;
-    setError(error, RenderError::None);
+    reportError(error, RenderError::None);
     return true;
 }
 
@@ -527,7 +520,7 @@ bool prepareTextureData(const TextureDescription &source, PreparedTextureData &p
 
     if (source.pixels == nullptr || source.width == 0 || source.height == 0)
     {
-        setError(error, RenderError::InvalidTexture);
+        reportError(error, RenderError::InvalidTexture);
         return false;
     }
 
@@ -536,7 +529,7 @@ bool prepareTextureData(const TextureDescription &source, PreparedTextureData &p
         || static_cast<std::uint32_t>(source.origin) > static_cast<std::uint32_t>(TextureOrigin::BottomLeft)
         || source.width > std::numeric_limits<std::uint32_t>::max() / bytesPerPixel)
     {
-        setError(error, RenderError::InvalidTexture);
+        reportError(error, RenderError::InvalidTexture);
         return false;
     }
 
@@ -545,7 +538,7 @@ bool prepareTextureData(const TextureDescription &source, PreparedTextureData &p
     if (sourceStride < tightRowBytes || source.height > std::numeric_limits<std::size_t>::max() / sourceStride
         || source.height > std::numeric_limits<std::size_t>::max() / source.width / 4)
     {
-        setError(error, RenderError::InvalidTexture);
+        reportError(error, RenderError::InvalidTexture);
         return false;
     }
 
@@ -555,14 +548,14 @@ bool prepareTextureData(const TextureDescription &source, PreparedTextureData &p
                           && sourceStride == source.width * 4;
     if (isCanonical)
     {
-        setError(error, RenderError::None);
+        reportError(error, RenderError::None);
         return true;
     }
 
     const std::size_t destinationSize = static_cast<std::size_t>(source.width) * source.height * 4;
     if (destinationSize > prepared.pixels.max_size())
     {
-        setError(error, RenderError::InvalidTexture);
+        reportError(error, RenderError::InvalidTexture);
         return false;
     }
     prepared.pixels.resize(destinationSize);
@@ -576,7 +569,7 @@ bool prepareTextureData(const TextureDescription &source, PreparedTextureData &p
             std::uint8_t       *destinationRow = prepared.pixels.data() + static_cast<std::size_t>(y) * tightRowBytes;
             std::memcpy(destinationRow, sourceRow, tightRowBytes);
         }
-        setError(error, RenderError::None);
+        reportError(error, RenderError::None);
         return true;
     }
 
@@ -621,7 +614,7 @@ bool prepareTextureData(const TextureDescription &source, PreparedTextureData &p
         }
     }
 
-    setError(error, RenderError::None);
+    reportError(error, RenderError::None);
     return true;
 }
 

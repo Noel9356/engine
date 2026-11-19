@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <new>
 #include <thread>
 #include <utility>
 
@@ -54,7 +55,7 @@ void clearDrawData(UiContextRecord &context) noexcept
     context.drawData = {};
 }
 
-bool copyDrawData(UiContextRecord &context) noexcept
+bool copyDrawData(UiContextRecord &context)
 {
     const ImDrawData *source = ImGui::GetDrawData();
     if (source == nullptr || !source->Valid)
@@ -96,9 +97,20 @@ bool copyDrawData(UiContextRecord &context) noexcept
     context.vertices.clear();
     context.indices.clear();
     context.commands.clear();
-    context.vertices.reserve(static_cast<std::size_t>(vertexCount));
-    context.indices.reserve(static_cast<std::size_t>(indexCount));
-    context.commands.reserve(static_cast<std::size_t>(commandCount));
+    try
+    {
+        context.vertices.reserve(static_cast<std::size_t>(vertexCount));
+        context.indices.reserve(static_cast<std::size_t>(indexCount));
+        context.commands.reserve(static_cast<std::size_t>(commandCount));
+    }
+    catch (const std::bad_alloc &)
+    {
+        // The frame's draw data does not fit: report it like the capacity
+        // caps above instead of letting the allocation failure escape (the
+        // caller maps a false return to UiError::CapacityExceeded).
+        clearDrawData(context);
+        return false;
+    }
 
     std::uint32_t vertexBase = 0;
     std::uint32_t indexBase  = 0;

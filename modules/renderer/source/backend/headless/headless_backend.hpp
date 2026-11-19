@@ -105,7 +105,7 @@ struct HeadlessBackendOptions
     // scheduler is available (renderer.headless_parallel_transform_vertices).
     std::uint32_t parallelTransformVertexThreshold = 8192;
 
-    // Screen tile edge for the tile-parallel paths (renderer.tile_pixels);
+    // Screen tile edge for the tile-parallel paths (renderer.headless_tile_pixels);
     // kept a power of two so the tile grid aligns with the framebuffer.
     std::uint32_t tilePixels = 64;
 
@@ -309,7 +309,7 @@ private:
     };
 
     // ---- tile-parallel path (opt-in; see HeadlessBackendOptions) ----
-    // Screen-tile edge in pixels (renderer.tile_pixels, a power of two):
+    // Screen-tile edge in pixels (renderer.headless_tile_pixels, a power of two):
     // a tile's colour/depth working set stays cache-local, and exclusive
     // ownership needs no per-pixel locks.
     std::uint32_t tileWidth_  = 64;
@@ -538,7 +538,7 @@ private:
         const HeadlessMesh &meshData, const float *modelMatrix, DrawBounds &outBounds, bool &outHaveBounds) const;
 
     window::WindowHandle surface_                   = 0;
-    std::size_t          transformCacheBudgetBytes_ = 32u * 1024u * 1024u;
+    std::size_t          transformCacheBudgetBytes_ = 256u * 1024u * 1024u; // replaced by options in the ctor
     bool                 frustumCullingEnabled_     = true;
     bool                 backFaceCullingEnabled_    = true;
     bool                 lodEnabled_                = true;

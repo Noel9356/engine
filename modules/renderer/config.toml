@@ -4,65 +4,61 @@
 # supersamples (integer grid) with an averaging resolve.
 
 [renderer]
-anisotropy_level                     = 1.0
-auto_config                          = false
-back_face_culling                    = true
-backend                              = "auto"
-clear_color                          = [0.0, 0.0, 0.0, 1.0]
-device                               = "auto"
-draw_sort_min_commands               = 2
-draw_sort_mode                       = "mesh_material"
-frustum_culling                      = true
-fur_enabled                          = true
-fur_max_layers                       = 16
-gi_indirect_lighting                 = true
-# Consume the optional lumen_reflection capability's screen-space field and
-# add its indirect specular radiance to the shaded pixels (see the module's
-# overview); false, or the module being absent, keeps the pre-hook specular.
-reflection_indirect_specular         = true
-gpu_timestamps_enabled               = false
+anisotropy_level                        = 1.0
+auto_config                             = false
+back_face_culling                       = true
+backend                                 = "auto"
+clear_color                             = [0.0, 0.0, 0.0, 1.0]
+device                                  = "auto"
+draw_sort_min_commands                  = 2
+draw_sort_mode                          = "mesh_material"
+frustum_culling                         = true
+fur_enabled                             = true
+fur_max_layers                          = 16
+gi_indirect_lighting                    = true
+gpu_timestamps_enabled                  = false
 headless_band_split_min_screen_fraction = 0.125
-headless_band_split_triangles        = 4096
+headless_band_split_triangles           = 4096
 # Record cap of the batched tile path (one record per rasterisable fan
 # triangle): bounds the transient scratch of one batch flush; frames that
 # would exceed it flush in more chunks with identical output.
-headless_batch_tile_records          = 524288
-# Whole draw lists can take the batched tile-parallel path
-# (headless_batched_tile_rasterization). The per-draw tile path
-# (headless_tile_parallel) has no entry here on purpose: its default adapts
-# to the machine (on from four logical processors, off below) and an
-# explicit line would pin it for every host.
-headless_transform_cache_mb          = 256
-headless_batched_tile_rasterization  = true
-instance_batch_min_count             = 4
-instance_batching                    = true
-instance_stream_mb                   = 4
-lod_enabled                          = true
-lod_min_triangles                    = 4096
-lod_strides                           = [4.0, 16.0, 64.0]
-# Angular-size LOD cutoffs (boundsRadius / distance): four strictly descending
+headless_batch_tile_records             = 524288
+headless_batched_tile_rasterization     = true
+headless_parallel_transform_vertices    = 8192
+headless_parallel_triangle_threshold    = 4096
+headless_pixels_per_lock_group          = 16
+headless_tile_pixels                    = 64
+# The per-draw tile path (headless_tile_parallel) has no entry here on
+# purpose: its default adapts to the machine (on from four logical
+# processors, off below) and an explicit line would pin it for every host.
+headless_transform_cache_mb             = 256
+instance_batch_min_count                = 4
+instance_batching                       = true
+instance_stream_mb                      = 4
+lod_enabled                             = true
+lod_min_triangles                       = 4096
+lod_strides                             = [4.0, 16.0, 64.0]
+# Angular-size LOD cutoffs (boundsRadius / distance): four strictly ascending
 # values in (0, 1]; coarser chains are picked as the apparent size drops below
 # each cutoff.
-lod_thresholds                        = [0.02, 0.05, 0.1, 0.2]
-# Vertex stage parallelism threshold and the screen tile edge of the
-# tile-parallel paths (see docs/configuration.md).
-headless_parallel_transform_vertices  = 8192
-tile_pixels                           = 64
-# sRGB output target (Vulkan surface pick + shader specialization); the
-# headless target always writes UNORM with its fixed encode.
-srgb_output                           = false
-max_frames_in_flight                 = 3
-max_material_sets_per_renderer       = 256
-max_pending_uploads                  = 64
-max_textures_per_renderer            = 256
+lod_thresholds                          = [0.02, 0.05, 0.1, 0.2]
+max_frames_in_flight                    = 3
+max_material_sets_per_renderer          = 256
+max_pending_uploads                     = 64
+max_textures_per_renderer               = 256
 # Anti-aliasing sample count: 4 = 2x2 (Vulkan multisample resolve, headless
 # supersampling); 2 = the cheap tier (headless 2x1), 1 = off.
-msaa_samples                         = 4
-memory_budget_update_interval_frames = 120
-parallel_triangle_threshold          = 4096
-pipeline_cache_mb                    = 64
-pixels_per_lock_group                = 16
-present_mode                         = "auto"
-texture_mipmaps                      = true
-validation                           = false
-vsync                                = false
+msaa_samples                            = 4
+memory_budget_update_interval_frames    = 120
+pipeline_cache_mb                       = 64
+present_mode                            = "auto"
+# Consume the optional lumen_reflection capability's screen-space field and
+# add its indirect specular radiance to the shaded pixels (see the module's
+# overview); false, or the module being absent, keeps the pre-hook specular.
+reflection_indirect_specular            = true
+# sRGB output target (Vulkan surface pick + shader specialization); the
+# headless target always writes UNORM with its fixed encode.
+srgb_output                             = false
+texture_mipmaps                         = true
+validation                              = false
+vsync                                   = false

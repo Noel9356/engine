@@ -1,10 +1,13 @@
 // renderer module entry point: the ModuleInterface implementation that binds
 // the "renderer" capability family to a backend instance.
 //
-// Responsibilities: read/refresh [renderer] configuration, acquire the window/
-// pbr/direct_lighting capabilities, create and route renderers (Vulkan or
-// headless), normalize mesh/texture uploads, sort and batch drawMeshes
-// command lists, and expose the module entry table for the kernel's loader.
+// Responsibilities: hold the current [renderer] settings (read and re-read
+// by renderer_settings.cpp), acquire the window/pbr/direct_lighting/
+// lumen_gi/lumen_reflection capabilities, create renderers by resolving the
+// configured backend (Vulkan or headless), and route capability calls into
+// the per-renderer frame input feeds (frame_inputs.cpp), the draw-list
+// scheduler (draw_scheduler.cpp) and the backend. The module entry table
+// for the kernel's loader sits at the bottom.
 
 #include <cstdint>
 #include <engine/direct_lighting/capabilities.hpp>
@@ -24,13 +27,27 @@
 #include <engine/renderer/material.hpp>
 #include <engine/renderer/mesh.hpp>
 
-#include <engine/util/hardware_info.hpp>
+#include "draw_scheduler.hpp"
+#include "frame_inputs.hpp"
 #include "headless_backend.hpp"
 #include "render_backend.hpp"
 #include "render_data.hpp"
+#include "render_errors.hpp"
 #include "render_shared.hpp"
+#include "renderer_settings.hpp"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdio>
+#include <memory>
+#include <new>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 #include "vulkan_backend.hpp"
 #include "vulkan_gpu_probe.hpp"
 
@@ -39,18 +56,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cmath>
-#include <cstddef>
-#include <cstdio>
-#include <new>
-#include <optional>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
 namespace engine
 {
 namespace renderer
@@ -58,7 +63,8 @@ namespace renderer
 namespace
 {
 
-// Backend actually powering a renderer vs. what the configuration asked for.
+// Backend actually powering a renderer (vs. what the configuration asked
+// for, RendererSettings::backend).
 enum class Backend
 {
     None,
@@ -66,59 +72,27 @@ enum class Backend
     Headless
 };
 
-enum class ConfiguredBackend
-{
-    Auto, // hardware-aware: Vulkan when the machine has a real GPU, headless otherwise
-    Vulkan,
-    Headless
-};
-
-// One live renderer: its backend object plus the state renderer.cpp manages on
-// its behalf (environment/light versioning, frame timing, draw scratch).
+// One live renderer: its backend object plus the per-renderer state the
+// module manages on its behalf - the version-gated frame input feeds, the
+// draw-list scheduler, the negotiated light budget and frame timing.
 struct RendererRecord
 {
     RendererHandle       id      = invalidRenderer;
     Backend              backend = Backend::None;
     window::WindowHandle surface = 0;
 
-    // Environment and light copies are pushed into the backend only when the
-    // provider's version counter changes (see beginFrameImpl). The lumen_gi
-    // probe grid follows the same version pattern; probeScratch owns the
-    // snapshot the backend borrows while setProbeGrid copies it.
-    std::uint64_t                         environmentVersion      = 0;
-    bool                                  environmentInitialized  = false;
-    std::uint64_t                         directLightVersion      = 0;
-    std::uint32_t                         directLightLimit        = direct_lighting::maxDirectLights;
-    bool                                  directLightsInitialized = false;
-    std::uint64_t                         probeGridVersion        = 0;
-    bool                                  probeGridInitialized    = false;
-    std::vector<lumen_gi::GiProbe>        probeScratch{};
-    lumen_gi::GiProbeHeader               probeHeader{};
-    // lumen_reflection field snapshot, same version pattern.
-    std::uint64_t                         reflectionFieldVersion  = 0;
-    bool                                  reflectionFieldInitialized = false;
-    std::vector<float>                    reflectionScratch{};
-    lumen_reflection::ReflectionFieldHeader reflectionHeader{};
+    // How many direct lights beginFrame may copy for this renderer; bound
+    // once at creation through the direct_lighting capability's device
+    // profile (see registerRenderer).
+    std::uint32_t directLightLimit = direct_lighting::maxDirectLights;
+
+    FrameInputs    frameInputs{};
+    DrawScheduler  drawScheduler{};
+
     std::chrono::steady_clock::time_point frameStart{};
     bool                                  frameTimingActive = false;
 
     std::unique_ptr<RenderBackend> backendInstance = nullptr;
-
-    // Scratch reused by drawMeshesImpl: the sorted copy of the command list
-    // and the packed instance matrices for the current batch. Static geometry
-    // redraws the same key set every frame, so the sorted ORDER is cached as
-    // a permutation (validated by a hash over mesh/material keys) and only
-    // the current frame's matrix pointers are gathered - the per-frame copy +
-    // std::sort with the field-wise material comparator disappears.
-    std::vector<RenderDrawCommand> sortedCommandsScratch{};
-    std::vector<float>             instanceMatricesScratch{};
-    std::vector<std::uint32_t>     sortPermutation{};
-    std::uint64_t                  sortSignature      = 0;
-    bool                           sortSignatureValid = false;
-
-    // The filtered mesh-draw list handed to RenderBackend::drawMeshBatch once
-    // per frame (see drawMeshesImpl); capacity persists across frames.
-    std::vector<RenderBackend::MeshBatchItem> batchItemsScratch{};
 };
 
 // Main-thread module object. All capability entry points funnel through the
@@ -138,9 +112,9 @@ public:
         return manifest_;
     }
 
-    // Requires the window capability; Vulkan surface / pbr / direct_lighting
-    // are optional and probed. Re-reads configuration and subscribes to
-    // ConfigurationReloadedEvent for live updates.
+    // Requires the window capability; the Vulkan surface and the lighting
+    // providers are optional and probed. Reads the configuration and
+    // subscribes to ConfigurationReloadedEvent for live updates.
     void construct(ParticipantContext &context) override
     {
         window_ = &context.acquireCapability<window::WindowCapability>();
@@ -148,12 +122,12 @@ public:
         vulkanSurface_ = context.tryAcquireCapability<window::VulkanSurfaceCapability>();
 #endif
 
-        pbr_            = context.tryAcquireCapability<pbr::PbrCapability>();
-        directLighting_ = context.tryAcquireCapability<direct_lighting::DirectLightingCapability>();
-        lumenGi_        = context.tryAcquireCapability<lumen_gi::LumenGiCapability>();
+        pbr_             = context.tryAcquireCapability<pbr::PbrCapability>();
+        directLighting_  = context.tryAcquireCapability<direct_lighting::DirectLightingCapability>();
+        lumenGi_         = context.tryAcquireCapability<lumen_gi::LumenGiCapability>();
         lumenReflection_ = context.tryAcquireCapability<lumen_reflection::LumenReflectionCapability>();
-        context_        = &context;
-        profiler_       = &context.profiler();
+        context_         = &context;
+        profiler_        = &context.profiler();
         readConfiguration();
         reloadSubscription_ = context.eventBus()
                                   .channel<ConfigurationReloadedEvent>()
@@ -177,6 +151,7 @@ public:
         pbr_            = nullptr;
         directLighting_ = nullptr;
         lumenGi_        = nullptr;
+        lumenReflection_ = nullptr;
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
         vulkanSurface_ = nullptr;
 #endif
@@ -200,572 +175,20 @@ public:
     }
 
 private:
-    // Reads [renderer] clear_color into configuredClearColor_. Requires at
-    // least four finite components; non-finite arrays are ignored with a
-    // warning, and each component is clamped to 0..1. Shared between the
-    // manual configuration reader and the hardware-derived path because
-    // clear_color is content-owned (auto_config never overrides it).
-    void readClearColorConfiguration(ParticipantContext &context)
-    {
-        const std::vector<double> clearColor = context.configurationFloatingArrayInSection("renderer", "clear_color");
-        if (clearColor.size() < 4)
-        {
-            return;
-        }
-        bool valid = true;
-        for (std::size_t index = 0; index < configuredClearColor_.size(); ++index)
-        {
-            valid = valid && std::isfinite(clearColor[index]);
-        }
-        if (valid)
-        {
-            for (std::size_t index = 0; index < configuredClearColor_.size(); ++index)
-            {
-                configuredClearColor_[index] = static_cast<float>(std::clamp(clearColor[index], 0.0, 1.0));
-            }
-        }
-        else
-        {
-            std::fprintf(stderr, "renderer module: ignoring [renderer] clear_color; components must be finite\n");
-        }
-    }
-
-    // Resets every setting to its built-in default, then overlays whatever
-    // [renderer] keys are present. Out-of-range numeric values are clamped to
-    // their validated range with a stderr warning; unknown enum strings warn
-    // and fall back (backend/device to "auto", draw_sort_mode to disabled).
-    // Note the built-in defaults here deliberately differ from config.toml
-    // for the opt-in features (sorting, batching, mipmaps): they stay off
-    // until the config file enables them.
-    //
-    // auto_config = true short-circuits the overlay: every performance,
-    // quality and memory knob is derived from the detected hardware instead
-    // (see applyHardwareDerivedConfiguration) and the matching [renderer]
-    // keys have no effect. clear_color stays content-owned and is still
-    // honored.
+    // Re-reads the whole [renderer] settings set. The values take effect on
+    // the next renderer or draw call (some, like backend, only for renderers
+    // created later). Toggling auto_config re-derives (or un-derives)
+    // everything on the next renderer/draw call, exactly like editing any
+    // other key.
     void readConfiguration()
     {
         if (context_ == nullptr)
         {
             return;
         }
-        ParticipantContext &context              = *context_;
-        autoConfigEnabled_ = context.configurationBooleanInSection("renderer", "auto_config").value_or(false);
-        if (autoConfigEnabled_)
-        {
-            applyHardwareDerivedConfiguration(context);
-            return;
-        }
-        configuredBackend_                       = ConfiguredBackend::Auto;
-        devicePreference_                        = DevicePreference::Auto;
-        vsync_                                   = false;
-        validation_                              = false;
-        presentMode_                             = SwapchainPresentMode::Auto;
-        maxFramesInFlight_                       = 3;
-        maxPendingUploads_                = 64;
-        maximumTexturesPerRenderer_       = 256;
-        maximumMaterialSetsPerRenderer_   = 256;
-        pipelineCacheMaximumBytes_        = 64u * 1024u * 1024u;
-        memoryBudgetUpdateIntervalFrames_ = 120;
-        giIndirectLighting_               = true;
-        reflectionIndirectSpecular_       = true;
-        configuredClearColor_                    = {0.0f, 0.0f, 0.0f, 1.0f};
-        headlessTransformCacheBudgetBytes_       = 256u * 1024u * 1024u;
-        frustumCulling_                          = true;
-        backFaceCulling_                         = true;
-        lodEnabled_                              = true;
-        gpuTimestampsEnabled_                    = true;
-        headlessTileParallel_                    = false;
-        batchedTileRasterizationEnabled_         = true;
-        parallelTriangleThreshold_               = 4096u;
-        pixelsPerLockGroup_                      = 16u;
-        lodMinTriangles_                         = 4096u;
-        bandSplitTriangleThreshold_              = 4096u;
-        bandSplitMinimumScreenFraction_          = 0.125f;
-        parallelTransformVertexThreshold_        = 8192u;
-        tilePixels_                              = 64u;
-        maxBatchTileRecords_                     = 512u * 1024u;
-        lodThresholds_                           = {0.02f, 0.05f, 0.1f, 0.2f};
-        lodStrides_                              = {4u, 16u, 64u};
-        anisotropyLevel_                         = 1.0f;
-        msaaSamples_                             = 4u;
-        srgbOutput_                              = false;
-        drawSortMode_                            = RenderDrawSortMode::MeshThenMaterial;
-        drawSortEnabled_                         = true;
-        drawSortMinimumCommands_                 = 2;
-        instanceBatchingEnabled_                 = true;
-        instanceBatchMinimumCount_               = 4;
-        instanceStreamMegabytes_                 = 4;
-        textureMipmapsEnabled_                   = true;
-        furEnabled_                              = true;
-        furMaximumLayers_                        = 16;
-        const std::optional<std::string> backend = context.configurationStringInSection("renderer", "backend");
-        if (backend.has_value())
-        {
-            if (*backend == "vulkan")
-            {
-                configuredBackend_ = ConfiguredBackend::Vulkan;
-            }
-            else if (*backend == "headless")
-            {
-                configuredBackend_ = ConfiguredBackend::Headless;
-            }
-            else if (*backend != "auto")
-            {
-                std::fprintf(
-                    stderr, "renderer module: unknown [renderer] backend '%s'; using \"auto\"\n", backend->c_str());
-            }
-        }
-
-        const std::optional<std::string> device = context.configurationStringInSection("renderer", "device");
-        if (device.has_value())
-        {
-            if (*device == "discrete")
-            {
-                devicePreference_ = DevicePreference::Discrete;
-            }
-            else if (*device == "integrated")
-            {
-                devicePreference_ = DevicePreference::Integrated;
-            }
-            else if (*device != "auto")
-            {
-                std::fprintf(stderr, "renderer module: unknown [renderer] device '%s'; using \"auto\"\n", device->c_str());
-            }
-        }
-
-        vsync_      = context.configurationBooleanInSection("renderer", "vsync").value_or(false);
-        validation_ = context.configurationBooleanInSection("renderer", "validation").value_or(false);
-
-        // present_mode pins the presentation-queue policy. Frame latency on
-        // this backend is dominated by vkQueuePresentKHR blocking on the
-        // compositor, so making the mode explicit is the difference between
-        // a ~2 ms and a ~7 ms tail; "auto" keeps the old vsync-derived choice.
-        if (const std::optional<std::string> presentModeText
-            = context.configurationStringInSection("renderer", "present_mode");
-            presentModeText.has_value())
-        {
-            if (*presentModeText == "auto")
-                presentMode_ = SwapchainPresentMode::Auto;
-            else if (*presentModeText == "fifo")
-                presentMode_ = SwapchainPresentMode::Fifo;
-            else if (*presentModeText == "mailbox")
-                presentMode_ = SwapchainPresentMode::Mailbox;
-            else if (*presentModeText == "immediate")
-                presentMode_ = SwapchainPresentMode::Immediate;
-            else
-                std::fprintf(stderr,
-                    "renderer module: unknown [renderer] present_mode '%s'; using \"auto\"\n",
-                    presentModeText->c_str());
-        }
-
-        const std::optional<std::int64_t> framesInFlight
-            = context.configurationIntegerInSection("renderer", "max_frames_in_flight");
-        if (framesInFlight.has_value())
-        {
-            if (*framesInFlight < 1 || *framesInFlight > 8)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] max_frames_in_flight %lld to range 1..8\n",
-                    (long long)*framesInFlight);
-            }
-            maxFramesInFlight_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*framesInFlight, 1, 8));
-        }
-
-        const std::optional<std::int64_t> pendingUploads
-            = context.configurationIntegerInSection("renderer", "max_pending_uploads");
-        if (pendingUploads.has_value())
-        {
-            if (*pendingUploads < 1 || *pendingUploads > 4096)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] max_pending_uploads %lld to range 1..4096\n",
-                    static_cast<long long>(*pendingUploads));
-            }
-            maxPendingUploads_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*pendingUploads, 1, 4096));
-        }
-
-        const auto readResourceLimit = [&context](const char *key, std::uint32_t &destination)
-        {
-            const auto value = context.configurationIntegerInSection("renderer", key);
-            if (!value.has_value())
-            {
-                return;
-            }
-            if (*value < 1 || *value > 65536)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] %s %lld to range 1..65536\n",
-                    key,
-                    static_cast<long long>(*value));
-            }
-            destination = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*value, 1, 65536));
-        };
-        readResourceLimit("max_textures_per_renderer", maximumTexturesPerRenderer_);
-        readResourceLimit("max_material_sets_per_renderer", maximumMaterialSetsPerRenderer_);
-
-        if (const auto cacheMegabytes = context.configurationIntegerInSection("renderer", "pipeline_cache_mb");
-            cacheMegabytes.has_value())
-        {
-            if (*cacheMegabytes < 0 || *cacheMegabytes > 512)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] pipeline_cache_mb %lld to range 0..512\n",
-                    static_cast<long long>(*cacheMegabytes));
-            }
-            pipelineCacheMaximumBytes_
-                = static_cast<std::size_t>(std::clamp<std::int64_t>(*cacheMegabytes, 0, 512)) * 1024u * 1024u;
-        }
-
-        if (const auto interval
-            = context.configurationIntegerInSection("renderer", "memory_budget_update_interval_frames");
-            interval.has_value())
-        {
-            if (*interval < 0 || *interval > 3600)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] memory_budget_update_interval_frames %lld to range 0..3600\n",
-                    static_cast<long long>(*interval));
-            }
-            memoryBudgetUpdateIntervalFrames_
-                = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*interval, 0, 3600));
-        }
-
-        readClearColorConfiguration(context);
-
-        const std::optional<std::int64_t> transformCacheMb
-            = context.configurationIntegerInSection("renderer", "headless_transform_cache_mb");
-        if (transformCacheMb.has_value())
-        {
-            if (*transformCacheMb < 0 || *transformCacheMb > 1024)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] headless_transform_cache_mb %lld to range 0..1024\n",
-                    static_cast<long long>(*transformCacheMb));
-            }
-            const std::int64_t bounded         = std::clamp<std::int64_t>(*transformCacheMb, 0, 1024);
-            headlessTransformCacheBudgetBytes_ = static_cast<std::size_t>(bounded) * 1024u * 1024u;
-        }
-        frustumCulling_  = context.configurationBooleanInSection("renderer", "frustum_culling").value_or(true);
-        backFaceCulling_ = context.configurationBooleanInSection("renderer", "back_face_culling").value_or(true);
-        lodEnabled_      = context.configurationBooleanInSection("renderer", "lod_enabled").value_or(true);
-        giIndirectLighting_
-            = context.configurationBooleanInSection("renderer", "gi_indirect_lighting").value_or(true);
-        reflectionIndirectSpecular_
-            = context.configurationBooleanInSection("renderer", "reflection_indirect_specular").value_or(true);
-        furEnabled_ = context.configurationBooleanInSection("renderer", "fur_enabled").value_or(true);
-        if (const auto furMaximumLayers = context.configurationIntegerInSection("renderer", "fur_max_layers");
-            furMaximumLayers.has_value())
-        {
-            if (*furMaximumLayers < 0 || *furMaximumLayers > 64)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] fur_max_layers %lld to range 0..64\n",
-                    static_cast<long long>(*furMaximumLayers));
-            }
-            furMaximumLayers_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*furMaximumLayers, 0, 64));
-        }
-        gpuTimestampsEnabled_
-            = context.configurationBooleanInSection("renderer", "gpu_timestamps_enabled").value_or(false);
-        instanceBatchingEnabled_ = context.configurationBooleanInSection("renderer", "instance_batching").value_or(true);
-        textureMipmapsEnabled_   = context.configurationBooleanInSection("renderer", "texture_mipmaps").value_or(true);
-        if (const auto batchMinimum = context.configurationIntegerInSection("renderer", "instance_batch_min_count");
-            batchMinimum.has_value())
-        {
-            if (*batchMinimum < 2 || *batchMinimum > 1024)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] instance_batch_min_count %lld to range 2..1024\n",
-                    static_cast<long long>(*batchMinimum));
-            }
-            instanceBatchMinimumCount_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*batchMinimum, 2, 1024));
-        }
-
-        // Headless rasterizer tuning. Read here (not per renderer creation)
-        // so live reloads and auto_config treat it like every other knob.
-        // The per-draw tile path defaults adaptively: the serial binning
-        // phase loses to the band/triangle-range split on two-core hosts
-        // (measured ~+55% frame time) but wins once per-pixel lock
-        // contention dominates on four cores and up. auto_config applies
-        // the same rule explicitly.
-        headlessTileParallel_ = context.configurationBooleanInSection("renderer", "headless_tile_parallel")
-                                   .value_or(util::logicalProcessorCount() >= 4u);
-        batchedTileRasterizationEnabled_
-            = context.configurationBooleanInSection("renderer", "headless_batched_tile_rasterization")
-                  .value_or(true);
-        if (const auto threshold = context.configurationIntegerInSection("renderer", "parallel_triangle_threshold");
-            threshold.has_value())
-        {
-            if (*threshold < 1 || *threshold > 1048576)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] parallel_triangle_threshold %lld to range 1..1048576\n",
-                    static_cast<long long>(*threshold));
-            }
-            parallelTriangleThreshold_
-                = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*threshold, 1, 1048576));
-        }
-        if (const auto lockGroup = context.configurationIntegerInSection("renderer", "pixels_per_lock_group");
-            lockGroup.has_value())
-        {
-            if (*lockGroup < 1 || *lockGroup > 4096)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] pixels_per_lock_group %lld to range 1..4096\n",
-                    static_cast<long long>(*lockGroup));
-            }
-            pixelsPerLockGroup_ = static_cast<std::size_t>(std::clamp<std::int64_t>(*lockGroup, 1, 4096));
-        }
-        if (const auto minimum = context.configurationIntegerInSection("renderer", "lod_min_triangles");
-            minimum.has_value())
-        {
-            if (*minimum < 0 || *minimum > 1048576)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] lod_min_triangles %lld to range 0..1048576\n",
-                    static_cast<long long>(*minimum));
-            }
-            lodMinTriangles_ = static_cast<std::size_t>(std::clamp<std::int64_t>(*minimum, 0, 1048576));
-        }
-        if (const auto bandTriangles = context.configurationIntegerInSection("renderer", "headless_band_split_triangles");
-            bandTriangles.has_value())
-        {
-            if (*bandTriangles < 0 || *bandTriangles > 1048576)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] headless_band_split_triangles %lld to range 0..1048576\n",
-                    static_cast<long long>(*bandTriangles));
-            }
-            bandSplitTriangleThreshold_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*bandTriangles, 0, 1048576));
-        }
-        // Vertex-stage parallelism: meshes at or above this many vertices
-        // transform across workers when a scheduler is available.
-        if (const auto parallelVertices
-            = context.configurationIntegerInSection("renderer", "headless_parallel_transform_vertices");
-            parallelVertices.has_value())
-        {
-            if (*parallelVertices < 64 || *parallelVertices > 1048576)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] headless_parallel_transform_vertices %lld to range "
-                    "64..1048576\n",
-                    static_cast<long long>(*parallelVertices));
-            }
-            parallelTransformVertexThreshold_
-                = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*parallelVertices, 64, 1048576));
-        }
-
-        // Screen tile edge in pixels for the tile-parallel paths; powers of
-        // two keep the tile grid aligned with the framebuffer.
-        if (const auto tileEdge = context.configurationIntegerInSection("renderer", "tile_pixels");
-            tileEdge.has_value())
-        {
-            const bool isPowerOfTwo = (*tileEdge & (*tileEdge - 1)) == 0;
-            if (!isPowerOfTwo || *tileEdge < 16 || *tileEdge > 256)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] tile_pixels %lld to a power of two in 16..256\n",
-                    static_cast<long long>(*tileEdge));
-            }
-            const std::int64_t bounded = std::clamp<std::int64_t>(*tileEdge, 16, 256);
-            const std::int64_t lowered = bounded > 128 ? 256 : (bounded > 64 ? 128 : (bounded > 32 ? 64 : (bounded > 16 ? 32 : 16)));
-            tilePixels_ = static_cast<std::uint32_t>(lowered);
-        }
-
-        // Record cap of the batched tile path (one record per rasterisable
-        // fan triangle): memory-tight targets can lower it, and oversized
-        // batches simply flush in more chunks with identical output.
-        if (const auto batchRecords = context.configurationIntegerInSection("renderer", "headless_batch_tile_records");
-            batchRecords.has_value())
-        {
-            if (*batchRecords < 1024 || *batchRecords > 4194304)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] headless_batch_tile_records %lld to range 1024..4194304\n",
-                    static_cast<long long>(*batchRecords));
-            }
-            maxBatchTileRecords_
-                = static_cast<std::size_t>(std::clamp<std::int64_t>(*batchRecords, 1024, 4194304));
-        }
-
-        // Angular-size LOD cutoffs (boundsRadius / distance): four strictly
-        // ascending values in (0, 1]; coarser chains are picked as the
-        // apparent size drops below each cutoff.
-        if (const std::vector<double> thresholds
-            = context.configurationFloatingArrayInSection("renderer", "lod_thresholds");
-            !thresholds.empty())
-        {
-            bool usable = thresholds.size() == 4;
-            for (double cutoff : thresholds)
-            {
-                if (!std::isfinite(cutoff) || cutoff <= 0.0 || cutoff > 1.0)
-                {
-                    usable = false;
-                }
-            }
-            for (std::size_t index = 1; index < thresholds.size() && usable; ++index)
-            {
-                if (!(thresholds[index - 1] < thresholds[index]))
-                {
-                    usable = false;
-                }
-            }
-            if (!usable)
-            {
-                std::fprintf(stderr,
-                    "renderer module: ignoring [renderer] lod_thresholds (need four finite strictly ascending "
-                    "values in (0, 1]); keeping the current cutoffs\n");
-            }
-            else
-            {
-                for (std::size_t index = 0; index < 4; ++index)
-                {
-                    lodThresholds_[index] = static_cast<float>(thresholds[index]);
-                }
-            }
-        }
-
-        // Triangle-stride LOD decimation (renderer.lod_strides): three
-        // strictly ascending strides in 2..1024; level 0 is always the full
-        // index list.
-        if (const std::vector<double> strides
-            = context.configurationFloatingArrayInSection("renderer", "lod_strides");
-            !strides.empty())
-        {
-            bool usable = strides.size() == 3;
-            for (double stride : strides)
-            {
-                if (!std::isfinite(stride) || stride < 2.0 || stride > 1024.0)
-                {
-                    usable = false;
-                }
-            }
-            for (std::size_t index = 1; index < strides.size() && usable; ++index)
-            {
-                if (!(strides[index - 1] < strides[index]))
-                {
-                    usable = false;
-                }
-            }
-            if (!usable)
-            {
-                std::fprintf(stderr,
-                    "renderer module: ignoring [renderer] lod_strides (need three strictly ascending values in "
-                    "2..1024); keeping the current strides\n");
-            }
-            else
-            {
-                for (std::size_t index = 0; index < 3; ++index)
-                {
-                    lodStrides_[index] = static_cast<std::uint32_t>(strides[index]);
-                }
-            }
-        }
-
-        // sRGB output target: the Vulkan surface pick and the shader's
-        // SRGB_OUTPUT specialization follow it; the headless target always
-        // writes UNORM with its fixed encode.
-        srgbOutput_ = context.configurationBooleanInSection("renderer", "srgb_output").value_or(srgbOutput_);
-
-        if (const auto fraction = context.configurationFloatingInSection("renderer", "headless_band_split_min_screen_fraction");
-            fraction.has_value())
-        {
-            if (!std::isfinite(*fraction) || *fraction < 0.0 || *fraction > 1.0)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] headless_band_split_min_screen_fraction %g to range 0..1\n",
-                    *fraction);
-            }
-            bandSplitMinimumScreenFraction_ = static_cast<float>(
-                std::clamp(*fraction, 0.0, 1.0));
-        }
-
-        const std::optional<std::int64_t> sortMinimum
-            = context.configurationIntegerInSection("renderer", "draw_sort_min_commands");
-        if (sortMinimum.has_value())
-        {
-            if (*sortMinimum < 2 || *sortMinimum > 65536)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] draw_sort_min_commands %lld to range 2..65536\n",
-                    static_cast<long long>(*sortMinimum));
-            }
-            drawSortMinimumCommands_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*sortMinimum, 2, 65536));
-        }
-
-        const std::optional<std::int64_t> instanceStreamMb
-            = context.configurationIntegerInSection("renderer", "instance_stream_mb");
-        if (instanceStreamMb.has_value())
-        {
-            if (*instanceStreamMb < 1 || *instanceStreamMb > 64)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] instance_stream_mb %lld to range 1..64\n",
-                    static_cast<long long>(*instanceStreamMb));
-            }
-            instanceStreamMegabytes_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*instanceStreamMb, 1, 64));
-        }
-
-        // MSAA sample count: > 1 selects the capability-checked
-        // dynamic-rendering resolve path on Vulkan (falling back to 1 with a
-        // logged note when the device, or the picked formats, do not support
-        // it) and the matching integer supersampling grid on the headless
-        // rasterizer. Anti-aliasing ships enabled by default.
-        if (const auto msaa = context.configurationIntegerInSection("renderer", "msaa_samples"); msaa.has_value())
-        {
-            if (*msaa < 1 || *msaa > 8)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] msaa_samples %lld to range 1..8\n",
-                    static_cast<long long>(*msaa));
-            }
-            msaaSamples_ = static_cast<std::uint32_t>(std::clamp<std::int64_t>(*msaa, 1, 8));
-        }
-
-        // Anisotropic filtering level for texture samplers; the backend clamps
-        // this against limits.maxSamplerAnisotropy before creating a sampler.
-        if (const auto anisotropy = context.configurationFloatingInSection("renderer", "anisotropy_level");
-            anisotropy.has_value())
-        {
-            if (*anisotropy < 1.0 || *anisotropy > 16.0)
-            {
-                std::fprintf(stderr,
-                    "renderer module: clamping [renderer] anisotropy_level %g to range 1..16\n",
-                    *anisotropy);
-            }
-            anisotropyLevel_ = static_cast<float>(std::clamp(*anisotropy, 1.0, 16.0));
-        }
-        if (const auto sortMode = context.configurationStringInSection("renderer", "draw_sort_mode"))
-        {
-            if (*sortMode == "mesh_material")
-            {
-                drawSortMode_    = RenderDrawSortMode::MeshThenMaterial;
-                drawSortEnabled_ = true;
-            }
-            else if (*sortMode == "material_mesh")
-            {
-                drawSortMode_    = RenderDrawSortMode::MaterialThenMesh;
-                drawSortEnabled_ = true;
-            }
-            else if (*sortMode == "off")
-            {
-                drawSortEnabled_ = false;
-            }
-            else
-            {
-                std::fprintf(stderr,
-                    "renderer module: unknown [renderer] draw_sort_mode '%s'; sorting disabled\n",
-                    sortMode->c_str());
-                drawSortEnabled_ = false;
-            }
-        }
+        settings_ = readRendererSettings(*context_);
     }
 
-    // Live reload: re-read configuration when any changed key starts with
-    // "renderer.". Read only - the values take effect on the next renderer or
-    // drawMeshes call (some, like backend, only for renderers created later).
-    // Toggling auto_config re-derives (or un-derives) everything on the next
-    // renderer/draw call, exactly like editing any other key.
     void onConfigurationReloaded(const ConfigurationReloadedEvent &event)
     {
         const bool changed = std::any_of(event.changedKeys.begin(),
@@ -775,130 +198,6 @@ private:
         {
             readConfiguration();
         }
-    }
-
-    // auto_config = true: derive every performance, quality and memory knob
-    // from the host hardware and skip the [renderer] overlay entirely (the
-    // tuning keys below have no effect until auto_config goes back to false).
-    // clear_color is content, not tuning, and is still read.
-    //
-    // Hardware inputs: the cached GPU probe (class, device-local memory,
-    // feature bits), the logical processor count, and installed RAM. Every
-    // derived value stays inside the validated ranges the manual config path
-    // clamps to, so a hardware-derived renderer is indistinguishable from a
-    // hand-tuned one apart from the stderr notice.
-    void applyHardwareDerivedConfiguration(ParticipantContext &context)
-    {
-        const GpuProbeResult &  gpu     = probeHostGpu();
-        const std::uint32_t     cores   = util::logicalProcessorCount();
-        const std::uint64_t     ram     = util::physicalMemoryBytes();
-        const bool              ramKnown = ram != 0u;
-        const bool              lowRam   = !ramKnown || ram < 4ull * 1024ull * 1024ull * 1024ull;
-        const bool              bigRam   = ramKnown && ram >= 8ull * 1024ull * 1024ull * 1024ull;
-        const bool              discrete = gpu.bestDeviceClass == DeviceClass::DiscreteGpu;
-        const bool              bigVram  = discrete && gpu.deviceLocalMemoryBytes >= 6ull * 1024ull * 1024ull * 1024ull;
-
-        // Backend: Vulkan when a real GPU is present (the same policy the
-        // backend = "auto" default follows), headless CPU rasterizer when it
-        // is not. Never a software Vulkan implementation: those report a CPU
-        // device class and the probe refuses to count them as a GPU.
-        configuredBackend_ = gpu.gpuPresent ? ConfiguredBackend::Vulkan : ConfiguredBackend::Headless;
-
-        // Device pick follows the detected class; Auto already prefers
-        // discrete, so only the unambiguous single-class cases pin it.
-        devicePreference_ = DevicePreference::Auto;
-        if (gpu.gpuPresent)
-        {
-            if (discrete)
-            {
-                devicePreference_ = DevicePreference::Discrete;
-            }
-            else if (gpu.bestDeviceClass == DeviceClass::IntegratedGpu)
-            {
-                devicePreference_ = DevicePreference::Integrated;
-            }
-        }
-
-        vsync_                                   = false;
-        validation_                              = false;
-        presentMode_                             = SwapchainPresentMode::Auto;
-        maxFramesInFlight_                       = 3;
-        maxPendingUploads_                       = lowRam ? 16u : 64u;
-        maximumTexturesPerRenderer_              = bigVram ? 512u : 256u;
-        maximumMaterialSetsPerRenderer_          = bigVram ? 512u : 256u;
-        pipelineCacheMaximumBytes_
-            = discrete ? 128u * 1024u * 1024u : (gpu.gpuPresent ? 64u * 1024u * 1024u : 32u * 1024u * 1024u);
-        memoryBudgetUpdateIntervalFrames_        = 120;
-        headlessTransformCacheBudgetBytes_
-            = bigRam ? 256u * 1024u * 1024u : (lowRam ? 64u * 1024u * 1024u : 128u * 1024u * 1024u);
-        frustumCulling_                          = true;
-        backFaceCulling_                         = true;
-        lodEnabled_                              = true;
-        gpuTimestampsEnabled_                    = gpu.gpuPresent && gpu.timestampsSupported;
-        drawSortMode_                            = RenderDrawSortMode::MeshThenMaterial;
-        drawSortEnabled_                         = true;
-        drawSortMinimumCommands_                 = 2;
-        instanceBatchingEnabled_                 = true;
-        instanceBatchMinimumCount_               = 4;
-        instanceStreamMegabytes_                 = bigVram ? 8u : 4u;
-        textureMipmapsEnabled_                   = true;
-
-        // Quality knobs scale with the accelerator: MSAA everywhere (the
-        // 4-sample tier where the memory bandwidth is there, 2 otherwise),
-        // anisotropy capped by the device limit at sampler creation.
-        msaaSamples_        = bigVram ? 4u : 2u;
-        anisotropyLevel_    = gpu.samplerAnisotropyAvailable ? (discrete ? 8.0f : 4.0f) : 1.0f;
-
-        // Headless rasterizer threading scales with the CPU shape: the
-        // per-draw tile path turns on from 4 logical processors (its serial
-        // binning loses on two cores), the batched tile path from 2 (one
-        // binning pass per frame amortizes the fork/join), and the parallel
-        // triangle thresholds drop once there are enough workers to win.
-        headlessTileParallel_       = cores >= 4u;
-        batchedTileRasterizationEnabled_ = cores >= 2u;
-        parallelTriangleThreshold_  = cores >= 8u ? 2048u : 4096u;
-        bandSplitTriangleThreshold_ = parallelTriangleThreshold_;
-        bandSplitMinimumScreenFraction_ = 0.125f;
-        pixelsPerLockGroup_         = 16;
-        lodMinTriangles_            = 4096;
-        tilePixels_                 = 64u;
-        maxBatchTileRecords_        = 512u * 1024u;
-
-        readClearColorConfiguration(context);
-
-        const char *gpuLabel = "none";
-        switch (gpu.bestDeviceClass)
-        {
-        case DeviceClass::DiscreteGpu:
-            gpuLabel = "discrete";
-            break;
-        case DeviceClass::IntegratedGpu:
-            gpuLabel = "integrated";
-            break;
-        case DeviceClass::VirtualGpu:
-            gpuLabel = "virtual";
-            break;
-        case DeviceClass::Cpu:
-            gpuLabel = "software-only";
-            break;
-        case DeviceClass::Unknown:
-            break;
-        }
-        char ramLabel[32];
-        if (ramKnown)
-        {
-            std::snprintf(ramLabel, sizeof(ramLabel), "%.1f GiB", static_cast<double>(ram) / (1024.0 * 1024.0 * 1024.0));
-        }
-        else
-        {
-            std::snprintf(ramLabel, sizeof(ramLabel), "unknown");
-        }
-        std::fprintf(stderr,
-            "renderer module: auto_config is on; [renderer] tuning derived from hardware "
-            "(gpu=%s, %u logical processor(s), ram=%s); other tuning keys in [renderer] are ignored\n",
-            gpuLabel,
-            cores,
-            ramLabel);
     }
 
     // Must mirror module.toml: provided/required/optional capability lists.
@@ -919,27 +218,20 @@ private:
         return found != renderers_.end() ? &found->second : nullptr;
     }
 
-    pbr::PbrEnvironment currentEnvironment() const
+    const RendererRecord *recordFor(RendererHandle renderer) const
     {
-        if (pbr_ != nullptr)
-        {
-            const pbr::PbrEnvironment *environment = pbr_->environment(pbr_->self);
-            if (environment != nullptr)
-            {
-                return *environment;
-            }
-        }
-        return defaultEnvironment();
+        const auto found = renderers_.find(renderer);
+        return found != renderers_.end() ? &found->second : nullptr;
     }
 
     const char *activeBackendNameImpl(RendererHandle renderer) const
     {
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backendInstance == nullptr)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr)
         {
             return "none";
         }
-        return found->second.backendInstance->name();
+        return record->backendInstance->name();
     }
 
     // Picks the backend for a new renderer. "auto" is hardware-aware:
@@ -961,7 +253,7 @@ private:
 
         const window::SurfaceApi surfaceApi = window_->surfaceApi(window_->self, surface);
         bool                     wantVulkan = false;
-        switch (configuredBackend_)
+        switch (settings_.backend)
         {
         case ConfiguredBackend::Auto:
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
@@ -990,26 +282,26 @@ private:
             return registerRenderer(Backend::Vulkan,
                 surface,
                 VulkanBackend::create(surface,
-                    vsync_,
-                    validation_,
-                    maxFramesInFlight_,
-                    maxPendingUploads_,
-                    memoryBudgetUpdateIntervalFrames_,
-                    devicePreference_,
-                    frustumCulling_,
-                    backFaceCulling_,
-                    gpuTimestampsEnabled_,
-                    instanceStreamMegabytes_,
-                    textureMipmapsEnabled_,
-                    anisotropyLevel_,
-                    msaaSamples_,
-                    srgbOutput_,
-                    maximumTexturesPerRenderer_,
-                    maximumMaterialSetsPerRenderer_,
-                    pipelineCacheMaximumBytes_,
+                    settings_.vsync,
+                    settings_.validation,
+                    settings_.maxFramesInFlight,
+                    settings_.maxPendingUploads,
+                    settings_.memoryBudgetUpdateIntervalFrames,
+                    settings_.devicePreference,
+                    settings_.frustumCulling,
+                    settings_.backFaceCulling,
+                    settings_.gpuTimestampsEnabled,
+                    settings_.instanceStreamMegabytes,
+                    settings_.textureMipmapsEnabled,
+                    settings_.anisotropyLevel,
+                    settings_.msaaSamples,
+                    settings_.srgbOutput,
+                    settings_.maxTexturesPerRenderer,
+                    settings_.maxMaterialSetsPerRenderer,
+                    settings_.maxPipelineCacheBytes,
                     vulkanSurface_,
                     error,
-                    presentMode_),
+                    settings_.presentMode),
                 error);
 #else
             reportError(error, RenderError::BackendUnavailable);
@@ -1026,25 +318,25 @@ private:
         try
         {
             HeadlessBackendOptions headlessOptions;
-            headlessOptions.transformCacheBudgetBytes = headlessTransformCacheBudgetBytes_;
-            headlessOptions.frustumCullingEnabled     = frustumCulling_;
-            headlessOptions.backFaceCullingEnabled    = backFaceCulling_;
-            headlessOptions.lodEnabled                = lodEnabled_;
-            headlessOptions.tileParallelEnabled       = headlessTileParallel_;
-            headlessOptions.batchedTileRasterizationEnabled = batchedTileRasterizationEnabled_;
-            headlessOptions.taskScheduler             = context_ != nullptr ? &context_->taskScheduler() : nullptr;
-            headlessOptions.msaaSamples                = msaaSamples_;
-
-            headlessOptions.parallelTriangleThreshold  = parallelTriangleThreshold_;
-            headlessOptions.pixelsPerLockGroup         = pixelsPerLockGroup_;
-            headlessOptions.lodMinTriangles            = lodMinTriangles_;
-            headlessOptions.bandSplitTriangleThreshold = bandSplitTriangleThreshold_;
-            headlessOptions.bandSplitMinimumScreenFraction = bandSplitMinimumScreenFraction_;
-            headlessOptions.parallelTransformVertexThreshold = parallelTransformVertexThreshold_;
-            headlessOptions.tilePixels                 = tilePixels_;
-            headlessOptions.maxBatchTileRecords        = maxBatchTileRecords_;
-            headlessOptions.lodThresholds              = lodThresholds_;
-            headlessOptions.lodStrides                 = lodStrides_;
+            headlessOptions.transformCacheBudgetBytes        = settings_.headlessTransformCacheBudgetBytes;
+            headlessOptions.frustumCullingEnabled            = settings_.frustumCulling;
+            headlessOptions.backFaceCullingEnabled           = settings_.backFaceCulling;
+            headlessOptions.lodEnabled                       = settings_.lodEnabled;
+            headlessOptions.tileParallelEnabled              = settings_.headlessTileParallel;
+            headlessOptions.batchedTileRasterizationEnabled  = settings_.headlessBatchedTileRasterization;
+            headlessOptions.taskScheduler
+                = context_ != nullptr ? &context_->taskScheduler() : nullptr;
+            headlessOptions.msaaSamples                       = settings_.msaaSamples;
+            headlessOptions.parallelTriangleThreshold         = settings_.headlessParallelTriangleThreshold;
+            headlessOptions.pixelsPerLockGroup                = settings_.headlessPixelsPerLockGroup;
+            headlessOptions.lodMinTriangles                   = settings_.lodMinTriangles;
+            headlessOptions.bandSplitTriangleThreshold        = settings_.headlessBandSplitTriangleThreshold;
+            headlessOptions.bandSplitMinimumScreenFraction    = settings_.headlessBandSplitMinimumScreenFraction;
+            headlessOptions.parallelTransformVertexThreshold  = settings_.headlessParallelTransformVertexThreshold;
+            headlessOptions.tilePixels                        = settings_.headlessTilePixels;
+            headlessOptions.maxBatchTileRecords               = settings_.headlessMaxBatchTileRecords;
+            headlessOptions.lodThresholds                     = settings_.lodThresholds;
+            headlessOptions.lodStrides                        = settings_.lodStrides;
             return registerRenderer(Backend::Headless,
                 surface,
                 std::make_unique<HeadlessBackend>(surface, window_, headlessOptions),
@@ -1121,10 +413,10 @@ private:
         record->backendInstance->setCamera(*camera);
     }
 
-    // Pushes the pbr environment and direct lights into the backend when
-    // their versions changed, starts frame timing for the profiler, then
-    // hands off to the backend. frame == nullptr selects the configured
-    // clear_color.
+    // Pushes the version-gated lighting inputs (pbr environment, direct
+    // lights, lumen_gi probe grid, lumen_reflection field), starts frame
+    // timing for the profiler, then hands off to the backend.
+    // frame == nullptr selects the configured clear_color.
     void beginFrameImpl(RendererHandle renderer, const FrameParameters *frame)
     {
         RendererRecord *record = recordFor(renderer);
@@ -1133,136 +425,21 @@ private:
             return;
         }
         FrameParameters configuredFrame{};
-        for (std::size_t index = 0; index < configuredClearColor_.size(); ++index)
+        for (std::size_t index = 0; index < settings_.clearColor.size(); ++index)
         {
-            configuredFrame.clearColor[index] = configuredClearColor_[index];
+            configuredFrame.clearColor[index] = settings_.clearColor[index];
         }
         const FrameParameters &frameParameters = frame != nullptr ? *frame : configuredFrame;
 
-        if (pbr_ == nullptr)
-        {
-            if (!record->environmentInitialized)
-            {
-                record->backendInstance->setEnvironment(defaultEnvironment());
-                record->environmentInitialized = true;
-            }
-        }
-        else if (pbr_->environmentVersion != nullptr)
-        {
-            const std::uint64_t version = pbr_->environmentVersion(pbr_->self);
-            if (!record->environmentInitialized || record->environmentVersion != version)
-            {
-                record->backendInstance->setEnvironment(currentEnvironment());
-                record->environmentVersion     = version;
-                record->environmentInitialized = true;
-            }
-        }
-        else
-        {
-            record->backendInstance->setEnvironment(currentEnvironment());
-        }
-        if (directLighting_ != nullptr && directLighting_->copyLights != nullptr)
-        {
-            std::uint64_t version = 0;
-            directLighting_->copyLights(directLighting_->self, nullptr, 0, &version);
-            if (!record->directLightsInitialized || record->directLightVersion != version)
-            {
-                std::array<direct_lighting::DirectLight, direct_lighting::maxDirectLights> lights{};
-                const std::uint32_t count = directLighting_->copyLights(
-                    directLighting_->self, lights.data(), record->directLightLimit, &version);
-                record->backendInstance->setDirectLights(lights.data(), count);
-                record->directLightVersion      = version;
-                record->directLightsInitialized = true;
-            }
-        }
-        else if (!record->directLightsInitialized)
-        {
-            record->backendInstance->setDirectLights(nullptr, 0);
-            record->directLightsInitialized = true;
-        }
-        // The lumen_gi probe grid follows the same version pattern as the
-        // environment/lights above: a null/zero-capacity copyProbes call
-        // reports the current version, and only a changed version pays for
-        // the snapshot copy. When the module is absent or the hook is
-        // disabled by configuration, the backend keeps whatever it had (an
-        // empty grid at creation) and shading falls back to the legacy
-        // hemispheric ambient. The snapshot may lag the latest evaluate() by
-        // one frame: module update order does not guarantee lumen_gi runs
-        // before the renderer, and GI is temporal by nature (Lumen's cache
-        // updates are amortized the same way).
-        if (giIndirectLighting_ && lumenGi_ != nullptr && lumenGi_->copyProbes != nullptr)
-        {
-            std::uint64_t version = 0;
-            lumenGi_->copyProbes(lumenGi_->self, nullptr, 0, &record->probeHeader, &version);
-            if (!record->probeGridInitialized || record->probeGridVersion != version)
-            {
-                record->probeScratch.resize(record->probeHeader.probeCount);
-                const std::uint32_t copied = record->probeHeader.probeCount != 0
-                    ? lumenGi_->copyProbes(lumenGi_->self,
-                          record->probeScratch.data(),
-                          static_cast<std::uint32_t>(record->probeScratch.size()),
-                          &record->probeHeader,
-                          &version)
-                    : 0;
-                GiProbeGrid grid;
-                grid.header     = record->probeHeader;
-                grid.probes     = record->probeScratch.data();
-                grid.probeCount = std::min(copied, record->probeHeader.probeCount);
-                record->backendInstance->setProbeGrid(grid);
-                record->probeGridVersion     = version;
-                record->probeGridInitialized = true;
-            }
-        }
-        else if (!record->probeGridInitialized)
-        {
-            record->backendInstance->setProbeGrid(GiProbeGrid{});
-            record->probeGridInitialized = true;
-        }
-        // The lumen_reflection field follows the same version pattern: a
-        // null/zero-capacity copyField reports the current version, and only
-        // a changed version pays for the snapshot copy. When the module is
-        // absent or the hook is disabled by configuration, the backend keeps
-        // whatever it had (an empty field at creation) and shading stays at
-        // the pre-hook specular. The snapshot may lag the latest evaluate()
-        // by one frame, like the probe grid above.
-        if (reflectionIndirectSpecular_ && lumenReflection_ != nullptr && lumenReflection_->copyField != nullptr)
-        {
-            std::uint64_t version = 0;
-            lumen_reflection::ReflectionFieldHeader header{};
-            lumenReflection_->copyField(lumenReflection_->self, nullptr, 0, &header, &version);
-            if (!record->reflectionFieldInitialized || record->reflectionFieldVersion != version
-                || record->reflectionHeader.width != header.width || record->reflectionHeader.height != header.height)
-            {
-                // copyField writes reflectionFieldTexelFloats floats per texel
-                // (the radiance triplet interleaved with the texel roughness;
-                // see the lumen_reflection ABI header) - the scratch sizing
-                // and the copy capacity must both carry that stride.
-                const std::size_t texelCount = static_cast<std::size_t>(header.width) * header.height;
-                record->reflectionScratch.resize(texelCount * lumen_reflection::reflectionFieldTexelFloats);
-                if (texelCount != 0)
-                {
-                    lumenReflection_->copyField(lumenReflection_->self,
-                        record->reflectionScratch.data(),
-                        static_cast<std::uint32_t>(texelCount),
-                        &record->reflectionHeader,
-                        &version);
-                }
-                ReflectionField field;
-                field.header  = record->reflectionHeader;
-                field.radiance = record->reflectionScratch.data();
-                record->backendInstance->setReflectionField(field);
-                record->reflectionFieldVersion     = version;
-                record->reflectionFieldInitialized = true;
-            }
-        }
-        else if (!record->reflectionFieldInitialized)
-        {
-            record->backendInstance->setReflectionField(ReflectionField{});
-            record->reflectionFieldInitialized = true;
-        }
+        RenderBackend &backend = *record->backendInstance;
+        record->frameInputs.pushEnvironment(backend, pbr_);
+        record->frameInputs.pushDirectLights(backend, directLighting_, record->directLightLimit);
+        record->frameInputs.pushProbeGrid(backend, lumenGi_, settings_.giIndirectLighting);
+        record->frameInputs.pushReflectionField(backend, lumenReflection_, settings_.reflectionIndirectSpecular);
+
         record->frameStart        = std::chrono::steady_clock::now();
         record->frameTimingActive = true;
-        record->backendInstance->beginFrame(frameParameters);
+        backend.beginFrame(frameParameters);
     }
 
     // Ends the backend frame and records the wall-clock frame time under
@@ -1343,8 +520,7 @@ private:
         {
             return;
         }
-        const MeshMaterial defaultMaterial;
-        record->backendInstance->drawMesh(mesh, modelMatrix, material != nullptr ? *material : defaultMaterial);
+        record->backendInstance->drawMesh(mesh, modelMatrix, effectiveRenderMaterial(material));
     }
 
     void drawMeshInstancesImpl(RendererHandle renderer, MeshHandle mesh, const float *modelMatrices,
@@ -1356,33 +532,30 @@ private:
         {
             return;
         }
-        const MeshMaterial defaultMaterial;
         record->backendInstance->drawMeshInstances(
-            mesh, modelMatrices, instanceCount, material != nullptr ? *material : defaultMaterial);
+            mesh, modelMatrices, instanceCount, effectiveRenderMaterial(material));
     }
 
     // Shell-fur draws: the [renderer] fur_enabled switch gates the whole
     // path (a disabled fur draws nothing, so applications can A/B the cost
-    // with one config change), and layerCount is clamped to
-    // fur_max_layers - the hard worst-case bound that keeps a buggy LOD
-    // policy from turning one fur surface into an unbounded overdraw
-    // spike. Everything else passes through to the backend unchanged: the
-    // layer loop IS the compositing order, so no sorting or batching may
-    // reorder it.
+    // with one config change), and layerCount is clamped to fur_max_layers -
+    // the hard worst-case bound that keeps a buggy LOD policy from turning
+    // one fur surface into an unbounded overdraw spike. Everything else
+    // passes through to the backend unchanged: the layer loop IS the
+    // compositing order, so no sorting or batching may reorder it.
     void drawFurImpl(RendererHandle renderer, MeshHandle mesh, const float *modelMatrix, const MeshMaterial *material,
         const FurLayerParams *params)
     {
         RendererRecord *record = recordFor(renderer);
         if (record == nullptr || record->backendInstance == nullptr || modelMatrix == nullptr || mesh == invalidMesh
-            || !furEnabled_)
+            || !settings_.furEnabled)
         {
             return;
         }
         FurLayerParams clamped = params != nullptr ? *params : FurLayerParams{};
-        clamped.layerCount     = std::clamp(clamped.layerCount, 0u, furMaximumLayers_);
-        const MeshMaterial defaultMaterial;
+        clamped.layerCount     = std::clamp(clamped.layerCount, 0u, settings_.furMaximumLayers);
         record->backendInstance->drawFur(
-            mesh, modelMatrix, material != nullptr ? *material : defaultMaterial, clamped);
+            mesh, modelMatrix, effectiveRenderMaterial(material), clamped);
     }
 
     void drawFurInstancesImpl(RendererHandle renderer, MeshHandle mesh, const float *modelMatrices,
@@ -1390,15 +563,14 @@ private:
     {
         RendererRecord *record = recordFor(renderer);
         if (record == nullptr || record->backendInstance == nullptr || modelMatrices == nullptr || instanceCount == 0
-            || mesh == invalidMesh || !furEnabled_)
+            || mesh == invalidMesh || !settings_.furEnabled)
         {
             return;
         }
         FurLayerParams clamped = params != nullptr ? *params : FurLayerParams{};
-        clamped.layerCount     = std::clamp(clamped.layerCount, 0u, furMaximumLayers_);
-        const MeshMaterial defaultMaterial;
+        clamped.layerCount     = std::clamp(clamped.layerCount, 0u, settings_.furMaximumLayers);
         record->backendInstance->drawFurInstances(
-            mesh, modelMatrices, instanceCount, material != nullptr ? *material : defaultMaterial, clamped);
+            mesh, modelMatrices, instanceCount, effectiveRenderMaterial(material), clamped);
     }
 
     void drawOverlayImpl(RendererHandle renderer, const OverlayDrawData *data)
@@ -1412,11 +584,8 @@ private:
         record->backendInstance->drawOverlay(*data);
     }
 
-    // The batched draw path: optionally sorts the commands (draw_sort_mode,
-    // only once commandCount >= draw_sort_min_commands), then - on the Vulkan
-    // backend only, when instance_batching is on - folds runs of equal
-    // mesh+material into drawMeshInstances. Runs smaller than
-    // instance_batch_min_count fall back to single draws.
+    // The batched draw path: sorted and batched by the per-renderer
+    // scheduler (draw_scheduler.cpp).
     void drawMeshesImpl(RendererHandle renderer, const RenderDrawCommand *commands, std::uint32_t commandCount)
     {
         RendererRecord *record = recordFor(renderer);
@@ -1424,199 +593,12 @@ private:
         {
             return;
         }
-        const MeshMaterial       defaultMaterial;
-        RenderBackend           *backend         = record->backendInstance.get();
-        const RenderDrawCommand *orderedCommands = commands;
-
-        if (drawSortEnabled_ && commandCount >= drawSortMinimumCommands_
-            && static_cast<std::size_t>(commandCount) <= record->sortedCommandsScratch.max_size())
-        {
-            try
-            {
-                // Percentile-relevant cost: the cache-hit gather is cheap, the
-                // rebuild path sorts. Recording both under one metric shows
-                // how often and how long the draw-order cache misses.
-                const ScopedProfileTimer sortTimer(profiler_, PerformanceMetric::RenderDrawSort);
-                const std::uint64_t signature = renderDrawCommandSortSignature(
-                    std::span<const RenderDrawCommand>(commands, commandCount), drawSortMode_);
-                if (record->sortSignatureValid && record->sortSignature == signature
-                    && record->sortPermutation.size() == static_cast<std::size_t>(commandCount))
-                {
-                    // Same key multiset in the same input order as the cached
-                    // sort: gather through the cached permutation. Matrix data
-                    // is dereferenced at draw time, so only the pointers must
-                    // be current - which the gather guarantees.
-                    record->sortedCommandsScratch.resize(commandCount);
-                    const std::vector<std::uint32_t> &permutation = record->sortPermutation;
-                    for (std::uint32_t index = 0; index < commandCount; ++index)
-                        record->sortedCommandsScratch[index] = commands[permutation[index]];
-                }
-                else
-                {
-                    // Sort {sort key, original index} pairs and gather through
-                    // the resulting permutation: O(n log n) with no separate
-                    // origin reconstruction, so the cache-rebuild frame (key
-                    // set changed: streaming, spawns, material edits) no
-                    // longer pays the previous O(n^2) search over consumed
-                    // commands. Ties resolve to the lower original index,
-                    // which makes the rebuild deterministic and the cached
-                    // gather identical to a fresh sort.
-                    record->sortPermutation.resize(commandCount);
-                    sortRenderDrawCommandPermutation(std::span<const RenderDrawCommand>(commands, commandCount),
-                        drawSortMode_, std::span<std::uint32_t>(record->sortPermutation));
-                    record->sortedCommandsScratch.resize(commandCount);
-                    for (std::uint32_t index = 0; index < commandCount; ++index)
-                        record->sortedCommandsScratch[index] = commands[record->sortPermutation[index]];
-                    // Record the permutation this sorted order came from so
-                    // later frames with the same keys can skip the sort.
-                    record->sortSignature      = signature;
-                    record->sortSignatureValid = true;
-                }
-                orderedCommands = record->sortedCommandsScratch.data();
-            }
-            catch (const std::bad_alloc &)
-            {
-                record->sortSignatureValid = false;
-            }
-        }
-        else
-        {
-            record->sortSignatureValid = false;
-        }
-
-        const bool useInstancing = instanceBatchingEnabled_ && record->backend == Backend::Vulkan
-                                && commandCount >= instanceBatchMinimumCount_;
-        if (!useInstancing)
-        {
-            // One backend call for the whole frame's mesh draws. The Vulkan
-            // backend's default implementation replays the items through
-            // drawMesh; the headless backend replaces the replay with a
-            // batched tile-parallel pass that preserves per-pixel submission
-            // order exactly while spreading the pixel work across every
-            // worker (see RenderBackend::drawMeshBatch). Only the scratch
-            // build can throw here (nothing has been drawn yet); the backend
-            // call itself is allocation-failure safe and falls back to the
-            // per-draw paths internally.
-            bool batchReady = false;
-            try
-            {
-                record->batchItemsScratch.clear();
-                record->batchItemsScratch.reserve(commandCount);
-                for (std::uint32_t commandIndex = 0; commandIndex < commandCount; ++commandIndex)
-                {
-                    const RenderDrawCommand &command = orderedCommands[commandIndex];
-                    if (command.modelMatrix == nullptr || command.mesh == invalidMesh)
-                    {
-                        continue;
-                    }
-                    record->batchItemsScratch.push_back(RenderBackend::MeshBatchItem{
-                        command.mesh, command.modelMatrix, command.material});
-                }
-                batchReady = true;
-            }
-            catch (const std::bad_alloc &)
-            {
-                record->batchItemsScratch.clear();
-            }
-            if (batchReady)
-            {
-                backend->drawMeshBatch(
-                    record->batchItemsScratch.data(), static_cast<std::uint32_t>(record->batchItemsScratch.size()));
-                return;
-            }
-            // The scratch copy failed; replay through the per-command path
-            // instead (identical output, just unbached).
-            for (std::uint32_t commandIndex = 0; commandIndex < commandCount; ++commandIndex)
-            {
-                const RenderDrawCommand &command = orderedCommands[commandIndex];
-                if (command.modelMatrix == nullptr || command.mesh == invalidMesh)
-                {
-                    continue;
-                }
-                backend->drawMesh(command.mesh,
-                    command.modelMatrix,
-                    command.material != nullptr ? *command.material : defaultMaterial);
-            }
-            return;
-        }
-
-        std::uint32_t index = 0;
-        while (index < commandCount)
-        {
-            const RenderDrawCommand &first = orderedCommands[index];
-            if (first.modelMatrix == nullptr || first.mesh == invalidMesh)
-            {
-                ++index;
-                continue;
-            }
-
-            // Same mesh + same material folds into one instanced draw; a run
-            // that is too small, overflows the scratch, or fails to allocate
-            // falls back to per-command drawMesh calls.
-            const MeshMaterial *const material = first.material != nullptr ? first.material : &defaultMaterial;
-            std::uint32_t             end      = index + 1u;
-            while (end < commandCount)
-            {
-                const RenderDrawCommand  &next         = orderedCommands[end];
-                const MeshMaterial *const nextMaterial = next.material != nullptr ? next.material : &defaultMaterial;
-                if (next.modelMatrix == nullptr || next.mesh != first.mesh
-                    || (next.material != first.material && compareRenderMaterialValues(*nextMaterial, *material) != 0))
-                {
-                    break;
-                }
-                ++end;
-            }
-
-            const std::size_t instanceCount = static_cast<std::size_t>(end - index);
-            if (instanceCount < instanceBatchMinimumCount_)
-            {
-                for (std::uint32_t fallback = index; fallback < end; ++fallback)
-                {
-                    const RenderDrawCommand &command = orderedCommands[fallback];
-                    backend->drawMesh(command.mesh, command.modelMatrix, effectiveRenderMaterial(command.material));
-                }
-                index = end;
-                continue;
-            }
-
-            if (instanceCount > record->instanceMatricesScratch.max_size() / 16u)
-            {
-                for (std::uint32_t fallback = index; fallback < end; ++fallback)
-                {
-                    const RenderDrawCommand &command = orderedCommands[fallback];
-                    backend->drawMesh(command.mesh, command.modelMatrix, *material);
-                }
-                index = end;
-                continue;
-            }
-
-            try
-            {
-                record->instanceMatricesScratch.resize(instanceCount * 16u);
-            }
-            catch (const std::bad_alloc &)
-            {
-                for (std::uint32_t fallback = index; fallback < end; ++fallback)
-                {
-                    const RenderDrawCommand &command = orderedCommands[fallback];
-                    backend->drawMesh(command.mesh, command.modelMatrix, *material);
-                }
-                index = end;
-                continue;
-            }
-
-            float *destination = record->instanceMatricesScratch.data();
-            for (std::uint32_t source = index; source < end; ++source)
-            {
-                std::copy_n(orderedCommands[source].modelMatrix, 16u, destination);
-                destination += 16u;
-            }
-            backend->drawMeshInstances(first.mesh,
-                record->instanceMatricesScratch.data(),
-                static_cast<std::uint32_t>(instanceCount),
-                *material);
-            index = end;
-        }
+        record->drawScheduler.submit(*record->backendInstance,
+            record->backend == Backend::Vulkan,
+            commands,
+            commandCount,
+            settings_,
+            profiler_);
     }
 
     TextureHandle createTextureImpl(RendererHandle renderer, const TextureDescription *description, RenderError *error)
@@ -1707,66 +689,66 @@ private:
 
     DeviceClass deviceClassImpl(RendererHandle renderer) const
     {
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backendInstance == nullptr)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr)
         {
             return DeviceClass::Unknown;
         }
-        return found->second.backendInstance->deviceClass();
+        return record->backendInstance->deviceClass();
     }
 
     const char *deviceNameImpl(RendererHandle renderer) const
     {
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backendInstance == nullptr)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr)
         {
             return nullptr;
         }
-        return found->second.backendInstance->deviceName();
+        return record->backendInstance->deviceName();
     }
 
     bool deviceProfileImpl(RendererHandle renderer, DeviceProfile *outProfile) const
     {
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backendInstance == nullptr || outProfile == nullptr)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr || outProfile == nullptr)
         {
             return false;
         }
-        *outProfile = found->second.backendInstance->deviceProfile();
+        *outProfile = record->backendInstance->deviceProfile();
         return true;
     }
 
     void frameStatisticsImpl(RendererHandle renderer, FrameStatistics *outStatistics) const
     {
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backendInstance == nullptr || outStatistics == nullptr)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr || outStatistics == nullptr)
         {
             return;
         }
-        *outStatistics = found->second.backendInstance->statistics();
+        *outStatistics = record->backendInstance->statistics();
     }
 
     // Whether endFrame already blocks on the display's vblank. Unknown
     // handles report false (nothing to assume about pacing).
     [[nodiscard]] bool waitsForPresentationImpl(RendererHandle renderer) const
     {
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backendInstance == nullptr)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr)
         {
             return false;
         }
-        return found->second.backendInstance->waitsForPresentation();
+        return record->backendInstance->waitsForPresentation();
     }
 
     bool vulkanInfoStringsImpl(RendererHandle renderer, RendererInfoStrings *outInfo) const
     {
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backend != Backend::Vulkan)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backend != Backend::Vulkan)
         {
             return false;
         }
-        return static_cast<VulkanBackend *>(found->second.backendInstance.get())->infoStrings(outInfo);
+        return static_cast<VulkanBackend *>(record->backendInstance.get())->infoStrings(outInfo);
 #else
         (void)renderer;
         (void)outInfo;
@@ -1777,12 +759,12 @@ private:
     bool vulkanNativeHandlesImpl(RendererHandle renderer, VulkanDeviceHandles *outHandles) const
     {
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backend != Backend::Vulkan)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backend != Backend::Vulkan)
         {
             return false;
         }
-        return static_cast<VulkanBackend *>(found->second.backendInstance.get())->nativeHandles(outHandles);
+        return static_cast<VulkanBackend *>(record->backendInstance.get())->nativeHandles(outHandles);
 #else
         (void)renderer;
         (void)outHandles;
@@ -1795,10 +777,10 @@ private:
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
         if (outProfile == nullptr)
             return false;
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backend != Backend::Vulkan)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backend != Backend::Vulkan)
             return false;
-        *outProfile = static_cast<VulkanBackend *>(found->second.backendInstance.get())->deviceProfile();
+        *outProfile = static_cast<VulkanBackend *>(record->backendInstance.get())->deviceProfile();
         return true;
 #else
         (void)renderer;
@@ -1810,13 +792,13 @@ private:
     bool vulkanExportFramePpmImpl(RendererHandle renderer, const char *filePath, RenderError *error)
     {
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backend != Backend::Vulkan)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backend != Backend::Vulkan)
         {
             reportError(error, RenderError::Unsupported);
             return false;
         }
-        return static_cast<VulkanBackend *>(found->second.backendInstance.get())->exportFramePpm(filePath, error);
+        return static_cast<VulkanBackend *>(record->backendInstance.get())->exportFramePpm(filePath, error);
 #else
         (void)renderer;
         (void)filePath;
@@ -1827,12 +809,12 @@ private:
 
     void headlessStatisticsImpl(RendererHandle renderer, HeadlessRenderStatistics *outStatistics) const
     {
-        const auto found = renderers_.find(renderer);
-        if (found == renderers_.end() || found->second.backend != Backend::Headless || outStatistics == nullptr)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backend != Backend::Headless || outStatistics == nullptr)
         {
             return;
         }
-        *outStatistics = static_cast<HeadlessBackend *>(found->second.backendInstance.get())->headlessStatistics();
+        *outStatistics = static_cast<HeadlessBackend *>(record->backendInstance.get())->headlessStatistics();
     }
 
     // Fills each capability struct's function pointers exactly once, at
@@ -1899,7 +881,7 @@ private:
         renderCapability_.endFrame
             = [](void *self, RendererHandle renderer) { static_cast<RenderModule *>(self)->endFrameImpl(renderer); };
         renderCapability_.frameStatistics = [](void *self, RendererHandle renderer, FrameStatistics *outStatistics)
-        { static_cast<const RenderModule *>(self)->frameStatisticsImpl(renderer, outStatistics); };
+        { return static_cast<const RenderModule *>(self)->frameStatisticsImpl(renderer, outStatistics); };
         renderCapability_.waitsForPresentation = [](void *self, RendererHandle renderer)
         { return static_cast<const RenderModule *>(self)->waitsForPresentationImpl(renderer); };
         renderCapability_.drawFur = [](void *self,
@@ -1946,77 +928,21 @@ private:
 
     window::WindowCapability *window_ = nullptr;
 
-    pbr::PbrCapability                        *pbr_            = nullptr;
-    direct_lighting::DirectLightingCapability *directLighting_ = nullptr;
-    lumen_gi::LumenGiCapability               *lumenGi_        = nullptr;
+    // Borrowed lighting providers (all optional; the frame inputs fall back
+    // to the built-in default environment and empty light/probe/field sets).
+    pbr::PbrCapability                        *pbr_             = nullptr;
+    direct_lighting::DirectLightingCapability *directLighting_  = nullptr;
+    lumen_gi::LumenGiCapability               *lumenGi_         = nullptr;
+    lumen_reflection::LumenReflectionCapability *lumenReflection_ = nullptr;
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
     window::VulkanSurfaceCapability *vulkanSurface_ = nullptr;
 #endif
 
-    // Current settings. Keep in mind these are the built-in defaults; the
-    // config file may override them at construct/reload time. Every key a
-    // reader consumes is reset here first so a reload that removes a key
-    // restores the built-in default (see readConfiguration).
-    bool                 autoConfigEnabled_ = false;
-
-    ConfiguredBackend configuredBackend_ = ConfiguredBackend::Auto;
-    DevicePreference  devicePreference_  = DevicePreference::Auto;
-    bool              vsync_             = false;
-    bool              validation_        = false;
-
-    // [renderer] present_mode. Auto keeps the historical vsync-derived choice;
-    // the explicit modes pin the presentation-queue policy so the tail latency
-    // cost of vkQueuePresentKHR is a configuration decision.
-    SwapchainPresentMode presentMode_ = SwapchainPresentMode::Auto;
-
-    std::uint32_t        maxFramesInFlight_                 = 3;
-    std::uint32_t        maxPendingUploads_                = 64;
-    std::uint32_t        maximumTexturesPerRenderer_       = 256;
-    std::uint32_t        maximumMaterialSetsPerRenderer_   = 256;
-    std::size_t          pipelineCacheMaximumBytes_        = 64u * 1024u * 1024u;
-    std::uint32_t        memoryBudgetUpdateIntervalFrames_ = 120;
-    std::array<float, 4> configuredClearColor_              = {0.0f, 0.0f, 0.0f, 1.0f};
-    std::size_t          headlessTransformCacheBudgetBytes_ = 256u * 1024u * 1024u;
-    bool                 frustumCulling_                    = true;
-    bool                 backFaceCulling_                   = true;
-    bool                 giIndirectLighting_                = true; // [renderer] gi_indirect_lighting
-    lumen_reflection::LumenReflectionCapability *lumenReflection_ = nullptr; // borrowed from lumen_reflection
-    bool                 reflectionIndirectSpecular_        = true; // [renderer] reflection_indirect_specular
-    bool                 lodEnabled_                        = true;
-    bool                 furEnabled_                        = true;
-    std::uint32_t        furMaximumLayers_                  = 16;
-    bool                 gpuTimestampsEnabled_              = true;
-    bool                 drawSortEnabled_                   = false;
-    std::uint32_t        drawSortMinimumCommands_           = 2;
-    bool                 instanceBatchingEnabled_           = false;
-    std::uint32_t        instanceBatchMinimumCount_         = 4;
-    std::uint32_t        instanceStreamMegabytes_           = 4;
-    bool                 textureMipmapsEnabled_             = false;
-    float                anisotropyLevel_                   = 1.0f;
-    std::uint32_t        msaaSamples_                       = 4u;
-    bool                 srgbOutput_                        = false;
-    // [renderer] srgb_output: consumed by the Vulkan surface pick and the
-    // SRGB_OUTPUT specialization; the headless target always writes UNORM
-    // with its fixed encode (see backends.md).
-
-
-    // Headless rasterizer tuning, held as members so readConfiguration (with
-    // or without auto_config) owns every derived value.
-    bool           headlessTileParallel_       = false;
-    bool           batchedTileRasterizationEnabled_ = true;
-    std::uint32_t  parallelTriangleThreshold_  = 4096u;
-    std::size_t    pixelsPerLockGroup_         = 16u;
-    std::size_t    lodMinTriangles_            = 4096u;
-    std::uint32_t  bandSplitTriangleThreshold_ = 4096u;
-    float          bandSplitMinimumScreenFraction_ = 0.125f;
-    std::uint32_t  parallelTransformVertexThreshold_ = 8192u;
-    std::uint32_t  tilePixels_                 = 64u;
-    std::size_t    maxBatchTileRecords_        = 512u * 1024u;
-    std::array<float, 4>        lodThresholds_ = {0.02f, 0.05f, 0.1f, 0.2f};
-    std::array<std::uint32_t, 3> lodStrides_   = {4u, 16u, 64u};
-
-    RenderDrawSortMode drawSortMode_ = RenderDrawSortMode::MeshThenMaterial;
+    // Current settings; read at construct and on every renderer.* reload
+    // (see renderer_settings.cpp). Draw-path values apply on the next frame;
+    // backend/device values apply to renderers created afterwards.
+    RendererSettings settings_{};
 
     // Mesh/texture ids are global across renderers and never reused.
     std::unordered_map<RendererHandle, RendererRecord> renderers_;

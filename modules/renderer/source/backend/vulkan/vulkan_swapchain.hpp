@@ -21,7 +21,7 @@ namespace renderer
 {
 
 // SwapchainPresentMode (the presentation-queue policy) is declared in
-// render_shared.hpp alongside DevicePreference: [renderer] present_mode is
+// render_shared.hpp alongside DevicePreference (backend-neutral enums): [renderer] present_mode is
 // parsed by the module core even when this backend is compiled out.
 
 // One swapchain per renderer. pickFormats() must be called before

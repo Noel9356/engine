@@ -3,7 +3,7 @@
 // Pipeline per draw: prepareRasterization (culling, transform cache, texture
 // resolution) then rasterizeTriangles (Sutherland-Hodgman-style near clip,
 // scanline rasterization with perspective-correct interpolation, PBR shading
-// via render_shared.hpp, tile-locked depth updates when parallel). Frames are
+// via pbr_shading.hpp, tile-locked depth updates when parallel). Frames are
 // blitted into the window module's locked surface pixels.
 
 #include "headless_backend.hpp"
