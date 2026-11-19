@@ -9,9 +9,11 @@
 // compliance-scaled corrections (accumulating a per-segment tension readout),
 // over-stretched segments break permanently when the description enables it,
 // attached nodes follow rigid bodies or pin positions, and free nodes resolve
-// against the rigid world's bodies and planes through the collideSphere query.
-// Stepping happens in whole fixed steps with internal substeps (the "small
-// steps" XPBD schedule), so the simulation is independent of frame rate.
+// against the rigid world's bodies and planes through one batched
+// sphere-overlap query per substep. Stepping happens in whole fixed steps
+// with internal substeps (the "small steps" XPBD schedule), so the simulation
+// is independent of frame rate; contact friction retains the documented share
+// of tangential velocity per second of contact.
 
 #include "records.hpp"
 #include <engine/kernel/module_api.hpp>
@@ -22,6 +24,7 @@
 #include <engine/util/module_error.hpp>
 #include <engine/util/simulation_lod.hpp>
 #include <engine/util/step_accumulator.hpp>
+#include <engine/util/xpbd_particles.hpp>
 #include <engine/physics_rope/capabilities.hpp>
 
 #include <algorithm>
@@ -228,7 +231,6 @@ private:
 
     void solveConstraints(RopeRecord &rope, double substepDelta)
     {
-        const double inverseDeltaTimeSquared = 1.0 / (substepDelta * substepDelta);
         if (rope.breakStrain > 0.0)
         {
             checkSegmentStrain(rope);
@@ -240,78 +242,47 @@ private:
             {
                 continue; // a broken segment no longer pulls its nodes together
             }
-            solveDistanceConstraint(rope,
+            // The shared XPBD solve keeps the lambda math identical to the
+            // cloth module; the returned lambda lands in the segment's
+            // tension accumulator (bend rows pass a null accumulator).
+            const double lambda = engine::util::solveXpbdDistance(rope.positions.data(),
                 constraint.nodeA,
                 constraint.nodeB,
+                rope.inverseMasses[constraint.nodeA],
+                rope.inverseMasses[constraint.nodeB],
                 constraint.restLength,
                 constraint.compliance,
-                inverseDeltaTimeSquared,
-                &rope.tensionAccumulator[index]);
+                substepDelta);
+            rope.tensionAccumulator[index] += std::abs(lambda);
         }
         for (const RopeRecord::BendConstraint &constraint : rope.bendConstraints)
         {
-            // A bend row spans the two stretch segments between its node
-            // pair; either one breaking releases the row, since holding the
+            // A bend row spans two stretch segments (its record names them);
+            // either one breaking releases the row, since holding the
             // two-apart distance across a break would drag the separated
             // pieces back together.
-            if (rope.brokenSegments[constraint.nodeA] != 0u || rope.brokenSegments[constraint.nodeA + 1] != 0u)
+            if (rope.brokenSegments[constraint.segmentA] != 0u || rope.brokenSegments[constraint.segmentB] != 0u)
             {
                 continue;
             }
-            solveDistanceConstraint(rope,
+            engine::util::solveXpbdDistance(rope.positions.data(),
                 constraint.nodeA,
                 constraint.nodeB,
+                rope.inverseMasses[constraint.nodeA],
+                rope.inverseMasses[constraint.nodeB],
                 constraint.restLength,
                 constraint.compliance,
-                inverseDeltaTimeSquared,
-                nullptr);
+                substepDelta);
         }
-    }
-
-    void solveDistanceConstraint(RopeRecord &rope, std::uint32_t nodeA, std::uint32_t nodeB, double restLength,
-        double compliance, double inverseDeltaTimeSquared, double *lambdaAccumulator)
-    {
-        const std::size_t offsetA = nodeOffset(nodeA);
-        const std::size_t offsetB = nodeOffset(nodeB);
-        const double      inverseMassA = rope.inverseMasses[nodeA];
-        const double      inverseMassB = rope.inverseMasses[nodeB];
-        const double      weightSum    = inverseMassA + inverseMassB;
-        if (weightSum <= 0.0)
-        {
-            return;
-        }
-        const double deltaX = rope.positions[offsetB] - rope.positions[offsetA];
-        const double deltaY = rope.positions[offsetB + 1] - rope.positions[offsetA + 1];
-        const double deltaZ = rope.positions[offsetB + 2] - rope.positions[offsetA + 2];
-        const double length = std::sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
-        if (length <= 1.0e-12)
-        {
-            return;
-        }
-        const double complianceScaled = compliance * inverseDeltaTimeSquared;
-        const double lambda           = (-length + restLength) / (weightSum + complianceScaled);
-        if (lambdaAccumulator != nullptr)
-        {
-            // Tension bookkeeping: the stretch row's |lambda| lands in its
-            // owning segment's accumulator (bend rows pass nullptr).
-            *lambdaAccumulator += std::abs(lambda);
-        }
-        const double scaleX = deltaX / length * lambda;
-        const double scaleY = deltaY / length * lambda;
-        const double scaleZ = deltaZ / length * lambda;
-        rope.positions[offsetA] -= inverseMassA * scaleX;
-        rope.positions[offsetA + 1] -= inverseMassA * scaleY;
-        rope.positions[offsetA + 2] -= inverseMassA * scaleZ;
-        rope.positions[offsetB] += inverseMassB * scaleX;
-        rope.positions[offsetB + 1] += inverseMassB * scaleY;
-        rope.positions[offsetB + 2] += inverseMassB * scaleZ;
     }
 
     // Resolves every free node against the rigid world in one batched
-    // sphere query per substep instead of one capability call per node.
+    // sphere query per substep (the shared engine::util batched
+    // projection). The caller clears the per-node contact scratch; the
+    // helper writes flags and normals for the hits and pushes the node
+    // positions out of the obstacles.
     void resolveCollisions(RopeRecord &rope)
     {
-        rope.lastContactCount = 0;
         if (rigid_ == nullptr || !rope.collideWithWorld)
         {
             return;
@@ -321,57 +292,30 @@ private:
         {
             rope.contactFlags[node] = 0u;
         }
-        collisionSlotIndices_.clear();
-        collisionQueries_.clear();
-        for (std::size_t node = 0; node < nodeCount; ++node)
-        {
-            if (rope.attachments[node] != NodeAttachment::Free)
-            {
-                continue;
-            }
-            engine::physics_rigid::SphereOverlapQuery query;
-            const std::size_t offset = node * 3;
-            query.center[0] = rope.positions[offset];
-            query.center[1] = rope.positions[offset + 1];
-            query.center[2] = rope.positions[offset + 2];
-            query.radius    = rope.nodeRadius;
-            collisionSlotIndices_.push_back(node);
-            collisionQueries_.push_back(query);
-        }
-        if (collisionQueries_.empty())
-        {
-            return;
-        }
-        collisionResults_.resize(collisionQueries_.size());
-        rigid_->collideSpheres(rigid_->self, rope.world, collisionQueries_.data(),
-            static_cast<std::uint32_t>(collisionQueries_.size()), collisionResults_.data());
-        for (std::size_t entry = 0; entry < collisionSlotIndices_.size(); ++entry)
-        {
-            const std::size_t node = collisionSlotIndices_[entry];
-            const engine::physics_rigid::SphereOverlapResult &result = collisionResults_[entry];
-            if (!result.hit || result.depth <= 0.0)
-            {
-                continue;
-            }
-            const std::size_t offset = node * 3;
-            // Contacts land in the node-keyed scratch the velocity pass reads.
-            rope.lastContactCount += 1;
-            rope.contactFlags[node] = 1u;
-            rope.contactNormals[offset]     = result.normal[0];
-            rope.contactNormals[offset + 1] = result.normal[1];
-            rope.contactNormals[offset + 2] = result.normal[2];
-            // Project the node out of the obstacle along the push-out
-            // direction; velocity damping happens in the final velocity pass.
-            rope.positions[offset] += result.normal[0] * result.depth;
-            rope.positions[offset + 1] += result.normal[1] * result.depth;
-            rope.positions[offset + 2] += result.normal[2] * result.depth;
-        }
+        engine::util::projectParticleSphereOverlaps(rigid_,
+            rope.world,
+            rope.positions.data(),
+            nodeCount,
+            rope.nodeRadius,
+            [&rope](std::size_t node) { return rope.attachments[node] != NodeAttachment::Free; },
+            collisionQueries_,
+            collisionSlotIndices_,
+            collisionResults_,
+            rope.contactNormals.data(),
+            rope.contactFlags.data());
     }
 
     void finalizeSubstepVelocities(RopeRecord &rope, double substepDelta)
     {
         const std::size_t nodeCount    = rope.positions.size() / 3;
         const double      inverseDeltaTime = 1.0 / substepDelta;
+        // Friction retention per contact substep: the capability documents
+        // the tangential velocity kept per SECOND of contact, so the
+        // per-substep multiplier is friction^(delta) - the same wall-clock
+        // contact time removes the same tangential speed at any step rate
+        // (a raw per-substep multiplier would not; the cloth module applies
+        // the identical conversion).
+        const double frictionRetention = rope.friction > 0.0 ? std::pow(rope.friction, substepDelta) : 0.0;
         for (std::size_t node = 0; node < nodeCount; ++node)
         {
             const std::size_t offset = node * 3;
@@ -379,38 +323,17 @@ private:
             {
                 continue;
             }
-            double velocityX = (rope.positions[offset] - rope.previousPositions[offset]) * inverseDeltaTime;
-            double velocityY = (rope.positions[offset + 1] - rope.previousPositions[offset + 1]) * inverseDeltaTime;
-            double velocityZ = (rope.positions[offset + 2] - rope.previousPositions[offset + 2]) * inverseDeltaTime;
-            if (rope.contactFlags[node] != 0u)
-            {
-                // Split into normal and tangential parts; the normal part is
-                // removed and the tangential part scales by the friction
-                // factor (the fraction of sliding velocity kept per substep).
-                const double normalX        = rope.contactNormals[offset];
-                const double normalY        = rope.contactNormals[offset + 1];
-                const double normalZ        = rope.contactNormals[offset + 2];
-                const double normalVelocity = normalX * velocityX + normalY * velocityY + normalZ * velocityZ;
-                velocityX -= normalX * normalVelocity;
-                velocityY -= normalY * normalVelocity;
-                velocityZ -= normalZ * normalVelocity;
-                velocityX *= rope.friction;
-                velocityY *= rope.friction;
-                velocityZ *= rope.friction;
-            }
-            // Clamp the derived velocity so solver noise cannot escalate
-            // into a diverging state (the value is module configuration).
-            const double speedSquared = velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ;
-            if (speedSquared > settings_.maximumVelocity * settings_.maximumVelocity)
-            {
-                const double scale = settings_.maximumVelocity / std::sqrt(speedSquared);
-                velocityX *= scale;
-                velocityY *= scale;
-                velocityZ *= scale;
-            }
-            rope.velocities[offset]     = velocityX;
-            rope.velocities[offset + 1] = velocityY;
-            rope.velocities[offset + 2] = velocityZ;
+            // The shared finalize re-derives the velocity from the position
+            // delta, removes the approaching velocity along the contact
+            // normal, scales the tangential remainder by the retention, and
+            // clamps to the module's configured maximum.
+            engine::util::finalizeParticleVelocity(&rope.velocities[offset],
+                &rope.positions[offset],
+                &rope.previousPositions[offset],
+                inverseDeltaTime,
+                rope.contactFlags[node] != 0u ? &rope.contactNormals[offset] : nullptr,
+                frictionRetention,
+                settings_.maximumVelocity);
         }
     }
 
@@ -490,7 +413,12 @@ private:
         engine::physics_rigid::WorldHandle world, const RopeDescription *description, RopeError *error)
     {
         setError(error, RopeError::None);
-        if (rigid_ == nullptr || description == nullptr)
+        if (rigid_ == nullptr)
+        {
+            setError(error, RopeError::InvalidHandle);
+            return invalidRope;
+        }
+        if (description == nullptr)
         {
             setError(error, RopeError::InvalidDescription);
             return invalidRope;
@@ -500,8 +428,11 @@ private:
             setError(error, RopeError::CapacityExceeded);
             return invalidRope;
         }
-        if (description->segments < 1 || description->segments + 1 > settings_.maximumNodesPerRope
-            || totalNodes_ + description->segments + 1 > settings_.maximumNodes)
+        // Node counts compute in 64-bit before any comparison, so a huge
+        // segment count cannot wrap past the per-rope or module budgets.
+        const std::size_t nodeCount = static_cast<std::size_t>(description->segments) + 1u;
+        if (description->segments < 1 || nodeCount > settings_.maximumNodesPerRope
+            || totalNodes_ + nodeCount > settings_.maximumNodes)
         {
             setError(error, RopeError::CapacityExceeded);
             return invalidRope;
@@ -560,14 +491,15 @@ private:
         rope.friction         = description->friction;
         rope.collideWithWorld = description->collideWithWorld;
         rope.breakStrain      = description->breakStrain;
+        // Capturing the gravity doubles as the world-handle validation: a
+        // world the rigid module does not know is rejected here instead of
+        // silently falling back to the default gravity.
         if (!rigid_->copyWorldGravity(rigid_->self, world, rope.gravity))
         {
-            rope.gravity[0] = 0.0;
-            rope.gravity[1] = -9.81;
-            rope.gravity[2] = 0.0;
+            setError(error, RopeError::InvalidHandle);
+            return invalidRope;
         }
 
-        const std::size_t nodeCount = static_cast<std::size_t>(description->segments) + 1;
         rope.positions.resize(nodeCount * 3);
         rope.velocities.assign(nodeCount * 3, 0.0);
         rope.previousPositions.resize(nodeCount * 3);
@@ -606,6 +538,8 @@ private:
                 RopeRecord::BendConstraint constraint;
                 constraint.nodeA      = segment;
                 constraint.nodeB      = segment + 2;
+                constraint.segmentA   = segment;
+                constraint.segmentB   = segment + 1;
                 constraint.restLength = segmentLength * 2.0;
                 constraint.compliance = description->bendingCompliance;
                 rope.bendConstraints.push_back(constraint);
@@ -796,16 +730,22 @@ private:
             return false;
         }
         const std::size_t offset = nodeOffset(nodeIndex);
-        if (pinned && rope->attachments[nodeIndex] == NodeAttachment::Free)
+        if (pinned)
         {
-            rope->attachments[nodeIndex]          = NodeAttachment::Pinned;
-            rope->inverseMasses[nodeIndex]        = 0.0;
-            for (std::uint32_t axis = 0; axis < 3; ++axis)
+            if (rope->attachments[nodeIndex] == NodeAttachment::Free)
             {
-                rope->pinPositions[offset + axis] = rope->positions[offset + axis];
+                rope->pinPositions[offset]     = rope->positions[offset];
+                rope->pinPositions[offset + 1] = rope->positions[offset + 1];
+                rope->pinPositions[offset + 2] = rope->positions[offset + 2];
             }
+            // Pinning supersedes any attachment (a body-attached node
+            // releases its body and holds its current world position),
+            // matching pinNodeToPosition.
+            rope->attachments[nodeIndex]    = NodeAttachment::Pinned;
+            rope->inverseMasses[nodeIndex]  = 0.0;
+            rope->attachedBodies[nodeIndex] = engine::physics_rigid::invalidBody;
         }
-        else if (!pinned && rope->attachments[nodeIndex] == NodeAttachment::Pinned)
+        else if (rope->attachments[nodeIndex] == NodeAttachment::Pinned)
         {
             rope->attachments[nodeIndex]   = NodeAttachment::Free;
             rope->inverseMasses[nodeIndex] = rope->nodeMass > 0.0 ? 1.0 / rope->nodeMass : 0.0;
@@ -1025,8 +965,7 @@ private:
     RopeHandle                                  nextRopeHandle_ = 1;
     std::size_t                                 totalNodes_     = 0;
 
-    // Per-substep collision scratch shared by the stepping path.
-    // Reused scratch for the batched sphere-overlap queries.
+    // Batched sphere-overlap scratch reused by the stepping path.
     std::vector<std::size_t>                               collisionSlotIndices_;
     std::vector<engine::physics_rigid::SphereOverlapQuery>  collisionQueries_;
     std::vector<engine::physics_rigid::SphereOverlapResult> collisionResults_;

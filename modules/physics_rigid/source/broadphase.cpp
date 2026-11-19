@@ -8,6 +8,14 @@
 // array of (cell key, body index) entries sorted by key, plus the bucket
 // offsets the binary searches need. No per-step allocations happen once the
 // scratch capacities have warmed up.
+//
+// Cell coordinates span +/- 2^30 cells per axis; beyond that range the
+// coordinates clamp to the boundary cells, so far-flung bodies still meet
+// every candidate they overlap, only through coarser buckets. At the
+// default 2-meter cell the representable extent is roughly +/- 1 billion
+// meters per axis. The three coordinate lanes mix into one 64-bit key;
+// distinct cells sharing a key merely merge their candidate buckets, which
+// the AABB overlap test rejects deterministically.
 
 #include "broadphase.hpp"
 
@@ -20,30 +28,28 @@ namespace engine::physics_rigid
 namespace
 {
 
-constexpr std::uint64_t kCellCoordinateBits = 21; // cells per axis before wrap
-constexpr std::uint64_t kCellCoordinateMask = (1ull << kCellCoordinateBits) - 1ull;
+constexpr std::uint64_t kCellCoordinateBits = 31; // representable coordinate lanes per axis
+constexpr std::int64_t  kCellCoordinateMinimum = -(1ll << (kCellCoordinateBits - 1));
+constexpr std::int64_t  kCellCoordinateMaximum = (1ll << (kCellCoordinateBits - 1)) - 1ll;
 
 inline std::int64_t worldToCell(double value, double inverseCellSize)
 {
-    // Floor to the cell grid; the coordinate range covers +/- 2^20 cells,
-    // far beyond any world this module's budgets allow.
+    // Floor to the cell grid; coordinates beyond the representable range
+    // clamp to the boundary cells so insert and query agree everywhere.
     const double cell = std::floor(value * inverseCellSize);
-    return static_cast<std::int64_t>(std::clamp(cell, -1048576.0, 1048575.0));
+    return static_cast<std::int64_t>(std::clamp(cell,
+        static_cast<double>(kCellCoordinateMinimum), static_cast<double>(kCellCoordinateMaximum)));
 }
 
 inline std::uint64_t makeCellKey(std::int64_t x, std::int64_t y, std::int64_t z)
 {
-    const std::uint64_t ux = static_cast<std::uint64_t>(x) & kCellCoordinateMask;
-    const std::uint64_t uy = static_cast<std::uint64_t>(y) & kCellCoordinateMask;
-    const std::uint64_t uz = static_cast<std::uint64_t>(z) & kCellCoordinateMask;
-    return (ux << (2 * kCellCoordinateBits)) | (uy << kCellCoordinateBits) | uz;
-}
-
-inline std::uint64_t makeBodyPairKey(std::size_t indexA, std::size_t indexB)
-{
-    const std::size_t smaller = indexA < indexB ? indexA : indexB;
-    const std::size_t larger  = indexA < indexB ? indexB : indexA;
-    return (static_cast<std::uint64_t>(smaller) << 32) | static_cast<std::uint64_t>(larger);
+    // 64-bit mix of the three coordinate lanes (the odd-multiplier mixes
+    // the spatially adjacent coordinates across the whole word, so nearby
+    // cells rarely share a key).
+    std::uint64_t key = static_cast<std::uint64_t>(x) * 0x9E3779B185EBCA87ull;
+    key ^= static_cast<std::uint64_t>(y) * 0xC2B2AE3D27D4EB4Full + 0x165667B19E3779F9ull;
+    key ^= static_cast<std::uint64_t>(z) * 0xBF58476D1CE4E5B9ull + 0x94D049BB133111EBull;
+    return key;
 }
 
 bool collisionFilterAllows(const Body &a, const Body &b)

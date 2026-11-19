@@ -442,12 +442,13 @@ private:
 
     // Resolves every particle against the rigid world in one batched sphere
     // query per substep instead of one capability call per particle.
-    void resolveCollisions(FluidRecord &fluid)
+    // Returns the substep's hit count; the step accumulates the counts so
+    // the statistic reports the whole step.
+    std::uint32_t resolveCollisions(FluidRecord &fluid)
     {
-        fluid.lastContactCount = 0;
         if (rigid_ == nullptr)
         {
-            return;
+            return 0u;
         }
         const std::size_t particleCount = fluid.positions.size() / 3;
         collisionQueries_.clear();
@@ -464,11 +465,12 @@ private:
         }
         if (collisionQueries_.empty())
         {
-            return;
+            return 0u;
         }
         collisionResults_.resize(collisionQueries_.size());
         rigid_->collideSpheres(rigid_->self, fluid.world, collisionQueries_.data(),
             static_cast<std::uint32_t>(collisionQueries_.size()), collisionResults_.data());
+        std::uint32_t hits = 0u;
         for (std::size_t particle = 0; particle < particleCount; ++particle)
         {
             const engine::physics_rigid::SphereOverlapResult &result = collisionResults_[particle];
@@ -477,7 +479,7 @@ private:
                 continue;
             }
             const std::size_t offset = particle * 3;
-            fluid.lastContactCount += 1;
+            ++hits;
             // Project the particle out along the push-out direction and
             // remove the approaching velocity part (inelastic contact).
             fluid.positions[offset] += result.normal[0] * result.depth;
@@ -493,6 +495,7 @@ private:
                 fluid.velocities[offset + 2] -= result.normal[2] * approach;
             }
         }
+        return hits;
     }
 
     bool stepFluid(FluidRecord &fluid, double fixedDeltaSeconds, std::uint32_t substeps)
@@ -504,6 +507,9 @@ private:
         }
         const double        substepDelta  = fixedDeltaSeconds / static_cast<double>(substeps);
         const std::size_t   particleCount = fluid.positions.size() / 3;
+        // The contact statistic covers the whole step: every substep's hit
+        // count accumulates into the one value the statistics publish.
+        fluid.lastContactCount = 0;
         // Pre-step copies for the rollback path: a diverged step restores
         // this state and reports failure, so the caller sees an untouched
         // fluid.
@@ -519,7 +525,7 @@ private:
             accumulateForces(fluid);
             integrateSubstep(fluid, substepDelta);
             resolveBounds(fluid);
-            resolveCollisions(fluid);
+            fluid.lastContactCount += resolveCollisions(fluid);
         }
         double densitySum = 0.0;
         for (double density : fluid.densities)
@@ -563,7 +569,12 @@ private:
         engine::physics_rigid::WorldHandle world, const FluidDescription *description, FluidError *error)
     {
         setError(error, FluidError::None);
-        if (rigid_ == nullptr || description == nullptr)
+        if (rigid_ == nullptr)
+        {
+            setError(error, FluidError::InvalidHandle);
+            return invalidFluid;
+        }
+        if (description == nullptr)
         {
             setError(error, FluidError::InvalidDescription);
             return invalidFluid;
@@ -602,11 +613,13 @@ private:
             = nextFluidHandle_ == std::numeric_limits<FluidHandle>::max() ? invalidFluid : nextFluidHandle_ + 1;
         fluid.world       = world;
         fluid.description = *description;
+        // Capturing the gravity doubles as the world-handle validation: a
+        // world the rigid module does not know is rejected here instead of
+        // silently falling back to the default gravity.
         if (!rigid_->copyWorldGravity(rigid_->self, world, fluid.gravity))
         {
-            fluid.gravity[0] = 0.0;
-            fluid.gravity[1] = -9.81;
-            fluid.gravity[2] = 0.0;
+            setError(error, FluidError::InvalidHandle);
+            return invalidFluid;
         }
         // Simulation LOD: the stagger phase derives from the registration
         // ordinal, so fluids sharing an interval spread their work across
@@ -652,18 +665,29 @@ private:
     {
         setError(error, FluidError::None);
         FluidRecord *fluid = findFluid(handle);
-        if (fluid == nullptr || (positions == nullptr && count > 0))
+        if (fluid == nullptr)
         {
             setError(error, FluidError::InvalidHandle);
             return 0u;
         }
-        const std::uint32_t current = static_cast<std::uint32_t>(fluid->positions.size() / 3);
-        if (current + count > settings_.maximumParticlesPerFluid
-            || totalParticles_ + count > settings_.maximumParticles)
+        if (positions == nullptr && count > 0)
+        {
+            setError(error, FluidError::InvalidDescription);
+            return 0u;
+        }
+        // Budget checks compute in 64-bit so a huge caller-supplied count
+        // cannot wrap past them.
+        const std::size_t current = fluid->positions.size() / 3;
+        if (current + static_cast<std::size_t>(count) > settings_.maximumParticlesPerFluid
+            || totalParticles_ + static_cast<std::size_t>(count) > settings_.maximumParticles)
         {
             setError(error, FluidError::CapacityExceeded);
             return 0u;
         }
+        // The batch is atomic: every particle validates before anything
+        // appends, so a rejected call can never leave the position, velocity,
+        // and state arrays at inconsistent sizes (which the stepping passes
+        // index into).
         for (std::uint32_t particle = 0; particle < count; ++particle)
         {
             const std::size_t source = static_cast<std::size_t>(particle) * 3;
@@ -674,8 +698,12 @@ private:
                         || !std::isfinite(velocities[source + 2]))))
             {
                 setError(error, FluidError::InvalidDescription);
-                return particle;
+                return 0u;
             }
+        }
+        for (std::uint32_t particle = 0; particle < count; ++particle)
+        {
+            const std::size_t source = static_cast<std::size_t>(particle) * 3;
             fluid->positions.push_back(positions[source]);
             fluid->positions.push_back(positions[source + 1]);
             fluid->positions.push_back(positions[source + 2]);
@@ -697,7 +725,7 @@ private:
         fluid->pressures.assign(particleCount, 0.0);
         fluid->accelerations.assign(particleCount * 3, 0.0);
         totalParticles_ += count;
-        return current;
+        return static_cast<std::uint32_t>(current);
     }
 
     bool copyParticlePositionsImpl(
@@ -846,9 +874,6 @@ private:
     std::unordered_map<FluidHandle, std::size_t> fluidIndexByHandle_;
     FluidHandle                                  nextFluidHandle_ = 1;
     std::size_t                                  totalParticles_  = 0;
-
-    // Per-substep neighbor scratch.
-    std::vector<std::uint32_t> neighbors_;
 
     // Reused scratch for the batched sphere-overlap queries.
     std::vector<engine::physics_rigid::SphereOverlapQuery>  collisionQueries_;

@@ -21,6 +21,6 @@ config_keys           = [
 ]
 name                  = "physics_foliage"
 provides              = ["physics_foliage"]
-requires              = ["physics_rigid"]
+requires              = []
 optional_capabilities = ["physics_fields"]
 version               = "0.1.0"

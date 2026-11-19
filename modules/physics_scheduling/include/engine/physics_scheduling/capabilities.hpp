@@ -42,7 +42,8 @@ enum class SchedulingError : std::uint32_t
     InvalidHandle,      // unknown schedule handle
     InvalidDescription, // null pointers, non-finite values, inverted thresholds, zero interval
     CapacityExceeded,   // configured schedule or item budget exhausted
-    Unsupported         // request not applicable (e.g. unknown item id)
+    Unsupported         // reserved; entry points without an error out-parameter
+                        // report rejections through their return value
 };
 
 // Fidelity bands, from lowest cost to highest. The meaning per band is the

@@ -63,7 +63,8 @@ struct FurParameters
 // One procedural fur texture request: RGBA8, width*height*4 bytes written
 // into the caller's buffer (tightly packed rows, top-left first, Repeat
 // addressing assumed - the pattern is tileable in both axes). 16..2048
-// pixels per side.
+// pixels per side; a zero edge length selects the module's configured
+// default texture size ([physics_fur] texture_size).
 struct FurTextureRequest
 {
     FurParameters parameters{};
@@ -95,7 +96,8 @@ struct FurCapability
     void *self = nullptr;
 
     // Parameters of a named preset; out-of-range preset ids fall back to
-    // Plush.
+    // the module's configured default preset ([physics_fur]
+    // default_preset, Plush by default).
     FurParameters (*presetParameters)(void *self, FurPreset preset);
 
     // Generates one tiled RGBA8 fur strand texture (rgb = strand albedo

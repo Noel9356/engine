@@ -144,6 +144,11 @@ inline bool isFinite(const Vec3 &a)
     return std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z);
 }
 
+inline bool isFinite(const Quaternion &a)
+{
+    return std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z) && std::isfinite(a.w);
+}
+
 inline Vec3 lerp(const Vec3 &a, const Vec3 &b, double alpha)
 {
     return a + (b - a) * alpha;

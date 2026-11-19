@@ -4,7 +4,7 @@ physics_foliage provides procedural foliage deformation: grass blades, bushes, a
 
 ## Capability
 
-The module provides the `physics_foliage` capability (ABI version constant `physicsFoliageCapabilityAbi = 2`, see `include/engine/physics_foliage/capabilities.hpp`; the simulation-LOD surface — `setFieldImportance` and the `lodSkippedSteps` counter — arrived in ABI 2, and consumers check `abi >= 2` before touching those additions) and declares `physics_rigid` as a required capability, so the kernel constructs the rigid core first and grants the permission from the manifest's `requires` list; `physics_fields` is declared optional and acquired with `tryAcquireCapability` in `construct()`, and a pointer whose `abi` does not equal `physicsFieldsCapabilityAbi = 1` is dropped so the module falls back to its ambient breeze. Field handles are `std::uint32_t` (`FieldHandle`), start at 1, are never reused, and `0` (`invalidField`) means "none". Positions are world-space meters and wind velocities are meters per second; each instance's internal bend state is a horizontal tip displacement in meters (packed `x, z`), and the published `FoliageBend` carries a unit horizontal direction (`bendDirectionX`, `bendDirectionZ`) plus `bendAngleRadians` — consumers compose the instance's model matrix as `translate(position) * rotate(axis, angle)` with `axis` the horizontal axis perpendicular to the bend direction.
+The module provides the `physics_foliage` capability (ABI version constant `physicsFoliageCapabilityAbi = 2`, see `include/engine/physics_foliage/capabilities.hpp`; the simulation-LOD surface — `setFieldImportance` and the `lodSkippedSteps` counter — arrived in ABI 2, and consumers check `abi >= 2` before touching those additions) and declares no required capabilities (the bend springs integrate their own state, so no kernel ordering constraint applies); `physics_fields` is declared optional and acquired with `tryAcquireCapability` in `construct()`, and a pointer whose `abi` does not equal `physicsFieldsCapabilityAbi = 1` is dropped so the module falls back to its ambient breeze. Field handles are `std::uint32_t` (`FieldHandle`), start at 1, are never reused, and `0` (`invalidField`) means "none". Positions are world-space meters and wind velocities are meters per second; each instance's internal bend state is a horizontal tip displacement in meters (packed `x, z`), and the published `FoliageBend` carries a unit horizontal direction (`bendDirectionX`, `bendDirectionZ`) plus `bendAngleRadians` — consumers compose the instance's model matrix as `translate(position) * rotate(axis, angle)` with `axis` the horizontal axis perpendicular to the bend direction.
 
 ### Fixed-step contract
 
@@ -33,7 +33,7 @@ The module provides the `physics_foliage` capability (ABI version constant `phys
 From `module.toml` and the entry table at the bottom of `source/physics_foliage.cpp` (they agree):
 
 - **Provided:** `physics_foliage`.
-- **Required:** `physics_rigid`.
+- **Required:** none.
 - **Optional:** `physics_fields` — acquired with `tryAcquireCapability` in `construct()` and kept only when its `abi` matches `physicsFieldsCapabilityAbi = 1`; when present, fields created with a wind handle sample gusts and spatial turbulence through `sampleWindVelocity`, and when absent every field falls back to the configured ambient breeze (a constant horizontal direction and speed), so a scene without the fields module still gets wind-driven motion.
 - **Declared permissions:** none.
 
@@ -47,7 +47,6 @@ From `module.toml` and the entry table at the bottom of `source/physics_foliage.
 | `include/engine/physics_foliage/capabilities.hpp` | Public capability types: ABI constant, field handles, instance and field descriptions, bend results, statistics, capability struct. |
 | `source/physics_foliage.cpp` | Module class (lifecycle, configuration, wind sampling, bend-spring integration, disturbance application, capability binding) and entry table. |
 | `include/engine/physics_fields/capabilities.hpp` | The optional wind capability's public surface; `sampleWindVelocity` is the one entry point the stepping path calls when a wind handle is bound. |
-| `include/engine/physics_rigid/capabilities.hpp` | The required rigid capability's public surface, included by the public header and declared in the manifest. |
 
 ## How it works
 

@@ -36,7 +36,6 @@ struct FluidRecord
     std::vector<std::uint64_t> hashCellIds;
     std::vector<std::uint32_t> hashCellCounts;
     double hashCellSize = 0.0;
-    double hashOrigin[3] = {0.0, 0.0, 0.0};
 
     // Per-substep neighbor cache shared by the density and force passes:
     // positions do not change between them, so the neighbor lists collect

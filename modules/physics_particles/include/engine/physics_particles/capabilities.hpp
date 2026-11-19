@@ -94,8 +94,9 @@ struct EmitterDescription
     double origin[3]          = {0.0, 8.0, 0.0};
     double halfExtents[3]     = {8.0, 0.5, 8.0};
 
-    // Particles per second; the pool fills to maximumParticles and recycles
-    // the oldest expired slot.
+    // Particles per second; the pool fills to maximumParticles and then
+    // recycles slots FIFO (the oldest slot respawns regardless of whether
+    // its particle is still alive).
     double emitRate = 400.0;
 
     std::uint32_t maximumParticles = 2000;
@@ -201,7 +202,8 @@ struct ParticlesCapability
 
     // One-shot burst: spawns `count` particles from the point with the
     // given speed and isotropic spread (explosion debris, dust kicks,
-    // splash droplets). Bursts reuse expired slots first.
+    // splash droplets). Bursts reuse expired slots first; when the pool is
+    // at capacity, the FIFO cursor slot respawns.
     bool (*burst)(void *self, EmitterHandle emitter, const double position[3], std::uint32_t count, double speed);
 
     // Particle state copies: fills up to capacity ParticleState records in

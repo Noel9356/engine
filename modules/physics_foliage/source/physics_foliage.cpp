@@ -17,8 +17,6 @@
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/physics_fields/capabilities.hpp>
 #include <engine/physics_foliage/capabilities.hpp>
-#include <engine/physics_rigid/capabilities.hpp>
-#include <engine/physics_rigid/math.hpp>
 #include <engine/util/module_error.hpp>
 #include <engine/util/simulation_lod.hpp>
 #include <engine/util/step_accumulator.hpp>
@@ -36,8 +34,6 @@ namespace engine::physics_foliage
 {
 namespace
 {
-
-namespace math = engine::physics_rigid::math;
 
 class FoliageModule final : public ModuleInterface
 {
@@ -119,7 +115,7 @@ private:
             .kind                 = ParticipantKind::EngineModule,
             .version              = "0.1.0",
             .providedCapabilities = {"physics_foliage"},
-            .requiredCapabilities = {"physics_rigid"},
+            .requiredCapabilities = {},
             .optionalCapabilities = {"physics_fields"}};
     }
 
@@ -446,6 +442,11 @@ private:
             return false;
         }
         bool diverged = false;
+        // The wind-sample stride rides a module-level step counter so the
+        // refresh phases advance every step whether LOD is on or off (a
+        // per-field cadence counter would freeze at zero with lod disabled
+        // and hold most cached samples forever).
+        const std::uint64_t stepCounter = stepCounter_++;
         for (FieldRecord &field : fieldRecords_)
         {
             // Simulation LOD: resolve the band, refresh the staggered
@@ -463,7 +464,6 @@ private:
             {
                 continue;
             }
-            const std::uint64_t stepCounter = settings_.lod.enabled ? field.cadence.stepCounter : 0u;
             stepField(field, fixedDeltaSeconds * static_cast<double>(interval), stepCounter);
             for (InstanceState &instance : field.instances)
             {
@@ -576,6 +576,10 @@ private:
     // Registration ordinal for LOD stagger phases.
     std::uint64_t registrationOrdinal_ = 0;
 
+    // Module-level fixed-step counter for the per-instance wind-sample
+    // stride (advances every stepImpl call, LOD or not).
+    std::uint64_t stepCounter_ = 0;
+
     std::vector<FieldRecord>                       fieldRecords_;
     std::unordered_map<FieldHandle, std::size_t>   fieldIndexByHandle_;
     FieldHandle                                    nextFieldHandle_ = 1;
@@ -590,7 +594,6 @@ private:
 extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQueryModuleEntryTable()
 {
     static const char *const    provided[] = {"physics_foliage"};
-    static const char *const    required[] = {"physics_rigid"};
     static const char *const    optional[] = {"physics_fields"};
     static const engine::EngineModuleEntryTable entry{
         .abiVersion           = engine::engineModuleAbiVersion,
@@ -599,8 +602,8 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
         .createModule         = []() -> engine::ModuleInterface         *{ return new engine::physics_foliage::FoliageModule(); },
         .providedCapabilities = provided,
         .providedCapabilityCount = 1,
-        .requiredCapabilities    = required,
-        .requiredCapabilityCount = 1,
+        .requiredCapabilities    = nullptr,
+        .requiredCapabilityCount = 0,
         .optionalCapabilities    = optional,
         .optionalCapabilityCount = 1,
         .declaredPermissions     = nullptr,

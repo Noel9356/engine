@@ -1,7 +1,7 @@
 config_keys           = [
     "physics_water.angular_drag_coefficient",
     "physics_water.buoyancy_scale",
-    "physics_water.linear_drag_coefficient",
+    "physics_water.quadratic_drag_coefficient",
     "physics_water.lod_animation_threshold",
     "physics_water.lod_demotion_margin",
     "physics_water.lod_enabled",

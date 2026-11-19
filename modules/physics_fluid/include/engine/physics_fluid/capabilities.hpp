@@ -111,8 +111,10 @@ struct FluidCapability
     bool (*fluidInfo)(void *self, FluidHandle fluid, FluidInfo *outInfo);
 
     // Appends particles (positions and optional velocities packed x,y,z per
-    // particle; a null velocities pointer starts them at rest). Returns the
-    // first appended particle index.
+    // particle; a null velocities pointer starts them at rest). The batch is
+    // atomic: any invalid or over-budget entry rejects the whole batch with
+    // the error code set and appends nothing. On success returns the first
+    // appended particle index.
     std::uint32_t (*addParticles)(void *self, FluidHandle fluid, const double *positions, const double *velocities,
         std::uint32_t count, FluidError *error);
 

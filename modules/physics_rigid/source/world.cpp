@@ -184,7 +184,7 @@ bool validateBodyDescription(const World &world, const SimulationSettings &setti
     {
         return setFailure(PhysicsError::Unsupported);
     }
-    if (!math::isFinite(description.transform.position))
+    if (!math::isFinite(description.transform.position) || !math::isFinite(description.transform.rotation))
     {
         return setFailure(PhysicsError::InvalidDescription);
     }

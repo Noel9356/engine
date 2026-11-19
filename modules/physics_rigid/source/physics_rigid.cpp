@@ -480,7 +480,7 @@ private:
             return false;
         }
         Body &body = world->bodies[iterator->second];
-        if (!math::isFinite(transform->position))
+        if (!math::isFinite(transform->position) || !math::isFinite(transform->rotation))
         {
             return false;
         }
@@ -680,15 +680,21 @@ private:
         {
             return false;
         }
-        wakeRecord(body);
-        body.forceAccumulator += candidate;
+        // Validate the optional anchor before touching any state, so a
+        // rejected call leaves the accumulators exactly as they were.
+        math::Vec3 point;
         if (worldPoint != nullptr)
         {
-            const math::Vec3 point{worldPoint[0], worldPoint[1], worldPoint[2]};
+            point = math::Vec3{worldPoint[0], worldPoint[1], worldPoint[2]};
             if (!math::isFinite(point))
             {
                 return false;
             }
+        }
+        wakeRecord(body);
+        body.forceAccumulator += candidate;
+        if (worldPoint != nullptr)
+        {
             body.torqueAccumulator += math::cross(point - body.transform.position, candidate);
         }
         return true;
@@ -736,15 +742,21 @@ private:
         {
             return false;
         }
-        wakeRecord(body);
-        body.linearVelocity += candidate * body.inverseMass;
+        // Validate the optional anchor before touching any state, so a
+        // rejected call leaves the velocities exactly as they were.
+        math::Vec3 point;
         if (worldPoint != nullptr)
         {
-            const math::Vec3 point{worldPoint[0], worldPoint[1], worldPoint[2]};
+            point = math::Vec3{worldPoint[0], worldPoint[1], worldPoint[2]};
             if (!math::isFinite(point))
             {
                 return false;
             }
+        }
+        wakeRecord(body);
+        body.linearVelocity += candidate * body.inverseMass;
+        if (worldPoint != nullptr)
+        {
             const math::Mat3 inverseInertia = computeWorldInverseInertia(body);
             body.angularVelocity
                 += math::multiplyMatrixVector(inverseInertia, math::cross(point - body.transform.position, candidate));
@@ -946,7 +958,10 @@ private:
             return false;
         }
         Joint &joint = world->joints[iterator->second];
-        if (enabled && (!std::isfinite(targetVelocity) || !std::isfinite(maximumTorque) || maximumTorque < 0.0))
+        // Motor parameters stay validated whichever way the switch goes, so
+        // a disabled motor never stores values a later copyJointDescription
+        // would echo as garbage.
+        if (!std::isfinite(targetVelocity) || !std::isfinite(maximumTorque) || maximumTorque < 0.0)
         {
             return false;
         }
@@ -984,9 +999,10 @@ private:
         {
             return false;
         }
-        if (enabled
-            && (!std::isfinite(frequencyHz) || frequencyHz < 0.0 || !std::isfinite(dampingRatio)
-                || dampingRatio < 0.0))
+        // Spring parameters stay validated whichever way the switch goes,
+        // so a disabled spring never stores values a later
+        // copyJointDescription would echo as garbage.
+        if (!std::isfinite(frequencyHz) || frequencyHz < 0.0 || !std::isfinite(dampingRatio) || dampingRatio < 0.0)
         {
             return false;
         }
@@ -1270,7 +1286,7 @@ private:
             return false;
         }
         Trigger *trigger = findTrigger(*world, handle);
-        if (trigger == nullptr || !math::isFinite(transform->position))
+        if (trigger == nullptr || !math::isFinite(transform->position) || !math::isFinite(transform->rotation))
         {
             return false;
         }

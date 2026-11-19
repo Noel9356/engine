@@ -4,8 +4,8 @@ All keys live in the `[physics_fur]` section of the module configuration (`runti
 
 | key | default | meaning |
 | --- | ------- | ------- |
-| `default_preset` | `"plush"` | Preset the demo/UI defaults to: `plush`, `shaggy` or `velvety`. Unknown names warn and use `plush`. |
-| `texture_size` | `256` | Default strand-texture edge length in pixels (16..2048) when a consumer does not pin one. |
+| `default_preset` | `"plush"` | Preset the capability falls back to for out-of-range preset ids and the demo/UI defaults to: `plush`, `shaggy` or `velvety`. Unknown names warn and use `plush`. |
+| `texture_size` | `256` | Strand-texture edge length in pixels (16..2048) a `generateFurTexture` request with zero-size edges selects; explicit sizes override it. |
 | `max_layers` | `16` | Hard shell-layer ceiling applied by the LOD evaluator (1..64). The renderer additionally clamps with `[renderer] fur_max_layers`, so this key bounds the policy while that one bounds the worst case. |
 | `lod_layer_counts` | `[14, 10, 6, 3, 1]` | Shell layer budget per LOD band, most detailed first (5 values). |
 | `lod_screen_sizes` | `[0.32, 0.16, 0.08, 0.03]` | Angular-size band edges (worldRadius / distance), descending; band 5 catches everything below the smallest threshold. |

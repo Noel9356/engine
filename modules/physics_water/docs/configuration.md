@@ -8,7 +8,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 | --- | --- | --- | --- | --- |
 | `physics_water.angular_drag_coefficient` | number | [0, 100] | `3.0` | Angular damping scale for submerged bodies: torque = `coefficient x submergedFraction x mass x angularSpeed x 0.01`, opposing the spin. |
 | `physics_water.buoyancy_scale` | number | [0, 100] | `1.0` | Global multiplier on the displaced-volume term of the buoyancy force; `0` disables buoyancy while surface queries keep working. |
-| `physics_water.linear_drag_coefficient` | number | [0, 100] | `1.8` | Quadratic water drag coefficient: force = `0.5 x water_density x coefficient x dragArea x submergedFraction x speed^2` opposite the velocity. |
+| `physics_water.quadratic_drag_coefficient` | number | [0, 100] | `1.8` | Quadratic water drag coefficient: force = `0.5 x water_density x coefficient x dragArea x submergedFraction x speed^2` opposite the velocity. |
 | `physics_water.maximum_oceans` | integer | 1 - 4096 | `16` | Maximum concurrently existing oceans; `createOcean` reports `CapacityExceeded` beyond it. |
 | `physics_water.maximum_registered_bodies` | integer | 1 - 100000 | `4096` | Largest number of bodies one ocean accepts for buoyancy registration; `registerBody` reports `CapacityExceeded` beyond it. |
 | `physics_water.lod_animation_threshold` | number | (0, 1] | `0.1` | Fidelity-ladder boundary between Animation and Cached; scores below it freeze oceans. |
@@ -39,7 +39,7 @@ Out-of-range numeric values, missing values, and non-finite values are ignored a
 
 ## Where the settings show up
 
-- The four force keys (`water_density`, `buoyancy_scale`, `linear_drag_coefficient`, `angular_drag_coefficient`) retune the entire buoyancy pass without touching any ocean description or registration; the default `1000.0` is fresh water in kilograms per cubic meter.
+- The four force keys (`water_density`, `buoyancy_scale`, `quadratic_drag_coefficient`, `angular_drag_coefficient`) retune the entire buoyancy pass without touching any ocean description or registration; the default `1000.0` is fresh water in kilograms per cubic meter.
 - The ripple keys (`ripple_speed`, `ripple_decay`, `ripple_attenuation`, `ripple_wavelength`) parameterize every ring's expansion, decay, radial falloff, and crest spacing, including the retirement threshold `stepRipples` applies; see [overview.md](overview.md) for the ripple model.
 - The budget keys bound the per-ocean slot arrays and registration lists, and the live counts surface in `WaterStatistics` (`oceanCount`, `registeredBodies`, `activeRipples`).
 - The wake keys (`wake_speed_threshold`, `wake_spacing_meters`, `wake_strength_scale`) drive the automatic ripple emission inside `stepRipples`: the speed gate, the travelled distance between rings, and the amplitude per meter per second of speed. Bodies whose `querySubmersion`-style submerged fraction reaches `wake_submerged_fraction` emit nothing; see [overview.md](overview.md) for the full wake rule.

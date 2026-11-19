@@ -46,7 +46,7 @@ The per-update entry points — `updateCharacter`, `updateFootPlanter`, `updateJ
 From `module.toml` and the entry table at the bottom of `source/physics_character.cpp` (they agree):
 
 - **Provided:** `physics_character`.
-- **Required:** `physics_rigid`, `physics_articulated` — both acquired in `construct()` and verified against `physicsRigidCapabilityAbi = 5` and `physicsArticulatedCapabilityAbi = 2`; the creators report failure while either capability is missing.
+- **Required:** `physics_rigid`, `physics_articulated` — both acquired in `construct()` and verified against `physicsRigidCapabilityAbi = 6` and `physicsArticulatedCapabilityAbi = 3`; the creators report failure while either capability is missing.
 - **Optional:** none.
 - **Declared permissions:** none.
 

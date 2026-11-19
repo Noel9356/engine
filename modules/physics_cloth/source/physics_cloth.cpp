@@ -27,6 +27,7 @@
 #include <engine/util/module_error.hpp>
 #include <engine/util/simulation_lod.hpp>
 #include <engine/util/step_accumulator.hpp>
+#include <engine/util/xpbd_particles.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -153,23 +154,34 @@ private:
         return iterator != clothIndexByHandle_.end() ? &cloths_[iterator->second] : nullptr;
     }
 
-    std::size_t particleIndex(const ClothRecord &cloth, std::uint32_t column, std::uint32_t row) const
+    std::size_t particleOffset(const ClothRecord &cloth, std::uint32_t column, std::uint32_t row) const
     {
         return (static_cast<std::size_t>(row) * cloth.columns + column) * 3u;
+    }
+
+    std::uint32_t particleIndexOf(const ClothRecord &cloth, std::uint32_t column, std::uint32_t row) const
+    {
+        return static_cast<std::uint32_t>(static_cast<std::size_t>(row) * cloth.columns + column);
     }
 
     // ---- XPBD stepping -----------------------------------------------------
 
     void integrateSubstep(ClothRecord &cloth, double substepDelta)
     {
-        // The aerodynamic wind acts as a force in the integrator: evaluated
-        // against the pre-integration velocities and merged into them before
-        // the position advance (uniform wind rides the per-particle loop
-        // below as a raw acceleration).
+        // The aerodynamic wind acts as a far-field wind VELOCITY against the
+        // per-face drag-and-lift model (evaluated against the pre-integration
+        // velocities and merged into them before the position advance). The
+        // uniform per-particle acceleration below covers the plain-wind case
+        // only: with the per-face model active the same vector must not also
+        // ride the loop as a raw acceleration, or the surface response
+        // doubles.
         if (cloth.aerodynamicWind)
         {
             applyAerodynamicWind(cloth, substepDelta);
         }
+        const double windAccelerationX = cloth.aerodynamicWind ? 0.0 : cloth.windAcceleration[0];
+        const double windAccelerationY = cloth.aerodynamicWind ? 0.0 : cloth.windAcceleration[1];
+        const double windAccelerationZ = cloth.aerodynamicWind ? 0.0 : cloth.windAcceleration[2];
         const std::size_t particleCount = cloth.positions.size() / 3;
         const double      dampingFactor = 1.0 / (1.0 + substepDelta * cloth.damping);
         for (std::size_t particle = 0; particle < particleCount; ++particle)
@@ -191,9 +203,9 @@ private:
             cloth.previousPositions[offset]     = cloth.positions[offset];
             cloth.previousPositions[offset + 1] = cloth.positions[offset + 1];
             cloth.previousPositions[offset + 2] = cloth.positions[offset + 2];
-            cloth.velocities[offset] += (cloth.gravity[0] + cloth.windAcceleration[0]) * substepDelta;
-            cloth.velocities[offset + 1] += (cloth.gravity[1] + cloth.windAcceleration[1]) * substepDelta;
-            cloth.velocities[offset + 2] += (cloth.gravity[2] + cloth.windAcceleration[2]) * substepDelta;
+            cloth.velocities[offset] += (cloth.gravity[0] + windAccelerationX) * substepDelta;
+            cloth.velocities[offset + 1] += (cloth.gravity[1] + windAccelerationY) * substepDelta;
+            cloth.velocities[offset + 2] += (cloth.gravity[2] + windAccelerationZ) * substepDelta;
             cloth.velocities[offset] *= dampingFactor;
             cloth.velocities[offset + 1] *= dampingFactor;
             cloth.velocities[offset + 2] *= dampingFactor;
@@ -237,9 +249,11 @@ private:
     // triangle's in-plane cross products; the scalar response applies along
     // the triangle normal, split evenly over the triangle's free particles.
     // The wind pushes the surface and makes it flutter instead of sliding
-    // every particle uniformly. Deterministic: faces iterate in grid order,
-    // pinned particles receive no velocity, and degenerate (zero-area or
-    // non-finite) faces are skipped.
+    // every particle uniformly; while this model is active the wind vector
+    // never doubles as a uniform acceleration (see integrateSubstep).
+    // Deterministic: faces iterate in grid order, pinned particles receive
+    // no velocity, and degenerate (zero-area or non-finite) faces are
+    // skipped.
     void applyAerodynamicWind(ClothRecord &cloth, double substepDelta)
     {
         if (cloth.faces.empty())
@@ -565,7 +579,10 @@ private:
     }
 
     // Resolves every free particle against the rigid world in one batched
-    // sphere query per substep instead of one capability call per particle.
+    // sphere query per substep instead of one capability call per particle
+    // (the shared engine::util batched projection). The caller clears the
+    // per-particle contact scratch; the helper writes flags and normals for
+    // the hits and pushes the positions out of the obstacles.
     void resolveCollisions(ClothRecord &cloth)
     {
         if (rigid_ == nullptr)
@@ -573,50 +590,21 @@ private:
             return;
         }
         const std::size_t particleCount = cloth.positions.size() / 3;
-        collisionSlotIndices_.clear();
-        collisionQueries_.clear();
         for (std::size_t particle = 0; particle < particleCount; ++particle)
         {
             cloth.contactFlags[particle] = 0u;
-            if (cloth.pinned[particle] != 0u)
-            {
-                continue;
-            }
-            engine::physics_rigid::SphereOverlapQuery query;
-            const std::size_t offset = particle * 3;
-            query.center[0] = cloth.positions[offset];
-            query.center[1] = cloth.positions[offset + 1];
-            query.center[2] = cloth.positions[offset + 2];
-            query.radius    = cloth.particleRadius;
-            collisionSlotIndices_.push_back(particle);
-            collisionQueries_.push_back(query);
         }
-        if (collisionQueries_.empty())
-        {
-            return;
-        }
-        collisionResults_.resize(collisionQueries_.size());
-        rigid_->collideSpheres(rigid_->self, cloth.world, collisionQueries_.data(),
-            static_cast<std::uint32_t>(collisionQueries_.size()), collisionResults_.data());
-        for (std::size_t entry = 0; entry < collisionSlotIndices_.size(); ++entry)
-        {
-            const std::size_t particle = collisionSlotIndices_[entry];
-            const engine::physics_rigid::SphereOverlapResult &result = collisionResults_[entry];
-            if (!result.hit || result.depth <= 0.0)
-            {
-                continue;
-            }
-            const std::size_t offset = particle * 3;
-            cloth.contactFlags[particle]     = 1u;
-            cloth.contactNormals[offset]     = result.normal[0];
-            cloth.contactNormals[offset + 1] = result.normal[1];
-            cloth.contactNormals[offset + 2] = result.normal[2];
-            // Project the particle out of the obstacle along the push-out
-            // direction; velocity damping happens in the final velocity pass.
-            cloth.positions[offset] += result.normal[0] * result.depth;
-            cloth.positions[offset + 1] += result.normal[1] * result.depth;
-            cloth.positions[offset + 2] += result.normal[2] * result.depth;
-        }
+        engine::util::projectParticleSphereOverlaps(rigid_,
+            cloth.world,
+            cloth.positions.data(),
+            particleCount,
+            cloth.particleRadius,
+            [&cloth](std::size_t particle) { return cloth.pinned[particle] != 0u; },
+            collisionQueries_,
+            collisionSlotIndices_,
+            collisionResults_,
+            cloth.contactNormals.data(),
+            cloth.contactFlags.data());
     }
 
     void finalizeSubstepVelocities(ClothRecord &cloth, double substepDelta, double frictionRetention)
@@ -630,42 +618,19 @@ private:
             {
                 continue;
             }
-            double velocityX = (cloth.positions[offset] - cloth.previousPositions[offset]) * inverseDeltaTime;
-            double velocityY = (cloth.positions[offset + 1] - cloth.previousPositions[offset + 1]) * inverseDeltaTime;
-            double velocityZ = (cloth.positions[offset + 2] - cloth.previousPositions[offset + 2]) * inverseDeltaTime;
-            if (cloth.contactFlags[particle] != 0u)
-            {
-                // Split into normal and tangential parts; the normal part is
-                // removed and the tangential part scales by the friction
-                // retention. The retention is friction^(substep delta), the
-                // per-second "sliding velocity kept" factor the capability
-                // documents, applied per contact substep - so the same
-                // wall-clock contact time removes the same tangential speed
-                // at any step rate (a per-substep multiplier would not).
-                const double normalX        = cloth.contactNormals[offset];
-                const double normalY        = cloth.contactNormals[offset + 1];
-                const double normalZ        = cloth.contactNormals[offset + 2];
-                const double normalVelocity = normalX * velocityX + normalY * velocityY + normalZ * velocityZ;
-                velocityX -= normalX * normalVelocity;
-                velocityY -= normalY * normalVelocity;
-                velocityZ -= normalZ * normalVelocity;
-                velocityX *= frictionRetention;
-                velocityY *= frictionRetention;
-                velocityZ *= frictionRetention;
-            }
-            // Clamp the derived velocity so solver noise cannot escalate
-            // into a diverging state (the value is module configuration).
-            const double speedSquared = velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ;
-            if (speedSquared > settings_.maximumVelocity * settings_.maximumVelocity)
-            {
-                const double scale = settings_.maximumVelocity / std::sqrt(speedSquared);
-                velocityX *= scale;
-                velocityY *= scale;
-                velocityZ *= scale;
-            }
-            cloth.velocities[offset]     = velocityX;
-            cloth.velocities[offset + 1] = velocityY;
-            cloth.velocities[offset + 2] = velocityZ;
+            // The shared finalize re-derives the velocity from the position
+            // delta, removes the approaching velocity along the contact
+            // normal, scales the tangential remainder by the retention (the
+            // per-second "sliding velocity kept" factor raised to the
+            // contact time, rate-independent by construction), and clamps
+            // to the module's configured maximum.
+            engine::util::finalizeParticleVelocity(&cloth.velocities[offset],
+                &cloth.positions[offset],
+                &cloth.previousPositions[offset],
+                inverseDeltaTime,
+                cloth.contactFlags[particle] != 0u ? &cloth.contactNormals[offset] : nullptr,
+                frictionRetention,
+                settings_.maximumVelocity);
         }
     }
 
@@ -786,7 +751,7 @@ private:
         setError(error, ClothError::None);
         if (rigid_ == nullptr)
         {
-            setError(error, ClothError::SimulationFailure);
+            setError(error, ClothError::InvalidHandle);
             return invalidCloth;
         }
         if (description == nullptr || description->columns < 2 || description->rows < 2)
@@ -822,7 +787,14 @@ private:
         cloth.rows         = description->rows;
         cloth.spacing      = description->spacing;
         cloth.particleMass = description->particleMass;
-        rigid_->copyWorldGravity(rigid_->self, world, cloth.gravity);
+        // Capturing the gravity doubles as the world-handle validation: a
+        // world the rigid module does not know is rejected here instead of
+        // silently falling back to the default gravity.
+        if (!rigid_->copyWorldGravity(rigid_->self, world, cloth.gravity))
+        {
+            setError(error, ClothError::InvalidHandle);
+            return invalidCloth;
+        }
         cloth.particleRadius
             = description->particleRadius > 0.0 ? description->particleRadius : description->spacing * 0.25;
         cloth.friction          = description->friction;
@@ -848,7 +820,7 @@ private:
         {
             for (std::uint32_t column = 0; column < description->columns; ++column)
             {
-                const std::size_t index = particleIndex(cloth, column, row);
+                const std::size_t index = particleOffset(cloth, column, row);
                 const math::Vec3  local{
                     static_cast<double>(column) * description->spacing,
                     0.0,
@@ -893,10 +865,10 @@ private:
             for (std::uint32_t column = 0; column + 1 < description->columns; ++column)
             {
                 ClothFace face;
-                face.particleA = static_cast<std::uint32_t>(particleIndex(cloth, column, row) / 3);
-                face.particleB = static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row) / 3);
-                face.particleC = static_cast<std::uint32_t>(particleIndex(cloth, column, row + 1) / 3);
-                face.particleD = static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row + 1) / 3);
+                face.particleA = particleIndexOf(cloth, column, row);
+                face.particleB = particleIndexOf(cloth, column + 1, row);
+                face.particleC = particleIndexOf(cloth, column, row + 1);
+                face.particleD = particleIndexOf(cloth, column + 1, row + 1);
                 cloth.faces.push_back(face);
             }
         }
@@ -904,38 +876,38 @@ private:
         {
             for (std::uint32_t column = 0; column < description->columns; ++column)
             {
-                const std::uint32_t index = static_cast<std::uint32_t>(particleIndex(cloth, column, row) / 3);
+                const std::uint32_t index = particleIndexOf(cloth, column, row);
                 if (column + 1 < description->columns)
                 {
                     addConstraint(index,
-                        static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row) / 3),
+                        particleIndexOf(cloth, column + 1, row),
                         description->stretchCompliance);
                 }
                 if (row + 1 < description->rows)
                 {
                     addConstraint(index,
-                        static_cast<std::uint32_t>(particleIndex(cloth, column, row + 1) / 3),
+                        particleIndexOf(cloth, column, row + 1),
                         description->stretchCompliance);
                 }
                 if (column + 1 < description->columns && row + 1 < description->rows)
                 {
                     addConstraint(index,
-                        static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row + 1) / 3),
+                        particleIndexOf(cloth, column + 1, row + 1),
                         description->shearCompliance);
-                    addConstraint(static_cast<std::uint32_t>(particleIndex(cloth, column + 1, row) / 3),
-                        static_cast<std::uint32_t>(particleIndex(cloth, column, row + 1) / 3),
+                    addConstraint(particleIndexOf(cloth, column + 1, row),
+                        particleIndexOf(cloth, column, row + 1),
                         description->shearCompliance);
                 }
                 if (column + 2 < description->columns)
                 {
                     addConstraint(index,
-                        static_cast<std::uint32_t>(particleIndex(cloth, column + 2, row) / 3),
+                        particleIndexOf(cloth, column + 2, row),
                         description->bendCompliance);
                 }
                 if (row + 2 < description->rows)
                 {
                     addConstraint(index,
-                        static_cast<std::uint32_t>(particleIndex(cloth, column, row + 2) / 3),
+                        particleIndexOf(cloth, column, row + 2),
                         description->bendCompliance);
                 }
             }
@@ -1084,6 +1056,10 @@ private:
         {
             return false;
         }
+        // Moving a pin is an interaction: a settled cloth must wake so the
+        // moved pin pulls the surface along instead of holding the old pose.
+        cloth->sleeping   = false;
+        cloth->sleepTimer = 0.0;
         cloth->pinned[particleIndex]        = 1u;
         cloth->inverseMasses[particleIndex] = 0.0;
         const std::size_t offset            = static_cast<std::size_t>(particleIndex) * 3;
@@ -1347,10 +1323,10 @@ private:
         const double tx = fractionalColumn - static_cast<double>(column);
         const double ty = fractionalRow - static_cast<double>(row);
 
-        const std::size_t offset00 = particleIndex(*cloth, column, row);
-        const std::size_t offset10 = particleIndex(*cloth, column + 1, row);
-        const std::size_t offset01 = particleIndex(*cloth, column, row + 1);
-        const std::size_t offset11 = particleIndex(*cloth, column + 1, row + 1);
+        const std::size_t offset00 = particleOffset(*cloth, column, row);
+        const std::size_t offset10 = particleOffset(*cloth, column + 1, row);
+        const std::size_t offset01 = particleOffset(*cloth, column, row + 1);
+        const std::size_t offset11 = particleOffset(*cloth, column + 1, row + 1);
 
         double position[3] = {0.0, 0.0, 0.0};
         double tangentU[3] = {0.0, 0.0, 0.0};

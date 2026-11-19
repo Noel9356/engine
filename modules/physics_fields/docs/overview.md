@@ -24,7 +24,7 @@ The module provides the `physics_fields` capability (ABI version constant `physi
 
 **Force volumes.** A Uniform volume applies the description acceleration to every dynamic body whose center stays inside the axis-aligned box (per-axis `|offset| <= halfExtents`), scaled by the body's mass — `density x closed-form shape volume` for density-described bodies, else the body's mass. A Radial volume pulls (negative `radialStrength`) or pushes (positive) along the away-from-center direction with the bounded inverse-square falloff `(1 - distance/radius) / max(distance^2, 1)` inside the influence radius; radius 0 or strength 0 keeps the volume inactive, and disabled volumes are skipped entirely. Forces apply at body centers through the rigid module's `applyForceAtPoint` and are counted in the statistics when the rigid world accepts them.
 
-**Radial impulse blasts.** `applyRadialImpulse` is a one-shot that needs no persistent record: every awake dynamic body of the given world within `radius` receives `impulseMagnitude x (1 - distance/radius)` along the away-from-center direction, with the `upwardBias` fraction added to the direction's +Z component before normalization, through the rigid module's `applyImpulseAtPoint`.
+**Radial impulse blasts.** `applyRadialImpulse` is a one-shot that needs no persistent record: every awake dynamic body of the given world within `radius` receives `impulseMagnitude x (1 - distance/radius)` along the away-from-center direction, with the `upwardBias` fraction added to the direction's +Y component (the engine's up axis, matching the gravity convention) before normalization, through the rigid module's `applyImpulseAtPoint`.
 
 **Composition.** The module owns no simulation state: wind fields are analytic functions, volumes are placement records, and every application drives forces and impulses through the physics_rigid capability inside the consumer's fixed update, so fields compose deterministically with any other force source and rigid integration remains the single mover of bodies.
 
@@ -56,7 +56,7 @@ From `module.toml` and the entry table at the bottom of `source/physics_fields.c
 
 **Statistics.** `fieldsStatistics` copies the `FieldsStatistics` struct: the live `windFieldCount` and `forceVolumeCount` (maintained on create and destroy) and the cumulative `dragApplications` and `volumeApplications`.
 
-**Interaction with rigid bodies.** Fields read nothing from the rigid module beyond body enumeration and state copies, and write nothing back beyond forces and impulses, so any body kind works the same: only awake bodies are visited (static scenery stays put), dynamic boxes catch the wind, and kinematic carriers respond to volumes and blasts. Rigid integration stays the single source of motion — fields is a pure force producer, one-way coupled by design (see configuration.md for the cost trade-off this represents).
+**Interaction with rigid bodies.** Fields read nothing from the rigid module beyond body enumeration and state copies, and write nothing back beyond forces and impulses, so any body kind works the same: only awake dynamic bodies are visited (static scenery stays put and kinematic carriers keep their scripted motion), dynamic boxes catch the wind, and cylinders receive drag and volume forces exactly like the other solid shapes. Rigid integration stays the single source of motion — fields is a pure force producer, one-way coupled by design (see configuration.md for the cost trade-off this represents).
 
 ## Simulation LOD and batched body reads
 

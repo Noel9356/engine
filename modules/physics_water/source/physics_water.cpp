@@ -16,6 +16,7 @@
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
 #include <engine/physics_water/capabilities.hpp>
+#include <engine/util/collider_metrics.hpp>
 #include <engine/util/module_error.hpp>
 #include <engine/util/simulation_lod.hpp>
 
@@ -24,6 +25,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace engine::physics_water
@@ -33,29 +35,9 @@ namespace
 
 namespace math = engine::physics_rigid::math;
 
-constexpr double kPi            = 3.14159265358979323846;
 constexpr double kGravityForWaves = 9.81; // deep-water dispersion reference gravity
 
 constexpr int    kGerstnerIterations    = 4;    // fixed inverse-iteration count for the displaced height
-
-double shapeVolumeOf(const engine::physics_rigid::ShapeDescription &shape)
-{
-    using engine::physics_rigid::ShapeKind;
-    switch (shape.kind)
-    {
-    case ShapeKind::Sphere:
-        return (4.0 / 3.0) * kPi * shape.sphereRadius * shape.sphereRadius * shape.sphereRadius;
-    case ShapeKind::Box:
-        return 8.0 * shape.boxHalfExtents[0] * shape.boxHalfExtents[1] * shape.boxHalfExtents[2];
-    case ShapeKind::Capsule: {
-        const double r = shape.capsuleRadius;
-        return kPi * r * r * (2.0 * shape.capsuleHalfLength) + (4.0 / 3.0) * kPi * r * r * r;
-    }
-    case ShapeKind::Plane:
-    default:
-        return 0.0;
-    }
-}
 
 struct PreparedWave
 {
@@ -84,7 +66,6 @@ struct WakeState
     double lastPositionZ     = 0.0;
     double travelledDistance = 0.0; // meters since the last wake ripple
 };
-
 struct OceanRecord
 {
     OceanHandle handle = invalidOcean;
@@ -94,14 +75,17 @@ struct OceanRecord
     OceanDescription description{};
 
     // Effective uniform current (meters per second); the y component is
-    // always 0. Re-derived from the description on create and
-    // setOceanDescription, updatable at runtime through setCurrentVelocity.
+    // always 0. Re-derived from the description on create and on
+    // setOceanDescription unless the consumer set an explicit current
+    // through setCurrentVelocity (which setOceanDescription then keeps).
     math::Vec3 currentVelocity{};
+    bool       currentExplicit = false;
 
-    // timeSeconds of the most recent applyBuoyancy pass on this ocean; the
-    // wake submersion check samples the wave surface at this clock reading
-    // (0 before the first pass).
-    double lastBuoyancyTime = 0.0;
+    // Simulated time of this ocean: the ripple pass advances it by the
+    // interval-scaled step delta, so the wake submersion gate samples the
+    // wave surface at the ocean's own clock even when the consumer never
+    // calls applyBuoyancy.
+    double simulatedTime = 0.0;
 
     std::vector<PreparedWave> waves;
 
@@ -145,7 +129,7 @@ struct WaterSettings
     double        rippleAttenuation       = 0.35;   // amplitude falloff per meter of radius
     double        rippleWavelength        = 1.6;    // ring crest spacing (meters)
     double        buoyancyScale           = 1.0;    // global buoyancy multiplier
-    double        linearDragCoefficient   = 1.8;    // quadratic water drag per square meter of drag area
+    double        quadraticDragCoefficient = 1.8;   // quadratic water drag per square meter of drag area
     double        angularDragCoefficient  = 3.0;    // angular damping torque per (rad/s) of submerged body
     double        wakeSpeedThreshold      = 1.2;    // minimum horizontal speed for wake emission (meters per second)
     double        wakeSpacingMeters       = 1.5;    // travelled distance between wake ripples (meters)
@@ -205,9 +189,9 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_water", "buoyancy_scale");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
             settings_.buoyancyScale = *value;
-        if (const auto value = context.configurationFloatingInSection("physics_water", "linear_drag_coefficient");
+        if (const auto value = context.configurationFloatingInSection("physics_water", "quadratic_drag_coefficient");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
-            settings_.linearDragCoefficient = *value;
+            settings_.quadraticDragCoefficient = *value;
         if (const auto value = context.configurationFloatingInSection("physics_water", "angular_drag_coefficient");
             value && *value >= 0.0 && *value <= 100.0 && std::isfinite(*value))
             settings_.angularDragCoefficient = *value;
@@ -343,7 +327,7 @@ private:
             {
                 prepared.direction = math::Vec3{candidate.directionX / length, 0.0, candidate.directionZ / length};
             }
-            prepared.waveNumber = 2.0 * kPi / candidate.wavelength;
+            prepared.waveNumber = 2.0 * math::kPi / candidate.wavelength;
             prepared.amplitude  = candidate.amplitude;
             const double steepness = std::clamp(candidate.steepness, 0.0, 1.0);
             prepared.horizontalAmplitude = steepness > 0.0 && candidate.amplitude > 0.0
@@ -422,7 +406,7 @@ private:
             {
                 continue;
             }
-            const double ringPhase = 2.0 * kPi * (radius - ringFront) / settings_.rippleWavelength;
+            const double ringPhase = 2.0 * math::kPi * (radius - ringFront) / settings_.rippleWavelength;
             const double envelope  = std::exp(-ripple.age * settings_.rippleDecay - radius * settings_.rippleAttenuation)
                                     * (1.0 - distanceToRing / settings_.rippleWavelength);
             height += ripple.strength * envelope * std::cos(ringPhase);
@@ -432,69 +416,20 @@ private:
 
     // Builds the shape-dependent sample set from an already fetched body
     // state and description (the buoyancy pass fetches them batched; the
-    // single-body queries fetch directly).
+    // single-body queries fetch directly). The sets come from the shared
+    // engine::util::collider_metrics vocabulary, which covers every solid
+    // shape including cylinders.
     void collectSamplePoints(const engine::physics_rigid::BodyState &state,
         const engine::physics_rigid::BodyDescription &description, std::vector<math::Vec3> &outPoints) const
     {
         outPoints.clear();
-        using engine::physics_rigid::ShapeKind;
-        const math::Vec3 center = state.transform.position;
-        switch (description.shape.kind)
-        {
-        case ShapeKind::Sphere: {
-            const double r = description.shape.sphereRadius * 0.5;
-            outPoints.push_back(center);
-            outPoints.push_back(center + math::Vec3{r, 0.0, 0.0});
-            outPoints.push_back(center + math::Vec3{-r, 0.0, 0.0});
-            outPoints.push_back(center + math::Vec3{0.0, r, 0.0});
-            outPoints.push_back(center + math::Vec3{0.0, -r, 0.0});
-            outPoints.push_back(center + math::Vec3{0.0, 0.0, r});
-            outPoints.push_back(center + math::Vec3{0.0, 0.0, -r});
-            break;
-        }
-        case ShapeKind::Box: {
-            const double hx = description.shape.boxHalfExtents[0] * 0.7;
-            const double hy = description.shape.boxHalfExtents[1] * 0.7;
-            const double hz = description.shape.boxHalfExtents[2] * 0.7;
-            for (const double sx : {-1.0, 1.0})
-            {
-                for (const double sy : {-1.0, 1.0})
-                {
-                    for (const double sz : {-1.0, 1.0})
-                    {
-                        outPoints.push_back(center + math::rotate(state.transform.rotation, math::Vec3{hx * sx, hy * sy, hz * sz}));
-                    }
-                }
-            }
-            outPoints.push_back(center);
-            break;
-        }
-        case ShapeKind::Capsule: {
-            // Segment samples along the capsule axis (five stations) plus
-            // lateral offsets at the center, so the submersion fraction
-            // varies smoothly as the body rides the waves.
-            const math::Vec3 axis = math::rotate(state.transform.rotation,
-                math::Vec3{0.0, description.shape.capsuleHalfLength, 0.0});
-            for (const double fraction : {-1.0, -0.5, 0.0, 0.5, 1.0})
-            {
-                outPoints.push_back(center + axis * fraction);
-            }
-            const double lateral = description.shape.capsuleRadius * 0.5;
-            outPoints.push_back(center + math::Vec3{lateral, 0.0, 0.0});
-            outPoints.push_back(center + math::Vec3{-lateral, 0.0, 0.0});
-            outPoints.push_back(center + math::Vec3{0.0, 0.0, lateral});
-            outPoints.push_back(center + math::Vec3{0.0, 0.0, -lateral});
-            break;
-        }
-        case ShapeKind::Plane:
-        default:
-            break;
-        }
+        engine::util::appendColliderSamplePoints(description.shape, state.transform, outPoints);
     }
 
     double bodyMassOf(const engine::physics_rigid::BodyDescription &description) const
     {
-        return description.density > 0.0 ? description.density * shapeVolumeOf(description.shape) : description.mass;
+        return description.density > 0.0 ? description.density * engine::util::colliderVolume(description.shape)
+                                         : description.mass;
     }
 
     // ---- capability implementations ---------------------------------------
@@ -581,7 +516,12 @@ private:
             return false;
         }
         ocean->description = *description;
-        ocean->currentVelocity = effectiveCurrentOf(ocean->description);
+        // An explicit runtime current survives a description update; without
+        // one the current re-derives from the description.
+        if (!ocean->currentExplicit)
+        {
+            ocean->currentVelocity = effectiveCurrentOf(ocean->description);
+        }
         prepareWaves(*ocean);
         return true;
     }
@@ -655,8 +595,8 @@ private:
     }
 
     // Submersion fraction with the querySubmersion sample scheme, evaluated
-    // against the surface at the ocean's last buoyancy clock reading (0
-    // before the first pass); used by the wake gate.
+    // against the surface at the ocean's simulated time; used by the wake
+    // gate.
     double bodySubmersionFraction(OceanRecord &ocean, engine::physics_rigid::BodyHandle body)
     {
         engine::physics_rigid::BodyState state;
@@ -674,7 +614,7 @@ private:
         std::uint32_t below = 0;
         for (const math::Vec3 &point : samplePoints_)
         {
-            if (surfaceHeight(ocean, point.x, point.z, ocean.lastBuoyancyTime) > point.y)
+            if (surfaceHeight(ocean, point.x, point.z, ocean.simulatedTime) > point.y)
             {
                 ++below;
             }
@@ -694,10 +634,25 @@ private:
         {
             return;
         }
-        // One batched state read per pass instead of one call per body.
+        // One batched state read per pass instead of one call per body; the
+        // resolved count prunes registrations whose body died in the rigid
+        // world (their stale velocity would otherwise plant a phantom wake
+        // at the last seen position).
         wakeStatesScratch_.resize(ocean.registeredBodies.size());
-        rigid_->copyBodyStates(rigid_->self, ocean.world, ocean.registeredBodies.data(),
-            static_cast<std::uint32_t>(ocean.registeredBodies.size()), wakeStatesScratch_.data());
+        const std::uint32_t resolved = rigid_->copyBodyStates(rigid_->self, ocean.world,
+            ocean.registeredBodies.data(), static_cast<std::uint32_t>(ocean.registeredBodies.size()),
+            wakeStatesScratch_.data());
+        for (std::size_t index = ocean.registeredBodies.size(); index > resolved; --index)
+        {
+            const std::size_t position = index - 1;
+            ocean.registeredBodies.erase(ocean.registeredBodies.begin() + static_cast<std::ptrdiff_t>(position));
+            ocean.wakeStates.erase(ocean.wakeStates.begin() + static_cast<std::ptrdiff_t>(position));
+            if (position < ocean.bodyVolumes.size())
+            {
+                ocean.bodyVolumes.erase(ocean.bodyVolumes.begin() + static_cast<std::ptrdiff_t>(position));
+            }
+            statistics_.registeredBodies = static_cast<std::uint32_t>(ocean.registeredBodies.size());
+        }
         for (std::size_t index = 0; index < ocean.registeredBodies.size(); ++index)
         {
             WakeState &wake = ocean.wakeStates[index];
@@ -750,6 +705,7 @@ private:
             return true;
         }
         const double stepDelta = fixedDeltaSeconds * static_cast<double>(lodInterval);
+        ocean->simulatedTime += stepDelta;
         emitWakes(*ocean);
         std::uint32_t active = 0;
         for (Ripple &ripple : ocean->ripples)
@@ -845,7 +801,10 @@ private:
         if (!rigid_->copyBodyState(rigid_->self, ocean->world, body, &state)
             || !rigid_->copyBodyDescription(rigid_->self, ocean->world, body, &description))
         {
+            // An unknown body sits fully above the surface: zero fraction,
+            // zero depth.
             *outFraction = 0.0;
+            *outDepth    = 0.0;
             return true;
         }
         collectSamplePoints(state, description, samplePoints_);
@@ -896,9 +855,6 @@ private:
         }
         const double forceScale = static_cast<double>(lodInterval);
         std::uint64_t applied = 0;
-        // Remember the pass clock: the wake submersion gate samples the
-        // surface at this reading until the next pass.
-        ocean->lastBuoyancyTime = timeSeconds;
         // Batched reads: two calls per pass instead of two per body.
         buoyancyStates_.resize(ocean->registeredBodies.size());
         buoyancyDescriptions_.resize(ocean->registeredBodies.size());
@@ -926,6 +882,7 @@ private:
             }
             const engine::physics_rigid::BodyState &state = buoyancyStates_[index];
             const engine::physics_rigid::BodyDescription &description = buoyancyDescriptions_[index];
+            const std::size_t registrationIndex = index;
             ++index;
             if (!state.awake)
             {
@@ -959,11 +916,13 @@ private:
             // The shape volume caches per registered body (shapes are
             // immutable per handle); the buoyancy factor scales with the
             // pass interval so the impulse per wall time stays constant.
-            double shapeVolumeMeters = ocean->bodyVolumes[std::min(index, ocean->bodyVolumes.size()) - 1];
+            // The volume vector stays index-parallel to the registrations,
+            // which the dead-body pruning above already compacted.
+            double shapeVolumeMeters = ocean->bodyVolumes[registrationIndex];
             if (!(shapeVolumeMeters >= 0.0))
             {
-                shapeVolumeMeters = shapeVolumeOf(description.shape);
-                ocean->bodyVolumes[std::min(index, ocean->bodyVolumes.size()) - 1] = shapeVolumeMeters;
+                shapeVolumeMeters = engine::util::colliderVolume(description.shape);
+                ocean->bodyVolumes[registrationIndex] = shapeVolumeMeters;
             }
             const double volume   = shapeVolumeMeters * fraction * settings_.buoyancyScale;
             const double mass     = bodyMassOf(description);
@@ -986,7 +945,7 @@ private:
             if (speed > 1.0e-6)
             {
                 const double dragArea  = std::cbrt(shapeVolumeMeters * shapeVolumeMeters);
-                const double magnitude = 0.5 * settings_.waterDensity * settings_.linearDragCoefficient * dragArea
+                const double magnitude = 0.5 * settings_.waterDensity * settings_.quadraticDragCoefficient * dragArea
                                          * fraction * speed * speed * forceScale;
                 const math::Vec3 direction = relativeVelocity * (-1.0 / speed);
                 const double dragForce[3]  = {direction.x * magnitude, direction.y * magnitude, direction.z * magnitude};
@@ -1051,6 +1010,7 @@ private:
             return false;
         }
         ocean->currentVelocity = math::Vec3{current[0], 0.0, current[2]};
+        ocean->currentExplicit = true;
         return true;
     }
 

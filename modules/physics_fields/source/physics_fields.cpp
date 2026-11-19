@@ -13,6 +13,7 @@
 #include <engine/physics_fields/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/collider_metrics.hpp>
 #include <engine/util/module_error.hpp>
 #include <engine/util/simulation_lod.hpp>
 
@@ -84,60 +85,10 @@ double valueNoise3(double x, double y, double z)
     return value;
 }
 
-// Closed-form solid volume of a validated rigid shape (mirrors the
-// physics_rigid shape set) so force scaling can convert accelerations into
-// forces for density-described bodies.
-double shapeVolume(const engine::physics_rigid::ShapeDescription &shape)
-{
-    using engine::physics_rigid::ShapeKind;
-    switch (shape.kind)
-    {
-    case ShapeKind::Sphere:
-        return (4.0 / 3.0) * math::kPi * shape.sphereRadius * shape.sphereRadius * shape.sphereRadius;
-    case ShapeKind::Box:
-        return 8.0 * shape.boxHalfExtents[0] * shape.boxHalfExtents[1] * shape.boxHalfExtents[2];
-    case ShapeKind::Capsule: {
-        const double r = shape.capsuleRadius;
-        return math::kPi * r * r * (2.0 * shape.capsuleHalfLength) + (4.0 / 3.0) * math::kPi * r * r * r;
-    }
-    case ShapeKind::Plane:
-    default:
-        return 0.0;
-    }
-}
-
-// Frontal cross-section and drag coefficient per shape class (documented
-// approximations used by the wind drag model).
-void shapeAerodynamics(const engine::physics_rigid::ShapeDescription &shape, double &outArea, double &outDragCoefficient)
-{
-    using engine::physics_rigid::ShapeKind;
-    switch (shape.kind)
-    {
-    case ShapeKind::Sphere:
-        outArea            = math::kPi * shape.sphereRadius * shape.sphereRadius;
-        outDragCoefficient = 0.47;
-        return;
-    case ShapeKind::Box: {
-        const double a = shape.boxHalfExtents[0] * 2.0;
-        const double b = shape.boxHalfExtents[1] * 2.0;
-        const double c = shape.boxHalfExtents[2] * 2.0;
-        outArea            = (a * b + b * c + c * a) / 3.0;
-        outDragCoefficient = 1.05;
-        return;
-    }
-    case ShapeKind::Capsule: {
-        const double r = shape.capsuleRadius;
-        outArea            = math::kPi * r * r + 2.0 * r * (2.0 * shape.capsuleHalfLength);
-        outDragCoefficient = 0.82;
-        return;
-    }
-    case ShapeKind::Plane:
-    default:
-        outArea            = 0.0;
-        outDragCoefficient = 0.0;
-        return;
-    }
-}
+// Closed-form solid volume, reference drag area, and drag coefficient of a
+// validated rigid shape come from the shared engine::util::collider_metrics
+// vocabulary (the same formulas the water module's buoyancy uses, covering
+// every solid shape including cylinders).
 
 struct WindFieldRecord
 {
@@ -295,6 +246,9 @@ private:
     }
 
     // Body list scratch: refreshed per apply call from the rigid world.
+    // Only awake dynamic bodies collect: static bodies never move, and
+    // kinematic bodies are driven by their mover rather than by fields
+    // (matching the apply entry points' documentation).
     bool collectDynamicBodies(engine::physics_rigid::WorldHandle world,
         std::vector<engine::physics_rigid::BodyHandle> &outHandles,
         std::vector<engine::physics_rigid::BodyState> &outStates,
@@ -332,7 +286,8 @@ private:
             {
                 break;
             }
-            if (bodyStatesScratch_[index].awake)
+            if (bodyStatesScratch_[index].awake
+                && bodyDescriptionsScratch_[index].kind == engine::physics_rigid::BodyKind::Dynamic)
             {
                 outHandles.push_back(bodyHandles_[index]);
                 outStates.push_back(bodyStatesScratch_[index]);
@@ -342,9 +297,13 @@ private:
         return true;
     }
 
+    // Force-scaling mass of one body: the density-sourced shapes derive it
+    // from the shared shape volume, the explicit-mass shapes carry their
+    // description mass.
     double bodyMass(const engine::physics_rigid::BodyDescription &description) const
     {
-        return description.density > 0.0 ? description.density * shapeVolume(description.shape) : description.mass;
+        return description.density > 0.0 ? description.density * engine::util::colliderVolume(description.shape)
+                                         : description.mass;
     }
 
     // ---- wind field evaluation ----------------------------------------------
@@ -388,7 +347,12 @@ private:
         engine::physics_rigid::WorldHandle world, const WindFieldDescription *description, FieldsError *error)
     {
         setError(error, FieldsError::None);
-        if (rigid_ == nullptr || description == nullptr)
+        if (rigid_ == nullptr)
+        {
+            setError(error, FieldsError::InvalidHandle);
+            return invalidWind;
+        }
+        if (description == nullptr)
         {
             setError(error, FieldsError::InvalidDescription);
             return invalidWind;
@@ -418,6 +382,14 @@ private:
         if (nextWindHandle_ == invalidWind)
         {
             setError(error, FieldsError::CapacityExceeded);
+            return invalidWind;
+        }
+        // The wind's world handle validates through a gravity probe: a
+        // world the rigid module does not know is rejected here.
+        double gravityProbe[3] = {0.0, 0.0, 0.0};
+        if (!rigid_->copyWorldGravity(rigid_->self, world, gravityProbe))
+        {
+            setError(error, FieldsError::InvalidHandle);
             return invalidWind;
         }
         WindFieldRecord record;
@@ -511,9 +483,12 @@ private:
             {
                 continue;
             }
-            double area = 0.0;
+            double area            = 0.0;
             double dragCoefficient = 0.0;
-            shapeAerodynamics(applyDescriptions_[index].shape, area, dragCoefficient);
+            const engine::util::ColliderAerodynamics aerodynamics
+                = engine::util::colliderAerodynamics(applyDescriptions_[index].shape);
+            area            = aerodynamics.referenceArea;
+            dragCoefficient = aerodynamics.dragCoefficient;
             if (area <= 0.0)
             {
                 continue;
@@ -539,7 +514,12 @@ private:
         engine::physics_rigid::WorldHandle world, const ForceVolumeDescription *description, FieldsError *error)
     {
         setError(error, FieldsError::None);
-        if (rigid_ == nullptr || description == nullptr)
+        if (rigid_ == nullptr)
+        {
+            setError(error, FieldsError::InvalidHandle);
+            return invalidForceVolume;
+        }
+        if (description == nullptr)
         {
             setError(error, FieldsError::InvalidDescription);
             return invalidForceVolume;
@@ -563,6 +543,14 @@ private:
         if (nextForceVolumeHandle_ == invalidForceVolume)
         {
             setError(error, FieldsError::CapacityExceeded);
+            return invalidForceVolume;
+        }
+        // The volume's world handle validates through a gravity probe: a
+        // world the rigid module does not know is rejected here.
+        double gravityProbe[3] = {0.0, 0.0, 0.0};
+        if (!rigid_->copyWorldGravity(rigid_->self, world, gravityProbe))
+        {
+            setError(error, FieldsError::InvalidHandle);
             return invalidForceVolume;
         }
         ForceVolumeRecord record;
@@ -622,11 +610,19 @@ private:
 
     bool applyForceVolumesImpl(double fixedDeltaSeconds)
     {
+        // The delta carries no physics here: volumes apply accelerations
+        // scaled by the simulation-LOD interval (the impulse-per-wall-time
+        // compensation), so the caller's fixed delta is accepted for
+        // interface consistency only.
         (void)fixedDeltaSeconds;
         if (rigid_ == nullptr)
         {
             return false;
         }
+        // Body collection memo for the pass: volumes sharing a world (the
+        // common case) collect its awake dynamic bodies once instead of
+        // once per volume.
+        engine::physics_rigid::WorldHandle collectedWorld = engine::physics_rigid::invalidWorld;
         for (ForceVolumeRecord &volume : forceVolumes_)
         {
             if (!volume.description.enabled)
@@ -653,7 +649,11 @@ private:
             // roughly N times the force so the impulse per wall time matches
             // the full-rate schedule.
             const double passScale = static_cast<double>(forceInterval);
-            collectDynamicBodies(volume.world, applyHandles_, applyStates_, applyDescriptions_);
+            if (volume.world != collectedWorld)
+            {
+                collectDynamicBodies(volume.world, applyHandles_, applyStates_, applyDescriptions_);
+                collectedWorld = volume.world;
+            }
             for (std::size_t index = 0; index < applyHandles_.size(); ++index)
             {
                 const engine::physics_rigid::BodyState &state = applyStates_[index];
@@ -730,16 +730,18 @@ private:
                 continue;
             }
             const double falloff = 1.0 - distance / radius;
-            double direction[3] = {0.0, 0.0, 1.0};
+            // The blast direction biases along the world's up axis (+Y, the
+            // engine's gravity convention).
+            double direction[3] = {0.0, 1.0, 0.0};
             if (distance > 1.0e-6)
             {
                 direction[0] = offset[0] / distance;
-                direction[1] = offset[1] / distance;
-                direction[2] = offset[2] / distance + upwardBias;
+                direction[1] = offset[1] / distance + upwardBias;
+                direction[2] = offset[2] / distance;
             }
             else
             {
-                direction[2] = 1.0 + upwardBias;
+                direction[1] = 1.0 + upwardBias;
             }
             const double directionLength = length3(direction);
             if (directionLength < 1.0e-9)

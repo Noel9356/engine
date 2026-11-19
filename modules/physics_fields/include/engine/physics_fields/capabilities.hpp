@@ -41,10 +41,10 @@ enum class FieldsError : std::uint32_t
 {
     None = 0,
 
-    InvalidHandle,      // unknown wind, volume, or emitter handle
+    InvalidHandle,      // unknown wind, volume, or world handle
     InvalidDescription, // null pointers, non-finite values, negative extents
     CapacityExceeded,   // configured wind or volume budget exhausted
-    SimulationFailure   // a force application rejected by the rigid world
+    SimulationFailure   // reserved; force rejections report through the return value
 };
 
 // One wind field. The velocity at a point and time is the base direction and
@@ -171,8 +171,9 @@ struct FieldsCapability
     // Instantaneous radial impulse: every awake dynamic body of the world
     // within `radius` of the point receives an impulse along the away-from-
     // center direction with linear falloff (1 - distance/radius) scaled by
-    // `impulseMagnitude` (newton-seconds at the center) and biased upward by
-    // the `upwardBias` fraction of its magnitude.
+    // `impulseMagnitude` (newton-seconds at the center) and biased along
+    // the world's up axis (+Y, the engine's gravity convention) by the
+    // `upwardBias` fraction of its magnitude.
     bool (*applyRadialImpulse)(void *self, engine::physics_rigid::WorldHandle world, const double position[3],
         double impulseMagnitude, double radius, double upwardBias);
 

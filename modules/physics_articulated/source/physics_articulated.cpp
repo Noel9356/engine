@@ -245,6 +245,12 @@ private:
                     = parentState.transform.position
                     + math::rotate(parentState.transform.rotation, link.relativeTransform.position);
                 bodyDescription.transform.rotation = parentState.transform.rotation * link.relativeTransform.rotation;
+                // Assembly reference (relative rotation parent^-1 * link):
+                // the child body takes exactly this composed transform, so
+                // the reference derives here without extra body-state round
+                // trips.
+                record.referenceRelativeRotation = math::normalize(
+                    math::conjugate(parentState.transform.rotation) * bodyDescription.transform.rotation);
             }
             bodyDescription.kind            = link.parentIndex < 0 && !description->rootDynamic
                                                 ? engine::physics_rigid::BodyKind::Static
@@ -293,18 +299,6 @@ private:
                     rollbackFigure(figure);
                     return invalidFigure;
                 }
-            }
-
-            // Assembly reference: relative rotation parent^-1 * link.
-            if (link.parentIndex >= 0)
-            {
-                engine::physics_rigid::BodyState parentState{};
-                engine::physics_rigid::BodyState childState{};
-                rigid_->copyBodyState(
-                    rigid_->self, world, figure.links[static_cast<std::uint32_t>(link.parentIndex)].body, &parentState);
-                rigid_->copyBodyState(rigid_->self, world, record.body, &childState);
-                record.referenceRelativeRotation
-                    = math::normalize(math::conjugate(parentState.transform.rotation) * childState.transform.rotation);
             }
         }
 
@@ -359,14 +353,8 @@ private:
                 break;
             }
         }
-        // Compact the record vector, keeping the handle map consistent.
-        const auto iterator = figureIndexByHandle_.find(handle);
-        if (iterator == figureIndexByHandle_.end() && figures_.empty())
-        {
-            return;
-        }
-        // The record was erased from the map in destroyFigureRecord; remove
-        // the vector slot by swapping the last element into its place.
+        // Compact the record vector, keeping the handle map consistent
+        // (the map entry went with the record in destroyFigureRecord).
         for (std::size_t index = 0; index < figures_.size(); ++index)
         {
             if (figures_[index].handle == handle)
@@ -468,7 +456,9 @@ private:
         LinkRecord &link = figure->links[linkIndex];
         if (link.joint == engine::physics_rigid::invalidJoint)
         {
-            setError(nullptr, ArticulatedError::Unsupported);
+            // The root link owns no joint, so it takes no drive. This entry
+            // point has no error out-parameter; the bare false is the
+            // documented rejection.
             return false;
         }
         if (!std::isfinite(drive->stiffness) || !std::isfinite(drive->damping)
@@ -501,9 +491,8 @@ private:
         return true;
     }
 
-    // Measures the joint angle of one link against its parent: the twist
-    // about the hinge axis relative to the assembly frame. Ball-socket
-    // drives power the twist component; swing stays limit-controlled.
+    // Simulation LOD importance setter: the band resolves on the next
+    // updateDrives pass (with demotion hysteresis, the shared ladder).
     bool setFigureImportanceImpl(FigureHandle handle, double importance)
     {
         FigureRecord *figure = findFigure(handle);
@@ -542,8 +531,9 @@ private:
         {
             return true;
         }
-        for (LinkRecord &link : figure->links)
+        for (std::size_t linkIndex = 0; linkIndex < figure->links.size(); ++linkIndex)
         {
+            LinkRecord &link = figure->links[linkIndex];
             if (link.joint == engine::physics_rigid::invalidJoint || !link.drive.enabled)
             {
                 continue;
@@ -555,9 +545,13 @@ private:
             }
             engine::physics_rigid::BodyState parentState{};
             engine::physics_rigid::BodyState childState{};
-            const bool parentLinkExists = std::any_of(figure->links.begin(),
-                figure->links.end(),
-                [&](const LinkRecord &candidate) { return candidate.body == description.bodyA; });
+            // The joint's parent body is the link's parent link by
+            // construction, so the linkage check reads the parent link's
+            // body directly instead of scanning the whole link list per
+            // driven link per step.
+            const bool parentLinkExists = link.parentIndex >= 0
+                                          && figure->links[static_cast<std::size_t>(link.parentIndex)].body
+                                              == description.bodyA;
             if (!parentLinkExists
                 || !rigid_->copyBodyState(rigid_->self, figure->world, description.bodyA, &parentState)
                 || !rigid_->copyBodyState(rigid_->self, figure->world, description.bodyB, &childState))
@@ -570,7 +564,7 @@ private:
             const engine::physics_rigid::Vec3 axisLocal = description.kind == engine::physics_rigid::JointKind::Hinge
                                                             ? description.axisLocalA
                                                             : engine::physics_rigid::Vec3{0.0, 1.0, 0.0};
-            const double assemblyTwist = math::twistAngleRadians(referenceRelativeRotationOf(link), axisLocal);
+            const double assemblyTwist = math::twistAngleRadians(link.referenceRelativeRotation, axisLocal);
             const double currentTwist  = math::twistAngleRadians(relativeRotation, axisLocal);
             const double angle         = currentTwist - assemblyTwist;
 
@@ -589,6 +583,9 @@ private:
         return true;
     }
 
+    // Measures the joint angle of one link against its parent: the twist
+    // about the hinge axis relative to the assembly frame. Ball-socket
+    // drives power the twist component; swing stays limit-controlled.
     bool copyJointStateImpl(FigureHandle handle, std::uint32_t linkIndex, FigureJointState *outState)
     {
         FigureRecord *figure = findFigure(handle);
@@ -615,7 +612,7 @@ private:
         }
         const engine::physics_rigid::Quaternion relativeRotation
             = math::normalize(math::conjugate(parentState.transform.rotation) * childState.transform.rotation);
-        const engine::physics_rigid::Quaternion assembly = referenceRelativeRotationOf(link);
+        const engine::physics_rigid::Quaternion assembly = link.referenceRelativeRotation;
         if (description.kind == engine::physics_rigid::JointKind::Hinge)
         {
             const engine::physics_rigid::Vec3 axisLocal = description.axisLocalA;
@@ -636,11 +633,6 @@ private:
         return true;
     }
 
-    static engine::physics_rigid::Quaternion referenceRelativeRotationOf(const LinkRecord &link)
-    {
-        return link.referenceRelativeRotation;
-    }
-
     // Assembly reference of one joint: the parent/child body pair, the
     // twist/hinge axis in the parent's frame, and the relative rotation
     // captured at figure creation.
@@ -654,7 +646,9 @@ private:
         const LinkRecord &link = figure->links[linkIndex];
         if (link.parentIndex < 0 || link.joint == engine::physics_rigid::invalidJoint)
         {
-            setError(nullptr, ArticulatedError::Unsupported);
+            // The root link and link-less figures have no joint reference.
+            // This entry point has no error out-parameter; the bare false is
+            // the documented rejection.
             return false;
         }
         const LinkRecord &parent = figure->links[static_cast<std::uint32_t>(link.parentIndex)];
@@ -664,7 +658,7 @@ private:
         outReference->axisLocalParent[0] = link.hingeAxisLocalParent.x;
         outReference->axisLocalParent[1] = link.hingeAxisLocalParent.y;
         outReference->axisLocalParent[2] = link.hingeAxisLocalParent.z;
-        const engine::physics_rigid::Quaternion reference = referenceRelativeRotationOf(link);
+        const engine::physics_rigid::Quaternion reference = link.referenceRelativeRotation;
         outReference->referenceRelativeRotation[0] = reference.x;
         outReference->referenceRelativeRotation[1] = reference.y;
         outReference->referenceRelativeRotation[2] = reference.z;

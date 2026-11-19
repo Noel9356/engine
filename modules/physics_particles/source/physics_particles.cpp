@@ -5,8 +5,8 @@
 // and size derive from an integer hash of (slot, generation), so identical
 // emitters replay identically with no random-number state. Particles
 // integrate per fixed step against the world gravity plus a uniform wind
-// acceleration, optionally collide with the rigid world through
-// collideSphere, and recycle their slots FIFO.
+// acceleration, optionally collide with the rigid world through the batched
+// sphere-overlap query, and recycle their pool slots FIFO.
 
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -166,6 +166,7 @@ public:
         emitterIndexByHandle_.clear();
         nextEmitterHandle_ = 1;
         registrationOrdinal_ = 0;
+        totalSlots_          = 0;
         statistics_        = ParticlesStatistics{};
     }
 
@@ -245,7 +246,6 @@ private:
         const std::uint64_t generation = ++emitter.generationCounter;
         const std::uint64_t baseSeed   = generation * 0x9E3779B97F4A7C15ull + slotIndex;
         const std::uint32_t seed       = static_cast<std::uint32_t>(baseSeed ^ (baseSeed >> 32));
-
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
             const double fraction = hashFraction(baseSeed + 0x1000ull * (axis + 1)) * 2.0 - 1.0;
@@ -282,17 +282,21 @@ private:
     {
         const EmitterDescription &description = emitter.description;
 
-        // Spawn from the emit rate plus recycle expired slots FIFO. Under
-        // simulation LOD one due step covers interval x the caller's fixed
-        // delta, so the debt accrues against wall time and the emission rate
-        // stays exact.
+        // Spawn from the emit rate, filling the pool while both budgets
+        // allow: the per-emitter pool cap and the module-wide pool budget
+        // across all emitters. Once both are full the loop recycles slots
+        // FIFO. Under simulation LOD one due step covers interval x the
+        // caller's fixed delta, so the debt accrues against wall time and
+        // the emission rate stays exact.
         emitter.spawnDebt += description.emitRate * stepDeltaSeconds;
         while (emitter.spawnDebt >= 1.0 && static_cast<std::uint32_t>(emitter.slots.size())
-                                              < std::min(description.maximumParticles, settings_.maximumParticlesPerEmitter))
+                                              < std::min(description.maximumParticles, settings_.maximumParticlesPerEmitter)
+                                              && totalSlots_ < settings_.maximumParticles)
         {
             SlotState slot;
             spawnSlot(emitter, slot, static_cast<std::uint32_t>(emitter.slots.size()));
             emitter.slots.push_back(slot);
+            totalSlots_ += 1;
             emitter.spawnDebt -= 1.0;
         }
         while (emitter.spawnDebt >= 1.0 && emitter.spawnCursor < emitter.slots.size())
@@ -336,7 +340,10 @@ private:
                 else
                 {
                     // Leaves settle briefly on impact and then expire (they
-                    // hold the contact for the configured settle window).
+                    // hold the contact for the configured settle window). The
+                    // settled branch only reaches non-snow kinds that settle,
+                    // i.e. leaves: the kinds that expire on contact (rain,
+                    // hail, fire) never enter it.
                     slot.settledTime += stepDeltaSeconds;
                     if (slot.settledTime >= settings_.leafSettleSeconds)
                     {
@@ -469,8 +476,11 @@ private:
                     slot.position[0] += result.normal[0] * result.depth;
                     slot.position[1] += result.normal[1] * result.depth;
                     slot.position[2] += result.normal[2] * result.depth;
-                    if (description.kind == EmitterKind::Rain || description.kind == EmitterKind::Hail)
+                    if (description.kind == EmitterKind::Rain || description.kind == EmitterKind::Hail
+                        || description.kind == EmitterKind::Fire)
                     {
+                        // Precipitation dies on impact; a flame that reaches
+                        // geometry burns out instead of settling.
                         slot.alive = false;
                         emitter.expiredTotal += 1;
                     }
@@ -491,7 +501,12 @@ private:
         engine::physics_rigid::WorldHandle world, const EmitterDescription *description, ParticlesError *error)
     {
         setError(error, ParticlesError::None);
-        if (rigid_ == nullptr || description == nullptr)
+        if (rigid_ == nullptr)
+        {
+            setError(error, ParticlesError::InvalidHandle);
+            return invalidEmitter;
+        }
+        if (description == nullptr)
         {
             setError(error, ParticlesError::InvalidDescription);
             return invalidEmitter;
@@ -501,7 +516,8 @@ private:
             setError(error, ParticlesError::CapacityExceeded);
             return invalidEmitter;
         }
-        if (description->maximumParticles > settings_.maximumParticlesPerEmitter)
+        if (description->maximumParticles == 0u
+            || description->maximumParticles > settings_.maximumParticlesPerEmitter)
         {
             setError(error, ParticlesError::InvalidDescription);
             return invalidEmitter;
@@ -526,11 +542,13 @@ private:
         // Stagger phase from the registration ordinal: emitters sharing an
         // update interval spread their due steps evenly across the cadence.
         emitter.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
+        // Capturing the gravity doubles as the world-handle validation: a
+        // world the rigid module does not know is rejected here instead of
+        // silently falling back to the default gravity.
         if (!rigid_->copyWorldGravity(rigid_->self, world, emitter.gravity))
         {
-            emitter.gravity[0] = 0.0;
-            emitter.gravity[1] = -9.81;
-            emitter.gravity[2] = 0.0;
+            setError(error, ParticlesError::InvalidHandle);
+            return invalidEmitter;
         }
         emitter.slots.reserve(description->maximumParticles);
         emitters_.push_back(std::move(emitter));
@@ -546,6 +564,7 @@ private:
         {
             return;
         }
+        totalSlots_ -= emitters_[iterator->second].slots.size();
         const std::size_t index = iterator->second;
         emitterIndexByHandle_.erase(iterator);
         if (index + 1 != emitters_.size())
@@ -571,6 +590,7 @@ private:
         emitter->description = *description;
         if (emitter->slots.size() > description->maximumParticles)
         {
+            totalSlots_ -= emitter->slots.size() - description->maximumParticles;
             emitter->slots.resize(description->maximumParticles);
             emitter->spawnCursor = 0;
         }
@@ -626,8 +646,22 @@ private:
             }
             if (slotIndex == emitter->slots.size())
             {
-                SlotState slot;
-                emitter->slots.push_back(slot);
+                // Growing the pool needs both budgets: the per-emitter pool
+                // cap and the module-wide pool budget. When either is full
+                // the burst particle drops (its spawn attempt still advanced
+                // the deterministic generation hash, so replays stay exact).
+                const bool poolCapacityAvailable
+                    = emitter->slots.size()
+                      < std::min(emitter->description.maximumParticles, settings_.maximumParticlesPerEmitter);
+                if (poolCapacityAvailable && totalSlots_ < settings_.maximumParticles)
+                {
+                    emitter->slots.push_back(SlotState{});
+                    totalSlots_ += 1;
+                }
+                else
+                {
+                    continue;
+                }
             }
             SlotState &slot = emitter->slots[slotIndex];
             spawnSlot(*emitter, slot, static_cast<std::uint32_t>(slotIndex));
@@ -820,6 +854,10 @@ private:
     std::unordered_map<EmitterHandle, std::size_t> emitterIndexByHandle_;
     EmitterHandle                                  nextEmitterHandle_ = 1;
     std::uint64_t                                  registrationOrdinal_ = 0;
+
+    // Module-wide pool budget bookkeeping: the total number of allocated
+    // slots across all emitters, bounded by settings_.maximumParticles.
+    std::size_t totalSlots_ = 0;
 
     // Reused scratch for the batched sphere-overlap queries.
     std::vector<std::size_t>                             sphereSlotIndices_;

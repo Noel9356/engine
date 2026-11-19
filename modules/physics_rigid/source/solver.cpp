@@ -10,8 +10,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 
 namespace engine::physics_rigid
 {

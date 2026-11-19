@@ -781,16 +781,6 @@ int main(int argc, char **argv)
                         demo::physics_sandbox::driveSimulationLod(dependencies, scene, sceneConfig, lodCameraPosition);
                     }
                 }
-                if (options.sceneName == "lod" && sceneConfig.driveSimulationLod)
-                {
-                    camera::CameraPose lodCamera{};
-                    if (cameraCapability.cameraPose(cameraCapability.self, cameraHandle, &lodCamera))
-                    {
-                        const double lodCameraPosition[3]
-                            = {lodCamera.position[0], lodCamera.position[1], lodCamera.position[2]};
-                        demo::physics_sandbox::driveSimulationLod(dependencies, scene, sceneConfig, lodCameraPosition);
-                    }
-                }
                 // Grab spring for rigid bodies: forces persist exactly one
                 // step, so re-apply each fixed update toward the current
                 // pointer ray.

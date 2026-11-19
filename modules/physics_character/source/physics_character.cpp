@@ -15,6 +15,7 @@
 #include <engine/physics_character/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/module_error.hpp>
 #include <engine/util/simulation_lod.hpp>
 
 #include <algorithm>
@@ -237,11 +238,17 @@ struct LeanRecord
 
 struct CharacterSettings
 {
-    std::uint32_t maximumCharacters     = 32;
-    std::uint32_t maximumJiggleChains   = 256;
-    std::uint32_t maximumPlanters       = 64;
-    std::uint32_t maximumHandPlanters   = 64;
+    std::uint32_t maximumCharacters      = 32;
+    std::uint32_t maximumJiggleChains    = 256;
+    std::uint32_t maximumFootPlanters    = 64;
+    std::uint32_t maximumHandPlanters    = 64;
     std::uint32_t maximumLeanControllers = 64;
+
+    // Secondary-motion gravity magnitude (meters per second squared): the
+    // jiggle chains' virtual force scales this by the chain's
+    // gravityInfluence factor. Configurable because a chain may ride a
+    // character whose world uses non-default gravity.
+    double jiggleGravityMagnitude = 9.81;
 
     // Simulation LOD: the shared ladder plus the per-band update intervals
     // (0 freezes that band, which is the Cached default).
@@ -272,13 +279,16 @@ public:
             settings_.maximumJiggleChains = static_cast<std::uint32_t>(*value);
         if (const auto value = context.configurationIntegerInSection("physics_character", "maximum_foot_planters");
             value && *value > 0 && *value <= 4096)
-            settings_.maximumPlanters = static_cast<std::uint32_t>(*value);
+            settings_.maximumFootPlanters = static_cast<std::uint32_t>(*value);
         if (const auto value = context.configurationIntegerInSection("physics_character", "maximum_hand_planters");
             value && *value > 0 && *value <= 4096)
             settings_.maximumHandPlanters = static_cast<std::uint32_t>(*value);
         if (const auto value = context.configurationIntegerInSection("physics_character", "maximum_lean_controllers");
             value && *value > 0 && *value <= 4096)
             settings_.maximumLeanControllers = static_cast<std::uint32_t>(*value);
+        if (const auto value = context.configurationFloatingInSection("physics_character", "jiggle_gravity_magnitude");
+            value && *value > 0.0 && *value <= 100.0 && std::isfinite(*value))
+            settings_.jiggleGravityMagnitude = *value;
         settings_.lod = engine::util::readSimulationLodSettings(context, "physics_character");
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
@@ -307,13 +317,14 @@ public:
         planterIndexByHandle_.clear();
         handPlanters_.clear();
         handPlanterIndexByHandle_.clear();
-        leans_.clear();
+        leanControllers_.clear();
         leanIndexByHandle_.clear();
         nextCharacterHandle_    = 1;
         nextChainHandle_        = 1;
         nextPlanterHandle_      = 1;
         nextHandPlanterHandle_  = 1;
         nextLeanHandle_         = 1;
+        registrationOrdinal_    = 0;
         statistics_             = CharacterStatistics{};
     }
 
@@ -335,10 +346,7 @@ private:
 
     static void setError(CharacterError *output, CharacterError value) noexcept
     {
-        if (output != nullptr)
-        {
-            *output = value;
-        }
+        engine::util::setModuleError(output, value);
     }
 
     CharacterRecord *findCharacter(CharacterHandle handle)
@@ -368,7 +376,7 @@ private:
     LeanRecord *findLean(LeanHandle handle)
     {
         const auto iterator = leanIndexByHandle_.find(handle);
-        return iterator != leanIndexByHandle_.end() ? &leans_[iterator->second] : nullptr;
+        return iterator != leanIndexByHandle_.end() ? &leanControllers_[iterator->second] : nullptr;
     }
 
     static bool finiteArray(const double *values, std::uint32_t count)
@@ -395,6 +403,8 @@ private:
             setError(error, CharacterError::InvalidDescription);
             return info;
         }
+        engine::physics_articulated::ArticulatedError articulatedError
+            = engine::physics_articulated::ArticulatedError::None;
         if (!finiteArray(parameters->position, 3) || !finiteArray(parameters->rotation, 4)
             || !std::isfinite(parameters->scale) || parameters->scale <= 0.0
             || !std::isfinite(parameters->totalMass) || parameters->totalMass <= 0.0
@@ -466,10 +476,15 @@ private:
         figure.rootDynamic   = !parameters->rootAnchored;
         figure.sleepingEnabled = parameters->sleepingEnabled;
 
-        info.figure = articulated_->createFigure(articulated_->self, world, &figure, nullptr);
+        info.figure = articulated_->createFigure(articulated_->self, world, &figure, &articulatedError);
         if (info.figure == engine::physics_articulated::invalidFigure)
         {
-            setError(error, CharacterError::CapacityExceeded);
+            // Propagate the articulated module's rejection: a full figure
+            // budget reports capacity, everything else (a rejected link
+            // description, an unknown world) reports a bad description.
+            setError(error, articulatedError == engine::physics_articulated::ArticulatedError::CapacityExceeded
+                                ? CharacterError::CapacityExceeded
+                                : CharacterError::InvalidDescription);
             return info;
         }
         info.partCount = kHumanoidPartCount;
@@ -882,7 +897,12 @@ private:
         math::Vec3 acceleration{};
         if (chain->hasPreviousVelocity)
         {
-            acceleration = (velocity - chain->previousRootVelocity) * (1.0 / fixedDeltaSeconds);
+            // The velocities are stepDeltaSeconds apart on a due pass (the
+            // LOD interval), so the finite difference divides by the step
+            // the pair actually spans; dividing by the bare fixed delta
+            // would amplify the excitation by the interval and break the
+            // module's wall-time pacing rule.
+            acceleration = (velocity - chain->previousRootVelocity) * (1.0 / stepDeltaSeconds);
         }
         chain->previousRootVelocity = velocity;
         chain->hasPreviousVelocity  = true;
@@ -900,7 +920,8 @@ private:
             const math::Vec3 localTip = offset + math::Vec3{
                 state.offsetVector[0], state.offsetVector[1], state.offsetVector[2]};
             const math::Vec3 tipWorld   = math::rotate(parentRotation, localTip);
-            const math::Vec3 forceWorld = math::Vec3{0.0, -9.81 * chain->description.gravityInfluence, 0.0} - acceleration;
+            const math::Vec3 forceWorld = math::Vec3{0.0, -settings_.jiggleGravityMagnitude * chain->description.gravityInfluence, 0.0}
+                                          - acceleration;
             // Torque about the bone origin from the tip force, expressed in
             // the parent bone frame (the spring state lives there).
             const math::Vec3 torqueWorld  = math::cross(tipWorld, forceWorld);
@@ -995,16 +1016,23 @@ private:
         engine::physics_rigid::WorldHandle world, const FootPlanterDescription *description, CharacterError *error)
     {
         setError(error, CharacterError::None);
-        if (rigid_ == nullptr || description == nullptr)
+        if (rigid_ == nullptr)
+        {
+            setError(error, CharacterError::InvalidHandle);
+            return invalidFootPlanter;
+        }
+        if (description == nullptr)
         {
             setError(error, CharacterError::InvalidDescription);
             return invalidFootPlanter;
         }
-        const double *all = &description->legUpperLength;
-        if (!finiteArray(all, 8) || description->legUpperLength <= 0.0 || description->legLowerLength <= 0.0
+        if (description->legUpperLength <= 0.0 || description->legLowerLength <= 0.0
             || description->footRadius <= 0.0 || description->maxStepHeight < 0.0 || description->strideThreshold <= 0.0
             || description->rayCastUp <= 0.0 || description->leadTime < 0.0
-            || !finiteArray(&description->footOffsets[0][0], 3) || !finiteArray(&description->footOffsets[1][0], 3))
+            || !std::isfinite(description->legUpperLength) || !std::isfinite(description->legLowerLength)
+            || !std::isfinite(description->hipAnchor[0]) || !std::isfinite(description->hipAnchor[1])
+            || !std::isfinite(description->hipAnchor[2]) || !finiteArray(description->footOffsets[0], 3)
+            || !finiteArray(description->footOffsets[1], 3))
         {
             setError(error, CharacterError::InvalidDescription);
             return invalidFootPlanter;
@@ -1019,7 +1047,7 @@ private:
             setError(error, CharacterError::InvalidDescription);
             return invalidFootPlanter;
         }
-        if (planters_.size() >= settings_.maximumPlanters)
+        if (planters_.size() >= settings_.maximumFootPlanters)
         {
             setError(error, CharacterError::CapacityExceeded);
             return invalidFootPlanter;
@@ -1027,6 +1055,14 @@ private:
         if (nextPlanterHandle_ == invalidFootPlanter)
         {
             setError(error, CharacterError::CapacityExceeded);
+            return invalidFootPlanter;
+        }
+        // The planter's world handle validates through a gravity probe: a
+        // world the rigid module does not know is rejected here.
+        double gravityProbe[3] = {0.0, 0.0, 0.0};
+        if (!rigid_->copyWorldGravity(rigid_->self, world, gravityProbe))
+        {
+            setError(error, CharacterError::InvalidHandle);
             return invalidFootPlanter;
         }
         FootPlanterRecord planter;
@@ -1243,7 +1279,7 @@ private:
         {
             lodSkippedSteps += planter.lodSkippedSteps;
         }
-        for (const LeanRecord &lean : leans_)
+        for (const LeanRecord &lean : leanControllers_)
         {
             lodSkippedSteps += lean.lodSkippedSteps;
         }
@@ -1426,7 +1462,7 @@ private:
             setError(error, CharacterError::InvalidDescription);
             return invalidLeanController;
         }
-        if (leans_.size() >= settings_.maximumLeanControllers)
+        if (leanControllers_.size() >= settings_.maximumLeanControllers)
         {
             setError(error, CharacterError::CapacityExceeded);
             return invalidLeanController;
@@ -1443,10 +1479,10 @@ private:
                               : nextLeanHandle_ + 1;
         lean.description = *description;
         lean.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
-        leans_.push_back(std::move(lean));
-        leanIndexByHandle_.emplace(leans_.back().handle, leans_.size() - 1);
-        statistics_.leanControllerCount = static_cast<std::uint32_t>(leans_.size());
-        return leans_.back().handle;
+        leanControllers_.push_back(std::move(lean));
+        leanIndexByHandle_.emplace(leanControllers_.back().handle, leanControllers_.size() - 1);
+        statistics_.leanControllerCount = static_cast<std::uint32_t>(leanControllers_.size());
+        return leanControllers_.back().handle;
     }
 
     void destroyLeanControllerImpl(LeanHandle handle)
@@ -1458,13 +1494,13 @@ private:
         }
         const std::size_t index = iterator->second;
         leanIndexByHandle_.erase(iterator);
-        if (index + 1 != leans_.size())
+        if (index + 1 != leanControllers_.size())
         {
-            leans_[index]                              = leans_.back();
-            leanIndexByHandle_[leans_[index].handle]   = index;
+            leanControllers_[index]                              = leanControllers_.back();
+            leanIndexByHandle_[leanControllers_[index].handle]   = index;
         }
-        leans_.pop_back();
-        statistics_.leanControllerCount = static_cast<std::uint32_t>(leans_.size());
+        leanControllers_.pop_back();
+        statistics_.leanControllerCount = static_cast<std::uint32_t>(leanControllers_.size());
     }
 
     bool updateLeanControllerImpl(LeanHandle handle, const engine::physics_rigid::RigidTransform *root,
@@ -1510,7 +1546,9 @@ private:
         math::Vec3 acceleration{};
         if (lean->hasPreviousVelocity)
         {
-            acceleration = (velocity - lean->previousVelocity) * (1.0 / fixedDeltaSeconds);
+            // Same interval-aware finite difference as the jiggle chains:
+            // the velocity pair spans the LOD-interval step.
+            acceleration = (velocity - lean->previousVelocity) * (1.0 / stepDeltaSeconds);
         }
         lean->previousVelocity      = velocity;
         lean->hasPreviousVelocity   = true;
@@ -1596,10 +1634,15 @@ private:
             return false;
         }
         const std::uint32_t liveCount = required < bodyCount ? required : bodyCount;
-        rigid_->copyBodyStates(rigid_->self, world, pushHandles_.data(), liveCount, pushStates_.data());
-        rigid_->copyBodyDescriptions(rigid_->self, world, pushHandles_.data(), liveCount, pushDescriptions_.data());
+        // The batched reads resolve in order; the resolved counts bound the
+        // loops so a partially-filled batch never reads stale entries.
+        const std::uint32_t resolvedStates = rigid_->copyBodyStates(rigid_->self, world, pushHandles_.data(),
+            liveCount, pushStates_.data());
+        const std::uint32_t resolvedDescriptions = rigid_->copyBodyDescriptions(rigid_->self, world,
+            pushHandles_.data(), liveCount, pushDescriptions_.data());
         const double radiusSquared = radius * radius;
-        for (std::uint32_t index = 0; index < liveCount; ++index)
+        for (std::uint32_t index = 0;
+            index < liveCount && index < resolvedStates && index < resolvedDescriptions; ++index)
         {
             if (pushDescriptions_[index].kind != engine::physics_rigid::BodyKind::Dynamic)
             {
@@ -1737,7 +1780,7 @@ private:
     std::vector<HandPlanterRecord>                        handPlanters_;
     std::unordered_map<HandPlanterHandle, std::size_t>    handPlanterIndexByHandle_;
     HandPlanterHandle                                     nextHandPlanterHandle_ = 1;
-    std::vector<LeanRecord>                               leans_;
+    std::vector<LeanRecord>                               leanControllers_;
     std::unordered_map<LeanHandle, std::size_t>           leanIndexByHandle_;
     LeanHandle                                            nextLeanHandle_ = 1;
 };

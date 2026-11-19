@@ -52,6 +52,10 @@ struct RopeRecord
     {
         std::uint32_t nodeA = 0;
         std::uint32_t nodeB = 0;
+        // The stretch segments the row spans (a segment index matches its
+        // stretch-constraint index); either one breaking releases the row.
+        std::uint32_t segmentA = 0;
+        std::uint32_t segmentB = 0;
         double        restLength = 0.0;
         double        compliance = 0.0;
     };

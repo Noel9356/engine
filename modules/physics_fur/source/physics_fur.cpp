@@ -143,8 +143,8 @@ public:
 
 private:
     // Resets every setting to its built-in default, then overlays whatever
-    // [fur] keys are present. Out-of-range values are clamped with a stderr
-    // warning, matching the renderer module's configuration style.
+    // [physics_fur] keys are present. Out-of-range values are clamped with a
+    // stderr warning, matching the renderer module's configuration style.
     void readConfiguration()
     {
         if (context_ == nullptr)
@@ -230,11 +230,13 @@ private:
                         "keeping the default\n",
                         band,
                         value);
-                    // Restore the built-in table for this reload.
-                    lodBands_.thresholds[0] = 0.32f;
-                    lodBands_.thresholds[1] = 0.16f;
-                    lodBands_.thresholds[2] = 0.08f;
-                    lodBands_.thresholds[3] = 0.03f;
+                    // Restore the built-in table for this reload (the same
+                    // defaults the LodBands struct ships).
+                    const LodBands defaults;
+                    for (std::size_t restored = 0; restored < 4; ++restored)
+                    {
+                        lodBands_.thresholds[restored] = defaults.thresholds[restored];
+                    }
                     break;
                 }
                 lodBands_.thresholds[band] = static_cast<float>(value);
@@ -274,29 +276,41 @@ private:
 
     static FurParameters presetParametersImpl(void *self, FurPreset preset)
     {
-        (void)self; // presets are static content
+        FurModule *module = static_cast<FurModule *>(self);
+        // Out-of-range preset ids resolve to the module's configured default
+        // preset (itself Plush unless [physics_fur] default_preset says
+        // otherwise), so consumers probing an unknown id get a coherent look.
         const std::uint32_t index = static_cast<std::uint32_t>(preset);
-        return presetTable(index >= static_cast<std::uint32_t>(FurPreset::count) ? 0u : index);
+        if (index >= static_cast<std::uint32_t>(FurPreset::count))
+        {
+            return presetTable(static_cast<std::uint32_t>(module->defaultPreset_));
+        }
+        return presetTable(index);
     }
 
     static bool generateFurTextureImpl(
         void *self, const FurTextureRequest *request, std::uint8_t *outPixelsRgba, std::size_t outCapacityBytes)
     {
-        (void)self;
+        FurModule *module = static_cast<FurModule *>(self);
         if (request == nullptr || outPixelsRgba == nullptr)
         {
             std::fprintf(stderr, "physics_fur module: generateFurTexture called with null request or buffer\n");
             return false;
         }
-        if (request->width < 16u || request->width > 2048u || request->height < 16u || request->height > 2048u)
+        // A zero edge length selects the module's configured default texture
+        // size ([physics_fur] texture_size, 256 by default); explicit sizes
+        // validate against the same 16..2048 range.
+        const std::uint32_t width = request->width != 0u ? request->width : module->defaultTextureSize_;
+        const std::uint32_t height = request->height != 0u ? request->height : module->defaultTextureSize_;
+        if (width < 16u || width > 2048u || height < 16u || height > 2048u)
         {
             std::fprintf(stderr,
                 "physics_fur module: fur texture size %ux%u outside 16..2048\n",
-                request->width,
-                request->height);
+                width,
+                height);
             return false;
         }
-        const std::size_t requiredBytes = static_cast<std::size_t>(request->width) * request->height * 4u;
+        const std::size_t requiredBytes = static_cast<std::size_t>(width) * height * 4u;
         if (outCapacityBytes < requiredBytes)
         {
             std::fprintf(stderr,
@@ -305,7 +319,7 @@ private:
                 requiredBytes);
             return false;
         }
-        generateFurTexturePixels(request->parameters, request->width, request->height, outPixelsRgba);
+        generateFurTexturePixels(request->parameters, width, height, outPixelsRgba);
         return true;
     }
 

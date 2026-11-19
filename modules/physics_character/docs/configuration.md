@@ -6,6 +6,7 @@ Every value is read once in `construct()`; the module does not follow configurat
 
 | Key | Type | Valid range / values | Default | Effect |
 | --- | --- | --- | --- | --- |
+| `physics_character.jiggle_gravity_magnitude` | number | (0, 100] | `9.81` | Secondary-motion gravity magnitude in meters per square second; each jiggle chain scales it by its `gravityInfluence` factor when it builds the droop force. |
 | `physics_character.maximum_characters` | integer | 1 - 4096 | `32` | Maximum concurrently existing characters (active-ragdoll control records over figures). |
 | `physics_character.lod_animation_threshold` | number | (0, 1] | `0.1` | Importance score at which the Animation band begins; scores below it sit in Cached. Must stay strictly below `lod_procedural_threshold`. |
 | `physics_character.lod_demotion_margin` | number | [0, 1) | `0.8` | Hysteresis fraction: a record keeps its current band until its score falls below that band's entry threshold times this margin. |

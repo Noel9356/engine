@@ -28,7 +28,7 @@ Like the rigid module, a fluid advances in whole fixed steps only. `step(fluid, 
 
 **Integration.** Velocities integrate the accumulated acceleration by the substep delta, then scale by the damping factor `1 / (1 + dt x damping)`, then clamp to `maximum_velocity` (the module configuration's stability bound); positions advance by the clamped velocity. Because each substep uses `fixedDeltaSeconds / substeps_per_step`, the substep count is the integration-resolution dial and the result stays independent of the call cadence.
 
-**Collision and bounds.** After integration each particle resolves against its surroundings: when `useBounds` is set, each axis clamps to the bounds box inset by `particleRadius` and the offending velocity component reverses at 30% strength (`x -`bounds_restitution``); then every particle queries the rigid world through `collideSphere` with `particleRadius` and is projected out along the push-out normal by the overlap depth, removing only the approaching velocity component (an inelastic contact that preserves sliding). The per-step contact count and the average density land in the statistics.
+**Collision and bounds.** After integration each particle resolves against its surroundings: when `useBounds` is set, each axis clamps to the bounds box inset by `particleRadius` and the offending velocity component reverses at 30% strength (`x -`bounds_restitution``); then every particle takes part in one batched `collideSpheres` query against the rigid world with `particleRadius` and is projected out along the push-out normal by the overlap depth, removing only the approaching velocity component (an inelastic contact that preserves sliding). The whole step's accumulated contact count and the average density land in the statistics.
 
 ## Provided / required / optional capabilities
 
@@ -57,7 +57,7 @@ From `module.toml` and the entry table at the bottom of `source/physics_fluid.cp
 
 **Stepping.** `stepFluid` runs the substep loop described above and reports failure (returning false) when any particle position becomes non-finite; the failing step does not advance the statistics counters. The counters accumulate steps, substeps, the contact count of the previous step, the previous step's average density, and the previous step's wall-clock cost. `simulate` mirrors the rigid module's accumulator: whole steps at the configured rate, budget clamp, and zero-budget reset when the step cap trips so a stalled consumer never accumulates debt.
 
-**Interaction with rigid bodies.** Fluid reads nothing from the rigid module beyond the world gravity and the `collideSphere` query, so any body kind works the same: static ground planes catch falling fluid, dynamic boxes pushed through a pool displace it, and kinematic carriers slosh it around. Rigid bodies never feel fluid back-reaction — fluid is one-way coupled by design (see configuration.md for the cost trade-off this represents).
+**Interaction with rigid bodies.** Fluid reads nothing from the rigid module beyond the world gravity and the batched `collideSpheres` query, so any body kind works the same: static ground planes catch falling fluid, dynamic boxes pushed through a pool displace it, and kinematic carriers slosh it around. Rigid bodies never feel fluid back-reaction — fluid is one-way coupled by design (see configuration.md for the cost trade-off this represents).
 
 ## Neighbor caching, simulation LOD, and robustness
 

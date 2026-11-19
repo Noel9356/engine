@@ -160,7 +160,9 @@ struct Quaternion
     double w = 1.0;
 };
 
-// Body placement: translation plus rotation.
+// Body placement: translation plus rotation. Every entry point that takes
+// one rejects non-finite positions and rotations (a zero quaternion
+// normalizes to identity; NaN or infinite components are rejected).
 struct RigidTransform
 {
     Vec3       position;
@@ -271,7 +273,11 @@ struct JointDescription
     // within (-pi, pi) with lower < upper. BallSocket: coneHalfAngleRadians
     // bounds the swing of the B-side anchor arm away from axisLocalA and
     // twistHalfAngleRadians bounds the rotation about it; both are measured
-    // against the frames captured at creation.
+    // against the frames captured at creation. Prismatic: limitLowerRadians
+    // / limitUpperRadians bound the anchor separation along axisLocalA in
+    // meters against the frame captured at creation. Distance and Fixed
+    // joints accept no limits: creating one with limitsEnabled reports
+    // InvalidDescription.
     bool   limitsEnabled         = false;
     double limitLowerRadians     = 0.0;
     double limitUpperRadians     = 0.0;
