@@ -72,15 +72,24 @@ bool PlanetGenerationParams::validate(std::string &error)
     // lattice coordinates per axis (see types.hpp), so the octree depth is
     // capped at 15 and the finest grid holds 2^15 chunks per root axis
     // (2^depth * leafGridN lattice steps). With leafGridN <= 64 that bounds
-    // voxels at rootSize / 2^19; deeper refinement than the cap allows is
-    // silently clamped.
+    // voxels at rootSize / 2^21 (rootSize / 2^19 at the leafGridN = 16
+    // default); deeper refinement than the cap allows is silently clamped.
     targetVoxelMeters = clampRange(targetVoxelMeters, radiusMeters / 131072.0, radiusMeters / 4.0);
+    selectionUpdateDistanceMeters = clampRange(selectionUpdateDistanceMeters, 0.0, radiusMeters * 0.1);
     maxDepthLimit = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxDepthLimit), 1.0, static_cast<double>(maxSupportedOctreeDepth)));
     lodAngularVoxelRadians = clampRange(lodAngularVoxelRadians, 0.0005, 0.5);
     lodBandLimitFactor = clampRange(lodBandLimitFactor, 1.0, 4.0);
+    lodScaffoldBuildsPerUpdate = static_cast<std::uint32_t>(clampRange(static_cast<double>(lodScaffoldBuildsPerUpdate), 0.0, 256.0));
     boundingFactor    = clampRange(boundingFactor, 1.05, 4.0);
     maxConcurrentBuilds  = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxConcurrentBuilds), 1.0, 64.0));
     maxNewBuildsPerUpdate = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxNewBuildsPerUpdate), 1.0, 256.0));
+    nodeRecordLifetimeUpdates = static_cast<std::uint32_t>(clampRange(static_cast<double>(nodeRecordLifetimeUpdates), 16.0, 65536.0));
+    nodeRecordPruneIntervalUpdates = static_cast<std::uint32_t>(clampRange(static_cast<double>(nodeRecordPruneIntervalUpdates), 1.0, 4096.0));
+    if (nodeRecordPruneIntervalUpdates > nodeRecordLifetimeUpdates)
+    {
+        nodeRecordPruneIntervalUpdates = nodeRecordLifetimeUpdates;
+    }
+    starvedInlineBuildIntervalUpdates = static_cast<std::uint32_t>(clampRange(static_cast<double>(starvedInlineBuildIntervalUpdates), 0.0, 4096.0));
     maxLivePlanets        = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxLivePlanets), 1.0, 4096.0));
     chunkEvictionUpdates  = static_cast<std::uint32_t>(clampRange(static_cast<double>(chunkEvictionUpdates), 2.0, 100000.0));
     chunkCacheCapacity    = static_cast<std::uint32_t>(clampRange(static_cast<double>(chunkCacheCapacity), 16.0, 65536.0));
@@ -105,8 +114,45 @@ bool PlanetGenerationParams::validate(std::string &error)
     mountainsFbm.gain        = clampRange(mountainsFbm.gain, 0.1, 0.9);
 
     mountainMassFraction         = clampRange(mountainMassFraction, 0.0, 1.0);
+    mountainMassWavelengthMultiple = clampRange(mountainMassWavelengthMultiple, 1.0, 8.0);
+    mountainCrestMassCoupling    = clampRange(mountainCrestMassCoupling, 0.0, 1.0);
     rangeClusterStrength         = clampRange(rangeClusterStrength, 0.0, 1.0);
     rangeClusterWavelengthMeters = clampRange(rangeClusterWavelengthMeters, radiusMeters / 1024.0, radiusMeters * 32.0);
+    rangeClusterGateHigh = clampRange(rangeClusterGateHigh, rangeClusterGateLow + 0.02, 1.0);
+    rangeClusterGateLow  = clampRange(rangeClusterGateLow, -1.0, rangeClusterGateHigh - 0.02);
+
+    mountainErosionWeight         = clampRange(mountainErosionWeight, 0.0, 1.0);
+    mountainErosionFaceBlendWidth = clampRange(mountainErosionFaceBlendWidth, 1.0e-4, 0.25);
+    mountainErosionTerrainFrequency = clampRange(mountainErosionTerrainFrequency, 0.25, 64.0);
+    mountainErosionTerrainAmplitude = clampRange(mountainErosionTerrainAmplitude, 0.0, 1.0);
+    mountainErosionTerrainOctaves   = static_cast<std::uint32_t>(
+        clampRange(static_cast<double>(mountainErosionTerrainOctaves), 1.0, static_cast<double>(maxFbmOctaves)));
+    mountainErosionTerrainGain       = clampRange(mountainErosionTerrainGain, 0.01, 0.99);
+    mountainErosionTerrainLacunarity = clampRange(mountainErosionTerrainLacunarity, 1.0, 4.0);
+    mountainErosionHeightOffsetLow   = clampRange(mountainErosionHeightOffsetLow, -4.0, 4.0);
+    mountainErosionHeightOffsetBlend = clampRange(mountainErosionHeightOffsetBlend, 0.0, 1.0);
+    mountainErosionScale         = clampRange(mountainErosionScale, 0.01, 8.0);
+    mountainErosionStrength      = clampRange(mountainErosionStrength, 0.0, 4.0);
+    mountainErosionGullyWeight   = clampRange(mountainErosionGullyWeight, 0.0, 4.0);
+    mountainErosionDetail        = clampRange(mountainErosionDetail, 0.1, 8.0);
+    mountainErosionCellScale     = clampRange(mountainErosionCellScale, 0.1, 4.0);
+    mountainErosionNormalization = clampRange(mountainErosionNormalization, 0.0, 1.0);
+    mountainErosionOctaves       = static_cast<std::uint32_t>(
+        clampRange(static_cast<double>(mountainErosionOctaves), 1.0, static_cast<double>(maxFbmOctaves)));
+    mountainErosionGain       = clampRange(mountainErosionGain, 0.1, 0.99);
+    mountainErosionLacunarity = clampRange(mountainErosionLacunarity, 1.0, 4.0);
+    mountainErosionRoundingRidge  = clampRange(mountainErosionRoundingRidge, 0.0, 4.0);
+    mountainErosionRoundingCrease = clampRange(mountainErosionRoundingCrease, 0.0, 4.0);
+    mountainErosionRoundingGlobal = clampRange(mountainErosionRoundingGlobal, 0.0, 4.0);
+    mountainErosionRoundingGain   = clampRange(mountainErosionRoundingGain, 0.5, 8.0);
+    mountainErosionOnsetInput     = clampRange(mountainErosionOnsetInput, 0.05, 16.0);
+    mountainErosionOnsetOctave    = clampRange(mountainErosionOnsetOctave, 0.05, 16.0);
+    mountainErosionOnsetRidgeMap  = clampRange(mountainErosionOnsetRidgeMap, 0.05, 16.0);
+    mountainErosionOnsetRidgeMask = clampRange(mountainErosionOnsetRidgeMask, 0.05, 16.0);
+    mountainErosionAssumedSlope      = clampRange(mountainErosionAssumedSlope, 0.0, 16.0);
+    mountainErosionAssumedSlopeBlend = clampRange(mountainErosionAssumedSlopeBlend, 0.0, 1.0);
+    mountainErosionProfileHigh = clampRange(mountainErosionProfileHigh, mountainErosionProfileLow + 0.01, 2.0);
+    mountainErosionProfileLow  = clampRange(mountainErosionProfileLow, -2.0, mountainErosionProfileHigh - 0.01);
 
     regionalAmplitudeMeters  = clampRange(regionalAmplitudeMeters, 0.0, 0.1 * radiusMeters);
     regionalWavelengthMeters = clampRange(regionalWavelengthMeters, radiusMeters / 8192.0, radiusMeters * 4.0);
@@ -141,9 +187,21 @@ bool PlanetGenerationParams::validate(std::string &error)
     strataAmplitudeMeters    = clampRange(strataAmplitudeMeters, 0.0, 0.01 * radiusMeters);
     strataBandMeters         = clampRange(strataBandMeters, radiusMeters / 16384.0, radiusMeters);
     strataWarp               = clampRange(strataWarp, 0.0, 4.0);
+    strataGateHigh = clampRange(strataGateHigh, 0.05, 1.0);
+    strataGateLow  = clampRange(strataGateLow, 0.0, strataGateHigh - 0.02);
+
+    // ---- geologic provinces -------------------------------------------------------
+    provinceWavelengthMeters = provinceWavelengthMeters <= 0.0
+        ? 0.0 // derived below (1.6 x continent wavelength), after the continent clamp
+        : clampRange(provinceWavelengthMeters, radiusMeters / 1024.0, radiusMeters * 32.0);
+    provinceRockVariation = clampRange(provinceRockVariation, 0.0, 1.0);
+    provinceStrataBias    = clampRange(provinceStrataBias, 0.0, 1.0);
+    provinceTerraceBias   = clampRange(provinceTerraceBias, 0.0, 1.0);
 
     coastalFlattenMeters = clampRange(coastalFlattenMeters, 0.0, 0.1 * radiusMeters);
     coastalFlattenFloor  = clampRange(coastalFlattenFloor, 0.0, 1.0);
+    coastalFlattenReachFraction = clampRange(coastalFlattenReachFraction, 0.5, 8.0);
+    coastalFlattenFullFraction  = clampRange(coastalFlattenFullFraction, 0.0, coastalFlattenReachFraction);
 
     caveThreshold           = clampRange(caveThreshold, 0.01, 0.6);
     caveWormWavelengthMeters = clampRange(caveWormWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
@@ -160,6 +218,10 @@ bool PlanetGenerationParams::validate(std::string &error)
     // pruning band and the surface scans, which must never see a value the
     // clamp would reject.
     abyssalDepthMeters   = clampRange(abyssalDepthMeters, 0.0, 0.08 * radiusMeters);
+    abyssalMaskHigh = clampRange(abyssalMaskHigh, -0.99, 1.0);
+    abyssalMaskLow  = clampRange(abyssalMaskLow, -1.0, abyssalMaskHigh - 0.02);
+    submarineFadeHighFraction = clampRange(submarineFadeHighFraction, 0.01, 1.0);
+    submarineFadeLowFraction  = clampRange(submarineFadeLowFraction, 0.0, submarineFadeHighFraction);
 
     // The aggregate relief band every generation term can reach. The ocean
     // surface has to stay inside it: the octree's sea-straddle exemption and
@@ -186,6 +248,8 @@ bool PlanetGenerationParams::validate(std::string &error)
     moistureBeltPolarAmplitude       = clampRange(moistureBeltPolarAmplitude, -1.0, 1.0);
     coastalMoistureBoost        = clampRange(coastalMoistureBoost, 0.0, 1.0);
     coastalMoistureBandMeters   = clampRange(coastalMoistureBandMeters, 1.0, radiusMeters);
+    climateContinentalityStrength = clampRange(climateContinentalityStrength, 0.0, 1.0);
+    climateRainShadowStrength     = clampRange(climateRainShadowStrength, 0.0, 1.0);
     colorVariation       = clampRange(colorVariation, 0.0, 1.0);
     colorVariationWavelengthMeters = clampRange(colorVariationWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     colorVariationGroundWavelengthMeters = clampRange(colorVariationGroundWavelengthMeters, radiusMeters / 16384.0, colorVariationWavelengthMeters);
@@ -217,6 +281,7 @@ bool PlanetGenerationParams::validate(std::string &error)
     walkGroundSnapMeters           = clampRange(walkGroundSnapMeters, 0.0, 1000.0);
     walkMaxStepUpMeters            = clampRange(walkMaxStepUpMeters, 0.0, 100.0);
     walkMaxClimbGrade              = clampRange(walkMaxClimbGrade, 0.1, 100.0);
+    walkTerminalVelocityMetersPerSecond = clampRange(walkTerminalVelocityMetersPerSecond, 1.0, 1000.0);
     swimSpeedMetersPerSecond       = clampRange(swimSpeedMetersPerSecond, 0.1, 1000.0);
     swimWadeDepthMeters            = clampRange(swimWadeDepthMeters, 0.0, 1000.0);
 
@@ -251,6 +316,7 @@ bool PlanetGenerationParams::validate(std::string &error)
         cloudColor[channel] = std::clamp(cloudColor[channel], 0.0f, 1.0f);
     }
     cloudShadowStrength = clampRange(cloudShadowStrength, 0.0, 1.0);
+    cloudShadowSoftness = clampRange(cloudShadowSoftness, 0.0, 1.0);
     {
         const double sunLength = std::sqrt(cloudShadowSunDirection[0] * cloudShadowSunDirection[0]
             + cloudShadowSunDirection[1] * cloudShadowSunDirection[1]
@@ -278,10 +344,13 @@ bool PlanetGenerationParams::validate(std::string &error)
     }
     waterDepthTintMeters        = clampRange(waterDepthTintMeters, 1.0, radiusMeters);
     waterShoreMixMeters         = clampRange(waterShoreMixMeters, 0.0, radiusMeters);
+    waterShoreSandBrightness    = clampRange(waterShoreSandBrightness, 1.0, 4.0);
     waterFoamWidthMeters        = clampRange(waterFoamWidthMeters, 0.0, 0.01 * radiusMeters);
     waterFoamStrength           = clampRange(waterFoamStrength, 0.0, 1.0);
+    waterFoamFalloffExponent    = clampRange(waterFoamFalloffExponent, 1.0, 8.0);
     waterWaveAmplitude        = clampRange(waterWaveAmplitude, 0.0, 1.0);
     waterWaveWavelengthMeters = clampRange(waterWaveWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
+    waterWaveChopFraction     = clampRange(waterWaveChopFraction, 0.0, 1.0);
 
     // ---- derived values -------------------------------------------------------------
     const double relief = shellReliefMeters;
@@ -296,16 +365,30 @@ bool PlanetGenerationParams::validate(std::string &error)
         ++depth;
     }
     derivedMaxDepth        = depth;
-    derivedLeafSizeMeters  = std::ldexp(derivedRootSizeMeters, -static_cast<int>(depth));
-    derivedVoxelMeters     = derivedLeafSizeMeters / static_cast<double>(leafGridN);
+    derivedVoxelMeters     = std::ldexp(derivedRootSizeMeters, -static_cast<int>(depth)) / static_cast<double>(leafGridN);
     derivedMinShellRadius  = std::max(0.0, radiusMeters - relief);
     derivedMaxShellRadius  = radiusMeters + relief;
     derivedMaxReliefMeters = relief;
     derivedSeaRadiusMeters = radiusMeters + seaLevelOffsetMeters;
-    // The broad mountain mass field rides at a fixed multiple of the crest
-    // wavelength (see reliefImpl); derived here so the octree's gradient
-    // bounds and the density field agree on one number.
-    derivedMountainMassWavelengthMeters = std::max(1.0, mountainWavelengthMeters * 1.8);
+    // The broad mountain mass field rides at the configured multiple of the
+    // crest wavelength (see reliefImpl); derived here so the octree's
+    // gradient bounds and the density field agree on one number.
+    derivedMountainMassWavelengthMeters = std::max(1.0, mountainWavelengthMeters * mountainMassWavelengthMultiple);
+    // Geologic provinces default to a broad multiple of the continent
+    // wavelength: provinces span whole landmass regions, a level above the
+    // continent field's own feature scale.
+    derivedProvinceWavelengthMeters = provinceWavelengthMeters > 0.0
+        ? provinceWavelengthMeters
+        : std::max(1.0, continentWavelengthMeters * 1.6);
+    // Sampling stride of the mesher's macro-climate grid: a sixteenth of the
+    // smallest climate-field wavelength the interpolated fields carry
+    // (temperature, moisture, clouds, provinces), so the grid resolves every
+    // octave those fields hold with several samples. The floor keeps the
+    // grid coarse enough that the packed cell indices cannot collide on any
+    // supported radius.
+    derivedMacroClimateStrideMeters = std::max(radiusMeters / 262144.0,
+        0.0625 * std::min(std::min(temperatureWavelengthMeters, moistureWavelengthMeters),
+            std::min(cloudWavelengthMeters, derivedProvinceWavelengthMeters)));
     return true;
 }
 

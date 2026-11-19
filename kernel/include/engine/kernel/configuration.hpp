@@ -256,14 +256,14 @@ private:
 
     static std::string leafValueRepr(const toml::node &value);
 
-    static void flattenNode(
-        const toml::node &subtree, const std::string &path, std::map<std::string, std::string> &out);
+    static void flattenNode(const toml::node &subtree, const std::string &path, std::map<std::string, std::string> &out,
+        std::size_t depth);
 
     void mergeTableAsOverride(toml::table &destination, const toml::table &source, const std::string &prefix,
-        const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker);
+        const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker, std::size_t depth);
 
     void mergeTableAsDefaults(toml::table &destination, const toml::table &source, const std::string &prefix,
-        const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker);
+        const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker, std::size_t depth);
 
     // The merged document; a raw owning pointer because toml::table is only
     // forward-declared here (deleted in the destructor).

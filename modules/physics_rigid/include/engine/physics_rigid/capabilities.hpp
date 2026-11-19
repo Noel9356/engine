@@ -54,7 +54,14 @@ namespace engine::physics_rigid
 //       bodies per step (force fields, buoyancy). Everything from ABI 4
 //       keeps its slot and meaning; consumers check `abi >= 5` before
 //       touching the additions.
-inline constexpr std::uint32_t physicsRigidCapabilityAbi = 5u;
+//   6 - appended the simulation-LOD surface: the setBodyImportance entry
+//       point writes a body's importance score, the solver spends a
+//       per-band iteration budget on each constraint (the largest budget
+//       among the constraint's dynamic bodies), and WorldStatistics grew
+//       the lodReducedBodyCount counter. Everything from ABI 5 keeps its
+//       slot and meaning; consumers check `abi >= 6` before touching the
+//       additions.
+inline constexpr std::uint32_t physicsRigidCapabilityAbi = 6u;
 
 using WorldHandle  = std::uint32_t;
 using BodyHandle   = std::uint32_t;
@@ -324,6 +331,11 @@ struct WorldStatistics
 
     std::uint32_t triggerCount             = 0;
     std::uint32_t pendingTriggerEventCount = 0;
+
+    // Simulation LOD: awake dynamic bodies whose fidelity band sat below
+    // Full on the last step, so their constraints solved on reduced
+    // iteration budgets.
+    std::uint32_t lodReducedBodyCount = 0;
 };
 
 // Closest ray hit. The normal always faces the ray origin (opposes direction).
@@ -350,7 +362,7 @@ struct SweepHit
 
 // A trigger volume: a non-solid shape region that reports which bodies enter
 // or leave it. Triggers participate in no contact solving; they are evaluated
-// once per step against the solid bodies (static, kinematic, and dynamic
+// once per substep against the solid bodies (static, kinematic, and dynamic
 // alike). A trigger is either fixed in world space or attached to a body and
 // follows that body's transform every step.
 struct TriggerDescription
@@ -585,6 +597,14 @@ struct PhysicsRigidCapability
         BodyState *outStates);
     std::uint32_t (*copyBodyDescriptions)(void *self, WorldHandle world, const BodyHandle *bodies,
         std::uint32_t bodyCount, BodyDescription *outDescriptions);
+
+    // Simulation LOD: writes the body's importance score in [0, 1]; the
+    // solver resolves the fidelity band once per step (with demotion
+    // hysteresis, the shared ladder every simulation module uses) and spends
+    // a per-band iteration budget on the body's constraints. Non-finite
+    // scores report failure. Every body starts at importance 1.0 (the Full
+    // band), so a world nobody scores solves exactly as before.
+    bool (*setBodyImportance)(void *self, WorldHandle world, BodyHandle body, double importance);
 };
 
 } // namespace engine::physics_rigid

@@ -86,7 +86,7 @@ The catalog format itself (`asset_catalog.cpp`) is little-endian: 8-byte magic `
 
 - Capability calls are safe from any thread. `AssetCache::mutex_` guards `records_`, `pathIndex_`, `residentBytes_`, `reservedBytes_`, and the handle counter; a dedicated `canonicalPathMutex_` guards the canonical-path cache and the identity dedupe between concurrent requests; each record has a `dataMutex` for its byte buffer and a `stateMutex` + `stateCondition` pair that `waitForAsset` sleeps on.
 - Reads run either inline on the caller's thread or on task-scheduler worker threads; the scheduler pointer is captured in `construct()`.
-- `AssetInfo::canonicalPath` points into the record's string and is only valid until that record is evicted, purged, or the module stops.
+- `assetInfo` reports state, error, sizes, and reference counts as plain values; `copyAssetPath` copies the canonical path into a caller-owned buffer, so nothing in `AssetInfo` borrows from the cache.
 - `copyAssetData` re-checks the record's state under `dataMutex` before copying, guaranteeing the bytes and state are consistent at the time of the copy (a concurrent reload could otherwise swap bytes between an unlocked state check and the data lock).
 - Records live until the last reference is released (or `stop()` clears the cache). The module instance itself is created by the kernel's entry table and destroyed by the kernel after `stop()`.
 - The catalog/cook helpers in `asset_catalog.cpp` share no mutable state except an atomic temporary-name counter, so concurrent use against different destinations is safe; the final rename makes each file install atomic.

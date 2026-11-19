@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <engine/planet/atmosphere.hpp>
 #include <engine/planet/climate.hpp>
+#include <engine/planet/erosion.hpp>
 #include <engine/planet/fbm.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
@@ -43,6 +44,7 @@ struct ReliefSample
     double cliffFactor    = 0.0; // terrace/cliff mask in [0, 1]
     double detailFade     = 1.0; // submarine fade of the detail fields in [0, 1]
     double coastalTaper   = 1.0; // detail damping near the datum in [0, 1] (coastal flattening)
+    double provinceChemistry = 0.0; // rock character in [0, 1]: 0 = shield/volcanic, 1 = sedimentary
 };
 
 class DensityField final
@@ -62,7 +64,14 @@ public:
     // curvature its own lattice resolves, so the fine isoline and the coarse
     // chords meet without slivers only when the field near their shared
     // boundary carries no content the coarse lattice cannot represent.
-    double densityAt(const Vec3 &point, double lowPassCutoffMeters = 0.0) const;
+    //
+    // denseSampling declares that the caller walks a dense sample grid
+    // around this point (the mesher's chunk lattices): the eroded-mountain
+    // relief then reads from its shared corner lattice instead of the exact
+    // filter per point. Both are pure functions of (point, cutoff), so any
+    // caller mix reads consistent values; the flag only chooses which cost
+    // model serves the query (see MountainErosionField::sample).
+    double densityAt(const Vec3 &point, double lowPassCutoffMeters = 0.0, bool denseSampling = false) const;
 
     // Convenience: FIRST radius where the density crosses zero along the
     // given unit direction (surface radius). The shell band is scanned
@@ -91,6 +100,22 @@ public:
     // when cloud shadows are disabled.
     double cloudShadow(const Vec3 &unitDirection, double lowPassCutoffMeters) const;
 
+    // Full single-point climate classification (macro fields evaluated
+    // exactly for this point, then classified). The single-point path for
+    // capability consumers and tooling; the mesher routes through
+    // macroSampleAt + ClimateSampler::sample to share the low-frequency
+    // fields between vertices.
+    ClimateSample sampleClimate(const Vec3 &unitDirection, double radiusMeters, double slope01,
+        double lowPassCutoffMeters = 0.0) const;
+
+    // Low-frequency climate fields at one planet-local surface point
+    // (see ClimateMacroSample): sea-level temperature and moisture
+    // (with continentality and rain shadow), cloud shadow, geologic-province
+    // character. Everything here varies over landscape scales - the mesher
+    // samples this on a coarse position-anchored grid and interpolates per
+    // vertex, so shared vertices evaluate identical values from any chunk.
+    void macroSampleAt(const Vec3 &surfacePoint, double lowPassCutoffMeters, ClimateMacroSample &outMacro) const;
+
     const CloudField &clouds() const
     {
         return clouds_;
@@ -98,8 +123,29 @@ public:
 
 private:
     // Radial relief with an optional low-pass cutoff (the raw path is
-    // reliefImpl(direction, 0)).
-    ReliefSample reliefImpl(const Vec3 &unitDirection, double lowPassCutoffMeters) const;
+    // reliefImpl(direction, 0)); denseSampling forwards to the eroded-
+    // mountain field's lattice path (see densityAt).
+    ReliefSample reliefImpl(const Vec3 &unitDirection, double lowPassCutoffMeters, bool denseSampling) const;
+
+    // Sample position for the continent-scale fields: the radial position,
+    // bent by the domain warp when the warp amplitude is configured. Shared
+    // by the relief composition and the macro climate path so both read the
+    // same warped geography.
+    Vec3 warpedSamplePosition(const Vec3 &unitDirection, double lowPassCutoffMeters) const;
+
+    // Continent base field (signed, positive = land) at an already-warped
+    // sample position; shared by the relief composition and the macro
+    // climate path (continentality).
+    double continentFieldAt(const Vec3 &warpedPosition, double lowPassCutoffMeters) const;
+
+    // Broad mountain-mass envelope in [0, 1] at an already-warped sample
+    // position; shared by the relief composition (the mountain profile) and
+    // the macro climate path (rain shadow).
+    double mountainMassAt(const Vec3 &warpedPosition, double lowPassCutoffMeters) const;
+
+    // Unit tangent pointing DOWNWIND at one direction (prevailing-wind frame
+    // for the rain shadow; see the climate_wind_zones_enabled key).
+    Vec3 prevailingWindDownwind(const Vec3 &unitDirection) const;
 
     // The fBm streams (see fbm()/ridgedFbm() in fbm.hpp), indexed for the
     // fbmSeeds_ table below.
@@ -118,6 +164,8 @@ private:
         streamDetail,
         streamCaveA,
         streamCaveB,
+        streamProvince,
+        streamProvinceCarbonate,
         streamCount
     };
 
@@ -139,6 +187,10 @@ private:
     std::int64_t seedMountainMass_;
     std::int64_t seedRangeCluster_;
     std::int64_t seedRegional_;
+    std::int64_t seedErosion_;
+
+    // Eroded-mountain field (see erosion.hpp), seeded above.
+    MountainErosionField erosion_;
 
     // Per-octave seed tables for the fBm streams (derived in the constructor).
     std::array<FbmStreamSeeds, streamCount> fbmSeeds_;

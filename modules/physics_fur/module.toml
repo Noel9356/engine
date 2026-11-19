@@ -1,0 +1,13 @@
+config_keys           = [
+    "physics_fur.default_preset",
+    "physics_fur.lod_fade_fraction",
+    "physics_fur.lod_height_scales",
+    "physics_fur.lod_layer_counts",
+    "physics_fur.lod_screen_sizes",
+    "physics_fur.max_layers",
+    "physics_fur.texture_size",
+]
+name                  = "physics_fur"
+provides              = ["physics_fur"]
+requires              = []
+version               = "0.1.0"

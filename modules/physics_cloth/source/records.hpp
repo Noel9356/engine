@@ -137,9 +137,7 @@ struct ClothSettings
     // half, Procedural = quarter, Animation = one); the interval table says
     // how many fixed steps each band updates on (0 freezes that band, which
     // is the Cached default).
-    bool                              lodEnabled   = false;
-    engine::util::SimulationFidelityThresholds lodThresholds{};
-    std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
+    engine::util::SimulationLodSettings lod{};
 };
 
 } // namespace engine::physics_cloth

@@ -55,8 +55,16 @@ double fbm(const FbmStreamSeeds &seeds, const Vec3 &point, double wavelengthMete
         {
             break; // octaves shorten monotonically: every later fade is also zero
         }
-        sum += amplitude * noise::simplex3ImproveXY(seeds.perOctave[octave], x, y, z);
-        norm += amplitude;
+        // The fade is APPLIED, not just tested: octaves in the transition band
+        // (cutoff..2*cutoff wavelengths) must contribute proportionally to
+        // their fade, and the normalizer must carry the same weight, or the
+        // surviving octaves get renormalized UP whenever the cutoff crosses
+        // one of their wavelengths - a discontinuous amplitude jump between
+        // the LOD depths either side of the crossing (and the gradient bound
+        // the octree probe margins derive from assumes exactly this
+        // proportional fade).
+        sum += amplitude * fade * noise::simplex3ImproveXY(seeds.perOctave[octave], x, y, z);
+        norm += amplitude * fade;
         x *= fbmParams.lacunarity;
         y *= fbmParams.lacunarity;
         z *= fbmParams.lacunarity;
@@ -85,8 +93,8 @@ double ridgedFbm(const FbmStreamSeeds &seeds, const Vec3 &point, double waveleng
             break; // octaves shorten monotonically: every later fade is also zero
         }
         const double n = noise::simplex3ImproveXY(seeds.perOctave[octave], x, y, z);
-        sum += amplitude * (1.0 - std::abs(n));
-        norm += amplitude;
+        sum += amplitude * fade * (1.0 - std::abs(n));
+        norm += amplitude * fade;
         x *= fbmParams.lacunarity;
         y *= fbmParams.lacunarity;
         z *= fbmParams.lacunarity;
@@ -111,15 +119,64 @@ double bandLimitedReliefGradient(const PlanetGenerationParams &params, double lo
     const auto term = [&](double amplitudeMeters, double wavelengthMeters)
     { return amplitudeMeters / std::max(1.0, wavelengthMeters)
          * lowPassFade(lowPassCutoffMeters, wavelengthMeters); };
+    // The abyssal deepening rides a smoothstep over the abyssal mask window;
+    // its metric gradient bound carries the smoothstep's worst slope
+    // (1.5 / window width), mirroring the field itself.
+    const double abyssalSlopeFactor = 1.5 / std::max(1.0e-3, params.abyssalMaskHigh - params.abyssalMaskLow);
+    // The classic mass-and-crest profile carries (1 - erosion weight) of the
+    // mountain amplitude; the eroded profile below carries the rest.
+    const double fbmMountainShare = 1.0 - params.mountainErosionWeight;
     const double gradient = term(params.continentAmplitudeMeters, params.continentWavelengthMeters)
-        + term(params.abyssalDepthMeters * (1.0 / 0.58), params.continentWavelengthMeters)
-        + term(params.mountainAmplitudeMeters, params.mountainWavelengthMeters)
-        + term(params.mountainAmplitudeMeters, params.derivedMountainMassWavelengthMeters)
+        + term(params.abyssalDepthMeters * abyssalSlopeFactor, params.continentWavelengthMeters)
+        + fbmMountainShare * term(params.mountainAmplitudeMeters, params.mountainWavelengthMeters)
+        + fbmMountainShare * term(params.mountainAmplitudeMeters, params.derivedMountainMassWavelengthMeters)
         + term(params.mountainAmplitudeMeters, params.rangeClusterWavelengthMeters)
         + term(params.regionalAmplitudeMeters, params.regionalWavelengthMeters)
         + term(params.hillAmplitudeMeters, params.hillWavelengthMeters)
         + term(params.detailAmplitudeMeters, params.detailWavelengthMeters);
-    return 3.0 * gradient;
+
+    // Eroded-mountain slope bound, separate from the composed bound above:
+    // each gully octave contributes its stripe strength over its own stripe
+    // wavelength (the stripe gradient bound is exact: the normalized sine
+    // carries the full circle rate) and the massif term carries the terrain
+    // amplitude over the massif wavelength. The per-octave sum assumes every
+    // octave peaks in alignment AND every mask stage saturates; the filter's
+    // faded gullies cannot actually reach that (the combi mask opens with
+    // the stripe slope and therefore peaks exactly where the stripe height
+    // crosses zero - the anti-correlation bounds a single octave's realized
+    // slope well under the raw stripe rate - and the stacked mask product
+    // that gates octave i must have EVERY prior stage open with it, which
+    // slope scans of the recommended shaping put at a vanishing fraction of
+    // the terrain). The factor takes the provable single-octave
+    // anti-correlation and leaves the residual stacked-mask tail to the
+    // octree's own undecided-refine path (any probe disagreement refines
+    // regardless of the margin). The range-cluster term above stays
+    // unweighted: the mask gates the eroded profile exactly as it gates the
+    // classic one.
+    double erosionGradient = 0.0;
+    if (params.mountainErosionWeight > 0.0)
+    {
+        const double metersPerUnit = std::max(1.0, params.mountainWavelengthMeters);
+        const double span = std::max(0.01, params.mountainErosionProfileHigh - params.mountainErosionProfileLow);
+        double stripeSlope = 0.0;
+        double strength = params.mountainErosionStrength * params.mountainErosionScale;
+        double stripeWavelength = params.mountainErosionScale * params.mountainErosionCellScale * metersPerUnit;
+        for (std::uint32_t octave = 0; octave < params.mountainErosionOctaves; ++octave)
+        {
+            stripeSlope += strength / std::max(1.0, stripeWavelength)
+                * lowPassFade(lowPassCutoffMeters, stripeWavelength);
+            strength *= params.mountainErosionGain;
+            stripeWavelength /= params.mountainErosionLacunarity;
+        }
+        const double massifWavelength =
+            metersPerUnit / std::max(0.25, params.mountainErosionTerrainFrequency);
+        const double massifSlope = params.mountainErosionTerrainAmplitude / massifWavelength
+            * lowPassFade(lowPassCutoffMeters, massifWavelength);
+        erosionGradient = params.mountainErosionWeight * params.mountainAmplitudeMeters / span
+            * (6.283185307179586 * stripeSlope + 2.0 * massifSlope) * 1.25;
+    }
+
+    return 3.0 * gradient + erosionGradient;
 }
 
 double bandLimitedBoundedTerms(const PlanetGenerationParams &params, double lowPassCutoffMeters)

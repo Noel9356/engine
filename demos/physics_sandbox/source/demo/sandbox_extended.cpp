@@ -970,6 +970,55 @@ void addLedgeRamp(const SceneDependencies &dependencies, SceneHandles &handles)
 
 } // namespace
 
+// The "lod" layout: eight kinematic shaker platforms at growing distance
+// along -Z, each carrying a small pile of crates. The shaking keeps every
+// crate awake and touching, so the solver works on all of them every step,
+// and driveSimulationLod scales each platform's importance by its distance
+// to the camera - the near piles solve at full iteration budgets while the
+// far ones ride the reduced bands, and --stats-every shows the split.
+void addLodScene(const SceneDependencies &dependencies, const SceneConfig &config, SceneHandles &handles,
+    std::ostringstream &report)
+{
+    if (dependencies.rigid == nullptr)
+    {
+        report << "the rigid capability is unavailable\n";
+        return;
+    }
+    addFlatScenery(dependencies, config, handles);
+
+    constexpr std::uint32_t kPlatformCount = 8;
+    constexpr double        kSpacing       = 8.0;
+    constexpr std::uint32_t kCratesPerPlatform = 5;
+    for (std::uint32_t platform = 0; platform < kPlatformCount; ++platform)
+    {
+        const double platformZ = -static_cast<double>(platform) * kSpacing;
+        BodyDescription platformBody;
+        platformBody.shape              = boxShape(1.6, 0.15, 1.6);
+        platformBody.transform.position = Vec3{0.0, 0.35, platformZ};
+        platformBody.kind               = engine::physics_rigid::BodyKind::Kinematic;
+        platformBody.material.friction  = 0.9;
+        handles.extended.shakerPlatforms.push_back(createBody(dependencies, handles.world, platformBody));
+
+        // The palette cools with distance so the gradient reads in captures.
+        const float palette[3] = {0.85f - 0.55f * (platform / 7.0f),
+            0.55f + 0.10f * (platform / 7.0f),
+            0.20f + 0.60f * (platform / 7.0f)};
+        for (std::uint32_t crate = 0; crate < kCratesPerPlatform; ++crate)
+        {
+            BodyDescription crateBody;
+            crateBody.shape              = boxShape(0.52, 0.52, 0.52);
+            crateBody.transform.position = Vec3{-0.42 + 0.42 * static_cast<double>(crate % 3),
+                0.75 + 0.54 * static_cast<double>(crate / 3),
+                platformZ + 0.36 * static_cast<double>(crate % 2) - 0.18};
+            crateBody.kind               = engine::physics_rigid::BodyKind::Dynamic;
+            crateBody.density            = 300.0;
+            crateBody.material.friction  = 0.55;
+            crateBody.material.restitution = 0.12;
+            pushBody(handles, createBody(dependencies, handles.world, crateBody), PrimitiveKind::Box, palette, false);
+        }
+    }
+}
+
 bool buildExtendedScene(const SceneDependencies &dependencies, const SceneConfig &config, const std::string &sceneName,
     SceneHandles &outHandles, std::string &outReport)
 {
@@ -1002,6 +1051,10 @@ bool buildExtendedScene(const SceneDependencies &dependencies, const SceneConfig
     {
         addLedgeRamp(dependencies, outHandles);
         addCharacterScene(dependencies, config, outHandles, report);
+    }
+    else if (sceneName == "lod")
+    {
+        addLodScene(dependencies, config, outHandles, report);
     }
     else
     {
@@ -1073,6 +1126,34 @@ void destroyExtendedScene(const SceneDependencies &dependencies, SceneHandles &h
 void stepExtendedBeforeRigid(const SceneDependencies &dependencies, SceneHandles &handles, double simulatedSeconds,
     double fixedDeltaSeconds)
 {
+    // The "lod" layout's shaker platforms: kinematic bodies oscillating
+    // vertically (position and velocity set together, like the paddle), so
+    // their crates stay awake and keep real contacts at every distance.
+    if (dependencies.rigid != nullptr && !handles.extended.shakerPlatforms.empty())
+    {
+        constexpr double kShakeFrequency = 0.9;
+        constexpr double kShakeAmplitude = 0.26;
+        for (std::size_t platform = 0; platform < handles.extended.shakerPlatforms.size(); ++platform)
+        {
+            const BodyHandle handle = handles.extended.shakerPlatforms[platform];
+            engine::physics_rigid::BodyState state{};
+            if (!dependencies.rigid->copyBodyState(dependencies.rigid->self, handles.world, handle, &state))
+            {
+                continue;
+            }
+            const double phase    = 2.0 * kPi * kShakeFrequency * simulatedSeconds
+                + static_cast<double>(platform) * (kPi / 4.0);
+            const double height   = 0.35 + kShakeAmplitude * std::sin(phase);
+            const double velocity = kShakeAmplitude * 2.0 * kPi * kShakeFrequency * std::cos(phase);
+            state.transform.position = Vec3{state.transform.position.x, height, state.transform.position.z};
+            dependencies.rigid->setBodyTransform(
+                dependencies.rigid->self, handles.world, handle, &state.transform, false);
+            const double platformVelocity[3] = {0.0, velocity, 0.0};
+            dependencies.rigid->setBodyLinearVelocity(
+                dependencies.rigid->self, handles.world, handle, platformVelocity);
+        }
+    }
+
     if (handles.world == engine::physics_rigid::invalidWorld)
     {
         return;
@@ -1127,6 +1208,7 @@ void stepExtendedBeforeRigid(const SceneDependencies &dependencies, SceneHandles
 void stepExtendedAfterRigid(
     const SceneDependencies &dependencies, SceneHandles &handles, double simulatedSeconds, double fixedDeltaSeconds)
 {
+    (void)simulatedSeconds;
     if (handles.world == engine::physics_rigid::invalidWorld)
     {
         return;
@@ -1287,4 +1369,31 @@ void updateExtendedScriptedTimeline(const SceneDependencies &dependencies, Scene
     }
 }
 
+void driveSimulationLod(const SceneDependencies &dependencies, const SceneHandles &handles, const SceneConfig &config,
+    const double cameraPosition[3])
+{
+    if (dependencies.rigid == nullptr || handles.world == engine::physics_rigid::invalidWorld
+        || cameraPosition == nullptr)
+    {
+        return;
+    }
+    const math::Vec3 camera{cameraPosition[0], cameraPosition[1], cameraPosition[2]};
+    const double     span = config.lodFarDistance - config.lodNearDistance;
+    for (const SceneBody &sceneBody : handles.bodies)
+    {
+        engine::physics_rigid::BodyState state{};
+        if (!dependencies.rigid->copyBodyState(dependencies.rigid->self, handles.world, sceneBody.body, &state))
+        {
+            continue;
+        }
+        const math::Vec3 offset = state.transform.position - camera;
+        const double     distance = std::sqrt(math::dot(offset, offset));
+        const double     falloff
+            = span > 0.0 ? (distance - config.lodNearDistance) / span : (distance > config.lodNearDistance ? 1.0 : 0.0);
+        const double importance = 1.0 - std::clamp(falloff, 0.0, 1.0);
+        dependencies.rigid->setBodyImportance(dependencies.rigid->self, handles.world, sceneBody.body, importance);
+    }
+}
+
 } // namespace demo::physics_sandbox
+

@@ -72,8 +72,10 @@ public:
     void update(const Vec3 &eyeLocal);
 
     // Copies borrowed views of every visible, ready chunk (terrain first,
-    // then that chunk's water patch). Returns the count written; call
-    // visibleChunkCapacity() to size the buffer.
+    // then that chunk's water patch), followed by the streaming-fallback
+    // ancestors of visible chunks still building (see lodMissingFallback).
+    // Returns the count written; call visibleChunkCapacity() to size the
+    // buffer.
     std::uint32_t copyVisibleChunks(PlanetChunkView *output, std::uint32_t capacity);
     std::uint32_t visibleChunkCapacity() const;
 
@@ -90,8 +92,6 @@ public:
     std::uint64_t buildChunkHash(const ChunkCoord &coord, const ConformMask &conformMask) const;
 
 private:
-    // Updates without a delivered mesh (while work is queued) before one chunk is built on the calling thread.
-    static constexpr std::uint32_t kStarvedUpdatesBeforeInlineBuild = 30;
     // Cache eviction scan cadence, in updates.
     static constexpr std::uint64_t kEvictionScanInterval = 8;
 
@@ -118,6 +118,14 @@ private:
     void evictStaleMeshes();
     void buildWorkerLoop();
 
+    // Streaming coverage for one visible chunk without a finished mesh (see
+    // lodMissingFallback in params.hpp): records its nearest finished
+    // distance-appropriate ancestor as a fallback draw and its coarsest
+    // pure ancestor as a scaffold build candidate. Both walks are memoized
+    // per pass in readyLeafAncestorStamps_ / ancestorFallbackMemo_, so
+    // chunks sharing ancestor chains resolve in near-constant time.
+    void planChunkCoverage(const ChunkCoord &coord, const Vec3 &eyeLocal);
+
     // Owned copy: capability callers pass temporaries (stack locals layered
     // over the module config), so a reference would dangle.
     PlanetGenerationParams        params_;
@@ -133,16 +141,47 @@ private:
     VisibleLeafSet           visibleLeafSet_;
 
     // Scratch for the nearest-first request pass of update() (kept at member
-    // scope so streaming frames do not reallocate the missing-chunk buffer).
-    // Entries carry the INDEX of the visible chunk (and of its conforming
-    // mask in visibleMasks_), not the mask itself: the sort below moves only
-    // the small tuple, and the mask is read once when the request is issued.
-    struct MissingChunk
+    // scope so streaming frames do not reallocate the candidate buffer).
+    // Fine entries carry the INDEX of the visible chunk (and of its
+    // conforming mask in visibleMasks_), scaffold entries the ancestor
+    // coordinate: the sort moves only the small tuple, and the mask is read
+    // once when the request is issued.
+    struct BuildCandidate
     {
-        double        apparentSize = 0.0; // chunk width / distance (screen-size priority)
-        std::uint32_t visibleIndex = 0;   // index into lastVisible_ / visibleMasks_
+        double        apparentSize = 0.0;    // chunk width / distance (screen-size priority)
+        std::uint32_t visibleIndex = 0;       // fine entries: index into lastVisible_ / visibleMasks_
+        ChunkCoord    scaffold{};            // scaffold entries: the ancestor to build
+        bool          isScaffold   = false;
     };
-    std::vector<MissingChunk> missingScratch_;
+    std::vector<BuildCandidate> candidateScratch_;
+
+    // Streaming coverage state (see lodMissingFallback in params.hpp).
+    // fallbackDraws_ holds the finished ancestor chunks serving as draw
+    // stand-ins this pass (sorted, deduplicated); copyVisibleChunks emits
+    // them after the visible set and their eviction stamps refresh in the
+    // pass, so reused coverage is not aged out while it is on screen.
+    // scaffoldNeeded_ holds the pure ancestors whose builds the queue must
+    // keep alive this pass; the stale-entry cancellation keeps visible-set
+    // entries plus these. readyLeafAncestorStamps_ marks, per pass, every
+    // ancestor of a finished visible chunk (an ancestor of a missing chunk
+    // is "shared" while stamped and "pure" once unstamped);
+    // ancestorFallbackMemo_ caches the nearest finished ancestor per chain
+    // node. All three carry update stamps instead of being cleared, so a
+    // streaming pass never reallocates.
+    std::vector<ChunkKey>        fallbackDraws_;
+    std::unordered_set<ChunkKey> fallbackSeen_;
+    std::unordered_set<ChunkKey> scaffoldNeeded_;
+    // Visible indices of the current pass's holes (chunks without a mesh of
+    // their own): the coverage planning runs only when this is non-empty,
+    // so the finished steady state skips the stamping and planning passes.
+    std::vector<std::uint32_t>   holeScratch_;
+    std::unordered_map<ChunkKey, std::uint64_t> readyLeafAncestorStamps_;
+    struct FallbackMemo
+    {
+        ChunkKey      nearestReady = 0; // 0 = no finished ancestor on the rest of the chain
+        std::uint64_t stamp        = 0;
+    };
+    std::unordered_map<ChunkKey, FallbackMemo> ancestorFallbackMemo_;
 
     // Sorted copy of the in-flight key set for one visible pass (see the
     // update() note): keeps the per-chunk in-flight probe off the mutex.
@@ -156,8 +195,11 @@ private:
     std::mutex                                   pendingMutex_;
     std::vector<PendingBuild>                    pendingBuilds_;
     std::vector<ChunkCoord>                      pendingFailures_;
-    std::mutex                                   inflightMutex_;
-    std::unordered_set<ChunkKey>                 inflightBuild_; // keys queued or building
+    // In-flight keys (queued or building). Main-thread state: requestBuild
+    // and collectPendingBuilds are the only mutators, and both run inside
+    // update() on the capability's main thread; workers hand results over
+    // through pendingBuilds_ above and never touch this set.
+    std::unordered_set<ChunkKey>                 inflightBuild_;
 
     // DEDICATED BUILD POOL. Chunk builds deliberately do NOT run on the
     // kernel TaskScheduler: the software renderer floods that scheduler with
@@ -185,6 +227,9 @@ private:
 
     std::uint64_t updateCount_ = 0;
     PlanetStatistics statistics_{};
+
+    // Per-pass scratch for the coverage walks (planChunkCoverage).
+    std::vector<ChunkKey> coverageChainScratch_;
 };
 
 } // namespace planet

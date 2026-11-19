@@ -12,7 +12,11 @@ namespace engine::file_asset_store
 {
 
 // ABI version consumers must match before calling any entry point.
-inline constexpr std::uint32_t fileAssetStoreCapabilityAbi = 5u;
+// History: 1 - initial surface; 2 - cooked-catalog surface; 3 - cache
+// statistics; 4 - reload and path copy; 5 - readahead and drop options;
+// 6 - AssetInfo dropped the borrowed canonicalPath pointer (use
+// copyAssetPath, whose output the caller owns).
+inline constexpr std::uint32_t fileAssetStoreCapabilityAbi = 6u;
 // Opaque asset id; 0 (invalidAsset) means "none" and is never handed out.
 using AssetHandle                         = std::uint64_t;
 inline constexpr AssetHandle invalidAsset = 0;
@@ -76,7 +80,6 @@ struct AssetInfo
     std::uint64_t byteCount      = 0;
     std::uint64_t contentVersion = 0;
     std::uint32_t referenceCount = 0;
-    const char   *canonicalPath  = nullptr;
 };
 
 // Cache-wide counters; byte fields are bytes, count fields are assets.

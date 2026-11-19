@@ -665,8 +665,24 @@ private:
 
     void destroyRuntimeImpl(ScriptRuntimeHandle handle)
     {
-        std::lock_guard lock(runtimesMutex_);
-        runtimes_.erase(handle);
+        // Take the runtime's own lock before dropping the record, so the
+        // destructor's lua_close runs only after any in-flight protected
+        // call on another thread has finished with the state.
+        std::shared_ptr<RuntimeRecord> runtime;
+        {
+            std::lock_guard lock(runtimesMutex_);
+            const auto     entry = runtimes_.find(handle);
+            if (entry == runtimes_.end())
+            {
+                return;
+            }
+            runtime = entry->second;
+            runtimes_.erase(entry);
+        }
+        if (runtime != nullptr)
+        {
+            std::lock_guard stateLock(runtime->mutex);
+        }
     }
 
     bool runtimeInfoImpl(ScriptRuntimeHandle handle, ScriptRuntimeInfo *output)

@@ -4,7 +4,7 @@
 // them from the body's shape description, so one mesh set serves any scene.
 #include "sandbox_render.hpp"
 
-#include <engine/fur/capabilities.hpp>
+#include <engine/physics_fur/capabilities.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -317,13 +317,13 @@ void SandboxRenderer::destroyMeshes(renderer::RenderCapability &renderCapability
 }
 
 void SandboxRenderer::prepareFur(renderer::RenderCapability &renderCapability, renderer::RendererHandle renderer,
-    const engine::fur::FurCapability *furCapability)
+    const engine::physics_fur::FurCapability *furCapability)
 {
     if (furCapability == nullptr || furTextureReady_)
     {
         return;
     }
-    engine::fur::FurTextureRequest request;
+    engine::physics_fur::FurTextureRequest request;
     request.parameters.strandLength    = 0.06f;
     request.parameters.density         = 0.78f;
     request.parameters.lengthVariance  = 0.5f;

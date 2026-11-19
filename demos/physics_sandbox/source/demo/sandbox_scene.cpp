@@ -351,6 +351,15 @@ SceneConfig readSceneConfig(engine::ParticipantContext &context)
     readNumber("wind_strength", config.windStrength, 0.0, 100.0);
     readNumber("paddle_span", config.paddleSpan, 0.0, 50.0);
     readNumber("paddle_speed", config.paddleSpeed, 0.0, 20.0);
+    readNumber("paddle_frequency", config.paddleFrequency, 0.01, 10.0);
+    config.driveSimulationLod
+        = context.configurationBooleanInSection("physics_sandbox", "drive_simulation_lod").value_or(true);
+    readNumber("lod_near_distance", config.lodNearDistance, 1.0, 500.0);
+    readNumber("lod_far_distance", config.lodFarDistance, 2.0, 2000.0);
+    if (config.lodFarDistance < config.lodNearDistance * 2.0)
+    {
+        config.lodFarDistance = config.lodNearDistance * 2.0;
+    }
     readNumber("pendulum_swing", config.pendulumSwing, 0.0, 3.0);
     readNumber("pendulum_frequency", config.pendulumFrequency, 0.01, 10.0);
     return config;
@@ -416,7 +425,7 @@ bool buildScene(const SceneDependencies &dependencies, const SceneConfig &config
     }
     else if (
         sceneName == "fields" || sceneName == "rope" || sceneName == "water" || sceneName == "fluid"
-        || sceneName == "particles" || sceneName == "foliage" || sceneName == "character")
+        || sceneName == "particles" || sceneName == "foliage" || sceneName == "character" || sceneName == "lod")
     {
         // Extended scenes build their own scenery through the extended
         // modules; the shared static scenery stays available to them.
@@ -645,10 +654,11 @@ void updateScriptedTimeline(const SceneDependencies &dependencies, const SceneCo
     // set (not teleported) so contacts push objects with physical momentum.
     if (handles.paddle != engine::physics_rigid::invalidBody)
     {
-        const double phase     = simulatedSeconds * config.paddleSpeed * 6.283185307179586 * 0.15;
+        const double phase     = simulatedSeconds * config.paddleSpeed * 6.283185307179586 * config.paddleFrequency;
         const double positionX = std::sin(phase) * config.paddleSpan * 0.5;
         const double velocityX
-            = std::cos(phase) * config.paddleSpan * 0.5 * config.paddleSpeed * 6.283185307179586 * 0.15;
+            = std::cos(phase) * config.paddleSpan * 0.5 * config.paddleSpeed * 6.283185307179586
+            * config.paddleFrequency;
         engine::physics_rigid::BodyState paddleState{};
         if (dependencies.rigid->copyBodyState(dependencies.rigid->self, handles.world, handles.paddle, &paddleState))
         {

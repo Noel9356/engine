@@ -4,6 +4,16 @@ config_keys           = [
     "physics_character.maximum_hand_planters",
     "physics_character.maximum_jiggle_chains",
     "physics_character.maximum_lean_controllers",
+    "physics_character.lod_animation_threshold",
+    "physics_character.lod_demotion_margin",
+    "physics_character.lod_enabled",
+    "physics_character.lod_full_threshold",
+    "physics_character.lod_interval_animation",
+    "physics_character.lod_interval_cached",
+    "physics_character.lod_interval_procedural",
+    "physics_character.lod_interval_simplified",
+    "physics_character.lod_procedural_threshold",
+    "physics_character.lod_simplified_threshold",
 ]
 name                  = "physics_character"
 provides              = ["physics_character"]

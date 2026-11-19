@@ -32,22 +32,71 @@ namespace engine
 namespace
 {
 
+// Maximum table nesting the configuration layer accepts. Documents nest
+// deeper than this are rejected (the parse errors name the file), which
+// keeps every recursive walker over the tree inside a bounded stack frame:
+// the engine's own sections nest at most three levels.
+constexpr std::size_t kMaximumTableDepth = 64;
+
+// True when the document's table nesting stays within the accepted depth.
+// The probe is iterative (an explicit stack), so it cannot itself be driven
+// into deep recursion by the document it inspects.
+bool tableDepthWithinLimit(const toml::table &table)
+{
+    std::vector<std::pair<const toml::table *, std::size_t>> pending{{&table, 0u}};
+    while (!pending.empty())
+    {
+        const auto [current, depth] = pending.back();
+        pending.pop_back();
+        if (depth > kMaximumTableDepth)
+        {
+            return false;
+        }
+        for (auto &&[key, value] : *current)
+        {
+            (void)key;
+            if (const auto *subtable = value.as_table())
+            {
+                pending.emplace_back(subtable, depth + 1);
+            }
+        }
+    }
+    return true;
+}
+
 // Visits every leaf path ("section.sub.key") of a TOML table in document order.
 template <typename Visit>
 void walkLeafPaths(const toml::table &table, const std::string &prefix, Visit &&visit)
 {
-    for (auto &&[key, value] : table)
+    struct Walker
     {
-        const std::string path = prefix.empty() ? std::string(key.str()) : prefix + "." + std::string(key.str());
-        if (const auto *subtable = value.as_table())
+        void run(const toml::table &current, const std::string &currentPrefix)
         {
-            walkLeafPaths(*subtable, path, visit);
+            if (depth > kMaximumTableDepth)
+            {
+                return;
+            }
+            ++depth;
+            for (auto &&[key, value] : current)
+            {
+                const std::string path
+                    = currentPrefix.empty() ? std::string(key.str()) : currentPrefix + "." + std::string(key.str());
+                if (const auto *subtable = value.as_table())
+                {
+                    run(*subtable, path);
+                }
+                else
+                {
+                    visit(path);
+                }
+            }
+            --depth;
         }
-        else
-        {
-            visit(path);
-        }
-    }
+
+        std::size_t depth = 0;
+        Visit      &visit;
+    } walker{0u, visit};
+    walker.run(table, prefix);
 }
 
 // A key segment is bare: letters, digits, '_' or '-' only (dots separate segments).
@@ -136,15 +185,20 @@ bool checkConfigurationFileSize(const std::filesystem::path &path, std::string &
 class ProvenanceTracker final
 {
 public:
-    void record(const toml::node &subtree, const std::string &prefix, const ConfigProvenance &provenance)
+    void record(const toml::node &subtree, const std::string &prefix, const ConfigProvenance &provenance,
+        std::size_t depth = 0)
     {
         if (const auto *table = subtree.as_table())
         {
+            if (depth >= kMaximumTableDepth)
+            {
+                return;
+            }
             for (auto &&[key, value] : *table)
             {
                 const std::string path
                     = prefix.empty() ? std::string(key.str()) : prefix + "." + std::string(key.str());
-                record(value, path, provenance);
+                record(value, path, provenance, depth + 1);
             }
             return;
         }
@@ -527,12 +581,16 @@ bool ConfigurationStore::loadFromFile(const std::filesystem::path &path, std::st
     try
     {
         toml::table parsed = toml::parse_file(path.string());
+        if (!tableDepthWithinLimit(parsed))
+        {
+            return false;
+        }
         if (parsedTable == nullptr)
         {
             parsedTable = new toml::table();
         }
         const ConfigProvenance provenance{.layer = ConfigProvenance::Layer::EngineConfig, .source = path.string()};
-        mergeTableAsOverride(*parsedTable, parsed, "", provenance, *provenanceTracker);
+        mergeTableAsOverride(*parsedTable, parsed, "", provenance, *provenanceTracker, 0u);
         return true;
     }
     catch (const toml::parse_error &error)
@@ -567,6 +625,10 @@ bool ConfigurationStore::mergeDefaultsFile(const std::filesystem::path &path, Co
     try
     {
         parsed = toml::parse_file(path.string());
+        if (!tableDepthWithinLimit(parsed))
+        {
+            return false;
+        }
     }
     catch (const toml::parse_error &error)
     {
@@ -609,7 +671,7 @@ bool ConfigurationStore::mergeDefaultsFile(const std::filesystem::path &path, Co
         parsedTable = new toml::table();
     }
     const ConfigProvenance provenance{.layer = layer, .source = source};
-    mergeTableAsDefaults(*parsedTable, parsed, "", provenance, *provenanceTracker);
+    mergeTableAsDefaults(*parsedTable, parsed, "", provenance, *provenanceTracker, 0u);
     return true;
 }
 
@@ -627,6 +689,10 @@ bool ConfigurationStore::mergeProfileFile(const std::filesystem::path &path, std
     try
     {
         parsed = toml::parse_file(path.string());
+        if (!tableDepthWithinLimit(parsed))
+        {
+            return false;
+        }
     }
     catch (const toml::parse_error &error)
     {
@@ -712,7 +778,7 @@ bool ConfigurationStore::mergeProfileFile(const std::filesystem::path &path, std
         parsedTable = new toml::table();
     }
     const ConfigProvenance provenance{.layer = ConfigProvenance::Layer::Profile, .source = path.string()};
-    mergeTableAsOverride(*parsedTable, parsed, "", provenance, *provenanceTracker);
+    mergeTableAsOverride(*parsedTable, parsed, "", provenance, *provenanceTracker, 0u);
     return true;
 }
 
@@ -729,6 +795,10 @@ bool ConfigurationStore::applySceneFile(const std::filesystem::path &path, std::
     try
     {
         parsed = toml::parse_file(path.string());
+        if (!tableDepthWithinLimit(parsed))
+        {
+            return false;
+        }
     }
     catch (const toml::parse_error &error)
     {
@@ -834,8 +904,13 @@ bool ConfigurationStore::applyCommandLineOverrides(std::string &errorMessage)
 // Recursive override merge: source tables merge into destination tables, everything
 // else replaces the destination value and its provenance subtree.
 void ConfigurationStore::mergeTableAsOverride(toml::table &destination, const toml::table &source,
-    const std::string &prefix, const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker)
+    const std::string &prefix, const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker,
+    std::size_t depth)
 {
+    if (depth > kMaximumTableDepth)
+    {
+        return;
+    }
     for (auto &&[key, value] : source)
     {
         const std::string keyString(key.str());
@@ -846,7 +921,7 @@ void ConfigurationStore::mergeTableAsOverride(toml::table &destination, const to
             auto *destinationTable = destination.get_as<toml::table>(keyString);
             if (destinationTable != nullptr)
             {
-                mergeTableAsOverride(*destinationTable, *sourceTable, path, provenance, provenanceTracker);
+                mergeTableAsOverride(*destinationTable, *sourceTable, path, provenance, provenanceTracker, depth + 1);
                 continue;
             }
         }
@@ -860,8 +935,13 @@ void ConfigurationStore::mergeTableAsOverride(toml::table &destination, const to
 // Recursive fill-only merge: only keys missing from the destination are inserted,
 // so defaults never override the engine configuration.
 void ConfigurationStore::mergeTableAsDefaults(toml::table &destination, const toml::table &source,
-    const std::string &prefix, const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker)
+    const std::string &prefix, const ConfigProvenance &provenance, ProvenanceTracker &provenanceTracker,
+    std::size_t depth)
 {
+    if (depth > kMaximumTableDepth)
+    {
+        return;
+    }
     for (auto &&[key, value] : source)
     {
         const std::string keyString(key.str());
@@ -877,7 +957,7 @@ void ConfigurationStore::mergeTableAsDefaults(toml::table &destination, const to
         {
             if (auto *destinationTable = existing->as_table())
             {
-                mergeTableAsDefaults(*destinationTable, *sourceTable, path, provenance, provenanceTracker);
+                mergeTableAsDefaults(*destinationTable, *sourceTable, path, provenance, provenanceTracker, depth + 1);
             }
         }
     }
@@ -1010,15 +1090,19 @@ std::string ConfigurationStore::leafValueRepr(const toml::node &value)
 
 // Flattens the document to "path -> repr": tables recurse, arrays of tables recurse
 // with [i] path segments, other arrays collapse into one "a:N:[...]" value.
-void ConfigurationStore::flattenNode(
-    const toml::node &subtree, const std::string &path, std::map<std::string, std::string> &out)
+void ConfigurationStore::flattenNode(const toml::node &subtree, const std::string &path,
+    std::map<std::string, std::string> &out, std::size_t depth)
 {
     if (const auto *table = subtree.as_table())
     {
+        if (depth >= kMaximumTableDepth)
+        {
+            return;
+        }
         for (auto &&[key, value] : *table)
         {
             const std::string childPath = path.empty() ? std::string(key.str()) : path + "." + std::string(key.str());
-            flattenNode(value, childPath, out);
+            flattenNode(value, childPath, out, depth + 1);
         }
         return;
     }
@@ -1035,9 +1119,13 @@ void ConfigurationStore::flattenNode(
         }
         if (allTables)
         {
+            if (depth >= kMaximumTableDepth)
+            {
+                return;
+            }
             for (std::size_t index = 0; index < array->size(); ++index)
             {
-                flattenNode(*array->get(index), path + "[" + std::to_string(index) + "]", out);
+                flattenNode(*array->get(index), path + "[" + std::to_string(index) + "]", out, depth + 1);
             }
             return;
         }
@@ -1061,7 +1149,7 @@ std::map<std::string, std::string> ConfigurationStore::flattenedValueReprs() con
     std::map<std::string, std::string> flattened;
     if (parsedTable != nullptr)
     {
-        flattenNode(*parsedTable, std::string(), flattened);
+        flattenNode(*parsedTable, std::string(), flattened, 0u);
     }
     return flattened;
 }
@@ -1077,8 +1165,7 @@ bool ConfigurationStore::fileParses(const std::filesystem::path &path, std::stri
     try
     {
         const toml::table parsed = toml::parse_file(path.string());
-        (void)parsed;
-        return true;
+        return tableDepthWithinLimit(parsed);
     }
     catch (const toml::parse_error &error)
     {

@@ -62,6 +62,7 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_articulated", "maximum_drive_torque");
             value && *value >= 1.0 && *value <= 1000000.0 && std::isfinite(*value))
             settings_.maximumDriveTorque = *value;
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_articulated");
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -317,6 +318,9 @@ private:
         nextFigureHandle_
             = nextFigureHandle_ == std::numeric_limits<FigureHandle>::max() ? invalidFigure : nextFigureHandle_ + 1;
         categoryPool_ |= categoryBit;
+        // Stagger phase from the registration ordinal: figures sharing a
+        // refresh interval spread their due steps evenly across the cadence.
+        figure.cadence.phase = static_cast<std::uint32_t>(figures_.size());
         figures_.push_back(std::move(figure));
         figureIndexByHandle_.emplace(figures_.back().handle, figures_.size() - 1);
         figureOrder_.push_back(figures_.back().handle);
@@ -416,6 +420,7 @@ private:
         outStatistics->linkCount        = static_cast<std::uint32_t>(figure->links.size());
         outStatistics->activeDriveCount = activeDrives;
         outStatistics->categoryBit      = figure->categoryBit;
+        outStatistics->lodSkippedSteps  = figure->lodSkippedSteps;
         return true;
     }
 
@@ -499,6 +504,17 @@ private:
     // Measures the joint angle of one link against its parent: the twist
     // about the hinge axis relative to the assembly frame. Ball-socket
     // drives power the twist component; swing stays limit-controlled.
+    bool setFigureImportanceImpl(FigureHandle handle, double importance)
+    {
+        FigureRecord *figure = findFigure(handle);
+        if (figure == nullptr || !std::isfinite(importance))
+        {
+            return false;
+        }
+        figure->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
+    }
+
     bool updateDrivesImpl(FigureHandle handle, double fixedDeltaSeconds)
     {
         FigureRecord *figure = findFigure(handle);
@@ -509,6 +525,22 @@ private:
         if (!(fixedDeltaSeconds > 0.0) || !std::isfinite(fixedDeltaSeconds))
         {
             return false;
+        }
+        // Simulation LOD: resolve the band and the staggered cadence. A
+        // skipped refresh keeps every motor on its last target (the rigid
+        // solver keeps applying it, so the figure holds its pose), and the
+        // Cached band freezes the refresh entirely. Without lod_enabled
+        // every figure refreshes every step.
+        if (engine::util::simulationLodResolvePass(figure->lodBand,
+                figure->cadence,
+                settings_.lod.thresholds,
+                settings_.lod.intervals,
+                settings_.lod.enabled,
+                figure->importance,
+                &figure->lodSkippedSteps)
+            == 0u)
+        {
+            return true;
         }
         for (LinkRecord &link : figure->links)
         {
@@ -661,6 +693,7 @@ private:
         ENGINE_PHYSICS_ARTICULATED_BIND(updateDrives, updateDrivesImpl);
         ENGINE_PHYSICS_ARTICULATED_BIND(copyJointState, copyJointStateImpl);
         ENGINE_PHYSICS_ARTICULATED_BIND(copyJointReference, copyJointReferenceImpl);
+        ENGINE_PHYSICS_ARTICULATED_BIND(setFigureImportance, setFigureImportanceImpl);
 #undef ENGINE_PHYSICS_ARTICULATED_BIND
     }
 

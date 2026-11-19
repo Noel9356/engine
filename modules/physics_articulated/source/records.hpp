@@ -8,6 +8,7 @@
 #pragma once
 
 #include <engine/physics_articulated/capabilities.hpp>
+#include <engine/util/simulation_lod.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -54,6 +55,16 @@ struct FigureRecord
     std::uint32_t categoryBit = 0;
 
     bool sleepingEnabled = true;
+
+    // Simulation LOD: the consumer-written importance score resolves the
+    // fidelity band (with demotion hysteresis, the shared ladder every
+    // simulation module uses); the band gates the drive refresh cadence -
+    // a skipped refresh keeps the rigid motors on their last target, so
+    // the figure keeps holding its pose at a fraction of the refresh cost.
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+    std::uint64_t                    lodSkippedSteps = 0;
 };
 
 // Module-wide budgets and clamps read from the [physics_articulated] section.
@@ -64,6 +75,10 @@ struct ArticulatedSettings
 
     double maximumDriveVelocity = 100.0;
     double maximumDriveTorque   = 10000.0;
+
+    // Simulation LOD: the shared ladder plus the per-band drive-refresh
+    // intervals (0 freezes that band, which is the Cached default).
+    engine::util::SimulationLodSettings lod{};
 };
 
 } // namespace engine::physics_articulated

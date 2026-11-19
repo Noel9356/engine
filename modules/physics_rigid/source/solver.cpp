@@ -18,6 +18,27 @@ namespace engine::physics_rigid
 namespace
 {
 
+// Simulation-LOD iteration budget for one constraint: the largest budget
+// among the pair's dynamic bodies (static and kinematic bodies contribute
+// nothing, so a distant pile on the static ground solves at the pile's own
+// band while an important body resting on it still gets its full budget).
+// The floor of one keeps every live constraint solved at least once per
+// step, which the stacking and speculative-contact logic relies on.
+std::uint32_t constraintIterationBudget(const Body &bodyA, const Body &bodyB, const std::uint32_t *bandBudgets)
+{
+    std::uint32_t budget = 0u;
+    if (bodyA.kind == BodyKind::Dynamic)
+    {
+        budget = bandBudgets[engine::util::simulationFidelityIndex(bodyA.lodBand)];
+    }
+    if (bodyB.kind == BodyKind::Dynamic)
+    {
+        const std::uint32_t budgetB = bandBudgets[engine::util::simulationFidelityIndex(bodyB.lodBand)];
+        budget                      = budgetB > budget ? budgetB : budget;
+    }
+    return budget < 1u ? 1u : budget;
+}
+
 } // namespace
 
 // World-frame inverse inertia tensor R * diag(1/I) * R^T; the zero matrix
@@ -169,6 +190,8 @@ void prepareContactConstraints(World &world, const StepContext &context, std::ve
         constraint.inverseMassB    = bodyB.inverseMass;
         constraint.inverseInertiaA = computeWorldInverseInertia(bodyA);
         constraint.inverseInertiaB = computeWorldInverseInertia(bodyB);
+        constraint.velocityIterationBudget = constraintIterationBudget(bodyA, bodyB, settings.lodVelocityIterations);
+        constraint.positionIterationBudget = constraintIterationBudget(bodyA, bodyB, settings.lodPositionIterations);
 
         const double friction    = std::sqrt(bodyA.material.friction * bodyB.material.friction);
         const double restitution = std::max(bodyA.material.restitution, bodyB.material.restitution);
@@ -243,6 +266,7 @@ void prepareJointConstraints(World &world, const StepContext &context, std::vect
 {
     // The scratch vector persists across steps and worlds; stale entries
     // would index the previous world's joints after a destroy/create cycle.
+    const SimulationSettings &settings = world.settings;
     outConstraints.clear();
     for (std::size_t jointIndex = 0; jointIndex < world.joints.size(); ++jointIndex)
     {
@@ -275,6 +299,8 @@ void prepareJointConstraints(World &world, const StepContext &context, std::vect
         constraint.inverseMassB    = bodyB.inverseMass;
         constraint.inverseInertiaA = computeWorldInverseInertia(bodyA);
         constraint.inverseInertiaB = computeWorldInverseInertia(bodyB);
+        constraint.velocityIterationBudget = constraintIterationBudget(bodyA, bodyB, settings.lodVelocityIterations);
+        constraint.positionIterationBudget = constraintIterationBudget(bodyA, bodyB, settings.lodPositionIterations);
 
         const math::Vec3 anchorWorldA
             = bodyA.transform.position + math::rotate(bodyA.transform.rotation, joint.description.anchorLocalA);
@@ -594,11 +620,15 @@ void warmStartJoints(World &world, std::vector<JointConstraint> &constraints, bo
 }
 
 void solveContactVelocityIteration(
-    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context)
+    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context, std::uint32_t iteration)
 {
     (void)context;
     for (ContactConstraint &constraint : constraints)
     {
+        if (iteration >= constraint.velocityIterationBudget)
+        {
+            continue; // simulation LOD: the budget is spent
+        }
         Body &bodyA = world.bodies[constraint.bodyIndexA];
         Body &bodyB = world.bodies[constraint.bodyIndexB];
         for (std::uint32_t pointIndex = 0; pointIndex < constraint.pointCount; ++pointIndex)
@@ -693,12 +723,17 @@ void solveContactVelocityIteration(
     }
 }
 
-void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &constraints, const StepContext &context)
+void solveJointVelocityIteration(
+    World &world, std::vector<JointConstraint> &constraints, const StepContext &context, std::uint32_t iteration)
 {
     const SimulationSettings &settings         = world.settings;
     const double              inverseDeltaTime = context.inverseDeltaTime;
     for (JointConstraint &constraint : constraints)
     {
+        if (iteration >= constraint.velocityIterationBudget)
+        {
+            continue; // simulation LOD: the budget is spent
+        }
         Joint &joint = world.joints[constraint.jointIndex];
         Body  &bodyA = world.bodies[constraint.bodyIndexA];
         Body  &bodyB = world.bodies[constraint.bodyIndexB];
@@ -1108,12 +1143,16 @@ void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &con
 }
 
 void solveContactPositionIteration(
-    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context)
+    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context, std::uint32_t iteration)
 {
     (void)context;
     const SimulationSettings &settings = world.settings;
     for (ContactConstraint &constraint : constraints)
     {
+        if (iteration >= constraint.positionIterationBudget)
+        {
+            continue; // simulation LOD: the budget is spent
+        }
         Body &bodyA = world.bodies[constraint.bodyIndexA];
         Body &bodyB = world.bodies[constraint.bodyIndexB];
         for (std::uint32_t pointIndex = 0; pointIndex < constraint.pointCount; ++pointIndex)

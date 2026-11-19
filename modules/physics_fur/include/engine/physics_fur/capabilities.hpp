@@ -1,4 +1,4 @@
-// Public capability surface of the fur module.
+// Public capability surface of the physics_fur module.
 //
 // Fur content and policy for the renderer module's shell-fur draw path
 // (see engine/renderer/capabilities.hpp FurLayerParams): deterministic
@@ -18,12 +18,12 @@
 
 namespace engine
 {
-namespace fur
+namespace physics_fur
 {
 
 // ABI version of the FurCapability struct below. Bump on any layout change.
 // History: 1 - initial surface (presets, texture synthesis, LOD evaluator).
-inline constexpr std::uint32_t furCapabilityAbi = 1u;
+inline constexpr std::uint32_t physicsFurCapabilityAbi = 1u;
 
 // Named fur looks. The demo maps its per-species controls onto these.
 enum class FurPreset : std::uint32_t
@@ -83,14 +83,14 @@ struct FurLodDecision
     std::uint32_t lodLevel       = 0;
 };
 
-// The "fur" capability: pure functions over configuration + arguments, no
+// The "physics_fur" capability: pure functions over configuration + arguments, no
 // GPU state, safe to call at asset-build time and per frame. All functions
 // are main-thread only (like every engine capability).
 struct FurCapability
 {
-    static constexpr const char *capabilityName = "fur";
+    static constexpr const char *capabilityName = "physics_fur";
 
-    std::uint32_t abi = furCapabilityAbi;
+    std::uint32_t abi = physicsFurCapabilityAbi;
 
     void *self = nullptr;
 
@@ -117,6 +117,6 @@ struct FurCapability
     FurLodDecision (*evaluateFurLod)(void *self, float angularSize);
 };
 
-} // namespace fur
+} // namespace physics_fur
 } // namespace engine
 

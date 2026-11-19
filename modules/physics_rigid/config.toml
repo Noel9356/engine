@@ -1,4 +1,19 @@
 [physics_rigid]
+lod_enabled                  = false
+lod_full_threshold           = 0.75
+lod_simplified_threshold     = 0.5
+lod_procedural_threshold     = 0.25
+lod_animation_threshold      = 0.1
+lod_demotion_margin          = 0.8
+lod_interval_simplified      = 2
+lod_interval_procedural      = 4
+lod_interval_animation       = 8
+lod_interval_cached          = 0
+# Per-band solver iteration budgets (Cached, Animation, Procedural,
+# Simplified, Full). A 0 entry derives the budget: Full keeps the
+# configured iteration count, each lower band halves it, floored at one.
+lod_velocity_iterations      = [0, 0, 0, 0, 0]
+lod_position_iterations      = [0, 0, 0, 0, 0]
 angular_sleep_tolerance       = 0.14
 ccd_velocity_threshold        = 1.5
 contact_margin                = 0.02

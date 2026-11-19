@@ -77,23 +77,16 @@ public:
     // and refreshes per-node selection bookkeeping. Cheap: no geometry.
     void selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &outVisible);
 
-    // Computes the conforming mask for one chunk against the SORTED visible
-    // leaf list emitted by selectVisible: a face segment conforms when the
-    // depth-(depth-1) cell beyond it (diagonal ring included) is itself a
-    // rendered leaf - exactly the situation where the coarse neighbor's own
-    // lattice chords define the shared surface, so the fine isoline must
-    // follow the coarse interpolant to meet it without cracks. Membership is
-    // a binary search over the visible list, which makes the mask a pure
-    // function of (visible set, coord) - every chunk touching the same
-    // boundary points derives the same decisions.
-    void computeConformMask(const ChunkCoord &coord, const std::vector<ChunkCoord> &visibleSortedLeaves,
-        ConformMask &outMask) const;
-
-    // Same decision against a prebuilt hash index of the visible leaves (identical result, O(1) membership).
+    // Computes the conforming mask for one chunk against the hash index of
+    // the visible leaf set emitted by selectVisible: a face segment conforms
+    // when the depth-(depth-1) cell beyond it (diagonal ring included) is
+    // itself a rendered leaf - exactly the situation where the coarse
+    // neighbor's own lattice chords define the shared surface, so the fine
+    // isoline must follow the coarse interpolant to meet it without cracks.
+    // Membership is an O(1) hash probe into the prebuilt index, which makes
+    // the mask a pure function of (visible set, coord) - every chunk touching
+    // the same boundary points derives the same decisions.
     void computeConformMask(const ChunkCoord &coord, const VisibleLeafSet &visibleLeaves, ConformMask &outMask) const;
-
-    // Current lifecycle state of a node (Empty when pruned).
-    ChunkState stateOf(const ChunkCoord &coord) const;
 
     void setState(const ChunkCoord &coord, ChunkState state);
 
@@ -124,6 +117,10 @@ private:
     const DensityField           &field_;
     // Sound corner-probe margin per depth (see the constructor comment).
     std::array<double, maxSupportedOctreeDepth + 1> probeMargins_{};
+    // Node bounding radius per depth (0.5 * nodeSize * sqrt(3)): a pure
+    // function of depth alone, so the descent reads it from this table
+    // instead of recomputing a sqrt per node visit.
+    std::array<double, maxSupportedOctreeDepth + 1> boundRadii_{};
     double                        innerOccluderRadius2_ = 0.0;  // squared radius of the guaranteed-solid occluder ball
     std::uint64_t                 updateIndex_ = 0;
 

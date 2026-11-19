@@ -222,6 +222,7 @@ struct PlanetStatistics
     std::uint64_t verticesTotal    = 0;
     double        lastUpdateMilliseconds = 0.0; // cost of the last update() call
     std::uint32_t octreeDepthUsed  = 0;
+    std::uint32_t chunksFallback   = 0;  // holes drawn through finished ancestor chunks this pass
 };
 
 } // namespace planet

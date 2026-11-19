@@ -15,6 +15,7 @@
 #include <engine/physics_character/capabilities.hpp>
 #include <engine/physics_rigid/capabilities.hpp>
 #include <engine/physics_rigid/math.hpp>
+#include <engine/util/simulation_lod.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -124,6 +125,15 @@ struct CharacterRecord
         double maximumTorque      = 60.0;
     };
     std::vector<JointTarget> joints;
+
+    // Simulation LOD: the consumer-written importance score resolves the
+    // fidelity band; a due update scales its PD torques by the cadence
+    // interval (the impulse per wall time matches the full-rate schedule)
+    // and the Cached band stops driving entirely.
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+    std::uint64_t                    lodSkippedSteps = 0;
 };
 
 struct JiggleBoneState
@@ -144,6 +154,14 @@ struct JiggleChainRecord
 
     math::Vec3 previousRootVelocity{};
     bool       hasPreviousVelocity = false;
+
+    // Simulation LOD: a due pass integrates interval x the caller's delta
+    // (a spring system, so the enlarged step keeps the wall-time pacing);
+    // the Cached band freezes the chain.
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+    std::uint64_t                    lodSkippedSteps = 0;
 };
 
 struct FootRuntime
@@ -167,6 +185,13 @@ struct FootPlanterRecord
     std::vector<engine::physics_rigid::BodyHandle> ignoredBodies; // owned copy of the description's list
 
     FootRuntime feet[2];
+
+    // Simulation LOD: a due pass runs the ground probes; a skipped pass
+    // keeps the last planted feet, and the Cached band freezes them.
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+    std::uint64_t                    lodSkippedSteps = 0;
 };
 
 struct HandRuntime
@@ -201,6 +226,13 @@ struct LeanRecord
     double           angularVelocity = 0.0;
     math::Vec3       previousVelocity{};
     bool             hasPreviousVelocity = false;
+
+    // Simulation LOD: a due pass integrates interval x the caller's delta;
+    // the Cached band holds the last lean.
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
+    engine::util::SimulationCadence  cadence{};
+    std::uint64_t                    lodSkippedSteps = 0;
 };
 
 struct CharacterSettings
@@ -210,6 +242,10 @@ struct CharacterSettings
     std::uint32_t maximumPlanters       = 64;
     std::uint32_t maximumHandPlanters   = 64;
     std::uint32_t maximumLeanControllers = 64;
+
+    // Simulation LOD: the shared ladder plus the per-band update intervals
+    // (0 freezes that band, which is the Cached default).
+    engine::util::SimulationLodSettings lod{};
 };
 
 class CharacterModule final : public ModuleInterface
@@ -243,6 +279,7 @@ public:
         if (const auto value = context.configurationIntegerInSection("physics_character", "maximum_lean_controllers");
             value && *value > 0 && *value <= 4096)
             settings_.maximumLeanControllers = static_cast<std::uint32_t>(*value);
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_character");
 
         rigid_ = context.tryAcquireCapability<engine::physics_rigid::PhysicsRigidCapability>();
         if (rigid_ != nullptr && rigid_->abi != engine::physics_rigid::physicsRigidCapabilityAbi)
@@ -494,6 +531,9 @@ private:
         // The articulated figure does not expose its world handle; the
         // consumer's fixed update passes the world implicitly through the
         // rigid calls on the torso body handle.
+        // Stagger phase from the registration ordinal (shared counter
+        // across every record type, like the fields module).
+        character.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         characters_.push_back(std::move(character));
         characterIndexByHandle_.emplace(characters_.back().handle, characters_.size() - 1);
         statistics_.characterCount = static_cast<std::uint32_t>(characters_.size());
@@ -581,7 +621,26 @@ private:
         {
             return false;
         }
-        const bool drivesActive = character->mode != CharacterMode::Dynamic;
+        // Simulation LOD: resolve the band and the staggered cadence. A due
+        // update scales its PD and upright torques by the interval so the
+        // impulse per wall time matches the full-rate schedule (the gain
+        // bounds account for the enlarged step, because the torque acts
+        // once per interval), and the Cached band stops driving entirely -
+        // the ragdoll goes passive until the score rises. Without
+        // lod_enabled every character updates every step.
+        const std::uint32_t lodInterval = engine::util::simulationLodResolvePass(character->lodBand,
+            character->cadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            character->importance,
+            &character->lodSkippedSteps);
+        if (lodInterval == 0u)
+        {
+            return true;
+        }
+        const double driveTimeScale = static_cast<double>(lodInterval);
+        const bool  drivesActive    = character->mode != CharacterMode::Dynamic;
         if (drivesActive && character->driveStrength > 0.0)
         {
             // Pose tracking: a torque PD on every enabled joint target. The
@@ -653,7 +712,11 @@ private:
                                              + childMass.inertiaLocal.z * axisLocalBody.z * axisLocalBody.z;
                     if (limbInertia > 1.0e-9)
                     {
-                        damping = std::min(damping, 1.6 * limbInertia / fixedDeltaSeconds);
+                        // The bound uses the drive's effective step: the
+                        // interval-scaled torque acts for one fixed step
+                        // every interval steps.
+                        const double effectiveStep = fixedDeltaSeconds * driveTimeScale;
+                        damping = std::min(damping, 1.6 * limbInertia / effectiveStep);
                         stiffness = std::min(stiffness, damping * damping / (4.0 * limbInertia));
                     }
                 }
@@ -671,9 +734,11 @@ private:
                     const math::Vec3 errorWorld = math::rotate(parentState.transform.rotation, errorLocal);
                     torque                      = errorWorld * stiffness - omegaRelative * damping;
                 }
-                if (math::length(torque) > maximumTorque)
+                torque = torque * driveTimeScale;
+                const double maximumScaledTorque = maximumTorque * driveTimeScale;
+                if (math::length(torque) > maximumScaledTorque)
                 {
-                    torque = torque * (maximumTorque / math::length(torque));
+                    torque = torque * (maximumScaledTorque / math::length(torque));
                 }
                 const double childTorque[3]  = {torque.x, torque.y, torque.z};
                 const double parentTorque[3] = {-torque.x, -torque.y, -torque.z};
@@ -691,7 +756,8 @@ private:
             {
                 const math::Vec3 bodyUp = math::rotate(torsoState.transform.rotation, math::Vec3{0.0, 1.0, 0.0});
                 const math::Vec3 axis   = math::cross(bodyUp, math::Vec3{0.0, 1.0, 0.0});
-                const math::Vec3 torque = axis * (character->uprightTorque * character->driveStrength);
+                const math::Vec3 torque
+                    = axis * (character->uprightTorque * character->driveStrength * driveTimeScale);
                 const double torqueVector[3] = {torque.x, torque.y, torque.z};
                 rigid_->applyTorque(rigid_->self, character->world, character->torsoBody, torqueVector);
             }
@@ -756,6 +822,7 @@ private:
         }
         chain.bones.assign(description->boneCount, JiggleBoneState{});
         chain.worldRotations.assign(description->boneCount, math::Quaternion{0.0, 0.0, 0.0, 1.0});
+        chain.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         chains_.push_back(std::move(chain));
         chainIndexByHandle_.emplace(chains_.back().handle, chains_.size() - 1);
         statistics_.jiggleChainCount = static_cast<std::uint32_t>(chains_.size());
@@ -794,6 +861,23 @@ private:
         {
             return false;
         }
+        // Simulation LOD: resolve the band and the staggered cadence; a due
+        // pass integrates interval x the caller's delta (a spring system,
+        // so the enlarged step keeps the wall-time pacing), and the Cached
+        // band freezes the chain. Without lod_enabled every chain updates
+        // every step.
+        const std::uint32_t lodInterval = engine::util::simulationLodResolvePass(chain->lodBand,
+            chain->cadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            chain->importance,
+            &chain->lodSkippedSteps);
+        if (lodInterval == 0u)
+        {
+            return true;
+        }
+        const double stepDeltaSeconds = fixedDeltaSeconds * static_cast<double>(lodInterval);
         const math::Vec3 velocity{rootVelocity[0], rootVelocity[1], rootVelocity[2]};
         math::Vec3 acceleration{};
         if (chain->hasPreviousVelocity)
@@ -831,8 +915,8 @@ private:
                 state.angularVelocity[axis] += (-stiffness * state.offsetVector[axis]
                                                     - damping * state.angularVelocity[axis]
                                                     + (&excitation.x)[axis])
-                                               * fixedDeltaSeconds;
-                state.offsetVector[axis] += state.angularVelocity[axis] * fixedDeltaSeconds;
+                                               * stepDeltaSeconds;
+                state.offsetVector[axis] += state.angularVelocity[axis] * stepDeltaSeconds;
             }
             const double angleSquared = state.offsetVector[0] * state.offsetVector[0]
                                         + state.offsetVector[1] * state.offsetVector[1]
@@ -963,6 +1047,7 @@ private:
         {
             planter.description.ignoredBodies = nullptr;
         }
+        planter.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         planters_.push_back(std::move(planter));
         planterIndexByHandle_.emplace(planters_.back().handle, planters_.size() - 1);
         statistics_.footPlanterCount = static_cast<std::uint32_t>(planters_.size());
@@ -999,6 +1084,22 @@ private:
         if (!finiteArray(rootVelocity, 3))
         {
             return false;
+        }
+        // Simulation LOD: resolve the band and the staggered cadence; a due
+        // pass runs the ground probes, a skipped pass keeps the last planted
+        // feet (the plant latch holds until the next due pass), and the
+        // Cached band freezes them entirely. Without lod_enabled every
+        // planter updates every step.
+        if (engine::util::simulationLodResolvePass(planter->lodBand,
+                planter->cadence,
+                settings_.lod.thresholds,
+                settings_.lod.intervals,
+                settings_.lod.enabled,
+                planter->importance,
+                &planter->lodSkippedSteps)
+            == 0u)
+        {
+            return true;
         }
         const FootPlanterDescription &description = planter->description;
         const math::Quaternion rootRotation = math::normalize(root->rotation);
@@ -1129,7 +1230,25 @@ private:
         {
             return false;
         }
-        *outStatistics = statistics_;
+        std::uint64_t lodSkippedSteps = 0;
+        for (const CharacterRecord &character : characters_)
+        {
+            lodSkippedSteps += character.lodSkippedSteps;
+        }
+        for (const JiggleChainRecord &chain : chains_)
+        {
+            lodSkippedSteps += chain.lodSkippedSteps;
+        }
+        for (const FootPlanterRecord &planter : planters_)
+        {
+            lodSkippedSteps += planter.lodSkippedSteps;
+        }
+        for (const LeanRecord &lean : leans_)
+        {
+            lodSkippedSteps += lean.lodSkippedSteps;
+        }
+        statistics_.lodSkippedSteps = lodSkippedSteps;
+        *outStatistics              = statistics_;
         return true;
     }
 
@@ -1323,6 +1442,7 @@ private:
                               ? invalidLeanController
                               : nextLeanHandle_ + 1;
         lean.description = *description;
+        lean.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         leans_.push_back(std::move(lean));
         leanIndexByHandle_.emplace(leans_.back().handle, leans_.size() - 1);
         statistics_.leanControllerCount = static_cast<std::uint32_t>(leans_.size());
@@ -1361,6 +1481,31 @@ private:
         {
             return false;
         }
+        // Simulation LOD: resolve the band and the staggered cadence; a due
+        // pass integrates interval x the caller's delta (a spring system),
+        // and the Cached band holds the last lean. Without lod_enabled
+        // every controller updates every step.
+        const std::uint32_t lodInterval = engine::util::simulationLodResolvePass(lean->lodBand,
+            lean->cadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            lean->importance,
+            &lean->lodSkippedSteps);
+        if (lodInterval == 0u)
+        {
+            // The caller still receives the held state.
+            outState->leanRadians    = lean->leanAngleRadians;
+            outState->leanAxis[0]    = lean->leanAxis.x;
+            outState->leanAxis[1]    = lean->leanAxis.y;
+            outState->leanAxis[2]    = lean->leanAxis.z;
+            outState->leanRotation[0] = lean->leanRotation.x;
+            outState->leanRotation[1] = lean->leanRotation.y;
+            outState->leanRotation[2] = lean->leanRotation.z;
+            outState->leanRotation[3] = lean->leanRotation.w;
+            return true;
+        }
+        const double stepDeltaSeconds = fixedDeltaSeconds * static_cast<double>(lodInterval);
         const math::Vec3 velocity{rootVelocity[0], rootVelocity[1], rootVelocity[2]};
         math::Vec3 acceleration{};
         if (lean->hasPreviousVelocity)
@@ -1388,8 +1533,8 @@ private:
         // Spring-damper scalar lean around the (possibly retargeted) axis.
         lean->angularVelocity += (-lean->description.stiffness * (lean->leanAngleRadians - targetAngle)
                                      - lean->description.damping * lean->angularVelocity)
-            * fixedDeltaSeconds;
-        lean->leanAngleRadians += lean->angularVelocity * fixedDeltaSeconds;
+            * stepDeltaSeconds;
+        lean->leanAngleRadians += lean->angularVelocity * stepDeltaSeconds;
         lean->leanAngleRadians = std::clamp(lean->leanAngleRadians, -lean->description.maximumLeanRadians,
             lean->description.maximumLeanRadians);
         if (lateralMagnitude > 1.0e-6)
@@ -1433,53 +1578,90 @@ private:
         {
             return false;
         }
-        std::uint32_t bodyCount = rigid_->bodyCount(rigid_->self, world);
+        const std::uint32_t bodyCount = rigid_->bodyCount(rigid_->self, world);
         if (bodyCount == 0u)
         {
             return true;
         }
-        // Fixed upper bound keeps the pass allocation-free; worlds above the
-        // bound are simply not pushed this call.
-        constexpr std::uint32_t kMaximumPushBodies = 4096;
-        if (bodyCount > kMaximumPushBodies)
-        {
-            bodyCount = kMaximumPushBodies;
-        }
-        engine::physics_rigid::BodyHandle handles[kMaximumPushBodies];
+        // Batched reads over the whole world (the rigid capability's
+        // copyBodyHandles / copyBodyStates / copyBodyDescriptions surface):
+        // three calls instead of two per body, and every dynamic body in the
+        // sphere receives the push no matter how large the world grew.
+        pushHandles_.resize(bodyCount);
+        pushStates_.resize(bodyCount);
+        pushDescriptions_.resize(bodyCount);
         std::uint32_t required = 0u;
-        if (!rigid_->copyBodyHandles(rigid_->self, world, handles, bodyCount, &required))
+        if (!rigid_->copyBodyHandles(rigid_->self, world, pushHandles_.data(), bodyCount, &required))
         {
             return false;
         }
+        const std::uint32_t liveCount = required < bodyCount ? required : bodyCount;
+        rigid_->copyBodyStates(rigid_->self, world, pushHandles_.data(), liveCount, pushStates_.data());
+        rigid_->copyBodyDescriptions(rigid_->self, world, pushHandles_.data(), liveCount, pushDescriptions_.data());
         const double radiusSquared = radius * radius;
-        for (std::uint32_t index = 0; index < bodyCount && index < required; ++index)
+        for (std::uint32_t index = 0; index < liveCount; ++index)
         {
-            engine::physics_rigid::BodyDescription description;
-            if (!rigid_->copyBodyDescription(rigid_->self, world, handles[index], &description))
+            if (pushDescriptions_[index].kind != engine::physics_rigid::BodyKind::Dynamic)
             {
                 continue;
             }
-            if (description.kind != engine::physics_rigid::BodyKind::Dynamic)
-            {
-                continue;
-            }
-            engine::physics_rigid::BodyState state;
-            if (!rigid_->copyBodyState(rigid_->self, world, handles[index], &state))
-            {
-                continue;
-            }
-            const double offsetX = state.transform.position.x - center[0];
-            const double offsetY = state.transform.position.y - center[1];
-            const double offsetZ = state.transform.position.z - center[2];
+            const engine::physics_rigid::RigidTransform &transform = pushStates_[index].transform;
+            const double offsetX = transform.position.x - center[0];
+            const double offsetY = transform.position.y - center[1];
+            const double offsetZ = transform.position.z - center[2];
             if (offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ > radiusSquared)
             {
                 continue;
             }
             const double impulse[3] = {pushVelocity[0] * forceScale, pushVelocity[1] * forceScale,
                 pushVelocity[2] * forceScale};
-            const double point[3]   = {state.transform.position.x, state.transform.position.y, state.transform.position.z};
-            rigid_->applyImpulseAtPoint(rigid_->self, world, handles[index], impulse, point);
+            const double point[3]   = {transform.position.x, transform.position.y, transform.position.z};
+            rigid_->applyImpulseAtPoint(rigid_->self, world, pushHandles_[index], impulse, point);
         }
+        return true;
+    }
+
+    bool setCharacterImportanceImpl(CharacterHandle handle, double importance)
+    {
+        CharacterRecord *character = findCharacter(handle);
+        if (character == nullptr || !std::isfinite(importance))
+        {
+            return false;
+        }
+        character->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
+    }
+
+    bool setJiggleChainImportanceImpl(JiggleChainHandle handle, double importance)
+    {
+        JiggleChainRecord *chain = findChain(handle);
+        if (chain == nullptr || !std::isfinite(importance))
+        {
+            return false;
+        }
+        chain->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
+    }
+
+    bool setFootPlanterImportanceImpl(FootPlanterHandle handle, double importance)
+    {
+        FootPlanterRecord *planter = findPlanter(handle);
+        if (planter == nullptr || !std::isfinite(importance))
+        {
+            return false;
+        }
+        planter->importance = engine::util::simulationImportanceClamped(importance);
+        return true;
+    }
+
+    bool setLeanControllerImportanceImpl(LeanHandle handle, double importance)
+    {
+        LeanRecord *lean = findLean(handle);
+        if (lean == nullptr || !std::isfinite(importance))
+        {
+            return false;
+        }
+        lean->importance = engine::util::simulationImportanceClamped(importance);
         return true;
     }
 
@@ -1516,6 +1698,10 @@ private:
         ENGINE_PHYSICS_CHARACTER_BIND(updateLeanController, updateLeanControllerImpl);
         ENGINE_PHYSICS_CHARACTER_BIND(applyCharacterPush, applyCharacterPushImpl);
         ENGINE_PHYSICS_CHARACTER_BIND(characterStatistics, characterStatisticsImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(setCharacterImportance, setCharacterImportanceImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(setJiggleChainImportance, setJiggleChainImportanceImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(setFootPlanterImportance, setFootPlanterImportanceImpl);
+        ENGINE_PHYSICS_CHARACTER_BIND(setLeanControllerImportance, setLeanControllerImportanceImpl);
 #undef ENGINE_PHYSICS_CHARACTER_BIND
     }
 
@@ -1528,6 +1714,16 @@ private:
     CharacterSettings settings_;
 
     CharacterStatistics statistics_{};
+
+    // Registration ordinal for the stagger phases (one counter shared by
+    // every record type, like the fields module): records sharing an update
+    // interval spread their due steps evenly across the cadence.
+    std::uint64_t registrationOrdinal_ = 0;
+
+    // Reused scratch for the batched push pass.
+    std::vector<engine::physics_rigid::BodyHandle>      pushHandles_;
+    std::vector<engine::physics_rigid::BodyState>       pushStates_;
+    std::vector<engine::physics_rigid::BodyDescription> pushDescriptions_;
 
     std::vector<CharacterRecord>                          characters_;
     std::unordered_map<CharacterHandle, std::size_t>      characterIndexByHandle_;

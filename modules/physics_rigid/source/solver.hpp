@@ -32,6 +32,12 @@ struct ContactConstraint
     math::Mat3  inverseInertiaA;
     math::Mat3  inverseInertiaB;
 
+    // Simulation LOD: the iteration budget derived from the pair's dynamic
+    // bodies' fidelity bands (largest wins). Iteration passes beyond the
+    // budget skip this constraint.
+    std::uint32_t velocityIterationBudget = 1u;
+    std::uint32_t positionIterationBudget = 1u;
+
     struct Point
     {
         math::Vec3             rA; // anchor relative to body A's center of mass
@@ -67,6 +73,10 @@ struct JointConstraint
     std::size_t bodyIndexB = 0;
     std::size_t jointIndex = 0;
     JointKind   kind       = JointKind::Distance;
+
+    // Simulation LOD: as ContactConstraint.
+    std::uint32_t velocityIterationBudget = 1u;
+    std::uint32_t positionIterationBudget = 1u;
 
     double     inverseMassA = 0.0;
     double     inverseMassB = 0.0;
@@ -139,15 +149,18 @@ void warmStartContacts(World &world, std::vector<ContactConstraint> &constraints
 void warmStartJoints(World &world, std::vector<JointConstraint> &constraints, bool warmStarting);
 
 // One sequential-impulse iteration over all constraints (contacts first,
-// joints second; each in fixed order).
+// joints second; each in fixed order). `iteration` is the pass index;
+// constraints whose simulation-LOD iteration budget has been exhausted
+// skip the pass.
 void solveContactVelocityIteration(
-    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context);
-void solveJointVelocityIteration(World &world, std::vector<JointConstraint> &constraints, const StepContext &context);
+    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context, std::uint32_t iteration);
+void solveJointVelocityIteration(
+    World &world, std::vector<JointConstraint> &constraints, const StepContext &context, std::uint32_t iteration);
 
 // One position-solver iteration: drives the remaining contact penetration out
 // by moving transforms directly (no velocity change), which removes overlap
 // without injecting the bounce energy a Baumgarte bias would.
 void solveContactPositionIteration(
-    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context);
+    World &world, std::vector<ContactConstraint> &constraints, const StepContext &context, std::uint32_t iteration);
 
 } // namespace engine::physics_rigid

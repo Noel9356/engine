@@ -104,11 +104,9 @@ struct ParticlesSettings
 
     // Simulation LOD: emitters below the Full band update on a staggered
     // cadence; the per-band interval says how many fixed steps one due step
-    // covers (0 freezes the band's emitters). The thresholds come from the
+    // covers (0 freezes the band's emitters). The whole block comes from the
     // shared fidelity-ladder vocabulary.
-    bool                              lodEnabled   = false;
-    engine::util::SimulationFidelityThresholds lodThresholds{};
-    std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
+    engine::util::SimulationLodSettings lod{};
 
     // Behavior tuning: the leaves' brief contact hold, and the insect
     // wander controller's radius and steering gain.
@@ -167,6 +165,7 @@ public:
         emitters_.clear();
         emitterIndexByHandle_.clear();
         nextEmitterHandle_ = 1;
+        registrationOrdinal_ = 0;
         statistics_        = ParticlesStatistics{};
     }
 
@@ -188,32 +187,7 @@ private:
 
     void readLodSettings(ParticipantContext &context)
     {
-        settings_.lodEnabled = context.configurationBooleanInSection("physics_particles", "lod_enabled").value_or(false);
-        const auto readThreshold = [this, &context](const char *key, double &target, double minimum, double maximum)
-        {
-            if (const auto value = context.configurationFloatingInSection("physics_particles", key);
-                value && *value >= minimum && *value <= maximum && std::isfinite(*value))
-                target = *value;
-        };
-        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold, 0.0, 1.0);
-        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold, 0.0, 1.0);
-        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold, 0.0, 1.0);
-        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold, 0.0, 1.0);
-        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin, 0.0, 1.0);
-        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
-        {
-            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
-        }
-        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
-        {
-            if (const auto value = context.configurationIntegerInSection("physics_particles", key);
-                value && *value >= 0 && *value <= 65536)
-                target = static_cast<std::uint32_t>(*value);
-        };
-        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
-        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
-        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
-        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_particles");
     }
 
     void readBehaviorSettings(ParticipantContext &context)
@@ -549,6 +523,9 @@ private:
                                : nextEmitterHandle_ + 1;
         emitter.world       = world;
         emitter.description = *description;
+        // Stagger phase from the registration ordinal: emitters sharing an
+        // update interval spread their due steps evenly across the cadence.
+        emitter.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
         if (!rigid_->copyWorldGravity(rigid_->self, world, emitter.gravity))
         {
             emitter.gravity[0] = 0.0;
@@ -724,28 +701,18 @@ private:
         // score, refresh the staggered cadence, and let one due step cover
         // the whole interval of wall time. Cached emitters freeze. Without
         // lod_enabled every emitter runs Full every step.
-        double stepDelta = fixedDeltaSeconds;
-        if (settings_.lodEnabled)
+        const std::uint32_t lodInterval = engine::util::simulationLodResolvePass(emitter->lodBand,
+            emitter->cadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            emitter->importance,
+            &statistics_.lodSkippedSteps);
+        if (lodInterval == 0u)
         {
-            emitter->lodBand = engine::util::simulationFidelityForImportance(
-                settings_.lodThresholds, emitter->importance, emitter->lodBand);
-            const std::uint32_t interval
-                = settings_.lodIntervals[engine::util::simulationFidelityIndex(emitter->lodBand)];
-            if (interval == 0u)
-            {
-                // Cached band: hold the last state until the score rises.
-                emitter->cadence.interval = 1u;
-                ++statistics_.lodSkippedSteps;
-                return true;
-            }
-            emitter->cadence.interval = interval;
-            if (!engine::util::simulationCadenceAdvance(emitter->cadence))
-            {
-                ++statistics_.lodSkippedSteps;
-                return true;
-            }
-            stepDelta = fixedDeltaSeconds * static_cast<double>(interval);
+            return true;
         }
+        const double stepDelta = fixedDeltaSeconds * static_cast<double>(lodInterval);
         stepEmitter(*emitter, stepDelta);
         // Finite guard: a diverging particle retires immediately instead of
         // poisoning its pool; the step still reports the failure.
@@ -852,6 +819,7 @@ private:
     std::vector<EmitterRecord>                     emitters_;
     std::unordered_map<EmitterHandle, std::size_t> emitterIndexByHandle_;
     EmitterHandle                                  nextEmitterHandle_ = 1;
+    std::uint64_t                                  registrationOrdinal_ = 0;
 
     // Reused scratch for the batched sphere-overlap queries.
     std::vector<std::size_t>                             sphereSlotIndices_;

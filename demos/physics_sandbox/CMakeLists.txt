@@ -16,7 +16,7 @@ engine_add_application(
     renderer
     camera
     pbr
-    fur
+    physics_fur
     physics_rigid
     physics_articulated
     physics_cloth

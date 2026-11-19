@@ -3,7 +3,7 @@
 //
 // Header-only and dependency-free, so any module (and any application built
 // on the engine) can adopt simulation LOD without pulling in a scheduler or
-// another module's capability. Two cooperating pieces live here:
+// another module's capability. The cooperating pieces live here:
 //
 //  1. The fidelity ladder: an importance score in [0, 1] maps onto five
 //     fidelity bands (Cached, Animation, Procedural, Simplified, Full) with
@@ -19,13 +19,22 @@
 //     objects sharing an interval spread their work evenly across steps
 //     instead of bunching into one heavy pass.
 //
+//  3. The shared configuration reader and pass resolver: every module reads
+//     the same lod_* keys into one SimulationLodSettings and resolves each
+//     update pass through simulationLodResolvePass, so the ladder, the
+//     cadence and the skip accounting behave identically everywhere a
+//     module adopts them.
+//
 // The caller owns the policy: it derives importance however the application
 // measures relevance (camera distance, screen coverage, gameplay tag), picks
 // the per-band intervals, and decides what each band means for its own
-// integrator. Constrained systems (cloth, ropes, fluids) keep their fixed
-// step size and lower their fidelity through cheaper solver settings;
-// unconstrained systems (particles, ambient springs) may cover one full
-// interval of wall time per update by integrating with interval x delta.
+// integrator. Constrained systems (cloth, ropes, fluids, rigid contact
+// islands) keep their fixed step size and lower their fidelity through
+// cheaper solver settings (simulationLodSubstepsForBand, per-constraint
+// iteration budgets); unconstrained systems (particles, ambient springs) may
+// cover one full interval of wall time per update by integrating with
+// interval x delta; force appliers scale their forces by the interval so the
+// impulse per wall time stays exact.
 
 #pragma once
 
@@ -194,6 +203,127 @@ inline double simulationImportanceClamped(double importance)
         return 0.0;
     }
     return importance >= 1.0 ? 1.0 : importance;
+}
+
+// Per-module simulation-LOD configuration: the shared fidelity ladder plus
+// the per-band update intervals, all read from one configuration section.
+// intervals is indexed by simulationFidelityIndex (Cached, Animation,
+// Procedural, Simplified, Full); interval 0 freezes that band's objects.
+struct SimulationLodSettings
+{
+    bool                          enabled     = false;
+    SimulationFidelityThresholds  thresholds{};
+    std::uint32_t                 intervals[kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
+};
+
+// Reads the standard simulation-LOD keys from one configuration section:
+// lod_enabled, lod_full_threshold, lod_simplified_threshold,
+// lod_procedural_threshold, lod_animation_threshold, lod_demotion_margin,
+// lod_interval_simplified, lod_interval_procedural, lod_interval_animation
+// and lod_interval_cached. `Context` is the ParticipantContext the module
+// receives in construct (duck-typed so this header stays dependency-free).
+// Out-of-range or non-finite values keep their defaults; a threshold
+// combination that is not strictly descending resets the whole ladder to
+// the defaults, matching the per-module readers this replaces.
+template <typename Context>
+SimulationLodSettings readSimulationLodSettings(const Context &context, const char *section)
+{
+    SimulationLodSettings settings;
+    settings.enabled = context.configurationBooleanInSection(section, "lod_enabled").value_or(false);
+    const auto readThreshold = [&context, section](const char *key, double &target)
+    {
+        if (const auto value = context.configurationFloatingInSection(section, key);
+            value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
+        {
+            target = *value;
+        }
+    };
+    readThreshold("lod_full_threshold", settings.thresholds.fullThreshold);
+    readThreshold("lod_simplified_threshold", settings.thresholds.simplifiedThreshold);
+    readThreshold("lod_procedural_threshold", settings.thresholds.proceduralThreshold);
+    readThreshold("lod_animation_threshold", settings.thresholds.animationThreshold);
+    readThreshold("lod_demotion_margin", settings.thresholds.demotionMargin);
+    if (!simulationFidelityThresholdsValid(settings.thresholds))
+    {
+        settings.thresholds = SimulationFidelityThresholds{};
+    }
+    const auto readInterval = [&context, section](const char *key, std::uint32_t &target)
+    {
+        if (const auto value = context.configurationIntegerInSection(section, key);
+            value && *value >= 0 && *value <= 65536)
+        {
+            target = static_cast<std::uint32_t>(*value);
+        }
+    };
+    readInterval(
+        "lod_interval_simplified", settings.intervals[simulationFidelityIndex(SimulationFidelity::Simplified)]);
+    readInterval(
+        "lod_interval_procedural", settings.intervals[simulationFidelityIndex(SimulationFidelity::Procedural)]);
+    readInterval("lod_interval_animation", settings.intervals[simulationFidelityIndex(SimulationFidelity::Animation)]);
+    readInterval("lod_interval_cached", settings.intervals[simulationFidelityIndex(SimulationFidelity::Cached)]);
+    return settings;
+}
+
+// Resolves one LOD-gated update pass: the fidelity band follows the clamped
+// importance through the ladder (with demotion hysteresis), the cadence
+// staggers passes across fixed steps, and the return value is the
+// wall-time multiple a due pass must cover - interval fixed steps - so an
+// unconstrained integrator steps with interval x delta and a force applier
+// scales its forces by the same factor. Returns 0 when the pass should
+// skip this step (a frozen band, or the staggered cadence is not due);
+// every skip bumps *skippedSteps when the pointer is non-null. With
+// `enabled` false every pass runs Full and is due every step.
+inline std::uint32_t simulationLodResolvePass(SimulationFidelity &band, SimulationCadence &cadence,
+    const SimulationFidelityThresholds &thresholds, const std::uint32_t *intervals, bool enabled, double importance,
+    std::uint64_t *skippedSteps)
+{
+    if (!enabled)
+    {
+        return 1u;
+    }
+    band = simulationFidelityForImportance(thresholds, importance, band);
+    const std::uint32_t interval = intervals[simulationFidelityIndex(band)];
+    if (interval == 0u)
+    {
+        cadence.interval = 1u;
+        if (skippedSteps != nullptr)
+        {
+            ++*skippedSteps;
+        }
+        return 0u;
+    }
+    cadence.interval = interval;
+    if (!simulationCadenceAdvance(cadence))
+    {
+        if (skippedSteps != nullptr)
+        {
+            ++*skippedSteps;
+        }
+        return 0u;
+    }
+    return interval;
+}
+
+// Substep budget for a constrained solver running in `band`: Full keeps the
+// configured substeps, Simplified halves them, Procedural quarters them,
+// and Animation/Cached keep one - always at least one substep, because the
+// fixed step size never changes for constrained systems.
+inline std::uint32_t simulationLodSubstepsForBand(SimulationFidelity band, std::uint32_t fullSubsteps)
+{
+    const std::uint32_t clamped = fullSubsteps < 1u ? 1u : fullSubsteps;
+    switch (band)
+    {
+    case SimulationFidelity::Full:
+        return clamped;
+    case SimulationFidelity::Simplified:
+        return clamped / 2u < 1u ? 1u : clamped / 2u;
+    case SimulationFidelity::Procedural:
+        return clamped / 4u < 1u ? 1u : clamped / 4u;
+    case SimulationFidelity::Animation:
+    case SimulationFidelity::Cached:
+    default:
+        return 1u;
+    }
 }
 
 } // namespace engine::util

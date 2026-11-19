@@ -351,8 +351,9 @@ private:
 
     std::vector<ParticipantRecord> records_;
 
-    // Construct order; stop() iterates it in reverse.
-    std::vector<ParticipantRecord *> participantStartOrder_;
+    // Construct order as indices into records_ (the vector may reallocate
+    // while later participants are gathered); stop() iterates it in reverse.
+    std::vector<std::size_t> participantStartOrder_;
     // Lifecycle flags; the setters above clear the ones they invalidate.
     bool configurationLoaded  = false;
     bool participantsGathered = false;

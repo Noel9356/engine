@@ -8,7 +8,8 @@ target_compile_definitions(engine_module_physics_scheduling
     PRIVATE ENGINE_PHYSICS_SCHEDULING_EMBEDDED=1
             ENGINE_PHYSICS_SCHEDULING_MODULE_VERSION="0.1.0")
 target_link_libraries(engine_module_physics_scheduling
-    PRIVATE engine_kernel
+    PRIVATE engine_util_types
+            engine_kernel
             engine_physics_scheduling_capabilities)
 set_target_properties(engine_module_physics_scheduling PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime/modules/physics_scheduling"

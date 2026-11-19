@@ -1,22 +1,22 @@
-// Internals shared between the fur module's translation units.
+// Internals shared between the physics_fur module's translation units.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
-#include <engine/fur/capabilities.hpp>
+#include <engine/physics_fur/capabilities.hpp>
 
 namespace engine
 {
-namespace fur
+namespace physics_fur
 {
 
-// Texture synthesis entry point (fur_texture.cpp): writes width*height*4
+// Texture synthesis entry point (strand_texture.cpp): writes width*height*4
 // RGBA8 bytes. Parameters are pre-validated by the caller.
 void generateFurTexturePixels(
     const FurParameters &parameters, std::uint32_t width, std::uint32_t height, std::uint8_t *outPixelsRgba);
 
-// LOD band tables (fur_lod.cpp / fur.cpp): five screen-size bands, most
+// LOD band tables (lod_bands.cpp / physics_fur.cpp): five screen-size bands, most
 // detailed first. thresholds[i] is the angular size where band i begins;
 // bands[4] catches everything smaller than thresholds[3]. layerCounts is
 // the shell budget per band, heightScales shrink the strand length at
@@ -41,6 +41,6 @@ std::size_t lodBandFor(const LodBands &bands, float angularSize);
 // The full LOD decision using the given band tables.
 FurLodDecision evaluateFurLodDecision(const LodBands &bands, float angularSize);
 
-} // namespace fur
+} // namespace physics_fur
 } // namespace engine
 

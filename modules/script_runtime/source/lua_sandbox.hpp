@@ -102,6 +102,10 @@ struct RuntimeRecord
     std::uint64_t                                      memoryUsed             = 0;
     std::uint64_t                                      instructionsRemaining  = 0;
     std::uint32_t                                      hookGranularity        = 1000;
+    // The interval actually installed by setExecutionBudget (the configured
+    // granularity clamped against a quarter of the instruction limit); the
+    // instruction hook decrements the budget by exactly this much.
+    std::uint32_t                                      effectiveHookGranularity = 1000;
     std::atomic<std::uint64_t>                        *globalMemoryUsed       = nullptr;
     std::uint64_t                                      globalMemoryLimitBytes = 0;
     // Optional wall-clock budget (description.wallClockLimitMilliseconds > 0);

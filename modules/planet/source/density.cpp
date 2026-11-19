@@ -19,10 +19,12 @@ namespace planet
 namespace
 {
 
-// Fixed-shape fBm layers (warp, cluster, mass, cliff mask, caves) share this
-// profile; configured layers (continents, mountains, ...) carry their own.
+// Fixed-shape fBm layers (warp, cluster, mass, cliff mask, caves, provinces)
+// share this profile; configured layers (continents, mountains, ...) carry
+// their own.
 constexpr FbmParams kFixedFbm{2, 2.0, 0.5};
 constexpr FbmParams kMassFbm{3, 2.0, 0.5};
+constexpr FbmParams kProvinceFbm{2, 2.0, 0.5};
 
 // Bisection stops once the surface bracket is tighter than this (sub-
 // millimeter at any supported radius) - further halvings cannot move the
@@ -49,6 +51,9 @@ DensityField::DensityField(const PlanetGenerationParams &params)
     , seedMountainMass_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x4A55ULL)))
     , seedRangeCluster_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x51A7E5ULL)))
     , seedRegional_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x6E10A7ULL)))
+    , seedErosion_(static_cast<std::int64_t>(hashCombine64(params.seed, 0xE9051AULL)))
+    , erosion_(params, seedErosion_)
+    , fbmSeeds_()
 {
     const double reliefRange = params.continentAmplitudeMeters + params.mountainAmplitudeMeters + params.hillAmplitudeMeters;
     terraceStepMeters_ = std::max(1.0, reliefRange / std::max(1.0, params.terraceSteps));
@@ -69,17 +74,21 @@ DensityField::DensityField(const PlanetGenerationParams &params)
     fbmSeeds_[streamDetail]       = makeFbmSeeds(seedDetail_, params.detailFbm.octaves);
     fbmSeeds_[streamCaveA]        = makeFbmSeeds(seedCaveA_, 2);
     fbmSeeds_[streamCaveB]        = makeFbmSeeds(seedCaveB_, 2);
+    // Geologic provinces: the rock-character stream and the carbonate stream
+    // share the fixed two-octave profile at the derived province wavelength
+    // (the carbonate patch rides a smaller multiple so limestone country
+    // patches in at a finer scale than the sediment/shield split).
+    fbmSeeds_[streamProvince]          = makeFbmSeeds(streamSeed(seedContinents_, 0x9B0B1EULL), kProvinceFbm.octaves);
+    fbmSeeds_[streamProvinceCarbonate] = makeFbmSeeds(streamSeed(seedContinents_, 0x9B0B2FULL), kProvinceFbm.octaves);
 }
 
 ReliefSample DensityField::reliefAt(const Vec3 &unitDirection) const
 {
-    return reliefImpl(unitDirection, 0.0);
+    return reliefImpl(unitDirection, 0.0, false);
 }
 
-ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassCutoffMeters) const
+Vec3 DensityField::warpedSamplePosition(const Vec3 &unitDirection, double lowPassCutoffMeters) const
 {
-    ReliefSample relief;
-
     // All continent-scale fields sample the noise at PHYSICAL positions
     // (meters) divided by their wavelength, so feature sizes stay metric at
     // any planet radius: a 9 km continent wavelength produces 9 km
@@ -90,21 +99,143 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // Domain warp: bend the sample position with a low-frequency vector
     // noise for swirling coastlines and bays. Skipped entirely when the
     // amplitude is configured to zero (six noise evaluations per sample).
-    Vec3 warpedPosition = radialPosition;
-    if (params_.domainWarpAmplitude > 0.0)
+    if (params_.domainWarpAmplitude <= 0.0)
     {
-        const Vec3 warpDirection = normalized(unitDirection
-            + params_.domainWarpAmplitude
-                * Vec3{fbm(fbmSeeds_[streamWarpX], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
-                    fbm(fbmSeeds_[streamWarpY], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
-                    fbm(fbmSeeds_[streamWarpZ], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters)});
-        warpedPosition = warpDirection * datumRadius;
+        return radialPosition;
     }
+    const Vec3 warpDirection = normalized(unitDirection
+        + params_.domainWarpAmplitude
+            * Vec3{fbm(fbmSeeds_[streamWarpX], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
+                fbm(fbmSeeds_[streamWarpY], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters),
+                fbm(fbmSeeds_[streamWarpZ], radialPosition, params_.domainWarpWavelengthMeters, kFixedFbm, lowPassCutoffMeters)});
+    return warpDirection * datumRadius;
+}
 
+double DensityField::continentFieldAt(const Vec3 &warpedPosition, double lowPassCutoffMeters) const
+{
     // Continent base: signed low-frequency field; positive rises above the
     // datum (land), negative dips below (ocean basins).
-    const double continents = fbm(fbmSeeds_[streamContinents], warpedPosition, params_.continentWavelengthMeters, params_.continentsFbm, lowPassCutoffMeters);
+    return fbm(fbmSeeds_[streamContinents], warpedPosition, params_.continentWavelengthMeters, params_.continentsFbm,
+        lowPassCutoffMeters);
+}
+
+double DensityField::mountainMassAt(const Vec3 &warpedPosition, double lowPassCutoffMeters) const
+{
+    // Broad, smooth mountain-mass envelope in [0, 1] (see the mountain
+    // profile below); shared by the relief composition and the climate's
+    // rain shadow so both agree about where mountain country sits.
+    return 0.5 + 0.5 * fbm(fbmSeeds_[streamMountainMass], warpedPosition,
+        params_.derivedMountainMassWavelengthMeters, kMassFbm, lowPassCutoffMeters);
+}
+
+Vec3 DensityField::prevailingWindDownwind(const Vec3 &unitDirection) const
+{
+    // Unit tangent pointing DOWNWIND at this direction (the way the wind
+    // blows, not where it comes from). The frame derives from the spin axis:
+    // east is the direction the body's rotation carries the surface. With
+    // the latitude zones enabled the direction follows the circulation cells
+    // every rotating planet shows - easterly trades inside the tropics
+    // (blowing toward west), westerlies over the temperate band, easterly
+    // polar winds - with the zones blended over a band of latitude so a
+    // walking camera never sees the wind direction flip.
+    const Vec3 axis{params_.axis[0], params_.axis[1], params_.axis[2]};
+    Vec3 east = cross(unitDirection, axis);
+    const double eastLength = length(east);
+    if (eastLength < 1.0e-9)
+    {
+        return Vec3{0.0, 0.0, 0.0}; // at the pole: no meaningful prevailing wind
+    }
+    east = east * (1.0 / eastLength);
+    if (!params_.climateWindZonesEnabled)
+    {
+        return east; // uniform westerly flow
+    }
+    const double absSinLatitude = clamp01(std::abs(dot(unitDirection, axis)));
+    const double latitudeDegrees = std::asin(absSinLatitude) * (180.0 / 3.14159265358979323846);
+    const double tradeWesterly = 1.0 - smoothstep(24.0, 36.0, latitudeDegrees); // 1 = blowing toward west
+    const double polarEasterly = smoothstep(54.0, 66.0, latitudeDegrees);
+    const double westward = std::max(tradeWesterly, polarEasterly);
+    return east * (1.0 - 2.0 * westward);
+}
+
+void DensityField::macroSampleAt(const Vec3 &surfacePoint, double lowPassCutoffMeters, ClimateMacroSample &outMacro) const
+{
+    const double radius = std::max(1.0e-9, length(surfacePoint));
+    const Vec3  direction = Vec3{surfacePoint.x / radius, surfacePoint.y / radius, surfacePoint.z / radius};
+
+    // Sea-level temperature and moisture (latitude gradient, perturbation
+    // noise, warp, latitude belts).
+    const ClimateSample sea = climate_.sampleSeaLevel(direction);
+    double moisture = sea.moisture01;
+
+    // Continental interiors dry out away from the ocean: the same continent
+    // field that shapes the landmasses rises toward its interior cores, so
+    // the interior factor climbs with it. The coast keeps its onshore
+    // humidity boost (applied in the per-vertex climate sample); this term
+    // pulls the deep interiors toward steppe and desert.
+    if (params_.climateContinentalityStrength > 0.0)
+    {
+        const Vec3 position = warpedSamplePosition(direction, lowPassCutoffMeters);
+        const double continent = continentFieldAt(position, lowPassCutoffMeters);
+        moisture -= params_.climateContinentalityStrength * smoothstep(0.0, 0.85, continent);
+    }
+
+    // Rain shadow: mountain country upwind wrings the moisture out of the
+    // air, so the lee side carries a dry belt. The mountain MASS envelope is
+    // sampled upwind along the prevailing wind at roughly the mountain
+    // wavelength's reach - the distance orographic precipitation plausibly
+    // extends.
+    if (params_.climateRainShadowStrength > 0.0)
+    {
+        const Vec3 wind = prevailingWindDownwind(direction);
+        if (lengthSquared(wind) > 0.5)
+        {
+            const double reach = std::max(1.0, params_.mountainWavelengthMeters * 1.25);
+            const Vec3 upwindDirection = normalized(direction + wind * (reach / radius));
+            const double mass = mountainMassAt(upwindDirection * params_.radiusMeters, lowPassCutoffMeters);
+            moisture -= params_.climateRainShadowStrength * mass;
+        }
+    }
+
+    outMacro.temperature01 = sea.temperature01;
+    outMacro.moisture01    = clamp01(moisture);
+    outMacro.cloudShadow   = cloudShadow(direction, lowPassCutoffMeters);
+
+    // Geologic province character (see the provinces keys in params.hpp).
+    outMacro.provinceChemistry = 0.0;
+    outMacro.provinceCarbonate = 0.0;
+    if (params_.provincesEnabled)
+    {
+        const Vec3 radial = direction * params_.radiusMeters;
+        const double provinceField = fbm(fbmSeeds_[streamProvince], radial,
+            params_.derivedProvinceWavelengthMeters, kProvinceFbm, lowPassCutoffMeters);
+        outMacro.provinceChemistry = smoothstep(-0.30, 0.45, provinceField);
+        const double carbonateField = fbm(fbmSeeds_[streamProvinceCarbonate], radial,
+            params_.derivedProvinceWavelengthMeters * 0.43, kProvinceFbm, lowPassCutoffMeters);
+        outMacro.provinceCarbonate = smoothstep(0.10, 0.72, carbonateField);
+    }
+}
+
+ClimateSample DensityField::sampleClimate(const Vec3 &unitDirection, double radiusMeters, double slope01,
+    double lowPassCutoffMeters) const
+{
+    ClimateMacroSample macro;
+    macroSampleAt(unitDirection * radiusMeters, lowPassCutoffMeters, macro);
+    return climate_.sample(macro, unitDirection, radiusMeters, slope01, lowPassCutoffMeters);
+}
+
+ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassCutoffMeters, bool denseSampling) const
+{
+    ReliefSample relief;
+
+    const Vec3 warpedPosition = warpedSamplePosition(unitDirection, lowPassCutoffMeters);
+    const double continents = continentFieldAt(warpedPosition, lowPassCutoffMeters);
     double       height     = params_.continentAmplitudeMeters * continents;
+    // Close-range layers (regional, hills, cliff mask, detail) sample the
+    // UNWARPED radial position: the warp bends the continent-scale geography
+    // only, and mixing it into the near-field layers would smear terrain
+    // texture along the warp's own contours.
+    const Vec3 radialPosition = unitDirection * params_.radiusMeters;
 
     // Abyssal deepening: the sea floor sinks from the shoreline into the
     // basins, carving a real ocean profile - a shallow continental shelf at
@@ -112,7 +243,7 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // the (band-limited) continent field, so the shelf is as wide and smooth
     // as the continent geography itself; the deepened floor also keeps every
     // detail layer faded out below the slope. 0 disables.
-    const double oceanDeepMask = 1.0 - smoothstep(-0.60, -0.02, continents);
+    const double oceanDeepMask = 1.0 - smoothstep(params_.abyssalMaskLow, params_.abyssalMaskHigh, continents);
     height -= params_.abyssalDepthMeters * oceanDeepMask;
 
     // Mountains grow where the continent field is strongly positive. A broad
@@ -125,7 +256,7 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     {
         const double clusterField = fbm(fbmSeeds_[streamRangeCluster], warpedPosition, params_.rangeClusterWavelengthMeters,
                                   kFixedFbm, lowPassCutoffMeters);
-        const double clusterGate  = smoothstep(-0.35, 0.45, clusterField);
+        const double clusterGate  = smoothstep(params_.rangeClusterGateLow, params_.rangeClusterGateHigh, clusterField);
         mountainMask = clamp01(baseMountainMask * mix(1.0 - params_.rangeClusterStrength, 1.0, clusterGate));
     }
 
@@ -138,15 +269,42 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // mask lets mountains contribute at all: over the oceans (about two
     // thirds of a typical globe) the crest and mass fields would be pure
     // waste, and they are the two most expensive layers of the field.
-    double ridges = 0.0;
+    // With the erosion filter weighted in, the belt relief instead comes
+    // from the analytic eroded-mountain field (see erosion.hpp): the
+    // filter's height remaps onto the same [0, 1] profile span, the ridge
+    // map takes over the crest-line role (cliff energy below keys on it),
+    // and the classic mass/crest streams are skipped entirely at full
+    // weight - the erosion sample costs more than they do, but only where
+    // mountains actually rise, and its interpolation lattice amortizes it
+    // across every voxel of a chunk.
+    double       ridges        = 0.0; // crest measure feeding the cliff mask
     if (mountainMask > 0.0)
     {
-        ridges = ridgedFbm(fbmSeeds_[streamMountains], warpedPosition, params_.mountainWavelengthMeters, params_.mountainsFbm, lowPassCutoffMeters);
-        const double mass       = 0.5 + 0.5 * fbm(fbmSeeds_[streamMountainMass], warpedPosition, params_.derivedMountainMassWavelengthMeters,
-                                  kMassFbm, lowPassCutoffMeters);
-        const double crest      = std::pow(ridges, params_.mountainSharpness);
-        const double mountainProfile = params_.mountainMassFraction * mass
-            + (1.0 - params_.mountainMassFraction) * crest * (0.35 + 0.65 * mass);
+        const double erosionWeight = params_.mountainErosionWeight;
+        double fbmProfile    = 0.0;
+        double erosionProfile = 0.0;
+        if (erosionWeight < 1.0)
+        {
+            ridges = ridgedFbm(fbmSeeds_[streamMountains], warpedPosition, params_.mountainWavelengthMeters,
+                params_.mountainsFbm, lowPassCutoffMeters);
+            const double mass  = mountainMassAt(warpedPosition, lowPassCutoffMeters);
+            const double crest = std::pow(ridges, params_.mountainSharpness);
+            fbmProfile = params_.mountainMassFraction * mass
+                + (1.0 - params_.mountainMassFraction) * crest
+                    * (params_.mountainCrestMassCoupling + (1.0 - params_.mountainCrestMassCoupling) * mass);
+        }
+        if (erosionWeight > 0.0)
+        {
+            const MountainErosionSample eroded =
+                erosion_.sample(unitDirection * params_.radiusMeters, lowPassCutoffMeters, denseSampling);
+            erosionProfile = clamp01((eroded.height - params_.mountainErosionProfileLow)
+                / std::max(0.01, params_.mountainErosionProfileHigh - params_.mountainErosionProfileLow));
+            // The ridge map (-1 crease .. +1 ridge) is the eroded profile's
+            // own crest measure; the blend keeps the cliff-mask energy
+            // continuous across the weight range.
+            ridges = mix(ridges, clamp01(0.5 + 0.5 * eroded.ridgeMap), erosionWeight);
+        }
+        const double mountainProfile = mix(fbmProfile, erosionProfile, erosionWeight);
         height += params_.mountainAmplitudeMeters * mountainMask * mountainProfile;
     }
 
@@ -158,7 +316,8 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // at globe scale - shoals deeper than a few meters must carry NOTHING
     // but the continent field, whose own fine octaves (tens of meters of
     // amplitude) then cannot cross the waterline either.
-    const double detailFade = smoothstep(-0.02 * params_.continentAmplitudeMeters, 0.06 * params_.continentAmplitudeMeters, height);
+    const double detailFade = smoothstep(-params_.submarineFadeLowFraction * params_.continentAmplitudeMeters,
+        params_.submarineFadeHighFraction * params_.continentAmplitudeMeters, height);
 
     // Coastal flattening: waves and sediment plan off the small-scale relief
     // right at the waterline. Detail terms (hills, terraces, overhangs,
@@ -175,7 +334,7 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     const auto coastalTaperOf = [this, &flattenWidth](double surfaceHeight)
     {
         return mix(params_.coastalFlattenFloor, 1.0,
-            smoothstep(0.45 * flattenWidth, 1.6 * flattenWidth,
+            smoothstep(params_.coastalFlattenFullFraction * flattenWidth, params_.coastalFlattenReachFraction * flattenWidth,
                 std::abs(surfaceHeight - params_.seaLevelOffsetMeters)));
     };
 
@@ -187,6 +346,10 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     // marginal land into islands (basins inland keep their full depth).
     double cliffMask   = 0.0;
     double coastalTaper = coastalTaperOf(height);
+    // Rock character of this point (0 = shield/volcanic, 1 = sedimentary);
+    // evaluated with the land detail fields below and carried out on the
+    // relief sample so the strata banding in densityAt() can bias with it.
+    double provinceChemistry = 0.0;
     if (detailFade > 0.0)
     {
         const double regionalTaper = mix(1.0, coastalTaper, 0.5);
@@ -219,9 +382,23 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
         // qualifies.
         const double hillFlank = std::pow(clamp01(1.0 - std::abs(hillField)), params_.cliffSharpness);
         const double cliffVariety = 0.82 + 0.18 * fbm(fbmSeeds_[streamCliffMask], radialPosition, params_.cliffWavelengthMeters, kFixedFbm, lowPassCutoffMeters);
-        const double crestRise = mountainMask * (0.40 + 0.60 * ridges);
+        const double crestRise = mountainMask * (0.30 + 0.70 * ridges);
         const double cliffEnergy = std::max(0.50 * hillFlank * cliffVariety, crestRise);
         cliffMask = smoothstep(params_.cliffSteepnessLow, params_.cliffSteepnessHigh, cliffEnergy);
+
+        // Geologic province character of THIS point (see the provinces keys):
+        // layered sedimentary country terraces and bands more readily than
+        // shield/volcanic country, so the terrace strength biases with the
+        // rock character. The same stream feeds the albedo tint (macro
+        // sample), so what the geometry builds and what the surface paints
+        // agree about the ground.
+        if (params_.provincesEnabled)
+        {
+            const double provinceField = fbm(fbmSeeds_[streamProvince], radialPosition,
+                params_.derivedProvinceWavelengthMeters, kProvinceFbm, lowPassCutoffMeters);
+            provinceChemistry = smoothstep(-0.30, 0.45, provinceField);
+        }
+        const double terraceBias = mix(1.0 - params_.provinceTerraceBias, 1.0 + params_.provinceTerraceBias, provinceChemistry);
 
         // Fine detail layer: rock ribs, soil ripples, scree - the roughness
         // that keeps close-range views from reading as smooth plastic.
@@ -244,7 +421,8 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
         const double f    = u - k;
         const double halfRiser = 0.5 * params_.terraceRiserFraction;
         const double edge = smoothstep(0.5 - halfRiser, 0.5 + halfRiser, f);
-        height            = mix(height, (k + edge) * terraceStepMeters_, params_.terraceStrength * cliffMask * detailFade * coastalTaper);
+        height            = mix(height, (k + edge) * terraceStepMeters_,
+            params_.terraceStrength * terraceBias * cliffMask * detailFade * coastalTaper);
     }
 
     relief.heightMeters   = height;
@@ -252,10 +430,11 @@ ReliefSample DensityField::reliefImpl(const Vec3 &unitDirection, double lowPassC
     relief.cliffFactor    = cliffMask;
     relief.detailFade     = detailFade;
     relief.coastalTaper   = coastalTaper;
+    relief.provinceChemistry = provinceChemistry;
     return relief;
 }
 
-double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) const
+double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters, bool denseSampling) const
 {
     const double radius = length(point);
     if (radius < 1.0e-9)
@@ -265,7 +444,7 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     }
     const Vec3 direction = Vec3{point.x / radius, point.y / radius, point.z / radius};
 
-    const ReliefSample relief = reliefImpl(direction, lowPassCutoffMeters);
+    const ReliefSample relief = reliefImpl(direction, lowPassCutoffMeters, denseSampling);
     double             d      = (params_.radiusMeters + relief.heightMeters) - radius;
 
     // Overhang displacement: true 3D noise added to the signed density.
@@ -300,9 +479,15 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
     if (relief.detailFade > 0.0 && relief.coastalTaper > 0.0)
     {
         const double strataFade = lowPassFade(lowPassCutoffMeters, params_.strataBandMeters);
-        const double strataGate  = smoothstep(0.45, 0.85, relief.cliffFactor);
+        const double strataGate  = smoothstep(params_.strataGateLow, params_.strataGateHigh, relief.cliffFactor);
         if (strataGate > 0.0 && strataFade > 0.0)
         {
+            // Sedimentary country (provinceChemistry -> 1) bands more
+            // strongly than shield/volcanic country - layered beds vs
+            // massive igneous rock - so the band amplitude biases with the
+            // rock character the relief sample already carries.
+            const double strataBias = mix(1.0 - params_.provinceStrataBias, 1.0 + params_.provinceStrataBias,
+                params_.provincesEnabled ? relief.provinceChemistry : 0.0);
             const double bandWidth = std::max(1.0, params_.strataBandMeters);
             const double bandPhase = radius / bandWidth;
             // Two warps bend the bands: a spatial warp at the band scale
@@ -322,7 +507,7 @@ double DensityField::densityAt(const Vec3 &point, double lowPassCutoffMeters) co
             // so the stripes come and go between outcrops instead of painting
             // every cliff with the same contrast.
             const double bedding = 0.30 + 0.70 * smoothstep(-0.55, 0.55, thicknessWarp);
-            d += params_.strataAmplitudeMeters * bedding
+            d += params_.strataAmplitudeMeters * strataBias * bedding
                 * std::sin(6.283185307179586 * bandPhase + params_.strataWarp * bandWarp
                     + params_.strataWarp * 2.6 * thicknessWarp)
                 * strataGate * relief.detailFade * relief.coastalTaper * strataFade;
@@ -381,7 +566,7 @@ double DensityField::surfaceRadius(const Vec3 &unitDirection) const
     double lowRadius = wideLowRadius;
     double highRadius = wideHighRadius;
     double lowDensity = 0.0;
-    const ReliefSample profile = reliefImpl(unitDirection, 0.0);
+    const ReliefSample profile = reliefImpl(unitDirection, 0.0, false);
     if (std::isfinite(profile.heightMeters))
     {
         const double guessLow = params_.radiusMeters + profile.heightMeters - band3d - 1.0;
@@ -489,7 +674,14 @@ double DensityField::cloudShadow(const Vec3 &unitDirection, double lowPassCutoff
     const double shellHeight = std::max(1.0, params_.cloudAltitudeMeters);
     const double rise = std::min(shellHeight / sunUp, 8.0 * shellHeight);
     const Vec3 samplePoint = unitDirection * params_.radiusMeters + sun * rise;
-    return params_.cloudShadowStrength * clouds_.coverage(normalized(samplePoint), lowPassCutoffMeters);
+    // The cast shade samples the coverage field with a WIDER threshold band
+    // than the painted banks (cloud_shadow_softness scales the edge width):
+    // sunlight around a cloud comes through a penumbra, so the shadow's
+    // edges blur beyond the outline that casts them instead of repeating it
+    // as a hard copy - the harsh dark blotches a 1:1 shade produces read as
+    // stencil cuts, not weather.
+    const double shadowSoftness = 1.0 + 2.0 * params_.cloudShadowSoftness;
+    return params_.cloudShadowStrength * clouds_.coverage(normalized(samplePoint), lowPassCutoffMeters, shadowSoftness);
 }
 
 } // namespace planet

@@ -120,8 +120,11 @@ public:
 
     // Coverage in [0, 1] for one unit direction (planet-local). direction
     // need not be exactly unit length; the sample position is its
-    // normalization scaled onto the cloud shell.
-    double coverage(const Vec3 &unitDirection, double lowPassCutoffMeters = 0.0) const;
+    // normalization scaled onto the cloud shell. softnessScale widens the
+    // threshold band (1 = the configured cloud_edge_softness; 2 doubles it):
+    // cloud SHADOWS sample with a wider band than the painted banks so the
+    // cast shade reads as penumbra instead of a hard copy of the outline.
+    double coverage(const Vec3 &unitDirection, double lowPassCutoffMeters = 0.0, double softnessScale = 1.0) const;
 
 private:
     const PlanetGenerationParams &params_;

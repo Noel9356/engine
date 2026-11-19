@@ -1043,12 +1043,12 @@ void PlanetChunkRenderer::ensureCloudLayer()
     }
 
     // Lat-long grid on the cloud shell (datum radius + cloud altitude).
-    // 288 x 144 quads keep the vertex spacing (~1.3 km at the equator of the
+    // 384 x 192 quads keep the vertex spacing (~1 km at the equator of the
     // 60 km showcase) well under the configured cloud wavelength, so the
     // shell resolves the banks while the coverage field's band limit (the
     // spacing is passed as the cutoff) keeps sub-spacing octaves out.
-    constexpr std::uint32_t kSegments = 288;
-    constexpr std::uint32_t kBands = 144;
+    constexpr std::uint32_t kSegments = 384;
+    constexpr std::uint32_t kBands = 192;
     constexpr double kCoverageFloor = 0.42;
 
     if (cloudField_ == nullptr)
@@ -1162,10 +1162,13 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // way sunrise/sunset light does). The warm band rides the azimuthal
     // gradient - azimuth 0 is the sunward limb (see updateAtmosphereShell),
     // so the warmth peaks where cos(azimuth) crosses zero and melts back to
-    // the plain horizon hue well inside the day side.
+    // the plain horizon hue well inside the day side. The strength stays a
+    // minority share of the horizon hue: a full-strength warm ring reads as
+    // a painted salmon halo from orbit, while a subtle one reads as sunset
+    // light on the thin air the ring depicts.
     const planet::Vec3 warmTint{1.0, 0.52, 0.26};
-    constexpr double kWarmStrength = 0.70;
-    constexpr double kWarmBandWidth = 0.55;
+    constexpr double kWarmStrength = 0.35;
+    constexpr double kWarmBandWidth = 0.35;
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;

@@ -19,6 +19,7 @@ add_library(
     source/fbm.cpp
     source/climate.cpp
     source/atmosphere.cpp
+    source/erosion.cpp
     source/density.cpp
     source/meshing.cpp
     source/octree.cpp

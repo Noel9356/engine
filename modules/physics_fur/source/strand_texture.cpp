@@ -1,4 +1,4 @@
-// Procedural fur strand texture synthesis for the fur module.
+// Procedural fur strand texture synthesis for the physics_fur module.
 //
 // Generates the tiled RGBA8 strand texture the shell-fur pipelines sample:
 //   rgb   - strand albedo variation (per-strand tint + per-texel noise)
@@ -13,8 +13,8 @@
 // set + seed - the demo's capture-matrix regression relies on byte-identical
 // output across runs.
 
-#include <engine/fur/capabilities.hpp>
-#include "fur_internal.hpp"
+#include <engine/physics_fur/capabilities.hpp>
+#include "internal.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -23,7 +23,7 @@
 
 namespace engine
 {
-namespace fur
+namespace physics_fur
 {
 namespace
 {
@@ -200,5 +200,5 @@ void generateFurTexturePixels(const FurParameters &parameters, std::uint32_t wid
     }
 }
 
-} // namespace fur
+} // namespace physics_fur
 } // namespace engine

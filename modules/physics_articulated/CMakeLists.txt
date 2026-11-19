@@ -26,6 +26,7 @@ target_link_libraries(
     PRIVATE engine_kernel
             engine_physics_articulated_capabilities
             engine_physics_rigid_capabilities
+            engine_util_types
 )
 set_target_properties(
     engine_module_physics_articulated

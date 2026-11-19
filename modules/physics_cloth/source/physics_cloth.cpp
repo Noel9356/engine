@@ -119,32 +119,7 @@ private:
 
     void readLodSettings(ParticipantContext &context)
     {
-        settings_.lodEnabled = context.configurationBooleanInSection("physics_cloth", "lod_enabled").value_or(false);
-        const auto readThreshold = [this, &context](const char *key, double &target)
-        {
-            if (const auto value = context.configurationFloatingInSection("physics_cloth", key);
-                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
-                target = *value;
-        };
-        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
-        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
-        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
-        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
-        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
-        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
-        {
-            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
-        }
-        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
-        {
-            if (const auto value = context.configurationIntegerInSection("physics_cloth", key);
-                value && *value >= 0 && *value <= 65536)
-                target = static_cast<std::uint32_t>(*value);
-        };
-        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
-        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
-        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
-        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_cloth");
     }
 
     static void setError(ClothError *output, ClothError value) noexcept
@@ -1009,22 +984,10 @@ private:
 
     // Internal substep count for one fidelity band: lower bands keep the
     // fixed step size and cut the substep count instead (the small-steps
-    // XPBD schedule tolerates the coarser solve), and Cached freezes.
+    // XPBD schedule tolerates the coarser solve).
     std::uint32_t substepsForBand(engine::util::SimulationFidelity band) const
     {
-        switch (band)
-        {
-        case engine::util::SimulationFidelity::Full:
-            return settings_.substepsPerStep;
-        case engine::util::SimulationFidelity::Simplified:
-            return std::max(1u, settings_.substepsPerStep / 2u);
-        case engine::util::SimulationFidelity::Procedural:
-            return std::max(1u, settings_.substepsPerStep / 4u);
-        case engine::util::SimulationFidelity::Animation:
-        case engine::util::SimulationFidelity::Cached:
-        default:
-            return 1u;
-        }
+        return engine::util::simulationLodSubstepsForBand(band, settings_.substepsPerStep);
     }
 
     bool stepImpl(ClothHandle handle, double fixedDeltaSeconds)
@@ -1034,25 +997,21 @@ private:
         {
             return false;
         }
-        if (settings_.lodEnabled)
+        // Simulation LOD: resolve the band and the staggered cadence; a
+        // due step keeps the fixed delta and spends the band's substep
+        // budget (constrained systems never enlarge the step). Cached
+        // cloths freeze. Without lod_enabled every cloth runs Full every
+        // step.
+        if (engine::util::simulationLodResolvePass(cloth->lodBand,
+                cloth->cadence,
+                settings_.lod.thresholds,
+                settings_.lod.intervals,
+                settings_.lod.enabled,
+                cloth->importance,
+                &cloth->lodSkippedSteps)
+            == 0u)
         {
-            cloth->lodBand = engine::util::simulationFidelityForImportance(
-                settings_.lodThresholds, cloth->importance, cloth->lodBand);
-            const std::uint32_t interval
-                = settings_.lodIntervals[engine::util::simulationFidelityIndex(cloth->lodBand)];
-            if (interval == 0u)
-            {
-                // Cached band: hold the last state until the score rises.
-                cloth->cadence.interval = 1u;
-                cloth->lodSkippedSteps += 1;
-                return true;
-            }
-            cloth->cadence.interval = interval;
-            if (!engine::util::simulationCadenceAdvance(cloth->cadence))
-            {
-                cloth->lodSkippedSteps += 1;
-                return true;
-            }
+            return true;
         }
         // A settled cloth holds its state until drag, pin, or wind changes
         // wake it (those setters clear the sleeping flag).

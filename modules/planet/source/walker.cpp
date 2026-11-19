@@ -29,6 +29,29 @@ constexpr std::uint32_t kGroundBisectSteps = 24;
 // comparisons do not flap on floating-point noise.
 constexpr double kGroundTouchMeters = 0.02;
 
+// Slack added to every move/snap/landing probe window on top of the
+// configured step-up and snap distances: the same margin the ride and
+// candidate probes share, so a move accepted by one window is always visible
+// to the others (the three windows must agree or a move can straddle them).
+constexpr double kProbeSlackMeters = 1.0;
+
+// Deepest spacing between consecutive march samples of a ground probe: a
+// floor thinner than this cannot hide between two samples, so a fall or a
+// pop-out never steps over a ledge the character should land on. Probes
+// cover their (speed-scaled) window with ceil(depth / spacing) samples,
+// clamped to the march bounds below.
+constexpr double kMaxMarchSpacingMeters = 0.25;
+constexpr std::uint32_t kMinMarchSteps = 12;
+constexpr std::uint32_t kMaxMarchSteps = 128;
+
+std::uint32_t marchStepCount(double depthMeters)
+{
+    const double spacing = std::max(1.0e-3, kMaxMarchSpacingMeters);
+    const double wanted = std::ceil(std::max(0.0, depthMeters) / spacing);
+    return static_cast<std::uint32_t>(std::clamp(wanted, static_cast<double>(kMinMarchSteps),
+        static_cast<double>(kMaxMarchSteps)));
+}
+
 } // namespace
 
 SurfaceWalker::SurfaceWalker(const PlanetGenerationParams &params, const DensityField &field)
@@ -127,11 +150,12 @@ bool SurfaceWalker::groundRadiusWithin(const Vec3 &position, double maxDepthMete
     {
         // The feet are inside solid rock (the terrain rose into them, or a
         // teleport landed inside a hill): search OUTWARD for the first
-        // surface above and pop out there.
-        constexpr std::uint32_t kMarchSteps = 12;
-        const double stepMeters = depth / static_cast<double>(kMarchSteps);
+        // surface above and pop out there. The march samples finely enough
+        // that no shell of the overhanging roof hides between two steps.
+        const std::uint32_t marchSteps = marchStepCount(depth);
+        const double stepMeters = depth / static_cast<double>(marchSteps);
         double previousOffset   = 0.0;
-        for (std::uint32_t step = 1; step <= kMarchSteps; ++step)
+        for (std::uint32_t step = 1; step <= marchSteps; ++step)
         {
             const double offset  = stepMeters * static_cast<double>(step);
             if (densityAtOffset(offset) <= 0.0)
@@ -147,11 +171,14 @@ bool SurfaceWalker::groundRadiusWithin(const Vec3 &position, double maxDepthMete
     // In air: march inward until the density turns positive, then bisect the
     // bracket. The probe follows the local radial direction, so the ground it
     // finds is the surface a point-feet character stands on - including
-    // overhang undersides and cave floors directly beneath the feet.
-    constexpr std::uint32_t kMarchSteps = 12;
-    const double stepMeters = depth / static_cast<double>(kMarchSteps);
+    // overhang undersides and cave floors directly beneath the feet. The
+    // march samples finely enough that a thin ledge under a fast-falling
+    // character cannot hide between two steps (a fixed step count would let
+    // the per-sample spacing grow with the probe depth and tunnel through).
+    const std::uint32_t marchSteps = marchStepCount(depth);
+    const double stepMeters = depth / static_cast<double>(marchSteps);
     double previousOffset   = 0.0;
-    for (std::uint32_t step = 1; step <= kMarchSteps; ++step)
+    for (std::uint32_t step = 1; step <= marchSteps; ++step)
     {
         const double offset = stepMeters * static_cast<double>(step);
         if (densityAtOffset(-offset) > 0.0)
@@ -244,7 +271,7 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
     // fall distance while airborne.
     const double fallThisFrame = std::abs(verticalSpeed_) * deltaSeconds + 4.0 * kGroundTouchMeters;
     const double probeDepth
-        = std::max(params_.walkMaxStepUpMeters + params_.walkGroundSnapMeters + 1.0, fallThisFrame);
+        = std::max(params_.walkMaxStepUpMeters + params_.walkGroundSnapMeters + kProbeSlackMeters, fallThisFrame);
     double     groundRadius = state_.groundRadius;
     const bool haveGround   = groundRadiusWithin(feet, probeDepth, groundRadius);
 
@@ -266,9 +293,12 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
     {
         // Eight probes resolve a ceiling anywhere in the column: thinner
         // rock shelves than one step of this march cannot seal a pocket a
-        // walker fits into, and thicker ones always catch a sample.
+        // walker fits into, and thicker ones always catch a sample. The
+        // rise is clamped at the waterline: feet a touch above it (inside
+        // the touch margin) probe a degenerate zero-height column instead
+        // of marching below the waterline.
         constexpr std::uint32_t kColumnProbes = 8;
-        const double columnRise = seaRadius - radius;
+        const double columnRise = std::max(0.0, seaRadius - radius);
         for (std::uint32_t probe = 1; probe <= kColumnProbes && overDeepWater; ++probe)
         {
             const Vec3 testPoint = feet + up * (columnRise * (static_cast<double>(probe) / static_cast<double>(kColumnProbes)));
@@ -280,7 +310,14 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
     }
     if (overDeepWater)
     {
-        state_.positionMeters = feet + up * (seaRadius - radius);
+        // The float carries the feet to the waterline at swim speed instead
+        // of teleporting them there: a character that waded past the wade
+        // band or fell off a shelf into deep water rises through the water
+        // column over successive frames, which reads as swimming up rather
+        // than snapping to the surface.
+        const double rise = std::min(seaRadius - radius,
+            params_.swimSpeedMetersPerSecond * deltaSeconds + 2.0 * kGroundTouchMeters);
+        state_.positionMeters = feet + up * rise;
         state_.up             = Vec3{up.x, up.y, up.z};
         state_.swimming       = true;
         state_.grounded       = false;
@@ -329,9 +366,20 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
             }
             const Vec3 candidate   = state_.positionMeters + delta;
             double     candidateGround = 0.0;
-            const double candidateProbe = params_.walkMaxStepUpMeters + params_.walkGroundSnapMeters + 1.0;
+            const double candidateProbe = params_.walkMaxStepUpMeters + params_.walkGroundSnapMeters + kProbeSlackMeters;
             if (!groundRadiusWithin(candidate, candidateProbe, candidateGround))
             {
+                if (field_.densityAt(candidate) > 0.0)
+                {
+                    // The probe found no pop-out surface within its window
+                    // AND the candidate sits inside solid rock: this is a
+                    // wall taller than the whole probe, not open sky. Block
+                    // the move the same way an over-grade slope is blocked
+                    // (the caller slides along it) - accepting it would
+                    // teleport the character into the rock with no ground
+                    // beneath and no surface above to pop out of.
+                    return false;
+                }
                 state_.positionMeters = candidate;
                 state_.groundRadius   = 0.0;
                 state_.grounded       = false; // left the ground this frame
@@ -368,6 +416,11 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
     // ---- vertical integration ------------------------------------------------------
     if (state_.grounded)
     {
+        // The feet ride the ground probed THIS frame (groundRadius above),
+        // not a radius carried over from an earlier frame: after a blocked
+        // attempt or a slide the carried radius can sit above or below the
+        // real surface, and snapping to it would hold the character in the
+        // air or bury the feet while grounded stays true.
         if (intent.jump && params_.jumpSpeedMetersPerSecond > 0.0)
         {
             verticalSpeed_  = params_.jumpSpeedMetersPerSecond;
@@ -375,12 +428,11 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
         }
         else
         {
-            // Ride the surface (state_.groundRadius was refreshed by the
-            // accepted move attempt; standing still keeps the last ground).
             const double currentRadius = length(state_.positionMeters);
-            if (state_.groundRadius > 0.0 && std::abs(state_.groundRadius - currentRadius) < params_.walkGroundSnapMeters + params_.walkMaxStepUpMeters + 1.0)
+            if (haveGround && std::abs(groundRadius - currentRadius) < params_.walkGroundSnapMeters + params_.walkMaxStepUpMeters + kProbeSlackMeters)
             {
-                state_.positionMeters = state_.positionMeters * (state_.groundRadius / currentRadius);
+                state_.positionMeters = state_.positionMeters * (groundRadius / currentRadius);
+                state_.groundRadius   = groundRadius;
             }
             verticalSpeed_ = 0.0;
         }
@@ -388,6 +440,10 @@ void SurfaceWalker::step(double deltaSeconds, const WalkIntent &intent)
     if (!state_.grounded)
     {
         verticalSpeed_ -= params_.surfaceGravityMetersPerSecond2 * deltaSeconds;
+        if (verticalSpeed_ < -params_.walkTerminalVelocityMetersPerSecond)
+        {
+            verticalSpeed_ = -params_.walkTerminalVelocityMetersPerSecond;
+        }
         const Vec3 verticalStep = up * (verticalSpeed_ * deltaSeconds);
         Vec3       moved        = state_.positionMeters + verticalStep;
         if (verticalSpeed_ > 0.0 && field_.densityAt(moved) > 0.0)

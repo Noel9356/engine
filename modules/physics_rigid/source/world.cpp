@@ -29,24 +29,6 @@ namespace
 constexpr double kEpsilon          = 1.0e-9;
 constexpr double kMaximumStepDelta = 0.1;
 
-Body *findBody(World &world, BodyHandle handle)
-{
-    const auto iterator = world.bodyIndexByHandle.find(handle);
-    return iterator != world.bodyIndexByHandle.end() ? &world.bodies[iterator->second] : nullptr;
-}
-
-const Body *findBody(const World &world, BodyHandle handle)
-{
-    const auto iterator = world.bodyIndexByHandle.find(handle);
-    return iterator != world.bodyIndexByHandle.end() ? &world.bodies[iterator->second] : nullptr;
-}
-
-Joint *findJoint(World &world, JointHandle handle)
-{
-    const auto iterator = world.jointIndexByHandle.find(handle);
-    return iterator != world.jointIndexByHandle.end() ? &world.joints[iterator->second] : nullptr;
-}
-
 void clampVelocity(math::Vec3 &velocity, double maximumMagnitude)
 {
     if (maximumMagnitude <= 0.0)
@@ -58,12 +40,6 @@ void clampVelocity(math::Vec3 &velocity, double maximumMagnitude)
     {
         velocity = velocity * (maximumMagnitude / std::sqrt(magnitudeSquared));
     }
-}
-
-void wakeBody(Body &body)
-{
-    body.awake      = true;
-    body.sleepTimer = 0.0;
 }
 
 // Island union-find with path halving.
@@ -84,6 +60,41 @@ void islandUnion(std::vector<std::size_t> &parent, std::size_t left, std::size_t
     if (rootLeft != rootRight)
     {
         parent[rootLeft] = rootRight;
+    }
+}
+
+// Resolves the simulation-LOD iteration budget tables into effective
+// per-band budgets: a zero entry derives from the configured iteration
+// count (Full keeps it, each lower band halves, floored at one) and every
+// entry clamps to [1, configured]. Called once per world creation, so the
+// per-step solver reads plain clamped numbers.
+void resolveLodIterationBudgets(SimulationSettings &settings)
+{
+    const std::uint32_t derivedVelocity[engine::util::kSimulationFidelityBandCount] = {1u,
+        1u,
+        settings.velocityIterations / 4u < 1u ? 1u : settings.velocityIterations / 4u,
+        settings.velocityIterations / 2u < 1u ? 1u : settings.velocityIterations / 2u,
+        settings.velocityIterations};
+    const std::uint32_t derivedPosition[engine::util::kSimulationFidelityBandCount] = {1u,
+        1u,
+        settings.positionIterations / 4u < 1u ? 1u : settings.positionIterations / 4u,
+        settings.positionIterations / 2u < 1u ? 1u : settings.positionIterations / 2u,
+        settings.positionIterations};
+    for (std::uint32_t band = 0; band < engine::util::kSimulationFidelityBandCount; ++band)
+    {
+        const std::uint32_t velocityBudget = settings.lodVelocityIterations[band] != 0u
+                ? settings.lodVelocityIterations[band]
+                : derivedVelocity[band];
+        const std::uint32_t positionBudget = settings.lodPositionIterations[band] != 0u
+                ? settings.lodPositionIterations[band]
+                : derivedPosition[band];
+        settings.lodVelocityIterations[band] = velocityBudget > settings.velocityIterations
+                || velocityBudget < 1u
+            ? settings.velocityIterations
+            : velocityBudget;
+        settings.lodPositionIterations[band] = positionBudget > settings.positionIterations || positionBudget < 1u
+            ? settings.positionIterations
+            : positionBudget;
     }
 }
 
@@ -261,6 +272,23 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     const SimulationSettings &settings = world.settings;
     StepContext               context{fixedDeltaSeconds, 1.0 / fixedDeltaSeconds};
 
+    // Simulation LOD: every awake dynamic body resolves its fidelity band
+    // from the importance score (promotions immediate, demotions behind the
+    // hysteresis margin). Sleeping bodies keep their band; it applies again
+    // when they wake. With lod_enabled off every body stays Full.
+    if (settings.lod.enabled)
+    {
+        for (Body &body : world.bodies)
+        {
+            if (body.kind != BodyKind::Dynamic)
+            {
+                continue;
+            }
+            body.lodBand = engine::util::simulationFidelityForImportance(
+                settings.lod.thresholds, body.importance, body.lodBand);
+        }
+    }
+
     scratch.snapshot.capture(world);
 
     // Force and gravity integration for awake dynamic bodies.
@@ -395,6 +423,39 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
             {
                 continue;
             }
+            // Cheap swept-AABB rejection before the shape narrowphase: a
+            // body whose velocity-extended bounds cannot reach the plane's
+            // speculative margin this step skips the full collision test.
+            // The bounds come from the previous step's refresh, so the
+            // per-axis velocity extension keeps the test conservative.
+            {
+                math::Vec3 sweptMinimum = body.aabbMinimum;
+                math::Vec3 sweptMaximum = body.aabbMaximum;
+                const math::Vec3 travel = body.linearVelocity * fixedDeltaSeconds;
+                for (std::uint32_t axis = 0; axis < 3; ++axis)
+                {
+                    const double component = math::component(travel, axis);
+                    if (component > 0.0)
+                    {
+                        math::component(sweptMaximum, axis) += component;
+                    }
+                    else
+                    {
+                        math::component(sweptMinimum, axis) += component;
+                    }
+                }
+                const math::Vec3 halfExtent
+                    = (sweptMaximum - sweptMinimum) * 0.5;
+                const math::Vec3 center = (sweptMaximum + sweptMinimum) * 0.5;
+                const double extentAlongNormal = std::abs(planeBody.shape.planeNormal.x) * halfExtent.x
+                    + std::abs(planeBody.shape.planeNormal.y) * halfExtent.y
+                    + std::abs(planeBody.shape.planeNormal.z) * halfExtent.z;
+                const double centerDistance = math::dot(center, planeBody.shape.planeNormal) - planeBody.shape.planeOffset;
+                if (centerDistance - extentAlongNormal > settings.contactMargin)
+                {
+                    continue;
+                }
+            }
             ContactManifold fresh;
             if (!collidePlaneSolid(planeBody.shape.planeNormal,
                     planeBody.shape.planeOffset,
@@ -461,18 +522,22 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     warmStartContacts(world, scratch.contacts, settings.warmStarting);
     warmStartJoints(world, scratch.jointConstraints, settings.warmStarting);
 
-    // Velocity iterations: contacts then joints, in fixed order.
+    // Velocity iterations: contacts then joints, in fixed order. Each
+    // constraint carries its simulation-LOD iteration budget and drops out
+    // of the passes once the budget is spent, so reduced-fidelity islands
+    // stop paying for iterations they no longer refine.
     for (std::uint32_t iteration = 0; iteration < settings.velocityIterations; ++iteration)
     {
-        solveContactVelocityIteration(world, scratch.contacts, context);
-        solveJointVelocityIteration(world, scratch.jointConstraints, context);
+        solveContactVelocityIteration(world, scratch.contacts, context, iteration);
+        solveJointVelocityIteration(world, scratch.jointConstraints, context, iteration);
     }
 
     // Position iterations remove the remaining contact penetration directly
-    // (split impulse scheme - no bias velocities, no bounce).
+    // (split impulse scheme - no bias velocities, no bounce), on the same
+    // per-constraint budgets.
     for (std::uint32_t iteration = 0; iteration < settings.positionIterations; ++iteration)
     {
-        solveContactPositionIteration(world, scratch.contacts, context);
+        solveContactPositionIteration(world, scratch.contacts, context, iteration);
     }
 
     // Persist the solved tangent basis so next step's warm start applies the
@@ -1401,6 +1466,10 @@ void fillWorldStatistics(const World &world, WorldStatistics &outStatistics)
             if (body.awake)
             {
                 ++statistics.awakeBodyCount;
+                if (body.lodBand != engine::util::SimulationFidelity::Full)
+                {
+                    ++statistics.lodReducedBodyCount;
+                }
             }
             else
             {
@@ -1427,6 +1496,7 @@ World *createWorld(std::vector<World> &worlds, std::unordered_map<WorldHandle, s
     World world;
     world.settings = settings;
     world.gravity  = description.useConfiguredGravity ? settings.gravity : description.gravity;
+    resolveLodIterationBudgets(world.settings);
     if (nextHandle == invalidWorld)
     {
         return nullptr; // handle space exhausted

@@ -7,6 +7,16 @@ Every value is read once in `construct()`; the module does not follow configurat
 | Key | Type | Valid range / values | Default | Effect |
 | --- | --- | --- | --- | --- |
 | `physics_character.maximum_characters` | integer | 1 - 4096 | `32` | Maximum concurrently existing characters (active-ragdoll control records over figures). |
+| `physics_character.lod_animation_threshold` | number | (0, 1] | `0.1` | Importance score at which the Animation band begins; scores below it sit in Cached. Must stay strictly below `lod_procedural_threshold`. |
+| `physics_character.lod_demotion_margin` | number | [0, 1) | `0.8` | Hysteresis fraction: a record keeps its current band until its score falls below that band's entry threshold times this margin. |
+| `physics_character.lod_enabled` | boolean | (boolean) | `false` | Turns the simulation-LOD ladder on; with the switch off every character, chain, planter, and lean controller updates every step whatever its score. |
+| `physics_character.lod_full_threshold` | number | (0, 1] | `0.75` | Importance score at which the Full band begins. |
+| `physics_character.lod_interval_animation` | integer | 0 - 65536 | `8` | Fixed steps between updates for the Animation band; 0 freezes the band's records. |
+| `physics_character.lod_interval_cached` | integer | 0 - 65536 | `0` | Fixed steps between updates for the Cached band; 0 freezes the band's records. |
+| `physics_character.lod_interval_procedural` | integer | 0 - 65536 | `4` | Fixed steps between updates for the Procedural band. |
+| `physics_character.lod_interval_simplified` | integer | 0 - 65536 | `2` | Fixed steps between updates for the Simplified band. |
+| `physics_character.lod_procedural_threshold` | number | (0, 1] | `0.25` | Importance score at which the Procedural band begins. |
+| `physics_character.lod_simplified_threshold` | number | (0, 1] | `0.5` | Importance score at which the Simplified band begins. |
 | `physics_character.maximum_foot_planters` | integer | 1 - 4096 | `64` | Maximum concurrently existing foot planters. |
 | `physics_character.maximum_hand_planters` | integer | 1 - 4096 | `64` | Maximum concurrently existing hand planters. |
 | `physics_character.maximum_jiggle_chains` | integer | 1 - 4096 | `256` | Maximum concurrently existing jiggle chains. |

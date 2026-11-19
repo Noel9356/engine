@@ -157,7 +157,8 @@ ClimateSample ClimateSampler::sampleSeaLevel(const Vec3 &direction) const
     return sample;
 }
 
-ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters, double slope01, double lowPassCutoffMeters) const
+ClimateSample ClimateSampler::sample(const ClimateMacroSample &macro, const Vec3 &direction, double radiusMeters,
+    double slope01, double lowPassCutoffMeters) const
 {
     const double  seaRadius = params_.derivedSeaRadiusMeters;
     const double  elevation = radiusMeters - seaRadius;
@@ -178,9 +179,12 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
     }
     else
     {
-        sample = sampleSeaLevel(direction);
-        // Altitude lapse rate cools the air above sea level.
-        sample.temperature01 = clamp01(sample.temperature01 - elevation / std::max(1.0, params_.temperatureLapseMeters));
+        // Low-frequency fields come in through the macro sample (sea-level
+        // temperature, humidity with latitude belts / continentality / rain
+        // shadow - see ClimateMacroSample); this point applies its own
+        // altitude lapse and the onshore coastal humidity boost.
+        sample.temperature01 = clamp01(macro.temperature01 - elevation / std::max(1.0, params_.temperatureLapseMeters));
+        sample.moisture01    = macro.moisture01;
 
         // Coastal humidity: onshore winds keep low land near the sea humid, so
         // the flat tapered shoreline belt stays green instead of painting a beige
@@ -394,6 +398,28 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
             }
         }
     }
+    if (rockW > 0.0 && params_.provinceRockVariation > 0.0)
+    {
+        // Geologic province tint (see the provinces keys): layered sedimentary
+        // country warms the bare rock toward bedded tan/brown tones,
+        // shield/volcanic country cools it toward gray basalt/stone, and
+        // carbonate patches lift toward pale limestone. The tint keys off the
+        // same province streams the geometry's strata and terrace biases
+        // read, so the rock faces' color and structure describe the same
+        // geology. Applied BEFORE the sediment stripes, so the banding
+        // rides the tinted rock rather than washing over it, and it flows
+        // into the soil tone the erosion patches pull toward.
+        constexpr double kSedimentaryTint[3] = {1.30, 1.06, 0.68};
+        constexpr double kVolcanicTint[3]    = {0.62, 0.62, 0.66};
+        constexpr double kCarbonateTint[3]   = {1.34, 1.30, 1.16};
+        for (std::size_t channel = 0; channel < 3; ++channel)
+        {
+            const double chemistryTint = mix(kVolcanicTint[channel], kSedimentaryTint[channel], macro.provinceChemistry);
+            const double tint = mix(chemistryTint, kCarbonateTint[channel], macro.provinceCarbonate);
+            rockRow[channel] = static_cast<float>(std::clamp(
+                static_cast<double>(rockRow[channel]) * mix(1.0, tint, params_.provinceRockVariation), 0.0, 1.0));
+        }
+    }
     if (rockW > 0.0 && params_.rockStrataContrast > 0.0)
     {
         // Sediment stripes on rock faces: a luminance band keyed to the strata
@@ -416,7 +442,13 @@ ClimateSample ClimateSampler::sample(const Vec3 &direction, double radiusMeters,
         const double stripeFade = lowPassFade(lowPassCutoffMeters, bandWidth);
         if (stripeFade > 0.0)
         {
-            const Vec3   stripePosition = direction * params_.radiusMeters;
+            // The stripe position uses the sample's OWN radius, not the datum
+            // sphere: the geometric strata bands (see density.cpp) are keyed
+            // to the true point, and the color stripes only track those beds
+            // when both are keyed to the same radius - on a tall cliff the
+            // datum-sampled warp would drift out of phase with the geometry
+            // the eye actually sees.
+            const Vec3   stripePosition = direction * radiusMeters;
             const double thicknessWarp = noise::simplex3ImproveXY(seedRockStripes_,
                 stripePosition.x / (bandWidth * 5.0), stripePosition.y / (bandWidth * 5.0),
                 stripePosition.z / (bandWidth * 5.0));

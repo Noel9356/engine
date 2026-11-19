@@ -44,7 +44,13 @@ namespace engine::physics_character
 //       updateLeanController entry points), and the applyCharacterPush
 //       entry point. Everything from ABI 2 keeps its slot and meaning;
 //       consumers check `abi >= 3` before touching the additions.
-inline constexpr std::uint32_t physicsCharacterCapabilityAbi = 3u;
+//   4 - appended the simulation-LOD surface: the setCharacterImportance /
+//       setJiggleChainImportance / setFootPlanterImportance /
+//       setLeanControllerImportance entry points and the
+//       CharacterStatistics.lodSkippedSteps counter. Everything from ABI 3
+//       keeps its slot and meaning; consumers check `abi >= 4` before
+//       touching the additions.
+inline constexpr std::uint32_t physicsCharacterCapabilityAbi = 4u;
 
 using CharacterHandle    = std::uint32_t;
 using JiggleChainHandle  = std::uint32_t;
@@ -271,6 +277,11 @@ struct CharacterStatistics
     std::uint32_t footPlanterCount = 0;
     std::uint32_t handPlanterCount = 0;
     std::uint32_t leanControllerCount = 0;
+
+    // Simulation LOD: update passes skipped so far across every driven
+    // record (a frozen band, or a staggered cadence that was not due on a
+    // step).
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_character" capability. Calls are main-thread only; the
@@ -379,6 +390,23 @@ struct CharacterCapability
         double radius, const double pushVelocity[3], double forceScale);
 
     bool (*characterStatistics)(void *self, CharacterStatistics *outStatistics);
+
+    // ---- simulation LOD (ABI 4 additions) ------------------------------------
+
+    // Writes the record's importance score in [0, 1]; the module resolves
+    // the fidelity band (with demotion hysteresis, the shared ladder every
+    // simulation module uses) and drives the record on a staggered cadence.
+    // A due character update scales its PD torques by the interval so the
+    // impulse per wall time matches the full-rate schedule (the Cached band
+    // stops driving entirely, so the ragdoll goes passive); a due jiggle or
+    // lean pass integrates interval x the caller's delta; a due foot-planter
+    // pass runs its ground probes, and a skipped pass keeps the last planted
+    // feet. Hand planters are pure per-call math and always run full.
+    // Non-finite scores report failure.
+    bool (*setCharacterImportance)(void *self, CharacterHandle character, double importance);
+    bool (*setJiggleChainImportance)(void *self, JiggleChainHandle chain, double importance);
+    bool (*setFootPlanterImportance)(void *self, FootPlanterHandle planter, double importance);
+    bool (*setLeanControllerImportance)(void *self, LeanHandle controller, double importance);
 };
 
 } // namespace engine::physics_character

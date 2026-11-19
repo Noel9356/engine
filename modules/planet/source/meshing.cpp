@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -223,6 +224,12 @@ Vec3 chunkCenterMeters(const PlanetGenerationParams &params, const ChunkCoord &c
 ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityField &field, const ChunkCoord &coord,
     const ConformMask &conformMask)
 {
+    // buildChunkMesh is documented to take validate()d params (the per-axis
+    // sample tables below are sized for the largest leaf grid the validator
+    // allows); assert the contract so a future unvalidated call path fails
+    // loudly instead of writing past the tables.
+    assert(params.leafGridN >= 4u && params.leafGridN <= 64u && (params.leafGridN % 2u) == 0u);
+
     ChunkMesh mesh;
 
     const std::uint32_t n        = params.leafGridN;
@@ -230,6 +237,9 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     const std::uint32_t strideY  = paddedN;
     const std::uint32_t strideZ  = paddedN * paddedN;
     const std::size_t   gridSize = static_cast<std::size_t>(paddedN) * paddedN * paddedN;
+    // The chunk's own cell population (n^3): the sizing basis for the mesh
+    // reservations and the edge-dedup table below.
+    const std::uint32_t gridCellCount = n * n * n;
     const double        nodeSize = chunkSizeMeters(params, coord.depth);
     const double        step     = chunkStepMeters(params, coord.depth);
     const double        half     = params.derivedRootHalfMeters;
@@ -340,8 +350,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // times, and each evaluation is a full raw-field pass. The memo keys a
     // mixed hash of the coarse indices and stores the indices alongside the
     // density so a (vanishingly rare) hash collision is detected and simply
-    // recomputed instead of reused. Allocated on first use: chunks without a
-    // conforming boundary never pay for it.
+    // recomputed instead of reused.
     struct CoarseDensityEntry
     {
         std::int64_t x       = 0;
@@ -350,7 +359,13 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         double       density = 0.0;
     };
     using CoarseDensityMemo = FlatKeyMap<CoarseDensityEntry>;
-    std::unique_ptr<CoarseDensityMemo> coarseDensityMemo;
+    // The memo lives in per-thread scratch like the density grids: a build
+    // fully overwrites every entry it reads before any read, so reuse cannot
+    // leak state between builds, and conforming chunks stop paying an
+    // allocation per chunk.
+    thread_local CoarseDensityMemo coarseDensityMemoScratch(1024);
+    CoarseDensityMemo &coarseDensityMemo = coarseDensityMemoScratch;
+    coarseDensityMemo.clear();
     const auto coarseDensityAt = [&](std::int64_t coarseX, std::int64_t coarseY, std::int64_t coarseZ) -> double
     {
         // splitMix64 mutates its state parameter, so the mixed coordinates are
@@ -359,32 +374,25 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                              ^ static_cast<std::uint64_t>(coarseZ) * 0x165667B19E3779F9ull;
         mixedU = splitMix64(mixedU) ^ static_cast<std::uint64_t>(coarseX) * 0x9E3779B97F4A7C15ull;
         const std::uint64_t mixed = splitMix64(mixedU);
-        if (coarseDensityMemo != nullptr)
+        if (const CoarseDensityEntry *cached = coarseDensityMemo.find(mixed))
         {
-            if (const CoarseDensityEntry *cached = coarseDensityMemo->find(mixed))
-            {
-                if (cached->x == coarseX && cached->y == coarseY && cached->z == coarseZ)
-                    return cached->density;
-                // Hash collision with a different lattice point (probability
-                // is negligible, but the exact field value matters):
-                // recompute without disturbing the cached entry.
-                const Vec3 corner{-half + coarseStep * static_cast<double>(coarseX),
-                    -half + coarseStep * static_cast<double>(coarseY),
-                    -half + coarseStep * static_cast<double>(coarseZ)};
-                return field.densityAt(corner, coarseCutoff);
-            }
+            if (cached->x == coarseX && cached->y == coarseY && cached->z == coarseZ)
+                return cached->density;
+            // Hash collision with a different lattice point (probability
+            // is negligible, but the exact field value matters):
+            // recompute without disturbing the cached entry.
+            const Vec3 corner{-half + coarseStep * static_cast<double>(coarseX),
+                -half + coarseStep * static_cast<double>(coarseY),
+                -half + coarseStep * static_cast<double>(coarseZ)};
+            return field.densityAt(corner, coarseCutoff, true);
         }
-        else
-        {
-            coarseDensityMemo = std::make_unique<CoarseDensityMemo>(1024);
-        }
-        CoarseDensityEntry &entry = coarseDensityMemo->findOrInsert(mixed);
+        CoarseDensityEntry &entry = coarseDensityMemo.findOrInsert(mixed);
         entry.x                   = coarseX;
         entry.y                   = coarseY;
         entry.z                   = coarseZ;
         const Vec3 corner{-half + coarseStep * static_cast<double>(coarseX),
             -half + coarseStep * static_cast<double>(coarseY), -half + coarseStep * static_cast<double>(coarseZ)};
-        entry.density = field.densityAt(corner, coarseCutoff);
+        entry.density = field.densityAt(corner, coarseCutoff, true);
         return entry.density;
     };
     const auto coarsePlaneDensity = [&](std::uint32_t axis, std::int64_t perpGlobalFine, std::int64_t tangentialGlobalU,
@@ -472,7 +480,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     {
         if (!conforming)
         {
-            return field.densityAt(p, ownCutoff);
+            return field.densityAt(p, ownCutoff, true);
         }
         const std::int64_t globals[3] = {static_cast<std::int64_t>(coord.x) * n + lx,
             static_cast<std::int64_t>(coord.y) * n + ly, static_cast<std::int64_t>(coord.z) * n + lz};
@@ -555,7 +563,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 return coarsePlaneDensity(axis, globals[axis], globalU, globalV);
             }
         }
-        return field.densityAt(p, ownCutoff);
+        return field.densityAt(p, ownCutoff, true);
     };
 
     // ---- sample the padded grids -------------------------------------------------
@@ -612,6 +620,13 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // ---- marching cubes over the inner cells --------------------------------------
     std::vector<PlanetVertex>                        &vertices = mesh.terrainVertices;
     std::vector<std::uint32_t>                       &indices  = mesh.terrainIndices;
+    // Reserve the typical surface budget up front: a terrain-crossing chunk
+    // carries a few thousand vertices, and the growth reallocation of a
+    // vector of 44-byte vertices is one of the largest per-chunk costs the
+    // build otherwise pays several times. Chunks that end smaller (or empty)
+    // only waste a reservation, never an allocation of the full size.
+    vertices.reserve(gridCellCount / 2u);
+    indices.reserve(static_cast<std::size_t>(gridCellCount) * 6u);
     // Edge-vertex dedup over the chunk's own lattice points; the flat map is
     // the project's open-addressing table (single cache line per lookup, no
     // node allocations) and the keys are chunk-local. Like the density grids
@@ -619,9 +634,16 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // overwritten before any read (findOrInsert seeds new keys), so reuse
     // cannot leak state between builds, and the worker pool stops paying a
     // constant-size allocation per chunk.
-    thread_local FlatKeyMap<std::uint32_t> vertexForEdgeScratch(4096);
+    thread_local FlatKeyMap<std::uint32_t> vertexForEdgeScratch(1024);
     FlatKeyMap<std::uint32_t> &vertexForEdge = vertexForEdgeScratch;
+    // Size the dedup table for the chunk's real edge population before the
+    // first insert: a rugged chunk carries on the order of the grid's cell
+    // count in unique edge vertices, and a table that overflows mid-build
+    // pays a rehash (reallocation + reinsertion of every entry) at the worst
+    // moment. Clearing before the reservation lets the rehash walk an empty
+    // table, and the scratch keeps its capacity across builds.
     vertexForEdge.clear();
+    vertexForEdge.reserve(gridCellCount);
 
     // Spherical reference frame of the spin axis (see the UV mapping below).
     // With the default upright axis this reduces to east = +x, north = +z.
@@ -763,6 +785,153 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         return false;
     };
 
+    // ---- macro-grid climate -----------------------------------------------------------
+    //
+    // The climate sampler's LOW-FREQUENCY fields (sea-level temperature and
+    // humidity, cloud shadows, geologic provinces) vary on landscape scales -
+    // thousands of meters, far wider than a leaf chunk - but the raw
+    // evaluation costs tens of noise octaves per point. Evaluating them per
+    // vertex re-pays that cost thousands of times per chunk for values that
+    // barely change across the chunk. Instead the mesher samples them on a
+    // coarse grid ANCHORED TO PLANET-LOCAL POSITIONS (stride
+    // derivedMacroClimateStrideMeters, a sixteenth of the smallest climate
+    // wavelength) and interpolates per vertex:
+    //   * the grid is a pure function of position, so a vertex shared by
+    //     neighbor chunks reads bit-identical values from either side (the
+    //     same guarantee the shared lattice gives the geometry); chunks of
+    //     equal depth share the band limit, so boundary values agree;
+    //   * the macro fields band-limit at the consuming chunk's own lattice
+    //     step, preserving the per-depth LOD fade every other field of a
+    //     rendered chunk follows (coarse shells read smooth far-field
+    //     shade); the ground-scale fields (albedo jitter, soil and dry
+    //     patches, rock stripes) band-limit inside the climate sampler as
+    //     before;
+    //   * chunks far wider than the stride (the coarsest globe shells) fall
+    //     back to one exact evaluation per vertex - the interpolation would
+    //     re-evaluate more corners than vertices anyway.
+    const double macroStride = std::max(1.0, params.derivedMacroClimateStrideMeters);
+    // The macro fields band-limit at the chunk's OWN lattice step - the same
+    // cutoff every per-vertex field of the chunk uses - so coarse LOD shells
+    // read smooth far-field shade (the sub-spacing cloud octaves fade exactly
+    // like they would per-vertex) while fine chunks carry the full field.
+    // Chunks of equal depth share the cutoff, so shared vertices still
+    // evaluate identical corner values on both sides of a chunk boundary.
+    const double macroCutoff = step;
+    // The chunk's reach includes the 1-voxel apron and the extension strips
+    // (one cell past a conforming face); the grid path only pays when the
+    // whole reach stays inside a couple of macro cells per axis.
+    const double macroReach = nodeSize + 2.0 * step;
+    const bool macroUseGrid = macroReach <= 2.0 * macroStride;
+    // Macro-corner cache over the cell indices (exactly the values the
+    // chunk's vertices need - at most 3x3x3 cells on the grid path). The
+    // table lives in per-thread scratch like the density grids and is keyed
+    // by a packed, injective cell index (see macroCellKey below - the stride
+    // floor in validate() bounds the index range so the packing cannot
+    // collide).
+    struct MacroCellKeyPacker
+    {
+        static std::uint64_t pack(std::int64_t ix, std::int64_t iy, std::int64_t iz)
+        {
+            // Offset into [0, 2^20) per axis and pack 3 x 20 bits. validate()
+            // floors the stride at radius / 2^18, so indices stay within
+            // +/- 2^18 < 2^19 for every supported radius.
+            constexpr std::int64_t kOffset = static_cast<std::int64_t>(1) << 19;
+            const std::uint64_t x = static_cast<std::uint64_t>(ix + kOffset);
+            const std::uint64_t y = static_cast<std::uint64_t>(iy + kOffset);
+            const std::uint64_t z = static_cast<std::uint64_t>(iz + kOffset);
+            return (x << 40u) | (y << 20u) | z;
+        }
+    };
+    thread_local FlatKeyMap<ClimateMacroSample> macroCornerCache(64);
+    macroCornerCache.clear();
+    if (macroUseGrid)
+    {
+        macroCornerCache.reserve(64);
+    }
+    const auto macroCornerAt = [&](std::int64_t ix, std::int64_t iy, std::int64_t iz, ClimateMacroSample &out)
+    {
+        if (macroUseGrid)
+        {
+            if (const ClimateMacroSample *cached = macroCornerCache.find(MacroCellKeyPacker::pack(ix, iy, iz)))
+            {
+                out = *cached;
+                return;
+            }
+        }
+        const Vec3 cornerPosition{static_cast<double>(ix) * macroStride, static_cast<double>(iy) * macroStride,
+            static_cast<double>(iz) * macroStride};
+        field.macroSampleAt(cornerPosition, macroCutoff, out);
+        if (macroUseGrid)
+        {
+            macroCornerCache.findOrInsert(MacroCellKeyPacker::pack(ix, iy, iz)) = out;
+        }
+    };
+    const auto macroSampleInterpolated = [&](const Vec3 &point, ClimateMacroSample &out)
+    {
+        if (!macroUseGrid)
+        {
+            // Coarse-shell chunks: one exact evaluation per vertex.
+            field.macroSampleAt(point, macroCutoff, out);
+            return;
+        }
+        // Fractional position inside the macro cell; the floor and the
+        // weights are exact doubles derived from the vertex position, so
+        // shared vertices agree bit-for-bit on cell and weights. A chunk
+        // far smaller than the stride keeps every vertex inside ONE cell,
+        // so the corner samples cache in locals until the cell changes and
+        // the per-vertex work collapses to the weight math.
+        const double fx = point.x / macroStride;
+        const double fy = point.y / macroStride;
+        const double fz = point.z / macroStride;
+        const std::int64_t ix = static_cast<std::int64_t>(std::floor(fx));
+        const std::int64_t iy = static_cast<std::int64_t>(std::floor(fy));
+        const std::int64_t iz = static_cast<std::int64_t>(std::floor(fz));
+        // Cache slots for the active cell (thread_local scratch follows the
+        // same build-scoped lifetime as the tables above).
+        thread_local std::int64_t cachedCell[3] = {0, 0, 0};
+        thread_local bool cachedCellValid = false;
+        thread_local ClimateMacroSample cachedCorner[8];
+        if (!cachedCellValid || cachedCell[0] != ix || cachedCell[1] != iy || cachedCell[2] != iz)
+        {
+            macroCornerAt(ix, iy, iz, cachedCorner[0]);
+            macroCornerAt(ix + 1, iy, iz, cachedCorner[1]);
+            macroCornerAt(ix, iy + 1, iz, cachedCorner[2]);
+            macroCornerAt(ix + 1, iy + 1, iz, cachedCorner[3]);
+            macroCornerAt(ix, iy, iz + 1, cachedCorner[4]);
+            macroCornerAt(ix + 1, iy, iz + 1, cachedCorner[5]);
+            macroCornerAt(ix, iy + 1, iz + 1, cachedCorner[6]);
+            macroCornerAt(ix + 1, iy + 1, iz + 1, cachedCorner[7]);
+            cachedCell[0] = ix;
+            cachedCell[1] = iy;
+            cachedCell[2] = iz;
+            cachedCellValid = true;
+        }
+        const ClimateMacroSample *c = cachedCorner;
+        const double tx = fx - static_cast<double>(ix);
+        const double ty = fy - static_cast<double>(iy);
+        const double tz = fz - static_cast<double>(iz);
+        // Trilinear fold without intermediate samples: the five channels
+        // accumulate corner values weighted by the separable factors.
+        const double w000 = (1.0 - tx) * (1.0 - ty) * (1.0 - tz);
+        const double w100 = tx * (1.0 - ty) * (1.0 - tz);
+        const double w010 = (1.0 - tx) * ty * (1.0 - tz);
+        const double w110 = tx * ty * (1.0 - tz);
+        const double w001 = (1.0 - tx) * (1.0 - ty) * tz;
+        const double w101 = tx * (1.0 - ty) * tz;
+        const double w011 = (1.0 - tx) * ty * tz;
+        const double w111 = tx * ty * tz;
+        out.temperature01     = c[0].temperature01 * w000 + c[1].temperature01 * w100 + c[2].temperature01 * w010 + c[3].temperature01 * w110
+            + c[4].temperature01 * w001 + c[5].temperature01 * w101 + c[6].temperature01 * w011 + c[7].temperature01 * w111;
+        out.moisture01        = c[0].moisture01 * w000 + c[1].moisture01 * w100 + c[2].moisture01 * w010 + c[3].moisture01 * w110
+            + c[4].moisture01 * w001 + c[5].moisture01 * w101 + c[6].moisture01 * w011 + c[7].moisture01 * w111;
+        out.cloudShadow       = c[0].cloudShadow * w000 + c[1].cloudShadow * w100 + c[2].cloudShadow * w010 + c[3].cloudShadow * w110
+            + c[4].cloudShadow * w001 + c[5].cloudShadow * w101 + c[6].cloudShadow * w011 + c[7].cloudShadow * w111;
+        out.provinceChemistry = c[0].provinceChemistry * w000 + c[1].provinceChemistry * w100 + c[2].provinceChemistry * w010 + c[3].provinceChemistry * w110
+            + c[4].provinceChemistry * w001 + c[5].provinceChemistry * w101 + c[6].provinceChemistry * w011 + c[7].provinceChemistry * w111;
+        out.provinceCarbonate = c[0].provinceCarbonate * w000 + c[1].provinceCarbonate * w100 + c[2].provinceCarbonate * w010 + c[3].provinceCarbonate * w110
+            + c[4].provinceCarbonate * w001 + c[5].provinceCarbonate * w101 + c[6].provinceCarbonate * w011 + c[7].provinceCarbonate * w111;
+    };
+
     // Terrain pass: own cells [0, n)^3 always march (cellNeedsMarching
     // above); vertices carry gradient normals and the climate sampler's
     // blended albedo; triangles use the fixed terrain winding.
@@ -796,8 +965,15 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // the colors are sampled at): octave scales below the spacing alias
         // into uncorrelated per-vertex speckle, so they fade out on coarse
         // LOD chunks exactly like sub-voxel geometry octaves, while the
-        // climate classification itself stays exact.
-        const ClimateSample climate = field.climate().sample(unitRadial, radius, slope01, step);
+        // climate classification itself stays exact. Underwater vertices
+        // classify by depth alone - the macro fields are not read there and
+        // their evaluation is skipped.
+        ClimateMacroSample macro;
+        if (radius >= params.derivedSeaRadiusMeters)
+        {
+            macroSampleInterpolated(point, macro);
+        }
+        const ClimateSample climate = field.climate().sample(macro, unitRadial, radius, slope01, step);
 
         PlanetVertex vertex{};
         vertex.position[0] = static_cast<float>(point.x - center.x);
@@ -806,13 +982,11 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         vertex.normal[0]   = static_cast<float>(nx);
         vertex.normal[1]   = static_cast<float>(ny);
         vertex.normal[2]   = static_cast<float>(nz);
-        // Cloud shadows: the same coverage field the cloud layer renders
-        // from, sampled at the vertex's radial direction and band-limited at
-        // the chunk's own spacing, darkens the albedo. The banks overhead
-        // and their shadows then agree from orbit and from the ground, and
-        // the shadow follows the LOD band limit like every other field
-        // (coarse chunks get smooth shade, not speckle).
-        const double cloudShade = 1.0 - field.cloudShadow(unitRadial, step);
+        // Cloud shadows ride the macro sample (see macroSampleAt): the same
+        // coverage field the cloud layer renders from, keyed to the sun ray
+        // through the point, darkens the albedo. The banks overhead and
+        // their shadows agree from orbit and from the ground.
+        const double cloudShade = 1.0 - macro.cloudShadow;
         vertex.color[0]    = climate.color[0] * static_cast<float>(cloudShade);
         vertex.color[1]    = climate.color[1] * static_cast<float>(cloudShade);
         vertex.color[2]    = climate.color[2] * static_cast<float>(cloudShade);
@@ -876,6 +1050,9 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         thread_local FlatKeyMap<std::uint32_t> waterForEdgeScratch(1024);
         FlatKeyMap<std::uint32_t> &waterForEdge = waterForEdgeScratch;
         waterForEdge.clear();
+        waterForEdge.reserve(gridCellCount);
+        waterVertices.reserve(gridCellCount / 2u);
+        waterIndices.reserve(static_cast<std::size_t>(gridCellCount) * 6u);
 
         // Wave-slope band limit: like every noise term of the module, the
         // wave slope fades out below the chunk's own LOD cutoff, so coarse
@@ -892,7 +1069,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         const double waveFade = lowPassFade(ownCutoff, waveWavelength);
         const double chopFade = lowPassFade(ownCutoff, 0.5 * waveWavelength);
         const double waveAmplitude = params.waterWaveAmplitude * waveFade;
-        const double chopAmplitude = 0.33 * params.waterWaveAmplitude * chopFade;
+        const double chopAmplitude = params.waterWaveChopFraction * params.waterWaveAmplitude * chopFade;
         const double waveFrequency = 1.0 / waveWavelength;
         const double chopFrequency = 2.0 / waveWavelength;
 
@@ -922,7 +1099,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // Brightness of the sand-through-water shore blend (the beach row
         // already carries the sand albedo; sunlit flats under a thin sheet
         // read brighter than the raw row).
-        constexpr float kShoreSandBrightness = 1.35f;
+        const float shoreSandBrightness = static_cast<float>(params.waterShoreSandBrightness);
         // Shore blend constants (per chunk, not per vertex): whether the
         // blend runs at all and the beach-sand tone transmitted by the
         // water's own hue - the shallow color's channel balance scaled so
@@ -963,21 +1140,24 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             // few meters of the shoreline), so a vertex whose whole edge
             // already sits that deep gets its depth from the chunk's own
             // lattice - the two endpoint densities the marching-cubes walk
-            // itself interpolated. Band-limited fields cannot rise out of a
-            // deep edge within one cell, so the probe only fires on truly
-            // deep water; anywhere near the shore the exact field takes over
-            // and keeps the bit-exact cross-depth agreement.
+            // itself interpolated. BOTH endpoints must read that deep
+            // before the shortcut fires: a single deep endpoint on a steep
+            // shore edge (beach to basin within one voxel) would paint the
+            // mid-edge water vertex - whose true depth is a few meters -
+            // with the deep color, striping navy bands along steep coasts.
+            // Anywhere near the shore the exact field takes over and keeps
+            // the bit-exact cross-depth agreement.
             double terrainDepth = 0.0;
             {
                 const double densityA = densities[static_cast<std::size_t>(aX) + strideY * aY + strideZ * aZ];
                 const double densityB = densities[static_cast<std::size_t>(bX) + strideY * bY + strideZ * bZ];
-                if (-std::min(densityA, densityB) >= tintDepths[2])
+                if (-std::max(densityA, densityB) >= tintDepths[2])
                 {
                     terrainDepth = tintDepths[2]; // saturated: every tint channel reads the deep color
                 }
                 else
                 {
-                    terrainDepth = std::max(0.0, -field.densityAt(point));
+                    terrainDepth = std::max(0.0, -field.densityAt(point, 0.0, true));
                 }
             }
 
@@ -1004,7 +1184,11 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             {
                 const double depthBand
                     = 1.0 - smoothstep(0.0, params.waterFoamWidthMeters, terrainDepth);
-                const double foamBand = depthBand * depthBand * depthBand;
+                // The band's falloff is the configured exponent: real breakers
+                // hug the waterline (a high exponent), while a plain
+                // smoothstep over a shallow shelf would wash the whole lagoon
+                // white.
+                const double foamBand = std::pow(depthBand, params.waterFoamFalloffExponent);
                 if (foamBand > 0.0)
                 {
                     double crestModulation = 0.30;
@@ -1125,10 +1309,13 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             vertex.normal[1]   = static_cast<float>(ny);
             vertex.normal[2]   = static_cast<float>(nz);
             // Cloud shadows ride the water sheet too: the same coverage
-            // field keyed to the vertex's radial direction, so a bank's
-            // shadow darkens the sea surface beneath it exactly like the
-            // terrain beside it.
-            const double cloudShade = 1.0 - field.cloudShadow(radial, step);
+            // field keyed to the vertex's radial direction (read through the
+            // macro-grid sample like the terrain beside it), so a bank's
+            // shadow darkens the sea surface exactly like the land and the
+            // shade stays continuous across the shoreline.
+            ClimateMacroSample macro;
+            macroSampleInterpolated(point, macro);
+            const double cloudShade = 1.0 - macro.cloudShadow;
             for (std::uint32_t channel = 0; channel < 3; ++channel)
             {
                 const float shallow = params.waterColorShallow[channel];
@@ -1146,7 +1333,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                         // under the shallow color's transmission tint, lifted
                         // by the sun the flats receive.
                         const float sand = params.biomePalette[static_cast<std::size_t>(Biome::Beach) * 3u + channel];
-                        const float shoreTarget = std::clamp(sand * sandHue[channel] * kShoreSandBrightness, 0.0f, 1.0f);
+                        const float shoreTarget = std::clamp(sand * sandHue[channel] * shoreSandBrightness, 0.0f, 1.0f);
                         blended = static_cast<float>(shoreTarget + (blended - shoreTarget)
                             * smoothstep(0.0, params.waterShoreMixMeters, terrainDepth));
                     }
@@ -1219,16 +1406,11 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     }
 
     // ---- hash (determinism self-tests + change detection) -----------------------------
-    // The combined hash covers all four buffers (the self-test identity);
-    // the per-pass hashes let consumers detect a rebuilt terrain or water
-    // patch independently (a chunk key can outlive one rebuild).
-    std::uint64_t hash = 0xCBF29CE484222325ull;
-    hash = fnv1a64(mesh.terrainVertices.data(), mesh.terrainVertices.size() * sizeof(PlanetVertex), hash);
-    hash = fnv1a64(mesh.terrainIndices.data(), mesh.terrainIndices.size() * sizeof(std::uint32_t), hash);
-    hash = fnv1a64(mesh.waterVertices.data(), mesh.waterVertices.size() * sizeof(PlanetVertex), hash);
-    hash = fnv1a64(mesh.waterIndices.data(), mesh.waterIndices.size() * sizeof(std::uint32_t), hash);
-    mesh.hash = hash;
-
+    // Each pass hashes its own buffers once; the combined hash folds the two
+    // per-pass values together, so the buffers are walked one time instead of
+    // two (a full chunk mesh is megabytes of vertex payload). The fold is a
+    // plain FNV round over the two 64-bit halves - order dependent by pass,
+    // which is fine: the terrain pass always precedes the water pass.
     std::uint64_t terrainHash = 0xCBF29CE484222325ull;
     terrainHash = fnv1a64(mesh.terrainVertices.data(), mesh.terrainVertices.size() * sizeof(PlanetVertex), terrainHash);
     mesh.terrainHash = fnv1a64(mesh.terrainIndices.data(), mesh.terrainIndices.size() * sizeof(std::uint32_t), terrainHash);
@@ -1236,6 +1418,9 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     std::uint64_t waterHash = 0xCBF29CE484222325ull;
     waterHash = fnv1a64(mesh.waterVertices.data(), mesh.waterVertices.size() * sizeof(PlanetVertex), waterHash);
     mesh.waterHash = fnv1a64(mesh.waterIndices.data(), mesh.waterIndices.size() * sizeof(std::uint32_t), waterHash);
+
+    std::uint64_t hash = fnv1a64(&mesh.terrainHash, sizeof(mesh.terrainHash), 0xCBF29CE484222325ull);
+    mesh.hash = fnv1a64(&mesh.waterHash, sizeof(mesh.waterHash), hash);
     return mesh;
 }
 

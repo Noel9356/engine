@@ -125,32 +125,7 @@ private:
 
     void readLodSettings(ParticipantContext &context)
     {
-        settings_.lodEnabled = context.configurationBooleanInSection("physics_foliage", "lod_enabled").value_or(false);
-        const auto readThreshold = [this, &context](const char *key, double &target)
-        {
-            if (const auto value = context.configurationFloatingInSection("physics_foliage", key);
-                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
-                target = *value;
-        };
-        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
-        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
-        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
-        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
-        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
-        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
-        {
-            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
-        }
-        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
-        {
-            if (const auto value = context.configurationIntegerInSection("physics_foliage", key);
-                value && *value >= 0 && *value <= 65536)
-                target = static_cast<std::uint32_t>(*value);
-        };
-        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
-        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
-        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
-        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_foliage");
     }
 
     static void setError(FoliageError *output, FoliageError value) noexcept
@@ -477,31 +452,19 @@ private:
             // cadence, and let one due step cover the whole interval of
             // wall time. Cached fields freeze. Without lod_enabled every
             // field runs Full every step.
-            if (settings_.lodEnabled)
+            const std::uint32_t interval = engine::util::simulationLodResolvePass(field.lodBand,
+                field.cadence,
+                settings_.lod.thresholds,
+                settings_.lod.intervals,
+                settings_.lod.enabled,
+                field.importance,
+                &field.lodSkippedSteps);
+            if (interval == 0u)
             {
-                field.lodBand = engine::util::simulationFidelityForImportance(
-                    settings_.lodThresholds, field.importance, field.lodBand);
-                const std::uint32_t interval
-                    = settings_.lodIntervals[engine::util::simulationFidelityIndex(field.lodBand)];
-                if (interval == 0u)
-                {
-                    field.cadence.interval = 1u;
-                    field.lodSkippedSteps += 1;
-                    continue;
-                }
-                field.cadence.interval = interval;
-                if (!engine::util::simulationCadenceAdvance(field.cadence))
-                {
-                    field.lodSkippedSteps += 1;
-                    continue;
-                }
-                const double stepDelta = fixedDeltaSeconds * static_cast<double>(interval);
-                stepField(field, stepDelta, field.cadence.stepCounter);
+                continue;
             }
-            else
-            {
-                stepField(field, fixedDeltaSeconds, 0u);
-            }
+            const std::uint64_t stepCounter = settings_.lod.enabled ? field.cadence.stepCounter : 0u;
+            stepField(field, fixedDeltaSeconds * static_cast<double>(interval), stepCounter);
             for (InstanceState &instance : field.instances)
             {
                 if (!std::isfinite(instance.bend[0]) || !std::isfinite(instance.bend[1])
@@ -591,9 +554,7 @@ private:
         // Simulation LOD: fields below the Full band update on a staggered
         // cadence; the per-band interval says how many fixed steps one due
         // step covers (0 freezes that band, which is the Cached default).
-        bool                              lodEnabled   = false;
-        engine::util::SimulationFidelityThresholds lodThresholds{};
-        std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
+        engine::util::SimulationLodSettings lod{};
     };
 
     ParticipantManifest manifest_;

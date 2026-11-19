@@ -121,19 +121,21 @@ struct OceanRecord
     // (the buoyancy pass pushes opposite to it).
     double gravityMagnitude = 9.81;
 
-    // Simulation LOD: importance-driven fidelity band and staggered cadence
-    // (the phase derives from the registration ordinal). Due passes age the
-    // ripples by the interval delta and scale the buoyancy forces by the
-    // interval.
+    // Simulation LOD: importance-driven fidelity band shared by the two
+    // passes, each with its own staggered cadence (the phases derive from
+    // the registration ordinal). A due ripple pass ages the ripples by the
+    // interval delta; a due buoyancy pass scales its forces by the
+    // interval, so the impulse per wall time matches the full-rate
+    // schedule.
     double                           importance = 1.0;
     engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
-    engine::util::SimulationCadence  cadence{};
+    engine::util::SimulationCadence  rippleCadence{};
+    engine::util::SimulationCadence  buoyancyCadence{};
     std::uint64_t                    lodSkippedSteps = 0;
 };
 
 struct WaterSettings
 {
-    double        fixedRateHz             = 60.0;
     std::uint32_t maximumOceans           = 16;
     std::uint32_t maximumRipplesPerOcean  = 64;
     std::uint32_t maximumRegisteredBodies = 4096;
@@ -157,9 +159,7 @@ struct WaterSettings
     // Simulation LOD: oceans below the Full band run their passes on a
     // staggered cadence; the per-band interval says how many fixed steps one
     // due pass covers (0 freezes that band, which is the Cached default).
-    bool                              lodEnabled   = false;
-    engine::util::SimulationFidelityThresholds lodThresholds{};
-    std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
+    engine::util::SimulationLodSettings lod{};
 };
 
 class WaterModule final : public ModuleInterface
@@ -220,6 +220,12 @@ public:
         if (const auto value = context.configurationFloatingInSection("physics_water", "wake_strength_scale");
             value && *value >= 0.0 && *value <= 10.0 && std::isfinite(*value))
             settings_.wakeStrengthScale = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_water", "wake_submerged_fraction");
+            value && *value > 0.0 && *value <= 1.0 && std::isfinite(*value))
+            settings_.wakeSubmergedFraction = *value;
+        if (const auto value = context.configurationFloatingInSection("physics_water", "ripple_retire_envelope");
+            value && *value > 0.0 && *value < 1.0 && std::isfinite(*value))
+            settings_.rippleRetireEnvelope = *value;
 
         readLodSettings(context);
 
@@ -259,38 +265,7 @@ private:
 
     void readLodSettings(ParticipantContext &context)
     {
-        if (const auto value = context.configurationFloatingInSection("physics_water", "wake_submerged_fraction");
-            value && *value > 0.0 && *value <= 1.0 && std::isfinite(*value))
-            settings_.wakeSubmergedFraction = *value;
-        if (const auto value = context.configurationFloatingInSection("physics_water", "ripple_retire_envelope");
-            value && *value > 0.0 && *value < 1.0 && std::isfinite(*value))
-            settings_.rippleRetireEnvelope = *value;
-        settings_.lodEnabled = context.configurationBooleanInSection("physics_water", "lod_enabled").value_or(false);
-        const auto readThreshold = [this, &context](const char *key, double &target)
-        {
-            if (const auto value = context.configurationFloatingInSection("physics_water", key);
-                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
-                target = *value;
-        };
-        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
-        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
-        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
-        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
-        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
-        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
-        {
-            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
-        }
-        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
-        {
-            if (const auto value = context.configurationIntegerInSection("physics_water", key);
-                value && *value >= 0 && *value <= 65536)
-                target = static_cast<std::uint32_t>(*value);
-        };
-        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
-        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
-        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
-        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_water");
     }
 
     static void setError(WaterError *output, WaterError value) noexcept
@@ -571,7 +546,9 @@ private:
         // Simulation LOD: the stagger phase derives from the registration
         // ordinal, so oceans sharing an interval spread their passes across
         // steps.
-        ocean.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
+        const auto phase = static_cast<std::uint32_t>(registrationOrdinal_++);
+        ocean.rippleCadence.phase   = phase;
+        ocean.buoyancyCadence.phase = phase;
         oceans_.push_back(std::move(ocean));
         oceanIndexByHandle_.emplace(oceans_.back().handle, oceans_.size() - 1);
         statistics_.oceanCount = static_cast<std::uint32_t>(oceans_.size());
@@ -754,32 +731,25 @@ private:
         {
             return false;
         }
-        // Simulation LOD: resolve the band and staggered cadence; a due step
-        // covers interval x the caller's delta (ripple aging is wave math
-        // over wall time, so the enlarged delta keeps the pacing exact), and
-        // Cached oceans freeze. Without lod_enabled every ocean runs Full
-        // every step.
-        double stepDelta = fixedDeltaSeconds;
-        if (settings_.lodEnabled)
+        // Simulation LOD: resolve the band and the ripple pass's own
+        // staggered cadence; a due step covers interval x the caller's
+        // delta (ripple aging is wave math over wall time, so the enlarged
+        // delta keeps the pacing exact), and Cached oceans freeze. Without
+        // lod_enabled every ocean runs Full every step. The buoyancy pass
+        // keeps its own cadence, so a consumer driving both passes per
+        // fixed update staggers each one exactly once per step.
+        const std::uint32_t lodInterval = engine::util::simulationLodResolvePass(ocean->lodBand,
+            ocean->rippleCadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            ocean->importance,
+            &ocean->lodSkippedSteps);
+        if (lodInterval == 0u)
         {
-            ocean->lodBand = engine::util::simulationFidelityForImportance(
-                settings_.lodThresholds, ocean->importance, ocean->lodBand);
-            const std::uint32_t interval
-                = settings_.lodIntervals[engine::util::simulationFidelityIndex(ocean->lodBand)];
-            if (interval == 0u)
-            {
-                ocean->cadence.interval = 1u;
-                ocean->lodSkippedSteps += 1;
-                return true;
-            }
-            ocean->cadence.interval = interval;
-            if (!engine::util::simulationCadenceAdvance(ocean->cadence))
-            {
-                ocean->lodSkippedSteps += 1;
-                return true;
-            }
-            stepDelta = fixedDeltaSeconds * static_cast<double>(interval);
+            return true;
         }
+        const double stepDelta = fixedDeltaSeconds * static_cast<double>(lodInterval);
         emitWakes(*ocean);
         std::uint32_t active = 0;
         for (Ripple &ripple : ocean->ripples)
@@ -908,31 +878,23 @@ private:
         {
             return false;
         }
-        // Simulation LOD: resolve the band and staggered cadence; a due
-        // pass scales the applied forces by the interval so the impulse per
-        // wall time matches the full-rate schedule, and Cached oceans apply
-        // nothing. Without lod_enabled every ocean runs Full every pass.
-        double forceScale = 1.0;
-        if (settings_.lodEnabled)
+        // Simulation LOD: resolve the band and the buoyancy pass's own
+        // staggered cadence; a due pass scales the applied forces by the
+        // interval so the impulse per wall time matches the full-rate
+        // schedule, and Cached oceans apply nothing. Without lod_enabled
+        // every ocean runs Full every pass.
+        const std::uint32_t lodInterval = engine::util::simulationLodResolvePass(ocean->lodBand,
+            ocean->buoyancyCadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            ocean->importance,
+            &ocean->lodSkippedSteps);
+        if (lodInterval == 0u)
         {
-            ocean->lodBand = engine::util::simulationFidelityForImportance(
-                settings_.lodThresholds, ocean->importance, ocean->lodBand);
-            const std::uint32_t interval
-                = settings_.lodIntervals[engine::util::simulationFidelityIndex(ocean->lodBand)];
-            if (interval == 0u)
-            {
-                ocean->cadence.interval = 1u;
-                ocean->lodSkippedSteps += 1;
-                return true;
-            }
-            ocean->cadence.interval = interval;
-            if (!engine::util::simulationCadenceAdvance(ocean->cadence))
-            {
-                ocean->lodSkippedSteps += 1;
-                return true;
-            }
-            forceScale = static_cast<double>(interval);
+            return true;
         }
+        const double forceScale = static_cast<double>(lodInterval);
         std::uint64_t applied = 0;
         // Remember the pass clock: the wake submersion gate samples the
         // surface at this reading until the next pass.

@@ -9,6 +9,7 @@
 #include <engine/kernel/executable_directory.hpp>
 #include <engine/kernel/participant_interface.hpp>
 
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <memory>
@@ -31,12 +32,24 @@ std::filesystem::path resolveApplicationPath(const std::filesystem::path &path)
     return std::filesystem::absolute(path).lexically_normal();
 }
 
-// config/engine.toml next to the cwd wins over the one beside the executable.
+// config/engine.toml next to the cwd wins over the one beside the
+// executable. The cwd copy also drives trust and plugin discovery, so a
+// startup from an unexpected directory deserves a loud note on stderr
+// before anything loads from there.
 std::filesystem::path defaultConfigurationPath()
 {
     const std::filesystem::path workingDirectoryPath = std::filesystem::current_path() / "config" / "engine.toml";
     if (std::filesystem::exists(workingDirectoryPath))
     {
+        const std::filesystem::path besideExecutable = executableDirectory() / "config" / "engine.toml";
+        if (std::error_code error; !std::filesystem::equivalent(workingDirectoryPath, besideExecutable, error)
+            && !error)
+        {
+            std::fprintf(stderr,
+                "engine: using the configuration from the working directory (%s), not the one beside the "
+                "executable; this file decides trust bindings and plugin directories\n",
+                workingDirectoryPath.string().c_str());
+        }
         return workingDirectoryPath;
     }
     return executableDirectory() / "config" / "engine.toml";

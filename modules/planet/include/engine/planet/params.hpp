@@ -53,6 +53,24 @@ struct PlanetGenerationParams
     // ---- octree / level of detail ---------------------------------------------
     std::uint32_t leafGridN          = 16;   // marching-cubes cells per leaf chunk axis
     double        targetVoxelMeters  = 2.5;  // desired finest voxel size (drives max depth)
+    // Eye movement (meters) below which update() keeps the previous visible
+    // selection instead of re-running the descent. The LOD decision for a
+    // point cannot flip until the eye moves a good part of the distance to
+    // the ring boundary, so a sub-voxel movement pins the whole selection:
+    // descent, balancing, conform masks and stamping are all skipped. 0 (the
+    // default) picks the derived finest voxel; a walking camera at human
+    // speeds then re-selects every few dozen frames instead of every frame.
+    // Large values trade nearby-LOD freshness for update headroom.
+    double        selectionUpdateDistanceMeters = 0.0;
+    // Octree node-record bookkeeping (selection caches): records remember
+    // their solid/air probe verdict and cached geometry for this many
+    // consecutive selections before the prune pass drops them, and the prune
+    // runs every this many selections. Longer lifetimes keep returning views
+    // (a walking camera revisiting ground, orbiting cameras) free of the
+    // first-visit field probes at the cost of resident memory (a few dozen
+    // bytes per record; ground views touch tens of thousands).
+    std::uint32_t nodeRecordLifetimeUpdates = 96;
+    std::uint32_t nodeRecordPruneIntervalUpdates = 16;
     std::uint32_t maxDepthLimit      = 15;   // hard cap for the octree depth (kept within the
                                              // 4-bit depth field of the chunk key, see types.hpp)
     // Per-depth angular (screen-space) refinement: a chunk refines while its
@@ -80,9 +98,31 @@ struct PlanetGenerationParams
     // shared plane stays consistent with the coarse neighbor's mesh.
     double        lodBandLimitFactor = 2.0;
     bool          horizonCulling     = true; // skip nodes behind the planet horizon
+    // Streaming coverage for visible chunks whose mesh has not finished
+    // building: such a chunk draws its nearest finished ANCESTOR whose LOD
+    // suits its distance (the same screen-space rule the selection uses,
+    // with a 2x tolerance) instead of contributing nothing, and the
+    // streamer additionally requests the chunk's coarsest pure ancestor -
+    // the coarsest ancestor under which no finished visible chunk lies, so
+    // its mesh covers the hole without overlapping finished geometry. The
+    // planet therefore appears coarse-first (the widest gaps stream the
+    // widest chunks) and sharpens in place as the fine meshes land, instead
+    // of showing empty sky until the build queue catches up.
+    bool          lodMissingFallback = true;
+    // Scaffold request budget per update (see lodMissingFallback): at most
+    // this many pure-ancestor builds are requested per update, competing on
+    // apparent screen size so the widest coverage builds first. 0 disables
+    // scaffold builds; the draw-side fallback then uses only ancestors that
+    // exist anyway.
+    std::uint32_t lodScaffoldBuildsPerUpdate = 8;
     double        boundingFactor     = 1.4;  // root cube half-size = radius * this
     std::uint32_t maxConcurrentBuilds = 16;  // in-flight async chunk mesh builds
     std::uint32_t maxNewBuildsPerUpdate = 48;  // build requests issued per update() call
+    // Consecutive updates with queued work but no delivered mesh after which
+    // update() builds one chunk inline on the calling thread (the streaming
+    // fallback for machines too small to give the pool any CPU). Lower values
+    // borrow more frame time for streaming; 0 keeps the pool-only behavior.
+    std::uint32_t starvedInlineBuildIntervalUpdates = 30;
     // Upper bound on simultaneously live planets for one module instance
     // (each planet owns a worker pool; the cap keeps a runaway consumer from
     // stacking unbounded thread counts). createPlanet reports
@@ -122,8 +162,100 @@ struct PlanetGenerationParams
     // ranges separated by lower foothill country instead of carpeting every
     // landmass uniformly.
     double mountainMassFraction         = 0.50;  // [0,1] amplitude share of the broad mass
+    // Wavelength multiple of the broad mountain mass field relative to the
+    // crest field (the mass rides a multiple of mountainWavelengthMeters).
+    double mountainMassWavelengthMultiple = 1.8;
+    // Crest-line weight of the mountain profile at zero mass: the crest term
+    // is crest * (coupling + (1 - coupling) * mass), so higher values keep
+    // ribbed crest lines alive across low-mass country and lower values
+    // concentrate the ridges on the big massifs.
+    double mountainCrestMassCoupling    = 0.35;  // [0,1]
     double rangeClusterStrength         = 0.55;  // [0,1] mountain clustering into ranges
     double rangeClusterWavelengthMeters = 20000.0;
+    // Continent-field window where the range-cluster gate opens / saturates
+    // (continent-field units): uplift clusters where the cluster field sits
+    // inside this band.
+    double rangeClusterGateLow  = -0.35;
+    double rangeClusterGateHigh = 0.45;
+
+    // ---- eroded mountains (the Advanced Terrain Erosion filter) ---------------
+    // The mountain belt relief can come from an analytic erosion filter (see
+    // erosion.hpp for the technique and its attribution): directional gully
+    // stripes aligned with the terrain slope carve branching valleys and
+    // leave sharp ridges between them, evaluated per point in isolation so
+    // streaming chunks sample the same eroded field at any size. The belts
+    // keep the same continent mask and range clustering as the fBm profile
+    // above; mountainErosionWeight blends the two profiles (1 = fully
+    // eroded mountains, 0 = the classic mass-plus-crest profile). All filter
+    // knobs below mirror the published parameters.
+    double mountainErosionWeight = 1.0; // [0,1] blend of eroded vs fBm mountain profile
+    // Width of the cubemap face-blend window (fraction of the dominant-axis
+    // coordinate): samples near face seams blend the two overlapping faces
+    // across this band so stripes continue around the sphere.
+    double mountainErosionFaceBlendWidth = 0.02;
+    // Base terrain the filter erodes. One unit of the filter's 2D domain
+    // spans mountainWavelengthMeters of arc at the cubemap face centers, so
+    // the massif scale is the wavelength divided by the frequency and the
+    // amplitude is in the filter's [0, 1] height band.
+    double        mountainErosionTerrainFrequency  = 1.0;
+    double        mountainErosionTerrainAmplitude  = 0.25;
+    std::uint32_t mountainErosionTerrainOctaves    = 3;
+    double        mountainErosionTerrainGain       = 0.10;
+    double        mountainErosionTerrainLacunarity = 2.0;
+    // Height offset the filter applies (a constant blended with the negated
+    // fade target), scaled by the accumulated erosion magnitude: the
+    // recommended -0.65 compensates the ridge-up bias of the gully stack and
+    // keeps the eroded belt's mean height on the input terrain's average.
+    double mountainErosionHeightOffsetLow  = -0.35; // constant part of the offset
+    double mountainErosionHeightOffsetBlend = 0.0;  // [0,1] blend toward -fadeTarget
+    // Gully stack: scale sets the coarsest stripe wavelength (in units of
+    // mountainWavelengthMeters times cellScale), strength the erosion
+    // amplitude, gullyWeight the stripes' share of each octave against the
+    // fade target (lower values keep peaks pointy), detail how strictly
+    // finer octaves are restricted to steeper ground, cellScale the stripe
+    // cell size, normalization the partial stripe re-normalization (0 =
+    // full, 1 = none), and octaves / gain / lacunarity the fractal stack
+    // over the stripe scale.
+    double        mountainErosionScale         = 0.28;
+    double        mountainErosionStrength      = 0.30;
+    double        mountainErosionGullyWeight   = 0.55;
+    double        mountainErosionDetail        = 1.2;
+    double        mountainErosionCellScale     = 0.70;
+    double        mountainErosionNormalization = 0.50;
+    std::uint32_t mountainErosionOctaves       = 5;
+    double        mountainErosionGain          = 0.80;
+    double        mountainErosionLacunarity    = 2.0;
+    // Edge rounding (ridge, crease): softens the sharp ridge crests and
+    // gully creases the stack produces (real peaks are never razor-sharp and
+    // gully floors collect sediment). The global multiplier scales both and
+    // its gain compounds it per octave.
+    double mountainErosionRoundingRidge  = 0.10;
+    double mountainErosionRoundingCrease = 0.00;
+    double mountainErosionRoundingGlobal = 0.10;
+    double mountainErosionRoundingGain   = 2.0;
+    // Slope onset thresholds (input slope, per-octave slope, ridge-map
+    // slope, ridge-map mask): how much slope the masks demand before
+    // gullies appear on the input terrain, on each octave, and on the ridge
+    // map's own fade chain. Higher values push gullies onto ever steeper
+    // ground only.
+    double mountainErosionOnsetInput     = 1.25;
+    double mountainErosionOnsetOctave    = 1.25;
+    double mountainErosionOnsetRidgeMap  = 2.80;
+    double mountainErosionOnsetRidgeMask = 1.50;
+    // Assumed slope (magnitude, blend): the gully directions use a fixed
+    // assumed slope magnitude blended over the input terrain's own slope, so
+    // gullies stay aligned through rounded peaks and valley floors where
+    // the real slope vanishes. Blend 1 = fully assumed (the recommended
+    // setting; the filter's own derivatives are approximations).
+    double mountainErosionAssumedSlope      = 0.70;
+    double mountainErosionAssumedSlopeBlend = 1.0;
+    // Output remap: the filter's height (a band around 0.5) is remapped
+    // linearly onto the mountain profile [0, 1] between these bounds, so
+    // valley floors sit at the belt base and crests reach the full mountain
+    // amplitude. The defaults bracket the recommended shaping's output
+    // range; widen them for gentler relief, narrow them for wilder.
+    double mountainErosionProfileLow  = 0.30;
+    double mountainErosionProfileHigh = 0.52;
 
     // Regional relief between the continent and hill bands: broad plateaus,
     // basins and valley systems. This is the layer that gives landmasses
@@ -184,6 +316,24 @@ struct PlanetGenerationParams
     double strataBandMeters          = 34.0;  // spacing of the strata bands
     double strataWarp                = 1.1;   // noise bending of the bands; >= 2 folds them
                                               // into nested ripple rings (visual artefact)
+    // Cliff-mask window where the strata banding gate opens / saturates (the
+    // gate keeps banding off open slopes - see strataAmplitudeMeters).
+    double strataGateLow  = 0.45;
+    double strataGateHigh = 0.85;
+
+    // ---- geologic provinces -----------------------------------------------------
+    // A very-low-frequency field classifies every landmass region into one of
+    // three rock characters - layered sedimentary country (warm bedded
+    // tones, strong strata and terraces), shield/volcanic country (cool
+    // gray tones, weaker strata) and pale carbonate patches (limestone) -
+    // and biases the terrain's strata and terrace behavior to match. The
+    // rock characters ride the SAME seed streams in density and climate, so
+    // the geometry and the albedo agree about what the ground is made of.
+    bool   provincesEnabled       = true;
+    double provinceWavelengthMeters = 0.0; // 0 = derived (1.6 x continent wavelength)
+    double provinceRockVariation  = 0.55;  // [0,1] strength of the rock palette tint
+    double provinceStrataBias     = 0.35;  // [0,1] strata amplitude bias toward sedimentary country
+    double provinceTerraceBias    = 0.30;  // [0,1] terrace strength bias toward sedimentary country
 
     // ---- coastal shaping --------------------------------------------------------
     // Real shorelines are planed off by waves and sediment: the medium-frequency
@@ -192,6 +342,11 @@ struct PlanetGenerationParams
     // (which reads as a web of sub-sea ponds with beach rims).
     double coastalFlattenMeters = 80.0;   // half-width of the flattening band around sea level
     double coastalFlattenFloor  = 0.10;   // residual detail fraction right at the shoreline
+    // Fractions of coastalFlattenMeters where the taper reaches full damping
+    // (below fullFraction of the band) and full detail strength (above
+    // reachFraction). The steepened curve keeps shoals from speckling.
+    double coastalFlattenFullFraction  = 0.45;
+    double coastalFlattenReachFraction = 1.6;
 
     // ---- caves (optional; cost is two extra noise fields per sample) -----------
     bool   cavesEnabled            = false;
@@ -209,6 +364,18 @@ struct PlanetGenerationParams
     // base relief amplitudes alone bottom out around the continent
     // amplitude, which reads as a flooded plain from above). 0 disables.
     double abyssalDepthMeters = 3500.0;
+    // Continent-field window the abyssal mask rides (continent-field units,
+    // negative = basins): the sea floor sinks where the continent field sits
+    // inside this band. Keep low < high; the window's lower edge shapes how
+    // far from the coast the deepening starts.
+    double abyssalMaskLow  = -0.60;
+    double abyssalMaskHigh = -0.02;
+    // Height fractions of the continent amplitude where the submarine fade
+    // closes (below lowFraction of the amplitude, ocean-floor detail is
+    // fully suppressed) and opens (above highFraction, land detail is
+    // untouched).
+    double submarineFadeLowFraction  = 0.02;
+    double submarineFadeHighFraction = 0.06;
 
     // ---- climate ---------------------------------------------------------------
     double equatorTemperature = 1.0;   // temperature01 at the equator, sea level
@@ -227,6 +394,22 @@ struct PlanetGenerationParams
     // landmass and the globe reads as speckled).
     double coastalMoistureBoost = 0.18;     // moisture added right at the shoreline
     double coastalMoistureBandMeters = 400.0; // elevation over which the boost fades out
+    // Continental interiors dry out away from the ocean: humidity drops as
+    // the continent field climbs deep into its positive range (the same
+    // field that shapes the landmasses), so landmass cores trend arid and
+    // the coasts keep their green fringe. 0 disables.
+    double climateContinentalityStrength = 0.30;
+    // Rain shadow: humidity drops DOWNWIND of mountain country. The mass of
+    // the mountain field is sampled upwind along the prevailing wind (see
+    // climateWindZonesEnabled) at the mountain wavelength's distance, so the
+    // lee side of every range carries a dry belt the way orographic
+    // precipitation leaves one. 0 disables.
+    double climateRainShadowStrength = 0.35;
+    // Prevailing winds for the rain shadow: true follows the latitude zones
+    // every rotating planet shows (easterly trades inside ~30 degrees,
+    // westerlies over the temperate band, easterly polar winds), false blows
+    // uniformly from the configured eastern hemisphere direction.
+    bool   climateWindZonesEnabled = true;
     bool   moistureLatitudeBands = true;    // ITCZ wet belt + subtropical dry belts
     // Amplitudes of the four circulation-cell humidity belts (see climate.hpp
     // for the fixed belt geometry: an ITCZ wet belt on the equator, subtropical
@@ -305,7 +488,7 @@ struct PlanetGenerationParams
         // taiga           tundra           snow
         0.060f, 0.100f, 0.050f,   0.260f, 0.240f, 0.170f,   0.870f, 0.900f, 0.930f,
         // rock (cliff faces)
-        0.160f, 0.140f, 0.120f,
+        0.280f, 0.250f, 0.210f,
     };
 
     // ---- surface walking (kinematic controller; see walker.hpp) ----------------
@@ -321,6 +504,11 @@ struct PlanetGenerationParams
     double walkGroundSnapMeters           = 0.9;  // drop the feet follow without falling
     double walkMaxStepUpMeters            = 0.55; // highest ledge walked straight onto
     double walkMaxClimbGrade              = 3.5;  // rise/run above this blocks (tan; ~74 deg)
+    // Speed cap of the falling integration. Terminal velocity bounds the
+    // landing probe the fall needs (the probe scales with speed * delta), so
+    // a long fall resolves the ground with a bounded number of march steps
+    // instead of accelerating without limit toward a tunnel-through.
+    double walkTerminalVelocityMetersPerSecond = 55.0;
     bool   swimEnabled                    = true; // float at the sea surface over deep water
     double swimSpeedMetersPerSecond       = 2.6;  // movement speed while swimming
     double swimWadeDepthMeters            = 1.2;  // water shallower than this stays walkable
@@ -354,12 +542,19 @@ struct PlanetGenerationParams
     // sandy turquoise (the bottom seen through the sheet) instead of one
     // pale sheet. 0 disables.
     double waterShoreMixMeters  = 3.0;
+    // Brightness lift of that transmitted sand: sunlit flats under a thin
+    // sheet read brighter than the raw beach palette row. 1.0 = no lift.
+    double waterShoreSandBrightness = 1.35;
     // Surf: a white breaker band where the water shallows toward the shore,
     // plus a noise modulation so the breaker reads as patchy wave crests
     // instead of a painted stripe.
     double waterFoamWidthMeters = 2.5;  // depth band under the surface that reads as surf; wide
                                         // enough to read as a breaker line from a standing eye
     double waterFoamStrength    = 0.60; // 0 = no foam, 1 = solid white surf band
+    // Falloff exponent of the breaker band across its depth range: 2 keeps a
+    // broad wash of surf over the whole shallow shelf, 4 squeezes the
+    // breakers into a tight rim at the waterline (real surf hugs the shore).
+    double waterFoamFalloffExponent = 3.0;
     // Sea ice: the water surface freezes where the SEA-LEVEL temperature drops
     // below seaIceTemperature (the same climate field that drives the land's
     // freeze line, so ice caps and snowy poles line up with an organic, noisy
@@ -376,6 +571,10 @@ struct PlanetGenerationParams
     // limit like every other noise term, so coarse chunks keep a smooth sea.
     double     waterWaveAmplitude          = 0.16;
     double     waterWaveWavelengthMeters   = 8.0;
+    // Amplitude of the half-wavelength chop riding the swell, as a fraction
+    // of the swell tilt: the chop breaks the sun glint into sparkle. 0 gives
+    // a single-scale swell.
+    double     waterWaveChopFraction       = 0.33;
 
     // ---- clouds (coverage field; see atmosphere.hpp) ----------------------------
     // A pure noise field on a spherical shell above the datum: consumers paint
@@ -425,6 +624,12 @@ struct PlanetGenerationParams
     // cloud shadows do and stay consistent with the cloud layer from orbit
     // and from the ground. 0 disables.
     double cloudShadowStrength   = 0.45;
+    // Penumbra softening of the cast shadows: the shadow field widens the
+    // coverage's own edge band by this fraction, so shadows read as soft-
+    // edged darkening under their banks (real cloud shadows blur with the
+    // sun's angular size) instead of a hard copy of the cloud outlines.
+    // 0 keeps the shadow exactly as sharp as the banks above it.
+    double cloudShadowSoftness   = 0.50;
     // Direction (unit, world space) of the sunlight that casts the cloud
     // shadows - the one lighting the scene the consumer renders (the demo
     // pairs it with its [pbr] sun_direction). The default matches the
@@ -448,13 +653,14 @@ struct PlanetGenerationParams
     double derivedRootHalfMeters   = 0.0; // root cube half-size
     double derivedRootSizeMeters   = 0.0; // root cube edge length (2 * half)
     std::uint32_t derivedMaxDepth  = 0;   // deepest octree level actually used
-    double derivedLeafSizeMeters   = 0.0; // leaf node cube size at derivedMaxDepth
-    double derivedVoxelMeters      = 0.0; // leaf voxel size
+    double derivedVoxelMeters      = 0.0; // leaf voxel size (leaf cube / leafGridN)
     double derivedMinShellRadius   = 0.0; // inner radius of the terrain band
     double derivedMaxShellRadius   = 0.0; // outer radius of the terrain band
     double derivedMaxReliefMeters  = 0.0; // total possible relief above/below the datum
     double derivedSeaRadiusMeters  = 0.0; // radius of the ocean surface
     double derivedMountainMassWavelengthMeters = 0.0; // wavelength of the broad mountain mass field
+    double derivedProvinceWavelengthMeters = 0.0;     // wavelength of the geologic-province field
+    double derivedMacroClimateStrideMeters = 0.0;     // sampling stride of the mesher's macro-climate grid
 
     // Clamp every field into its documented range and recompute the derived
     // values. Returns false (with an error string) when a value cannot be

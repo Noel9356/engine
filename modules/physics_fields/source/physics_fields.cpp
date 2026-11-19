@@ -179,9 +179,7 @@ struct FieldsSettings
     // staggered cadence; the per-band interval says how many fixed steps one
     // due pass covers, and the applied force scales with it (0 freezes that
     // band, which is the Cached default).
-    bool                              lodEnabled   = false;
-    engine::util::SimulationFidelityThresholds lodThresholds{};
-    std::uint32_t                     lodIntervals[engine::util::kSimulationFidelityBandCount] = {0u, 8u, 4u, 2u, 1u};
+    engine::util::SimulationLodSettings lod{};
 };
 
 class FieldsModule final : public ModuleInterface
@@ -254,32 +252,7 @@ private:
 
     void readLodSettings(ParticipantContext &context)
     {
-        settings_.lodEnabled = context.configurationBooleanInSection("physics_fields", "lod_enabled").value_or(false);
-        const auto readThreshold = [this, &context](const char *key, double &target)
-        {
-            if (const auto value = context.configurationFloatingInSection("physics_fields", key);
-                value && *value >= 0.0 && *value <= 1.0 && std::isfinite(*value))
-                target = *value;
-        };
-        readThreshold("lod_full_threshold", settings_.lodThresholds.fullThreshold);
-        readThreshold("lod_simplified_threshold", settings_.lodThresholds.simplifiedThreshold);
-        readThreshold("lod_procedural_threshold", settings_.lodThresholds.proceduralThreshold);
-        readThreshold("lod_animation_threshold", settings_.lodThresholds.animationThreshold);
-        readThreshold("lod_demotion_margin", settings_.lodThresholds.demotionMargin);
-        if (!engine::util::simulationFidelityThresholdsValid(settings_.lodThresholds))
-        {
-            settings_.lodThresholds = engine::util::SimulationFidelityThresholds{};
-        }
-        const auto readInterval = [this, &context](const char *key, std::uint32_t &target)
-        {
-            if (const auto value = context.configurationIntegerInSection("physics_fields", key);
-                value && *value >= 0 && *value <= 65536)
-                target = static_cast<std::uint32_t>(*value);
-        };
-        readInterval("lod_interval_simplified", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Simplified)]);
-        readInterval("lod_interval_procedural", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Procedural)]);
-        readInterval("lod_interval_animation", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Animation)]);
-        readInterval("lod_interval_cached", settings_.lodIntervals[engine::util::simulationFidelityIndex(engine::util::SimulationFidelity::Cached)]);
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_fields");
     }
 
     static void setError(FieldsError *output, FieldsError value) noexcept
@@ -372,36 +345,6 @@ private:
     double bodyMass(const engine::physics_rigid::BodyDescription &description) const
     {
         return description.density > 0.0 ? description.density * shapeVolume(description.shape) : description.mass;
-    }
-
-    // Resolves one field's fidelity band and staggered cadence ahead of an
-    // application pass. Returns the force scale for the pass (0 = skip: the
-    // pass is not due, or the band froze), keeping the total impulse per
-    // wall time constant on a reduced cadence.
-    std::uint32_t lodIntervalAndScale(engine::util::SimulationFidelity &band, engine::util::SimulationCadence &cadence,
-        double importance, std::uint64_t &skipped, engine::util::SimulationFidelity &outBand)
-    {
-        if (!settings_.lodEnabled)
-        {
-            outBand = engine::util::SimulationFidelity::Full;
-            return 1u;
-        }
-        band = engine::util::simulationFidelityForImportance(settings_.lodThresholds, importance, band);
-        outBand = band;
-        const std::uint32_t interval = settings_.lodIntervals[engine::util::simulationFidelityIndex(band)];
-        if (interval == 0u)
-        {
-            cadence.interval = 1u;
-            skipped += 1;
-            return 0u;
-        }
-        cadence.interval = interval;
-        if (!engine::util::simulationCadenceAdvance(cadence))
-        {
-            skipped += 1;
-            return 0u;
-        }
-        return interval;
     }
 
     // ---- wind field evaluation ----------------------------------------------
@@ -536,9 +479,17 @@ private:
         {
             return false;
         }
-        engine::util::SimulationFidelity band = engine::util::SimulationFidelity::Full;
-        const std::uint32_t forceInterval = lodIntervalAndScale(wind->lodBand, wind->cadence, wind->importance,
-            wind->lodSkippedSteps, band);
+        // Simulation LOD: resolve the band and the staggered cadence; a due
+        // pass scales the applied drag by the interval so the impulse per
+        // wall time matches the full-rate schedule, and Cached winds apply
+        // nothing. Without lod_enabled every wind runs Full every pass.
+        const std::uint32_t forceInterval = engine::util::simulationLodResolvePass(wind->lodBand,
+            wind->cadence,
+            settings_.lod.thresholds,
+            settings_.lod.intervals,
+            settings_.lod.enabled,
+            wind->importance,
+            &wind->lodSkippedSteps);
         if (forceInterval == 0u)
         {
             return true;
@@ -682,9 +633,18 @@ private:
             {
                 continue;
             }
-            engine::util::SimulationFidelity band = engine::util::SimulationFidelity::Full;
-            const std::uint32_t forceInterval = lodIntervalAndScale(volume.lodBand, volume.cadence,
-                volume.importance, volume.lodSkippedSteps, band);
+            // Simulation LOD: resolve the band and the staggered cadence; a
+            // due pass scales the applied forces by the interval so the
+            // impulse per wall time matches the full-rate schedule, and
+            // Cached volumes apply nothing. Without lod_enabled every
+            // volume runs Full every pass.
+            const std::uint32_t forceInterval = engine::util::simulationLodResolvePass(volume.lodBand,
+                volume.cadence,
+                settings_.lod.thresholds,
+                settings_.lod.intervals,
+                settings_.lod.enabled,
+                volume.importance,
+                &volume.lodSkippedSteps);
             if (forceInterval == 0u)
             {
                 continue;

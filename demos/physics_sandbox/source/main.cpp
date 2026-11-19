@@ -28,7 +28,7 @@
 #include <engine/application/frame_clock.hpp>
 #include <engine/application/frame_pacer.hpp>
 #include <engine/camera/capabilities.hpp>
-#include <engine/fur/capabilities.hpp>
+#include <engine/physics_fur/capabilities.hpp>
 #include <engine/kernel/engine_kernel.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/pbr/capabilities.hpp>
@@ -151,7 +151,7 @@ int main(int argc, char **argv)
     {
         requiredCapabilities = {"window", "renderer", "camera", "pbr", "physics_rigid", "physics_articulated",
             "physics_cloth", "physics_fields", "physics_rope", "physics_water", "physics_fluid",
-            "physics_particles", "physics_foliage", "physics_character", "physics_scheduling", "fur"};
+            "physics_particles", "physics_foliage", "physics_character", "physics_scheduling", "physics_fur"};
     }
     if (options.fixedHz > 0.0)
     {
@@ -253,8 +253,8 @@ int main(int argc, char **argv)
             dependencies.scheduling = nullptr;
         }
     }
-    const engine::fur::FurCapability *furCapability = context.tryAcquireCapability<engine::fur::FurCapability>();
-    if (furCapability != nullptr && furCapability->abi != engine::fur::furCapabilityAbi)
+    const engine::physics_fur::FurCapability *furCapability = context.tryAcquireCapability<engine::physics_fur::FurCapability>();
+    if (furCapability != nullptr && furCapability->abi != engine::physics_fur::physicsFurCapabilityAbi)
     {
         furCapability = nullptr;
     }
@@ -476,7 +476,8 @@ int main(int argc, char **argv)
     // ---- run mode -----------------------------------------------------------------
     const bool          runUntilClosed = options.frames == 0 && windowedBackend;
     const std::uint64_t totalFrames    = options.frames != 0 ? options.frames : 120;
-    if (options.screenshotFrame == 0 && !options.screenshotPath.empty())
+    if (options.screenshotFrame == demo::physics_sandbox::SandboxOptions::kScreenshotFrameUnset
+        && !options.screenshotPath.empty())
     {
         options.screenshotFrame = totalFrames - 1;
     }
@@ -765,6 +766,28 @@ int main(int argc, char **argv)
                     demo::physics_sandbox::updateExtendedScriptedTimeline(
                         dependencies, scene, simulatedSeconds, fixedDelta);
                 }
+                if (options.sceneName == "lod" && sceneConfig.driveSimulationLod)
+                {
+                    // Warmup runs before the first rendered frame; the
+                    // camera still reports its creation pose here.
+                    camera::CameraPose lodCamera{};
+                    if (cameraCapability.cameraPose(cameraCapability.self, cameraHandle, &lodCamera))
+                    {
+                        const double lodCameraPosition[3]
+                            = {lodCamera.position[0], lodCamera.position[1], lodCamera.position[2]};
+                        demo::physics_sandbox::driveSimulationLod(dependencies, scene, sceneConfig, lodCameraPosition);
+                    }
+                }
+                if (options.sceneName == "lod" && sceneConfig.driveSimulationLod)
+                {
+                    camera::CameraPose lodCamera{};
+                    if (cameraCapability.cameraPose(cameraCapability.self, cameraHandle, &lodCamera))
+                    {
+                        const double lodCameraPosition[3]
+                            = {lodCamera.position[0], lodCamera.position[1], lodCamera.position[2]};
+                        demo::physics_sandbox::driveSimulationLod(dependencies, scene, sceneConfig, lodCameraPosition);
+                    }
+                }
                 // Grab spring for rigid bodies: forces persist exactly one
                 // step, so re-apply each fixed update toward the current
                 // pointer ray.
@@ -932,10 +955,11 @@ int main(int argc, char **argv)
             {
                 std::cout << "demo_physics_sandbox: frame " << frameIndex << " | bodies " << statistics.bodyCount
                           << " (awake " << statistics.awakeBodyCount << ", sleeping " << statistics.sleepingBodyCount
-                          << "), contacts " << statistics.contactPairCount << " pairs / "
-                          << statistics.contactPointCount << " points, joints " << statistics.jointCount
-                          << ", triggers +" << triggerEnters << "/-" << triggerExits << ", step "
-                          << statistics.lastStepMilliseconds << " ms, steps this frame " << stepsExecuted << "\n";
+                          << ", lod-reduced " << statistics.lodReducedBodyCount << "), contacts "
+                          << statistics.contactPairCount << " pairs / " << statistics.contactPointCount
+                          << " points, joints " << statistics.jointCount << ", triggers +" << triggerEnters << "/-"
+                          << triggerExits << ", step " << statistics.lastStepMilliseconds << " ms, steps this frame "
+                          << stepsExecuted << "\n";
             }
             if (dependencies.cloth != nullptr && !scene.cloths.empty())
             {

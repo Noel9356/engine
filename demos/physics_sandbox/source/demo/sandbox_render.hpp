@@ -4,7 +4,7 @@
 // from the physics capabilities' state copies.
 #pragma once
 
-#include <engine/fur/capabilities.hpp>
+#include <engine/physics_fur/capabilities.hpp>
 #include <engine/physics_articulated/capabilities.hpp>
 #include <engine/physics_cloth/capabilities.hpp>
 #include <engine/physics_particles/capabilities.hpp>
@@ -52,11 +52,11 @@ public:
 
     void destroyMeshes(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer);
 
-    // Generates the fur strand texture through the fur capability and
+    // Generates the fur strand texture through the physics_fur capability and
     // uploads it; the fur ball's drawFur layer stack samples it. Safe to
-    // call when the fur capability is absent (the fur draw then skips).
+    // call when the physics_fur capability is absent (the fur draw then skips).
     void prepareFur(engine::renderer::RenderCapability &renderCapability, engine::renderer::RendererHandle renderer,
-        const engine::fur::FurCapability *furCapability);
+        const engine::physics_fur::FurCapability *furCapability);
 
     // Rebuilds the tracked-state bookkeeping after a scene (re)build.
     void syncScene(const SceneDependencies &dependencies, const SceneHandles &handles,

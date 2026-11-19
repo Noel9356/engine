@@ -33,7 +33,10 @@ struct SandboxOptions
     double warmupSeconds = 0.0;
 
     std::string   screenshotPath;
-    std::uint64_t screenshotFrame = 0;
+    // Frame selected by --screenshot-frame; kScreenshotFrameUnset means
+    // "the last rendered frame".
+    static constexpr std::uint64_t kScreenshotFrameUnset = ~std::uint64_t{0u};
+    std::uint64_t                   screenshotFrame      = kScreenshotFrameUnset;
     std::string   frameTimesPath;
     std::uint32_t statsEveryFrames = 60;
 

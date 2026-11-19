@@ -91,6 +91,7 @@ public:
         readSolverSettings(context);
         readSleepSettings(context);
         readSpaceSettings(context);
+        readLodSettings(context);
 
         if (const auto gravity = context.configurationFloatingArrayInSection("physics_rigid", "gravity");
             gravity.size() == 3)
@@ -155,6 +156,9 @@ private:
     {
         readPositiveLimit(context, "solver_velocity_iterations", 1000, settings_.velocityIterations);
         readPositiveLimit(context, "solver_position_iterations", 1000, settings_.positionIterations);
+        if (const auto value = context.configurationFloatingInSection("physics_rigid", "contact_margin");
+            value && *value > 0.0 && *value <= 0.5 && std::isfinite(*value))
+            settings_.contactMargin = *value;
         if (const auto value = context.configurationFloatingInSection("physics_rigid", "contact_slop");
             value && *value > 0.0 && *value < 1.0 && std::isfinite(*value))
             settings_.contactSlop = *value;
@@ -207,6 +211,34 @@ private:
         if (const auto value = context.configurationFloatingInSection("physics_rigid", "ccd_velocity_threshold");
             value && *value >= 0.0 && *value <= 1000.0 && std::isfinite(*value))
             settings_.ccdVelocityThreshold = *value;
+    }
+
+    void readLodSettings(ParticipantContext &context)
+    {
+        settings_.lod = engine::util::readSimulationLodSettings(context, "physics_rigid");
+        // Per-band solver iteration budgets: five values, one per fidelity
+        // band (Cached, Animation, Procedural, Simplified, Full). A 0 entry
+        // keeps the derived budget (Full keeps the configured iterations,
+        // each lower band halves, floored at one); explicit values clamp to
+        // [1, configured iterations] at world creation.
+        const auto readBudget = [&context](const char *key, std::uint32_t *targets, std::uint32_t maximum) {
+            const auto values = context.configurationFloatingArrayInSection("physics_rigid", key);
+            if (values.size() < engine::util::kSimulationFidelityBandCount)
+            {
+                return;
+            }
+            for (std::uint32_t band = 0; band < engine::util::kSimulationFidelityBandCount; ++band)
+            {
+                const long long value = static_cast<long long>(values[band]);
+                if (value < 0 || value > static_cast<long long>(maximum))
+                {
+                    continue;
+                }
+                targets[band] = static_cast<std::uint32_t>(value);
+            }
+        };
+        readBudget("lod_velocity_iterations", settings_.lodVelocityIterations, settings_.velocityIterations);
+        readBudget("lod_position_iterations", settings_.lodPositionIterations, settings_.positionIterations);
     }
 
     static void setError(PhysicsError *output, PhysicsError value) noexcept
@@ -578,6 +610,24 @@ private:
             return false;
         }
         world->bodies[iterator->second].continuousCollisionEnabled = enabled;
+        return true;
+    }
+
+    bool setBodyImportanceImpl(WorldHandle worldHandle, BodyHandle handle, double importance)
+    {
+        World *world = findWorld(worldHandle);
+        if (world == nullptr || !std::isfinite(importance))
+        {
+            return false;
+        }
+        const auto iterator = world->bodyIndexByHandle.find(handle);
+        if (iterator == world->bodyIndexByHandle.end())
+        {
+            return false;
+        }
+        // Importance is a policy input, not motion: the band resolves on the
+        // next step and the body keeps its sleep state.
+        world->bodies[iterator->second].importance = engine::util::simulationImportanceClamped(importance);
         return true;
     }
 
@@ -1412,6 +1462,7 @@ private:
         ENGINE_PHYSICS_RIGID_BIND(collideSpheres, collideSpheresImpl);
         ENGINE_PHYSICS_RIGID_BIND(copyBodyStates, copyBodyStatesImpl);
         ENGINE_PHYSICS_RIGID_BIND(copyBodyDescriptions, copyBodyDescriptionsImpl);
+        ENGINE_PHYSICS_RIGID_BIND(setBodyImportance, setBodyImportanceImpl);
 #undef ENGINE_PHYSICS_RIGID_BIND
     }
 

@@ -70,7 +70,7 @@ struct AssetStoreConfig
     // inside the root; without a root it rejects absolute paths entirely, so
     // only relative paths (resolved against the process working directory)
     // are served.
-    bool allowAbsolutePaths = true;
+    bool allowAbsolutePaths = false;
 
     // Cooked-asset object directory (set when the catalog loads).
     std::filesystem::path cookedObjectDirectory;

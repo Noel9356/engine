@@ -6,6 +6,7 @@
 
 #include "shapes.hpp"
 #include <engine/physics_rigid/capabilities.hpp>
+#include <engine/util/simulation_lod.hpp>
 #include <engine/util/step_accumulator.hpp>
 
 #include <cstdint>
@@ -66,6 +67,16 @@ struct Body
     std::uint32_t maskBits     = 0xFFFFFFFFu;
 
     std::uint64_t userTag = 0;
+
+    // Simulation LOD: the consumer-written importance score resolves the
+    // fidelity band once per step (with demotion hysteresis, the shared
+    // ladder every simulation module uses); the band scales the solver's
+    // iteration budget for every constraint this body takes part in. The
+    // band matters only for dynamic bodies - static and kinematic bodies
+    // never integrate, and a constraint's budget follows its dynamic
+    // participants alone.
+    double                           importance = 1.0;
+    engine::util::SimulationFidelity lodBand    = engine::util::SimulationFidelity::Full;
 
     math::Vec3 aabbMinimum;
     math::Vec3 aabbMaximum;
@@ -224,6 +235,18 @@ struct SimulationSettings
     double spatialHashCellSize = 2.0;
 
     bool warmStarting = true;
+
+    // Simulation LOD: bodies resolve a fidelity band from their importance
+    // score (the shared ladder), and each contact and joint constraint
+    // solves on a per-band iteration budget - the largest budget among the
+    // constraint's dynamic bodies, so an important body resting on a
+    // reduced-fidelity pile still solves at full quality. An entry of 0 in
+    // either table derives the budget from the configured iteration counts
+    // (Full keeps them, each lower band halves, floored at one); explicit
+    // entries clamp to [1, configured].
+    engine::util::SimulationLodSettings lod{};
+    std::uint32_t lodVelocityIterations[engine::util::kSimulationFidelityBandCount] = {0u, 0u, 0u, 0u, 0u};
+    std::uint32_t lodPositionIterations[engine::util::kSimulationFidelityBandCount] = {0u, 0u, 0u, 0u, 0u};
 
     std::uint32_t maximumWorlds  = 16;
     std::uint32_t maximumBodies  = 100000;

@@ -20,15 +20,21 @@ The shipped defaults describe the showcase planet: radius 60 km, Earth-like reli
 | `leaf_grid_n` | `16` | Marching-cubes cells per leaf chunk axis (grid is `(n+1)^3` samples plus a 1-voxel apron). Must be EVEN so chunk faces sit on coarse planes. Range [4, 64]. |
 | `target_voxel_meters` | `2.5` | Desired finest voxel size; drives the derived octree depth (`derivedMaxDepth`). The lower clamp is `radius / 131072` (depth-capped by the chunk key's 15-level limit). |
 | `max_depth_limit` | `15` | Hard cap for the octree depth. The chunk key stores the depth in 4 bits, so 15 is also the structural maximum. |
+| `selection_update_distance_meters` | `0` | Eye movement below which `updatePlanet` keeps the previous visible selection (the streaming passes still run). `0` derives the finest voxel: a smaller step cannot change any LOD decision, so a walking camera re-selects every few dozen frames instead of every frame. | 
+| `node_record_lifetime_updates` | `96` | Selections an octree node record (its solid/air probe verdict) survives before the prune pass drops it. Longer lifetimes keep revisited views free of the first-visit field probes; the resident cost is a few dozen bytes per record. |
+| `node_record_prune_interval_updates` | `16` | Cadence of the record prune pass (clamped to the lifetime so visible records never age out between scans). |
 | `lod_angular_voxel_radians` | `0.02` | Screen-space LOD: refine a node while its voxel subtends more than this many radians at the eye. Detail follows apparent size, independent of planet radius, viewport and zoom. Smaller = finer views everywhere, visible chunk count grows quadratically. |
 | `lod_band_limit_factor` | `2.0` | Per-depth low-pass: density content below `voxel * factor` fades out before coarse chunks sample it. Marching cubes needs ~4 samples per wavelength; 2.0 renders content at full strength from 4 voxels up and fades it to zero at 2 voxels. Without it, sub-voxel octaves alias into random spikes on every coarse LOD surface (the "spiky globe"). Raise it to trade close-range roughness for cheaper, smoother chunks. |
 | `horizon_culling` | `true` | Skip nodes fully inside the shadow cone of the guaranteed-solid inner shell ball. |
+| `lod_missing_fallback` | `true` | Streaming coverage for visible chunks whose mesh has not finished building: such a chunk draws its nearest finished ancestor whose LOD suits its distance (the selection's screen-space rule with a 2x tolerance) instead of contributing no geometry, and the streamer additionally requests the chunk's coarsest pure ancestor (the coarsest one under which no finished visible chunk lies, so its mesh covers the hole without overlapping finished geometry). The planet therefore appears coarse-first - the widest gaps stream the widest chunks - and sharpens in place as the fine meshes land, so a fresh view never waits on the build queue before showing terrain. |
+| `lod_scaffold_builds_per_update` | `8` | Scaffold request budget per `updatePlanet` call (see `lod_missing_fallback`): at most this many pure-ancestor builds are requested per update, competing on apparent screen size in the same order as the fine chunks so the widest coverage builds first. `0` disables scaffold builds; the draw-side fallback then uses only ancestors that exist anyway. |
 | `bounding_factor` | `1.4` | Root cube half-size = `radius * factor`. Range [1.05, 4]. |
 | `max_concurrent_builds` | `16` | Chunk mesh builds in flight at once (the pool runs wide open; ground views select thousands of chunks). |
+| `starved_inline_build_interval_updates` | `30` | Consecutive updates with queued work but no delivered mesh after which one chunk builds inline on the calling thread (the streaming fallback for machines too small to give the pool CPU time). `0` keeps the pool-only behavior. |
 | `max_new_builds_per_update` | `48` | Build requests issued per `updatePlanet` call. Requests are ordered by apparent size (chunk width over distance, the same quantity the LOD rule is built on), so the widest-on-screen unresolved chunks build first. |
 | `max_live_planets` | `16` | How many planets one module instance may keep alive at once (each owns a worker pool). `createPlanet` reports `CapacityReached` beyond the cap. |
 | `chunk_eviction_updates` | `240` | Updates a hidden mesh stays cached before eviction. The stamp-refresh and eviction scan follows this value whenever it is shorter than the default eight-update cadence, so thresholds below eight never age a visible chunk out between scans. |
-| `chunk_cache_capacity` | `16384` | Hard cap on cached chunk meshes (oldest evicted first). Must exceed the whole visible set on the deepest ground views (~9000 chunks at radius 60000) or ready meshes evict and rebuild in a churn loop. |
+| `chunk_cache_capacity` | `16384` | Hard cap on cached chunk meshes (oldest evicted first). Must exceed the whole visible set on the deepest ground views (~12500 chunks at radius 60000 with the eroded mountain defaults) or ready meshes evict and rebuild in a churn loop. |
 
 ## Relief shaping (meters unless noted)
 
@@ -46,9 +52,41 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `mountain_mask_low` / `mountain_mask_high` | `0.08` / `0.45` | Continent-field values where mountains start / reach full height. |
 | `mountain_sharpness` | `1.25` | Exponent applied to the ridged field. |
 | `mountain_octaves` | `5` | fBm octaves of the ridged field. |
+| `mountain_mass_wavelength_multiple` | `1.8` | Wavelength of the broad mass field as a multiple of the crest wavelength. |
+| `mountain_crest_mass_coupling` | `0.35` | Crest weight at zero mass: higher keeps ribbed crest lines alive across low-mass country, lower concentrates the ridges on the big massifs. |
 | `mountain_mass_fraction` | `0.50` | Amplitude share of the broad smooth mass field (the rest goes to the ridged crest field; a pure ridge sum reads as uniform needle carpets). |
 | `range_cluster_strength` | `0.55` | How strongly uplift groups into distinct ranges with foothill gaps. |
+| `range_cluster_gate_low` / `range_cluster_gate_high` | `-0.35` / `0.45` | Cluster-field window where the uplift gate opens / saturates (continent-field units). |
 | `range_cluster_wavelength_meters` | `20000.0` | Scale of the range-cluster field. |
+| `mountain_erosion_weight` | `1.0` | Blend of the analytic erosion filter's mountain profile against the classic mass-and-crest profile above (`0` = classic, `1` = fully eroded mountains; the belts keep the same continent mask and range clustering at every weight). |
+| `mountain_erosion_face_blend_width` | `0.02` | Width of the cubemap face-blend window (fraction of the dominant axis): near face seams the two overlapping faces blend across this band so gully stripes continue around the sphere. |
+| `mountain_erosion_terrain_frequency` | `1.0` | Frequency of the filter's base terrain: massifs sit at `mountain_wavelength_meters / frequency` (one filter unit spans one wavelength of arc at the cubemap face centers). |
+| `mountain_erosion_terrain_amplitude` | `0.25` | Amplitude of the filter's base terrain in its `[0, 1]` height band - the massif relief share of the eroded profile. |
+| `mountain_erosion_terrain_octaves` | `3` | Octaves of the filter's base terrain. |
+| `mountain_erosion_terrain_gain` | `0.10` | Gain of the filter's base terrain octaves. |
+| `mountain_erosion_terrain_lacunarity` | `2.0` | Lacunarity of the filter's base terrain octaves. |
+| `mountain_erosion_height_offset_low` | `-0.35` | Constant height offset compensating the gully stack's ridge-up bias, scaled by the accumulated erosion magnitude (partially compensating keeps the eroded belt's mean height on the input terrain's average). |
+| `mountain_erosion_height_offset_blend` | `0.0` | Blend of the offset toward the negated fade target (`0` = constant offset, `1` = fully altitude-keyed). |
+| `mountain_erosion_scale` | `0.28` | Coarsest gully stripe wavelength in units of `mountain_wavelength_meters` times `mountain_erosion_cell_scale` (default stripes span ~1.8 km on the 60 km showcase planet). |
+| `mountain_erosion_strength` | `0.30` | Erosion amplitude of the gully stack. |
+| `mountain_erosion_gully_weight` | `0.55` | The stripes' share of each octave against the fade target; lower values keep peaks pointy, higher values carve deeper gullies. |
+| `mountain_erosion_detail` | `1.2` | How strictly finer gully octaves are restricted to steeper ground (lower = fine gullies across gentler slopes, higher = only on the steepest ground). |
+| `mountain_erosion_cell_scale` | `0.70` | Cell size of the stripe interpolation grid relative to the stripe wavelength. |
+| `mountain_erosion_normalization` | `0.50` | Partial stripe re-normalization keeping gully magnitudes consistent (`0` = full normalization, `1` = none). |
+| `mountain_erosion_octaves` | `5` | Gully octaves over the stripe scale (each at half the wavelength of the previous). |
+| `mountain_erosion_gain` | `0.80` | Gain of the gully octaves: above `0.5` the fine gullies carry more slope than the coarse ones, which is what makes the erosion texture visible at walking scale. |
+| `mountain_erosion_lacunarity` | `2.0` | Lacunarity of the gully octaves. |
+| `mountain_erosion_rounding_ridge` | `0.10` | Rounding applied to ridge crests (real peaks are never razor-sharp). |
+| `mountain_erosion_rounding_crease` | `0.00` | Rounding applied to gully creases (gully floors collect sediment). |
+| `mountain_erosion_rounding_global` | `0.10` | Global multiplier of both roundings. |
+| `mountain_erosion_rounding_gain` | `2.0` | Per-octave compounding of the global rounding multiplier. |
+| `mountain_erosion_onset_input` | `1.25` | Slope the input terrain needs before gullies appear on it. |
+| `mountain_erosion_onset_octave` | `1.25` | Slope each gully octave needs before it contributes. |
+| `mountain_erosion_onset_ridge_map` | `2.80` | Slope threshold of the ridge map's own fade chain. |
+| `mountain_erosion_onset_ridge_mask` | `1.50` | Slope threshold of the ridge map's mask chain. |
+| `mountain_erosion_assumed_slope` | `0.70` | Fixed slope magnitude the gully directions use, blended over the terrain's own slope so gullies stay aligned through rounded peaks and valley floors. |
+| `mountain_erosion_assumed_slope_blend` | `1.0` | Blend toward the assumed slope (`1` = fully assumed; the filter's own derivatives are approximations). |
+| `mountain_erosion_profile_low` / `mountain_erosion_profile_high` | `0.30` / `0.52` | The filter's height band remapped linearly onto the mountain profile `[0, 1]`, so valley floors sit at the belt base and crests reach the full `mountain_amplitude_meters`. Widen for gentler relief, narrow for wilder. |
 | `regional_amplitude_meters` | `80.0` | Broad plateaus/basins/valley systems between the continent and hill bands - the landform-structure layer at globe scale. |
 | `regional_wavelength_meters` | `6500.0` | Scale of the regional field. |
 | `regional_octaves` | `3` | fBm octaves of the regional field. |
@@ -65,7 +103,20 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `cliff_wavelength_meters` | `1400.0` | Scale of the cliff-mask variety modulation (spacing between mask-band variations). |
 | `cliff_steepness_low` | `0.42` | Cliff-mask gate over the terrain's steepness energy: where the mask opens (terracing/strata/overhangs begin). Lower widens terraced country, higher restricts it to the steepest flanks. |
 | `cliff_steepness_high` | `0.70` | Steepness energy where the mask saturates (full-strength terraces, strata and overhangs). Keep at least ~0.2 above `cliff_steepness_low`. |
+| `strata_gate_low` / `strata_gate_high` | `0.45` / `0.85` | Cliff-mask window where the strata banding gate opens / saturates (keeps banding off open slopes). |
 | `cliff_sharpness` | `2.6` | Exponent concentrating the hill-flank term of the cliff mask. Higher narrows terraced hill country into tighter bands; the mountain-crest term is unaffected. |
+
+## Geologic provinces
+
+A very-low-frequency field classifies every landmass region into layered sedimentary country (warm bedded tones, stronger strata and terraces), shield/volcanic country (cool gray tones, weaker strata) and pale carbonate patches (limestone). The geometry biases and the rock albedo read the same field, so cliff faces look and structure themselves as one geology.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `provinces_enabled` | `true` | Master switch of the province field. |
+| `province_wavelength_meters` | `0` | Feature scale of the province field; `0` derives 1.6x the continent wavelength (provinces span whole landmass regions). |
+| `province_rock_variation` | `0.55` | Strength of the bare-rock palette tint (sedimentary tan/brown, volcanic gray, carbonate pale). |
+| `province_strata_bias` | `0.35` | How much stronger the strata banding runs in sedimentary than in shield/volcanic country. |
+| `province_terrace_bias` | `0.30` | How much stronger terracing runs in sedimentary than in shield/volcanic country. |
 
 ## True-3D terms (what a heightmap cannot do)
 
@@ -78,6 +129,7 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `strata_band_meters` | `34.0` | Strata band spacing. |
 | `strata_warp` | `1.1` | Noise bending of the bands. Values >= 2 fold the sinusoid into nested ripple rings (an artefact, not geology). |
 | `coastal_flatten_meters` | `80.0` | Half-width of the flattening band around sea level: detail fields (hills, terraces, overhangs, strata) are damped there so shorelines slope into the sea instead of zig-zagging across it (a zig-zag reads as a web of sub-sea ponds with beach rims). |
+| `coastal_flatten_full_fraction` / `coastal_flatten_reach_fraction` | `0.45` / `1.6` | Fractions of the flatten band where the taper reaches full damping (below) and full detail strength (above). The steepened curve keeps shoals from speckling. |
 | `coastal_flatten_floor` | `0.10` | Residual detail fraction right at the shoreline. |
 | `caves_enabled` | `false` | Cave worm carving (two extra noise fields per density sample). |
 | `cave_threshold` | `0.16` | Worm field magnitude below which material is carved. |
@@ -90,6 +142,8 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | --- | --- | --- |
 | `shallow_water_meters` | `18.0` | Shoreline band classified as shallow ocean. |
 | `deep_water_meters` | `140.0` | Depth where the ocean counts as deep. |
+| `abyssal_mask_low` / `abyssal_mask_high` | `-0.60` / `-0.02` | Continent-field window the abyssal mask rides (negative = basins): the sea floor sinks where the continent field sits inside this band. |
+| `submarine_fade_low_fraction` / `submarine_fade_high_fraction` | `0.02` / `0.06` | Height fractions of the continent amplitude where the submarine fade closes (below: ocean-floor detail fully suppressed) and opens (above: land detail untouched). |
 | `abyssal_depth_meters` | `3500.0` | Extra depth the sea floor sinks toward as the continent field dips into its basins: the coast keeps a shallow, sunlit continental shelf that slopes into dark abyssal plains, instead of one uniformly shallow flooded plain (the base relief amplitudes alone bottom out around the continent amplitude). The shelf is as wide and smooth as the continent geography itself, and every detail layer stays faded out over the deepened slope. Clamped to 8% of `radius_meters` so the floor stays a surface feature on small bodies. `0` disables. |
 | `water_depth_tint_meters` | `70.0` | Depth over which the water surface tint saturates in the BLUE channel; red and green saturate at fixed fractions of it (0.28x and 0.6x - the physical absorption ordering, red first), so the ramp runs shallow turquoise -> green-teal mid shelf -> navy deep. |
 | `water_enabled` | `true` | Generate water surface patches (marching cubes on the sea sphere). |
@@ -101,8 +155,11 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `water_color_ice` | `[0.78, 0.85, 0.94]` | Linear RGB of the frozen water surface; slightly blue against the warm-white cloud tops so polar caps read as ice, not weather. |
 | `water_wave_amplitude` | `0.16` | Radian-scale tilt applied to the water surface normals by a deterministic two-scale noise field (the configured swell plus a half-wavelength chop at a third of the tilt), giving the sea a sun-glint texture with sparkle at close range. The tilt fades out under the LOD band limit like every other noise term, so coarse chunks keep a smooth sea. `0` gives a perfectly smooth surface. |
 | `water_wave_wavelength_meters` | `8.0` | Feature size of the wave-swell field (the chop rides at half of it). |
-| `water_foam_width_meters` | `2.5` | Depth band under the surface that reads as surf - the breaker rim hugging the waterline. The band's falloff is cubed, so the bright rim stays at the shore even on ultra-gentle shelves (a plain smoothstep would wash whole shallow lagoons white). |
+| `water_wave_chop_fraction` | `0.33` | Amplitude of the half-wavelength chop as a fraction of the swell tilt (the chop breaks the sun glint into sparkle). `0` gives a single-scale swell. |
+| `water_foam_width_meters` | `2.5` | Depth band under the surface that reads as surf - the breaker rim hugging the waterline. The band's falloff exponent (see `water_foam_falloff_exponent`) keeps the bright rim at the shore even on ultra-gentle shelves (a plain smoothstep would wash whole shallow lagoons white). |
+| `water_foam_falloff_exponent` | `3.0` | Falloff exponent of the breaker band across its depth range: 2 keeps a broad wash of surf over the shelf, 4 squeezes it into a tight rim at the waterline. |
 | `water_foam_strength` | `0.60` | 0 = no surf, 1 = a solid white breaker band. The crest modulation keys to the offshore direction (read from the terrain gradient at the waterline), so the band breaks into elongated breaker ranks running parallel to the coast instead of isotropic patches; between ranks a base wash keeps the rim continuous. |
+| `water_shore_sand_brightness` | `1.35` | Brightness lift of the sand seen through the shallow shelf (sunlit flats under a thin sheet read brighter than the raw beach row). |
 | `water_shore_mix_meters` | `3.0` | Depth over which the water surface blends toward the beach-sand tone transmitted by the water's own hue, so very shallow flats read as sandy turquoise (the bottom seen through the sheet) instead of one pale sheet. `0` disables the blend. |
 
 ## Climate and biomes
@@ -119,6 +176,9 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `moisture_warp_amplitude` | `0.22` | Domain-warp of the humidity field: bends biome patches into elongated, organic shapes (unwarped, patches read as round camouflage blobs). |
 | `coastal_moisture_boost` | `0.18` | Onshore humidity: low land near the sea stays green (without it the shoreline belt paints a beige desert fringe around every landmass). |
 | `coastal_moisture_band_meters` | `400.0` | Elevation over which the coastal moisture boost fades out. |
+| `climate_continentality_strength` | `0.30` | How strongly continental interiors dry out away from the ocean: humidity drops as the continent field climbs into its interior cores, so landmass cores trend arid while the coasts keep their green fringe. `0` disables. |
+| `climate_rain_shadow_strength` | `0.35` | Humidity dropped downwind of mountain country: the mountain mass envelope is sampled upwind along the prevailing wind, so the lee side of every range carries a dry belt the way orographic precipitation leaves one. `0` disables. |
+| `climate_wind_zones_enabled` | `true` | Prevailing winds for the rain shadow follow the latitude zones every rotating planet shows (easterly trades in the tropics, westerlies over the temperate band, easterly polar winds); `false` blows uniformly west-to-east. | Elevation over which the coastal moisture boost fades out. |
 | `moisture_latitude_bands` | `true` | Circulation-cell humidity belts (see the four amplitude keys below). |
 | `moisture_belt_equator_amplitude` | `0.20` | Humidity added by the ITCZ wet belt on the equator. |
 | `moisture_belt_subtropical_amplitude` | `-0.26` | Humidity shift of the subtropical dry belts (~26 degrees latitude). |
@@ -156,6 +216,7 @@ A kinematic, point-feet character controller lives in the module (`SurfaceWalker
 | `walk_ground_snap_meters` | `0.9` | Deepest drop the feet follow without becoming a fall; walking off a bigger drop goes airborne. |
 | `walk_max_step_up_meters` | `0.55` | Highest ledge the character walks straight onto; taller walls block and the movement slides along them. |
 | `walk_max_climb_grade` | `3.5` | Rise/run above which a slope is unclimbable (a tangent value; 3.5 ≈ 74 degrees). |
+| `walk_terminal_velocity_mps` | `55.0` | Speed cap of the falling integration (bounds the landing probe a long fall needs). | Rise/run above which a slope is unclimbable (a tangent value; 3.5 ≈ 74 degrees). |
 | `swim_enabled` | `true` | Float at the sea surface over water deeper than the wade band. |
 | `swim_speed_mps` | `2.6` | Movement speed while swimming. |
 | `swim_wade_depth_meters` | `1.2` | Water shallower than this stays walkable (the terrain floor carries the feet). |
@@ -191,6 +252,7 @@ The same coverage field also drives the cloud SHADOWS: chunk meshes darken their
 | `cloud_band_frequency` | `3.4` | Frequency of those bands over latitude (radians of phase per radian of latitude): ~3.4 places a wet equatorial belt, dry subtropics and wet mid-latitudes the way Earth's circulation cells do. |
 | `cloud_color` | `[0.985, 0.975, 0.955]` | Linear RGB of the cloud tops; warm white, so the layer reads against the bluer sea ice at globe scale. |
 | `cloud_shadow_strength` | `0.45` | How strongly the terrain and water albedo darkens under the coverage field (sampled along the sun ray through each point). `0` disables cloud shadows. |
+| `cloud_shadow_softness` | `0.50` | Penumbra softening of the cast shadows: the shadow field widens the coverage edge band by this fraction, so shadows read as soft-edged darkening under their banks instead of a hard copy of the cloud outlines. `0` keeps the shadow exactly as sharp as the banks. |
 | `cloud_shadow_sun_direction` | `[0.50, 0.45, 0.74]` | Unit vector of the sunlight that casts the cloud shadows - pair it with the direction your scene's lighting uses (the demo ships it next to its `[pbr] sun_direction` and warns when the two disagree). Points on the night side of this sun get no shadow. |
 
 ## Stars

@@ -1,5 +1,5 @@
 [file_asset_store]
-allow_absolute_paths       = true
+allow_absolute_paths       = false
 auto_config                = false
 cache_eviction_batch_mb    = 64
 cache_unreferenced_assets  = false

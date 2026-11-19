@@ -46,7 +46,12 @@ grab_maximum_force    = 4000.0
 grab_stiffness        = 60.0
 gravity               = [0.0, -9.81, 0.0]
 ground_extent         = 40.0
-paddle_frequency      = 0.14
+# Simulation-LOD driving for the lod layout: importance falls linearly from
+# 1 inside lod_near_distance of the camera to 0 at lod_far_distance.
+drive_simulation_lod  = true
+lod_near_distance     = 12.0
+lod_far_distance      = 90.0
+paddle_frequency      = 0.15
 paddle_speed          = 0.9
 paddle_span           = 6.0
 pendulum_frequency    = 0.25
@@ -60,7 +65,22 @@ wind_strength         = 3.0
 # self-test drives a reduced-importance emitter through the bands.
 lod_enabled = true
 
+[physics_articulated]
+# Figures default to importance 1.0 (Full, every step); the lod layout and
+# the self-test drive reduced scores through the bands.
+lod_enabled = true
+
+[physics_character]
+# Characters, jiggle chains, foot planters, and lean controllers default to
+# importance 1.0 (Full); the self-test drives a reduced score through the
+# bands.
+lod_enabled = true
+
 [physics_rigid]
+# Solver LOD is on: bodies default to importance 1.0 (the Full band, the
+# configured iteration budgets), and the lod layout drives per-body scores
+# from the camera distance so far piles solve on reduced budgets.
+lod_enabled = true
 # Solver defaults from the module config; the demo keeps the 60 Hz contract
 # (--fixed-hz overrides it for A/B captures and the V key cycles it live).
 joint_baumgarte_factor     = 0.2

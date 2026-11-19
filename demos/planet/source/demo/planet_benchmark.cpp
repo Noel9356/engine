@@ -122,7 +122,7 @@ int runBenchmark(const planet::PlanetGenerationParams &params)
         printStatsLine("climate sample",
             summarize(timeSamples(directions,
                 [&field, &params](const planet::Vec3 &d)
-                { return field.climate().sample(d, params.radiusMeters + 10.0, 0.2).color[0]; })),
+                { return field.sampleClimate(d, params.radiusMeters + 10.0, 0.2).color[0]; })),
             "ms");
         printStatsLine("seaLevelTemperature",
             summarize(timeSamples(directions, [&field](const planet::Vec3 &d) { return field.climate().seaLevelTemperature(d); })),

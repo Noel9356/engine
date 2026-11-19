@@ -87,7 +87,7 @@ CloudField::CloudField(const PlanetGenerationParams &params)
     flowSide_ = normalized(tangent);
 }
 
-double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeters) const
+double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale) const
 {
     if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0)
     {
@@ -161,7 +161,7 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
         crossing -= weatherFade * fbm(seedsWeather_, shellPosition,
             params_.cloudWavelengthMeters * params_.cloudWeatherWavelengthMultiple, kCloudWeatherFbm, lowPassCutoffMeters);
     }
-    const double edgeHalfWidth = std::max(0.01, params_.cloudEdgeSoftness);
+    const double edgeHalfWidth = std::max(0.01, params_.cloudEdgeSoftness * std::max(1.0, softnessScale));
     return smoothstep(crossing - edgeHalfWidth, crossing + edgeHalfWidth, field);
 }
 

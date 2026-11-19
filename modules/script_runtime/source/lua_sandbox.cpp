@@ -223,10 +223,10 @@ void instructionHook(lua_State *state, lua_Debug * /*debug*/) noexcept
         luaL_error(state, "wall-clock limit exceeded");
         return;
     }
-    // The hook fires every `hookGranularity` VM instructions (the clamped count
-    // passed to lua_sethook in setExecutionBudget). Decrement by the same
-    // amount so the budget tracks the configured instruction limit accurately.
-    const std::uint32_t granularity = runtime->hookGranularity != 0 ? runtime->hookGranularity : 1000;
+    // The hook fires every `effectiveHookGranularity` VM instructions - the
+    // clamped interval setExecutionBudget installed - so decrementing by the
+    // same amount tracks the configured instruction limit exactly.
+    const std::uint32_t granularity = runtime->effectiveHookGranularity;
     if (runtime->instructionsRemaining < granularity)
     {
         runtime->instructionsRemaining = 0;
@@ -352,6 +352,7 @@ void setExecutionBudget(RuntimeRecord &runtime) noexcept
     const std::uint64_t granularityCeiling = std::max<std::uint64_t>(1u, runtime.description.instructionLimit / 4u);
     const std::uint32_t granularity        = static_cast<std::uint32_t>(
         std::min<std::uint64_t>(configuredGranularity, std::min<std::uint64_t>(granularityCeiling, std::numeric_limits<std::uint32_t>::max())));
+    runtime.effectiveHookGranularity = granularity;
     lua_sethook(runtime.state,
         instructionHook,
         LUA_MASKCOUNT,

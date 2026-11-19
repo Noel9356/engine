@@ -1,17 +1,17 @@
-// Screen-size LOD evaluation for the fur module.
+// Screen-size LOD evaluation for the physics_fur module.
 //
 // Shell fur's cost is fill-rate: every shell layer blends over every covered
 // pixel, so the layer count is the lever that matters (a 20-layer shell
 // stack measured ~1.1 ms at Full HD on a mid-range GPU - see
-// modules/fur/docs/overview.md for the sources). The evaluator maps a
+// modules/physics_fur/docs/overview.md for the sources). The evaluator maps a
 // surface's angular size (world bounding radius / camera distance, the
 // headless backend's mesh-LOD metric) onto a layer budget across five
 // bands, and fades the OUTERMOST layer's alpha across the lower part of
 // each band so the reduced layer count of the next band dissolves the
 // strand tips smoothly instead of clipping them with a visible pop.
 
-#include <engine/fur/capabilities.hpp>
-#include "fur_internal.hpp"
+#include <engine/physics_fur/capabilities.hpp>
+#include "internal.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,7 +20,7 @@
 
 namespace engine
 {
-namespace fur
+namespace physics_fur
 {
 
 std::size_t lodBandFor(const LodBands &bands, float angularSize)
@@ -90,5 +90,5 @@ FurLodDecision evaluateFurLodDecision(const LodBands &bands, float angularSize)
     return decision;
 }
 
-} // namespace fur
+} // namespace physics_fur
 } // namespace engine

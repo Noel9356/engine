@@ -149,7 +149,7 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
                 return false;
             }
             record->constructed = true;
-            participantStartOrder_.push_back(record);
+            participantStartOrder_.push_back(static_cast<std::size_t>(record - records_.data()));
             continue;
         }
 
@@ -201,7 +201,7 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
             }
         }
         record->constructed = true;
-        participantStartOrder_.push_back(record);
+        participantStartOrder_.push_back(static_cast<std::size_t>(record - records_.data()));
 
         // Only fully constructed participants enter the provider index.
         capabilityProviderIndex_->addProvider(CapabilityProviderEntry{
@@ -360,9 +360,9 @@ void EngineKernel::start()
     }
 
     taskScheduler_.start();
-    for (ParticipantRecord *recordPointer : participantStartOrder_)
+    for (const std::size_t recordIndex : participantStartOrder_)
     {
-        ParticipantRecord &record = *recordPointer;
+        ParticipantRecord &record = records_[recordIndex];
         if (!record.constructed || record.started)
         {
             continue;
@@ -425,7 +425,7 @@ void EngineKernel::stop()
 
     for (auto iterator = participantStartOrder_.rbegin(); iterator != participantStartOrder_.rend(); ++iterator)
     {
-        ParticipantRecord &record = **iterator;
+        ParticipantRecord &record = records_[*iterator];
         if (record.started && record.moduleInstance != nullptr)
         {
             record.moduleInstance->stop();
@@ -464,9 +464,13 @@ std::string EngineKernel::participantGraphReport() const
 
     std::vector<const ParticipantRecord *> orderedRecords;
     const char                            *orderSource = "start order";
-    if (!participantStartOrder_.empty())
+    if (!participantStartOrder_.empty() && !records_.empty())
     {
-        orderedRecords.assign(participantStartOrder_.begin(), participantStartOrder_.end());
+        orderedRecords.reserve(participantStartOrder_.size());
+        for (const std::size_t recordIndex : participantStartOrder_)
+        {
+            orderedRecords.push_back(&records_[recordIndex]);
+        }
     }
     else if (!records_.empty())
     {

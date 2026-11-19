@@ -89,10 +89,11 @@ bool parseSandboxOptions(const std::vector<std::string> &arguments, SandboxOptio
             }
             if (*text != "showcase" && *text != "stacks" && *text != "cloth" && *text != "fields"
                 && *text != "rope" && *text != "water" && *text != "fluid" && *text != "particles"
-                && *text != "foliage" && *text != "character")
+                && *text != "foliage" && *text != "character" && *text != "lod")
             {
                 outError = "unknown layout '" + *text
-                           + "' (showcase, stacks, cloth, fields, rope, water, fluid, particles, foliage, character)";
+                           + "' (showcase, stacks, cloth, fields, rope, water, fluid, particles, foliage, "
+                             "character, lod)";
                 return false;
             }
             options.sceneName = *text;
@@ -215,7 +216,8 @@ std::string sandboxOptionsUsage()
 {
     std::ostringstream usage;
     usage << "\nphysics sandbox options:\n"
-          << "  --layout <name>           showcase (default), stacks, or cloth\n"
+          << "  --layout <name>           showcase (default), stacks, cloth, fields, rope, water,\n"
+          << "                            fluid, particles, foliage, character, or lod\n"
           << "  --camera <mode>           orbit (default), free, or fixed\n"
           << "  --fixed-hz <hz>           physics fixed step rate override [15, 1000]\n"
           << "  --frames <count>          render exactly count frames (0 = until window close)\n"

@@ -92,7 +92,7 @@ A consumer creates a renderer per window surface and drives it frame by frame:
 1. `createRenderer(surface, &error)` - resolves the backend (see below), constructs it, and returns a `RendererHandle`.
 2. Optionally `createMesh`/`createTexture`/`createTextureFromFile` (also possible later).
 3. Per frame: `setViewport`, `setCamera`, then `beginFrame(renderer, frame)`.
-4. Record draws: `drawMesh`, `drawMeshes` (sorted/batched command list), `drawMeshInstances` (explicit instancing), `drawFur`/`drawFurInstances` (alpha-blended shell-fur layer stacks, ABI 13 - see the fur module's overview), `drawOverlay` (UI triangles).
+4. Record draws: `drawMesh`, `drawMeshes` (sorted/batched command list), `drawMeshInstances` (explicit instancing), `drawFur`/`drawFurInstances` (alpha-blended shell-fur layer stacks, ABI 13 - see the physics_fur module's overview), `drawOverlay` (UI triangles).
 5. `endFrame(renderer)` submits/presents (Vulkan) or blits (headless).
 6. `destroyRenderer`, `destroyMesh`, `destroyTexture` as needed.
 

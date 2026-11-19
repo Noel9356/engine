@@ -117,6 +117,8 @@ PlanetOctree::PlanetOctree(const PlanetGenerationParams &params, const DensityFi
         const double probeCutoff = chunkStepMeters(params, depth) * params.lodBandLimitFactor;
         probeMargins_[depth] = (1.0 + bandLimitedReliefGradient(params, probeCutoff)) * coveringRadius
             + bandLimitedBoundedTerms(params, probeCutoff);
+        // The node bounding sphere's radius is a pure function of depth.
+        boundRadii_[depth] = coveringRadius * std::sqrt(3.0);
     }
 
     // Occluder for the horizon test: everything below the inner shell radius
@@ -194,12 +196,6 @@ PlanetOctree::NodeRecord &PlanetOctree::recordFor(ChunkKey key)
     return nodes_.findOrInsert(key);
 }
 
-ChunkState PlanetOctree::stateOf(const ChunkCoord &coord) const
-{
-    const auto *record = findRecord(makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
-    return record != nullptr ? record->state : ChunkState::Wanted;
-}
-
 void PlanetOctree::setState(const ChunkCoord &coord, ChunkState state)
 {
     recordFor(makeChunkKey(coord.depth, coord.x, coord.y, coord.z)).state = state;
@@ -229,7 +225,7 @@ ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLo
     const Vec3   nodeCenter  = Vec3{-params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.x) + 0.5),
         -params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.y) + 0.5),
         -params_.derivedRootHalfMeters + nodeSize * (static_cast<double>(coord.z) + 0.5)};
-    const double boundRadius = halfSize * std::sqrt(3.0);
+    const double boundRadius = boundRadii_[std::min<std::size_t>(coord.depth, boundRadii_.size() - 1)];
 
     // 1. Shell-band pruning: cubes fully inside the core or fully outside
     //    the terrain band cannot contain surface.
@@ -623,34 +619,6 @@ void computeConformMaskImpl(const PlanetGenerationParams &params, const ChunkCoo
 
 } // namespace
 
-void PlanetOctree::computeConformMask(const ChunkCoord &coord, const std::vector<ChunkCoord> &visibleSortedLeaves,
-    ConformMask &outMask) const
-{
-    // Membership over the sorted visible leaves (depth, x, y, z order, the exact ordering selectVisible emits).
-    const auto visibleContains = [&visibleSortedLeaves](const ChunkCoord &probe)
-    {
-        const auto it = std::lower_bound(visibleSortedLeaves.begin(), visibleSortedLeaves.end(), probe,
-            [](const ChunkCoord &a, const ChunkCoord &b)
-            {
-                if (a.depth != b.depth)
-                {
-                    return a.depth < b.depth;
-                }
-                if (a.x != b.x)
-                {
-                    return a.x < b.x;
-                }
-                if (a.y != b.y)
-                {
-                    return a.y < b.y;
-                }
-                return a.z < b.z;
-            });
-        return it != visibleSortedLeaves.end() && *it == probe;
-    };
-    computeConformMaskImpl(params_, coord, outMask, visibleContains);
-}
-
 void PlanetOctree::computeConformMask(const ChunkCoord &coord, const VisibleLeafSet &visibleLeaves,
     ConformMask &outMask) const
 {
@@ -817,10 +785,15 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
     // shapes; dropping them keeps the node map bounded and guarantees the
     // balancing walks only ever see fresh states (neighborMaterialDepth
     // already skips stale records, this just reclaims the memory).
-    // Pruning runs on a cadence: a rebuild pass per update would cost more than the stale records it reclaims.
-    if (updateIndex_ % 16 == 0)
+    // Pruning runs on the configured cadence and keeps records for the
+    // configured lifetime: a longer lifetime holds probe verdicts and cached
+    // geometry for views that revisit ground (walking cameras, orbits), so
+    // the first-visit field probes are paid once per area instead of once
+    // per return.
+    if (updateIndex_ % params_.nodeRecordPruneIntervalUpdates == 0)
     {
-        const std::uint64_t staleThreshold = updateIndex_ > 64 ? updateIndex_ - 64 : 1;
+        const std::uint64_t staleThreshold = updateIndex_ > params_.nodeRecordLifetimeUpdates
+            ? updateIndex_ - params_.nodeRecordLifetimeUpdates : 1;
         nodes_.eraseIf([staleThreshold](ChunkKey, const NodeRecord &record)
             { return record.lastSelectedUpdate < staleThreshold; });
     }

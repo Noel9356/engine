@@ -34,6 +34,16 @@
 //     step again; emission totals stay rate-correct across the bands.
 // 24. Per-ocean gravity: two oceans over worlds with different gravity
 //     produce different buoyancy for identical bodies.
+// 25. Rigid simulation LOD: importance 1.0 keeps every body in the Full
+//     band, reduced-importance bodies count as lod-reduced while their
+//     stacks still rest stably on the ground, and identically scored twin
+//     worlds stay bit-identical (the budgets follow the scores
+//     deterministically).
+// 26. Articulated simulation LOD: a Cached figure skips every drive
+//     refresh (the motors keep their last target) and the skip counter
+//     reports it.
+// 27. Character simulation LOD: a Cached character stops driving and the
+//     module-wide skip counter reports it.
 #include "sandbox_selftest.hpp"
 
 #include <algorithm>
@@ -1758,6 +1768,224 @@ SelfTestResult runSelfTestExtended(const SceneDependencies &dependencies, const 
         const bool testPassed = sceneA && sceneB && riseB > riseA;
         report << (testPassed ? "PASS" : "FAIL") << ": per-ocean gravity - heavy world rises faster (A " << riseA
                << ", B " << riseB << ")\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 25. rigid simulation LOD ---------------------------------------------
+    if (dependencies.rigid != nullptr)
+    {
+        EXTENDED_TEST_MARKER("rigid-lod")
+        const auto buildStackWorld = [&](std::vector<engine::physics_rigid::BodyHandle> &outBodies)
+        {
+            engine::physics_rigid::WorldDescription worldDescription;
+            const engine::physics_rigid::WorldHandle world
+                = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+            engine::physics_rigid::BodyDescription ground;
+            ground.shape.kind          = engine::physics_rigid::ShapeKind::Plane;
+            ground.shape.planeNormal[0] = 0.0;
+            ground.shape.planeNormal[1] = 1.0;
+            ground.shape.planeNormal[2] = 0.0;
+            ground.kind               = engine::physics_rigid::BodyKind::Static;
+            ground.material.friction  = 0.8;
+            dependencies.rigid->createBody(dependencies.rigid->self, world, &ground, nullptr);
+            for (std::uint32_t index = 0; index < 5; ++index)
+            {
+                engine::physics_rigid::BodyDescription box;
+                box.shape.kind              = engine::physics_rigid::ShapeKind::Box;
+                box.shape.boxHalfExtents[0] = 0.5;
+                box.shape.boxHalfExtents[1] = 0.5;
+                box.shape.boxHalfExtents[2] = 0.5;
+                box.transform.position      = engine::physics_rigid::Vec3{0.0, 0.5 + index, 0.0};
+                box.kind                    = engine::physics_rigid::BodyKind::Dynamic;
+                box.density                 = 500.0;
+                outBodies.push_back(dependencies.rigid->createBody(dependencies.rigid->self, world, &box, nullptr));
+            }
+            return world;
+        };
+
+        std::vector<engine::physics_rigid::BodyHandle> stackA;
+        std::vector<engine::physics_rigid::BodyHandle> stackB;
+        const engine::physics_rigid::WorldHandle worldA = buildStackWorld(stackA);
+        const engine::physics_rigid::WorldHandle worldB = buildStackWorld(stackB);
+        bool fullCountsZero = false;
+        bool reducedCounts  = false;
+        bool stacksRest = false;
+        bool twinsMatch = false;
+        if (worldA != engine::physics_rigid::invalidWorld && worldB != engine::physics_rigid::invalidWorld
+            && stackA.size() == 5 && stackB.size() == 5)
+        {
+            // A: every body keeps the default importance 1.0 (the Full
+            // band); 120 steps settle the stack.
+            for (std::uint32_t step = 0; step < 120; ++step)
+            {
+                dependencies.rigid->step(dependencies.rigid->self, worldA, 1.0 / 60.0);
+            }
+            engine::physics_rigid::WorldStatistics statisticsA{};
+            dependencies.rigid->worldStatistics(dependencies.rigid->self, worldA, &statisticsA);
+            fullCountsZero = statisticsA.lodReducedBodyCount == 0u;
+
+            // B: the same stack with the top three boxes scored down to the
+            // Cached band; the budget follows the score while the pile
+            // keeps resting on the ground. The A twin gets the same scores
+            // so the worlds stay comparable.
+            for (std::uint32_t index = 0; index < 5; ++index)
+            {
+                const double importance = index < 2 ? 1.0 : 0.05;
+                dependencies.rigid->setBodyImportance(dependencies.rigid->self, worldB, stackB[index], importance);
+                dependencies.rigid->setBodyImportance(dependencies.rigid->self, worldA, stackA[index], importance);
+            }
+            for (std::uint32_t step = 0; step < 120; ++step)
+            {
+                dependencies.rigid->step(dependencies.rigid->self, worldA, 1.0 / 60.0);
+                dependencies.rigid->step(dependencies.rigid->self, worldB, 1.0 / 60.0);
+            }
+            engine::physics_rigid::WorldStatistics statisticsB{};
+            dependencies.rigid->worldStatistics(dependencies.rigid->self, worldB, &statisticsB);
+            reducedCounts = statisticsB.lodReducedBodyCount >= 1u && statisticsB.lodReducedBodyCount <= 3u;
+
+            engine::physics_rigid::BodyState topA{};
+            engine::physics_rigid::BodyState topB{};
+            dependencies.rigid->copyBodyState(dependencies.rigid->self, worldA, stackA.back(), &topA);
+            dependencies.rigid->copyBodyState(dependencies.rigid->self, worldB, stackB.back(), &topB);
+            // The reduced pile rests (no explosion, still on the stack):
+            // the top box sits within half a meter of its full-rate twin.
+            stacksRest = topB.transform.position.y > 0.5
+                && topB.transform.position.y < topA.transform.position.y + 0.5
+                && std::isfinite(topB.transform.position.y);
+
+            // Determinism with LOD scores: two fresh worlds scored
+            // identically from creation and stepped in lockstep must finish
+            // bit-identical - the budgets follow the scores deterministically.
+            std::vector<engine::physics_rigid::BodyHandle> twinStacks[2];
+            const engine::physics_rigid::WorldHandle twinWorlds[2] = {
+                buildStackWorld(twinStacks[0]),
+                buildStackWorld(twinStacks[1]),
+            };
+            for (std::uint32_t twin = 0; twin < 2; ++twin)
+            {
+                for (std::uint32_t index = 0; index < 5; ++index)
+                {
+                    const double importance = index < 2 ? 1.0 : 0.05;
+                    dependencies.rigid->setBodyImportance(
+                        dependencies.rigid->self, twinWorlds[twin], twinStacks[twin][index], importance);
+                }
+            }
+            for (std::uint32_t step = 0; step < 240; ++step)
+            {
+                dependencies.rigid->step(dependencies.rigid->self, twinWorlds[0], 1.0 / 60.0);
+                dependencies.rigid->step(dependencies.rigid->self, twinWorlds[1], 1.0 / 60.0);
+            }
+            twinsMatch = true;
+            for (std::size_t index = 0; index < twinStacks[0].size(); ++index)
+            {
+                engine::physics_rigid::BodyState stateA{};
+                engine::physics_rigid::BodyState stateB{};
+                dependencies.rigid->copyBodyState(dependencies.rigid->self, twinWorlds[0], twinStacks[0][index], &stateA);
+                dependencies.rigid->copyBodyState(dependencies.rigid->self, twinWorlds[1], twinStacks[1][index], &stateB);
+                if (std::abs(stateA.transform.position.x - stateB.transform.position.x) > kDeterminismTolerance
+                    || std::abs(stateA.transform.position.y - stateB.transform.position.y) > kDeterminismTolerance
+                    || std::abs(stateA.transform.position.z - stateB.transform.position.z) > kDeterminismTolerance)
+                {
+                    twinsMatch = false;
+                    break;
+                }
+            }
+            dependencies.rigid->destroyWorld(dependencies.rigid->self, twinWorlds[0]);
+            dependencies.rigid->destroyWorld(dependencies.rigid->self, twinWorlds[1]);
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, worldA);
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, worldB);
+        const bool testPassed = fullCountsZero && reducedCounts && stacksRest && twinsMatch;
+        report << (testPassed ? "PASS" : "FAIL") << ": rigid LOD - full counts zero " << fullCountsZero
+               << ", reduced counts " << reducedCounts << ", stack rests " << stacksRest << ", twins match "
+               << twinsMatch << "\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 26. articulated simulation LOD ---------------------------------------
+    if (dependencies.articulation != nullptr)
+    {
+        EXTENDED_TEST_MARKER("articulated-lod")
+        engine::physics_rigid::WorldDescription worldDescription;
+        const engine::physics_rigid::WorldHandle world
+            = dependencies.rigid->createWorld(dependencies.rigid->self, &worldDescription, nullptr);
+        bool skipsCounted = false;
+        if (world != engine::physics_rigid::invalidWorld)
+        {
+            // A minimal parent-child hinge chain: a static anchor box with
+            // a driven box hanging below it.
+            engine::physics_articulated::LinkDescription links[2];
+            links[0].parentIndex = -1;
+            links[0].shape.kind  = engine::physics_rigid::ShapeKind::Box;
+            links[0].shape.boxHalfExtents[0] = 0.15;
+            links[0].shape.boxHalfExtents[1] = 0.15;
+            links[0].shape.boxHalfExtents[2] = 0.15;
+            links[0].density    = 0.0;
+            links[0].mass       = 20.0;
+            links[1].parentIndex = 0;
+            links[1].shape.kind  = engine::physics_rigid::ShapeKind::Box;
+            links[1].shape.boxHalfExtents[0] = 0.2;
+            links[1].shape.boxHalfExtents[1] = 0.2;
+            links[1].shape.boxHalfExtents[2] = 0.2;
+            links[1].density                   = 500.0;
+            links[1].relativeTransform.position = engine::physics_rigid::Vec3{0.0, -0.7, 0.0};
+            links[1].jointAnchorLocalChild     = engine::physics_rigid::Vec3{0.0, 0.35, 0.0};
+            links[1].jointAnchorLocalParent    = engine::physics_rigid::Vec3{0.0, -0.35, 0.0};
+            engine::physics_articulated::FigureDescription description;
+            description.links       = links;
+            description.linkCount   = 2;
+            description.rootDynamic = false;
+            const engine::physics_articulated::FigureHandle figure = dependencies.articulation->createFigure(
+                dependencies.articulation->self, world, &description, nullptr);
+            if (figure != engine::physics_articulated::invalidFigure)
+            {
+                // Cached importance: every drive refresh skips and the
+                // counter reports it.
+                dependencies.articulation->setFigureImportance(dependencies.articulation->self, figure, 0.05);
+                for (std::uint32_t step = 0; step < 10; ++step)
+                {
+                    dependencies.articulation->updateDrives(dependencies.articulation->self, figure, 1.0 / 60.0);
+                }
+                engine::physics_articulated::ArticulatedFigureStatistics statistics{};
+                dependencies.articulation->figureStatistics(dependencies.articulation->self, figure, &statistics);
+                skipsCounted = statistics.lodSkippedSteps >= 10u;
+                dependencies.articulation->destroyFigure(dependencies.articulation->self, figure);
+            }
+        }
+        dependencies.rigid->destroyWorld(dependencies.rigid->self, world);
+        const bool testPassed = skipsCounted;
+        report << (testPassed ? "PASS" : "FAIL") << ": articulated LOD - cached drive refreshes skip " << skipsCounted
+               << "\n";
+        pass = pass && testPassed;
+    }
+
+    // ---- 27. character simulation LOD -----------------------------------------
+    if (dependencies.character != nullptr)
+    {
+        EXTENDED_TEST_MARKER("character-lod")
+        SceneHandles handles;
+        buildExtendedTestScene(dependencies, config, "character", handles);
+        bool skipsCounted = false;
+        if (handles.extended.character != engine::physics_character::invalidCharacter)
+        {
+            engine::physics_character::CharacterStatistics before{};
+            dependencies.character->characterStatistics(dependencies.character->self, &before);
+            // Cached importance: the character stops driving and every
+            // update skips.
+            dependencies.character->setCharacterImportance(
+                dependencies.character->self, handles.extended.character, 0.05);
+            for (std::uint32_t step = 0; step < 10; ++step)
+            {
+                dependencies.character->updateCharacter(
+                    dependencies.character->self, handles.extended.character, 1.0 / 60.0);
+            }
+            engine::physics_character::CharacterStatistics after{};
+            dependencies.character->characterStatistics(dependencies.character->self, &after);
+            skipsCounted = after.lodSkippedSteps - before.lodSkippedSteps >= 10u;
+        }
+        destroyScene(dependencies, handles);
+        const bool testPassed = skipsCounted;
+        report << (testPassed ? "PASS" : "FAIL") << ": character LOD - cached updates skip " << skipsCounted << "\n";
         pass = pass && testPassed;
     }
 

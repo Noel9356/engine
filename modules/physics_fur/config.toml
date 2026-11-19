@@ -1,4 +1,4 @@
-[fur]
+[physics_fur]
 # Preset returned by presetParameters for FurPreset::Plush-style default
 # lookups; "plush" | "shaggy" | "velvety".
 default_preset    = "plush"

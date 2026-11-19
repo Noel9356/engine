@@ -66,6 +66,10 @@ struct ExtendedHandles
     static constexpr std::uint32_t kEmitterSlotCount = 9;
     engine::physics_particles::EmitterHandle emitters[kEmitterSlotCount] = {};
 
+    // The "lod" layout's kinematic shaker platforms (driven every fixed
+    // update by the extended timeline so their crates never settle).
+    std::vector<engine::physics_rigid::BodyHandle> shakerPlatforms;
+
     // physics_foliage: the bend field plus a copy of the instance layout for
     // the renderer (base positions, heights, seeds).
     engine::physics_foliage::FieldHandle foliageField = engine::physics_foliage::invalidField;
@@ -83,7 +87,7 @@ struct ExtendedHandles
     double        jiggleOffsets[4][3] = {};
 
     // The fur ball: a rigid sphere drawn through the renderer's shell-fur
-    // path with the fur module's texture; the wind field drives its sway.
+    // path with the physics_fur module's texture; the wind field drives its sway.
     bool                              furBall     = false;
     engine::physics_rigid::BodyHandle furBallBody = engine::physics_rigid::invalidBody;
 };
@@ -136,8 +140,17 @@ struct SceneConfig
     double windStrength      = 3.0;
     double paddleSpan        = 6.0;
     double paddleSpeed       = 0.9;
+    double paddleFrequency   = 0.15;
     double pendulumSwing     = 0.6;
     double pendulumFrequency = 0.25;
+
+    // Simulation-LOD driving (the "lod" layout): every tracked body's
+    // importance falls linearly from 1 inside lodNearDistance of the camera
+    // to 0 at lodFarDistance, so the near platform stacks solve at full
+    // iteration budgets while the distant ones ride the reduced bands.
+    bool   driveSimulationLod = true;
+    double lodNearDistance    = 12.0;
+    double lodFarDistance     = 90.0;
 };
 
 // Reads the demo's tuning section with built-in defaults.

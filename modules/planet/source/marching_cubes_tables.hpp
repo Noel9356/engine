@@ -18,9 +18,15 @@ namespace detail
 {
 
 // Orientation of marching-cubes triangles relative to the density gradient.
-// The Bourke tables produce triangles that face the NEGATIVE gradient (air)
-// for d > 0 = inside with the corner numbering below; the demo's --self-test
-// verifies this constant against the geometry and fails loudly on mismatch.
+// With d > 0 = inside and the corner numbering below, the Bourke tables
+// produce triangles whose right-hand-rule normal points along the POSITIVE
+// gradient (into the rock): terrain triangles are therefore emitted with the
+// winding flipped (kTerrainFlipWinding = true), which makes every terrain
+// triangle face the negative gradient - outward, away from the material,
+// matching the outward vertex normals the mesher derives from the negated
+// gradient and keeping the whole terrain mesh consistently front-facing for
+// back-face culling. The water pass re-orients each triangle radially in
+// code, so the flag does not apply there.
 inline constexpr bool kTerrainFlipWinding = true;
 
 inline constexpr std::uint32_t kEdgeTable[256] = {

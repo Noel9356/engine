@@ -921,6 +921,7 @@ int main(int argc, char **argv)
             {
                 std::cout << "demo_planet: frame " << frameIndex << " | chunks visible " << statistics.chunksVisible
                           << ", ready " << statistics.chunksReady << ", building " << statistics.chunksBuilding
+                          << ", fallback " << statistics.chunksFallback
                           << ", cached " << statistics.chunksReadyTotal << ", triangles " << statistics.triangleCount
                           << ", depth " << statistics.octreeDepthUsed
                           << ", update " << statistics.lastUpdateMilliseconds << " ms\n";

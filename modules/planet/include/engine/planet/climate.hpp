@@ -28,26 +28,47 @@ namespace engine
 namespace planet
 {
 
+// Low-frequency climate fields shared by many neighboring vertices, evaluated
+// on the mesher's macro grid (see buildChunkMesh): every field here varies on
+// landscape scales (thousands of meters to tens of thousands), so the mesher
+// samples it once per grid corner and interpolates per vertex instead of
+// re-evaluating the full noise stacks per vertex. The grid anchors to exact
+// planet-local positions, so the interpolation is a pure function of position:
+// vertices shared between neighbor chunks (and across LOD depths) evaluate
+// bit-identical values. Consumers that sample single points (the capability
+// path) evaluate the same fields exactly for that point - the interpolated
+// values land between the same bounds.
+struct ClimateMacroSample
+{
+    double temperature01   = 0.0; // sea-level temperature (no altitude lapse)
+    double moisture01      = 0.0; // sea-level humidity incl. latitude belts, continentality and rain shadow
+    double cloudShadow     = 0.0; // cloud shadow factor in [0, 1]
+    double provinceChemistry = 0.0; // rock character: 0 = shield/volcanic, 1 = layered sedimentary
+    double provinceCarbonate = 0.0; // carbonate (limestone) patch weight in [0, 1]
+};
+
 class ClimateSampler final
 {
 public:
     explicit ClimateSampler(const PlanetGenerationParams &params);
 
-    // Classifies one surface point. direction must be unit length (the
-    // planet-local radial direction), radiusMeters is the point's distance
-    // from the planet center and slope01 is 0 for ground flush with the
-    // gravity gradient and 1 for vertical cliff faces (1 - dot(normal, down)).
-    // lowPassCutoffMeters optionally band-limits the ALBEDO jitter fields
-    // (like every other noise term of a rendered chunk): below the cutoff the
-    // metre-scale mottle fades out, so coarse LOD chunks stop aliasing
-    // sub-voxel color speckle. The climate fields themselves (temperature,
-    // moisture, biome) of AIR samples are always evaluated in full - they are
-    // smooth at landscape scale and consumers (capability sampling, the
-    // water pass) need their true values. Underwater samples classify and
-    // color by depth alone; their temperature/moisture fields carry the
-    // latitude gradient without the perturbation noise (the sea floor has no
-    // weather).
-    ClimateSample sample(const Vec3 &direction, double radiusMeters, double slope01, double lowPassCutoffMeters = 0.0) const;
+    // Classifies one surface point from a macro sample (see
+    // ClimateMacroSample): the macro fields carry temperature, moisture and
+    // the low-frequency albedo modulators; this call applies the point's own
+    // altitude lapse, slope/beach/snow overrides and the ground-scale albedo
+    // fields. direction must be unit length (the planet-local radial
+    // direction), radiusMeters is the point's distance from the planet center
+    // and slope01 is 0 for ground flush with the gravity gradient and 1 for
+    // vertical cliff faces (1 - dot(normal, down)). lowPassCutoffMeters
+    // optionally band-limits the ALBEDO jitter fields (like every other noise
+    // term of a rendered chunk): below the cutoff the metre-scale mottle fades
+    // out, so coarse LOD chunks stop aliasing sub-voxel color speckle.
+    // Underwater samples classify and color by depth alone; the macro fields
+    // are ignored there (the sea floor has no weather). The macro sample
+    // itself comes from DensityField::macroSampleAt, which owns the fields the
+    // macro layers read (continent, mountain mass, provinces, clouds).
+    ClimateSample sample(const ClimateMacroSample &macro, const Vec3 &direction, double radiusMeters, double slope01,
+        double lowPassCutoffMeters = 0.0) const;
 
     // Sea-level temperature/moisture without terrain effects; exposed for
     // debugging and the preview tooling.

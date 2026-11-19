@@ -38,4 +38,13 @@ void stepExtendedAfterRigid(
 void updateExtendedScriptedTimeline(const SceneDependencies &dependencies, SceneHandles &handles,
     double simulatedSeconds, double fixedDeltaSeconds);
 
+// Simulation-LOD driver for the "lod" layout: writes every tracked body's
+// importance from its distance to the camera (1 inside lodNearDistance,
+// falling linearly to 0 at lodFarDistance), so the solver spends its
+// iteration budgets where the camera actually looks. Call once per fixed
+// update; the modules' default importance of 1.0 keeps every other layout
+// at full fidelity without calling this.
+void driveSimulationLod(const SceneDependencies &dependencies, const SceneHandles &handles,
+    const SceneConfig &config, const double cameraPosition[3]);
+
 } // namespace demo::physics_sandbox

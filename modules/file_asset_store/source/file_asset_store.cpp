@@ -332,7 +332,7 @@ private:
         // existing directory, all requests are rejected rather than silently
         // falling back to unrestricted filesystem access.
         config_.allowAbsolutePaths
-            = context.configurationBooleanInSection("file_asset_store", "allow_absolute_paths").value_or(true);
+            = context.configurationBooleanInSection("file_asset_store", "allow_absolute_paths").value_or(false);
         // A configured root that does not resolve to an existing directory
         // makes canonicalPath reject every request with InvalidPath. That is
         // the deliberate fail-closed choice over falling back to unrestricted
@@ -605,7 +605,6 @@ private:
         output->state          = record->state.load(std::memory_order_acquire);
         output->error          = record->error.load(std::memory_order_acquire);
         output->referenceCount = record->references.load(std::memory_order_acquire);
-        output->canonicalPath  = record->canonicalPath.c_str();
         {
             std::lock_guard lock(record->dataMutex);
             output->byteCount      = record->bytes.size();

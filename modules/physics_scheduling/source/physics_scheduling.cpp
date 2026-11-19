@@ -14,6 +14,7 @@
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
 #include <engine/physics_scheduling/capabilities.hpp>
+#include <engine/util/simulation_lod.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -128,58 +129,40 @@ private:
         return iterator != scheduleIndexByHandle_.end() ? &schedules_[iterator->second] : nullptr;
     }
 
+    // The thresholds carry the same bounds and the same demotion-hysteresis
+    // semantics as the shared engine::util fidelity ladder (the FidelityLevel
+    // values match engine::util::SimulationFidelity band for band), so the
+    // validation and the band resolution delegate to the shared helpers
+    // instead of keeping a second copy of the ladder here.
+    static engine::util::SimulationFidelityThresholds sharedThresholds(const ScheduleDescription &description)
+    {
+        engine::util::SimulationFidelityThresholds thresholds;
+        thresholds.fullThreshold       = description.fullThreshold;
+        thresholds.simplifiedThreshold = description.simplifiedThreshold;
+        thresholds.proceduralThreshold = description.proceduralThreshold;
+        thresholds.animationThreshold  = description.animationThreshold;
+        thresholds.demotionMargin      = description.demotionMargin;
+        return thresholds;
+    }
+
     static bool validateScheduleDescription(const ScheduleDescription &description)
     {
         return description.defaultUpdateInterval > 0u && description.defaultUpdateInterval <= 65536u
-            && std::isfinite(description.fullThreshold) && std::isfinite(description.simplifiedThreshold)
-            && std::isfinite(description.proceduralThreshold) && std::isfinite(description.animationThreshold)
-            && description.fullThreshold > description.simplifiedThreshold
-            && description.simplifiedThreshold > description.proceduralThreshold
-            && description.proceduralThreshold > description.animationThreshold
-            && description.animationThreshold > 0.0 && description.animationThreshold <= 1.0
-            && description.fullThreshold <= 1.0 && std::isfinite(description.demotionMargin)
-            && description.demotionMargin >= 0.0 && description.demotionMargin < 1.0;
+            && engine::util::simulationFidelityThresholdsValid(sharedThresholds(description));
     }
 
     // The entry threshold that granted `level`: scores below the threshold
     // times the demotion margin release the item back down the ladder.
     static double levelEntryThreshold(const ScheduleDescription &description, FidelityLevel level)
     {
-        switch (level)
-        {
-        case FidelityLevel::Full:
-            return description.fullThreshold;
-        case FidelityLevel::Simplified:
-            return description.simplifiedThreshold;
-        case FidelityLevel::Procedural:
-            return description.proceduralThreshold;
-        case FidelityLevel::Animation:
-            return description.animationThreshold;
-        case FidelityLevel::Cached:
-        default:
-            return 0.0;
-        }
+        return engine::util::simulationFidelityEntryThreshold(
+            sharedThresholds(description), static_cast<engine::util::SimulationFidelity>(level));
     }
 
     static FidelityLevel levelForScore(const ScheduleDescription &description, double score)
     {
-        if (score >= description.fullThreshold)
-        {
-            return FidelityLevel::Full;
-        }
-        if (score >= description.simplifiedThreshold)
-        {
-            return FidelityLevel::Simplified;
-        }
-        if (score >= description.proceduralThreshold)
-        {
-            return FidelityLevel::Procedural;
-        }
-        if (score >= description.animationThreshold)
-        {
-            return FidelityLevel::Animation;
-        }
-        return FidelityLevel::Cached;
+        return static_cast<FidelityLevel>(engine::util::simulationFidelityForScore(
+            sharedThresholds(description), score));
     }
 
     // ---- capability implementations ---------------------------------------

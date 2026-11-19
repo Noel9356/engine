@@ -22,8 +22,11 @@ namespace engine::physics_articulated
 {
 
 // Increment when any public capability structure or function-table layout
-// changes; consumers verify it after acquisition.
-inline constexpr std::uint32_t physicsArticulatedCapabilityAbi = 2u;
+// changes; consumers verify it after acquisition. History: 1 - initial
+// surface; 2 - drive measurement surface (copyJointState,
+// copyJointReference); 3 - simulation LOD (setFigureImportance and the
+// ArticulatedFigureStatistics.lodSkippedSteps counter).
+inline constexpr std::uint32_t physicsArticulatedCapabilityAbi = 3u;
 
 using FigureHandle = std::uint32_t;
 
@@ -151,6 +154,10 @@ struct ArticulatedFigureStatistics
     std::uint32_t linkCount        = 0;
     std::uint32_t activeDriveCount = 0;
     std::uint32_t categoryBit      = 0;
+
+    // Simulation LOD: drive refreshes skipped so far (a frozen band, or a
+    // staggered cadence that was not due on a step).
+    std::uint64_t lodSkippedSteps = 0;
 };
 
 // The "physics_articulated" capability. Calls are main-thread only; the
@@ -196,6 +203,14 @@ struct ArticulatedCapability
     // reports Unsupported).
     bool (*copyJointReference)(
         void *self, FigureHandle figure, std::uint32_t linkIndex, FigureJointReference *outReference);
+
+    // Simulation LOD: writes the figure's importance score in [0, 1]; the
+    // module resolves the fidelity band (with demotion hysteresis, the
+    // shared ladder every simulation module uses) and refreshes the drive
+    // targets on a staggered cadence - a skipped refresh keeps the motors
+    // on their last target, and the Cached band freezes the refresh
+    // entirely. Non-finite scores report failure.
+    bool (*setFigureImportance)(void *self, FigureHandle figure, double importance);
 };
 
 } // namespace engine::physics_articulated
