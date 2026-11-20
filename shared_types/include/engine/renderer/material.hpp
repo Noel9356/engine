@@ -75,6 +75,18 @@ struct MeshMaterial
     // (cloth, flags, curtains) light correctly from both sides without a
     // duplicated shell mesh.
     bool doubleSided = false;
+
+    // Winding convention of this mesh's triangles, known by the generator:
+    // +1.0f marks triangles wound so cross(b - a, c - a) points outward in
+    // world space, -1.0f the mirrored convention, 0.0f (the default) leaves
+    // the convention to the renderer (its configured culling plus, on the
+    // CPU backend, its winding vote). A known sign enables exact
+    // per-triangle back-face culling for meshes whose winding the vote
+    // cannot classify (rugged procedural terrain: crease triangles whose
+    // smooth normals lean across edges flip the majority vote). Culling
+    // applies only where the renderer culls at all; a negative sign is
+    // ignored on double-sided draws. Field order is append-only.
+    float frontFaceWinding = 0.0f;
 };
 
 } // namespace engine::renderer

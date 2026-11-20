@@ -18,15 +18,19 @@ namespace
 
 // Fixed shape of the cloud field: three smooth octaves carry the banks, a
 // two-octave detail stream breaks them up (amplitude set by
-// cloudDetailStrength) and a very-low-frequency weather field shifts the
-// coverage threshold regionally, so banks organize into large cloudy and
-// clear systems instead of uniform popcorn. The base banks are sampled in a
-// wind-stretched frame: a deterministic flow direction (derived from the
-// seed) compresses the base field along the flow, elongating the banks into
-// the organized streaks real weather systems follow - unwarped, the banks
-// read as round popcorn blobs. A two-octave swirl bends the bank shapes so
-// their edges stay organic. The profiles stay constants of the model;
-// coverage, scale, edge softness and the weather strength are configured.
+// cloudDetailStrength), an inverted-Worley billow octave packs the banks'
+// rounded cumulus lobes (smooth fBm alone reads as soft cotton; the
+// cellular octave contributes the cauliflower clumping real cumulus shows -
+// the Perlin-Worley pairing volumetric-cloud pipelines use) and a
+// very-low-frequency weather field shifts the coverage threshold
+// regionally, so banks organize into large cloudy and clear systems instead
+// of uniform popcorn. The base banks are sampled in a wind-stretched frame:
+// a deterministic flow direction (derived from the seed) compresses the base
+// field along the flow, elongating the banks into the organized streaks real
+// weather systems follow - unwarped, the banks read as round popcorn blobs.
+// A two-octave swirl bends the bank shapes so their edges stay organic. The
+// profiles stay constants of the model; coverage, scale, edge softness and
+// the weather strength are configured.
 constexpr FbmParams kCloudBaseFbm{3, 2.0, 0.55};
 constexpr FbmParams kCloudDetailFbm{2, 2.0, 0.5};
 constexpr FbmParams kCloudWeatherFbm{2, 2.0, 0.5};
@@ -34,14 +38,21 @@ constexpr FbmParams kCloudSwirlFbm{2, 2.0, 0.5};
 
 // Amplitude of the bank-elongation (1.0 = features stretch to about twice
 // their width along the flow) and of the swirl bend, in units of the cloud
-// wavelength.
+// wavelength. The billow octave's wavelength rides at 0.7x the bank scale -
+// the lobes sit one size class under the banks while keeping the rendered
+// shells' own grids at six-plus samples per lobe wavelength (the contour
+// walk needs that headroom to keep lobe outlines off the grid stairs) - with
+// the amplitude below as its share of the field.
 constexpr double kCloudStretchFactor = 0.62;
 constexpr double kCloudSwirlAmplitude = 0.35;
+constexpr double kCloudBillowStrength = 0.0; // DEBUG isolation
+constexpr double kCloudBillowWavelengthFraction = 0.70;
 
 constexpr std::uint64_t kCloudSeedTag    = 0xC10D1ULL;
 constexpr std::uint64_t kCloudDetailSeedTag  = 0xC10D2ULL;
 constexpr std::uint64_t kCloudWeatherSeedTag = 0xC10D3ULL;
 constexpr std::uint64_t kCloudSwirlSeedTag   = 0xC10D4ULL;
+constexpr std::uint64_t kCloudBillowSeedTag  = 0xC10D5ULL;
 
 // Star field constants: the lattice spans the unit-cube projection of the
 // direction sphere (cellsPerAxis across [-1, 1]), the presence probability
@@ -67,6 +78,7 @@ CloudField::CloudField(const PlanetGenerationParams &params)
         kCloudWeatherFbm.octaves);
     seedsSwirl_   = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudSwirlSeedTag)),
         kCloudSwirlFbm.octaves);
+    seedBillow_  = static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudBillowSeedTag));
 
     // Deterministic wind frame: a unit flow direction derived from the cloud
     // seed. The base field is sampled in a frame whose axis is compressed
@@ -127,8 +139,19 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
             * swirl;
 
     // Base banks plus the breakup octave; both fade under the consumer's
-    // band limit like every other noise term of the module.
+    // band limit like every other noise term of the module. The billow
+    // octave rides at half the bank scale: inverted cellular distance (one
+    // at the lobe centers, zero at the cell walls) packs the rounded
+    // cumulus lobes into the bank bodies.
     double field = fbm(seedsBase_, shellPosition, params_.cloudWavelengthMeters, kCloudBaseFbm, lowPassCutoffMeters);
+    const double billowFade = kCloudBillowStrength
+        * lowPassFade(lowPassCutoffMeters, params_.cloudWavelengthMeters * kCloudBillowWavelengthFraction);
+    if (billowFade > 0.0)
+    {
+        const double billowWavelength = params_.cloudWavelengthMeters * kCloudBillowWavelengthFraction;
+        field += billowFade * (1.0 - 2.0 * noise::worley3(seedBillow_,
+            shellPosition.x / billowWavelength, shellPosition.y / billowWavelength, shellPosition.z / billowWavelength));
+    }
     const double detailFade = params_.cloudDetailStrength * lowPassFade(lowPassCutoffMeters, params_.cloudWavelengthMeters * 0.25);
     if (detailFade > 0.0)
     {

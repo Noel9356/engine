@@ -21,6 +21,20 @@
 namespace demo::planet_demo
 {
 
+// The lighting the backdrop shells bake into their vertex colors (from the
+// pbr capability's environment snapshot, so the baked shells photograph like
+// the lit geometry under the same sun and sky). sunRadianceOverPi is the
+// sun's color x intensity / pi - the Lambertian diffuse reflectance of a
+// white surface under that sun.
+struct BackdropLighting
+{
+    glm::dvec3 sunDirection{0.0, 1.0, 0.0};
+    glm::dvec3 sunRadianceOverPi{0.0, 0.0, 0.0};
+    glm::dvec3 ambientSky{0.0, 0.0, 0.0};
+    glm::dvec3 ambientGround{0.0, 0.0, 0.0};
+    bool sunEnabled = false;
+};
+
 class PlanetChunkRenderer final
 {
 public:
@@ -32,18 +46,43 @@ public:
     PlanetChunkRenderer(const PlanetChunkRenderer &) = delete;
     PlanetChunkRenderer &operator=(const PlanetChunkRenderer &) = delete;
 
+    // Configures the terrain surface-group textures the chunk materials
+    // reference (see the surface-group partition in the planet module's
+    // meshing.hpp): the ground group's detail texture, the rock group's
+    // detail texture and its OpenGL-convention tangent-space normal map,
+    // plus the per-group gate distances (meters) within which a chunk's
+    // draw multiplies the texture in. invalidTexture keeps a group
+    // untextured (the material then samples the renderer's neutral white
+    // stand-in, so the vertex colors stand alone); a zero/negative gate
+    // distance keeps the texture off everywhere.
+    void setTerrainTextures(engine::renderer::TextureHandle groundDetail,
+        engine::renderer::TextureHandle rockDetail, engine::renderer::TextureHandle rockNormal,
+        double groundTextureMaxDistanceMeters, double rockTextureMaxDistanceMeters);
+
+    // Installs the environment lighting the world-anchored cloud shell bakes
+    // into its vertex colors (see BackdropLighting). Called before
+    // ensureCloudLayer; the shell's material draws unlit, so the per-pixel
+    // PBR evaluation over the disk-sized shell is replaced by the vertex
+    // bake (its matte material carries no visible specular to lose).
+    void setBackdropLighting(const BackdropLighting &lighting);
+
     void updateVisibleChunks();
-    // Assembles the frame's draw commands: backdrop shells first (sky dome,
-    // sky cloud deck, space-only atmosphere limb), then the world-anchored
-    // cloud shell, then chunk terrain/water. viewProjection frustum-culls the
-    // chunk draws (the planet's own selection spans the whole visible disk,
-    // including the half behind the camera); eyePlanetLocal drives the
-    // per-chunk aerial perspective (distant terrain fades toward the horizon
-    // haze through the material's base color and emissive terms - the
-    // renderer's shading is albedo * light, so the fade composes exact fog:
-    // baseColor scales the terrain down by (1 - w) and the emissive term
-    // adds hazeColor * w). sunTint is the same tint the sky dome carries
-    // this frame.
+    // Assembles the frame's draw commands. Opaque scene geometry goes first
+    // (chunk terrain surface groups + water, near to far), then the
+    // world-anchored cloud shell and the sky cloud deck (both depth-tested
+    // against the terrain, so each shell's far side rejects early), and the
+    // unlit backdrop shells last (star dome, sun disc, sky dome - every
+    // pixel they cover that terrain already drew depth-fails). The
+    // atmosphere limb shell STAYS ahead of the scene: its disk interior is
+    // meant to be overwritten by the opaque draws. viewProjection
+    // frustum-culls the chunk draws (the planet's own selection spans the
+    // whole visible disk, including the half behind the camera);
+    // eyePlanetLocal drives the per-chunk aerial perspective (distant
+    // terrain fades toward the horizon haze through the material's base
+    // color and emissive terms - the renderer's shading is albedo * light,
+    // so the fade composes exact fog: baseColor scales the terrain down by
+    // (1 - w) and the emissive term adds hazeColor * w). sunTint is the
+    // same tint the sky dome carries this frame.
     void rebuildDrawCommands(const glm::mat4 &viewProjection, const glm::dvec3 &eyePlanetLocal,
         const engine::planet::Vec3 &sunTint, const glm::dvec3 &renderShift);
     void destroy();
@@ -123,17 +162,21 @@ private:
     struct ChunkMeshHandles
     {
         engine::renderer::MeshHandle terrain = engine::renderer::invalidMesh;
+        engine::renderer::MeshHandle rock = engine::renderer::invalidMesh;
         engine::renderer::MeshHandle water = engine::renderer::invalidMesh;
         glm::mat4 terrainTransform{1.0f};
         glm::mat4 waterTransform{1.0f};
         // The same placement in f64 (planet-local + center), set whenever a
         // transform is built: the camera-relative pass composes against it,
-        // so chunk placement never quantizes at planet scale.
+        // so chunk placement never quantizes at planet scale. The rock
+        // group shares the terrain placement (both terrain groups draw with
+        // the terrainTransform).
         glm::dvec3 placementCenter{0.0};
         bool terrainPlacementBuilt = false; // terrainTransform carries the chunk's placement
         bool waterPlacementBuilt = false;   // waterTransform carries the chunk's placement
         std::uint64_t lastSeenUpdate = 0;  // update that last listed this chunk as visible
-        std::uint64_t terrainHash = 0;     // content hash of the uploaded terrain mesh
+        std::uint64_t terrainHash = 0;     // content hash of the uploaded ground-group mesh
+        std::uint64_t rockHash = 0;        // content hash of the uploaded rock-group mesh
         std::uint64_t waterHash = 0;       // content hash of the uploaded water mesh
     };
 
@@ -175,8 +218,23 @@ private:
     // Draw commands retain pointers to materials until endFrame. Deques keep
     // references stable while the command list is being assembled.
     std::deque<engine::renderer::MeshMaterial> terrainMaterials_;
+    std::deque<engine::renderer::MeshMaterial> rockMaterials_;
     std::deque<engine::renderer::MeshMaterial> waterMaterials_;
     std::vector<engine::renderer::RenderDrawCommand> drawCommands_;
+
+    // Environment lighting for the baked cloud shell (see
+    // setBackdropLighting).
+    BackdropLighting backdropLighting_{};
+    bool backdropLightingValid_ = false;
+
+    // Terrain surface-group textures (see setTerrainTextures): the detail
+    // and normal maps the chunk materials multiply the vertex colors with,
+    // and the per-group gate distances within which the multiply applies.
+    engine::renderer::TextureHandle groundDetailTexture_ = engine::renderer::invalidTexture;
+    engine::renderer::TextureHandle rockDetailTexture_ = engine::renderer::invalidTexture;
+    engine::renderer::TextureHandle rockNormalTexture_ = engine::renderer::invalidTexture;
+    double groundTextureMaxDistanceMetersSquared_ = 0.0;
+    double rockTextureMaxDistanceMetersSquared_ = 0.0;
 
     // Sky dome: unit-radius gradient sphere (positions on the unit ball,
     // colors from the atmosphere model's up-gradient) shared by every frame;

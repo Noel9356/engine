@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <glm/ext/vector_float2.hpp>
 #include <glm/ext/vector_float3.hpp>
 #include <glm/geometric.hpp>
 #include <vector>
@@ -71,13 +72,25 @@ struct HeadlessMesh
 };
 
 // CPU-side texture. pixels is the RGBA8 upload copy (read by sampleAlpha,
-// e.g. the fur strand field); pixelsRGB is what the color sampler reads.
+// e.g. the fur strand field); pixelsRGB is what the color sampler reads as
+// mip level 0, and mipChain holds the box-filtered quarters for levels 1..n
+// (see sampleTrilinear).
 struct HeadlessTexture
 {
+    // One box-filtered quarter of the previous level; level 0 lives in
+    // pixelsRGB, so the chain starts at level 1.
+    struct MipLevel
+    {
+        std::uint32_t      width  = 0;
+        std::uint32_t      height = 0;
+        std::vector<float> rgb;
+    };
+
     std::uint32_t                   width  = 0;
     std::uint32_t                   height = 0;
     std::vector<std::uint8_t>       pixels;
     std::vector<float>              pixelsRGB;
+    std::vector<MipLevel>           mipChain;
     TextureFilter  filter  = TextureFilter::Linear;
     TextureAddress address = TextureAddress::Repeat;
 
@@ -138,6 +151,54 @@ struct HeadlessTexture
             p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11);
     }
 
+    // Trilinear sampling for screen-mapped fragments: uvDx / uvDy are the
+    // perspective-correct UV derivatives per screen pixel (the rasterizer
+    // derives them from the same barycentric gradients that interpolate the
+    // UV itself). The larger axis footprint selects the mip level, and the
+    // level blends bilinearly across the floor/ceil pair - the CPU twin of
+    // the GPU sampler's linear-mipmap-linear filtering. Callers without
+    // derivatives (fur strand fields, flat stand-ins) keep the base-level
+    // sample(): their fetches are screen-aligned or constant.
+    [[nodiscard]] glm::vec3 sampleTrilinear(float u, float v, const glm::vec2 &uvDx, const glm::vec2 &uvDy) const
+    {
+        if (width == 0 || height == 0 || pixelsRGB.empty() || filter != TextureFilter::Linear
+            || mipChain.empty() || (width == 1 && height == 1))
+        {
+            return sample(u, v);
+        }
+        // Isotropic footprint: the longer of the two screen-axis footprints,
+        // in level-0 texels. Sub-texel footprints stay on the base level.
+        // The comparisons run on SQUARED footprints: the two common extremes
+        // (full minification onto the top level, magnification onto the base
+        // level) then resolve with two multiplies and a compare, and the
+        // sqrt/log2 pair only runs inside the blend band between them.
+        const float footprintX2 = uvDx.x * uvDx.x * static_cast<float>(width * width)
+            + uvDx.y * uvDx.y * static_cast<float>(height * height);
+        const float footprintY2 = uvDy.x * uvDy.x * static_cast<float>(width * width)
+            + uvDy.y * uvDy.y * static_cast<float>(height * height);
+        const float footprintSquared = std::max(footprintX2, footprintY2);
+        const float maxLevel         = static_cast<float>(mipChain.size());
+        const float topFootprint     = std::exp2(maxLevel); // footprint that selects the top level
+        if (footprintSquared >= topFootprint * topFootprint)
+        {
+            return sampleBilinearAt(static_cast<std::uint32_t>(maxLevel), u, v);
+        }
+        if (footprintSquared <= 1.0f)
+        {
+            return sample(u, v);
+        }
+        const float level = std::min(maxLevel, std::log2(std::sqrt(footprintSquared)));
+        const auto  low   = static_cast<std::uint32_t>(level);
+        const float blend = level - static_cast<float>(low);
+        if (low >= mipChain.size() || blend <= 0.0f)
+        {
+            return sampleBilinearAt(low, u, v);
+        }
+        const glm::vec3 coarse = sampleBilinearAt(low, u, v);
+        const glm::vec3 fine   = sampleBilinearAt(low + 1 <= mipChain.size() ? low + 1 : low, u, v);
+        return fine * (1.0f - blend) + coarse * blend;
+    }
+
     // Alpha-channel sample from the RGBA8 upload copy, same addressing and
     // filtering as sample(). Alpha always samples the base image - matching
     // the fur pipeline, whose strand-field fetch (the fur texture's alpha)
@@ -180,6 +241,66 @@ struct HeadlessTexture
     }
 
 private:
+    // Bilinear fetch from one mip level (0 = the base image, k = mipChain[k-1])
+    // with this sampler's addressing; shares the wrap logic with sample().
+    [[nodiscard]] glm::vec3 sampleBilinearAt(std::uint32_t level, float u, float v) const
+    {
+        std::uint32_t   levelWidth = 0;
+        std::uint32_t   levelHeight = 0;
+        const float    *data = nullptr;
+        if (level == 0u)
+        {
+            levelWidth  = width;
+            levelHeight = height;
+            data        = pixelsRGB.data();
+        }
+        else if (level - 1u < mipChain.size())
+        {
+            const MipLevel &mip = mipChain[level - 1u];
+            levelWidth  = mip.width;
+            levelHeight = mip.height;
+            data        = mip.rgb.data();
+        }
+        if (levelWidth == 0 || levelHeight == 0 || data == nullptr)
+        {
+            return glm::vec3(1.0f);
+        }
+        if (levelWidth == 1u && levelHeight == 1u)
+        {
+            return glm::vec3(data[0], data[1], data[2]);
+        }
+        if (address == TextureAddress::Repeat)
+        {
+            u -= std::floor(u);
+            v -= std::floor(v);
+        }
+        else
+        {
+            u = std::clamp(u, 0.0f, 1.0f);
+            v = std::clamp(v, 0.0f, 1.0f);
+        }
+        // Power-of-two levels keep the mask trick: every level of a pow2 base
+        // is pow2 itself, so each level derives its own mask from its extent.
+        const std::uint32_t maskX = (levelWidth & (levelWidth - 1u)) == 0u ? levelWidth - 1u : 0u;
+        const std::uint32_t maskY = (levelHeight & (levelHeight - 1u)) == 0u ? levelHeight - 1u : 0u;
+        const float texelX = u * static_cast<float>(levelWidth) - 0.5f;
+        const float texelY = v * static_cast<float>(levelHeight) - 0.5f;
+        const auto pixelAt = [data, levelWidth](std::uint32_t x, std::uint32_t y) -> const float *
+        { return data + (static_cast<std::size_t>(y) * levelWidth + x) * 3; };
+        const auto x0i = static_cast<std::int32_t>(std::floor(texelX));
+        const auto y0i = static_cast<std::int32_t>(std::floor(texelY));
+        const float fx = texelX - static_cast<float>(x0i);
+        const float fy = texelY - static_cast<float>(y0i);
+        const std::uint32_t x0 = wrappedCoordinate(x0i, levelWidth, maskX), x1 = wrappedCoordinate(x0i + 1, levelWidth, maskX);
+        const std::uint32_t y0 = wrappedCoordinate(y0i, levelHeight, maskY), y1 = wrappedCoordinate(y0i + 1, levelHeight, maskY);
+        const float *p00 = pixelAt(x0, y0), *p10 = pixelAt(x1, y0), *p01 = pixelAt(x0, y1), *p11 = pixelAt(x1, y1);
+        const float omx = 1.0f - fx, omy = 1.0f - fy;
+        const float w00 = omx * omy, w10 = fx * omy, w01 = omx * fy, w11 = fx * fy;
+        return glm::vec3(p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11,
+            p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11,
+            p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11);
+    }
+
     // Maps one texel coordinate onto the texture under this sampler's
     // addressing: repeat wraps the coordinate into [0, extent), clamp pins
     // it to the edge. Shared by the color and alpha samplers so both walk

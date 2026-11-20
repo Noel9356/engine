@@ -464,6 +464,21 @@ struct PlanetGenerationParams
                                             // strata band spacing (sediment layer stripes);
                                             // strong values read as dirt smears at grazing light
 
+    // ---- surface texturing -----------------------------------------------------
+    // The mesher partitions every chunk's terrain into a GROUND and a ROCK
+    // surface group (see meshing.hpp) and tiles texture coordinates over each
+    // with a cubemap-style projection of the dominant normal axis. These keys
+    // set how many METERS one texture tile spans per group: the generator's
+    // world-space tiling and the consumer's textures meet here (a 3 m tile
+    // with a 1024-texel texture photographs at ~3 mm per texel). Keep every
+    // tile at or above the finest voxel's band limit - a tile much smaller
+    // than a coarse chunk's voxel fades out with the LOD anyway.
+    double terrainTextureTileMetersGround = 3.0;  // meters per texture tile on ground surfaces
+    double terrainTextureTileMetersRock   = 6.0;  // meters per texture tile on rock surfaces
+    // The water sheet tiles the same projection keyed to the radial
+    // direction (stable against the wave-slope normal wiggles).
+    double waterTextureTileMeters = 8.0;          // meters per texture tile on the sea sheet
+
     // Biome colors are BLENDED, not hard-switched: per-vertex hard switches smear
     // into pale stains across triangles (the "blotch" artefact). These widths
     // control how softly each transition interpolates between palette rows.

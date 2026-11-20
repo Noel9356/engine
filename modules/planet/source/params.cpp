@@ -263,6 +263,13 @@ bool PlanetGenerationParams::validate(std::string &error)
     beachWetDarkening    = clampRange(beachWetDarkening, 0.0, 0.95);
     rockSlopeThreshold   = clampRange(rockSlopeThreshold, 0.05, 1.0);
     rockStrataContrast   = clampRange(rockStrataContrast, 0.0, 1.0);
+
+    // ---- surface texturing -------------------------------------------------------
+    // Texture tiles may span from a few meters to a whole chunk face; below
+    // the finest voxel's band limit they would fade out with the LOD anyway.
+    terrainTextureTileMetersGround = clampRange(terrainTextureTileMetersGround, 0.1, 0.25 * radiusMeters);
+    terrainTextureTileMetersRock   = clampRange(terrainTextureTileMetersRock, 0.1, 0.25 * radiusMeters);
+    waterTextureTileMeters         = clampRange(waterTextureTileMeters, 0.1, 0.25 * radiusMeters);
     biomeBlendWidth        = clampRange(biomeBlendWidth, 0.005, 0.2);
     slopeBlendWidth        = clampRange(slopeBlendWidth, 0.01, 0.5);
     elevationBlendFraction = clampRange(elevationBlendFraction, 0.02, 1.0);

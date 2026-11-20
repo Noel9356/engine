@@ -345,6 +345,16 @@ private:
         glm::vec3     tangent;
         glm::vec3     bitangent;
         float         tangentInverseMax;
+        // Perspective-correct UV gradients over the screen triangle (see
+        // HeadlessTexture::sampleTrilinear): uv = P(x, y) / S(x, y) with P an
+        // affine vec2 and S an affine scalar, so the per-pixel derivative is
+        // (gradient - uv * Sgrad) / S. The numerators carry uv * inverseW per
+        // corner - the same 1/w-weighted form the attribute interpolation
+        // itself uses.
+        float         uvNumeratorX[2];
+        float         uvNumeratorY[2];
+        float         uvDenominatorX;
+        float         uvDenominatorY;
         std::uint32_t sourceTriangle;
         std::uint32_t setupIndex;
     };
@@ -467,7 +477,7 @@ private:
     // mesh reads as far as TBAA is concerned - measured 5x regression of the
     // geometry half without this).
     ENGINE_RASTERIZER_INLINE std::size_t prepareFanTriangles(
-        const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triangleIndex, TileBinRecord (&outFans)[2]) const;
+        const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triangleIndex, TileBinRecord (&outFans)[6]) const;
 
     // Shared rasteriser core: scan one fan record's bounding box clamped to
     // the inclusive pixel window; barycentric coverage with edge-function

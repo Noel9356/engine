@@ -577,6 +577,12 @@ int main(int argc, char **argv)
         ? std::clamp(static_cast<float>(planetRadius * (options.viewName == "globe" ? 0.05 : 0.025)), 250.0f, 50000.0f)
         : std::clamp(static_cast<float>(planetRadius * 0.001), 12.0f, 300.0f);
 
+    // Field of view per view family (walk leans wide; globe frames the whole
+    // planet; surface views lean wide for ground context). Hoisted so the
+    // texture gate below and the camera share one source.
+    const float cameraFovYDegrees = walkView ? 70.0f
+        : (macroView ? (options.viewName == "orbit" ? 55.0f : 42.0f) : 65.0f);
+
     const camera::CameraHandle cameraHandle = [&]()
     {
         camera::CameraParameters cameraParameters{};
@@ -592,8 +598,7 @@ int main(int argc, char **argv)
         cameraParameters.up[1]        = static_cast<float>(initialCameraUp.y);
         cameraParameters.up[2]        = static_cast<float>(initialCameraUp.z);
         cameraParameters.hasUp        = true;
-        cameraParameters.fovYDegrees  = walkView ? 70.0f
-            : (macroView ? (options.viewName == "orbit" ? 55.0f : 42.0f) : 65.0f);
+        cameraParameters.fovYDegrees  = cameraFovYDegrees;
         cameraParameters.nearZ        = static_cast<float>(nearZ);
         cameraParameters.farZ         = static_cast<float>(farZ);
         cameraParameters.moveSpeed    = cameraMoveSpeed;
@@ -658,11 +663,66 @@ int main(int argc, char **argv)
     // application loop; this keeps planet streaming and camera control from
     // accumulating in one demo-level coordinator.
     PlanetChunkRenderer chunkRenderer(*planetCapability, planetHandle, renderCapability, rendererHandle, params);
-    // Upload order = mesh handle order: the backdrop layers first (limb
-    // lowest, then dome, sky deck, macro shell), scene chunks after. The
-    // renderer's optional draw sorting is off for this demo (see
-    // config/engine.toml), but submission order stays the layered order
-    // either way.
+    // Terrain surface textures (CC0 scans under assets/textures; see that
+    // directory's README): the ground group's detail map, the rock group's
+    // detail map and its normal map. The renderer multiplies them with the
+    // vertex colors in linear space; a missing file leaves that group
+    // untextured (the vertex colors stand alone) with one warning, so the
+    // demo still runs from a checkout without the asset directory.
+    //
+    // Each group's multiply only applies to chunks within the gate distance:
+    // one texture tile must still span at least kTextureMinTilePixels screen
+    // pixels, because a 1024-texel scan tiled across fewer pixels is
+    // minified past what the mip-less CPU sampler can filter - and beyond
+    // that point the vertex colors photograph identically without the
+    // per-pixel sample. The gate follows from the viewport height and the
+    // view's field of view (the tile's projected pixel span grows linearly
+    // with height and shrinks with distance and zoom).
+    constexpr double kTextureMinTilePixels = 32.0;
+    const double viewportHeightMeters = static_cast<double>(
+        context.configurationIntegerInSection("window", "height").value_or(540));
+    const double tanHalfFovY = std::tan(glm::radians(static_cast<double>(cameraFovYDegrees)) * 0.5);
+    const double groundTextureGateMeters = params.terrainTextureTileMetersGround * viewportHeightMeters
+        / (2.0 * tanHalfFovY * kTextureMinTilePixels);
+    const double rockTextureGateMeters = params.terrainTextureTileMetersRock * viewportHeightMeters
+        / (2.0 * tanHalfFovY * kTextureMinTilePixels);
+    {
+        const std::filesystem::path textureDirectory
+            = engine::executableDirectory() / "assets" / "textures";
+        const auto loadTexture = [&renderCapability, rendererHandle, &textureDirectory](const char *fileName) -> renderer::TextureHandle
+        {
+            const std::filesystem::path path = textureDirectory / fileName;
+            renderer::RenderError error = renderer::RenderError::None;
+            const renderer::TextureHandle handle
+                = renderCapability.createTextureFromFile(renderCapability.self, rendererHandle, path.string().c_str(), &error);
+            if (handle == renderer::invalidTexture)
+            {
+                std::cerr << "demo_planet: terrain texture '" << path.string()
+                          << "' could not be loaded; the surface group it belongs to draws untextured\n";
+            }
+            return handle;
+        };
+        chunkRenderer.setTerrainTextures(loadTexture("ground_grey_diff_1k.jpg"),
+            loadTexture("cliff_side_diff_1k.jpg"), loadTexture("cliff_side_nor_gl_1k.jpg"),
+            groundTextureGateMeters, rockTextureGateMeters);
+    }
+    // The world-anchored cloud shell bakes the pbr environment's lighting
+    // into its vertex colors and draws unlit (see BackdropLighting); the
+    // values below are the same snapshot the renderer shades every lit draw
+    // with.
+    chunkRenderer.setBackdropLighting({glm::dvec3(environment.sun.direction[0], environment.sun.direction[1],
+        environment.sun.direction[2]),
+        glm::dvec3(environment.sun.color[0], environment.sun.color[1], environment.sun.color[2])
+            * static_cast<double>(environment.sun.intensity) / glm::pi<double>(),
+        glm::dvec3(environment.ambient.skyColor[0], environment.ambient.skyColor[1], environment.ambient.skyColor[2])
+            * static_cast<double>(environment.ambient.intensity),
+        glm::dvec3(environment.ambient.groundColor[0], environment.ambient.groundColor[1],
+            environment.ambient.groundColor[2])
+            * static_cast<double>(environment.ambient.intensity),
+        environment.sun.enabled});
+    // Backdrop shells upload once per run; the frame loop only places and
+    // tints them. Draw order lives in rebuildDrawCommands (opaque scene
+    // first, clouds depth-tested against it, backdrop shells last).
     chunkRenderer.ensureAtmosphereShell();
     chunkRenderer.ensureSkyDome();
     chunkRenderer.ensureSkyCloudLayer(eye - planetCenter,

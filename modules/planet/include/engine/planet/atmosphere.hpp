@@ -132,6 +132,7 @@ private:
     FbmStreamSeeds seedsDetail_{};
     FbmStreamSeeds seedsWeather_{};
     FbmStreamSeeds seedsSwirl_{};
+    std::int64_t seedBillow_ = 0;
     Vec3 flowAxis_{};
     Vec3 flowSide_{};
     Vec3 spinAxis_{};

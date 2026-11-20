@@ -125,8 +125,10 @@ PlanetOctree::PlanetOctree(const PlanetGenerationParams &params, const DensityFi
 
     // Occluder for the horizon test: everything below the inner shell radius
     // is guaranteed solid rock, so a sight line passing through that ball is
-    // guaranteed blocked by real terrain.
+    // guaranteed blocked by real terrain. The sea sphere (see horizonHidden)
+    // adds the waterline occluder for eyes above the water.
     innerOccluderRadius2_ = params.derivedMinShellRadius * params.derivedMinShellRadius;
+    seaOccluderRadius2_ = params.derivedSeaRadiusMeters * params.derivedSeaRadiusMeters;
 }
 
 bool PlanetOctree::cubeIntersectsShell(double minCubeRadius, double maxCubeRadius) const
@@ -134,32 +136,45 @@ bool PlanetOctree::cubeIntersectsShell(double minCubeRadius, double maxCubeRadiu
     return minCubeRadius <= params_.derivedMaxShellRadius && maxCubeRadius >= params_.derivedMinShellRadius;
 }
 
-// Horizon test against the guaranteed-solid inner sphere (radius
-// derivedMinShellRadius): a point P is occluded when the segment eye -> P
-// intersects that ball before reaching P - the sight line then passes through
-// rock that provably exists. The occluded set is a solid circular cone with
-// apex at the eye, which is convex, so a node's cube lies fully inside it
-// exactly when all 8 cube corners do.
+// Horizon tests against occluder spheres (radius r, centered on the planet
+// center): a point P is occluded when the segment eye -> P intersects the
+// ball before reaching P. The occluded set is a solid circular cone with apex
+// at the eye, which is convex, so a node's cube lies fully inside it exactly
+// when all 8 cube corners do.
 //
-// (The previous test used the quadric H(P) = dot(P, P - eye), whose zero set
+// Two occluders, both sound:
+//   * the guaranteed-solid inner ball (radius derivedMinShellRadius): a
+//     sight line through it passes through rock that provably exists;
+//   * the SEA SPHERE (radius derivedSeaRadius) when the eye is above the
+//     water: every sight line that crosses the sea sphere is blocked by what
+//     the renderer draws there - the water sheet where the sea exists, the
+//     land that pokes through it elsewhere - so the whole underwater half of
+//     the shell (abyssal floors and submerged slopes, invisible through the
+//     opaque sea from above) culls at the waterline instead of at the deep
+//     floor, where the old single-occluder horizon reached 3-4x farther.
+//     Eyes at or below the sea surface (wading, swimming, underwater
+//     cameras) disable the sea-sphere test: sight lines between the surface
+//     and the floor do not cross it, and the deep ball stays the only
+//     occluder.
+//
+// (An earlier test used the quadric H(P) = dot(P, P - eye), whose zero set
 // is the diameter ball of the eye vector - an occluder much larger than the
 // planet itself. Around the limb it culled chunks whose terrain was still
 // visible and shaved the horizon into straight chords.)
 //
-// An eye INSIDE the occluder ball (buried cameras, probes below the inner
-// shell) must disable the test: every sight line then intersects the ball
+// An eye INSIDE an occluder ball (buried cameras, probes below the inner
+// shell) must disable that ball's test: every sight line then intersects it
 // trivially and the whole planet would cull away.
-bool PlanetOctree::horizonHidden(const Vec3 &nodeCenter, double nodeSize, const Vec3 &eyeLocal) const
+namespace
 {
-    if (innerOccluderRadius2_ <= 0.0)
-    {
-        return false;
-    }
-    const double a = dot(eyeLocal, eyeLocal);
-    if (a <= innerOccluderRadius2_)
-    {
-        return false; // the eye is inside the guaranteed-solid ball
-    }
+
+// Corner-sight-line occlusion against one centered ball (see the
+// horizonHidden comment): true when every corner's segment to the eye
+// intersects the ball. eyeRadius2 = squared eye distance from the planet
+// center; occluderRadius2 the ball's.
+bool cornersOccludedByBall(const Vec3 &nodeCenter, double nodeSize, const Vec3 &eyeLocal, double eyeRadius2,
+    double occluderRadius2)
+{
     for (std::uint32_t corner = 0; corner < 8; ++corner)
     {
         const Vec3 point{nodeCenter.x + kCornerDelta[corner][0] * nodeSize,
@@ -174,13 +189,35 @@ bool PlanetOctree::horizonHidden(const Vec3 &nodeCenter, double nodeSize, const 
         const double b = 2.0 * dot(eyeLocal, direction);
         double t = -b / (2.0 * c);
         t = std::clamp(t, 0.0, 1.0);
-        const double minDistance2 = a + b * t + c * t * t;
-        if (minDistance2 > innerOccluderRadius2_)
+        const double minDistance2 = eyeRadius2 + b * t + c * t * t;
+        if (minDistance2 > occluderRadius2)
         {
             return false; // this corner has an unobstructed sight line
         }
     }
     return true;
+}
+
+} // namespace
+
+bool PlanetOctree::horizonHidden(const Vec3 &nodeCenter, double nodeSize, const Vec3 &eyeLocal) const
+{
+    const double a = dot(eyeLocal, eyeLocal);
+    if (innerOccluderRadius2_ > 0.0 && a > innerOccluderRadius2_
+        && cornersOccludedByBall(nodeCenter, nodeSize, eyeLocal, a, innerOccluderRadius2_))
+    {
+        return true;
+    }
+    // The sea sphere occludes only for an eye above the water (see the
+    // function comment); waterEnabled off means there is no sea surface to
+    // hide behind.
+    if (params_.waterEnabled && seaOccluderRadius2_ > 0.0
+        && a > seaOccluderRadius2_ + 2.0 * seaOccluderEyeMarginMeters * std::sqrt(seaOccluderRadius2_)
+        && cornersOccludedByBall(nodeCenter, nodeSize, eyeLocal, a, seaOccluderRadius2_))
+    {
+        return true;
+    }
+    return false;
 }
 
 PlanetOctree::NodeRecord *PlanetOctree::findRecord(ChunkKey key)

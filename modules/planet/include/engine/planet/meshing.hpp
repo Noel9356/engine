@@ -132,19 +132,42 @@ inline void setConformBit(ConformMask &mask, std::uint32_t face, int offsetU, in
     mask.face[face][static_cast<std::uint32_t>(offsetU + 1) + static_cast<std::uint32_t>(offsetV + 1) * 3u] = value ? 1u : 0u;
 }
 
-// Built geometry for one chunk: terrain surface plus (optionally) a water
-// surface patch. Vertices are chunk-local offsets from the chunk center
-// (computed in double against the shared lattice, then cast to float); the
-// chunk's PlanetChunkView.centerMeters carries the planet-local placement
-// origin consumers translate by.
+// Terrain surface groups. One chunk's terrain mesh is partitioned by the
+// surface material each cell carries: GROUND cells (soil, vegetation, snow
+// and other slope-hugging surfaces) and ROCK cells (faces whose slope
+// crosses the rock threshold - cliff walls, boulder flanks). Consumers pick
+// one texture set per group (a ground detail and a cliff rock); the split
+// follows the same slope gate the climate sampler uses for the rock albedo,
+// so the texture boundary lands where the color already turns rocky.
+inline constexpr std::uint32_t terrainSurfaceGroupCount = 2;
+inline constexpr std::uint32_t terrainSurfaceGroupGround = 0;
+inline constexpr std::uint32_t terrainSurfaceGroupRock   = 1;
+
+// Winding convention of every terrain and water triangle the mesher emits,
+// expressed in the renderer's MeshMaterial::frontFaceWinding terms: +1.0f
+// marks triangles whose cross(b - a, c - a) points outward, away from the
+// material (the mesher's fixed winding faces the negated density gradient,
+// and the water pass re-orients each triangle radially). Consumers that
+// declare this sign on their chunk materials enable exact per-triangle
+// back-face culling on renderers that support it.
+inline constexpr float terrainFrontFaceWinding = 1.0f;
+
+// Built geometry for one chunk: terrain surface (partitioned into the
+// surface groups above) plus (optionally) a water surface patch. Vertices
+// are chunk-local offsets from the chunk center (computed in double against
+// the shared lattice, then cast to float); the chunk's
+// PlanetChunkView.centerMeters carries the planet-local placement origin
+// consumers translate by. A vertex never spans groups - the surface groups
+// duplicate the boundary vertices their triangles need, so every group's
+// buffers stand alone.
 struct ChunkMesh
 {
-    std::vector<PlanetVertex>   terrainVertices;
-    std::vector<std::uint32_t>  terrainIndices;
+    std::vector<PlanetVertex>   terrainVertices[terrainSurfaceGroupCount];
+    std::vector<std::uint32_t>  terrainIndices[terrainSurfaceGroupCount];
     std::vector<PlanetVertex>   waterVertices;
     std::vector<std::uint32_t>  waterIndices;
     std::uint64_t               hash = 0;        // FNV-1a over all buffers (self-tests)
-    std::uint64_t               terrainHash = 0; // FNV-1a over the terrain buffers only
+    std::uint64_t               terrainHash = 0; // FNV-1a over every terrain group in group order
     std::uint64_t               waterHash = 0;   // FNV-1a over the water buffers only
     std::uint64_t               triangleCount = 0;
 };

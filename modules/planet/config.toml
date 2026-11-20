@@ -496,6 +496,15 @@ rock_slope_threshold       = 0.46
 # stripes); 0 disables.
 rock_strata_contrast       = 0.75
 
+# surface texturing: the mesher partitions terrain into ground and rock
+# surface groups and tiles texture coordinates over each with a cubemap-style
+# projection of the dominant normal axis. These keys set how many meters one
+# texture tile spans per group (see docs/configuration.md): the consumer's
+# textures meet the generator's tiling here.
+terrain_texture_tile_meters_ground = 3.0
+terrain_texture_tile_meters_rock   = 6.0
+water_texture_tile_meters          = 8.0
+
 # biome color BLENDING (see docs/configuration.md): biome colors interpolate
 # between palette rows over these widths instead of hard-switching per vertex
 # (hard switches smear into pale stains across triangles).

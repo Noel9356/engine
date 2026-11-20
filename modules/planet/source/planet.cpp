@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <ratio>
 #include <thread>
@@ -26,6 +27,19 @@ namespace planet
 
 namespace
 {
+
+// Streaming-coverage stand-in bound: an ancestor may stand in for a hole
+// only when its own chunk width stays within this factor of the hole's
+// distance to the terrain shell. The factor bounds the stand-in's on-screen
+// extent (about 2 radians wide at worst) so a far hole cannot pull a
+// planet-scale ancestor over the screen; coarser ancestors are wider, so
+// the first ancestor to fail the bound closes the hole's sweep.
+inline constexpr double kCoverageStandInWidthFactor = 2.0;
+
+// Sweep result marker: the nearest finished ancestor exists but fails the
+// stand-in width bound, so the hole has no stand-in this pass (coarser
+// ancestors are wider and fail too). Never a real chunk key.
+inline constexpr ChunkKey kNoCoverageStandIn = std::numeric_limits<ChunkKey>::max();
 
 // The ancestor of `coord` at the given (smaller) depth: the chain to the
 // root drops one lattice coordinate bit per level, so the ancestor index is
@@ -123,21 +137,15 @@ void Planet::update(const Vec3 &eyeLocal)
     if (!hasSelectionEye_ || lengthSquared(eyeLocal - selectionEye_) > selectionThreshold * selectionThreshold)
     {
         octree_.selectVisible(eyeLocal, lastVisible_);
-        selectionEye_    = eyeLocal;
-        hasSelectionEye_ = true;
-        selectionChanged = true;
-
-        // 2b. Conforming masks. A chunk's mask is a pure function of the sorted visible list and its coordinate (each
-        // face segment conforms when the depth-(depth-1) cell beyond it is itself a rendered leaf - see octree.hpp), so
-        // the masks only change when the visible set changes. Chunks whose stored mesh was built under a different mask
-        // are rebuilt; the stale mesh keeps rendering until the conforming rebuild lands.
         visibleLeafSet_.assign(lastVisible_);
         visibleMasks_.resize(lastVisible_.size());
         for (std::size_t index = 0; index < lastVisible_.size(); ++index)
         {
             octree_.computeConformMask(lastVisible_[index], visibleLeafSet_, visibleMasks_[index]);
         }
-
+        selectionChanged = true;
+        selectionEye_    = eyeLocal;
+        hasSelectionEye_ = true;
     }
 
     const std::vector<ChunkCoord> &visible = lastVisible_;
@@ -193,11 +201,13 @@ void Planet::update(const Vec3 &eyeLocal)
         fallbackDraws_.clear();
         fallbackSeen_.clear();
         scaffoldNeeded_.clear();
+        parentCoverage_.clear();
 
         std::uint32_t readyVisible = 0;
         std::uint64_t triangles    = 0;
         std::uint64_t vertexCount  = 0;
         std::uint32_t depthUsed    = 0;
+        coverageDeficitCount_ = 0;
         // Visible chunks without a mesh of their own (the holes the coverage
         // planning below fills). Collected in the scan so the stamping and
         // planning runs are skipped entirely on passes where every visible
@@ -215,7 +225,11 @@ void Planet::update(const Vec3 &eyeLocal)
                 ++readyVisible;
                 readyIt->second.lastSelectedUpdate = updateCount_;
                 triangles += readyIt->second.mesh.triangleCount;
-                vertexCount += readyIt->second.mesh.terrainVertices.size() + readyIt->second.mesh.waterVertices.size();
+                for (std::uint32_t group = 0; group < terrainSurfaceGroupCount; ++group)
+                {
+                    vertexCount += readyIt->second.mesh.terrainVertices[group].size();
+                }
+                vertexCount += readyIt->second.mesh.waterVertices.size();
                 if (readyIt->second.conformMask == visibleMasks_[index])
                 {
                     continue;
@@ -299,24 +313,39 @@ void Planet::update(const Vec3 &eyeLocal)
                 }
                 return a.visibleIndex < b.visibleIndex;
             });
+            // Requests within this update's budget, apparent-size first (see the
+            // note above the pass). Fine chunks and scaffold ancestors share the
+            // in-flight capacity; each kind also carries its own per-update
+            // request budget so neither can crowd the other out entirely.
+            //
+            // When some holes lack any stand-in (no finished ancestor fits
+            // their distance yet - the region's coverage umbrella is
+            // incomplete), the scaffold builds go FIRST: each umbrella chunk
+            // serves every hole in its region at once and turns whole rings
+            // of holes into covered ground, while a fine chunk serves the
+            // one hole it stands for. The apparent-size sort still applies
+            // within each kind. Once every hole finds a stand-in the order
+            // reverts to pure apparent size.
+            const bool scaffoldFirst = coverageDeficitCount_ > 0;
             std::uint32_t fineRequests     = 0;
             std::uint32_t scaffoldRequests = 0;
-            for (const BuildCandidate &candidate : candidates)
+            const auto tryRequest = [this, &visible, &inflightBuilds, &fineRequests, &scaffoldRequests](
+                const BuildCandidate &candidate) -> bool
             {
                 if (fineRequests >= params_.maxNewBuildsPerUpdate
                     && scaffoldRequests >= params_.lodScaffoldBuildsPerUpdate)
                 {
-                    break; // both request budgets spent
+                    return false; // both request budgets spent
                 }
                 if (inflightBuilds + fineRequests + scaffoldRequests >= params_.maxConcurrentBuilds)
                 {
-                    break; // no in-flight slot left this update
+                    return false; // no in-flight slot left this update
                 }
                 if (candidate.isScaffold)
                 {
                     if (scaffoldRequests >= params_.lodScaffoldBuildsPerUpdate)
                     {
-                        continue;
+                        return true; // scaffold budget spent; keep scanning
                     }
                     // The scaffold mesh is built raw (no conforming mask):
                     // it draws as stand-in coverage among whatever tree the
@@ -329,11 +358,33 @@ void Planet::update(const Vec3 &eyeLocal)
                 {
                     if (fineRequests >= params_.maxNewBuildsPerUpdate)
                     {
-                        continue;
+                        return true; // fine budget spent; keep scanning
                     }
                     const std::uint32_t visibleIndex = candidate.visibleIndex;
                     requestBuild(visible[visibleIndex], visibleMasks_[visibleIndex]);
                     ++fineRequests;
+                }
+                return true;
+            };
+            if (scaffoldFirst)
+            {
+                for (const BuildCandidate &candidate : candidates)
+                {
+                    if (!candidate.isScaffold)
+                    {
+                        continue;
+                    }
+                    if (!tryRequest(candidate))
+                    {
+                        break;
+                    }
+                }
+            }
+            for (const BuildCandidate &candidate : candidates)
+            {
+                if (!tryRequest(candidate))
+                {
+                    break;
                 }
             }
             inflightBuilds += fineRequests + scaffoldRequests;
@@ -455,44 +506,76 @@ void Planet::buildOneInline()
     }
 }
 
-void Planet::planChunkCoverage(const ChunkCoord &coord, const Vec3 &eyeLocal)
+Planet::AncestorCoverage Planet::sweepAncestorCoverage(const ChunkCoord &hole, const Vec3 &eyeLocal)
 {
     // One sweep up the ancestor chain (parent first) collects both pieces of
-    // streaming coverage for this chunk. Every candidate is checked against
-    // the selection's own screen-space rule with a 2x tolerance - the hole
-    // itself sits at that rule's edge, so its direct parent always qualifies
-    // and coarser ancestors qualify exactly as far as their detail allows
-    // (voxel step within distance * lodAngularVoxelRadians * 2):
+    // streaming coverage for the hole. Every hole under the same parent
+    // shares the chain above that parent, so the caller runs this once per
+    // parent per pass (see parentCoverage_). The two searches gate
+    // themselves differently:
     //
-    // * fallback draw - the nearest finished ancestor that passes. A
-    //   stand-in never paints more of the screen than its detail justifies,
-    //   so the fill cost stays proportional to the holes actually open, and
-    //   the stand-in is replaced by the fine mesh it shadows once that
-    //   lands. Finished siblings inside the stand-in's region are re-drawn
-    //   at the coarser LOD until then; the overlap is confined to that
-    //   region and shrinks as the holes under it fill.
-    // * scaffold - the coarsest UNSTAMPED ancestor that passes (pure: no
-    //   finished visible chunk lies under it, see readyLeafAncestorStamps_).
-    //   Its build covers every hole in its region without overlapping
-    //   finished geometry, and because the target rides the same
-    //   screen-space rule, coverage arrives coarse at range and fine near
-    //   the eye - chunks closer to the viewer stream smaller, like the
-    //   selection itself. Stamps split the chain: everything above the first
-    //   stamped node shares finished material and cannot be a pure target.
+    // * fallback draw - the nearest finished ancestor whose chunk width fits
+    //   the hole's distance (see kCoverageStandInWidthFactor). The voxel
+    //   screen-space rule with its 2x tolerance governs what the streamer
+    //   BUILDS (scaffolds below), not what it DRAWS: a stand-in coarser than
+    //   the voxel rule would justify still beats a hole to the sky/haze, and
+    //   the rule's edge sits exactly where the fine chunks the eye actually
+    //   waits for live - stopping the draw search there leaves the far half
+    //   of every ground view uncovered (near-eye fine chunks win the build
+    //   budget, so the ancestors a far hole's chain would need do not exist
+    //   yet). A stand-in never paints more than the hole it covers (the fine
+    //   chunks that share its region win the depth test), and it is replaced
+    //   by the fine mesh it shadows once that lands. Finished siblings inside
+    //   the stand-in's region are re-drawn at the coarser LOD until then; the
+    //   overlap is confined to that region and shrinks as the holes under it
+    //   fill.
+    // * scaffold - the coarsest UNSTAMPED ancestor that still passes the
+    //   screen-space rule and the width bound (pure: no finished visible
+    //   chunk lies under it, see readyLeafAncestorStamps_). Its build covers
+    //   every hole in its region without overlapping finished geometry, and
+    //   because the target rides the same screen-space rule, coverage arrives
+    //   coarse at range and fine near the eye - chunks closer to the viewer
+    //   stream smaller, like the selection itself. Stamps split the chain:
+    //   everything above the first stamped node shares finished material and
+    //   cannot be a pure target.
     //
     // The sweep memoizes the fallback answer for every chain node it passes
-    // while the search is still open: a node is only reached after all finer
-    // chain nodes found nothing finished, so they share the same nearest
-    // finished ancestor.
+    // while the fallback search is still open: a node is only reached after
+    // all finer chain nodes found nothing finished, so they share the same
+    // nearest finished ancestor.
     coverageChainScratch_.clear();
-    ChunkKey   nearestReady = 0;
-    ChunkCoord pure{};
-    bool       pureFound  = false;
-    bool       pureClosed = false; // the stamped prefix began: no purer target above
-    std::size_t sweepMemoEnd = 0;  // chain nodes whose fallback answer is settled
-    for (std::uint32_t depth = coord.depth; depth-- > 0u;)
+    AncestorCoverage coverage{};
+    bool             pureClosed   = false; // the stamped prefix began: no purer target above
+    bool             scaffoldOpen = true;  // the rule-gated scaffold search is still running
+    std::size_t      sweepMemoEnd = 0;     // chain nodes whose fallback answer is settled
+    // Reference distance for the width bound: the hole's own piece of the
+    // terrain shell. The honest distance from the eye to that patch of
+    // ground has a tangential AND a radial component - a hole the eye hovers
+    // over is a whole eye-altitude away even though its tangential separation
+    // is ~0 (a step-sized floor would read it as "closer than its own voxel"
+    // and starve near-eye holes of stand-ins entirely). Every ancestor of
+    // the hole stands for the same patch of ground, so one hole-level bound
+    // keeps the sweep's stop condition monotone: coarser ancestors are wider
+    // and fail a bound the hole's own distance justifies.
+    const double eyeRadius = std::max(length(eyeLocal), 1.0e-9);
+    double holeWidthBound = 0.0;
     {
-        const ChunkCoord ancestor    = ancestorOf(coord, depth);
+        const Vec3   holeCenter        = chunkCenterMeters(params_, hole);
+        const double dx = holeCenter.x - eyeLocal.x;
+        const double dy = holeCenter.y - eyeLocal.y;
+        const double dz = holeCenter.z - eyeLocal.z;
+        const double centerDistance    = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double radialComponent   = (eyeLocal.x * dx + eyeLocal.y * dy + eyeLocal.z * dz) / eyeRadius;
+        const double tangentialSquared = std::max(0.0,
+            centerDistance * centerDistance - radialComponent * radialComponent);
+        const double radialSeparation  = std::abs(length(holeCenter) - eyeRadius);
+        const double holeShellDistance = std::max(chunkStepMeters(params_, hole.depth),
+            std::max(std::sqrt(tangentialSquared), radialSeparation));
+        holeWidthBound = holeShellDistance * kCoverageStandInWidthFactor;
+    }
+    for (std::uint32_t depth = hole.depth; depth-- > 0u;)
+    {
+        const ChunkCoord ancestor    = ancestorOf(hole, depth);
         const ChunkKey   ancestorKey = makeChunkKey(ancestor.depth, ancestor.x, ancestor.y, ancestor.z);
         const Vec3       center      = chunkCenterMeters(params_, ancestor);
         const double     dx = center.x - eyeLocal.x;
@@ -506,64 +589,124 @@ void Planet::planChunkCoverage(const ChunkCoord &coord, const Vec3 &eyeLocal)
         // centers sit buried deep inside the planet as "near", while the
         // node-cube bounding sphere over-measures chunks whose shell patch
         // is simply beside the eye. A node the eye hovers over measures ~0
-        // tangentially and can never stand in at coarse detail.
-        const double eyeRadius    = std::max(length(eyeLocal), 1.0e-9);
+        // tangentially and can never stand in at coarse detail, so the
+        // radial separation (the eye's altitude over the node's own shell
+        // radius) floors the distance the way it does for the hole bound.
         const double centerDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
         const double radialComponent = (eyeLocal.x * dx + eyeLocal.y * dy + eyeLocal.z * dz) / eyeRadius;
         const double radialSquared   = radialComponent * radialComponent;
         const double shellDistance   = std::max(chunkStepMeters(params_, depth),
-            std::sqrt(std::max(0.0, centerDistance * centerDistance - radialSquared)));
-        if (chunkStepMeters(params_, depth) > shellDistance * params_.lodAngularVoxelRadians * 2.0)
-        {
-            break; // too coarse for its distance; coarser ancestors only fall further behind
-        }
-        if (nearestReady == 0)
+            std::max(std::sqrt(std::max(0.0, centerDistance * centerDistance - radialSquared)),
+                std::abs(length(center) - eyeRadius)));
+        // Screen-size bound for stand-in material: an ancestor may cover a
+        // hole only when the ancestor's own chunk width fits the hole's
+        // distance (width within kCoverageStandInWidthFactor of it, so the
+        // stand-in's on-screen extent stays bounded). Without the bound a
+        // planet-scale ancestor covers ground-view holes with whole-planet
+        // triangles - unbounded fill and tile-scan cost for one hole.
+        // Coarser ancestors are wider, so once an ancestor fails the bound
+        // every coarser one fails too.
+        const bool fitsDistance = chunkSizeMeters(params_, depth) <= holeWidthBound;
+        if (coverage.nearestReady == 0)
         {
             coverageChainScratch_.push_back(ancestorKey);
             sweepMemoEnd = coverageChainScratch_.size();
             const auto readyIt = readyMeshes_.find(ancestorKey);
             if (readyIt != readyMeshes_.end()
-                && (!readyIt->second.terrainEmpty || !readyIt->second.waterEmpty))
+                && (std::any_of(std::begin(readyIt->second.terrainGroupEmpty),
+                        std::end(readyIt->second.terrainGroupEmpty), [](bool empty) { return !empty; })
+                    || !readyIt->second.waterEmpty))
             {
-                nearestReady = ancestorKey;
+                // The nearest finished ancestor is settled; record whether
+                // it may stand in (a too-wide stand-in closes the search -
+                // coarser ones are wider still).
+                coverage.nearestReady = fitsDistance ? ancestorKey : kNoCoverageStandIn;
             }
             else
             {
                 const auto memoIt = ancestorFallbackMemo_.find(ancestorKey);
                 if (memoIt != ancestorFallbackMemo_.end() && memoIt->second.stamp == updateCount_)
                 {
-                    nearestReady = memoIt->second.nearestReady;
+                    coverage.nearestReady = memoIt->second.nearestReady;
                 }
             }
         }
-        if (!pureClosed)
+        if (scaffoldOpen)
         {
-            const auto stampIt = readyLeafAncestorStamps_.find(ancestorKey);
-            if (stampIt != readyLeafAncestorStamps_.end() && stampIt->second == updateCount_)
+            if (chunkStepMeters(params_, depth) > shellDistance * params_.lodAngularVoxelRadians * 2.0)
             {
-                pureClosed = true; // finished material above: nothing coarser can be pure
+                scaffoldOpen = false; // too coarse for its distance; coarser ancestors only fall further behind
+            }
+            else if (!fitsDistance)
+            {
+                scaffoldOpen = false; // wider than the screen-size bound; coarser only falls further behind
+            }
+            else if (pureClosed)
+            {
+                scaffoldOpen = false; // finished material above: nothing coarser can be pure
             }
             else
             {
-                pure      = ancestor; // kept: the coarsest passing pure node wins
-                pureFound = true;
+                const auto stampIt = readyLeafAncestorStamps_.find(ancestorKey);
+                if (stampIt != readyLeafAncestorStamps_.end() && stampIt->second == updateCount_)
+                {
+                    pureClosed = true; // finished material above: nothing coarser can be pure
+                    scaffoldOpen = false;
+                }
+                else
+                {
+                    coverage.pure      = ancestor; // kept: the coarsest passing pure node wins
+                    coverage.pureFound = true;
+                }
             }
         }
-        if (nearestReady != 0 && pureClosed)
+        if ((coverage.nearestReady != 0 || !fitsDistance) && !scaffoldOpen)
         {
-            break; // fallback found and no better scaffold target above
+            // The fallback answer is settled when a passing stand-in was
+            // found, or when the width bound closed the search (the nearest
+            // finished ancestor was too wide, so coarser ones fail too). No
+            // better scaffold target exists above a closed search either.
+            break;
         }
     }
     for (std::size_t index = 0; index < sweepMemoEnd; ++index)
     {
-        ancestorFallbackMemo_[coverageChainScratch_[index]] = FallbackMemo{nearestReady, updateCount_};
+        ancestorFallbackMemo_[coverageChainScratch_[index]] = FallbackMemo{coverage.nearestReady, updateCount_};
     }
-    if (nearestReady != 0 && fallbackSeen_.insert(nearestReady).second)
+    return coverage;
+}
+
+void Planet::planChunkCoverage(const ChunkCoord &coord, const Vec3 &eyeLocal)
+{
+    // Applies one hole's streaming coverage. Every hole under the same
+    // parent shares the ancestor chain above that parent, so the sweep runs
+    // once per parent per pass (see parentCoverage_) and this function
+    // applies its result per hole: the fallback draw (deduplicated across
+    // the pass), the coverage-deficit count (per hole - it drives the
+    // request loop's scaffold-first rule) and the scaffold build candidate
+    // (deduplicated by the needed-scaffold set).
+    const ChunkCoord parent       = ancestorOf(coord, coord.depth - 1u);
+    const ChunkKey   parentKey    = makeChunkKey(parent.depth, parent.x, parent.y, parent.z);
+    const auto       coverageSlot = parentCoverage_.find(parentKey);
+    if (coverageSlot == parentCoverage_.end())
     {
-        fallbackDraws_.push_back(nearestReady);
+        parentCoverage_.emplace(parentKey, sweepAncestorCoverage(coord, eyeLocal));
     }
-    if (pureFound && params_.lodScaffoldBuildsPerUpdate > 0)
+    const AncestorCoverage &coverage = parentCoverage_.find(parentKey)->second;
+    if (coverage.nearestReady != 0 && coverage.nearestReady != kNoCoverageStandIn
+        && fallbackSeen_.insert(coverage.nearestReady).second)
     {
+        fallbackDraws_.push_back(coverage.nearestReady);
+    }
+    if (coverage.nearestReady == 0 || coverage.nearestReady == kNoCoverageStandIn)
+    {
+        // This hole has no stand-in this pass: the region still lacks its
+        // coverage umbrella (see the request loop's scaffold-first rule).
+        ++coverageDeficitCount_;
+    }
+    if (coverage.pureFound && params_.lodScaffoldBuildsPerUpdate > 0)
+    {
+        const ChunkCoord &pure = coverage.pure;
         const ChunkKey pureKey = makeChunkKey(pure.depth, pure.x, pure.y, pure.z);
         if (readyMeshes_.find(pureKey) == readyMeshes_.end()
             && inflightBuild_.find(pureKey) == inflightBuild_.end()
@@ -590,28 +733,34 @@ std::uint32_t Planet::copyVisibleChunks(PlanetChunkView *output, std::uint32_t c
     std::uint32_t copied = 0;
     const auto emitBuilt = [output, capacity, &copied](ChunkKey key, const BuiltMesh &built)
     {
-        if (!built.terrainEmpty && copied < capacity)
+        for (std::uint32_t group = 0; group < terrainSurfaceGroupCount && copied < capacity; ++group)
         {
-            output[copied].key           = key;
-            output[copied].centerMeters  = built.center;
-            output[copied].vertices      = built.mesh.terrainVertices.data();
-            output[copied].vertexCount   = static_cast<std::uint32_t>(built.mesh.terrainVertices.size());
-            output[copied].indices       = built.mesh.terrainIndices.data();
-            output[copied].indexCount    = static_cast<std::uint32_t>(built.mesh.terrainIndices.size());
-            output[copied].isWater       = false;
-            output[copied].meshHash      = built.mesh.terrainHash;
+            if (built.terrainGroupEmpty[group])
+            {
+                continue;
+            }
+            output[copied].key          = key;
+            output[copied].centerMeters = built.center;
+            output[copied].vertices     = built.mesh.terrainVertices[group].data();
+            output[copied].vertexCount  = static_cast<std::uint32_t>(built.mesh.terrainVertices[group].size());
+            output[copied].indices      = built.mesh.terrainIndices[group].data();
+            output[copied].indexCount   = static_cast<std::uint32_t>(built.mesh.terrainIndices[group].size());
+            output[copied].isWater      = false;
+            output[copied].meshHash     = built.mesh.terrainHash;
+            output[copied].surfaceGroup = group;
             ++copied;
         }
         if (!built.waterEmpty && copied < capacity)
         {
-            output[copied].key           = key;
-            output[copied].centerMeters  = built.center;
-            output[copied].vertices      = built.mesh.waterVertices.data();
-            output[copied].vertexCount   = static_cast<std::uint32_t>(built.mesh.waterVertices.size());
-            output[copied].indices       = built.mesh.waterIndices.data();
-            output[copied].indexCount    = static_cast<std::uint32_t>(built.mesh.waterIndices.size());
-            output[copied].isWater       = true;
-            output[copied].meshHash      = built.mesh.waterHash;
+            output[copied].key          = key;
+            output[copied].centerMeters = built.center;
+            output[copied].vertices     = built.mesh.waterVertices.data();
+            output[copied].vertexCount  = static_cast<std::uint32_t>(built.mesh.waterVertices.size());
+            output[copied].indices      = built.mesh.waterIndices.data();
+            output[copied].indexCount   = static_cast<std::uint32_t>(built.mesh.waterIndices.size());
+            output[copied].isWater      = true;
+            output[copied].meshHash     = built.mesh.waterHash;
+            output[copied].surfaceGroup = 0;
             ++copied;
         }
     };
@@ -649,9 +798,10 @@ std::uint32_t Planet::copyVisibleChunks(PlanetChunkView *output, std::uint32_t c
 
 std::uint32_t Planet::visibleChunkCapacity() const
 {
-    // Every visible chunk and every fallback ancestor may contribute a
-    // terrain AND a water draw.
-    return static_cast<std::uint32_t>((lastVisible_.size() + fallbackDraws_.size()) * 2u);
+    // Every visible chunk and every fallback ancestor may contribute one
+    // draw per terrain surface group plus a water draw.
+    return static_cast<std::uint32_t>((lastVisible_.size() + fallbackDraws_.size())
+        * (terrainSurfaceGroupCount + 1u));
 }
 
 double Planet::surfaceRadius(const Vec3 &unitDirection) const
@@ -785,7 +935,10 @@ std::uint32_t Planet::collectPendingBuilds()
             built.mesh         = std::move(entry.mesh);
             built.conformMask  = entry.conformMask;
             built.center       = chunkCenterMeters(params_, entry.coord);
-            built.terrainEmpty = built.mesh.terrainVertices.empty();
+            for (std::uint32_t group = 0; group < terrainSurfaceGroupCount; ++group)
+            {
+                built.terrainGroupEmpty[group] = built.mesh.terrainVertices[group].empty();
+            }
             built.waterEmpty   = built.mesh.waterVertices.empty();
             built.lastSelectedUpdate = updateCount_;
             readyMeshes_.insert_or_assign(key, std::move(built));

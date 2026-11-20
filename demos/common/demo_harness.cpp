@@ -64,6 +64,11 @@ void clampCursorDelta(double &deltaX, double &deltaY, double maximumCursorDeltaP
     deltaY = std::clamp(deltaY, -maximumCursorDeltaPixels, maximumCursorDeltaPixels);
 }
 
+void FrameTimingRecorder::setAutoFlushPath(const std::string &path)
+{
+    autoFlushPath_ = path;
+}
+
 void FrameTimingRecorder::beginFrame()
 {
     frameStart_ = Clock::now();
@@ -91,6 +96,26 @@ void FrameTimingRecorder::markDrawDone()
     current_.drawMilliseconds = millisecondsBetween(lastMark_, now);
     current_.totalMilliseconds = millisecondsBetween(frameStart_, now);
     samples_.push_back(current_);
+    // Auto-flush after the frame is complete and out of the measured phases:
+    // the CSV is rewritten atomically (sibling temporary file, then rename),
+    // so a run that is interrupted mid-measurement (process kill, machine
+    // shutdown) still keeps the timings of the frames it managed to render
+    // and a reader never observes a half-written file. Flushing is throttled
+    // to a wall-clock interval so long measurement runs do not pay quadratic
+    // I/O; the final writeCsv at run end always publishes the complete set.
+    if (!autoFlushPath_.empty())
+    {
+        const auto flushElapsed = millisecondsBetween(lastAutoFlush_, now);
+        if (lastAutoFlush_ == Clock::time_point{} || flushElapsed >= kAutoFlushIntervalMilliseconds)
+        {
+            const std::string temporaryPath = autoFlushPath_ + ".tmp";
+            if (writeCsv(temporaryPath))
+            {
+                std::rename(temporaryPath.c_str(), autoFlushPath_.c_str());
+                lastAutoFlush_ = now;
+            }
+        }
+    }
 }
 
 std::string FrameTimingRecorder::summary() const

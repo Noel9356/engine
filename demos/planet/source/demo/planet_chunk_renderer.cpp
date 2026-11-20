@@ -43,6 +43,14 @@ namespace
 {
 constexpr std::uint32_t kVertexStride = sizeof(planet::PlanetVertex);
 
+// Winding of the demo's outward spherical shells (the world-anchored cloud
+// shell, the atmosphere limb annulus) as emitted by the backdrop builders
+// below. Declaring it per draw lets the headless backend cull each shell's
+// far hemisphere per triangle (see MeshMaterial::frontFaceWinding); the
+// sign was verified against the builders' vertex emission (a globe capture
+// with the shells intact confirms it - the wrong sign erases them).
+constexpr float macroShellFrontFaceWinding = 1.0f;
+
 // Spec for one contoured cloud-coverage shell mesh (see
 // engine/planet/atmosphere.hpp CloudField). Both backdrop layers the demo
 // draws from the coverage field - the world-anchored macro shell and the
@@ -63,6 +71,12 @@ struct CoverageShellSpec
     // them, so the deck's lower boundary reads as thinning cloud instead of
     // the hard polygon cut the quad guard would otherwise leave.
     double guardFadeRadians = 0.0;
+    // Inclusion-floor lift across the guard fade band (0 = off): quads inside
+    // the band raise their coverage floor proportionally, so banks
+    // DISINTEGRATE into fragments toward the horizon instead of staying bank
+    // sized and merely paling out - the color fade alone leaves flattened
+    // pale sheets hanging over the horizon, which reads as an artifact.
+    double guardFloorLift = 0.0;
     // Edge softening: when set, quad corners with coverage near the floor
     // blend their vertex color toward the sky gradient behind them (sampled
     // at the corner's own elevation), so a deck's contoured boundary reads
@@ -95,6 +109,12 @@ struct CoverageShellSpec
     // Optional sun direction (world space) for the baked directional shading
     // above; null leaves the deck's shading flat.
     const planet::Vec3 *sunDirection = nullptr;
+    // Optional environment lighting for an EXACT unlit bake (see
+    // BackdropLighting): when set, the vertex color carries the full
+    // hemispheric ambient plus the sun's Lambertian term against the shell's
+    // radial normals, and the shell draws unlit. Overridden when set together
+    // with sunDirection (the deck keeps its sky-dome-tinted fake term).
+    const BackdropLighting *bakedLighting = nullptr;
 };
 
 // Builds the contoured shell mesh: coverage is sampled on the lat-long grid,
@@ -111,8 +131,30 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
     std::vector<std::uint32_t> &indices)
 {
     const std::uint32_t stride = spec.segments + 1u;
+    // The coverage grid is sampled RAW here, smoothed below, and only then
+    // colored: the contour walk, the vertex colors and the greedy merge all
+    // read the SAME smoothed field. (Coloring from the pre-smoothing samples
+    // painted a quad-aligned artifact band along every bank edge - the
+    // smoothing moves the inclusion crossing by up to half the edge band, so
+    // quads rendered from the smoothed field carried pre-smoothing colors of
+    // nearly clear sky, and vice versa.)
     std::vector<float> coverageGrid;
     coverageGrid.reserve(static_cast<std::size_t>(stride) * (spec.bands + 1u));
+    // Subdivision of near-boundary quads and the width of the near-boundary
+    // band in coverage units: quads whose corners sit within the band of the
+    // inclusion floor are marched at kSub x kSub sub-resolution, so every
+    // visual boundary lives at 1/kSub of the grid spacing and the
+    // marching-squares isolines curve at sub-quad precision instead of
+    // snapping to the grid stair pattern. Interior quads keep their
+    // single-pair cost. A quad whose corners clear its floor by the whole
+    // band joins an interior rectangle (the bilinear coverage of a merged
+    // rectangle stays above its corners, so the rectangle carries no
+    // boundary inside it); quads inside the band still sub-divide at the
+    // contour walk, because merging them would flatten their coverage-
+    // shaded colors into rectangle steps the eye reads as stair edges.
+    constexpr std::uint32_t kSub = 4;
+    constexpr float kBoundaryBand = 0.30f;
+
     for (std::uint32_t band = 0; band <= spec.bands; ++band)
     {
         const double latitude = spec.latitudeLowRadians
@@ -136,16 +178,34 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             vertex.normal[0] = static_cast<float>(shellDirection.x);
             vertex.normal[1] = static_cast<float>(shellDirection.y);
             vertex.normal[2] = static_cast<float>(shellDirection.z);
-            // Coverage shades the cloud color: dense banks at full albedo,
-            // thin edges dimmer (a soft read for the geometry edges at shell
-            // resolution). A directional term models the sun's shading of the
-            // deck when the caller provides one (the sun expressed in the
-            // shell's own frame, dotted against the shell-local vertex
-            // direction): banks facing the sun read bright, the anti-sun
-            // side cools off - without it an unlit deck reads as flat paper
-            // cutouts.
+            vertices.push_back(vertex);
+        }
+    }
+
+    // ---- color pass over the smoothed field ---------------------------------------------
+    // One color per grid vertex, sampled from the SMOOTHED grid the contour
+    // walk follows (see the sampling note above): coverage shades the cloud
+    // color (dense banks at full albedo, thin edges dimmer - a soft read for
+    // the geometry edges at shell resolution), the sun term shades the deck
+    // (the caller's sun direction against the shell-local vertex direction,
+    // or the exact environment bake below - banks facing the sun read
+    // bright, the anti-sun side cools off, and an unlit deck without one
+    // reads as flat paper cutouts), and the haze and horizon-guard blends
+    // thin the fringe into the sky behind it.
+    for (std::uint32_t band = 0; band <= spec.bands; ++band)
+    {
+        const double latitude = spec.latitudeLowRadians
+            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
+                * (static_cast<double>(band) / static_cast<double>(spec.bands));
+        const double sinLatitude = std::sin(latitude);
+        for (std::uint32_t segment = 0; segment <= spec.segments; ++segment)
+        {
+            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(spec.segments);
+            const glm::dvec3 shellDirection(std::cos(azimuth) * std::cos(latitude), sinLatitude,
+                std::sin(azimuth) * std::cos(latitude));
+            const float coverage = coverageGrid[static_cast<std::size_t>(band) * stride + segment];
             const float shade = 0.88f + 0.12f * coverage;
-            const float sunFacing = spec.sunDirection != nullptr
+            float sunFacing = spec.sunDirection != nullptr
                 ? static_cast<float>(0.30 + 0.70 * planet::clamp01(0.5 + 0.5
                     * planet::dot(planet::Vec3{shellDirection.x, shellDirection.y, shellDirection.z},
                         *spec.sunDirection)))
@@ -153,11 +213,49 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             glm::dvec3 color(params.cloudColor[0] * shade * sunFacing,
                 params.cloudColor[1] * shade * sunFacing,
                 params.cloudColor[2] * shade * sunFacing);
+            if (spec.bakedLighting != nullptr && spec.bakedLighting->sunEnabled)
+            {
+                // Exact unlit bake (see BackdropLighting): the hemispheric
+                // ambient against the shell's radial normal plus the sun's
+                // Lambertian term - the matte deck's whole lit response,
+                // evaluated per vertex instead of per pixel.
+                const double upMix = shellDirection.y * 0.5 + 0.5;
+                const glm::dvec3 bakedAmbient
+                    = glm::mix(spec.bakedLighting->ambientGround, spec.bakedLighting->ambientSky, upMix);
+                const double sunDot = std::max(0.0, planet::dot(
+                    planet::Vec3{shellDirection.x, shellDirection.y, shellDirection.z},
+                    planet::Vec3{spec.bakedLighting->sunDirection.x, spec.bakedLighting->sunDirection.y,
+                        spec.bakedLighting->sunDirection.z}));
+                const glm::dvec3 light = bakedAmbient
+                    + glm::dvec3(spec.bakedLighting->sunRadianceOverPi.x, spec.bakedLighting->sunRadianceOverPi.y,
+                        spec.bakedLighting->sunRadianceOverPi.z)
+                        * sunDot;
+                color = glm::dvec3(params.cloudColor[0] * shade * light.x,
+                    params.cloudColor[1] * shade * light.y,
+                    params.cloudColor[2] * shade * light.z);
+            }
             const planet::Vec3 sky = planet::skyGradientColor(params, sinLatitude);
+            // Guard position of this vertex (0 at the guard latitude, 1 above
+            // the fade band) drives the guard's two thinning effects below.
+            const double guardFadeT = spec.guardFadeRadians > 0.0 && spec.minQuadLatitudeRadians > -3.0
+                ? planet::clamp01((latitude - spec.minQuadLatitudeRadians) / spec.guardFadeRadians)
+                : 1.0;
             if (spec.hazeEdgeBlend)
             {
+                // The thinning fringe runs over the configured haze width; a
+                // width past the contour walk's boundary band would keep
+                // blending where the merge operates, so it clamps to the
+                // band. Decks with a guard-floor lift WIDEN the fringe
+                // through the guard band: the lift leaves small dense
+                // fragments there, and without the wider fringe they render
+                // as hard-edged blades instead of haze-veiled wisps.
+                double hazeWidth = std::min(spec.hazeEdgeWidth, static_cast<double>(kBoundaryBand));
+                if (spec.guardFloorLift > 0.0)
+                {
+                    hazeWidth += (1.0 - guardFadeT) * 0.45;
+                }
                 const double blend = planet::smoothstep(spec.coverageFloor,
-                    std::min(1.0, spec.coverageFloor + spec.hazeEdgeWidth), static_cast<double>(coverage));
+                    std::min(1.0, spec.coverageFloor + hazeWidth), static_cast<double>(coverage));
                 color = glm::mix(glm::dvec3(sky.x, sky.y, sky.z), color, blend);
             }
             if (spec.guardFadeRadians > 0.0 && spec.minQuadLatitudeRadians > -3.0)
@@ -169,12 +267,10 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
                     spec.minQuadLatitudeRadians + spec.guardFadeRadians, latitude);
                 color = glm::mix(glm::dvec3(sky.x, sky.y, sky.z), color, guardBlend);
             }
+            planet::PlanetVertex &vertex = vertices[static_cast<std::size_t>(band) * stride + segment];
             vertex.color[0] = static_cast<float>(color.x);
             vertex.color[1] = static_cast<float>(color.y);
             vertex.color[2] = static_cast<float>(color.z);
-            vertex.uv[0] = 0.0f;
-            vertex.uv[1] = 0.0f;
-            vertices.push_back(vertex);
         }
     }
 
@@ -210,7 +306,6 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
     {
         return coverageGrid[static_cast<std::size_t>(band) * stride + segment];
     };
-
     const auto interpolatedVertex = [&vertices](std::uint32_t indexA, std::uint32_t indexB, float t) -> std::uint32_t
     {
         const planet::PlanetVertex &va = vertices[indexA];
@@ -255,38 +350,34 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             : std::clamp((coverageA - floor) / denominator, 0.0f, 1.0f);
     };
 
-    // Subdivision of near-boundary quads and the width of the near-boundary
-    // band in coverage units: quads whose corners sit within the band of the
-    // inclusion floor are marched at kSub x kSub sub-resolution, so every
-    // visual boundary lives at 1/kSub of the grid spacing and the
-    // marching-squares isolines curve at sub-quad precision instead of
-    // snapping to the grid stair pattern. Interior quads keep their
-    // single-pair cost.
-    constexpr std::uint32_t kSub = 4;
-    constexpr float kBoundaryBand = 0.30f;
-
+    // ---- per-quad inclusion floors ----------------------------------------------------
+    // Every quad's inclusion threshold (the base floor plus the ragged-edge
+    // wiggle, neighbor-gated) is computed once in a pre-pass: the greedy
+    // interior merge below and the contour walk share the same values, so a
+    // merged rectangle and the per-quad walk agree about what is inside.
+    // Quad-indexed arrays stride by SPEC.SEGMENTS (quads per row); the
+    // coverage grid itself strides by SEGMENTS+1 (grid corners per row).
+    const std::size_t quadStride = spec.segments;
+    const std::size_t quadSlotCount = static_cast<std::size_t>(spec.bands) * quadStride;
+    std::vector<float> quadFloors(quadSlotCount, static_cast<float>(spec.coverageFloor));
     for (std::uint32_t band = 0; band < spec.bands; ++band)
     {
-        const double quadLatitude = spec.latitudeLowRadians
-            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
-                * (static_cast<double>(band) / static_cast<double>(spec.bands));
-        if (quadLatitude < spec.minQuadLatitudeRadians)
+        // Guard-band floor lift (see CoverageShellSpec::guardFloorLift):
+        // quads inside the fade band raise their threshold with the fade
+        // position, thinning the banks into fragments near the horizon.
+        double guardLift = 0.0;
+        if (spec.guardFloorLift > 0.0 && spec.guardFadeRadians > 0.0 && spec.minQuadLatitudeRadians > -3.0)
         {
-            continue; // below the guard latitude (the horizon rim, for sky decks)
+            const double quadLatitude = spec.latitudeLowRadians
+                + (spec.latitudeHighRadians - spec.latitudeLowRadians)
+                    * (static_cast<double>(band) / static_cast<double>(spec.bands));
+            const double fadeT = planet::clamp01(
+                (quadLatitude - spec.minQuadLatitudeRadians) / spec.guardFadeRadians);
+            guardLift = (1.0 - fadeT) * spec.guardFloorLift;
         }
         for (std::uint32_t segment = 0; segment < spec.segments; ++segment)
         {
-            // Ring order: top-left, top-right, bottom-right, bottom-left;
-            // each ring step crosses one cell edge (top, right, bottom,
-            // left).
-            const std::uint32_t tl = band * stride + segment;
-            const std::uint32_t tr = tl + 1u;
-            const std::uint32_t br = tl + stride + 1u;
-            const std::uint32_t bl = tl + stride;
-            const std::uint32_t ring[4] = {tl, tr, br, bl};
-            const float cornerCoverage[4] = {coverageAt(band, segment), coverageAt(band, segment + 1u),
-                coverageAt(band + 1u, segment + 1u), coverageAt(band + 1u, segment)};
-            float floorThisQuad = static_cast<float>(quadFloor(band, segment));
+            float floorThisQuad = static_cast<float>(quadFloor(band, segment) + guardLift);
             if (floorThisQuad < static_cast<float>(spec.coverageFloor))
             {
                 // Neighbor gate on the threshold wiggle: a quad may clear a
@@ -324,6 +415,165 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
                     floorThisQuad = baseFloor;
                 }
             }
+            quadFloors[static_cast<std::size_t>(band) * quadStride + segment] = floorThisQuad;
+        }
+    }
+
+    // ---- greedy interior merge ---------------------------------------------------------
+    // A quad is "solid interior" when all four corners clear its floor by
+    // the whole boundary band above the BASE floor (the interior shade
+    // saturates there, so the rectangle renders like the quads it absorbs).
+    // Banks are mostly interior, so runs of
+    // solid quads merge into maximal rectangles (a greedy row run extended
+    // downward while the whole run stays solid): the rectangle emits the
+    // same six indices its quads would have - as one quad over the
+    // rectangle's grid corners - so a filled bank interior costs two
+    // triangles per rectangle instead of a subdivided quad per quad, while
+    // every boundary quad keeps the contour walk's sub-quad precision.
+    // Bilinear coverage inside a rectangle is a convex combination of its
+    // corners, so a rectangle whose corners are all above the floor carries
+    // no boundary inside it. Rows below the
+    // guard latitude never merge: the contour walk skips them outright.
+    std::vector<std::uint8_t> rowAllowed(spec.bands, 0);
+    for (std::uint32_t band = 0; band < spec.bands; ++band)
+    {
+        const double quadLatitude = spec.latitudeLowRadians
+            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
+                * (static_cast<double>(band) / static_cast<double>(spec.bands));
+        // Rows inside the horizon-guard fade never merge: the fade blends
+        // per-vertex toward the sky behind the deck, and a rectangle
+        // spanning it would render the fade as visible steps.
+        rowAllowed[band] = quadLatitude >= spec.minQuadLatitudeRadians + spec.guardFadeRadians ? 1u : 0u;
+    }
+    std::vector<std::uint8_t> claimedQuad(quadSlotCount, 0);
+    // Plain inclusion of one quad against its own (jittered) floor - the
+    // per-quad walk's insideCount == 4 test.
+    const auto quadFullyInside = [&](std::uint32_t band, std::uint32_t segment) -> bool
+    {
+        const float floor = quadFloors[static_cast<std::size_t>(band) * quadStride + segment];
+        return coverageAt(band, segment) >= floor && coverageAt(band, segment + 1u) >= floor
+            && coverageAt(band + 1u, segment + 1u) >= floor && coverageAt(band + 1u, segment) >= floor;
+    };
+    const auto quadSolidInterior = [&](std::uint32_t band, std::uint32_t segment) -> bool
+    {
+        // A rectangle may only replace quads STRICTLY INSIDE a bank, with
+        // every 8-neighborhood quad also fully solid: the rectangle's edge
+        // is one straight grid-aligned segment, and only the deep interior
+        // has no visible boundary to straighten. The banks' ragged outer
+        // boundary - each quad's own jittered floor wiggling the cutout -
+        // then stays entirely with the per-quad contour walk, where it
+        // belongs. (The raw-grid color bar is gone: the shade and the haze
+        // blend are continuous functions of coverage, and the merge is now
+        // confined to the deep interior where their gradient across a
+        // rectangle is far below one encode step.)
+        if (!quadFullyInside(band, segment))
+        {
+            return false;
+        }
+        const std::uint32_t bandLow = band > 0u ? band - 1u : 0u;
+        const std::uint32_t bandHigh = band + 2u < spec.bands ? band + 1u : spec.bands - 1u;
+        const std::uint32_t segmentLow = segment > 0u ? segment - 1u : 0u;
+        const std::uint32_t segmentHigh = segment + 2u < spec.segments ? segment + 1u : spec.segments - 1u;
+        for (std::uint32_t neighborBand = bandLow; neighborBand <= bandHigh; ++neighborBand)
+        {
+            for (std::uint32_t neighborSegment = segmentLow; neighborSegment <= segmentHigh; ++neighborSegment)
+            {
+                if (neighborBand == band && neighborSegment == segment)
+                {
+                    continue;
+                }
+                if (!quadFullyInside(neighborBand, neighborSegment))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    for (std::uint32_t band = 0; band < spec.bands; ++band)
+    {
+        if (!rowAllowed[band])
+        {
+            continue; // below the guard latitude (the horizon rim, for sky decks)
+        }
+        for (std::uint32_t segment = 0; segment < spec.segments; ++segment)
+        {
+            if (claimedQuad[static_cast<std::size_t>(band) * quadStride + segment]
+                || !quadSolidInterior(band, segment))
+            {
+                continue;
+            }
+            // Extend the row run rightward, then grow the rectangle down
+            // while every quad of the run in the next row is solid too.
+            std::uint32_t runEnd = segment + 1u;
+            while (runEnd < spec.segments && quadSolidInterior(band, runEnd))
+            {
+                ++runEnd;
+            }
+            std::uint32_t runBottom = band + 1u;
+            const auto runSolid = [&quadSolidInterior, &rowAllowed, segment, runEnd](std::uint32_t row)
+            {
+                if (rowAllowed[row] == 0u)
+                {
+                    return false;
+                }
+                for (std::uint32_t column = segment; column < runEnd; ++column)
+                {
+                    if (!quadSolidInterior(row, column))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            while (runBottom < spec.bands && runSolid(runBottom))
+            {
+                ++runBottom;
+            }
+            for (std::uint32_t row = band; row < runBottom; ++row)
+            {
+                for (std::uint32_t column = segment; column < runEnd; ++column)
+                {
+                    claimedQuad[static_cast<std::size_t>(row) * quadStride + column] = 1u;
+                }
+            }
+            const std::uint32_t rectTopLeft = band * stride + segment;
+            const std::uint32_t rectTopRight = band * stride + runEnd;
+            const std::uint32_t rectBottomRight = runBottom * stride + runEnd;
+            const std::uint32_t rectBottomLeft = runBottom * stride + segment;
+            indices.insert(indices.end(), {rectTopLeft, rectTopRight, rectBottomRight, rectTopLeft, rectBottomRight,
+                rectBottomLeft});
+            segment = runEnd - 1u;
+        }
+    }
+
+    // ---- contour walk over the remaining quads ------------------------------------------
+    for (std::uint32_t band = 0; band < spec.bands; ++band)
+    {
+        const double quadLatitude = spec.latitudeLowRadians
+            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
+                * (static_cast<double>(band) / static_cast<double>(spec.bands));
+        if (quadLatitude < spec.minQuadLatitudeRadians)
+        {
+            continue; // below the guard latitude (the horizon rim, for sky decks)
+        }
+        for (std::uint32_t segment = 0; segment < spec.segments; ++segment)
+        {
+            if (claimedQuad[static_cast<std::size_t>(band) * quadStride + segment])
+            {
+                continue; // already part of a merged interior rectangle
+            }
+            // Ring order: top-left, top-right, bottom-right, bottom-left;
+            // each ring step crosses one cell edge (top, right, bottom,
+            // left).
+            const std::uint32_t tl = band * stride + segment;
+            const std::uint32_t tr = tl + 1u;
+            const std::uint32_t br = tl + stride + 1u;
+            const std::uint32_t bl = tl + stride;
+            const std::uint32_t ring[4] = {tl, tr, br, bl};
+            const float cornerCoverage[4] = {coverageAt(band, segment), coverageAt(band, segment + 1u),
+                coverageAt(band + 1u, segment + 1u), coverageAt(band + 1u, segment)};
+            const float floorThisQuad = quadFloors[static_cast<std::size_t>(band) * quadStride + segment];
             bool inside[4];
             std::uint32_t insideCount = 0;
             for (std::uint32_t corner = 0; corner < 4; ++corner)
@@ -695,6 +945,25 @@ PlanetChunkRenderer::~PlanetChunkRenderer()
     destroy();
 }
 
+void PlanetChunkRenderer::setBackdropLighting(const BackdropLighting &lighting)
+{
+    backdropLighting_ = lighting;
+    backdropLightingValid_ = true;
+}
+
+void PlanetChunkRenderer::setTerrainTextures(renderer::TextureHandle groundDetail, renderer::TextureHandle rockDetail,
+    renderer::TextureHandle rockNormal, double groundTextureMaxDistanceMeters,
+    double rockTextureMaxDistanceMeters)
+{
+    groundDetailTexture_ = groundDetail;
+    rockDetailTexture_ = rockDetail;
+    rockNormalTexture_ = rockNormal;
+    groundTextureMaxDistanceMetersSquared_ = groundTextureMaxDistanceMeters > 0.0
+        ? groundTextureMaxDistanceMeters * groundTextureMaxDistanceMeters : 0.0;
+    rockTextureMaxDistanceMetersSquared_ = rockTextureMaxDistanceMeters > 0.0
+        ? rockTextureMaxDistanceMeters * rockTextureMaxDistanceMeters : 0.0;
+}
+
 void PlanetChunkRenderer::destroyChunkMeshes(ChunkMeshHandles &handles)
 {
     if (renderer_ == nullptr || rendererHandle_ == renderer::invalidRenderer)
@@ -706,6 +975,11 @@ void PlanetChunkRenderer::destroyChunkMeshes(ChunkMeshHandles &handles)
     {
         renderer_->destroyMesh(renderer_->self, rendererHandle_, handles.terrain);
         handles.terrain = renderer::invalidMesh;
+    }
+    if (handles.rock != renderer::invalidMesh)
+    {
+        renderer_->destroyMesh(renderer_->self, rendererHandle_, handles.rock);
+        handles.rock = renderer::invalidMesh;
     }
     if (handles.water != renderer::invalidMesh)
     {
@@ -742,9 +1016,13 @@ void PlanetChunkRenderer::updateVisibleChunks()
         ChunkMeshHandles &handles = found->second;
         handles.lastSeenUpdate = updateCounter_;
 
-        const bool wantTerrain = !view.isWater;
-        renderer::MeshHandle &slot = wantTerrain ? handles.terrain : handles.water;
-        std::uint64_t &uploadedHash = wantTerrain ? handles.terrainHash : handles.waterHash;
+        const bool wantWater = view.isWater;
+        // Terrain views carry their surface group (see the view struct): the
+        // ground and rock groups upload as separate renderer meshes sharing
+        // the chunk's placement, so each group draws with its own material.
+        const bool wantRock = !wantWater && view.surfaceGroup != 0u;
+        renderer::MeshHandle &slot = wantWater ? handles.water : (wantRock ? handles.rock : handles.terrain);
+        std::uint64_t &uploadedHash = wantWater ? handles.waterHash : (wantRock ? handles.rockHash : handles.terrainHash);
         // A chunk key can outlive one mesh REBUILD: the planet module
         // re-meshes a visible chunk when its conforming mask changes (LOD
         // boundary geometry), and the rebuilt mesh keeps the key but carries
@@ -785,7 +1063,7 @@ void PlanetChunkRenderer::updateVisibleChunks()
         // instead of once per visible chunk per frame - including for
         // all-water chunks, whose terrain slot never opens but whose water
         // draw still needs the placement.
-        if (wantTerrain ? handles.terrainPlacementBuilt : handles.waterPlacementBuilt)
+        if (wantWater ? handles.waterPlacementBuilt : handles.terrainPlacementBuilt)
         {
             continue;
         }
@@ -795,15 +1073,15 @@ void PlanetChunkRenderer::updateVisibleChunks()
             glm::vec3(static_cast<float>(placementCenter.x), static_cast<float>(placementCenter.y),
                 static_cast<float>(placementCenter.z)));
         handles.placementCenter = placementCenter;
-        if (wantTerrain)
-        {
-            handles.terrainTransform = transform;
-            handles.terrainPlacementBuilt = true;
-        }
-        else
+        if (wantWater)
         {
             handles.waterTransform = transform;
             handles.waterPlacementBuilt = true;
+        }
+        else
+        {
+            handles.terrainTransform = transform;
+            handles.terrainPlacementBuilt = true;
         }
     }
 
@@ -826,24 +1104,30 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
 {
     drawCommands_.clear();
     terrainMaterials_.clear();
+    rockMaterials_.clear();
     waterMaterials_.clear();
 
-    // Backdrop order: every shell reaches the depth buffer before the scene
-    // geometry and each later layer overwrites the previous one it sits in
-    // front of.
-    //   1. star dome (space views): unlit, depth writes off; the star field
-    //      behind everything.
-    //   2. atmosphere limb (space views): unlit, depth writes off; the ring
-    //      outside the terrain silhouette survives as glowing air.
-    //   3. sky dome: fills the sky pixels the terrain does not reach (or,
-    //      where chunks are still streaming in, a haze color instead of a
-    //      hole to the clear color).
-    //   4. sun disc: the bright disc with its halo, ahead of the clouds so
-    //      banks occlude it.
-    //   5. sky cloud deck (ground views): coverage-contoured banks overhead,
-    //      tinted with the dome.
-    //   6. world-anchored cloud shell (macro views): lit geometry between
-    //      the terrain and the dome's far rim.
+    // Draw order: opaque scene geometry first, transparent/cloudy geometry
+    // depth-tested against it, then the backdrop shells.
+    //   1. atmosphere limb (space views): unlit, depth writes off; the ring
+    //      outside the terrain silhouette survives as glowing air - the
+    //      limb's disk interior is MEANT to be overwritten by the opaque
+    //      draws, so this shell stays ahead of the scene.
+    //   2. chunk terrain (both surface groups) and water, near to far: the
+    //      depth buffer fills with the surfaces the eye actually sees, so
+    //      every later draw's hidden pixels reject early.
+    //   3. sky cloud deck (ground views) and world-anchored cloud shell
+    //      (macro views): drawn against the filled depth buffer, so a
+    //      shell's far side (hidden behind the planet) rejects without
+    //      shading a pixel, and near-side banks composite over the terrain
+    //      the way the previous backdrop-first order composited them over
+    //      the limb.
+    //   4. sun disc, star dome, sky dome: the unlit backdrop shells. Every
+    //      pixel they cover that the terrain already drew depth-fails (they
+    //      all sit beyond the terrain from any camera the demo uses), so
+    //      they only fill the sky the terrain does not reach - or, where
+    //      chunks are still streaming in, a haze color instead of a hole to
+    //      the clear color.
     // Camera-relative pass: every model matrix is composed in f64 against
     // the render shift, so the f32 pipeline only sees eye-relative
     // coordinates (a zero shift reproduces the historical absolute frame
@@ -855,60 +1139,19 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     };
     frameBackdropMatrices_.clear();
     frameBackdropMatrices_.reserve(6);
-    frameBackdropMatrices_.push_back(composeShifted(starDomeTransform_));
     frameBackdropMatrices_.push_back(composeShifted(atmosphereShellTransform_));
-    frameBackdropMatrices_.push_back(composeShifted(skyDomeTransform_));
-    frameBackdropMatrices_.push_back(composeShifted(sunDiscTransform_));
     frameBackdropMatrices_.push_back(composeShifted(skyCloudTransform_));
     frameBackdropMatrices_.push_back(composeShifted(cloudLayerTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(sunDiscTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(starDomeTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(skyDomeTransform_));
 
-    if (starDomeActive_ && starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = starDome_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[0]);
-        command.material = &starDomeMaterials_.front();
-        drawCommands_.push_back(command);
-    }
     if (atmosphereShellActive_ && atmosphereShell_ != renderer::invalidMesh && !atmosphereShellMaterials_.empty())
     {
         renderer::RenderDrawCommand command{};
         command.mesh = atmosphereShell_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[1]);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[0]);
         command.material = &atmosphereShellMaterials_.front();
-        drawCommands_.push_back(command);
-    }
-    if (skyDomeActive_ && skyDome_ != renderer::invalidMesh && !skyDomeMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = skyDome_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[2]);
-        command.material = &skyDomeMaterials_.front();
-        drawCommands_.push_back(command);
-    }
-    if (sunDiscActive_ && sunDisc_ != renderer::invalidMesh && !sunDiscMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = sunDisc_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[3]);
-        command.material = &sunDiscMaterials_.front();
-        drawCommands_.push_back(command);
-    }
-    if (skyCloudActive_ && skyCloudVisible_ && skyCloudLayer_ != renderer::invalidMesh && !skyCloudMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = skyCloudLayer_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[4]);
-        command.material = &skyCloudMaterials_.front();
-        drawCommands_.push_back(command);
-    }
-    if (cloudLayerActive_ && cloudLayerVisible_ && cloudLayer_ != renderer::invalidMesh
-        && !cloudLayerMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = cloudLayer_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[5]);
-        command.material = &cloudLayerMaterials_.front();
         drawCommands_.push_back(command);
     }
 
@@ -926,13 +1169,14 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     // the LOD band limit, so from above the sea is a sheet of flat coarse
     // facets and a tight specular term turns each facet into a separate
     // sharp glint - a field of sparkles around the sun point. The material
-    // therefore widens toward a broad sheen as the eye climbs the atmosphere
-    // column (settling just past half-rough by twice the atmosphere height),
-    // keeping one smooth sun glint on the water instead of per-facet
-    // sparkles; close-range views keep the configured sea texture.
+    // therefore widens toward a near-mirror-diffuse sheen as the eye climbs
+    // the atmosphere column (roughness 0.95 by twice the atmosphere height):
+    // a broad, soft sun glint like the one real oceans throw at orbital
+    // eye heights, instead of per-facet sparkles; close-range views keep
+    // the configured sea texture.
     const double orbitBlend = planet::smoothstep(params_.atmosphereHeightMeters, 2.0 * params_.atmosphereHeightMeters,
         eyeAltitudeMeters);
-    const float waterRoughness = static_cast<float>(params_.waterRoughness + (0.58f - params_.waterRoughness) * orbitBlend);
+    const float waterRoughness = static_cast<float>(params_.waterRoughness + (0.95f - params_.waterRoughness) * orbitBlend);
 
     // Aerial perspective: the atmosphere model's haze for the eye's sight
     // lines, composed as exact fog through the material - the renderer's
@@ -943,7 +1187,6 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     const planet::Vec3 eyeLocal{eyePlanetLocal.x, eyePlanetLocal.y, eyePlanetLocal.z};
 
     const glm::dvec3 planetCenter(params_.centerMeters[0], params_.centerMeters[1], params_.centerMeters[2]);
-    const glm::dvec3 eyeWorld = eyePlanetLocal + planetCenter;
 
     // ---- pass 1: collect the surviving chunks ------------------------------
     // Cull against the frustum (sphere-vs-plane; the bounding sphere comes
@@ -1041,12 +1284,56 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             material.emissiveColor[1] = addHaze[1];
             material.emissiveColor[2] = addHaze[2];
             material.roughnessFactor = 0.95f;
+            // The ground detail multiplies in only where one tile still
+            // spans its pixel budget (see the gate setup in main.cpp):
+            // beyond the gate the texels are sub-pixel, the vertex colors
+            // photograph identically without the sample, and the mip-less
+            // CPU sampler would only pay for minification shimmer.
+            material.baseColorTexture = draw.distanceSquared <= groundTextureMaxDistanceMetersSquared_
+                ? groundDetailTexture_ : renderer::invalidTexture;
+            // The planet mesher's terrain winding is fixed (see the
+            // meshing module): declaring it enables exact per-triangle
+            // back-face culling, so a rugged chunk's hidden far side
+            // rejects per triangle instead of relying on the renderer's
+            // per-mesh winding vote.
+            material.frontFaceWinding = planet::terrainFrontFaceWinding;
             terrainMaterials_.push_back(material);
 
             renderer::RenderDrawCommand command{};
             command.mesh = handles.terrain;
             command.modelMatrix = glm::value_ptr(frameChunkMatrices_.back());
             command.material = &terrainMaterials_.back();
+            drawCommands_.push_back(command);
+        }
+        if (handles.rock != renderer::invalidMesh)
+        {
+            renderer::MeshMaterial material{};
+            material.baseColor[0] = keepTerrain;
+            material.baseColor[1] = keepTerrain;
+            material.baseColor[2] = keepTerrain;
+            material.emissiveColor[0] = addHaze[0];
+            material.emissiveColor[1] = addHaze[1];
+            material.emissiveColor[2] = addHaze[2];
+            material.roughnessFactor = 0.85f;
+            // Rock tiles span twice the ground tile's meters, so the rock
+            // texture stays useful to twice the distance (same pixel
+            // budget, see main.cpp).
+            material.baseColorTexture = draw.distanceSquared <= rockTextureMaxDistanceMetersSquared_
+                ? rockDetailTexture_ : renderer::invalidTexture;
+            material.normalTexture = draw.distanceSquared <= rockTextureMaxDistanceMetersSquared_
+                ? rockNormalTexture_ : renderer::invalidTexture;
+            // Subtle tangent-space relief: the headless backend rebuilds the
+            // tangent frame per triangle from the tiled UVs, so the value
+            // stays small to keep the frame continuous where the projection
+            // switches axes.
+            material.normalScale = 0.35f;
+            material.frontFaceWinding = planet::terrainFrontFaceWinding;
+            rockMaterials_.push_back(material);
+
+            renderer::RenderDrawCommand command{};
+            command.mesh = handles.rock;
+            command.modelMatrix = glm::value_ptr(frameChunkMatrices_.back());
+            command.material = &rockMaterials_.back();
             drawCommands_.push_back(command);
         }
         if (handles.water != renderer::invalidMesh)
@@ -1059,6 +1346,12 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             material.emissiveColor[1] = addHaze[1];
             material.emissiveColor[2] = addHaze[2];
             material.roughnessFactor = waterRoughness;
+            // The sea sheet is a thin surface a swimmer sees from below as
+            // well as above: double-sided keeps the sheet visible
+            // underwater (the shading normal flips toward the viewer's
+            // side) and disables the per-triangle culling that would
+            // otherwise drop the seen-from-below surface.
+            material.doubleSided = true;
             waterMaterials_.push_back(material);
 
             renderer::RenderDrawCommand command{};
@@ -1067,6 +1360,51 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             command.material = &waterMaterials_.back();
             drawCommands_.push_back(command);
         }
+    }
+
+    // Backdrop shells behind and above the scene: the cloud geometry first
+    // (depth-tested against the terrain drawn above), then the unlit space
+    // shells and the sky dome. See the draw-order comment at the top.
+    if (skyCloudActive_ && skyCloudVisible_ && skyCloudLayer_ != renderer::invalidMesh && !skyCloudMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = skyCloudLayer_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[1]);
+        command.material = &skyCloudMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    if (cloudLayerActive_ && cloudLayerVisible_ && cloudLayer_ != renderer::invalidMesh
+        && !cloudLayerMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = cloudLayer_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[2]);
+        command.material = &cloudLayerMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    if (sunDiscActive_ && sunDisc_ != renderer::invalidMesh && !sunDiscMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = sunDisc_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[3]);
+        command.material = &sunDiscMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    if (starDomeActive_ && starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = starDome_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[4]);
+        command.material = &starDomeMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    if (skyDomeActive_ && skyDome_ != renderer::invalidMesh && !skyDomeMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = skyDome_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[5]);
+        command.material = &skyDomeMaterials_.front();
+        drawCommands_.push_back(command);
     }
 }
 
@@ -1106,7 +1444,10 @@ void PlanetChunkRenderer::ensureCloudLayer()
     // 384 x 192 quads keep the vertex spacing (~1 km at the equator of the
     // 60 km showcase) well under the configured cloud wavelength, so the
     // shell resolves the banks while the coverage field's band limit (the
-    // spacing is passed as the cutoff) keeps sub-spacing octaves out.
+    // spacing is passed as the cutoff) keeps sub-spacing octaves out. The
+    // greedy interior merge (see buildCoverageShellMesh) collapses the
+    // banks' solid middles, so the triangle count stays near the contoured
+    // boundary's own cost.
     constexpr std::uint32_t kSegments = 384;
     constexpr std::uint32_t kBands = 192;
     constexpr double kCoverageFloor = 0.42;
@@ -1144,6 +1485,14 @@ void PlanetChunkRenderer::ensureCloudLayer()
     // thinning cloud instead of a hard polygon cutout at orbit distance.
     spec.hazeEdgeBlend = true;
     spec.hazeEdgeWidth = 0.30;
+    // The shell bakes the environment lighting per vertex and draws unlit
+    // (see BackdropLighting): a matte white deck's lit response has no
+    // visible specular, so the per-pixel PBR evaluation over the disk-sized
+    // shell only cost fill rate.
+    if (backdropLightingValid_)
+    {
+        spec.bakedLighting = &backdropLighting_;
+    }
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -1166,7 +1515,16 @@ void PlanetChunkRenderer::ensureCloudLayer()
     material.baseColor[0] = 1.0f;
     material.baseColor[1] = 1.0f;
     material.baseColor[2] = 1.0f;
+    // The vertex colors carry the environment bake (see the spec above); the
+    // material draws unlit with the coverage-shaded deck tones. Without a
+    // bake (no pbr environment) the deck falls back to the lit draw.
+    material.unlit = backdropLightingValid_ && backdropLighting_.sunEnabled;
     material.roughnessFactor = 0.9f; // matte decks; the sun does the shading
+    // The shell is an outward sphere seen from outside at every view that
+    // draws it (globe and orbit keep the eye above the shell): declaring the
+    // winding culls the far hemisphere per triangle instead of letting its
+    // bounding boxes scan the framebuffer against the depth buffer.
+    material.frontFaceWinding = macroShellFrontFaceWinding;
     cloudLayerMaterials_.push_back(material);
     cloudLayerActive_ = true;
 }
@@ -1184,14 +1542,19 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
         return;
     }
 
-    // Hemisphere around the planet, latitudes 0 (its equator rim) to 90
-    // degrees (its pole). The pole points at the eye each frame, so mesh
-    // latitude runs from the silhouette edge (0, equator) to the disk center
-    // (90, pole). Colors key on the angle from the pole: bright horizon
-    // color over the disk interior (the opaque terrain/cloud draws overwrite
-    // it), fading to black at the rim - the ring between the terrain
-    // silhouette and the shell's own silhouette then reads as glowing air
-    // instead of a hard terrain edge on black.
+    // Rim annulus around the planet, latitudes 0 (its equator rim) to 40
+    // degrees. The pole points at the eye each frame, so mesh latitude 0 is
+    // the silhouette edge and latitude 40 sits 23% of the disk radius inside
+    // it - the annulus covers the ring the eye can actually see (the glow's
+    // own fade starts at 50 degrees from the pole, and the opaque terrain
+    // silhouette eats everything inside roughly 70 degrees) while skipping
+    // the disk interior the terrain draws over anyway: the old full
+    // hemisphere shaded the whole disk's worth of pixels per frame only for
+    // the opaque draws to overwrite them. Colors key on the angle from the
+    // pole: bright horizon color over the annulus interior (the opaque
+    // terrain/cloud draws overwrite it), fading to black at the rim - the
+    // ring between the terrain silhouette and the shell's own silhouette
+    // then reads as glowing air instead of a hard terrain edge on black.
     //
     // The gradient also runs around the AZIMUTH: the shell's local +X points
     // at the sun each frame (see updateAtmosphereShell), so azimuth 0 is the
@@ -1200,7 +1563,10 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // planet and a dark one on the other reads as a real sunlit atmosphere
     // (the uniform ring read as a painted halo).
     constexpr std::uint32_t kSegments = 96;
-    constexpr std::uint32_t kBands = 48;
+    constexpr std::uint32_t kBands = 22;
+    // Latitude span of the annulus (the fade band below starts at 50
+    // degrees from the pole = 40 degrees of latitude).
+    constexpr double kAnnulusLatitudeRadians = 0.6981317007977318; // 40 deg
     // Fade band in the angle from the pole. The shell is scaled per frame to
     // a visual radius a few percent above the surface (see
     // updateAtmosphereShell - the configured air column can span a large
@@ -1237,7 +1603,7 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     const planet::Vec3 limbColor = planet::skyGradientColor(params_, 0.0); // the horizon band color
     for (std::uint32_t band = 0; band <= kBands; ++band)
     {
-        const double latitude = glm::pi<double>() * 0.5 * (static_cast<double>(band) / static_cast<double>(kBands));
+        const double latitude = kAnnulusLatitudeRadians * (static_cast<double>(band) / static_cast<double>(kBands));
         const double cosLatitude = std::cos(latitude);
         const double sinLatitude = std::sin(latitude);
         const double angleFromPole = glm::pi<double>() * 0.5 - latitude;
@@ -1286,6 +1652,10 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     atmosphereShellMaterials_.emplace_back();
     renderer::MeshMaterial &material = atmosphereShellMaterials_.front();
     material.unlit = true;
+    // Outward annulus seen from outside (space views): the declared winding
+    // culls the far half of the ring per triangle (its pixels only ever
+    // failed the depth test after scanning their bounding boxes).
+    material.frontFaceWinding = macroShellFrontFaceWinding;
     // Depth writes off: the shell is a backdrop drawn ahead of the scene.
     // Depth testing stays on (the cleared buffer passes it) so the opaque
     // terrain/cloud/water draws that follow overwrite the disk interior and
@@ -1607,10 +1977,17 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // well under the field's feature size).
     // Grid resolution: fine enough that the deck's contoured edges stay
     // curved at eye level - the deck spans the whole upper hemisphere, and a
-    // standing camera resolves roughly one band per degree of elevation at
-    // 1920x1080, so the grid needs to stay below that pixel scale.
-    constexpr std::uint32_t kSegments = 384;
-    constexpr std::uint32_t kBands = 192;
+    // standing camera resolves roughly half a degree of azimuth per pixel
+    // pair at 1920x1080; the 0.7-degree cells (with the contour walk's 4x4
+    // subdivision of near-boundary quads) keep bank outlines smooth at that
+    // scale. Coarser grids terrace the smoothed coverage into grid-row
+    // plateaus, and the floor cutout follows the terraces: banks read as
+    // stacked horizontal planks. The grid is ISOTROPIC in angle - segments
+    // per degree of azimuth equal bands per degree of latitude
+    // (512/360 ~ 128/90): an anisotropic grid smears the banks along the
+    // azimuth rows through the coverage smoothing.
+    constexpr std::uint32_t kSegments = 512;
+    constexpr std::uint32_t kBands = 128;
     // The deck's coverage floor sits BELOW the visual cloud edge on purpose:
     // quads between the floor and the floor + haze width carry the thinning
     // fringe (their color fades from the sky gradient into the cloud tone),
@@ -1618,8 +1995,14 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // boundary. The opaque cutout then happens where quads are already
     // nearly sky-colored and its silhouette cannot read.
     constexpr double kCoverageFloor = 0.22;
-    constexpr double kHorizonGuardRadians = 0.05235987755982988; // 3 deg above the horizon
-    constexpr double kGuardFadeRadians = 0.06981317007977318;    // 4 deg of thinning cloud above it
+    // The guard spans the low sky band where the deck's grid cells project
+    // at extreme grazing angles (a 0.7-degree cell is a couple of pixels
+    // tall but tens of pixels wide at 10 degrees of elevation), so contour
+    // detail there reads as horizontal smears. The deck thins into the sky
+    // gradient over the band instead - the same place the atmosphere's own
+    // haze swallows distant detail, so the read stays natural.
+    constexpr double kHorizonGuardRadians = 0.06981317007977318;   // 4 deg above the horizon
+    constexpr double kGuardFadeRadians = 0.20943951023931953;      // 12 deg of thinning cloud above it
 
     if (cloudField_ == nullptr)
     {
@@ -1662,10 +2045,18 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     spec.lowPassCutoffMeters = 2.0 * vertexSpacing;
     spec.coverageFloor = kCoverageFloor;
     spec.smoothingPasses = 3;
-    spec.floorJitter = 0.25;
+    // No per-quad floor jitter on the deck (unlike the macro shell): the
+    // jittered threshold is per-QUAD, so two quads sharing a grid edge each
+    // interpolate their own crossing position on that edge and the polygons
+    // part by the threshold difference - hairline sky notches along every
+    // bank boundary, glaring at ground-view quad sizes. The sub-quad contour
+    // walk already curves the outlines (bilinear isolines at 4x4
+    // sub-resolution), which is the stair-breaking the jitter was for.
+    spec.floorJitter = 0.0;
     spec.floorJitterSeed = 0xC10D5C11ull;
     spec.minQuadLatitudeRadians = kHorizonGuardRadians;
     spec.guardFadeRadians = kGuardFadeRadians;
+    spec.guardFloorLift = 0.30; // banks crumble into fragments through the guard band
     spec.hazeEdgeBlend = true;
     spec.hazeEdgeWidth = 0.55;
     spec.frame = glm::dmat3(tangent, upNormalized, third);

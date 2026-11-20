@@ -85,6 +85,89 @@ bool transformMatricesEqual(const glm::mat4 &a, const glm::mat4 &b)
 {
     return std::memcmp(&a, &b, sizeof(glm::mat4)) == 0;
 }
+
+// Sutherland-Hodgman clip of one polygon against a single half-plane given
+// as a distance functor (negative = outside). Interpolates every vertex
+// attribute along the cut edge, exactly like the near-plane clip walk.
+template <typename Vertex, typename Distance>
+inline std::uint32_t clipPolygonAgainstPlane(
+    const Vertex *input, std::uint32_t count, Vertex *output, Distance distanceOf)
+{
+    std::uint32_t outCount = 0;
+    for (std::uint32_t current = 0; current < count; ++current)
+    {
+        const std::uint32_t next    = (current + 1u) % count;
+        const Vertex       &edgeStart = input[current];
+        const Vertex       &edgeEnd   = input[next];
+        const float startDistance = distanceOf(edgeStart);
+        const float endDistance   = distanceOf(edgeEnd);
+        const bool  startInside   = startDistance >= 0.0f;
+        const bool  endInside     = endDistance >= 0.0f;
+        if (startInside)
+        {
+            output[outCount++] = edgeStart;
+        }
+        if (startInside != endInside)
+        {
+            const float t          = startDistance / (startDistance - endDistance);
+            Vertex      &crossing  = output[outCount++];
+            crossing.clip          = glm::mix(edgeStart.clip, edgeEnd.clip, t);
+            crossing.worldPosition = glm::mix(edgeStart.worldPosition, edgeEnd.worldPosition, t);
+            crossing.worldNormal   = glm::mix(edgeStart.worldNormal, edgeEnd.worldNormal, t);
+            crossing.color         = glm::mix(edgeStart.color, edgeEnd.color, t);
+            crossing.uv            = glm::mix(edgeStart.uv, edgeEnd.uv, t);
+        }
+    }
+    return outCount;
+}
+
+// Guard-band screen-rect clip: clips a (near-plane-clipped) polygon against
+// the framebuffer rectangle expressed in clip space - the four planes
+// x = ±w, y = ±w, i.e. NDC |x|,|y| <= 1. A near-plane crossing survives the
+// near clip with a w a hair above the near plane and projects to
+// astronomical screen coordinates; the rasterizer's bounding-box clamp then
+// turns the fan's scan window into the whole framebuffer for a sliver
+// triangle (an eye-centered dome's horizon ring measured as full-screen
+// scans per degenerate fan). Clipping here keeps every projected vertex
+// inside the screen so the scan window is tight. Output is unchanged: the
+// removed region is off-screen (those pixels were never shaded), and
+// clipping is linear along the polygon's edges, so every surviving pixel
+// interpolates the same attributes it did before. scratchA/scratchB must
+// hold at least 9 vertices (a 4-gon grows by at most one vertex per plane);
+// outPolygon points at the clipped polygon (input, scratchA or scratchB).
+template <typename Vertex>
+inline std::uint32_t clipPolygonToFramebuffer(const Vertex *input, std::uint32_t count, Vertex *scratchA,
+    Vertex *scratchB, const Vertex *&outPolygon)
+{
+    const Vertex *currentPoly = input;
+    Vertex       *writeBuffer = scratchA;
+    std::uint32_t currentCount = clipPolygonAgainstPlane(currentPoly, count, writeBuffer,
+        [](const Vertex &vertex) { return vertex.clip.x + vertex.clip.w; });
+    currentPoly = writeBuffer;
+    writeBuffer = writeBuffer == scratchA ? scratchB : scratchA;
+    if (currentCount >= 3)
+    {
+        currentCount = clipPolygonAgainstPlane(currentPoly, currentCount, writeBuffer,
+            [](const Vertex &vertex) { return vertex.clip.w - vertex.clip.x; });
+        currentPoly  = writeBuffer;
+        writeBuffer  = writeBuffer == scratchA ? scratchB : scratchA;
+    }
+    if (currentCount >= 3)
+    {
+        currentCount = clipPolygonAgainstPlane(currentPoly, currentCount, writeBuffer,
+            [](const Vertex &vertex) { return vertex.clip.y + vertex.clip.w; });
+        currentPoly  = writeBuffer;
+        writeBuffer  = writeBuffer == scratchA ? scratchB : scratchA;
+    }
+    if (currentCount >= 3)
+    {
+        currentCount = clipPolygonAgainstPlane(currentPoly, currentCount, writeBuffer,
+            [](const Vertex &vertex) { return vertex.clip.w - vertex.clip.y; });
+        currentPoly  = writeBuffer;
+    }
+    outPolygon = currentPoly;
+    return currentCount;
+}
 } // namespace
 
 // Precomputes shading inputs: radiance = color * intensity, inverse-squared
@@ -649,6 +732,51 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                 texture.pixelsRGB[i * 3 + 2] = static_cast<float>(description.pixels[i * 4 + 2]) * inv;
             }
         }
+        // Mip chain (box-filtered quarters, level 1 down to 1x1): minified
+        // fragments sample the level whose footprint matches their screen
+        // texel instead of a shimmering base-level fetch (see
+        // HeadlessTexture::sampleTrilinear). Non-square and non-pow2 sources
+        // still chain cleanly - each level halves its own extents.
+        {
+            std::vector<HeadlessTexture::MipLevel> chain;
+            std::uint32_t levelWidth  = description.width;
+            std::uint32_t levelHeight = description.height;
+            const float   *source     = texture.pixelsRGB.data();
+            while (levelWidth > 1u || levelHeight > 1u)
+            {
+                const std::uint32_t nextWidth  = std::max(1u, levelWidth / 2u);
+                const std::uint32_t nextHeight = std::max(1u, levelHeight / 2u);
+                HeadlessTexture::MipLevel mip;
+                mip.width  = nextWidth;
+                mip.height = nextHeight;
+                mip.rgb.assign(static_cast<std::size_t>(nextWidth) * nextHeight * 3, 0.0f);
+                for (std::uint32_t y = 0; y < nextHeight; ++y)
+                {
+                    for (std::uint32_t x = 0; x < nextWidth; ++x)
+                    {
+                        // 2x2 box; odd extents clamp their far tap to the
+                        // last texel so edge texels keep full weight.
+                        const std::uint32_t x0 = x * 2u;
+                        const std::uint32_t y0 = y * 2u;
+                        const std::uint32_t x1 = std::min(x0 + 1u, levelWidth - 1u);
+                        const std::uint32_t y1 = std::min(y0 + 1u, levelHeight - 1u);
+                        for (std::uint32_t channel = 0; channel < 3u; ++channel)
+                        {
+                            const float a = source[(static_cast<std::size_t>(y0) * levelWidth + x0) * 3 + channel];
+                            const float b = source[(static_cast<std::size_t>(y0) * levelWidth + x1) * 3 + channel];
+                            const float c = source[(static_cast<std::size_t>(y1) * levelWidth + x0) * 3 + channel];
+                            const float d = source[(static_cast<std::size_t>(y1) * levelWidth + x1) * 3 + channel];
+                            mip.rgb[(static_cast<std::size_t>(y) * nextWidth + x) * 3 + channel] = (a + b + c + d) * 0.25f;
+                        }
+                    }
+                }
+                chain.push_back(std::move(mip));
+                source      = chain.back().rgb.data();
+                levelWidth  = nextWidth;
+                levelHeight = nextHeight;
+            }
+            texture.mipChain = std::move(chain);
+        }
         textures.emplace(id, std::move(texture));
         reportError(error, RenderError::None);
         return true;
@@ -1068,7 +1196,7 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
             const std::vector<std::uint32_t> *activeIndices
                 = activeIndicesForDraw(meshData, item.modelMatrix, bounds, haveBounds);
             const std::size_t triCount = activeIndices->size() / 3;
-            const std::size_t recordEstimate = triCount * 2u; // worst case: near-clip fans
+            const std::size_t recordEstimate = triCount * 6u; // worst case: near-clip + screen-rect clip fans
             if (recordEstimate > maxBatchTileRecords_)
             {
                 // A single draw too big for the batch scratch: the per-draw
@@ -1107,7 +1235,7 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
             const std::size_t   recordsBefore = tileRecords_.size();
             try
             {
-                TileBinRecord fans[2];
+                TileBinRecord fans[6]; // near-clip + screen-rect clip fans, see prepareFanTriangles
                 for (std::size_t triangle = 0; triangle < triCount; ++triangle)
                 {
                     const std::size_t fanCount = prepareFanTriangles(meshData, setup, triangle, fans);
@@ -1824,101 +1952,119 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     // Double-sided draws (cloth sheets, flags, thin shells) never cull: their
     // fragments may face either way, and the pixel path flips normals toward
     // the viewer instead (the mesh.frag twin of the glTF doubleSided rule).
-    if (backFaceCullingEnabled_ && !outSetup.doubleSided && !outSetup.unlit && outSetup.useTransformCache
-        && cameraInitialized_ && mesh.boundsValid && triangleCount >= 4)
+    if (cameraInitialized_ && !outSetup.doubleSided)
     {
-        ensureWorldBounds();
-        const float cameraDist = glm::distance(cameraPosition_, outSetup.boundsWorldCenter);
-        if (cameraDist > outSetup.boundsWorldRadius)
+        // A generator that knows its own winding convention (see
+        // MeshMaterial::frontFaceWinding) pins the culling sign directly:
+        // exact per-triangle culling, no heuristics. This bypasses the
+        // bounds and majority-vote machinery below, whose vote cannot
+        // classify rugged procedural meshes reliably. The declared sign
+        // needs only vertex POSITIONS (a face normal cross product), so it
+        // works for unlit backdrops too - shells and domes drawn by
+        // position-only vertex colors - where the vote path (which reads
+        // smooth vertex normals) cannot apply.
+        if (material.frontFaceWinding > 0.0f || material.frontFaceWinding < 0.0f)
         {
-            // Majority vote over a spread of triangles: face winding against
-            // vertex normals identifies the outward orientation
-            // camera-independently (screen-space signs cannot - front and
-            // back faces balance on a closed mesh). A crease triangle whose
-            // smooth corner normals lean across the edge loses the vote
-            // instead of flipping the whole mesh.
-            //
-            // The outcome is a pure function of the mesh geometry, the
-            // sampled index list and the sign of the model's linear part
-            // (((M a) x (M b)) . (M c) = det(M) . ((a x b) . c)), so it is
-            // memoized per mesh and re-derived only when the transform
-            // mirrors or the index subset changes.
-            const unsigned determinantSlot = glm::determinant(glm::mat3(outSetup.model)) < 0.0f ? 1u : 0u;
-            HeadlessMesh::WindingVoteMemo &memo = mesh.windingVotes[determinantSlot];
-            float frontSign = 0.0f;
-            bool  memoHit   = false;
-            for (std::size_t slot = 0; slot < HeadlessMesh::WindingVoteMemo::capacity; ++slot)
+            outSetup.frontSign          = material.frontFaceWinding;
+            outSetup.enableBackFaceCull = true; // winding convention declared; culling is safe
+        }
+        else if (!outSetup.unlit && backFaceCullingEnabled_ && outSetup.useTransformCache && mesh.boundsValid
+            && triangleCount >= 4)
+        {
+            ensureWorldBounds();
+            const float cameraDist = glm::distance(cameraPosition_, outSetup.boundsWorldCenter);
+            if (cameraDist > outSetup.boundsWorldRadius)
             {
-                if (memo.sources[slot] == activeIndices)
-                {
-                    frontSign = memo.signs[slot];
-                    memoHit   = true;
-                    break;
-                }
-            }
-            if (!memoHit)
-            {
-                const std::size_t sampleStride = std::max<std::size_t>(1, triangleCount / 64);
-                std::uint32_t     positive = 0, negative = 0;
-                for (std::size_t t = 0; t < triangleCount; t += sampleStride)
-                {
-                    const std::uint32_t i0 = activeIndices[t * 3 + 0];
-                    const std::uint32_t i1 = activeIndices[t * 3 + 1];
-                    const std::uint32_t i2 = activeIndices[t * 3 + 2];
-                    if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
-                        continue;
-                    const TransformedVertex *const cache = outSetup.transformCache;
-                    const glm::vec3 &wp0 = cache[i0].worldPosition;
-                    const glm::vec3 &wp1 = cache[i1].worldPosition;
-                    const glm::vec3 &wp2 = cache[i2].worldPosition;
-                    const glm::vec3  faceNormal = glm::cross(wp1 - wp0, wp2 - wp0);
-                    const float      fnLen2     = glm::dot(faceNormal, faceNormal);
-                    if (fnLen2 < 1e-12f)
-                        continue;
-                    const glm::vec3 &wn0 = cache[i0].worldNormal;
-                    const glm::vec3 &wn1 = cache[i1].worldNormal;
-                    const glm::vec3 &wn2 = cache[i2].worldNormal;
-                    const glm::vec3  avgNormal = wn0 + wn1 + wn2;
-                    const float      anLen2    = glm::dot(avgNormal, avgNormal);
-                    if (anLen2 < 1e-12f)
-                        continue;
-                    const float dotFN = glm::dot(faceNormal, avgNormal);
-                    if (dotFN > 1e-6f)
-                        ++positive;
-                    else if (dotFN < -1e-6f)
-                        ++negative;
-                }
-                if (positive > negative && positive > 0)
-                    frontSign = 1.0f;
-                else if (negative > positive && negative > 0)
-                    frontSign = -1.0f;
-                // Record the outcome for this index list, reusing the first
-                // free slot; when every slot is taken, slot 0 is the victim so
-                // a ninth index list still gets memoized instead of re-running
-                // the vote on every draw. A fixed victim is enough because the
-                // pipeline only ever samples the base list plus its (at most
-                // four) LOD lists per determinant slot - the eviction path
-                // exists to degrade gracefully, not because it is expected.
-                std::size_t memoSlot = HeadlessMesh::WindingVoteMemo::capacity;
+                // Majority vote over a spread of triangles: face winding
+                // against vertex normals identifies the outward orientation
+                // camera-independently (screen-space signs cannot - front and
+                // back faces balance on a closed mesh). A crease triangle
+                // whose smooth corner normals lean across the edge loses the
+                // vote instead of flipping the whole mesh.
+                //
+                // The outcome is a pure function of the mesh geometry, the
+                // sampled index list and the sign of the model's linear part
+                // (((M a) x (M b)) . (M c) = det(M) . ((a x b) . c)), so it is
+                // memoized per mesh and re-derived only when the transform
+                // mirrors or the index subset changes.
+                const unsigned determinantSlot = glm::determinant(glm::mat3(outSetup.model)) < 0.0f ? 1u : 0u;
+                HeadlessMesh::WindingVoteMemo &memo = mesh.windingVotes[determinantSlot];
+                float frontSign = 0.0f;
+                bool  memoHit   = false;
                 for (std::size_t slot = 0; slot < HeadlessMesh::WindingVoteMemo::capacity; ++slot)
                 {
-                    if (memo.sources[slot] == nullptr)
+                    if (memo.sources[slot] == activeIndices)
                     {
-                        memoSlot = slot;
+                        frontSign = memo.signs[slot];
+                        memoHit   = true;
                         break;
                     }
                 }
-                if (memoSlot == HeadlessMesh::WindingVoteMemo::capacity)
+                if (!memoHit)
                 {
-                    memoSlot = 0;
+                    const std::size_t sampleStride = std::max<std::size_t>(1, triangleCount / 64);
+                    std::uint32_t     positive = 0, negative = 0;
+                    for (std::size_t t = 0; t < triangleCount; t += sampleStride)
+                    {
+                        const std::uint32_t i0 = activeIndices[t * 3 + 0];
+                        const std::uint32_t i1 = activeIndices[t * 3 + 1];
+                        const std::uint32_t i2 = activeIndices[t * 3 + 2];
+                        if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                            continue;
+                        const TransformedVertex *const cache = outSetup.transformCache;
+                        const glm::vec3 &wp0 = cache[i0].worldPosition;
+                        const glm::vec3 &wp1 = cache[i1].worldPosition;
+                        const glm::vec3 &wp2 = cache[i2].worldPosition;
+                        const glm::vec3  faceNormal = glm::cross(wp1 - wp0, wp2 - wp0);
+                        const float      fnLen2     = glm::dot(faceNormal, faceNormal);
+                        if (fnLen2 < 1e-12f)
+                            continue;
+                        const glm::vec3 &wn0 = cache[i0].worldNormal;
+                        const glm::vec3 &wn1 = cache[i1].worldNormal;
+                        const glm::vec3 &wn2 = cache[i2].worldNormal;
+                        const glm::vec3  avgNormal = wn0 + wn1 + wn2;
+                        const float      anLen2    = glm::dot(avgNormal, avgNormal);
+                        if (anLen2 < 1e-12f)
+                            continue;
+                        const float dotFN = glm::dot(faceNormal, avgNormal);
+                        if (dotFN > 1e-6f)
+                            ++positive;
+                        else if (dotFN < -1e-6f)
+                            ++negative;
+                    }
+                    if (positive > negative && positive > 0)
+                        frontSign = 1.0f;
+                    else if (negative > positive && negative > 0)
+                        frontSign = -1.0f;
+                    // Record the outcome for this index list, reusing the first
+                    // free slot; when every slot is taken, slot 0 is the victim
+                    // so a ninth index list still gets memoized instead of
+                    // re-running the vote on every draw. A fixed victim is
+                    // enough because the pipeline only ever samples the base
+                    // list plus its (at most four) LOD lists per determinant
+                    // slot - the eviction path exists to degrade gracefully,
+                    // not because it is expected.
+                    std::size_t memoSlot = HeadlessMesh::WindingVoteMemo::capacity;
+                    for (std::size_t slot = 0; slot < HeadlessMesh::WindingVoteMemo::capacity; ++slot)
+                    {
+                        if (memo.sources[slot] == nullptr)
+                        {
+                            memoSlot = slot;
+                            break;
+                        }
+                    }
+                    if (memoSlot == HeadlessMesh::WindingVoteMemo::capacity)
+                    {
+                        memoSlot = 0;
+                    }
+                    memo.sources[memoSlot] = activeIndices;
+                    memo.signs[memoSlot]   = frontSign;
                 }
-                memo.sources[memoSlot] = activeIndices;
-                memo.signs[memoSlot]   = frontSign;
-            }
-            if (frontSign != 0.0f)
-            {
-                outSetup.frontSign          = frontSign;
-                outSetup.enableBackFaceCull = true; // winding convention confirmed; culling is safe
+                if (frontSign != 0.0f)
+                {
+                    outSetup.frontSign          = frontSign;
+                    outSetup.enableBackFaceCull = true; // winding convention confirmed; culling is safe
+                }
             }
         }
     }
@@ -2018,7 +2164,11 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                 corners[corner].clip                 = transformed.clip;
                 corners[corner].worldPosition        = transformed.worldPosition;
                 corners[corner].worldNormal          = unlit ? glm::vec3(0.0f) : transformed.worldNormal;
-                if (unlit)
+                // Unlit draws skip per-pixel position interpolation, so the
+                // corners' world positions were dropped - except when the
+                // draw declares its winding: the per-triangle cull test
+                // reads them (see prepareRasterization).
+                if (unlit && !setup.enableBackFaceCull)
                     corners[corner].worldPosition = glm::vec3(0.0f);
             }
             else
@@ -2056,7 +2206,10 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                 else
                 {
                     corners[corner].worldNormal   = glm::vec3(0.0f);
-                    corners[corner].worldPosition = glm::vec3(0.0f);
+                    if (!setup.enableBackFaceCull)
+                    {
+                        corners[corner].worldPosition = glm::vec3(0.0f);
+                    }
                 }
             }
             corners[corner].color = glm::make_vec3(colorData + vertexIndex * 3);
@@ -2074,7 +2227,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
             }
         }
 
-        ClipVertex    clipped[4];
+        ClipVertex    clipped[9]; // near-clip emits up to 4; the screen-rect clip result (up to 8) is copied back
         std::uint32_t clippedCount = 0;
         // Near-plane clip: w + z >= 0 is inside. Fully-inside triangles skip
         // the Sutherland-Hodgman walk; otherwise emit inside corners and the
@@ -2122,20 +2275,60 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
             continue;
         }
 
-        glm::vec3 screen[4];
-        float     depth[4];
-        float     clipW[4];
-        for (std::uint32_t vertex = 0; vertex < clippedCount; ++vertex)
+        glm::vec3 screen[9];
+        float     depth[9];
+        float     clipW[9];
+        const auto projectPolygon = [&screen, &depth, &clipW, framebufferWidth, framebufferHeight](const ClipVertex *polygon, std::uint32_t vertexCount)
         {
-            clipW[vertex]        = clipped[vertex].clip.w;
-            const float inverseW = 1.0f / clipW[vertex];
-            const float ndcX     = clipped[vertex].clip.x * inverseW;
-            const float ndcY     = clipped[vertex].clip.y * inverseW;
-            const float ndcZ     = clipped[vertex].clip.z * inverseW;
-            screen[vertex]       = glm::vec3((ndcX * 0.5f + 0.5f) * static_cast<float>(framebufferWidth),
-                (1.0f - (ndcY * 0.5f + 0.5f)) * static_cast<float>(framebufferHeight),
-                0.0f);
-            depth[vertex]        = ndcZ * 0.5f + 0.5f;
+            for (std::uint32_t vertex = 0; vertex < vertexCount; ++vertex)
+            {
+                clipW[vertex]        = polygon[vertex].clip.w;
+                const float inverseW = 1.0f / clipW[vertex];
+                const float ndcX     = polygon[vertex].clip.x * inverseW;
+                const float ndcY     = polygon[vertex].clip.y * inverseW;
+                const float ndcZ     = polygon[vertex].clip.z * inverseW;
+                screen[vertex]       = glm::vec3((ndcX * 0.5f + 0.5f) * static_cast<float>(framebufferWidth),
+                    (1.0f - (ndcY * 0.5f + 0.5f)) * static_cast<float>(framebufferHeight),
+                    0.0f);
+                depth[vertex]        = ndcZ * 0.5f + 0.5f;
+            }
+        };
+        projectPolygon(clipped, clippedCount);
+        // Guard-band screen-rect clip: a near-plane crossing projects through
+        // a w a hair above the near plane and lands at astronomical screen
+        // coordinates, so the fan's clamped scan window becomes the whole
+        // framebuffer for a sliver triangle (an eye-centered dome's horizon
+        // ring measured as full-screen scans per degenerate fan). When any
+        // projected vertex escapes the screen, clip the polygon against the
+        // framebuffer rectangle in clip space; the removed region is
+        // off-screen, so every surviving pixel interpolates identically.
+        {
+            bool insideScreen = true;
+            const float maxScreenX = static_cast<float>(framebufferWidth) - 1.0f;
+            const float maxScreenY = static_cast<float>(framebufferHeight) - 1.0f;
+            for (std::uint32_t vertex = 0; vertex < clippedCount && insideScreen; ++vertex)
+            {
+                insideScreen = screen[vertex].x >= 0.0f && screen[vertex].x <= maxScreenX && screen[vertex].y >= 0.0f
+                    && screen[vertex].y <= maxScreenY;
+            }
+            if (!insideScreen)
+            {
+                ClipVertex         rectScratchA[9];
+                ClipVertex         rectScratchB[9];
+                const ClipVertex  *rectPolygon = nullptr;
+                const std::uint32_t rectCount
+                    = clipPolygonToFramebuffer(clipped, clippedCount, rectScratchA, rectScratchB, rectPolygon);
+                if (rectCount < 3)
+                {
+                    continue;
+                }
+                clippedCount = rectCount;
+                projectPolygon(rectPolygon, clippedCount);
+                for (std::uint32_t vertex = 0; vertex < clippedCount; ++vertex)
+                {
+                    clipped[vertex] = rectPolygon[vertex];
+                }
+            }
         }
 
         glm::vec3 tangentVector(1.0f, 0.0f, 0.0f);
@@ -2199,6 +2392,25 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
             const float inverseWB = 1.0f / clipW[cornerB];
             const float inverseWC = 1.0f / clipW[cornerC];
 
+            // UV gradients for mip selection (same derivation as
+            // TileBinRecord's; see HeadlessTexture::sampleTrilinear).
+            const float gradAx = -(screen[cornerC].y - screen[cornerB].y) * inverseArea;
+            const float gradAy = (screen[cornerC].x - screen[cornerB].x) * inverseArea;
+            const float gradBx = -(screen[cornerA].y - screen[cornerC].y) * inverseArea;
+            const float gradBy = (screen[cornerA].x - screen[cornerC].x) * inverseArea;
+            const float gradCx = -(gradAx + gradBx);
+            const float gradCy = -(gradAy + gradBy);
+            const float uvNumeratorX0 = gradAx * inverseWA * clipped[cornerA].uv.x
+                + gradBx * inverseWB * clipped[cornerB].uv.x + gradCx * inverseWC * clipped[cornerC].uv.x;
+            const float uvNumeratorX1 = gradAx * inverseWA * clipped[cornerA].uv.y
+                + gradBx * inverseWB * clipped[cornerB].uv.y + gradCx * inverseWC * clipped[cornerC].uv.y;
+            const float uvNumeratorY0 = gradAy * inverseWA * clipped[cornerA].uv.x
+                + gradBy * inverseWB * clipped[cornerB].uv.x + gradCy * inverseWC * clipped[cornerC].uv.x;
+            const float uvNumeratorY1 = gradAy * inverseWA * clipped[cornerA].uv.y
+                + gradBy * inverseWB * clipped[cornerB].uv.y + gradCy * inverseWC * clipped[cornerC].uv.y;
+            const float uvDenominatorX = gradAx * inverseWA + gradBx * inverseWB + gradCx * inverseWC;
+            const float uvDenominatorY = gradAy * inverseWA + gradBy * inverseWB + gradCy * inverseWC;
+
             const float weightADx = -(screen[cornerC].y - screen[cornerB].y) * inverseArea;
             const float weightBDx = -(screen[cornerA].y - screen[cornerC].y) * inverseArea;
             const float sampleX   = static_cast<float>(firstX) + 0.5f;
@@ -2252,13 +2464,24 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         const glm::vec2 interpolatedUv    = correctedA * clipped[cornerA].uv
                                                           + correctedB * clipped[cornerB].uv
                                                           + correctedC * clipped[cornerC].uv;
+                        // Per-pixel UV derivatives (quotient rule over the
+                        // affine numerator/denominator; see sampleTrilinear).
+                        glm::vec2 uvDerivativeX(0.0f);
+                        glm::vec2 uvDerivativeY(0.0f);
+                        if (hasBaseColorMap || hasNormalMap || hasMetallicRoughnessMap || hasOcclusion || hasEmissiveMap)
+                        {
+                            uvDerivativeX = glm::vec2(uvNumeratorX0 - interpolatedUv.x * uvDenominatorX,
+                                uvNumeratorX1 - interpolatedUv.y * uvDenominatorX) * inversePerspective;
+                            uvDerivativeY = glm::vec2(uvNumeratorY0 - interpolatedUv.x * uvDenominatorY,
+                                uvNumeratorY1 - interpolatedUv.y * uvDenominatorY) * inversePerspective;
+                        }
                         const glm::vec3 interpolatedColor = correctedA * clipped[cornerA].color
                                                           + correctedB * clipped[cornerB].color
                                                           + correctedC * clipped[cornerC].color;
                         glm::vec3       baseColor         = interpolatedColor * baseColorFactor;
                         if (hasBaseColorMap)
                         {
-                            baseColor *= baseColorMap->sample(interpolatedUv.x, interpolatedUv.y);
+                            baseColor *= baseColorMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY);
                         }
 
                         // Shell-fur strand crop (fur.frag mirror): the layer
@@ -2351,7 +2574,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             if (hasNormalMap)
                             {
                                 const glm::vec3 normalMapSample
-                                    = normalMap->sample(interpolatedUv.x, interpolatedUv.y) * 2.0f - 1.0f;
+                                    = normalMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY) * 2.0f - 1.0f;
                                 const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
                                     normalMapSample.y * normalScale,
                                     normalMapSample.z));
@@ -2370,7 +2593,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             if (hasMetallicRoughnessMap)
                             {
                                 const glm::vec3 metallicRoughnessSample
-                                    = metallicRoughnessMap->sample(interpolatedUv.x, interpolatedUv.y);
+                                    = metallicRoughnessMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY);
                                 metallic *= metallicRoughnessSample.b;
                                 roughness *= metallicRoughnessSample.g;
                             }
@@ -2380,7 +2603,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 = hasOcclusion
                                     ? 1.0f
                                           - occlusionStrength
-                                                * (1.0f - occlusionMap->sample(interpolatedUv.x, interpolatedUv.y).r)
+                                                * (1.0f - occlusionMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY).r)
                                     : 1.0f;
                             shaded = pbrShade(normal,
                                 interpolatedPosition,
@@ -2416,7 +2639,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         {
                             if (hasEmissiveMap)
                             {
-                                shaded += emissiveColor * emissiveMap->sample(interpolatedUv.x, interpolatedUv.y);
+                                shaded += emissiveColor * emissiveMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY);
                             }
                             else
                             {
@@ -2566,7 +2789,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
 // regression of the geometry half). The previous single-loop core had no
 // escaped stores in the geometry half at all and got this for free.
 std::size_t HeadlessBackend::prepareFanTriangles(
-    const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triangleIndex, TileBinRecord (&outFans)[2]) const
+    const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triangleIndex, TileBinRecord (&outFans)[6]) const
 {
     // Inputs (value copies - registers, not aliasable memory).
     const glm::mat4   model             = setup.model;
@@ -2601,7 +2824,9 @@ std::size_t HeadlessBackend::prepareFanTriangles(
             corners[corner].clip                 = transformed.clip;
             corners[corner].worldPosition        = transformed.worldPosition;
             corners[corner].worldNormal          = unlit ? glm::vec3(0.0f) : transformed.worldNormal;
-            if (unlit)
+            // Keep world positions for declared-winding unlit draws (the
+            // per-triangle cull test reads them; see rasterizeTriangles).
+            if (unlit && !enableBackFaceCull)
                 corners[corner].worldPosition = glm::vec3(0.0f);
         }
         else
@@ -2621,7 +2846,10 @@ std::size_t HeadlessBackend::prepareFanTriangles(
             else
             {
                 corners[corner].worldNormal   = glm::vec3(0.0f);
-                corners[corner].worldPosition = glm::vec3(0.0f);
+                if (!enableBackFaceCull)
+                {
+                    corners[corner].worldPosition = glm::vec3(0.0f);
+                }
             }
         }
         corners[corner].color = glm::make_vec3(colorData + vertexIndex * 3);
@@ -2639,7 +2867,7 @@ std::size_t HeadlessBackend::prepareFanTriangles(
         }
     }
 
-    RasterVertex  clipped[4];
+    RasterVertex  clipped[9]; // near-clip emits up to 4; the screen-rect clip result (up to 8) is copied back
     std::uint32_t clippedCount = 0;
     // Near-plane clip: w + z >= 0 is inside. Fully-inside triangles skip
     // the Sutherland-Hodgman walk; otherwise emit inside corners and the
@@ -2687,21 +2915,59 @@ std::size_t HeadlessBackend::prepareFanTriangles(
         return 0;
     }
 
-    float screenX[4];
-    float screenY[4];
-    float depth[4];
-    float clipW[4];
-    float inverseW[4];
-    for (std::uint32_t vertex = 0; vertex < clippedCount; ++vertex)
+    float screenX[9];
+    float screenY[9];
+    float depth[9];
+    float clipW[9];
+    float inverseW[9];
+    const auto projectPolygon = [&](const RasterVertex *polygon, std::uint32_t vertexCount)
     {
-        clipW[vertex]    = clipped[vertex].clip.w;
-        inverseW[vertex] = 1.0f / clipW[vertex];
-        const float ndcX = clipped[vertex].clip.x * inverseW[vertex];
-        const float ndcY = clipped[vertex].clip.y * inverseW[vertex];
-        const float ndcZ = clipped[vertex].clip.z * inverseW[vertex];
-        screenX[vertex]  = (ndcX * 0.5f + 0.5f) * static_cast<float>(framebufferWidthLocal);
-        screenY[vertex]  = (1.0f - (ndcY * 0.5f + 0.5f)) * static_cast<float>(framebufferHeightLocal);
-        depth[vertex]    = ndcZ * 0.5f + 0.5f;
+        for (std::uint32_t vertex = 0; vertex < vertexCount; ++vertex)
+        {
+            clipW[vertex]    = polygon[vertex].clip.w;
+            inverseW[vertex] = 1.0f / clipW[vertex];
+            const float ndcX = polygon[vertex].clip.x * inverseW[vertex];
+            const float ndcY = polygon[vertex].clip.y * inverseW[vertex];
+            const float ndcZ = polygon[vertex].clip.z * inverseW[vertex];
+            screenX[vertex]  = (ndcX * 0.5f + 0.5f) * static_cast<float>(framebufferWidthLocal);
+            screenY[vertex]  = (1.0f - (ndcY * 0.5f + 0.5f)) * static_cast<float>(framebufferHeightLocal);
+            depth[vertex]    = ndcZ * 0.5f + 0.5f;
+        }
+    };
+    projectPolygon(clipped, clippedCount);
+    // Guard-band screen-rect clip (see rasterizeTriangles): a near-plane
+    // crossing projects to astronomical screen coordinates and the fan's
+    // clamped pixel window becomes the whole framebuffer for a sliver
+    // triangle. Clipping against the framebuffer rectangle in clip space
+    // keeps every record's window tight; off-screen pixels were never
+    // shaded, so output is unchanged.
+    {
+        bool insideScreen = true;
+        const float maxScreenX = static_cast<float>(framebufferWidthLocal) - 1.0f;
+        const float maxScreenY = static_cast<float>(framebufferHeightLocal) - 1.0f;
+        for (std::uint32_t vertex = 0; vertex < clippedCount && insideScreen; ++vertex)
+        {
+            insideScreen = screenX[vertex] >= 0.0f && screenX[vertex] <= maxScreenX && screenY[vertex] >= 0.0f
+                && screenY[vertex] <= maxScreenY;
+        }
+        if (!insideScreen)
+        {
+            RasterVertex         rectScratchA[9];
+            RasterVertex         rectScratchB[9];
+            const RasterVertex  *rectPolygon = nullptr;
+            const std::uint32_t  rectCount
+                = clipPolygonToFramebuffer(clipped, clippedCount, rectScratchA, rectScratchB, rectPolygon);
+            if (rectCount < 3)
+            {
+                return 0;
+            }
+            clippedCount = rectCount;
+            projectPolygon(rectPolygon, clippedCount);
+            for (std::uint32_t vertex = 0; vertex < clippedCount; ++vertex)
+            {
+                clipped[vertex] = rectPolygon[vertex];
+            }
+        }
     }
 
     glm::vec3 tangentVector(1.0f, 0.0f, 0.0f);
@@ -2754,6 +3020,31 @@ std::size_t HeadlessBackend::prepareFanTriangles(
         record.tangent           = tangentVector;
         record.bitangent         = bitangentVector;
         record.tangentInverseMax = tangentInverseMax;
+        // UV gradients for mip selection (see TileBinRecord): the barycentric
+        // weights are affine over the screen triangle, so the 1/w-weighted UV
+        // numerator P and denominator S are affine too - only their gradients
+        // are needed per pixel (the quotient rule turns them into dUv/dx and
+        // dUv/dy).
+        {
+            const float invArea = 1.0f / area;
+            const float gradAx = -(record.screenY[2] - record.screenY[1]) * invArea;
+            const float gradAy = (record.screenX[2] - record.screenX[1]) * invArea;
+            const float gradBx = -(record.screenY[0] - record.screenY[2]) * invArea;
+            const float gradBy = (record.screenX[0] - record.screenX[2]) * invArea;
+            const float gradCx = -(gradAx + gradBx);
+            const float gradCy = -(gradAy + gradBy);
+            const float wA = record.inverseClipW[0], wB = record.inverseClipW[1], wC = record.inverseClipW[2];
+            record.uvNumeratorX[0] = gradAx * wA * record.corners[0].uv.x + gradBx * wB * record.corners[1].uv.x
+                + gradCx * wC * record.corners[2].uv.x;
+            record.uvNumeratorX[1] = gradAx * wA * record.corners[0].uv.y + gradBx * wB * record.corners[1].uv.y
+                + gradCx * wC * record.corners[2].uv.y;
+            record.uvNumeratorY[0] = gradAy * wA * record.corners[0].uv.x + gradBy * wB * record.corners[1].uv.x
+                + gradCy * wC * record.corners[2].uv.x;
+            record.uvNumeratorY[1] = gradAy * wA * record.corners[0].uv.y + gradBy * wB * record.corners[1].uv.y
+                + gradCy * wC * record.corners[2].uv.y;
+            record.uvDenominatorX = gradAx * wA + gradBx * wB + gradCx * wC;
+            record.uvDenominatorY = gradAy * wA + gradBy * wB + gradCy * wC;
+        }
         record.sourceTriangle    = static_cast<std::uint32_t>(triangleIndex);
     }
     return fanCount;
@@ -2835,12 +3126,25 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     const float correctedC         = 1.0f - correctedA - correctedB;
 
     const glm::vec2 interpolatedUv    = correctedA * cornerA.uv + correctedB * cornerB.uv + correctedC * cornerC.uv;
+    // Per-pixel UV derivatives from the record's affine gradients (see
+    // TileBinRecord): the quotient rule over P/S yields dUv/dx and dUv/dy at
+    // this pixel, which the mip-selecting sampler turns into a level.
+    glm::vec2 uvDerivativeX(0.0f);
+    glm::vec2 uvDerivativeY(0.0f);
+    if (hasBaseColorMap || hasNormalMap || hasMetallicRoughnessMap || hasOcclusion || hasEmissiveMap)
+    {
+        const float invS = inversePerspective;
+        uvDerivativeX = glm::vec2(record.uvNumeratorX[0] - interpolatedUv.x * record.uvDenominatorX,
+            record.uvNumeratorX[1] - interpolatedUv.y * record.uvDenominatorX) * invS;
+        uvDerivativeY = glm::vec2(record.uvNumeratorY[0] - interpolatedUv.x * record.uvDenominatorY,
+            record.uvNumeratorY[1] - interpolatedUv.y * record.uvDenominatorY) * invS;
+    }
     const glm::vec3 interpolatedColor = correctedA * cornerA.color + correctedB * cornerB.color
                                       + correctedC * cornerC.color;
     glm::vec3       baseColor         = interpolatedColor * baseColorFactor;
     if (hasBaseColorMap)
     {
-        baseColor *= baseColorMap->sample(interpolatedUv.x, interpolatedUv.y);
+        baseColor *= baseColorMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY);
     }
 
     glm::vec3 shaded = baseColor;
@@ -2869,7 +3173,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         }
         if (hasNormalMap)
         {
-            const glm::vec3 normalMapSample = normalMap->sample(interpolatedUv.x, interpolatedUv.y) * 2.0f - 1.0f;
+            const glm::vec3 normalMapSample = normalMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY) * 2.0f - 1.0f;
             const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
                 normalMapSample.y * normalScale,
                 normalMapSample.z));
@@ -2883,7 +3187,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         float roughness = roughnessFactor;
         if (hasMetallicRoughnessMap)
         {
-            const glm::vec3 metallicRoughnessSample = metallicRoughnessMap->sample(interpolatedUv.x, interpolatedUv.y);
+            const glm::vec3 metallicRoughnessSample = metallicRoughnessMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY);
             metallic *= metallicRoughnessSample.b;
             roughness *= metallicRoughnessSample.g;
         }
@@ -2892,7 +3196,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         const float occlusion
             = hasOcclusion
                   ? 1.0f
-                        - occlusionStrength * (1.0f - occlusionMap->sample(interpolatedUv.x, interpolatedUv.y).r)
+                        - occlusionStrength * (1.0f - occlusionMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY).r)
                   : 1.0f;
         shaded = pbrShade(normal,
             interpolatedPosition,
@@ -2934,7 +3238,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     {
         if (hasEmissiveMap)
         {
-            shaded += emissiveColor * emissiveMap->sample(interpolatedUv.x, interpolatedUv.y);
+            shaded += emissiveColor * emissiveMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY);
         }
         else
         {
@@ -3131,10 +3435,11 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
     {
         return false;
     }
-    // Worst case every triangle clips into a two-triangle fan. Draws that
-    // could exceed the record cap fall back to the sequential path instead
-    // of growing the persistent scratch without bound.
-    if (triangleCount > maxTileRecords_ / 2u)
+    // Worst case every triangle clips into a six-triangle fan (near-plane
+    // clip followed by the screen-rect clip). Draws that could exceed the
+    // record cap fall back to the sequential path instead of growing the
+    // persistent scratch without bound.
+    if (triangleCount > maxTileRecords_ / 6u)
     {
         return false;
     }
@@ -3143,7 +3448,7 @@ bool HeadlessBackend::buildTileRecords(const HeadlessMesh &mesh, const RasterSet
     {
         tileRecords_.clear();
         tileRecords_.reserve(triangleCount * 2u);
-        TileBinRecord fans[2]; // reused across triangles; see rasterizeTriangles
+        TileBinRecord fans[6]; // reused across triangles; see rasterizeTriangles
         for (std::size_t triangle = 0; triangle < triangleCount; ++triangle)
         {
             const std::size_t fanCount = prepareFanTriangles(mesh, setup, triangle, fans);

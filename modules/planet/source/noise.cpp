@@ -11,7 +11,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <engine/planet/noise.hpp>
+#include <engine/planet/types.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -265,6 +267,52 @@ double simplex3ImproveXY(std::int64_t seed, double x, double y, double z)
     const double yr = y + s2 + zz;
     const double zr = xy * -root3Over3 + zz;
     return static_cast<double>(noise3UnrotatedBase(seed, xr, yr, zr));
+}
+
+double worley3(std::int64_t seed, double x, double y, double z)
+{
+    // Lattice cell of the sample and the feature point of one cell: the
+    // cell's integer coordinates hashed through the seed into a jittered
+    // point inside the cell (a fixed margin keeps neighbor searches simple -
+    // every feature point stays within its own cell, so the 27-cell walk
+    // always finds the true F1 neighbor).
+    const std::int64_t cellX = static_cast<std::int64_t>(std::floor(x));
+    const std::int64_t cellY = static_cast<std::int64_t>(std::floor(y));
+    const std::int64_t cellZ = static_cast<std::int64_t>(std::floor(z));
+    const auto featurePoint = [seed](std::int64_t cx, std::int64_t cy, std::int64_t cz, double &fx, double &fy, double &fz)
+    {
+        std::uint64_t mixed = static_cast<std::uint64_t>(cx) * 0x9E3779B97F4A7C15ull
+                            ^ static_cast<std::uint64_t>(cy) * 0xC2B2AE3D27D4EB4Full
+                            ^ static_cast<std::uint64_t>(cz) * 0x165667B19E3779F9ull
+                            ^ static_cast<std::uint64_t>(seed);
+        mixed = splitMix64(mixed);
+        fx = static_cast<double>(cx) + static_cast<double>(mixed >> 40) / 16777216.0;
+        fy = static_cast<double>(cy) + static_cast<double>((mixed >> 16) & 0xFFFFFFull) / 16777216.0;
+        fz = static_cast<double>(cz) + static_cast<double>(mixed & 0xFFFFFFull) / 16777216.0;
+    };
+    double bestSquared = 1.0e30;
+    for (std::int64_t offsetZ = -1; offsetZ <= 1; ++offsetZ)
+    {
+        for (std::int64_t offsetY = -1; offsetY <= 1; ++offsetY)
+        {
+            for (std::int64_t offsetX = -1; offsetX <= 1; ++offsetX)
+            {
+                double fx = 0.0;
+                double fy = 0.0;
+                double fz = 0.0;
+                featurePoint(cellX + offsetX, cellY + offsetY, cellZ + offsetZ, fx, fy, fz);
+                const double dx = fx - x;
+                const double dy = fy - y;
+                const double dz = fz - z;
+                const double distanceSquared = dx * dx + dy * dy + dz * dz;
+                bestSquared = std::min(bestSquared, distanceSquared);
+            }
+        }
+    }
+    // Normalize by the cell scale (one cell spans [0, 1] of distance) and
+    // clamp the diagonal overshoot: a distance beyond one cell cannot come
+    // from the true F1 feature (the 27-cell walk would have found it).
+    return std::min(1.0, std::sqrt(bestSquared));
 }
 
 } // namespace noise

@@ -239,6 +239,9 @@ void setSnowLine(PlanetGenerationParams &params, double value) { params.snowLine
 void setBeachWidth(PlanetGenerationParams &params, double value) { params.beachWidthMeters = value; }
 void setRockSlopeThreshold(PlanetGenerationParams &params, double value) { params.rockSlopeThreshold = value; }
 void setRockStrataContrast(PlanetGenerationParams &params, double value) { params.rockStrataContrast = value; }
+void setTerrainTextureTileGround(PlanetGenerationParams &params, double value) { params.terrainTextureTileMetersGround = value; }
+void setTerrainTextureTileRock(PlanetGenerationParams &params, double value) { params.terrainTextureTileMetersRock = value; }
+void setWaterTextureTile(PlanetGenerationParams &params, double value) { params.waterTextureTileMeters = value; }
 void setBiomeBlendWidth(PlanetGenerationParams &params, double value) { params.biomeBlendWidth = value; }
 void setSlopeBlendWidth(PlanetGenerationParams &params, double value) { params.slopeBlendWidth = value; }
 void setElevationBlendFraction(PlanetGenerationParams &params, double value) { params.elevationBlendFraction = value; }
@@ -440,6 +443,9 @@ constexpr SettingRow kSettingRows[] = {
     {"beach_wet_darkening",           SettingKind::Floating, setBeachWetDarkening},
     {"rock_slope_threshold",          SettingKind::Floating, setRockSlopeThreshold},
     {"rock_strata_contrast",          SettingKind::Floating, setRockStrataContrast},
+    {"terrain_texture_tile_meters_ground", SettingKind::Floating, setTerrainTextureTileGround},
+    {"terrain_texture_tile_meters_rock",   SettingKind::Floating, setTerrainTextureTileRock},
+    {"water_texture_tile_meters",          SettingKind::Floating, setWaterTextureTile},
     {"biome_blend_width",             SettingKind::Floating, setBiomeBlendWidth},
     {"slope_blend_width",             SettingKind::Floating, setSlopeBlendWidth},
     {"elevation_blend_fraction",      SettingKind::Floating, setElevationBlendFraction},

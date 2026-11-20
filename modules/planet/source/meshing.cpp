@@ -51,11 +51,15 @@ inline void cornerOffset(std::uint32_t corner, std::uint32_t &dx, std::uint32_t 
 }
 
 // Dedup key for an edge between two padded-grid points a step apart on
-// `axis` (local to one chunk's build).
-inline std::uint64_t edgeKey(std::uint32_t ax, std::uint32_t ay, std::uint32_t az, std::uint32_t axis)
+// `axis` within one surface group (local to one chunk's build). The group
+// rides the top bits: vertices at a surface-group boundary exist once per
+// group, so the texture sets never share a vertex whose UV scale (or, later,
+// texture-dependent data) would disagree.
+inline std::uint64_t edgeKey(std::uint32_t ax, std::uint32_t ay, std::uint32_t az, std::uint32_t axis, std::uint32_t group)
 {
-    return (static_cast<std::uint64_t>(axis) << 60) | (static_cast<std::uint64_t>(ax) << 40)
-         | (static_cast<std::uint64_t>(ay) << 20) | static_cast<std::uint64_t>(az);
+    return (static_cast<std::uint64_t>(axis) << 61) | (static_cast<std::uint64_t>(group) << 59)
+         | (static_cast<std::uint64_t>(ax) << 39) | (static_cast<std::uint64_t>(ay) << 19)
+         | static_cast<std::uint64_t>(az);
 }
 
 // Canonical endpoints of a marching-cubes edge: lexicographic minimum first.
@@ -82,24 +86,27 @@ inline void canonicalEdge(std::uint32_t pax, std::uint32_t pay, std::uint32_t pa
 // albedo vs water depth tint) and their triangle orientation (fixed winding
 // vs radial auto-orient); everything else - corner classification, edge
 // canonicalization, zero-crossing interpolation, edge-vertex dedup and the
-// case-table walk - is this one implementation. The four callables keep the
+// case-table walk - is this one implementation. The five callables keep the
 // shared walk free of per-cell virtual or std::function dispatch:
 //   cellActive(cx, cy, cz) -> bool - whether the cell marches at all;
+//   cellGroup(cx, cy, cz) -> std::uint32_t - the surface group the cell's
+//     triangles belong to (terrain pass: ground vs rock; water pass: 0);
 //   skipCell(cubeIndex, buriedMin) -> bool - fully solid/air cells, and
 //     (for the water pass, which passes the terrain grid as buriedField)
 //     cells buried under the terrain surface;
-//   makeVertex(aX, aY, aZ, bX, bY, bZ, edgeAxis, t, point) -> std::uint32_t
-//     - assembles the vertex for a newly seen edge crossing and returns its
-//       slot in the pass's vertex buffer;
-//   emitTriangle(cubeIndex, slotVertex) - pushes the case table's triangles
-//     for the cell.
+//   makeVertex(aX, aY, aZ, bX, bY, bZ, edgeAxis, t, point, group) ->
+//     std::uint32_t - assembles the vertex for a newly seen edge crossing
+//       and returns its slot in the pass's vertex buffer;
+//   emitTriangle(cubeIndex, slotVertex, group) - pushes the case table's
+//     triangles for the cell.
 // `buriedField` (optional) is sampled alongside the field so skipCell can
 // reason about the other pass's values; nullptr skips the extra reads.
-template <typename CellActive, typename SkipCell, typename MakeVertex, typename EmitTriangle>
+template <typename CellActive, typename CellGroup, typename SkipCell, typename MakeVertex, typename EmitTriangle>
 void marchCells(const std::vector<double> &field, const std::vector<double> *buriedField, std::int64_t minCell,
     std::int64_t maxCell, const std::array<double, 64 + 3> &axisX, const std::array<double, 64 + 3> &axisY,
     const std::array<double, 64 + 3> &axisZ, std::uint32_t paddedN, FlatKeyMap<std::uint32_t> &vertexForEdge,
-    CellActive &&cellActive, SkipCell &&skipCell, MakeVertex &&makeVertex, EmitTriangle &&emitTriangle)
+    CellActive &&cellActive, CellGroup &&cellGroup, SkipCell &&skipCell, MakeVertex &&makeVertex,
+    EmitTriangle &&emitTriangle)
 {
     const std::size_t strideY = paddedN;
     const std::size_t strideZ = static_cast<std::size_t>(paddedN) * paddedN;
@@ -146,6 +153,7 @@ void marchCells(const std::vector<double> &field, const std::vector<double> *bur
                 {
                     continue;
                 }
+                const std::uint32_t group = cellGroup(cx, cy, cz);
 
                 std::uint32_t slotVertex[12];
                 for (std::uint32_t slot = 0; slot < 12; ++slot)
@@ -167,7 +175,7 @@ void marchCells(const std::vector<double> &field, const std::vector<double> *bur
                     canonicalEdge(cx + 1 + adx, cy + 1 + ady, cz + 1 + adz, cx + 1 + bdx, cy + 1 + bdy, cz + 1 + bdz,
                         aX, aY, aZ, bX, bY, bZ, edgeAxis);
 
-                    const std::uint64_t key = edgeKey(aX, aY, aZ, edgeAxis);
+                    const std::uint64_t key = edgeKey(aX, aY, aZ, edgeAxis, group);
                     const std::uint32_t *vertexSlot = vertexForEdge.find(key);
                     if (vertexSlot != nullptr)
                     {
@@ -196,13 +204,13 @@ void marchCells(const std::vector<double> &field, const std::vector<double> *bur
                         const Vec3 point = pointA + (pointB - pointA) * t;
 
                         const std::uint32_t newSlot
-                            = makeVertex(aX, aY, aZ, bX, bY, bZ, edgeAxis, t, point);
+                            = makeVertex(aX, aY, aZ, bX, bY, bZ, edgeAxis, t, point, group);
                         vertexForEdge.findOrInsert(key) = newSlot;
                         slotVertex[slot] = newSlot;
                     }
                 }
 
-                emitTriangle(cubeIndex, slotVertex);
+                emitTriangle(cubeIndex, slotVertex, group);
             }
         }
     }
@@ -675,8 +683,14 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     { return grid[static_cast<std::size_t>(px) + strideY * py + strideZ * pz]; };
 
     // ---- marching cubes over the inner cells --------------------------------------
-    std::vector<PlanetVertex>                        &vertices = mesh.terrainVertices;
-    std::vector<std::uint32_t>                       &indices  = mesh.terrainIndices;
+    // Terrain surface groups (see meshing.hpp): ground cells and rock cells
+    // build into their own vertex/index buffers so consumers can texture the
+    // two surface characters differently. The classification is a pure
+    // function of the chunk's density grid (the cell gradient's slope against
+    // the radial direction), so the same cell lands in the same group in
+    // every build of the chunk.
+    std::vector<PlanetVertex>                        &vertices = mesh.terrainVertices[terrainSurfaceGroupGround];
+    std::vector<std::uint32_t>                       &indices  = mesh.terrainIndices[terrainSurfaceGroupGround];
     // Reserve the typical surface budget up front: a terrain-crossing chunk
     // carries a few thousand vertices, and the growth reallocation of a
     // vector of 44-byte vertices is one of the largest per-chunk costs the
@@ -684,6 +698,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // only waste a reservation, never an allocation of the full size.
     vertices.reserve(gridCellCount / 2u);
     indices.reserve(static_cast<std::size_t>(gridCellCount) * 6u);
+    mesh.terrainVertices[terrainSurfaceGroupRock].reserve(gridCellCount / 8u);
+    mesh.terrainIndices[terrainSurfaceGroupRock].reserve(static_cast<std::size_t>(gridCellCount) * 2u);
     // Edge-vertex dedup over the chunk's own lattice points; the flat map is
     // the project's open-addressing table (single cache line per lookup, no
     // node allocations) and the keys are chunk-local. Like the density grids
@@ -701,16 +717,6 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     // table, and the scratch keeps its capacity across builds.
     vertexForEdge.clear();
     vertexForEdge.reserve(gridCellCount);
-
-    // Spherical reference frame of the spin axis (see the UV mapping below).
-    // With the default upright axis this reduces to east = +x, north = +z.
-    const Vec3 axisVector{params.axis[0], params.axis[1], params.axis[2]};
-    Vec3 equatorEast = normalized(cross(axisVector, Vec3{0.0, 0.0, 1.0}));
-    if (length(equatorEast) < 1.0e-6)
-    {
-        equatorEast = Vec3{1.0, 0.0, 0.0}; // axis parallel to z: any east works
-    }
-    const Vec3 equatorNorth = cross(equatorEast, axisVector);
 
     // Gradient of the trilinear interpolant at an edge, averaged over the (up
     // to) four cells adjacent to the edge on the canonical side. A single-cell
@@ -989,11 +995,47 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             + c[4].provinceCarbonate * w001 + c[5].provinceCarbonate * w101 + c[6].provinceCarbonate * w011 + c[7].provinceCarbonate * w111;
     };
 
+    // World-space tiling frame for the surface textures (see the UV emission
+    // below): each vertex projects onto the plane perpendicular to its
+    // DOMINANT NORMAL AXIS (a cubemap-style projection), so cliff walls tile
+    // by their horizontal coordinates instead of smearing the ground texture
+    // across them. The two non-dominant planet-local coordinates divided by
+    // the group's tile size form the texture coordinates; a shared vertex
+    // evaluates the identical normal, position and tile scale from either
+    // side of a chunk boundary, so the tiling continues across chunks.
+    const double tileMeters[terrainSurfaceGroupCount] = {
+        std::max(0.1, params.terrainTextureTileMetersGround),
+        std::max(0.1, params.terrainTextureTileMetersRock)};
+    const auto tiledSurfaceUv = [](const Vec3 &point, const double normal[3], double tileMeters) -> std::pair<float, float>
+    {
+        const double absX = std::abs(normal[0]);
+        const double absY = std::abs(normal[1]);
+        const double absZ = std::abs(normal[2]);
+        double u = 0.0;
+        double v = 0.0;
+        if (absX >= absY && absX >= absZ)
+        {
+            u = point.y;
+            v = point.z;
+        }
+        else if (absY >= absZ)
+        {
+            u = point.x;
+            v = point.z;
+        }
+        else
+        {
+            u = point.x;
+            v = point.y;
+        }
+        return {static_cast<float>(u / tileMeters), static_cast<float>(v / tileMeters)};
+    };
+
     // Terrain pass: own cells [0, n)^3 always march (cellNeedsMarching
     // above); vertices carry gradient normals and the climate sampler's
     // blended albedo; triangles use the fixed terrain winding.
     auto terrainMakeVertex = [&](std::uint32_t aX, std::uint32_t aY, std::uint32_t aZ, std::uint32_t, std::uint32_t,
-        std::uint32_t, std::uint32_t edgeAxis, double, const Vec3 &point) -> std::uint32_t
+        std::uint32_t, std::uint32_t edgeAxis, double, const Vec3 &point, std::uint32_t group) -> std::uint32_t
     {
         double gradient[3] = {0.0, 0.0, 0.0};
         edgeGradient(aX, aY, aZ, edgeAxis, gradient);
@@ -1048,21 +1090,21 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         vertex.color[1]    = climate.color[1] * static_cast<float>(cloudShade);
         vertex.color[2]    = climate.color[2] * static_cast<float>(cloudShade);
         applyDebugBorderTint(vertex.color, chunkBorderWeight(point));
-        // Spherical mapping around the SPIN AXIS, not the world Y axis:
-        // climate latitude already follows the axis, and the two disagree
-        // when the axis is tilted. With the default upright axis the frame
-        // reduces to the plain atan2(z, x) mapping.
-        const double longitude = std::atan2(dot(unitRadial, equatorNorth), dot(unitRadial, equatorEast)) * 0.15915494309189535 + 0.5;
-        const double latitude  = 0.5 - std::asin(std::clamp(dot(unitRadial, axisVector), -1.0, 1.0)) * 0.3183098861837907;
-        vertex.uv[0] = static_cast<float>(longitude);
-        vertex.uv[1] = static_cast<float>(latitude);
+        // Texture coordinates: the cubemap-style projection of the dominant
+        // normal axis (see tiledSurfaceUv), scaled by the group's tile size.
+        const double unitNormal[3] = {nx, ny, nz};
+        const auto [tileU, tileV] = tiledSurfaceUv(point, unitNormal, tileMeters[group]);
+        vertex.uv[0] = tileU;
+        vertex.uv[1] = tileV;
 
-        const std::uint32_t slot = static_cast<std::uint32_t>(vertices.size());
-        vertices.push_back(vertex);
+        std::vector<PlanetVertex> &groupVertices = mesh.terrainVertices[group];
+        const std::uint32_t slot = static_cast<std::uint32_t>(groupVertices.size());
+        groupVertices.push_back(vertex);
         return slot;
     };
-    auto terrainEmitTriangle = [&](std::uint32_t cubeIndex, const std::uint32_t *slotVertex)
+    auto terrainEmitTriangle = [&](std::uint32_t cubeIndex, const std::uint32_t *slotVertex, std::uint32_t group)
     {
+        std::vector<std::uint32_t> &groupIndices = mesh.terrainIndices[group];
         for (std::uint32_t triangle = 0; triangle < 5; ++triangle)
         {
             const std::int8_t v0 = detail::kTriTable[cubeIndex][triangle * 3 + 0];
@@ -1074,19 +1116,63 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             const std::int8_t v2 = detail::kTriTable[cubeIndex][triangle * 3 + 2];
             if (!detail::kTerrainFlipWinding)
             {
-                indices.insert(indices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
+                groupIndices.insert(groupIndices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
                     slotVertex[static_cast<std::uint32_t>(v1)], slotVertex[static_cast<std::uint32_t>(v2)]});
             }
             else
             {
-                indices.insert(indices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
+                groupIndices.insert(groupIndices.end(), {slotVertex[static_cast<std::uint32_t>(v0)],
                     slotVertex[static_cast<std::uint32_t>(v2)], slotVertex[static_cast<std::uint32_t>(v1)]});
             }
             mesh.triangleCount += 1;
         }
     };
+    // Surface-group classification from the chunk's own density grid: the
+    // cell's central-difference gradient (over the cell's eight corners)
+    // gives the cell's surface slope against the radial direction, and cells
+    // whose slope crosses the rock threshold march as ROCK - the same gate
+    // the climate sampler applies to the rock albedo, evaluated at cell
+    // granularity. A near-zero gradient (locally flat field) falls back to
+    // the radial direction: slope 0, ground.
+    const double rockSlopeThreshold = std::clamp(params.rockSlopeThreshold, 0.05, 0.95);
+    const auto terrainCellGroup = [&](std::int64_t cx, std::int64_t cy, std::int64_t cz) -> std::uint32_t
+    {
+        const std::uint32_t px = static_cast<std::uint32_t>(cx + 1);
+        const std::uint32_t py = static_cast<std::uint32_t>(cy + 1);
+        const std::uint32_t pz = static_cast<std::uint32_t>(cz + 1);
+        double gradient[3] = {
+            0.25 * ((sampleGrid(densities, px + 1, py, pz) + sampleGrid(densities, px + 1, py + 1, pz)
+                   + sampleGrid(densities, px + 1, py, pz + 1) + sampleGrid(densities, px + 1, py + 1, pz + 1))
+                 - (sampleGrid(densities, px, py, pz) + sampleGrid(densities, px, py + 1, pz)
+                   + sampleGrid(densities, px, py, pz + 1) + sampleGrid(densities, px, py + 1, pz + 1))),
+            0.25 * ((sampleGrid(densities, px, py + 1, pz) + sampleGrid(densities, px + 1, py + 1, pz)
+                   + sampleGrid(densities, px, py + 1, pz + 1) + sampleGrid(densities, px + 1, py + 1, pz + 1))
+                 - (sampleGrid(densities, px, py, pz) + sampleGrid(densities, px + 1, py, pz)
+                   + sampleGrid(densities, px, py, pz + 1) + sampleGrid(densities, px + 1, py, pz + 1))),
+            0.25 * ((sampleGrid(densities, px, py, pz + 1) + sampleGrid(densities, px + 1, py, pz + 1)
+                   + sampleGrid(densities, px, py + 1, pz + 1) + sampleGrid(densities, px + 1, py + 1, pz + 1))
+                 - (sampleGrid(densities, px, py, pz) + sampleGrid(densities, px + 1, py, pz)
+                   + sampleGrid(densities, px, py + 1, pz) + sampleGrid(densities, px + 1, py + 1, pz)))};
+        // d > 0 = inside: the outward normal opposes the gradient.
+        gradient[0] = -gradient[0];
+        gradient[1] = -gradient[1];
+        gradient[2] = -gradient[2];
+        const double gradientLength = std::sqrt(gradient[0] * gradient[0] + gradient[1] * gradient[1] + gradient[2] * gradient[2]);
+        const double cellPoint[3] = {(axisX[px] + axisX[px + 1]) * 0.5, (axisY[py] + axisY[py + 1]) * 0.5,
+            (axisZ[pz] + axisZ[pz + 1]) * 0.5};
+        const double cellRadius = std::max(1.0e-9,
+            std::sqrt(cellPoint[0] * cellPoint[0] + cellPoint[1] * cellPoint[1] + cellPoint[2] * cellPoint[2]));
+        double slope01 = 0.0;
+        if (gradientLength > 1.0e-12)
+        {
+            const double inverseLength = 1.0 / gradientLength;
+            slope01 = std::clamp(1.0 - (gradient[0] * cellPoint[0] + gradient[1] * cellPoint[1] + gradient[2] * cellPoint[2])
+                * inverseLength / cellRadius, 0.0, 1.0);
+        }
+        return slope01 > rockSlopeThreshold ? terrainSurfaceGroupRock : terrainSurfaceGroupGround;
+    };
     marchCells(densities, nullptr, -1, static_cast<std::int64_t>(n), axisX, axisY, axisZ, paddedN, vertexForEdge,
-        cellNeedsMarching,
+        cellNeedsMarching, terrainCellGroup,
         [](std::uint32_t cubeIndex, double) { return cubeIndex == 0u || cubeIndex == 255u; },
         terrainMakeVertex, terrainEmitTriangle);
 
@@ -1178,7 +1264,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // terrain surface (the terrain grid rides along as buriedField), and
         // auto-orient every triangle against the true radial direction.
         auto waterMakeVertex = [&](std::uint32_t aX, std::uint32_t aY, std::uint32_t aZ, std::uint32_t bX,
-            std::uint32_t bY, std::uint32_t bZ, std::uint32_t edgeAxis, double, const Vec3 &point) -> std::uint32_t
+            std::uint32_t bY, std::uint32_t bZ, std::uint32_t edgeAxis, double, const Vec3 &point,
+            std::uint32_t) -> std::uint32_t
         {
             const double radius = std::max(1.0e-9, length(point));
             const Vec3   radial = point * (1.0 / radius);
@@ -1402,14 +1489,19 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                 vertex.color[channel] = blended * static_cast<float>(cloudShade);
             }
             applyDebugBorderTint(vertex.color, chunkBorderWeight(point));
-            vertex.uv[0] = 0.0f;
-            vertex.uv[1] = 0.0f;
+            // Texture coordinates: the sea sheet tiles by the same cubemap
+            // projection of the RADIAL direction (stable across the wave
+            // slope's normal wiggles), scaled by the water tile size.
+            const double radialUnit[3] = {radial.x, radial.y, radial.z};
+            const auto [waterU, waterV] = tiledSurfaceUv(point, radialUnit, params.waterTextureTileMeters);
+            vertex.uv[0] = waterU;
+            vertex.uv[1] = waterV;
 
             const std::uint32_t slot = static_cast<std::uint32_t>(waterVertices.size());
             waterVertices.push_back(vertex);
             return slot;
         };
-        auto waterEmitTriangle = [&](std::uint32_t cubeIndex, const std::uint32_t *slotVertex)
+        auto waterEmitTriangle = [&](std::uint32_t cubeIndex, const std::uint32_t *slotVertex, std::uint32_t)
         {
             for (std::uint32_t triangle = 0; triangle < 5; ++triangle)
             {
@@ -1449,6 +1541,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         };
         marchCells(waters, &densities, 0, static_cast<std::int64_t>(n) - 1, axisX, axisY, axisZ, paddedN, waterForEdge,
             [](std::int64_t, std::int64_t, std::int64_t) { return true; },
+            [](std::int64_t, std::int64_t, std::int64_t) { return 0u; },
             [](std::uint32_t cubeIndex, double minBuried)
             {
                 if (cubeIndex == 0u || cubeIndex == 255u)
@@ -1465,14 +1558,21 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     }
 
     // ---- hash (determinism self-tests + change detection) -----------------------------
-    // Each pass hashes its own buffers once; the combined hash folds the two
-    // per-pass values together, so the buffers are walked one time instead of
-    // two (a full chunk mesh is megabytes of vertex payload). The fold is a
-    // plain FNV round over the two 64-bit halves - order dependent by pass,
-    // which is fine: the terrain pass always precedes the water pass.
+    // Each pass hashes its own buffers once; the combined hash folds the
+    // per-pass values together, so the buffers are walked one time instead
+    // of several (a full chunk mesh is megabytes of vertex payload). The
+    // fold is a plain FNV round over the 64-bit halves - order dependent by
+    // pass and group, which is fine: terrain groups always precede the water
+    // pass, in fixed group order.
     std::uint64_t terrainHash = 0xCBF29CE484222325ull;
-    terrainHash = fnv1a64(mesh.terrainVertices.data(), mesh.terrainVertices.size() * sizeof(PlanetVertex), terrainHash);
-    mesh.terrainHash = fnv1a64(mesh.terrainIndices.data(), mesh.terrainIndices.size() * sizeof(std::uint32_t), terrainHash);
+    for (std::uint32_t group = 0; group < terrainSurfaceGroupCount; ++group)
+    {
+        terrainHash = fnv1a64(mesh.terrainVertices[group].data(),
+            mesh.terrainVertices[group].size() * sizeof(PlanetVertex), terrainHash);
+        terrainHash = fnv1a64(mesh.terrainIndices[group].data(),
+            mesh.terrainIndices[group].size() * sizeof(std::uint32_t), terrainHash);
+    }
+    mesh.terrainHash = terrainHash;
 
     std::uint64_t waterHash = 0xCBF29CE484222325ull;
     waterHash = fnv1a64(mesh.waterVertices.data(), mesh.waterVertices.size() * sizeof(PlanetVertex), waterHash);

@@ -38,7 +38,9 @@ namespace planet
 {
 
 // Borrowed view of one drawable chunk mesh (valid until the next update()).
-// Fields are append-only across ABI revisions (see capabilities.hpp).
+// Fields are append-only across ABI revisions (see capabilities.hpp): ABI 2
+// later gained surfaceGroup alongside isWater (the terrain mesh is
+// partitioned into surface groups, see meshing.hpp).
 struct PlanetChunkView
 {
     ChunkKey             key          = 0;
@@ -53,6 +55,10 @@ struct PlanetChunkView
     // conforming-mask change) keeps its key but changes its hash, so
     // consumers can detect the rebuild and refresh their uploaded copies.
     std::uint64_t        meshHash     = 0;
+    // Surface group of a terrain view (ground = 0, rock = 1; see
+    // terrainSurfaceGroup* in meshing.hpp). Water views carry 0: consumers
+    // distinguish them through isWater.
+    std::uint32_t        surfaceGroup = 0;
 };
 
 class Planet final
@@ -100,7 +106,7 @@ private:
         ChunkMesh     mesh;
         Vec3          center             = {};
         ConformMask   conformMask        = {}; // mask the mesh was built with (rebuild trigger on change)
-        bool          terrainEmpty       = true;
+        bool          terrainGroupEmpty[terrainSurfaceGroupCount] = {true, true};
         bool          waterEmpty         = true;
         std::uint64_t lastSelectedUpdate = 0;
     };
@@ -123,8 +129,23 @@ private:
     // distance-appropriate ancestor as a fallback draw and its coarsest
     // pure ancestor as a scaffold build candidate. Both walks are memoized
     // per pass in readyLeafAncestorStamps_ / ancestorFallbackMemo_, so
-    // chunks sharing ancestor chains resolve in near-constant time.
+    // chunks sharing ancestor chains resolve in near-constant time. Holes
+    // under the same parent share the whole chain above it, so the sweep
+    // itself runs once per parent (sweepAncestorCoverage through
+    // parentCoverage_) and planChunkCoverage applies the result per hole.
     void planChunkCoverage(const ChunkCoord &coord, const Vec3 &eyeLocal);
+
+    // The chain-sweep result for one hole's ancestor chain (see
+    // planChunkCoverage): the nearest finished ancestor that may stand in
+    // (0 = none finished, kNoCoverageStandIn = one exists but fails the
+    // stand-in width bound) and the pure scaffold target.
+    struct AncestorCoverage
+    {
+        ChunkKey      nearestReady = 0;
+        bool          pureFound    = false;
+        ChunkCoord    pure{};
+    };
+    AncestorCoverage sweepAncestorCoverage(const ChunkCoord &hole, const Vec3 &eyeLocal);
 
     // Owned copy: capability callers pass temporaries (stack locals layered
     // over the module config), so a reference would dangle.
@@ -175,6 +196,15 @@ private:
     // their own): the coverage planning runs only when this is non-empty,
     // so the finished steady state skips the stamping and planning passes.
     std::vector<std::uint32_t>   holeScratch_;
+    // Holes of the current pass whose coverage sweep found no stand-in at
+    // all (no finished ancestor fit their distance). Non-zero means the
+    // visible region still lacks its coverage umbrella, which promotes
+    // scaffold builds ahead of fine ones for the pass (see the request
+    // loop in update()).
+    std::uint32_t coverageDeficitCount_ = 0;
+    // Chain-sweep results for the current pass, keyed by the holes' parent
+    // (siblings share the sweep); reset with the rest of the pass scratch.
+    std::unordered_map<ChunkKey, AncestorCoverage> parentCoverage_;
     std::unordered_map<ChunkKey, std::uint64_t> readyLeafAncestorStamps_;
     struct FallbackMemo
     {
@@ -226,7 +256,7 @@ private:
     Vec3           selectionEye_{};
 
     std::uint64_t updateCount_ = 0;
-    PlanetStatistics statistics_{};
+    PlanetStatistics statistics_;
 
     // Per-pass scratch for the coverage walks (planChunkCoverage).
     std::vector<ChunkKey> coverageChainScratch_;

@@ -93,13 +93,25 @@ public:
     // Writes one CSV row per frame; returns false when the file cannot be written.
     [[nodiscard]] bool writeCsv(const std::string &path) const;
 
+    // Installs a path that is rewritten (atomically, throttled to a fixed
+    // wall-clock interval) after completed frames, so a run that is
+    // interrupted mid-measurement (process kill, machine shutdown) still keeps
+    // the timings of the frames it managed to render. Passing an empty string
+    // disables auto-flushing. Flushing happens outside the measured phases: it
+    // never inflates the update, upload, or draw times of the frame itself.
+    void setAutoFlushPath(const std::string &path);
+
 private:
     using Clock = std::chrono::steady_clock;
+
+    static constexpr double kAutoFlushIntervalMilliseconds = 250.0;
 
     std::vector<FrameTimingSample> samples_;
     Clock::time_point frameStart_{};
     Clock::time_point lastMark_{};
+    Clock::time_point lastAutoFlush_{};
     FrameTimingSample current_{};
+    std::string autoFlushPath_;
 };
 
 } // namespace demo::harness

@@ -122,6 +122,8 @@ private:
     // instead of recomputing a sqrt per node visit.
     std::array<double, maxSupportedOctreeDepth + 1> boundRadii_{};
     double                        innerOccluderRadius2_ = 0.0;  // squared radius of the guaranteed-solid occluder ball
+    double                        seaOccluderRadius2_   = 0.0;  // squared sea-sphere radius (occludes when the eye is above the water)
+    double                        seaOccluderEyeMarginMeters = 0.5; // eye height above the sea sphere the sea-sphere occluder requires
     std::uint64_t                 updateIndex_ = 0;
 
     // Sparse node map: only nodes touched by selection (visited + pruned).

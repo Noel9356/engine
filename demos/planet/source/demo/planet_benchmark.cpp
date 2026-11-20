@@ -204,7 +204,11 @@ int runBenchmark(const planet::PlanetGenerationParams &params)
                 const planet::ChunkMesh mesh = planet::buildChunkMesh(params, field, coord);
                 times.push_back(millisecondsSince(start));
                 triangles += mesh.triangleCount;
-                vertices += mesh.terrainVertices.size() + mesh.waterVertices.size();
+                for (std::uint32_t group = 0; group < planet::terrainSurfaceGroupCount; ++group)
+                {
+                    vertices += mesh.terrainVertices[group].size();
+                }
+                vertices += mesh.waterVertices.size();
             }
             const TimingStats stats = summarize(times);
             std::printf("bench: chunk depth %2u (%6.0f m) x%u  mean %10.3f  min %10.3f  max %10.3f  ms  (%llu tri, "
