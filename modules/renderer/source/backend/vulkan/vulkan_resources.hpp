@@ -119,11 +119,6 @@ public:
         VkBuffer *outVertexBuffer, VkDeviceSize *outVertexBytes, RenderError *error);
 
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error);
-
-    // Mean RGB over the texture's pixel payload (alpha ignored), computed at
-    // creation; RenderCapability::textureMean reads it. False for unknown
-    // handles.
-    bool textureMean(TextureHandle textureHandle, float outMeanRGB[3]) const;
     void destroyTexture(TextureHandle texture);
 
     // Material descriptor sets are interned per texture-combination; null
@@ -155,7 +150,6 @@ private:
         VkImageView   view            = VK_NULL_HANDLE;
         VkSampler     sampler         = VK_NULL_HANDLE; // filter/address/anisotropy baked in
         std::uint32_t mipLevels       = 1;
-        float         meanRGB[3]      = {1.0f, 1.0f, 1.0f}; // pixel payload mean (see textureMean)
     };
 
     // A material is identified purely by its five texture handles; factors

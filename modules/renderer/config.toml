@@ -24,12 +24,6 @@ headless_band_split_triangles           = 4096
 # would exceed it flush in more chunks with identical output.
 headless_batch_tile_records             = 524288
 headless_batched_tile_rasterization     = true
-# MSAA-style interior shading for the supersampled target: output pixels
-# whose whole sample block one triangle covers shade once at the block
-# centre instead of once per sample; coverage, depth and the resolve stay
-# per sample, so silhouette anti-aliasing is unchanged while interior
-# shading cost drops by the sample count (4x at msaa_samples = 4).
-headless_msaa_interior_shading          = true
 headless_parallel_transform_vertices    = 8192
 headless_parallel_triangle_threshold    = 4096
 headless_pixels_per_lock_group          = 16

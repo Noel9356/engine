@@ -336,23 +336,12 @@ struct GiTlasNode
 // Snapshot of the pbr environment + direct lights taken each evaluate().
 struct GiEnvironmentSnapshot
 {
-    // Direct light with the per-light constants the shading loop needs
-    // (normalized direction, cone cosines) precomputed at snapshot time, so
+    // Direct light with the per-light constants the shading loop needs,
+    // shared with lumen_reflection through engine/renderer/lumen_ray_core.hpp
+    // (normalized direction, cone cosines) prepared at snapshot time, so
     // per-texel evaluation does not re-normalize or re-trigonometrise every
     // frame. Inactive lights (zero intensity or black color) are dropped.
-    struct PreparedDirectLight
-    {
-        direct_lighting::DirectLightType type = direct_lighting::DirectLightType::Directional;
-        glm::vec3 color{0.0f};
-        float     intensity   = 0.0f;
-        // Directional: unit direction toward the light. Spot: unit cone axis.
-        glm::vec3 direction{0.0f};
-        glm::vec3 position{0.0f};
-        float     range       = 0.0f;
-        float     innerCosine = 0.0f;
-        float     outerCosine = 0.0f;
-        float     coneDivisor = 1.0e-5f;
-    };
+    using PreparedDirectLight = engine::lumen::PreparedLight;
 
     bool     hasSun       = false;
     bool     sunEnabled   = false;

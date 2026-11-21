@@ -744,42 +744,18 @@ private:
             snapshot.hasDirectLights = !snapshot.directLights.empty();
         }
         // Precompute the per-light constants the shading loop needs and drop
-        // inactive lights; the per-texel evaluation then skips them without
-        // re-normalizing directions or re-evaluating cone cosines.
+        // inactive lights; the shared lumen::prepareLight fills the same
+        // structure lumen_reflection snapshots, so the two modules' direct
+        // terms stay identical.
         snapshot.preparedLights.clear();
         snapshot.preparedLights.reserve(snapshot.directLights.size());
         for (const direct_lighting::DirectLight &light : snapshot.directLights)
         {
-            const direct_lighting::DirectLightDescription &description = light.description;
-            const glm::vec3 color(description.color[0], description.color[1], description.color[2]);
-            if (description.intensity <= 0.0f || (color.x <= 0.0f && color.y <= 0.0f && color.z <= 0.0f))
-            {
-                continue;
-            }
             GiEnvironmentSnapshot::PreparedDirectLight prepared;
-            prepared.type      = description.type;
-            prepared.color     = color;
-            prepared.intensity = description.intensity;
-            prepared.position  = glm::vec3(description.position[0], description.position[1], description.position[2]);
-            prepared.range     = std::max(description.range, 1.0e-3f);
-            if (description.type == direct_lighting::DirectLightType::Directional)
+            if (lumen::prepareLight(light, prepared))
             {
-                prepared.direction = -glm::normalize(
-                    glm::vec3(description.direction[0], description.direction[1], description.direction[2]));
+                snapshot.preparedLights.push_back(prepared);
             }
-            else if (description.type == direct_lighting::DirectLightType::Spot)
-            {
-                prepared.direction = glm::normalize(
-                    glm::vec3(description.direction[0], description.direction[1], description.direction[2]));
-                prepared.innerCosine = std::cos(description.innerConeRadians);
-                prepared.outerCosine = std::cos(description.outerConeRadians);
-                prepared.coneDivisor = std::max(prepared.innerCosine - prepared.outerCosine, 1.0e-5f);
-            }
-            else
-            {
-                prepared.direction = glm::vec3(0.0f);
-            }
-            snapshot.preparedLights.push_back(prepared);
         }
         snapshot.hasDirectLights = !snapshot.preparedLights.empty();
         const bool environmentChanged = !state_.environmentValid

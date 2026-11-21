@@ -96,11 +96,6 @@ struct RendererSettings
     std::size_t  headlessTransformCacheBudgetBytes     = 256u * 1024u * 1024u;
     bool         headlessTileParallel                  = false;
     bool         headlessBatchedTileRasterization      = true;
-    // MSAA-style interior shading for the supersampled headless target:
-    // output pixels whose whole sample block one triangle covers shade
-    // once at the block centre instead of once per sample (coverage, depth
-    // and the resolve stay per sample, so edges keep their anti-aliasing).
-    bool         headlessMsaaInteriorShading           = true;
     std::uint32_t headlessParallelTriangleThreshold    = 4096;
     std::size_t  headlessPixelsPerLockGroup            = 16;
     std::uint32_t headlessBandSplitTriangleThreshold   = 4096;

@@ -12,6 +12,7 @@
 
 #include <engine/renderer/device_profile.hpp>
 
+#include <algorithm>
 #include <cstdint>
 
 namespace engine
@@ -258,6 +259,35 @@ inline void evaluateSh2Irradiance(const float sh2[27], const float normal[3], fl
 inline void evaluateProbeIrradiance(const GiProbe &probe, const float normal[3], float outIrradiance[3])
 {
     evaluateSh2Irradiance(&probe.sh2[0][0], normal, outIrradiance);
+}
+
+// Tangent-plane factor of the probe interpolation weights, part of the
+// exported-grid convention the module's world cache, the renderer's probe
+// walk, and lumen_reflection's hit lighting all share (the DDGI anti-leak
+// rule): a probe on the far side of the shaded point's tangent plane
+// describes the space behind the surface, and blending it in lights surfaces
+// through walls. `toProbe` is the shaded point to probe offset and
+// `inverseSpacing` the reciprocal of the level's lattice spacing (hoisted by
+// the callers - the factor runs per probe corner); the alignment is measured
+// against the lattice scale instead of the exact probe distance (an offset
+// of one spacing along the normal reaches the saturated ends, which keeps
+// the per-probe cost free of the square root a normalized direction would
+// need while preserving the zero crossing exactly at the tangent plane).
+// Probes lying in the plane (a lattice row sitting exactly on a floor) keep
+// half weight. The alignment form below is the factored variant hot paths
+// use: the pixel-level base alignment (normal . (anchor - position), scaled)
+// plus the corner's unit offsets dotted with the normal, which reproduces
+// the direct form without re-deriving the corner position per probe.
+inline float probeTangentPlaneAlignmentFactor(float alignment)
+{
+    const float scaled = alignment * 0.5f + 0.5f;
+    return scaled < 0.0f ? 0.0f : (scaled > 1.0f ? 1.0f : scaled);
+}
+
+inline float probeTangentPlaneFactor(const float normal[3], const float toProbe[3], float inverseSpacing)
+{
+    const float alignment = (normal[0] * toProbe[0] + normal[1] * toProbe[1] + normal[2] * toProbe[2]) * inverseSpacing;
+    return probeTangentPlaneAlignmentFactor(alignment);
 }
 
 } // namespace lumen_gi

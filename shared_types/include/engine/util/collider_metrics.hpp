@@ -94,17 +94,6 @@ inline ColliderAerodynamics colliderAerodynamics(const engine::physics_rigid::Sh
     return aerodynamics;
 }
 
-// Effective mass of one rigid body: the density-sourced shapes (density > 0)
-// derive it from the shared shape volume, the explicit-mass shapes carry
-// their description mass - the same mass-source rule the rigid module's
-// BodyDescription documents. Surface-sampled and drag force passes scale
-// their impulses with this value, so every module agrees on one body's
-// mass even when its description arrives second-hand.
-inline double colliderMass(const engine::physics_rigid::BodyDescription &body)
-{
-    return body.density > 0.0 ? body.density * colliderVolume(body.shape) : body.mass;
-}
-
 // Appends the body sample points the surface-sampled force passes evaluate
 // (submersion fractions, submerged centroids). The sets are small, fixed,
 // and deterministic: a sphere keeps its center and six half-radius axis

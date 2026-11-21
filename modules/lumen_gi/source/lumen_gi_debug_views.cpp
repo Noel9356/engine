@@ -92,6 +92,14 @@ void composeDebugView(
                     const glm::vec3 position = constState.viewWorldPosition[pixelIndex];
                     const glm::vec3 normal   = constState.viewNormal[pixelIndex];
                     const std::uint32_t surfaceIndex = constState.viewSurfaceIndex[pixelIndex];
+                    // The share of its own response a transparent surface
+                    // scatters (scatteredShare; the transmitted share leaves
+                    // through the transmission paths the gather, probe, and
+                    // reference rays walk separately). The image views compose
+                    // the scattered response, so every lit term carries it -
+                    // the card caches and the renderer's shading apply the
+                    // same share.
+                    const float opacityShare = glm::clamp(constState.surfaces[surfaceIndex].opacity, 0.0f, 1.0f);
 
                     glm::vec3 color(0.0f);
                     switch (view)
@@ -112,13 +120,15 @@ void composeDebugView(
                     }
                     case GiDebugView::GiOnly:
                         // The indirect term on top of emission, so lamp pixels
-                        // stay identifiable in the A/B against FinalImage.
-                        color = albedo / kPi * constState.gatherFiltered[pixelIndex] + emissive;
+                        // stay identifiable in the A/B against FinalImage. Both
+                        // terms scatter at the surface's opacity share.
+                        color = albedo / kPi * constState.gatherFiltered[pixelIndex] * opacityShare
+                            + emissive * opacityShare;
                         break;
                     case GiDebugView::FinalImage:
                     default:
                     {
-                        color = emissive;
+                        color = emissive * opacityShare;
                         if (unlit)
                         {
                             color += albedo;
@@ -142,12 +152,12 @@ void composeDebugView(
                             }
                         }
                         irradiance += directLightRadiance(constState, position, normal);
-                        color += albedo * (irradiance * (1.0f / kPi));
+                        color += albedo * (irradiance * (1.0f / kPi)) * opacityShare;
                         if (constState.settings.debugIncludeAmbient)
                         {
-                            color += albedo * snapshot.skyRadiance(normal);
+                            color += albedo * snapshot.skyRadiance(normal) * opacityShare;
                         }
-                        color += albedo / kPi * constState.gatherFiltered[pixelIndex];
+                        color += albedo / kPi * constState.gatherFiltered[pixelIndex] * opacityShare;
                         break;
                     }
                     }
@@ -173,6 +183,24 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
     const bool          hasSun      = sunRadiance.x + sunRadiance.y + sunRadiance.z > 0.0f;
     const GiPipelineState &constState = state;
 
+    // One pending transmitted continuation of a reference path: a transparent
+    // interface split the path into its scattered share (walked now) and its
+    // transmitted share (walked when the current branch ends). The stack
+    // bounds the nested transparent interfaces a path walks; splits deeper
+    // than the ceiling truncate their transmitted share deterministically.
+    struct PendingReferencePath
+    {
+        glm::vec3     origin;
+        glm::vec3     direction;
+        glm::vec3     throughput;
+        std::uint32_t bouncesLeft;
+    };
+    constexpr std::uint32_t kReferencePendingCapacity = 8u;
+    // One pending entry per transparent interface crossing, bounded by the
+    // module's transmission budget.
+    const std::uint32_t pendingCapacity
+        = std::min(state.settings.maxTransmissionSegments + 1u, kReferencePendingCapacity);
+
     parallelRange(scheduler, height, 2,
         [&](std::size_t rowBegin, std::size_t rowEnd)
         {
@@ -192,30 +220,104 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                         glm::vec3 direction = viewRayDirection(constState, inverseViewProjection,
                             static_cast<float>(x) + jitterX, static_cast<float>(y) + jitterY);
                         glm::vec3 pathRadiance(0.0f);
-                        glm::vec3 throughput(1.0f);
-                        glm::vec3 origin = constState.cameraPosition;
-                        for (std::uint32_t bounce = 0; bounce <= bounces; ++bounce)
+                        // A transparent interface splits the path into its
+                        // scattered share (cosine bounce) and its transmitted
+                        // share (refracted continuation). Both shares are
+                        // walked - the deterministic split the cache's gather
+                        // and the probe rays mirror - so the reference
+                        // estimates a pane's own bounce and the scene behind
+                        // it; the stack resumes the transmitted continuations
+                        // depth-first when the current branch ends.
+                        PendingReferencePath pending[kReferencePendingCapacity];
+                        std::uint32_t pendingCount  = 0;
+                        glm::vec3     throughput(1.0f);
+                        glm::vec3     origin      = constState.cameraPosition;
+                        std::uint32_t bouncesLeft = bounces;
+                        // Pops the next transmitted continuation; false ends
+                        // the path (no share left to walk).
+                        const auto resumePending = [&]() -> bool
+                        {
+                            if (pendingCount == 0u)
+                            {
+                                return false;
+                            }
+                            const PendingReferencePath &resumed = pending[--pendingCount];
+                            origin      = resumed.origin;
+                            direction   = resumed.direction;
+                            throughput  = resumed.throughput;
+                            bouncesLeft = resumed.bouncesLeft;
+                            return true;
+                        };
+                        for (;;)
                         {
                             const GiHit hit = traceScene(constState, GiRay{origin, direction, constState.settings.maxTraceDistance});
                             if (!hit.hit)
                             {
                                 pathRadiance += throughput * snapshot.skyRadiance(direction);
-                                break;
-                            }
-                            if (hit.backface)
-                            {
-                                break; // inside geometry
+                                if (!resumePending())
+                                {
+                                    break;
+                                }
+                                continue;
                             }
                             const GiSurface &surface = constState.surfaces[hit.surfaceIndex];
                             const float     opacity  = glm::clamp(surface.opacity, 0.0f, 1.0f);
+                            if (hit.backface && opacity >= 1.0f)
+                            {
+                                // Inside opaque geometry: the branch ends (the
+                                // module's anti-leak rule); the pending shares
+                                // still walk.
+                                if (!resumePending())
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
+                            // The interface normal faces the ray: outward
+                            // normals stay outward on a medium exit (a
+                            // backface hit), and the refraction needs the
+                            // normal on the ray's side to bend across the
+                            // interface.
+                            const glm::vec3 interfaceNormal
+                                = glm::dot(hit.normal, direction) < 0.0f ? hit.normal : -hit.normal;
                             if (opacity < 1.0f)
                             {
-                                // Transparent surface: the opacity share
-                                // scatters at the surface (emission + the
-                                // albedo-lit response), the rest transmits,
-                                // tinted by the albedo and bent by Snell's law
-                                // with the index ratio (the reference tracer
-                                // mirrors the cache's deterministic split).
+                                if (hit.backface)
+                                {
+                                    // Medium exit: the anti-leak rule keeps the
+                                    // exit face dark (inside hits contribute
+                                    // nothing); the share leaves untinted (the
+                                    // albedo absorption applied once, at the
+                                    // entering interface) and bent by the
+                                    // inverse Snell ratio - total internal
+                                    // reflection mirrors the path back inside.
+                                    if (bouncesLeft-- == 0u)
+                                    {
+                                        if (!resumePending())
+                                        {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    glm::vec3 bent = glm::refract(direction, interfaceNormal,
+                                        glm::max(surface.indexOfRefraction, 1.0f));
+                                    if (glm::dot(bent, bent) < 1.0e-8f)
+                                    {
+                                        bent = glm::reflect(direction, interfaceNormal);
+                                    }
+                                    direction = glm::normalize(bent);
+                                    origin    = hit.position + direction * constState.settings.traceBias;
+                                    continue;
+                                }
+                                // Transparent surface, entering the medium: the
+                                // opacity share scatters (emission + the
+                                // albedo-lit direct response next-event
+                                // estimated here + the indirect share the
+                                // cosine bounce below collects), the rest
+                                // transmits - tinted by the albedo and bent by
+                                // Snell's law with the index ratio (the
+                                // reference tracer mirrors the cache's
+                                // deterministic split).
                                 glm::vec3 hitAlbedo(0.0f);
                                 sampleSurfaceAlbedoLocal(constState, surface, hit.localPosition, hit.localNormal, hitAlbedo);
                                 if (glm::dot(hitAlbedo, hitAlbedo) <= 0.0f)
@@ -226,29 +328,54 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                                 if (!surface.unlit)
                                 {
                                     glm::vec3 irradiance(0.0f);
-                                    const float nDotL = glm::dot(hit.normal, snapshot.sunDirection);
+                                    const float nDotL = glm::dot(interfaceNormal, snapshot.sunDirection);
                                     if (hasSun && nDotL > 0.0f)
                                     {
                                         irradiance += sunRadiance * nDotL
-                                            * sunShadowTransmittance(constState, hit.position, hit.normal);
+                                            * sunShadowTransmittance(constState, hit.position, interfaceNormal);
                                     }
-                                    irradiance += directLightRadiance(constState, hit.position, hit.normal);
+                                    irradiance += directLightRadiance(constState, hit.position, interfaceNormal);
                                     scattered += hitAlbedo * (irradiance * (1.0f / kPi));
                                 }
                                 pathRadiance += throughput * opacity * scattered;
-                                if (opacity <= 0.0f || bounce == bounces)
+                                if (bouncesLeft-- == 0u)
                                 {
-                                    break;
+                                    if (!resumePending())
+                                    {
+                                        break;
+                                    }
+                                    continue;
                                 }
-                                throughput *= hit.backface ? glm::vec3(1.0f) : surface.albedo * (1.0f - opacity);
-                                glm::vec3 bent = glm::refract(direction, hit.normal,
-                                    hit.backface ? glm::max(surface.indexOfRefraction, 1.0f) : 1.0f / glm::max(surface.indexOfRefraction, 1.0f));
-                                if (glm::dot(bent, bent) < 1.0e-8f)
+                                // Transmitted share: pushed and resumed when
+                                // the scattered branch ends.
+                                if (opacity > 0.0f && pendingCount < pendingCapacity)
                                 {
-                                    bent = glm::reflect(direction, hit.normal);
+                                    glm::vec3 bent = glm::refract(direction, interfaceNormal,
+                                        1.0f / glm::max(surface.indexOfRefraction, 1.0f));
+                                    if (glm::dot(bent, bent) < 1.0e-8f)
+                                    {
+                                        bent = glm::reflect(direction, interfaceNormal);
+                                    }
+                                    bent = glm::normalize(bent);
+                                    pending[pendingCount++] = PendingReferencePath{
+                                        hit.position + bent * constState.settings.traceBias, bent,
+                                        throughput * surface.albedo * (1.0f - opacity), bouncesLeft};
                                 }
-                                direction = glm::normalize(bent);
-                                origin    = hit.position + direction * constState.settings.traceBias;
+                                if (surface.unlit)
+                                {
+                                    if (!resumePending())
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                // The scattered share's indirect: the cosine
+                                // bounce collects albedo * E_i of the opacity
+                                // share.
+                                throughput *= surface.albedo * opacity;
+                                direction   = glm::normalize(makeBasis(interfaceNormal)
+                                    * cosineHemisphere(randomFloat(seed), randomFloat(seed)));
+                                origin      = hit.position + interfaceNormal * constState.settings.traceBias;
                                 continue;
                             }
                             glm::vec3 hitAlbedo(0.0f);
@@ -263,23 +390,36 @@ void referencePathTrace(GiPipelineState &state, TaskScheduler *scheduler, std::v
                             pathRadiance += throughput * (surface.unlit ? hitAlbedo : surface.emissive);
                             if (surface.unlit)
                             {
-                                break;
+                                if (!resumePending())
+                                {
+                                    break;
+                                }
+                                continue;
                             }
                             // Next-event estimation: shadowed sun + direct
                             // lights; transparent surfaces soften the shadow.
                             glm::vec3 irradiance(0.0f);
-                            const float nDotL = glm::dot(hit.normal, snapshot.sunDirection);
+                            const float nDotL = glm::dot(interfaceNormal, snapshot.sunDirection);
                             if (hasSun && nDotL > 0.0f)
                             {
-                                const float transmittance = sunShadowTransmittance(constState, hit.position, hit.normal);
+                                const float transmittance = sunShadowTransmittance(constState, hit.position, interfaceNormal);
                                 irradiance += sunRadiance * nDotL * transmittance;
                             }
-                            irradiance += directLightRadiance(constState, hit.position, hit.normal);
+                            irradiance += directLightRadiance(constState, hit.position, interfaceNormal);
                             pathRadiance += throughput * hitAlbedo * (irradiance * (1.0f / kPi));
                             // Indirect: cosine-sampled bounce.
+                            if (bouncesLeft-- == 0u)
+                            {
+                                if (!resumePending())
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
                             throughput *= hitAlbedo;
-                            direction = glm::normalize(makeBasis(hit.normal) * cosineHemisphere(randomFloat(seed), randomFloat(seed)));
-                            origin    = hit.position + hit.normal * constState.settings.traceBias;
+                            direction   = glm::normalize(makeBasis(interfaceNormal)
+                                * cosineHemisphere(randomFloat(seed), randomFloat(seed)));
+                            origin      = hit.position + interfaceNormal * constState.settings.traceBias;
                         }
                         sum += pathRadiance;
                     }

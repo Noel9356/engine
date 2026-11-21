@@ -74,18 +74,33 @@ inline float pbrVisibilityNeubelt(float nDotV, float nDotL)
     return 1.0f / (4.0f * (nDotL + nDotV - nDotL * nDotV));
 }
 
+// A pre-evaluated probe-grid ambient sample: the irradiance walk's result for
+// one (position, normal) pair plus its validity coverage. The tile rasterizer
+// computes one sample per 2x2 pixel quad when the quad's surface response is
+// smooth (same plane, compatible normal) and hands it to pbrShade, so the
+// per-pixel probe walk runs a quarter as often with no visible change - the
+// term the sample carries is exactly what the walk would return for any
+// point of the quad that passes the same gates.
+struct GiAmbientSample
+{
+    glm::vec3 irradiance{0.0f};
+    float     coverage = 0.0f;
+    bool      valid    = false;
+};
+
 // Full CPU shading pass: hemispheric ambient (or the lumen_gi probe-grid
 // indirect term blended over it by probe validity), one directional sun, then
 // the prepared direct lights (range-faded point/spot attenuation with
 // smoothstep cones). Roughness/metallic are clamped here exactly like the
 // shader. giGrid is the borrowed probe-grid snapshot; nullptr keeps the
-// legacy ambient path bit-identical.
+// legacy ambient path bit-identical. giSample, when non-null, replaces the
+// per-pixel probe walk with a caller-evaluated sample (see GiAmbientSample).
 ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPosition,
     const glm::vec3 &cameraPosition, const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance,
     const glm::vec3 &ambientSky, const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic,
     float roughness, float ambientOcclusion, const PreparedDirectLight *directLights,
     std::uint32_t directLightCount, const PreparedGiProbeGrid *giGrid = nullptr, float opacity = 1.0f,
-    float sheenFactor = 0.0f)
+    float sheenFactor = 0.0f, const GiAmbientSample *giSample = nullptr)
 {
     // Metallic surfaces carry almost no diffuse response. The hemispheric
     // ambient and the probe-grid GI are diffuse integrals, so they scale by
@@ -100,23 +115,38 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     const glm::vec3 hemispheric = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * diffuseAlbedo
                                   * ambientOcclusion;
     glm::vec3       ambient     = hemispheric;
-    if (giGrid != nullptr && giGrid->valid)
+    // The SH2 convolution returns incident irradiance; a Lambertian BRDF
+    // turns it into outgoing radiance as albedo / pi * E. The occlusion map
+    // darkens the indirect term like the ambient it replaces. The irradiance
+    // is already renormalized over the valid probes of the footprint, so a
+    // quarter of valid coverage is enough to trust it (probe lattices
+    // routinely lose the corners that fall inside nearby geometry); the
+    // ambient remains the fallback only while almost no probe is valid.
+    const auto blendGiAmbient = [&](const glm::vec3 &giIrradiance, float giWeight)
+    {
+        const float     giTrust   = glm::smoothstep(0.0f, 0.25f, giWeight);
+        const glm::vec3 giAmbient = diffuseAlbedo * (giIrradiance * (1.0f / glm::pi<float>())) * ambientOcclusion;
+        ambient                   = glm::mix(hemispheric, giAmbient, giTrust);
+    };
+    // The hemispheric ambient and the probe-grid GI are diffuse integrals, so
+    // a fully metallic or fully transparent surface carries no diffuse
+    // response at all - the probe walk would multiply zero (mesh.frag's twin
+    // of this early-out).
+    if (giSample != nullptr)
+    {
+        if (giSample->valid)
+        {
+            blendGiAmbient(giSample->irradiance, giSample->coverage);
+        }
+    }
+    else if (giGrid != nullptr && giGrid->valid
+        && diffuseAlbedo.x + diffuseAlbedo.y + diffuseAlbedo.z > 1.0e-6f)
     {
         glm::vec3 giIrradiance(0.0f);
         float     giWeight         = 0.0f;
         if (giProbeGridIrradiance(*giGrid, worldPosition, normal, giIrradiance, giWeight))
         {
-            // The SH2 convolution returns incident irradiance; a Lambertian
-            // BRDF turns it into outgoing radiance as albedo / pi * E. The
-            // occlusion map darkens the indirect term like the ambient it
-            // replaces. The irradiance is already renormalized over the valid
-            // probes of the footprint, so a quarter of valid coverage is
-            // enough to trust it (probe lattices routinely lose the corners
-            // that fall inside nearby geometry); the ambient remains the
-            // fallback only while almost no probe is valid.
-            const float     giTrust   = glm::smoothstep(0.0f, 0.25f, giWeight);
-            const glm::vec3 giAmbient = diffuseAlbedo * (giIrradiance * (1.0f / glm::pi<float>())) * ambientOcclusion;
-            ambient                   = glm::mix(hemispheric, giAmbient, giTrust);
+            blendGiAmbient(giIrradiance, giWeight);
         }
     }
     glm::vec3 result = ambient;

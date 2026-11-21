@@ -907,24 +907,6 @@ bool VulkanResources::createTexture(TextureHandle id, const TextureDescription &
         return false;
     }
 
-    // The texture's mean color, computed once over the upload copy while it
-    // is still in host memory (alpha ignored; see RenderCapability::textureMean).
-    {
-        const std::size_t pixelCount = static_cast<std::size_t>(description.width) * description.height;
-        double mean[3] = {0.0, 0.0, 0.0};
-        constexpr double inv = 1.0 / 255.0;
-        for (std::size_t i = 0; i < pixelCount; ++i)
-        {
-            mean[0] += static_cast<double>(description.pixels[i * 4]) * inv;
-            mean[1] += static_cast<double>(description.pixels[i * 4 + 1]) * inv;
-            mean[2] += static_cast<double>(description.pixels[i * 4 + 2]) * inv;
-        }
-        for (int channel = 0; channel < 3; ++channel)
-        {
-            texture.meanRGB[channel] = static_cast<float>(mean[channel] / static_cast<double>(pixelCount));
-        }
-    }
-
     try
     {
         const auto [entry, inserted] = textures_.emplace(id, texture);
@@ -951,20 +933,6 @@ bool VulkanResources::createTexture(TextureHandle id, const TextureDescription &
 bool VulkanResources::createNeutralTexture(VulkanTexture &destination, const std::uint8_t pixel[4])
 {
     return createTextureObjects(destination, 1, 1, pixel, TextureFilter::Nearest, TextureAddress::Repeat, false);
-}
-
-// Reports a texture's creation-time mean color (see createTexture).
-bool VulkanResources::textureMean(TextureHandle textureHandle, float outMeanRGB[3]) const
-{
-    const auto found = textures_.find(textureHandle);
-    if (found == textures_.end())
-    {
-        return false;
-    }
-    outMeanRGB[0] = found->second.meanRGB[0];
-    outMeanRGB[1] = found->second.meanRGB[1];
-    outMeanRGB[2] = found->second.meanRGB[2];
-    return true;
 }
 
 // Frees the texture and every material set (plus the lookup cache) that

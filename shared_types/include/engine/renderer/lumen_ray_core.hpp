@@ -18,6 +18,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+
+#include <engine/direct_lighting/capabilities.hpp>
 
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
@@ -137,6 +140,115 @@ bool rayTriangle(const Ray &ray, const PackedTriangle &triangle, float &outT, gl
     }
     outT           = t;
     outBarycentric = glm::vec3(1.0f - u - v, u, v);
+    return true;
+}
+
+// ---- shared direct-light preparation and evaluation --------------------------
+
+// One direct_lighting registry light with the per-light constants the shading
+// loops need (normalized direction or cone axis, cone cosines) prepared once
+// per frame, so the per-texel and per-hit evaluation below is pure math.
+// lumen_gi and lumen_reflection snapshot the same structure so their direct
+// terms stay identical to each other's (and to the renderer's formulas).
+struct PreparedLight
+{
+    direct_lighting::DirectLightType type = direct_lighting::DirectLightType::Directional;
+    glm::vec3 color{0.0f};
+    float     intensity   = 0.0f;
+    // Directional: unit direction toward the light. Spot: unit cone axis.
+    glm::vec3 direction{0.0f};
+    glm::vec3 position{0.0f};
+    float     range       = 0.0f;
+    float     innerCosine = 0.0f;
+    float     outerCosine = 0.0f;
+    float     coneDivisor = 1.0e-5f;
+};
+
+// Prepares one registry light for the loops above; returns false for inactive
+// lights (zero intensity or black color), which the snapshots drop.
+inline bool prepareLight(const direct_lighting::DirectLight &light, PreparedLight &out)
+{
+    const direct_lighting::DirectLightDescription &description = light.description;
+    const glm::vec3 color(description.color[0], description.color[1], description.color[2]);
+    if (description.intensity <= 0.0f || (color.x <= 0.0f && color.y <= 0.0f && color.z <= 0.0f))
+    {
+        return false;
+    }
+    out.type      = description.type;
+    out.color     = color;
+    out.intensity = description.intensity;
+    out.position  = glm::vec3(description.position[0], description.position[1], description.position[2]);
+    out.range     = std::max(description.range, 1.0e-3f);
+    if (description.type == direct_lighting::DirectLightType::Directional)
+    {
+        out.direction = -glm::normalize(glm::vec3(
+            description.direction[0], description.direction[1], description.direction[2]));
+    }
+    else if (description.type == direct_lighting::DirectLightType::Spot)
+    {
+        out.direction = glm::normalize(glm::vec3(
+            description.direction[0], description.direction[1], description.direction[2]));
+        out.innerCosine = std::cos(description.innerConeRadians);
+        out.outerCosine = std::cos(description.outerConeRadians);
+        out.coneDivisor = std::max(out.innerCosine - out.outerCosine, 1.0e-5f);
+    }
+    else
+    {
+        out.direction = glm::vec3(0.0f);
+    }
+    return true;
+}
+
+// Unoccluded arrival of one prepared light at a shaded point: the irradiance
+// contribution `color * intensity * attenuation * nDotL` together with the
+// unit direction toward the light and the light's distance (the inputs a
+// shadow ray needs; a directional light reports an infinite distance). The
+// attenuation follows the renderer's shading formulas - range fade
+// (1 - (d/r)^2)^2 / d^2 and the smoothstep cone - with no shadowing: the
+// caller decides how, and whether, to occlude. Returns false when the light
+// reaches nothing here (back-facing, out of range, outside the cone).
+inline bool lightArrival(
+    const PreparedLight &light, const glm::vec3 &position, const glm::vec3 &normal, glm::vec3 &outDirection,
+    float &outDistance, glm::vec3 &outArrival)
+{
+    if (light.type == direct_lighting::DirectLightType::Directional)
+    {
+        const glm::vec3 &direction = light.direction;
+        const float      nDotL     = glm::dot(normal, direction);
+        if (nDotL <= 0.0f)
+        {
+            return false;
+        }
+        outDirection = direction;
+        outDistance  = std::numeric_limits<float>::max();
+        outArrival   = light.color * light.intensity * nDotL;
+        return true;
+    }
+    const glm::vec3 toLight         = light.position - position;
+    const float     distanceSquared = std::max(glm::dot(toLight, toLight), 1.0e-4f);
+    const float     rangeRatioSquared = distanceSquared / (light.range * light.range);
+    if (rangeRatioSquared >= 1.0f)
+    {
+        return false;
+    }
+    const float     distance  = std::sqrt(distanceSquared);
+    const glm::vec3 direction = toLight * (1.0f / distance);
+    const float     rangeFade = 1.0f - rangeRatioSquared * rangeRatioSquared;
+    float           attenuation = rangeFade * rangeFade / distanceSquared;
+    if (light.type == direct_lighting::DirectLightType::Spot)
+    {
+        const float coneCosine = glm::dot(-direction, light.direction);
+        const float coneT      = std::clamp((coneCosine - light.outerCosine) / light.coneDivisor, 0.0f, 1.0f);
+        attenuation *= coneT * coneT * (3.0f - 2.0f * coneT);
+    }
+    const float nDotL = glm::dot(normal, direction);
+    if (nDotL <= 0.0f || attenuation <= 0.0f)
+    {
+        return false;
+    }
+    outDirection = direction;
+    outDistance  = distance;
+    outArrival   = light.color * light.intensity * attenuation * nDotL;
     return true;
 }
 

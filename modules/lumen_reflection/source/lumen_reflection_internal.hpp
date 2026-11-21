@@ -221,6 +221,10 @@ struct RfSurface
     glm::mat4                inverseTransform{1.0f};
     glm::mat3                inverseLinear{1.0f};       // upper 3x3 of inverseTransform
     glm::vec3                inverseTranslation{0.0f}; // column 3 of inverseTransform
+    // Inverse-transpose of the transform's upper 3x3: the correct matrix for
+    // transforming normals under non-uniform scale (the plain linear matrix
+    // skews them). Cached per surface like the other derived pieces.
+    glm::mat3                normalMatrix{1.0f};
     // Exact-identity transform: local space coincides with world space, so
     // the hot per-ray path skips the local<->world arithmetic.
     bool                     localIsWorld = true;
@@ -265,18 +269,10 @@ struct RfTlasNode
 // Snapshot of the pbr environment + direct lights taken each evaluate().
 struct RfEnvironmentSnapshot
 {
-    struct PreparedDirectLight
-    {
-        direct_lighting::DirectLightType type = direct_lighting::DirectLightType::Directional;
-        glm::vec3 color{0.0f};
-        float     intensity   = 0.0f;
-        glm::vec3 direction{0.0f}; // Directional: toward the light. Spot: cone axis.
-        glm::vec3 position{0.0f};
-        float     range       = 0.0f;
-        float     innerCosine = 0.0f;
-        float     outerCosine = 0.0f;
-        float     coneDivisor = 1.0e-5f;
-    };
+    // Direct light with the per-light constants the hit-shading loop needs,
+    // shared with lumen_gi through engine/renderer/lumen_ray_core.hpp, so the
+    // two modules' direct terms stay identical.
+    using PreparedDirectLight = engine::lumen::PreparedLight;
 
     bool     hasSun       = false;
     bool     sunEnabled   = false;
@@ -545,7 +541,13 @@ using engine::lumen::storePixel;
 void rfBuildSurfaceGeometry(RfSurfaceGeometry &geometry, const ReflectionSurfaceDescription &description,
     std::uint64_t maxTriangles, ReflectionError *error);
 void rfBuildSurfaceBvh(RfSurfaceGeometry &geometry);
-void rfUpdateSurfaceTransform(RfSurface &surface, const glm::mat4 &transform);
+// Applies one model transform to a surface and refreshes the derived
+// matrices/bounds. Returns false (leaving the surface untouched) when the
+// transform is singular - its inverse or normal matrix is not finite, so every
+// slab test against the derived bounds would fail closed and the surface would
+// silently vanish from all rays (the same contract lumen_gi's transform update
+// carries).
+bool rfUpdateSurfaceTransform(RfSurface &surface, const glm::mat4 &transform);
 void rfUpdateSurfaceWorldBounds(RfSurface &surface);
 void rfEnsureSceneTlas(RfPipelineState &state);
 
@@ -633,14 +635,20 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler);
 // roughness blur), its origin, and its unbiased chain weight; returns false
 // for the absorbed share (no return). The reflected/opaque path keeps
 // `rayOrigin` (the normal-offset origin the screen march starts from); only
-// the transmitted branch offsets into the medium.
+// the transmitted branch offsets into the medium. `outReflected` reports
+// which of the two happened, so the caller decides the screen-trace tier
+// without re-comparing the chain origin against rayOrigin; the refracted
+// lobe's tangent frame is passed in prebuilt (every ray of a texel shares
+// it).
 inline bool rfSplitFirstSegment(bool transmits, const glm::vec3 &fresnel, float texelOpacity,
     const glm::vec3 &albedo, const glm::vec3 &refractedView, const glm::vec3 &direction, float clampedRoughness,
     float alpha, const glm::mat3 &refractedBasis, const glm::vec3 &position, const glm::vec3 &rayOrigin,
-    float traceBias, glm::vec3 &outDirection, glm::vec3 &outOrigin, glm::vec3 &outWeight, std::uint64_t &seed)
+    float traceBias, glm::vec3 &outDirection, glm::vec3 &outOrigin, glm::vec3 &outWeight, bool &outReflected,
+    std::uint64_t &seed)
 {
     outDirection = direction;
     outOrigin    = rayOrigin;
+    outReflected = true;
     if (!transmits)
     {
         // Opaque texel: every ray is a reflected lobe carrying its Fresnel
@@ -669,8 +677,9 @@ inline bool rfSplitFirstSegment(bool transmits, const glm::vec3 &fresnel, float 
     {
         outDirection = rfSampleGgxVndf(refractedBasis, glm::vec3(0.0f, 0.0f, 1.0f), alpha, seed);
     }
-    outOrigin = position + outDirection * traceBias;
-    outWeight = albedo;
+    outOrigin    = position + outDirection * traceBias;
+    outWeight    = albedo;
+    outReflected = false;
     return true;
 }
 
@@ -745,7 +754,7 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler);
 
 // Variance-driven bilateral filter (Lumen's last-ditch pass): smooths only
 // high-variance texels with tone-mapped (firefly-suppressing) weights.
-void rfbilateralFilter(RfPipelineState &state, TaskScheduler *scheduler);
+void rfBilateralFilter(RfPipelineState &state, TaskScheduler *scheduler);
 
 // ---- debug.cpp ----------------------------------------------------------------------
 

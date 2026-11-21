@@ -324,7 +324,17 @@ private:
         surface.excluded = (description.flagBits & reflectionSurfaceFlagExcluded) != 0u;
         surface.unlit    = (description.flagBits & reflectionSurfaceFlagUnlit) != 0u;
         surface.dynamic  = (description.flagBits & reflectionSurfaceFlagDynamic) != 0u;
-        rfUpdateSurfaceTransform(surface, glm::make_mat4(description.transform));
+        // A singular transform is refused like any other malformed
+        // description: the caller reports the error and discards the surface
+        // (the registry paths build into a fresh surface, so a rejection never
+        // publishes a half-updated one).
+        if (!rfUpdateSurfaceTransform(surface, glm::make_mat4(description.transform)))
+        {
+            if (error != nullptr)
+            {
+                *error = ReflectionError::InvalidDescription;
+            }
+        }
     }
 
     void registryChangedLocked()
@@ -470,7 +480,12 @@ private:
         {
             return true; // unchanged: keep the frame clean for the static skip
         }
-        rfUpdateSurfaceTransform(replacementTarget, transform);
+        // A singular transform is refused and the previous one kept; the
+        // caller only sees the boolean.
+        if (!rfUpdateSurfaceTransform(replacementTarget, transform))
+        {
+            return false;
+        }
         state_.tlasDirty  = true;
         state_.sceneDirty = true;
         return true;
@@ -607,39 +622,17 @@ private:
                 lights.data(), static_cast<std::uint32_t>(lights.size()), &lightsVersion);
             lights.resize(std::min<std::size_t>(count, lights.size()));
             // Precompute the per-light constants the shading loop needs and
-            // drop inactive lights.
+            // drop inactive lights; the shared lumen::prepareLight fills the
+            // same structure lumen_gi snapshots, so the two modules' direct
+            // terms stay identical.
+            snapshot.preparedLights.reserve(lights.size());
             for (const direct_lighting::DirectLight &light : lights)
             {
-                const direct_lighting::DirectLightDescription &description = light.description;
-                const glm::vec3 color(description.color[0], description.color[1], description.color[2]);
-                if (description.intensity <= 0.0f || (color.x <= 0.0f && color.y <= 0.0f && color.z <= 0.0f))
-                {
-                    continue;
-                }
                 RfEnvironmentSnapshot::PreparedDirectLight prepared;
-                prepared.type      = description.type;
-                prepared.color     = color;
-                prepared.intensity = description.intensity;
-                prepared.position  = glm::vec3(description.position[0], description.position[1], description.position[2]);
-                prepared.range     = std::max(description.range, 1.0e-3f);
-                if (description.type == direct_lighting::DirectLightType::Directional)
+                if (lumen::prepareLight(light, prepared))
                 {
-                    prepared.direction = -glm::normalize(
-                        glm::vec3(description.direction[0], description.direction[1], description.direction[2]));
+                    snapshot.preparedLights.push_back(prepared);
                 }
-                else if (description.type == direct_lighting::DirectLightType::Spot)
-                {
-                    prepared.direction = glm::normalize(
-                        glm::vec3(description.direction[0], description.direction[1], description.direction[2]));
-                    prepared.innerCosine = std::cos(description.innerConeRadians);
-                    prepared.outerCosine = std::cos(description.outerConeRadians);
-                    prepared.coneDivisor = std::max(prepared.innerCosine - prepared.outerCosine, 1.0e-5f);
-                }
-                else
-                {
-                    prepared.direction = glm::vec3(0.0f);
-                }
-                snapshot.preparedLights.push_back(prepared);
             }
         }
         const bool environmentChanged = !state_.environmentValid

@@ -52,8 +52,9 @@ float sunShadowTransmittance(const GiPipelineState &state, const glm::vec3 &posi
 }
 
 // Directional/point/spot radiance arriving at position from the module's
-// light snapshot; formulas mirror the renderer's shading (range fade
-// (1 - (d/r)^2)^2 / d^2, smoothstep cone). Shadow rays follow
+// light snapshot. The shared lumen::lightArrival evaluates the renderer's
+// attenuation formulas (range fade (1 - (d/r)^2)^2 / d^2, smoothstep cone)
+// and hands back the shadow ray's direction and distance; shadow rays follow
 // lighting.point_light_shadows. Light directions and cone cosines come from
 // the snapshot's prepared array (see GiEnvironmentSnapshot), so the loop
 // body is pure per-texel math.
@@ -65,78 +66,49 @@ glm::vec3 directLightRadiance(const GiPipelineState &state, const glm::vec3 &pos
     {
         return sum;
     }
-    const bool shadows = state.settings.pointLightShadows;
-    const glm::vec3 origin = position + normal * state.settings.traceBias;
+    const bool      shadows = state.settings.pointLightShadows;
+    const glm::vec3 origin  = position + normal * state.settings.traceBias;
     for (const GiEnvironmentSnapshot::PreparedDirectLight &light : environment.preparedLights)
     {
-        const glm::vec3 &color     = light.color;
-        const float      intensity = light.intensity;
+        glm::vec3 direction(0.0f);
+        float     distance = 0.0f;
+        glm::vec3 arrival(0.0f);
+        if (!lumen::lightArrival(light, position, normal, direction, distance, arrival))
+        {
+            continue;
+        }
+        if (!shadows)
+        {
+            sum += arrival;
+            continue;
+        }
         if (light.type == direct_lighting::DirectLightType::Directional)
         {
-            const glm::vec3 &direction = light.direction;
-            const float nDotL = glm::dot(normal, direction);
-            if (nDotL > 0.0f)
+            const float transmittance
+                = traceSceneTransmittance(state, GiRay{origin, direction, state.settings.maxTraceDistance});
+            if (transmittance > 0.0f)
             {
-                if (shadows)
-                {
-                    const float transmittance
-                        = traceSceneTransmittance(state, GiRay{origin, direction, state.settings.maxTraceDistance});
-                    if (transmittance <= 0.0f)
-                    {
-                        continue;
-                    }
-                    sum += color * intensity * nDotL * transmittance;
-                }
-                else
-                {
-                    sum += color * intensity * nDotL;
-                }
+                sum += arrival * transmittance;
             }
             continue;
         }
-        const glm::vec3 toLight           = light.position - position;
-        const float     distanceSquared   = std::max(glm::dot(toLight, toLight), 1.0e-4f);
-        const float     rangeRatioSquared = distanceSquared / (light.range * light.range);
-        if (rangeRatioSquared >= 1.0f)
+        // Point-light shadow rays start at the same surface bias as the
+        // other trace sites and are skipped entirely for very close
+        // lights, where a shadow ray would immediately re-hit the
+        // receiver (trace.bias_m). Transparent surfaces soften the
+        // shadow by their transmittance.
+        const float shadowMinimum = state.settings.traceBias * 3.0f;
+        if (distance <= shadowMinimum)
         {
+            sum += arrival;
             continue;
         }
-        const float     distance    = std::sqrt(distanceSquared);
-        const glm::vec3 direction   = toLight * (1.0f / distance);
-        const float     rangeFade   = 1.0f - rangeRatioSquared * rangeRatioSquared;
-        float           attenuation = rangeFade * rangeFade / distanceSquared;
-        if (light.type == direct_lighting::DirectLightType::Spot)
+        const float transmittance
+            = traceSceneTransmittance(state, GiRay{origin, direction, distance - shadowMinimum});
+        if (transmittance > 0.0f)
         {
-            const float coneCosine = glm::dot(-direction, light.direction);
-            const float coneT =
-                std::clamp((coneCosine - light.outerCosine) / light.coneDivisor, 0.0f, 1.0f);
-            attenuation *= coneT * coneT * (3.0f - 2.0f * coneT);
+            sum += arrival * transmittance;
         }
-        const float nDotL = glm::dot(normal, direction);
-        if (nDotL <= 0.0f || attenuation <= 0.0f)
-        {
-            continue;
-        }
-        if (shadows && distance > 0.0f)
-        {
-            // Point-light shadow rays start at the same surface bias as the
-            // other trace sites and are skipped entirely for very close
-            // lights, where a shadow ray would immediately re-hit the
-            // receiver (trace.bias_m). Transparent surfaces soften the
-            // shadow by their transmittance.
-            const float shadowMinimum = state.settings.traceBias * 3.0f;
-            if (distance > shadowMinimum)
-            {
-                const float transmittance
-                    = traceSceneTransmittance(state, GiRay{origin, direction, distance - shadowMinimum});
-                if (transmittance <= 0.0f)
-                {
-                    continue;
-                }
-                attenuation *= transmittance;
-            }
-        }
-        sum += color * intensity * attenuation * nDotL;
     }
     return sum;
 }
@@ -462,6 +434,18 @@ void projectRadianceToSh2(
 
 // ---- direct lighting --------------------------------------------------------------
 
+// The scattered share a texel contributes to the caches: a transparent surface
+// keeps its opacity share of the outgoing radiance (the reference estimator's
+// rule - the (1 - opacity) share leaves through the transmission path the
+// gather, probe, and reflection rays walk separately). Scaled once here, every
+// consumer of the card (indirect gathers, probe rays, the reflection module's
+// hit lighting through its own copy of the same rule) sees the correctly
+// attenuated bounce without re-deriving it.
+inline glm::vec3 scatteredShare(const GiSurface &surface, const glm::vec3 &radiance)
+{
+    return surface.opacity >= 1.0f ? radiance : radiance * surface.opacity;
+}
+
 void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit)
 {
     const GiEnvironmentSnapshot &environment = state.environment;
@@ -474,13 +458,15 @@ void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit)
     // zero, so albedo / pi * E collapses to zero), and the world-space position
     // / normal the full evaluation transforms per texel would multiply zero.
     // Scenes lit purely through GI (the interior demo view) skip that work
-    // every frame.
+    // every frame. The emission carries the same opacity share the lit terms
+    // carry (see scatteredShare).
     if (!surface.unlit && !hasSun && !environment.hasDirectLights)
     {
         for (std::uint32_t texel = unit.texelBegin; texel < unit.texelEnd; ++texel)
         {
-            card.directRadiance[texel]
-                = card.depthTexels[texel] >= invalidCardDepth ? glm::vec3(0.0f) : surface.emissive;
+            card.directRadiance[texel] = card.depthTexels[texel] >= invalidCardDepth
+                ? glm::vec3(0.0f)
+                : scatteredShare(surface, surface.emissive);
         }
         state.directTexelsThisFrame.fetch_add(unit.texelEnd - unit.texelBegin, std::memory_order_relaxed);
         return;
@@ -540,7 +526,7 @@ void gatherDirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit)
                 radiance = card.albedo[texel] * (irradiance * (1.0f / kPi));
             }
             radiance += surface.emissive;
-            card.directRadiance[texel] = radiance;
+            card.directRadiance[texel] = scatteredShare(surface, radiance);
         }
         if (++x == card.texelWidth)
         {
@@ -659,19 +645,28 @@ void gatherIndirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit,
                         : surface.linear * hit.localPosition + surface.translation;
                     const glm::vec3 worldNormal
                         = glm::normalize(surface.normalMatrix * hit.localNormal);
+                    // The interface normal faces the ray: outward normals stay
+                    // outward on a medium exit (a backface hit), and the
+                    // refraction needs the normal on the ray's side to bend
+                    // across the interface instead of mirroring back into the
+                    // medium.
+                    const glm::vec3 interfaceNormal = hit.backface ? -worldNormal : worldNormal;
                     const float     ior = glm::max(surface.indexOfRefraction, 1.0f);
-                    glm::vec3 bent  = glm::refract(rayDirection, worldNormal, hit.backface ? ior : 1.0f / ior);
+                    glm::vec3 bent  = glm::refract(rayDirection, interfaceNormal, hit.backface ? ior : 1.0f / ior);
                     if (glm::dot(bent, bent) < 1.0e-8f)
                     {
-                        bent = glm::reflect(rayDirection, worldNormal); // total internal reflection
+                        bent = glm::reflect(rayDirection, interfaceNormal); // total internal reflection
                     }
                     rayOrigin    = worldPosition + bent * state.settings.traceBias;
                     rayDirection = bent;
                 }
             }
             // Cosine-weighted sampling: E = pi * mean(L_i), and the Lambertian
-            // radiance is albedo / pi * E = albedo * mean(L_i).
-            gather = card.albedo[texel] * (gather / static_cast<float>(rayCount));
+            // radiance is albedo / pi * E = albedo * mean(L_i). The scattered
+            // share carries the surface's opacity (see scatteredShare): the
+            // transmitted share of a transparent texel lives in the ray chains
+            // its transmission segments walk, never in its own bounce term.
+            gather = scatteredShare(surface, card.albedo[texel] * (gather / static_cast<float>(rayCount)));
             // Exponential history with a ramp-up: the first update takes the
             // fresh sample whole, then the weight settles at (1 - history).
             const std::uint32_t seen  = std::min<std::uint32_t>(card.indirectSamples[texel] + 1u, 255u);
@@ -833,11 +828,15 @@ void updateProbe(GiPipelineState &state, std::uint32_t levelIndex, std::uint32_t
                     : surface.linear * hit.localPosition + surface.translation;
                 const glm::vec3 worldNormal
                     = glm::normalize(surface.normalMatrix * hit.localNormal);
+                // The interface normal faces the ray (see the gather's
+                // transmission walk): outward normals stay outward on a medium
+                // exit, and the refraction needs the normal on the ray's side.
+                const glm::vec3 interfaceNormal = hit.backface ? -worldNormal : worldNormal;
                 const float     ior = glm::max(surface.indexOfRefraction, 1.0f);
-                glm::vec3 bent  = glm::refract(rayDirection, worldNormal, hit.backface ? ior : 1.0f / ior);
+                glm::vec3 bent  = glm::refract(rayDirection, interfaceNormal, hit.backface ? ior : 1.0f / ior);
                 if (glm::dot(bent, bent) < 1.0e-8f)
                 {
-                    bent = glm::reflect(rayDirection, worldNormal);
+                    bent = glm::reflect(rayDirection, interfaceNormal);
                 }
                 traveled    += hit.t + state.settings.traceBias;
                 rayOrigin    = worldPosition + bent * state.settings.traceBias;
@@ -1047,13 +1046,25 @@ bool worldCacheIrradiance(
         {
             continue;
         }
+        // Each valid corner evaluates against the shared normal and
+        // accumulates into one vec3 accumulator (the register-friendly shape;
+        // see the renderer twin in gi_probe_sampling.hpp); the tangent-plane
+        // factor comes from the shared exported-grid convention
+        // (lumen_gi::probeTangentPlaneFactor in capabilities.hpp).
+        const float inverseSpacing = 1.0f / std::max(level->spacing, 1.0e-5f);
         glm::vec3 sum(0.0f);
         float     weightSum = 0.0f;
         for (std::uint32_t corner = 0; corner < 8; ++corner)
         {
             const GiProbeLevel::Probe &probe = level->probes[corners.slots[corner]];
-            const float weight = corners.weights[corner] * probe.validity;
+            float weight = corners.weights[corner] * probe.validity;
             if (weight <= 0.0f)
+            {
+                continue;
+            }
+            const glm::vec3 toProbe = probe.position - position;
+            weight *= probeTangentPlaneFactor(&normal.x, &toProbe.x, inverseSpacing);
+            if (weight <= 1.0e-8f)
             {
                 continue;
             }

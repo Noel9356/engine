@@ -287,29 +287,32 @@ RfHit rfTraceScene(const RfPipelineState &state, const RfRay &ray)
                                  + geometry.colors[i2] * b.z;
     const glm::vec3 geometric = glm::cross(
         geometry.positions[i1] - geometry.positions[i0], geometry.positions[i2] - geometry.positions[i0]);
+    const float geometricLength = glm::length(geometric);
     const float smoothLength = glm::length(localNormal);
     if (smoothLength < 1.0e-8f)
     {
-        const float geometricLength = glm::length(geometric);
         localNormal = geometricLength > 1.0e-12f ? geometric / geometricLength : glm::vec3(0.0f, 1.0f, 0.0f);
     }
     else
     {
         localNormal /= smoothLength;
     }
-    const glm::vec3 geometricNormal = glm::length(geometric) > 1.0e-12f
-        ? glm::normalize(surface.transform * glm::vec4(geometric, 0.0f))
-        : localNormal;
 
     result.position = glm::vec3(surface.transform * glm::vec4(localPosition, 1.0f));
-    result.normal   = glm::normalize(surface.transform * glm::vec4(localNormal, 0.0f));
+    // Normals transform through the inverse transpose: the plain linear
+    // matrix skews them under non-uniform scale.
+    result.normal   = surface.localIsWorld ? localNormal : glm::normalize(surface.normalMatrix * localNormal);
     result.albedo   = surface.albedo * localAlbedo;
     // Reflection rays start on surfaces and legitimately strike the back of
     // thin geometry (the inside of the room's outer shell, seen from outside
     // through a miss). Report a backface only when BOTH the smooth and the
     // geometric normal face away, mirroring lumen_gi's anti-leak rule.
+    const glm::vec3 worldGeometric = geometricLength > 1.0e-12f
+        ? (surface.localIsWorld ? geometric / geometricLength
+                                : glm::normalize(surface.normalMatrix * geometric))
+        : result.normal;
     const bool smoothFaces  = glm::dot(result.normal, ray.direction) <= 0.0f;
-    const bool geometricFaces = glm::dot(geometricNormal, ray.direction) <= 0.0f;
+    const bool geometricFaces = glm::dot(worldGeometric, ray.direction) <= 0.0f;
     result.backface = !smoothFaces && !geometricFaces;
     if (!smoothFaces && geometricFaces)
     {
@@ -618,18 +621,42 @@ void rfUpdateSurfaceWorldBounds(RfSurface &surface)
     surface.worldMax = worldMax;
 }
 
-void rfUpdateSurfaceTransform(RfSurface &surface, const glm::mat4 &transform)
+bool rfUpdateSurfaceTransform(RfSurface &surface, const glm::mat4 &transform)
 {
+    // The derived matrices are validated before anything is committed: a
+    // singular transform produces non-finite values, and NaN bounds make every
+    // slab test fail closed, silently removing the surface from all rays. The
+    // caller keeps the previous transform instead (see the header contract).
+    const glm::mat4 inverse       = glm::inverse(transform);
+    const glm::mat3 normalMatrix  = glm::inverseTranspose(glm::mat3(transform));
+    const auto      allFinite    = [](const float *elements, std::uint32_t count)
+    {
+        for (std::uint32_t element = 0; element < count; ++element)
+        {
+            if (!std::isfinite(elements[element]))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!allFinite(glm::value_ptr(transform), 16u) || !allFinite(glm::value_ptr(inverse), 16u)
+        || !allFinite(glm::value_ptr(normalMatrix), 9u))
+    {
+        return false;
+    }
     surface.transform       = transform;
-    surface.inverseTransform = glm::inverse(transform);
-    surface.inverseLinear   = glm::mat3(surface.inverseTransform);
-    surface.inverseTranslation = glm::vec3(surface.inverseTransform[3]);
+    surface.inverseTransform = inverse;
+    surface.inverseLinear   = glm::mat3(inverse);
+    surface.inverseTranslation = glm::vec3(inverse[3]);
+    surface.normalMatrix    = normalMatrix;
     surface.localIsWorld    = transform == glm::mat4(1.0f);
     rfUpdateSurfaceWorldBounds(surface);
     // The raster caches depend on the transform: the projected triangles and
     // the world-space vertex positions rebuild on the next raster pass.
     surface.rasterBuiltSerial = 0;
     surface.rasterWorldDirty  = true;
+    return true;
 }
 
 void rfEnsureSceneTlas(RfPipelineState &state)
@@ -919,20 +946,41 @@ bool rfProbeIrradiance(
         return false;
     }
     const float normalArray[3] = {normal.x, normal.y, normal.z};
-    float valid = 0.0f;
+    // The tangent-plane (geometric) term of the probe weights comes from the
+    // shared lumen_gi::probeTangentPlaneFactor - the exported-grid convention
+    // the provider's world cache and the renderer's probe walk also apply -
+    // and each valid corner evaluates into one vec3 accumulator (the
+    // register-friendly shape; see the renderer twin in gi_probe_sampling.hpp).
+    const float inverseSpacing = 1.0f / std::max(level->spacing, 1.0e-5f);
+    float     valid = 0.0f;
+    glm::vec3 sum(0.0f);
     for (std::uint32_t slot = 0; slot < 8; ++slot)
     {
         if (weights[slot] <= 0.0f)
         {
             continue;
         }
-        glm::vec3 irradiance;
+        const glm::ivec3 corner(irradianceCache.base + glm::ivec3(static_cast<int>(slot & 1u),
+            static_cast<int>((slot >> 1) & 1u), static_cast<int>((slot >> 2) & 1u)));
+        const glm::vec3 toProbe = (level->anchor + glm::vec3(corner) * level->spacing) - position;
+        const float weight
+            = weights[slot] * lumen_gi::probeTangentPlaneFactor(&normal.x, &toProbe.x, inverseSpacing);
+        if (weight <= 1.0e-8f)
+        {
+            continue;
+        }
+        const float blend = weight / weightSum;
+        glm::vec3    irradiance;
         lumen_gi::evaluateSh2Irradiance(&irradianceCache.sh2[slot][0].x, normalArray, glm::value_ptr(irradiance));
-        const float blend = weights[slot] / weightSum;
-        outIrradiance += irradiance * blend;
+        sum += irradiance * blend;
         valid += irradianceCache.validity[slot] * blend;
     }
-    return valid > 0.0f;
+    if (valid <= 0.0f)
+    {
+        return false;
+    }
+    outIrradiance = sum;
+    return true;
 }
 
 bool rfProbeRadiance(

@@ -347,7 +347,7 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
 
 // ---- bilateral filter ----------------------------------------------------------------
 
-void rfbilateralFilter(RfPipelineState &state, TaskScheduler *scheduler)
+void rfBilateralFilter(RfPipelineState &state, TaskScheduler *scheduler)
 {
     if (!state.settings.bilateralEnabled)
     {

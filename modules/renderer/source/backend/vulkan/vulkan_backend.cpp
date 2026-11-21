@@ -2276,10 +2276,8 @@ void VulkanBackend::endFrame()
     std::uint32_t exportWidth = 0;
     std::uint32_t exportHeight = 0;
     bool          exportBgra   = false;
-    bool          exportPng    = false;
     if (exportRequested_)
     {
-        exportPng = exportPng_;
         // Export path: transition to TRANSFER_SRC, copy into the readback
         // buffer, then back to PRESENT. The file write happens later (next
         // slot rotation, or an explicit flush) - not between submit and
@@ -2423,7 +2421,6 @@ void VulkanBackend::endFrame()
         // request pending so the next endFrame re-records it.
         pendingExportResult_.active        = true;
         pendingExportResult_.path          = exportPath_;
-        pendingExportResult_.png           = exportPng;
         pendingExportResult_.frameSlot     = frames_->currentFrame();
         pendingExportResult_.width         = exportWidth;
         pendingExportResult_.height        = exportHeight;
@@ -2485,13 +2482,6 @@ void VulkanBackend::destroyTexture(TextureHandle texture)
     }
 }
 
-// Reports the creation-time mean color stored on the texture record (see
-// VulkanResources::createTexture, where the sum rides the upload path).
-bool VulkanBackend::textureMean(TextureHandle texture, float outMeanRGB[3]) const
-{
-    return resources_ != nullptr && resources_->textureMean(texture, outMeanRGB);
-}
-
 // Frees the resources queued by destroyMesh/destroyTexture for this frame
 // slot; called from beginFrame once the slot's previous work has retired.
 void VulkanBackend::drainDeferredDestroys(std::uint32_t frameIndex)
@@ -2544,18 +2534,6 @@ bool VulkanBackend::nativeHandles(VulkanDeviceHandles *outHandles) const
 // the shared readback buffer is never overwritten by two pending copies.
 bool VulkanBackend::exportFramePpm(const char *filePath, RenderError *error)
 {
-    return exportFrameImage(filePath, false, error);
-}
-
-bool VulkanBackend::exportFramePng(const char *filePath, RenderError *error)
-{
-    return exportFrameImage(filePath, true, error);
-}
-
-// Shared deferred-export request path for the PPM and PNG writers: the
-// format only decides which file writer the completed readback feeds.
-bool VulkanBackend::exportFrameImage(const char *filePath, bool png, RenderError *error)
-{
     if (pendingExportResult_.active)
     {
         // Rare (two screenshots back to back): complete the outstanding
@@ -2577,7 +2555,6 @@ bool VulkanBackend::exportFrameImage(const char *filePath, bool png, RenderError
 
     exportRequested_ = true;
     exportPath_      = filePath;
-    exportPng_       = png;
     reportError(error, RenderError::None);
     return true;
 }
@@ -2596,7 +2573,6 @@ void VulkanBackend::completePendingExportIfReady()
         pendingExportResult_.width,
         pendingExportResult_.height,
         pendingExportResult_.bgra,
-        pendingExportResult_.png,
         &exportError);
     if (exportError != RenderError::None)
     {
@@ -2636,7 +2612,6 @@ void VulkanBackend::flushPendingExport(bool allowBlocking)
             pendingExportResult_.width,
             pendingExportResult_.height,
             pendingExportResult_.bgra,
-            pendingExportResult_.png,
             &exportError);
         if (exportError != RenderError::None)
         {

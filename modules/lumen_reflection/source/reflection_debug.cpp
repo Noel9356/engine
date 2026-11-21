@@ -174,6 +174,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                                 : glm::vec3(0.0f);
                             const bool transmits = texelOpacity < 1.0f
                                 && glm::dot(refractedView, refractedView) > 0.5f;
+                            const glm::mat3 refractedBasis = transmits ? makeBasis(refractedView) : basis;
                             std::uint64_t seed = hashSeed(0x5EEDBEEFull + index * 2654435761ull);
                             glm::vec3    sum(0.0f);
                             for (std::uint32_t sample = 0; sample < samples; ++sample)
@@ -183,18 +184,20 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                                 glm::vec3 chainWeight(1.0f);
                                 glm::vec3 chainDirection(0.0f);
                                 glm::vec3 chainOrigin(0.0f);
+                                bool      chainReflected = true;
                                 if (!rfSplitFirstSegment(transmits, fresnel, texelOpacity, albedo, refractedView,
-                                    direction, clampedRoughness, alpha, makeBasis(refractedView), position, rayOrigin,
-                                    state.settings.traceBias, chainDirection, chainOrigin, chainWeight, seed))
+                                    direction, clampedRoughness, alpha, refractedBasis, position, rayOrigin,
+                                    state.settings.traceBias, chainDirection, chainOrigin, chainWeight,
+                                    chainReflected, seed))
                                 {
                                     continue; // absorbed share
                                 }
-                                const glm::vec4 chainClipOrigin = chainOrigin == rayOrigin
+                                const glm::vec4 chainClipOrigin = chainReflected
                                     ? clipOrigin
                                     : state.viewProjection * glm::vec4(chainOrigin, 1.0f);
                                 RfChainResolve chain = resolveRayChain(
                                     state, chainClipOrigin, chainOrigin, chainDirection, chainWeight,
-                                    state.settings.maxTransmissionSegments, chainOrigin == rayOrigin, seed);
+                                    state.settings.maxTransmissionSegments, chainReflected, seed);
                                 // The reference brute-forces scene traces only
                                 // (no screen tier), so a deferred chain answer is
                                 // shaded right here (the texel's own response as

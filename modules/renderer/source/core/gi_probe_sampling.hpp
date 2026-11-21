@@ -40,6 +40,10 @@ struct GiProbeLevel
     glm::vec3     anchor{0.0f};
     glm::ivec3    dims{0};
     float         spacing = 1.0f;
+    // Reciprocal of spacing, precomputed per snapshot: the per-pixel probe
+    // walk's tangent-plane factor multiplies by it once per corner, and a
+    // per-corner division would dominate the walk's cost.
+    float         inverseSpacing = 1.0f;
     std::uint32_t offset  = 0; // first probe index inside GiProbeGrid::probes
 };
 
@@ -91,12 +95,14 @@ inline bool buildProbeLevels(GiProbeGrid &grid)
     grid.level0.dims    = glm::ivec3(static_cast<int>(header.level0Dimensions[0]),
         static_cast<int>(header.level0Dimensions[1]), static_cast<int>(header.level0Dimensions[2]));
     grid.level0.spacing = header.level0Spacing;
+    grid.level0.inverseSpacing = 1.0f / std::max(header.level0Spacing, 1.0e-5f);
     grid.level0.offset  = header.level0ProbeOffset;
 
     grid.level1.anchor  = glm::make_vec3(grid.probes[header.level1ProbeOffset].position);
     grid.level1.dims    = glm::ivec3(static_cast<int>(header.level1Dimensions[0]),
         static_cast<int>(header.level1Dimensions[1]), static_cast<int>(header.level1Dimensions[2]));
     grid.level1.spacing = header.level1Spacing;
+    grid.level1.inverseSpacing = 1.0f / std::max(header.level1Spacing, 1.0e-5f);
     grid.level1.offset  = header.level1ProbeOffset;
 
     grid.levelsBuilt = true;
@@ -233,10 +239,13 @@ ENGINE_SHADING_INLINE glm::vec3 giEvaluateSh2Irradiance(const float sh2[27], con
                      + band2XXYY * basis.xxmyy));
 }
 
-// Trilinear probe-grid irradiance for one shaded point, validity-weighted.
-// Returns false when the grid holds no valid probes along this footprint (the
-// caller keeps its legacy ambient); outWeight is the validity coverage of the
-// footprint in 0..1, used to blend GI against the hemispheric ambient.
+// Trilinear probe-grid irradiance for one shaded point, validity- and
+// tangent-plane-weighted. Returns false when the grid holds no valid probes
+// along this footprint (the caller keeps its legacy ambient); outWeight is the
+// validity coverage of the footprint in 0..1, used to blend GI against the
+// hemispheric ambient. The tangent-plane term comes from the shared
+// lumen_gi::probeTangentPlaneFactor, the exported-grid convention the
+// provider's world cache and lumen_reflection's hit lighting also apply.
 ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid, const glm::vec3 &position,
     const glm::vec3 &normal, glm::vec3 &outIrradiance, float &outWeight)
 {
@@ -248,8 +257,8 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
         return false;
     }
 
-    // The SH2 basis is shared by every probe of the footprint (same normal),
-    // so its products are computed once here instead of once per probe.
+    // The SH2 basis is shared by the single blended evaluation (same normal),
+    // so its products are computed once here.
     const Sh2Basis basis = sh2BasisFor(normal);
 
     const glm::vec3 cell     = (position - level.anchor) / level.spacing;
@@ -257,10 +266,18 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
     const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
 
     // The irradiance sum evaluates each valid probe corner against the shared
-    // basis and accumulates its weighted result; the corner loop keeps its
-    // early-outs (probe index range, zero-weight corners) so invalid probes
-    // never touch the arithmetic at all.
-    float       weightSum   = 0.0f;
+    // basis and accumulates its weighted result into ONE vec3 accumulator
+    // (three live floats, everything stays in registers; blending the corners'
+    // coefficients first would hold all 27 coefficient floats live and spill);
+    // the loop keeps its early-outs (probe index range, zero-weight corners)
+    // so invalid probes never touch the arithmetic at all. The tangent-plane
+    // term runs in its factored form (see lumen_gi::probeTangentPlaneFactor):
+    // the pixel-level base alignment (measured against the cell's base corner,
+    // anchor + base * spacing) plus the corner's unit offsets dotted with the
+    // normal, so no corner position is rebuilt per probe.
+    const float baseAlignment
+        = glm::dot(normal, level.anchor + glm::vec3(base) * level.spacing - position) * level.inverseSpacing;
+    float       weightSum     = 0.0f;
     glm::vec3   irradianceSum(0.0f);
     for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
     {
@@ -279,8 +296,26 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
                 const float latticeWeight = (cornerX != 0 ? fraction.x : 1.0f - fraction.x)
                                           * (cornerY != 0 ? fraction.y : 1.0f - fraction.y)
                                           * (cornerZ != 0 ? fraction.z : 1.0f - fraction.z);
-                const float weight = latticeWeight * probe.validity;
+                float weight = latticeWeight * probe.validity;
                 if (weight <= 0.0f)
+                {
+                    continue;
+                }
+                float alignment = baseAlignment;
+                if (cornerX != 0)
+                {
+                    alignment += normal.x;
+                }
+                if (cornerY != 0)
+                {
+                    alignment += normal.y;
+                }
+                if (cornerZ != 0)
+                {
+                    alignment += normal.z;
+                }
+                weight *= lumen_gi::probeTangentPlaneAlignmentFactor(alignment);
+                if (weight <= 1.0e-8f)
                 {
                     continue;
                 }
@@ -293,7 +328,7 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
     {
         return false;
     }
-    outIrradiance = irradianceSum / weightSum;
+    outIrradiance = irradianceSum * (1.0f / weightSum);
     outWeight     = glm::clamp(weightSum, 0.0f, 1.0f);
     return true;
 }

@@ -194,14 +194,15 @@ void rasterizeBand(RfPipelineState &state, const std::vector<RfScreenTriangle> &
         const std::uint32_t      i0 = geometry.indices[screen.triangle * 3 + 0];
         const std::uint32_t      i1 = geometry.indices[screen.triangle * 3 + 1];
         const std::uint32_t      i2 = geometry.indices[screen.triangle * 3 + 2];
-        // World-space vertex normals: the transform is linear, so shifting it
-        // before the barycentric interpolation instead of after gives the same
+        // World-space vertex normals through the surface's normal matrix (the
+        // inverse transpose): the plain linear matrix skews them under
+        // non-uniform scale. The transform is linear, so shifting it before the
+        // barycentric interpolation instead of after gives the same
         // interpolated direction (and the length change the interpolation
         // applies is erased by the final normalize).
-        const glm::mat3 linear(surface.transform);
-        const glm::vec3 worldNormal0 = linear * geometry.normals[i0];
-        const glm::vec3 worldNormal1 = linear * geometry.normals[i1];
-        const glm::vec3 worldNormal2 = linear * geometry.normals[i2];
+        const glm::vec3 worldNormal0 = surface.normalMatrix * geometry.normals[i0];
+        const glm::vec3 worldNormal1 = surface.normalMatrix * geometry.normals[i1];
+        const glm::vec3 worldNormal2 = surface.normalMatrix * geometry.normals[i2];
         for (std::int32_t y = yBegin; y < yEnd; ++y)
         {
             for (std::int32_t x = xBegin; x < xEnd; ++x)
@@ -396,44 +397,21 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
     }
 
     // Direct lights (point/spot/directional of the direct_lighting module):
-    // the renderer's attenuation formulas.
+    // the shared lumen::lightArrival evaluates the renderer's attenuation
+    // formulas and hands back the unoccluded arrival; point-light shadows on
+    // reflection hits are off by default (the module carries no dedicated
+    // pointLightShadows setting; the sun shadow above carries the occlusion
+    // the eye reads).
     for (const RfEnvironmentSnapshot::PreparedDirectLight &light : environment.preparedLights)
     {
-        glm::vec3  localLightDirection;
-        float      attenuation = 1.0f;
-        if (light.type == direct_lighting::DirectLightType::Directional)
-        {
-            localLightDirection = -light.direction;
-        }
-        else
-        {
-            const glm::vec3 toLight           = light.position - position;
-            const float     distanceSquared   = std::max(glm::dot(toLight, toLight), 1.0e-4f);
-            const float     rangeRatioSquared = distanceSquared / (light.range * light.range);
-            if (rangeRatioSquared >= 1.0f)
-            {
-                continue;
-            }
-            const float inverseDistance = 1.0f / std::sqrt(distanceSquared);
-            localLightDirection         = toLight * inverseDistance;
-            const float rangeFade       = 1.0f - rangeRatioSquared * rangeRatioSquared;
-            attenuation                 = rangeFade * rangeFade / distanceSquared;
-            if (light.type == direct_lighting::DirectLightType::Spot)
-            {
-                const float coneCosine = glm::dot(-localLightDirection, light.direction);
-                const float coneT = std::clamp((coneCosine - light.outerCosine) / light.coneDivisor, 0.0f, 1.0f);
-                attenuation *= coneT * coneT * (3.0f - 2.0f * coneT);
-            }
-        }
-        const float localNDotL = glm::dot(normal, localLightDirection);
-        if (localNDotL <= 0.0f || attenuation <= 0.0f)
+        glm::vec3 lightDirection(0.0f);
+        float     lightDistance = 0.0f;
+        glm::vec3 arrival(0.0f);
+        if (!lumen::lightArrival(light, position, normal, lightDirection, lightDistance, arrival))
         {
             continue;
         }
-        // Point-light shadows on reflection hits are off by default (the
-        // module carries no dedicated pointLightShadows setting; the sun
-        // shadow above carries the occlusion the eye reads).
-        result += diffuse * (light.color * light.intensity) * attenuation * localNDotL;
+        result += diffuse * arrival;
     }
 
     // Diffuse GI from the probe grid; the hemispheric ambient fallback while
@@ -581,7 +559,12 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec4 &cli
 
     // Camera distance of the marched point as a quadratic in t (the direction
     // is unit length): d(t)^2 = t^2 + linear * t + constant, so each step
-    // needs two multiplies and an add instead of a vector rebuild.
+    // needs two multiplies and an add instead of a vector rebuild. The
+    // comparison runs entirely on squared distances - both the hit test
+    // (ray behind the stored surface) and the thin-occluder thickness test
+    // (rayDepth - storedDepth <= thickness, with both distances non-negative,
+    // is rayDepth <= storedDepth + thickness) are order-preserving under
+    // squaring, so the per-step square root disappears.
     const glm::vec3 relative = origin - state.cameraPosition;
     const float     linear   = 2.0f * glm::dot(direction, relative);
     const float     constant = glm::dot(relative, relative);
@@ -616,8 +599,9 @@ ScreenTraceResult screenTrace(const RfPipelineState &state, const glm::vec4 &cli
         {
             continue;
         }
-        const float rayDepth = std::sqrt(t * t + linear * t + constant);
-        if (rayDepth > storedDepth && rayDepth - storedDepth <= thickness)
+        const float rayDepthSquared = t * t + linear * t + constant;
+        const float hitDepthLimit   = storedDepth + thickness;
+        if (rayDepthSquared > storedDepth * storedDepth && rayDepthSquared <= hitDepthLimit * hitDepthLimit)
         {
             // A transparent texel transmits the ray instead of stopping it:
             // the surface's tint (albedo x (1 - opacity)) attenuates the
@@ -770,10 +754,13 @@ RfChainResolve resolveRayChain(const RfPipelineState &state, const glm::vec4 &cl
     }
 
     // Transparent interface: one transmission segment, then the Fresnel
-    // split. The face normal faces the ray (rfTraceScene's contract), so
-    // `entering` distinguishes the outside -> medium crossing from the
+    // split. `entering` distinguishes the outside -> medium crossing from the
     // medium -> outside one and picks the index ratio accordingly. The
-    // refraction is computed before the budget check so an exhausted chain
+    // interface works on the ray-facing normal: rfTraceScene keeps the
+    // outward normal on a true backface (its flip handles only the winding
+    // disagreement), and the refraction needs the normal on the ray's side to
+    // bend across the interface instead of mirroring back into the medium.
+    // The refraction is computed before the budget check so an exhausted chain
     // can still fall back to the cache along the direction the ray would
     // continue with (refracted, or mirrored under total internal reflection)
     // instead of reading black.
@@ -782,9 +769,10 @@ RfChainResolve resolveRayChain(const RfPipelineState &state, const glm::vec4 &cl
     const float   ior      = glm::max(surface.indexOfRefraction, 1.0f);
     const float   n1       = entering ? 1.0f : ior;
     const float   n2       = entering ? ior : 1.0f;
-    const float   cosI     = glm::clamp(glm::dot(-direction, hit.normal), 0.0f, 1.0f);
+    const glm::vec3 interfaceNormal = glm::dot(hit.normal, direction) < 0.0f ? hit.normal : -hit.normal;
+    const float   cosI     = glm::clamp(glm::dot(-direction, interfaceNormal), 0.0f, 1.0f);
     const float   fresnel  = rfFresnelSchlickScalar(cosI, rfDielectricF0FromIor(n1, n2));
-    const glm::vec3 transmitted = glm::refract(direction, hit.normal, n1 / n2);
+    const glm::vec3 transmitted = glm::refract(direction, interfaceNormal, n1 / n2);
     if (remainingSegments == 0)
     {
         // Budget exhausted: the chain stops tracing, but the pixel keeps its
@@ -794,7 +782,7 @@ RfChainResolve resolveRayChain(const RfPipelineState &state, const glm::vec4 &cl
         // absorbing to black.
         const glm::vec3 continuation = glm::dot(transmitted, transmitted) > 1.0e-8f
             ? glm::normalize(transmitted)
-            : glm::reflect(direction, hit.normal);
+            : glm::reflect(direction, interfaceNormal);
         glm::vec3 cached(0.0f);
         if (!rfProbeRadiance(state, hit.position, continuation, cached))
         {
@@ -816,10 +804,10 @@ RfChainResolve resolveRayChain(const RfPipelineState &state, const glm::vec4 &cl
         // reflectance out of the weight (the estimator stays unbiased). The
         // reflected path leaves the medium, so its nested chain may use the
         // screen tier again.
-        const glm::vec3 reflectDirection = glm::reflect(direction, hit.normal);
+        const glm::vec3 reflectDirection = glm::reflect(direction, interfaceNormal);
         const glm::vec4 reflectClip = state.viewProjection
-            * glm::vec4(hit.position + hit.normal * state.settings.traceBias, 1.0f);
-        return resolveRayChain(state, reflectClip, hit.position + hit.normal * state.settings.traceBias,
+            * glm::vec4(hit.position + interfaceNormal * state.settings.traceBias, 1.0f);
+        return resolveRayChain(state, reflectClip, hit.position + interfaceNormal * state.settings.traceBias,
             reflectDirection, weight, remainingSegments, true, seed);
     }
     // Transmit: bent by Snell's law; total internal reflection falls back to
@@ -832,10 +820,14 @@ RfChainResolve resolveRayChain(const RfPipelineState &state, const glm::vec4 &cl
     const bool exitCrossing = hit.backface;
     if (glm::dot(transmitted, transmitted) < 1.0e-8f)
     {
+        // Total internal reflection: the path stays inside the medium, so the
+        // continuation runs on scene traces (the screen march cannot walk the
+        // bending interfaces) and offsets along the mirrored direction.
+        const glm::vec3 reflectDirection = glm::reflect(direction, interfaceNormal);
         const glm::vec4 reflectClip = state.viewProjection
-            * glm::vec4(hit.position + hit.normal * state.settings.traceBias, 1.0f);
-        return resolveRayChain(state, reflectClip, hit.position + hit.normal * state.settings.traceBias,
-            glm::reflect(direction, hit.normal), weight, remainingSegments, true, seed);
+            * glm::vec4(hit.position + reflectDirection * state.settings.traceBias, 1.0f);
+        return resolveRayChain(state, reflectClip, hit.position + reflectDirection * state.settings.traceBias,
+            reflectDirection, weight, remainingSegments, false, seed);
     }
     glm::vec3 transmittedDirection = glm::normalize(transmitted);
     if (surface.roughness > kMinimumRoughness)
@@ -950,12 +942,15 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                     // The transmitted share leaves through the refracted
                     // direction (Snell with the air -> medium ratio); rough
                     // surfaces blur it, frosted glass reads blurry instead of
-                    // clear.
+                    // clear. The refracted lobe's tangent frame is shared by
+                    // every ray of the texel, so it is built once here (the
+                    // split call only consumes it).
                     const glm::vec3 refractedView = texelOpacity < 1.0f
                         ? glm::normalize(glm::refract(-view, normal, 1.0f / texelIor))
                         : glm::vec3(0.0f);
                     const bool transmits = texelOpacity < 1.0f
                         && glm::dot(refractedView, refractedView) > 0.5f;
+                    const glm::mat3 refractedBasis = transmits ? makeBasis(refractedView) : basis;
 
                     std::uint64_t seed = hashSeed(state.frameIndex * 7919ull + index * 104729ull);
                     glm::vec3    sum(0.0f);
@@ -976,22 +971,23 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                             glm::vec3 chainWeight(1.0f);
                             glm::vec3 chainDirection(0.0f);
                             glm::vec3 chainOrigin(0.0f);
+                            bool      chainReflected = true;
                             if (!rfSplitFirstSegment(transmits, fresnel, texelOpacity, albedo, refractedView,
-                                direction, clampedRoughness, alpha, makeBasis(refractedView), position, rayOrigin,
-                                state.settings.traceBias, chainDirection, chainOrigin, chainWeight, seed))
+                                direction, clampedRoughness, alpha, refractedBasis, position, rayOrigin,
+                                state.settings.traceBias, chainDirection, chainOrigin, chainWeight, chainReflected,
+                                seed))
                             {
                                 ++raysDone;
                                 continue; // absorbed share: no return
                             }
-                            const glm::vec4 chainClipOrigin = chainOrigin == rayOrigin
+                            const glm::vec4 chainClipOrigin = chainReflected
                                 ? clipOrigin
                                 : state.viewProjection * glm::vec4(chainOrigin, 1.0f);
                             // A transmitted first segment starts inside the
                             // medium: scene traces only from there on.
-                            const bool chainAllowsScreenTrace = chainOrigin == rayOrigin;
                             RfChainResolve chain = resolveRayChain(
                                 state, chainClipOrigin, chainOrigin, chainDirection, chainWeight,
-                                state.settings.maxTransmissionSegments, chainAllowsScreenTrace, seed);
+                                state.settings.maxTransmissionSegments, chainReflected, seed);
                             segmentsDone += chain.segments;
                             if (chain.deferred)
                             {
@@ -1151,7 +1147,7 @@ bool rfRunReflectionFrame(RfPipelineState &state, TaskScheduler *scheduler)
         rfTraceReflections(state, scheduler);
         rfSpatialReuse(state, scheduler);
         rfTemporalAccumulate(state, scheduler);
-        rfbilateralFilter(state, scheduler);
+        rfBilateralFilter(state, scheduler);
         return true;
     }
     catch (...)
