@@ -242,11 +242,18 @@ void setRockStrataContrast(PlanetGenerationParams &params, double value) { param
 void setTerrainTextureTileGround(PlanetGenerationParams &params, double value) { params.terrainTextureTileMetersGround = value; }
 void setTerrainTextureTileRock(PlanetGenerationParams &params, double value) { params.terrainTextureTileMetersRock = value; }
 void setWaterTextureTile(PlanetGenerationParams &params, double value) { params.waterTextureTileMeters = value; }
+void setTextureUvWarpStrength(PlanetGenerationParams &params, double value) { params.textureUvWarpStrength = value; }
+void setTextureUvWarpWavelength(PlanetGenerationParams &params, double value) { params.textureUvWarpWavelengthMeters = value; }
+void setTextureChunkRotation(PlanetGenerationParams &params, double value) { params.textureChunkRotation = value != 0.0; }
 void setBiomeBlendWidth(PlanetGenerationParams &params, double value) { params.biomeBlendWidth = value; }
 void setSlopeBlendWidth(PlanetGenerationParams &params, double value) { params.slopeBlendWidth = value; }
 void setElevationBlendFraction(PlanetGenerationParams &params, double value) { params.elevationBlendFraction = value; }
 void setWaterEnabled(PlanetGenerationParams &params, double value) { params.waterEnabled = value != 0.0; }
 void setWaterRoughness(PlanetGenerationParams &params, double value) { params.waterRoughness = static_cast<float>(value); }
+void setWaterRoughnessOrbital(PlanetGenerationParams &params, double value)
+{
+    params.waterRoughnessOrbital = static_cast<float>(value);
+}
 void setSeaIceTemperature(PlanetGenerationParams &params, double value) { params.seaIceTemperature = value; }
 void setSeaIceTransition(PlanetGenerationParams &params, double value) { params.seaIceTransition = value; }
 void setWaterWaveAmplitude(PlanetGenerationParams &params, double value) { params.waterWaveAmplitude = value; }
@@ -265,7 +272,10 @@ void setSwimSpeed(PlanetGenerationParams &params, double value) { params.swimSpe
 void setSwimWadeDepth(PlanetGenerationParams &params, double value) { params.swimWadeDepthMeters = value; }
 void setAtmosphereEnabled(PlanetGenerationParams &params, double value) { params.atmosphereEnabled = value != 0.0; }
 void setAtmosphereHeight(PlanetGenerationParams &params, double value) { params.atmosphereHeightMeters = value; }
-void setAerialPerspectiveScaleFraction(PlanetGenerationParams &params, double value) { params.aerialPerspectiveScaleFraction = value; }
+void setAerialPerspectiveScaleMeters(PlanetGenerationParams &params, double value)
+{
+    params.aerialPerspectiveScaleMeters = value;
+}
 void setAerialPerspectiveAsymptote(PlanetGenerationParams &params, double value) { params.aerialPerspectiveAsymptote = value; }
 void setDebugChunkBorders(PlanetGenerationParams &params, double value) { params.debugChunkBorders = value != 0.0; }
 void setDebugChunkBorderWidth(PlanetGenerationParams &params, double value) { params.debugChunkBorderWidthMeters = value; }
@@ -446,11 +456,15 @@ constexpr SettingRow kSettingRows[] = {
     {"terrain_texture_tile_meters_ground", SettingKind::Floating, setTerrainTextureTileGround},
     {"terrain_texture_tile_meters_rock",   SettingKind::Floating, setTerrainTextureTileRock},
     {"water_texture_tile_meters",          SettingKind::Floating, setWaterTextureTile},
+    {"texture_uv_warp_strength",           SettingKind::Floating, setTextureUvWarpStrength},
+    {"texture_uv_warp_wavelength_meters",  SettingKind::Floating, setTextureUvWarpWavelength},
+    {"texture_chunk_rotation",             SettingKind::Boolean,  setTextureChunkRotation},
     {"biome_blend_width",             SettingKind::Floating, setBiomeBlendWidth},
     {"slope_blend_width",             SettingKind::Floating, setSlopeBlendWidth},
     {"elevation_blend_fraction",      SettingKind::Floating, setElevationBlendFraction},
     {"water_enabled",                 SettingKind::Boolean,  setWaterEnabled},
     {"water_roughness",               SettingKind::Floating, setWaterRoughness},
+    {"water_roughness_orbital",       SettingKind::Floating, setWaterRoughnessOrbital},
     {"water_foam_width_meters",       SettingKind::Floating, setWaterFoamWidth},
     {"water_foam_strength",           SettingKind::Floating, setWaterFoamStrength},
     {"water_foam_falloff_exponent",   SettingKind::Floating, setWaterFoamFalloffExponent},
@@ -489,7 +503,7 @@ constexpr SettingRow kSettingRows[] = {
     {"swim_wade_depth_meters",        SettingKind::Floating, setSwimWadeDepth},
     {"atmosphere_enabled",            SettingKind::Boolean,  setAtmosphereEnabled},
     {"atmosphere_height_meters",      SettingKind::Floating, setAtmosphereHeight},
-    {"aerial_perspective_scale_fraction", SettingKind::Floating, setAerialPerspectiveScaleFraction},
+    {"aerial_perspective_scale_meters",  SettingKind::Floating, setAerialPerspectiveScaleMeters},
     {"aerial_perspective_asymptote",  SettingKind::Floating, setAerialPerspectiveAsymptote},
     {"debug_chunk_borders",           SettingKind::Boolean,  setDebugChunkBorders},
     {"debug_chunk_border_width_meters", SettingKind::Floating, setDebugChunkBorderWidth},

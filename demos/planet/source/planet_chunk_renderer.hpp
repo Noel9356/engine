@@ -35,6 +35,19 @@ struct BackdropLighting
     bool sunEnabled = false;
 };
 
+// One scanned texture variant of a terrain surface group: the detail map
+// the material multiplies the vertex colors with, the rock group's optional
+// OpenGL-convention tangent-space normal map, and the per-channel mean
+// compensation read back from the renderer's textureMean query (the gated
+// material divides its base color by the SELECTED variant's mean, so the
+// multiply preserves the vertex albedo on average and only adds detail).
+struct TerrainTextureVariant
+{
+    engine::renderer::TextureHandle detail = engine::renderer::invalidTexture;
+    engine::renderer::TextureHandle normal = engine::renderer::invalidTexture;
+    float meanCompensation[3] = {1.0f, 1.0f, 1.0f};
+};
+
 class PlanetChunkRenderer final
 {
 public:
@@ -46,18 +59,25 @@ public:
     PlanetChunkRenderer(const PlanetChunkRenderer &) = delete;
     PlanetChunkRenderer &operator=(const PlanetChunkRenderer &) = delete;
 
-    // Configures the terrain surface-group textures the chunk materials
-    // reference (see the surface-group partition in the planet module's
-    // meshing.hpp): the ground group's detail texture, the rock group's
-    // detail texture and its OpenGL-convention tangent-space normal map,
-    // plus the per-group gate distances (meters) within which a chunk's
-    // draw multiplies the texture in. invalidTexture keeps a group
-    // untextured (the material then samples the renderer's neutral white
-    // stand-in, so the vertex colors stand alone); a zero/negative gate
-    // distance keeps the texture off everywhere.
-    void setTerrainTextures(engine::renderer::TextureHandle groundDetail,
-        engine::renderer::TextureHandle rockDetail, engine::renderer::TextureHandle rockNormal,
-        double groundTextureMaxDistanceMeters, double rockTextureMaxDistanceMeters);
+    // Configures the terrain surface-group texture VARIANTS the chunk
+    // materials reference (see the surface-group partition in the planet
+    // module's meshing.hpp): each group carries a set of scanned variants
+    // and every chunk's draw picks one deterministically from the chunk
+    // address, so neighboring chunks photograph different scans and no
+    // single scan repeats across the visible disk. invalidTexture variants
+    // are skipped; a group with no loadable variant draws untextured (the
+    // material then samples the renderer's neutral white stand-in, so the
+    // vertex colors stand alone).
+    // The per-group gate distances (meters) keep the multiply off beyond
+    // them; a zero/negative gate distance keeps the texture off everywhere.
+    // Each variant's meanCompensation carries its detail scan's mean color
+    // as 1/mean (read back from the renderer's textureMean query): a chunk
+    // inside the gate divides its material base color by the SELECTED
+    // variant's mean, so the texture multiply preserves the vertex albedo
+    // on average and only adds detail, and the gate boundary cannot read.
+    void setTerrainTextures(const std::vector<TerrainTextureVariant> &groundVariants,
+        const std::vector<TerrainTextureVariant> &rockVariants, double groundTextureMaxDistanceMeters,
+        double rockTextureMaxDistanceMeters);
 
     // Installs the environment lighting the world-anchored cloud shell bakes
     // into its vertex colors (see BackdropLighting). Called before
@@ -227,12 +247,11 @@ private:
     BackdropLighting backdropLighting_{};
     bool backdropLightingValid_ = false;
 
-    // Terrain surface-group textures (see setTerrainTextures): the detail
-    // and normal maps the chunk materials multiply the vertex colors with,
-    // and the per-group gate distances within which the multiply applies.
-    engine::renderer::TextureHandle groundDetailTexture_ = engine::renderer::invalidTexture;
-    engine::renderer::TextureHandle rockDetailTexture_ = engine::renderer::invalidTexture;
-    engine::renderer::TextureHandle rockNormalTexture_ = engine::renderer::invalidTexture;
+    // Terrain surface-group texture variants (see setTerrainTextures): the
+    // per-group variant sets the chunk draws pick from, and the per-group
+    // gate distances within which the multiply applies.
+    std::vector<TerrainTextureVariant> groundTextureVariants_;
+    std::vector<TerrainTextureVariant> rockTextureVariants_;
     double groundTextureMaxDistanceMetersSquared_ = 0.0;
     double rockTextureMaxDistanceMetersSquared_ = 0.0;
 

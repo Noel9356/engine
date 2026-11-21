@@ -47,14 +47,18 @@ std::uint32_t drainWindowEvents(engine::window::WindowCapability &windowCapabili
     return dispatched;
 }
 
-// Exports the current frame as a binary P6 PPM. Headless windows export their
-// CPU surface directly; Vulkan renderers schedule the export through the
+// Exports the current frame as a PNG (the default) or, when the requested
+// path carries a .ppm suffix, as a binary P6 PPM - the same pixel payload
+// either way. A path with no known image suffix is completed with .png so
+// --screenshot <name> writes <name>.png. Headless windows export their CPU
+// surface directly; Vulkan renderers schedule the export through the
 // renderer's vulkan extension (written at the next frame retirement). Both
-// paths are tried in that order; the return value reports success and the
-// caller owns the one-line log output (prefixed with its own demo name).
-bool exportScreenshotPpm(engine::ParticipantContext &context, engine::window::WindowCapability &windowCapability,
+// paths are tried in that order; the return value reports success and
+// writtenPath carries the file actually written (the caller owns the
+// one-line log output, prefixed with its own demo name).
+bool exportScreenshot(engine::ParticipantContext &context, engine::window::WindowCapability &windowCapability,
     engine::window::WindowHandle windowHandle, engine::renderer::RenderCapability &renderCapability,
-    engine::renderer::RendererHandle rendererHandle, const std::string &path);
+    engine::renderer::RendererHandle rendererHandle, const std::string &requestedPath, std::string &writtenPath);
 
 // Clamps a cursor delta to the +/-maximumCursorDeltaPixels band the demos
 // use: a window-system glitch (or a warp across screens) must not throw the

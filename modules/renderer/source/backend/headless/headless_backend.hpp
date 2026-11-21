@@ -84,6 +84,17 @@ struct HeadlessBackendOptions
     // draw, which is what makes many-small-draw scenes (streamed chunk
     // meshes) scale across the machine.
     bool           batchedTileRasterizationEnabled = true;
+    // MSAA-style interior shading for the supersampled target: an output
+    // pixel whose entire sample block one triangle covers (and whose every
+    // sample passes the depth test) shades once at the block centre and
+    // commits the one color to all samples - coverage, per-sample depth and
+    // the averaging resolve stay per sample, so silhouettes keep the exact
+    // supersampled anti-aliasing while interior pixels drop the redundant
+    // per-sample shading (the software twin of hardware MSAA, where the
+    // pixel shader runs once per pixel and only coverage/depth run per
+    // sample). Transparent and shell-fur draws keep the per-sample path:
+    // their per-sample blends read the samples' own background colors.
+    bool           msaaInteriorShadingEnabled      = true;
     TaskScheduler *taskScheduler             = nullptr; // borrowed; parallelism disabled when null/not running
     std::uint32_t  parallelTriangleThreshold = 4096;    // triangles per draw before splitting across workers
     std::size_t    pixelsPerLockGroup        = 16;      // pixels per depth lock during parallel rasterization
@@ -140,6 +151,8 @@ public:
           lodEnabled_(options.lodEnabled),
           tileParallelEnabled_(options.tileParallelEnabled),
           batchedTileRasterizationEnabled_(options.batchedTileRasterizationEnabled),
+          msaaInteriorShadingEnabled_(options.msaaInteriorShadingEnabled && options.msaaSamples >= 3u
+              && options.msaaSamples <= 4u),
           taskScheduler_(options.taskScheduler),
           window_(windowCapability),
           bandSplitTriangleThreshold_(options.bandSplitTriangleThreshold),
@@ -284,6 +297,10 @@ public:
 
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) override;
     void destroyTexture(TextureHandle texture) override;
+
+    // Reports the creation-time mean color stored on the texture record
+    // (see HeadlessTexture::meanRGB).
+    bool textureMean(TextureHandle texture, float outMeanRGB[3]) const override;
 
     FrameStatistics statistics() const override
     {
@@ -479,13 +496,34 @@ private:
     ENGINE_RASTERIZER_INLINE std::size_t prepareFanTriangles(
         const HeadlessMesh &mesh, const RasterSetup &setup, std::size_t triangleIndex, TileBinRecord (&outFans)[6]) const;
 
+    // Per-tile occlusion state for the tile-parallel raster paths (see
+    // rasterizeFanRecord): coverage bits for the samples that carry
+    // depth-written geometry and, once every sample of the tile is covered,
+    // the tile's farthest depth at that moment. A later record whose NEAREST
+    // corner depth lies beyond that farthest depth is fully hidden behind
+    // geometry the tile already drew (its every sample would fail the
+    // per-sample depth test), so its whole bounding-box scan is skipped.
+    // Depth writes only lower sample values, so the stored farthest depth
+    // stays a conservative upper bound of the tile's true maximum. One
+    // 64-sample word per tile row: tiles wider or taller than 64 samples
+    // (renderer.headless_tile_pixels above 64) leave the state unused.
+    struct TileOcclusion
+    {
+        std::array<std::uint64_t, 64> coveredWords{};
+        std::uint32_t coveredCount  = 0;
+        std::uint32_t sampleCount   = 0; // 0 = occlusion tracking disabled
+        bool         closed         = false;
+        float        farthestDepth  = 1.0f;
+    };
+
     // Shared rasteriser core: scan one fan record's bounding box clamped to
     // the inclusive pixel window; barycentric coverage with edge-function
-    // increments, depth-test, shade, write. Tile owners pass their tile;
-    // writes only touch the window, so concurrent calls with disjoint
-    // windows never share a pixel.
+    // increments, depth-test, shade, write. Tile owners pass their tile and
+    // its occlusion state; writes only touch the window, so concurrent calls
+    // with disjoint windows never share a pixel.
     ENGINE_RASTERIZER_INLINE bool rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
-        std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd);
+        std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
+        TileOcclusion *occlusion = nullptr);
 
     // Integer pixel window (inclusive) a fan record can write, clamped to
     // the framebuffer. Shared verbatim by the rasteriser core and the tile
@@ -565,6 +603,10 @@ private:
     // readers).
     bool                 tileParallelEnabled_       = false;
     bool                 batchedTileRasterizationEnabled_ = true;
+    // Mirrors HeadlessBackendOptions::msaaInteriorShadingEnabled (see there);
+    // the constructor ANDs it with the 2x2 grid requirement, so the flag is
+    // only ever true on the sample grid the fast path walks.
+    bool                 msaaInteriorShadingEnabled_ = false;
 
     TaskScheduler *taskScheduler_ = nullptr;
 

@@ -36,11 +36,11 @@
 #include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
 
-#include "demo/planet_camera_input.hpp"
-#include "demo/planet_chunk_renderer.hpp"
-#include "demo/planet_demo_support.hpp"
+#include "planet_camera_input.hpp"
+#include "planet_chunk_renderer.hpp"
+#include "planet_demo_support.hpp"
 #include "demo_harness.hpp"
-#include "demo/planet_walk_controller.hpp"
+#include "planet_walk_controller.hpp"
 #include <engine/application/application_host.hpp>
 #include <engine/application/command_line.hpp>
 #include <engine/kernel/engine_kernel.hpp>
@@ -671,21 +671,26 @@ int main(int argc, char **argv)
     // demo still runs from a checkout without the asset directory.
     //
     // Each group's multiply only applies to chunks within the gate distance:
-    // one texture tile must still span at least kTextureMinTilePixels screen
-    // pixels, because a 1024-texel scan tiled across fewer pixels is
-    // minified past what the mip-less CPU sampler can filter - and beyond
-    // that point the vertex colors photograph identically without the
-    // per-pixel sample. The gate follows from the viewport height and the
-    // view's field of view (the tile's projected pixel span grows linearly
-    // with height and shrinks with distance and zoom).
-    constexpr double kTextureMinTilePixels = 32.0;
+    // one texture tile must still span at least --texture-tile-pixels screen
+    // pixels. The CPU sampler filters through a full trilinear mip chain, so
+    // a tile minified to a handful of pixels still contributes its macro
+    // variation instead of shimmering - the gate only cuts the multiply
+    // where the sample can no longer move the pixel. The gate follows from
+    // the viewport height and the view's field of view (the tile's projected
+    // pixel span grows linearly with height and shrinks with distance and
+    // zoom).
+    // 0 disables the terrain textures outright (a zero gate distance keeps
+    // every chunk past the gate, and the divide below would otherwise turn
+    // the zero into an infinite gate - the exact opposite of disabling).
+    const double textureMinTilePixels = options.textureTilePixels != 0u
+        ? static_cast<double>(options.textureTilePixels) : std::numeric_limits<double>::infinity();
     const double viewportHeightMeters = static_cast<double>(
         context.configurationIntegerInSection("window", "height").value_or(540));
     const double tanHalfFovY = std::tan(glm::radians(static_cast<double>(cameraFovYDegrees)) * 0.5);
     const double groundTextureGateMeters = params.terrainTextureTileMetersGround * viewportHeightMeters
-        / (2.0 * tanHalfFovY * kTextureMinTilePixels);
+        / (2.0 * tanHalfFovY * textureMinTilePixels);
     const double rockTextureGateMeters = params.terrainTextureTileMetersRock * viewportHeightMeters
-        / (2.0 * tanHalfFovY * kTextureMinTilePixels);
+        / (2.0 * tanHalfFovY * textureMinTilePixels);
     {
         const std::filesystem::path textureDirectory
             = engine::executableDirectory() / "assets" / "textures";
@@ -702,8 +707,52 @@ int main(int argc, char **argv)
             }
             return handle;
         };
-        chunkRenderer.setTerrainTextures(loadTexture("ground_grey_diff_1k.jpg"),
-            loadTexture("cliff_side_diff_1k.jpg"), loadTexture("cliff_side_nor_gl_1k.jpg"),
+        // Per-variant mean compensation, read back from the renderer instead
+        // of hardcoding per-asset constants: the capability computes each
+        // texture's mean over its decoded pixels at creation (see
+        // RenderCapability::textureMean), and the chunk renderer divides the
+        // gated material's base color by the SELECTED variant's mean, keeping
+        // every variant's multiply albedo-preserving (see setTerrainTextures).
+        const auto loadVariant = [&loadTexture, &renderCapability, rendererHandle](const char *detailFile,
+            const char *normalFile) -> demo::planet_demo::TerrainTextureVariant
+        {
+            demo::planet_demo::TerrainTextureVariant variant;
+            variant.detail = loadTexture(detailFile);
+            if (normalFile != nullptr)
+            {
+                variant.normal = loadTexture(normalFile);
+            }
+            renderer::RenderError error = renderer::RenderError::None;
+            if (variant.detail != renderer::invalidTexture
+                && renderCapability.textureMean != nullptr)
+            {
+                renderCapability.textureMean(renderCapability.self, rendererHandle, variant.detail,
+                    variant.meanCompensation, &error);
+                // The mean compensates the multiply: divide the material's
+                // base color by the scan's mean (per channel).
+                for (int channel = 0; channel < 3; ++channel)
+                {
+                    variant.meanCompensation[channel]
+                        = 1.0f / std::max(1.0e-4f, variant.meanCompensation[channel]);
+                }
+            }
+            return variant;
+        };
+        // Each surface group carries a SET of scanned variants: the chunk
+        // renderer picks one per chunk (deterministically from the chunk
+        // address), so neighboring chunks photograph different ground and
+        // rock scans and no scan repeats across the whole visible disk (see
+        // setTerrainTextures). All scans come from Poly Haven under CC0
+        // (see assets/textures/README.md).
+        std::vector<demo::planet_demo::TerrainTextureVariant> groundVariants;
+        groundVariants.push_back(loadVariant("ground_grey_diff_1k.jpg", nullptr));
+        groundVariants.push_back(loadVariant("aerial_ground_rock_diff_1k.jpg", nullptr));
+        groundVariants.push_back(loadVariant("dry_ground_rocks_diff_1k.jpg", nullptr));
+        std::vector<demo::planet_demo::TerrainTextureVariant> rockVariants;
+        rockVariants.push_back(loadVariant("cliff_side_diff_1k.jpg", "cliff_side_nor_gl_1k.jpg"));
+        rockVariants.push_back(loadVariant("rocky_terrain_02_diff_1k.jpg", "rocky_terrain_02_nor_gl_1k.jpg"));
+        rockVariants.push_back(loadVariant("rock_face_diff_1k.jpg", "rock_face_nor_gl_1k.jpg"));
+        chunkRenderer.setTerrainTextures(groundVariants, rockVariants,
             groundTextureGateMeters, rockTextureGateMeters);
     }
     // The world-anchored cloud shell bakes the pbr environment's lighting
@@ -1017,15 +1066,17 @@ int main(int argc, char **argv)
         if (!screenshotTaken && !options.screenshotPath.empty()
             && framesRendered == options.screenshotFrame + 1)
         {
-            screenshotTaken = demo::harness::exportScreenshotPpm(context,
+            std::string screenshotWrittenPath;
+            screenshotTaken = demo::harness::exportScreenshot(context,
                 windowCapability,
                 windowHandle,
                 renderCapability,
                 rendererHandle,
-                options.screenshotPath);
+                options.screenshotPath,
+                screenshotWrittenPath);
             if (screenshotTaken)
             {
-                std::cout << "demo_planet: screenshot written to " << options.screenshotPath << "\n";
+                std::cout << "demo_planet: screenshot written to " << screenshotWrittenPath << "\n";
             }
             else
             {

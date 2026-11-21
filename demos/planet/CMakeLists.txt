@@ -2,13 +2,13 @@ engine_add_application(
     demo_planet
     SOURCES
     source/main.cpp
-    source/demo/planet_demo_options.cpp
-    source/demo/planet_camera_input.cpp
-    source/demo/planet_chunk_renderer.cpp
-    source/demo/planet_demo_tests.cpp
-    source/demo/planet_benchmark.cpp
-    source/demo/planet_viewpoints.cpp
-    source/demo/planet_walk_controller.cpp
+    source/planet_demo_options.cpp
+    source/planet_camera_input.cpp
+    source/planet_chunk_renderer.cpp
+    source/planet_demo_tests.cpp
+    source/planet_benchmark.cpp
+    source/planet_viewpoints.cpp
+    source/planet_walk_controller.cpp
     ../common/demo_harness.cpp
     INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/../common"

@@ -149,7 +149,8 @@ A very-low-frequency field classifies every landmass region into layered sedimen
 | `water_enabled` | `true` | Generate water surface patches (marching cubes on the sea sphere). |
 | `water_color_shallow` | `[0.070, 0.255, 0.275]` | Linear RGB at zero depth (the turquoise of sunlit shallow water over sand). |
 | `water_color_deep` | `[0.012, 0.060, 0.130]` | Linear RGB at full tint depth. |
-| `water_roughness` | `0.55` | Gloss hint handed to the renderer's water material. Low values give mirror-sharp sun glints, which makes the coarse far-water facets band at grazing angles; higher values spread the highlight. |
+| `water_roughness` | `0.22` | Gloss hint handed to the renderer's water material at close range. Low values give the sea a crisp sun-glint path that the wave normals break into glitter. |
+| `water_roughness_orbital` | `0.20` | High-altitude blend target for the same hint: the material widens the water lobe toward this value as the eye climbs out of the atmosphere, trading close-range glitter for the broad, soft sun patch orbital views of the ocean show. |
 | `sea_ice_temperature` | `0.10` | Sea-level temperature below which the water surface freezes. The field is the same climate field that drives the land's freeze line, so polar oceans ice over where the land turns tundra, with an organic, noise-shaped edge. `0` disables sea ice. |
 | `sea_ice_transition` | `0.05` | Temperature range around `sea_ice_temperature` over which the ice color blends in. |
 | `water_color_ice` | `[0.78, 0.85, 0.94]` | Linear RGB of the frozen water surface; slightly blue against the warm-white cloud tops so polar caps read as ice, not weather. |
@@ -208,9 +209,12 @@ The mesher partitions terrain into two surface groups - ground (soil, grass, sno
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `terrain_texture_tile_meters_ground` | `3.0` | World meters one ground-group texture tile spans (soil/grass detail scale). |
-| `terrain_texture_tile_meters_rock` | `6.0` | World meters one rock-group texture tile spans; rock faces read coarser beds than soil reads grain. |
+| `terrain_texture_tile_meters_ground` | `8.0` | World meters one ground-group texture tile spans (soil/grass detail scale). |
+| `terrain_texture_tile_meters_rock` | `14.0` | World meters one rock-group texture tile spans; rock faces read coarser beds than soil reads grain. |
 | `water_texture_tile_meters` | `8.0` | World meters one water-surface texture tile spans (wave/glint detail scale). |
+| `texture_uv_warp_strength` | `0.35` | Amplitude (in texture tiles) of the low-frequency simplex field that bends each group's tile lattice, so the world never photographs every tile at the same phase and the visible repeat of a tiled scan breaks up into organic variation. A pure world-space function of position, band-limited like every other noise term (it fades out below the chunk's own LOD cutoff), and clamped well under one tile so the frame never folds onto itself. `0` restores the unbent world-space tiling. |
+| `texture_uv_warp_wavelength_meters` | `64.0` | Feature size of that warp field (a few tiles at the shipped tile sizes). Clamped to at least 4 m and to a quarter of the planet radius. |
+| `texture_chunk_rotation` | `true` | Turns each chunk's terrain tiling by a deterministic multiple of 90 degrees, hashed from the planet seed and the chunk address per surface group, so neighboring chunks never photograph the same scan in the same orientation. Quarter turns map the tile lattice onto itself, so the frames stay seamless inside every chunk and tileable textures keep tiling; `false` keeps every chunk's frame unrotated. |
 
 ## Surface walking
 
@@ -233,7 +237,7 @@ A kinematic, point-feet character controller lives in the module (`SurfaceWalker
 
 ## Sky backdrop
 
-The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon gradient keyed to the view direction's elevation above the local horizon, an altitude weight that fades the whole sky to space over `atmosphere_height_meters`, a sun-elevation tint (neutral through the day, warm gold through the low-sun band, deep blue at night), and an aerial-perspective sample for one sight line (the sun-tinted haze the air adds between the eye and a distant point - its weight grows exponentially with the sight-line length on a scale riding `atmosphere_height_meters` at `aerial_perspective_scale_fraction` of it, approaches `aerial_perspective_asymptote` at infinite distance, and fades out as the eye climbs into space, and its color is the horizon band under the same sun tint, so distant terrain melts into the sky behind it). All functions are pure and thread-safe, and the colors are linear RGB like the water colors, so a consumer can paint a sky dome, a frame clear color, or apply distance haze to their scene - the demo draws a gradient sphere around the walking eye, hands the horizon color to the renderer as the clear color, and fades its chunk draws toward the haze with distance (space views keep the atmosphere limb shell as their depth cue).
+The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon gradient keyed to the view direction's elevation above the local horizon, an altitude weight that fades the whole sky to space over `atmosphere_height_meters`, a sun-elevation tint (neutral through the day, warm gold through the low-sun band, deep blue at night), and an aerial-perspective sample for one sight line (the sun-tinted haze the air adds between the eye and a distant point - its weight grows exponentially with the sight-line length on the `aerial_perspective_scale_meters` scale, approaches `aerial_perspective_asymptote` at infinite distance, and fades out as the eye climbs into space, and its color is the horizon band under the same sun tint, so distant terrain melts into the sky behind it). All functions are pure and thread-safe, and the colors are linear RGB like the water colors, so a consumer can paint a sky dome, a frame clear color, or apply distance haze to their scene - the demo draws a gradient sphere around the walking eye, hands the horizon color to the renderer as the clear color, and fades its chunk draws toward the haze with distance (space views keep the atmosphere limb shell as their depth cue).
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -241,8 +245,8 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 | `atmosphere_height_meters` | `20000.0` | Eye altitude over which the sky fades to black (space). The sky is at full strength below 15% of this height. |
 | `atmosphere_zenith_color` | `[0.040, 0.130, 0.460]` | Linear RGB at the zenith. The defaults are chosen for the renderer's shared tone mapping (which brightens midtones), so the pre-tone-map values sit deeper and more saturated than the sky they finally display. |
 | `atmosphere_horizon_color` | `[0.220, 0.400, 0.780]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
-| `aerial_perspective_scale_fraction` | `0.70` | Sight-line distance (as a fraction of `atmosphere_height_meters`) at which the aerial-perspective haze saturates. Larger values keep the midground clear and let the far ridge dissolve gradually; smaller values haze the whole distance range over at once. |
-| `aerial_perspective_asymptote` | `0.62` | Haze weight the profile approaches at infinite distance. Keeps the farthest terrain faintly readable as terrain instead of fading fully into sky; `0` disables the aerial perspective entirely. |
+| `aerial_perspective_scale_meters` | `3600.0` | Scale length of the aerial-perspective haze's exponential, in meters (the distance at which the haze has covered ~63% of its asymptote). Larger values keep the midground clear and let the far ridge dissolve gradually; smaller values haze the whole distance range over at once. |
+| `aerial_perspective_asymptote` | `0.72` | Haze weight the profile approaches at infinite distance. Keeps the farthest terrain faintly readable as terrain instead of fading fully into sky; `0` disables the aerial perspective entirely. |
 
 ## Clouds
 

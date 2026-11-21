@@ -54,7 +54,7 @@ The demo `demos/lumen_gi/` exercises this hook with its reflective surfaces (a p
 
 Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDERER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
 
-Vulkan swapchains require surface support for color-attachment usage. PPM screenshot readback is enabled when the surface also supports transfer-source usage; otherwise rendering remains available and screenshot requests report a creation failure.
+Vulkan swapchains require surface support for color-attachment usage. Screenshot readback (PPM or PNG) is enabled when the surface also supports transfer-source usage; otherwise rendering remains available and screenshot requests report a creation failure.
 
 ## Transparent draws
 
@@ -81,7 +81,7 @@ Two material fields drive the fabric rendering path, and one appended entry poin
 | `source/core/frame_inputs.hpp/.cpp` | `FrameInputs`: the version-gated pushes of the pbr environment, direct lights, lumen_gi probe grid and lumen_reflection field into a backend. |
 | `source/core/draw_scheduler.hpp/.cpp` | `DrawScheduler`: draw-list sorting with the cached permutation, the backend batch submission, and the Vulkan instance fold. |
 | `source/core/render_errors.hpp` | The optional-error out-parameter convention shared by the module's entry points and helpers. |
-| `source/core/render_shared.hpp` | Umbrella for the focused shading headers plus the backend-neutral pieces: device/presentation enums, default environment, frustum rejection, sRGB/tone-map output encoders, and the PPM/error utilities. |
+| `source/core/render_shared.hpp` | Umbrella for the focused shading headers plus the backend-neutral pieces: device/presentation enums, default environment, frustum rejection, sRGB/tone-map output encoders, and the PPM/PNG/error utilities. |
 | `source/core/direct_light_shading.hpp` | `PreparedDirectLight` and `resolveDirectLight()` - the per-point light resolution shared by the PBR and fur passes. |
 | `source/core/pbr_shading.hpp` | The CPU Cook-Torrance shading pass `pbrShade` (the reference twin of `shaders/mesh.frag`). |
 | `source/core/fur_shading.hpp` | The shell-fur shading helpers and `furShade` (the twin of `shaders/fur.frag`). |
@@ -99,7 +99,7 @@ Two material fields drive the fabric rendering path, and one appended entry poin
 | `source/backend/vulkan/vulkan_frames.hpp/.cpp` | `VulkanFrameScheduler`: frames-in-flight slots, fences/semaphores, GPU timestamp queries. |
 | `source/backend/vulkan/vulkan_pipeline.hpp/.cpp` | `VulkanPipeline`: render pass, descriptor layouts, PBR mesh pipeline, overlay pipeline, disk-backed pipeline cache. |
 | `source/backend/vulkan/vulkan_resources.hpp/.cpp` | `VulkanResources`: frame uniform ring, mesh buffers, texture images/samplers, material descriptor-set cache with per-renderer capacity limits. |
-| `source/backend/vulkan/vulkan_swapchain.hpp/.cpp` | `VulkanSwapchain`: format/present-mode selection, image views, framebuffers, recreation, PPM readback. |
+| `source/backend/vulkan/vulkan_swapchain.hpp/.cpp` | `VulkanSwapchain`: format/present-mode selection, image views, framebuffers, recreation, PPM/PNG readback. |
 | `shaders/mesh.vert`, `shaders/mesh.frag` | GLSL sources of the PBR pipeline (the fragment shader is the reference twin of the CPU shading in `source/core/pbr_shading.hpp`). |
 | `shaders/ui.vert`, `shaders/ui.frag` | GLSL sources of the overlay pipeline. |
 | `shaders/*_gen.hpp` | SPIR-V arrays included by `source/backend/vulkan/vulkan_pipeline.cpp`; regenerated from the GLSL by `engine_module_compile_shaders` at build time. |
@@ -153,7 +153,7 @@ drawOverlay:
     per command: scissor from clip rectangle, bind texture set, draw indexed
 
 endFrame:
-    end render pass (+ optional frame->readback copy for PPM export)
+    end render pass (+ optional frame->readback copy for screenshot export)
     end GPU timestamps, end command buffer
     submit (wait: imageAvailable; signal: renderFinished + slot fence or timeline)
     register deferred export (copy recorded; file written at the recording
@@ -169,6 +169,7 @@ Headless parallel rasterization has three execution structures:
 - **Default per-draw - band/triangle-range split.** Big draws split their triangle range across workers; few-triangle wide-coverage draws (floor, sky) split their projected row extent into bands. Workers share the framebuffer, so depth/colour writes take a per-pixel-group spin lock. A submission rejected by the scheduler (stopping, or the outstanding bound hit) runs inline on the calling thread instead of silently dropping that band/range's geometry.
 - **Per-draw tile-based split** (`[renderer] headless_tile_parallel`, default adaptive: on from four logical processors). One draw's triangles are binned into screen tiles of `[renderer] headless_tile_pixels` edge (default 64) and each worker owns disjoint tiles exclusively, so no per-pixel locks exist. The binning pass (transform/clip/project of every triangle on the calling thread) makes this slower than the band/range split on low-core machines (measured ~+55% frame time on a 2-core host), which is why the default follows the processor count. Tile grids and flattened record lists use 32-bit indices, with allocation counts also bounded by the host's representable vector size; dimensions beyond the signed raster-coordinate range or bins beyond either limit use the sequential path. Triggers mirror the default paths exactly.
 - **Batched tile pass for whole draw lists** (`[renderer] headless_batched_tile_rasterization`, default on). `drawMeshes` hands its whole command list to `drawMeshBatch`, which prepares every item, bins all triangles in submission order and rasterizes the tiles across every worker (two or more). Per-tile record lists preserve submission order, so per-pixel triangle order - and therefore the image - equals the sequential per-draw replay; chunks of records keep the scratch bounded on very large frames, and items or situations the batch cannot take (single worker, oversized single draw, allocation failure) fall back to the per-draw paths with identical output. This is the structure that parallelizes many-small-draw scenes: no single draw reaches the per-draw thresholds, but the frame as a whole is large. Draw lists below two items, and the fur/overlay paths, always use the per-draw structures.
+- **MSAA-style interior shading** (`[renderer] headless_msaa_interior_shading`, default on). The headless target supersamples (see `msaa_samples`); with interior shading, an output pixel whose whole sample block one triangle covers shades once at the block centre instead of once per sample - the software twin of hardware MSAA, where the pixel shader runs once per pixel and only coverage and depth run per sample. Silhouette anti-aliasing is unchanged (coverage, depth and the resolve stay per sample); steep-ramp unlit records (star discs, the limb fade) keep per-sample shading so their within-block color ramp survives.
 
 ### Mesh and texture resource model
 
@@ -194,7 +195,7 @@ The `renderer.device` key additionally biases Vulkan physical-device selection (
 
 - **Main thread only.** Every capability entry point, both backends, and the draw-sort/batch helpers are main-thread constructs. There is no internal locking around renderer lookup; the only mutex (the Vulkan device context's queue mutex) serializes Vulkan queue submission, upload bookkeeping, and wait-idle.
 - **Frame discipline.** Draw calls must sit between a matching `beginFrame`/`endFrame` pair; the Vulkan backend drops draws issued outside a frame (`frameActive_`). Resource creation/destruction may happen any time.
-- **GPU sync model (Vulkan).** N frame slots (`[renderer] max_frames_in_flight`, clamped 1..8) each own a command pool/buffer, an image-available semaphore, and a fence; `waitForFrameSlot` waits the slot's previous submission before re-recording. Swapchain images additionally track an "images in flight" fence so an image acquired early is not rendered into while still presenting (fence path). The timeline semaphore interface exists but is currently left uncreated, so all sync uses fences. Uploads run on one-shot command buffers, each fenced, capped at `[renderer] max_pending_uploads` pending copies; their staging memory comes from a persistently mapped, fence-recycled pool (blocks up to 16 MiB, 64 MiB total; oversized or pool-pressured uploads keep a one-off buffer). Mesh/texture destruction during a frame is deferred to the resource's frame slot and drained by the next `beginFrame` on that slot. PPM screenshots are likewise deferred: the copy rides the frame's command buffer, and the file write waits only for the recording slot's retirement (immediately at the next `beginFrame` of that slot; explicit flushes on a second request, swapchain recreation, and shutdown).
+- **GPU sync model (Vulkan).** N frame slots (`[renderer] max_frames_in_flight`, clamped 1..8) each own a command pool/buffer, an image-available semaphore, and a fence; `waitForFrameSlot` waits the slot's previous submission before re-recording. Swapchain images additionally track an "images in flight" fence so an image acquired early is not rendered into while still presenting (fence path). The timeline semaphore interface exists but is currently left uncreated, so all sync uses fences. Uploads run on one-shot command buffers, each fenced, capped at `[renderer] max_pending_uploads` pending copies; their staging memory comes from a persistently mapped, fence-recycled pool (blocks up to 16 MiB, 64 MiB total; oversized or pool-pressured uploads keep a one-off buffer). Mesh/texture destruction during a frame is deferred to the resource's frame slot and drained by the next `beginFrame` on that slot. Screenshots are likewise deferred: the copy rides the frame's command buffer, and the file write waits only for the recording slot's retirement (immediately at the next `beginFrame` of that slot; explicit flushes on a second request, swapchain recreation, and shutdown). The request carries the format, so the same deferred copy feeds either the PPM or the PNG writer.
 - **Handle lifetime.** Renderer destruction destroys the backend (Vulkan: device idle, then scratch, swapchain, resources, frames, pipeline, device - in that order). The strings returned by `RendererInfoStrings` are owned by the module and die with the renderer; the Vulkan handles from `VulkanDeviceHandles` are borrowed and must not be destroyed by the caller.
 
 ## VR support

@@ -324,6 +324,7 @@ private:
             headlessOptions.lodEnabled                       = settings_.lodEnabled;
             headlessOptions.tileParallelEnabled              = settings_.headlessTileParallel;
             headlessOptions.batchedTileRasterizationEnabled  = settings_.headlessBatchedTileRasterization;
+            headlessOptions.msaaInteriorShadingEnabled         = settings_.headlessMsaaInteriorShading;
             headlessOptions.taskScheduler
                 = context_ != nullptr ? &context_->taskScheduler() : nullptr;
             headlessOptions.msaaSamples                       = settings_.msaaSamples;
@@ -710,6 +711,25 @@ private:
         record->backendInstance->destroyTexture(texture);
     }
 
+    // Reports a texture's creation-time mean color (see the capability doc):
+    // both backends compute it once over the decoded pixels at creation.
+    bool textureMeanImpl(RendererHandle renderer, TextureHandle texture, float outMeanRGB[3], RenderError *error) const
+    {
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr)
+        {
+            reportError(error, RenderError::InvalidHandle);
+            return false;
+        }
+        if (record->backendInstance->textureMean(texture, outMeanRGB))
+        {
+            reportError(error, RenderError::None);
+            return true;
+        }
+        reportError(error, RenderError::InvalidTexture);
+        return false;
+    }
+
     DeviceClass deviceClassImpl(RendererHandle renderer) const
     {
         const RendererRecord *record = recordFor(renderer);
@@ -814,6 +834,18 @@ private:
 
     bool vulkanExportFramePpmImpl(RendererHandle renderer, const char *filePath, RenderError *error)
     {
+        return vulkanExportFrameImageImpl(renderer, filePath, false, error);
+    }
+
+    bool vulkanExportFramePngImpl(RendererHandle renderer, const char *filePath, RenderError *error)
+    {
+        return vulkanExportFrameImageImpl(renderer, filePath, true, error);
+    }
+
+    // Shared request path for the deferred Vulkan screenshot export; the
+    // format only decides which file writer the completed readback feeds.
+    bool vulkanExportFrameImageImpl(RendererHandle renderer, const char *filePath, bool png, RenderError *error)
+    {
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
         const RendererRecord *record = recordFor(renderer);
         if (record == nullptr || record->backend != Backend::Vulkan)
@@ -821,10 +853,11 @@ private:
             reportError(error, RenderError::Unsupported);
             return false;
         }
-        return static_cast<VulkanBackend *>(record->backendInstance.get())->exportFramePpm(filePath, error);
+        return static_cast<VulkanBackend *>(record->backendInstance.get())->exportFrameImage(filePath, png, error);
 #else
         (void)renderer;
         (void)filePath;
+        (void)png;
         reportError(error, RenderError::Unsupported);
         return false;
 #endif
@@ -882,6 +915,11 @@ private:
         { static_cast<RenderModule *>(self)->drawMeshImpl(renderer, mesh, modelMatrix, material); };
         renderCapability_.drawOverlay = [](void *self, RendererHandle renderer, const OverlayDrawData *data)
         { static_cast<RenderModule *>(self)->drawOverlayImpl(renderer, data); };
+        renderCapability_.textureMean = [](void *self, RendererHandle renderer, TextureHandle texture,
+                                           float outMeanRGB[3], RenderError *error)
+        {
+            return static_cast<const RenderModule *>(self)->textureMeanImpl(renderer, texture, outMeanRGB, error);
+        };
         renderCapability_.drawMeshInstances = [](void                *self,
                                                   RendererHandle      renderer,
                                                   MeshHandle          mesh,
@@ -939,6 +977,9 @@ private:
         vulkanCapability_.exportFramePpm
             = [](void *self, RendererHandle renderer, const char *filePath, RenderError *error)
         { return static_cast<RenderModule *>(self)->vulkanExportFramePpmImpl(renderer, filePath, error); };
+        vulkanCapability_.exportFramePng
+            = [](void *self, RendererHandle renderer, const char *filePath, RenderError *error)
+        { return static_cast<RenderModule *>(self)->vulkanExportFramePngImpl(renderer, filePath, error); };
 
         headlessCapability_.statistics
             = [](void *self, RendererHandle renderer, HeadlessRenderStatistics *outStatistics)

@@ -223,6 +223,12 @@ void overlayConfiguredSettings(ParticipantContext &context, RendererSettings &se
                                         .value_or(util::logicalProcessorCount() >= 4u);
     settings.headlessBatchedTileRasterization
         = context.configurationBooleanInSection("renderer", "headless_batched_tile_rasterization").value_or(true);
+    // MSAA-style interior shading (see RendererSettings::headlessMsaaInteriorShading):
+    // a quality-preserving frame-cost cut for the supersampled target - the
+    // per-sample coverage/depth work stays, the per-sample shading collapses
+    // to one evaluation per fully-covered output pixel.
+    settings.headlessMsaaInteriorShading
+        = context.configurationBooleanInSection("renderer", "headless_msaa_interior_shading").value_or(true);
     settings.headlessParallelTriangleThreshold = static_cast<std::uint32_t>(readClampedInteger(
         context, "headless_parallel_triangle_threshold", settings.headlessParallelTriangleThreshold, 1, 1048576));
     settings.headlessPixelsPerLockGroup        = static_cast<std::size_t>(readClampedInteger(

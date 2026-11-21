@@ -150,6 +150,15 @@ public:
     virtual bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) = 0;
     virtual void destroyTexture(TextureHandle texture)                                                      = 0;
 
+    // Mean RGB over a texture's pixel payload (alpha ignored; see
+    // RenderCapability::textureMean). Default: unsupported.
+    virtual bool textureMean(TextureHandle texture, float outMeanRGB[3]) const
+    {
+        (void)texture;
+        (void)outMeanRGB;
+        return false;
+    }
+
     virtual FrameStatistics statistics() const = 0;
 
     // True when endFrame blocks until the display's vblank, i.e. the backend

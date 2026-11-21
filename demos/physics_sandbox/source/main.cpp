@@ -21,7 +21,7 @@
 //   Escape           quit
 //
 // Useful flags: --frames N renders exactly N frames (headless captures),
-// --screenshot PATH exports a frame as PPM, --scripted runs the deterministic
+// --screenshot PATH exports a frame as PNG, --scripted runs the deterministic
 // capture timeline (spawns, impulses, paddle sweep, wind), --warmup-seconds
 // pre-simulates before the first rendered frame, and --self-test runs the
 // determinism and frame-rate independence battery without a renderer.
@@ -1000,11 +1000,13 @@ int main(int argc, char **argv)
 
         if (!screenshotTaken && !options.screenshotPath.empty() && framesRendered == options.screenshotFrame + 1)
         {
-            screenshotTaken = demo::harness::exportScreenshotPpm(
-                context, windowCapability, windowHandle, renderCapability, rendererHandle, options.screenshotPath);
+            std::string screenshotWrittenPath;
+            screenshotTaken = demo::harness::exportScreenshot(
+                context, windowCapability, windowHandle, renderCapability, rendererHandle, options.screenshotPath,
+                screenshotWrittenPath);
             if (screenshotTaken)
             {
-                std::cout << "demo_physics_sandbox: screenshot written to " << options.screenshotPath << "\n";
+                std::cout << "demo_physics_sandbox: screenshot written to " << screenshotWrittenPath << "\n";
             }
             else
             {

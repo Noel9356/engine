@@ -94,6 +94,11 @@ struct HeadlessTexture
     TextureFilter  filter  = TextureFilter::Linear;
     TextureAddress address = TextureAddress::Repeat;
 
+    // Mean RGB over the pixel payload (alpha ignored), computed once at
+    // creation and read by RenderCapability::textureMean; consumers that
+    // multiply this texture over a calibrated albedo divide by it.
+    float meanRGB[3] = {1.0f, 1.0f, 1.0f};
+
     // Power-of-two extents switch the sampler's repeat addressing from a
     // division/modulo pair to an AND mask (same result for any int32 texel
     // coordinate; see wrappedCoordinate). Set by createTexture; the 1x1
@@ -102,6 +107,26 @@ struct HeadlessTexture
     std::uint32_t wrapMaskX = 0;
     std::uint32_t wrapMaskY = 0;
     bool          repeatPow2 = false;
+
+    // Cached mip-selection constants (mutable: the sampler is const): the
+    // squared footprint that selects the top level, derived from the mip
+    // chain depth and reused by every sampleTrilinear call - the hot
+    // full-minification / base-level extremes then cost two multiplies and
+    // a compare instead of an exp2 each. createTexture warms the cache right
+    // after building the chain (warmMipSelectionCache); the lazy refresh in
+    // sampleTrilinear covers textures assembled any other way (the neutral
+    // stand-ins never reach it - their empty chains early out).
+    mutable std::uint64_t cachedMipLevels_     = ~static_cast<std::uint64_t>(0);
+    mutable float         topFootprintSquared_ = 0.0f;
+
+    // Recomputes the cached constants from the current mip chain (see the
+    // members above). Const: only the mutable cache writes.
+    void warmMipSelectionCache() const
+    {
+        cachedMipLevels_         = mipChain.size();
+        const float topFootprint = std::exp2(static_cast<float>(cachedMipLevels_));
+        topFootprintSquared_     = topFootprint * topFootprint;
+    }
 
     // Bilinear or nearest sample with repeat/clamp addressing; returns white
     // when empty. Defined inline in the header: the rasterizer calls it per
@@ -171,23 +196,30 @@ struct HeadlessTexture
         // The comparisons run on SQUARED footprints: the two common extremes
         // (full minification onto the top level, magnification onto the base
         // level) then resolve with two multiplies and a compare, and the
-        // sqrt/log2 pair only runs inside the blend band between them.
+        // log2 only runs inside the blend band between them. The top-level
+        // threshold is cached per mip-chain depth (see topFootprintSquared_),
+        // so the hot extremes never evaluate an exp2.
         const float footprintX2 = uvDx.x * uvDx.x * static_cast<float>(width * width)
             + uvDx.y * uvDx.y * static_cast<float>(height * height);
         const float footprintY2 = uvDy.x * uvDy.x * static_cast<float>(width * width)
             + uvDy.y * uvDy.y * static_cast<float>(height * height);
         const float footprintSquared = std::max(footprintX2, footprintY2);
-        const float maxLevel         = static_cast<float>(mipChain.size());
-        const float topFootprint     = std::exp2(maxLevel); // footprint that selects the top level
-        if (footprintSquared >= topFootprint * topFootprint)
+        if (cachedMipLevels_ != mipChain.size())
         {
-            return sampleBilinearAt(static_cast<std::uint32_t>(maxLevel), u, v);
+            warmMipSelectionCache();
+        }
+        if (footprintSquared >= topFootprintSquared_)
+        {
+            return sampleBilinearAt(static_cast<std::uint32_t>(mipChain.size()), u, v);
         }
         if (footprintSquared <= 1.0f)
         {
             return sample(u, v);
         }
-        const float level = std::min(maxLevel, std::log2(std::sqrt(footprintSquared)));
+        // log2(sqrt(f)) == 0.5 * log2(f): one log2 instead of a sqrt plus a
+        // log2 (the level blend differs from the two-step form by at most
+        // one ulp, far below the bilinear blend's own precision).
+        const float level = std::min(static_cast<float>(mipChain.size()), 0.5f * std::log2(footprintSquared));
         const auto  low   = static_cast<std::uint32_t>(level);
         const float blend = level - static_cast<float>(low);
         if (low >= mipChain.size() || blend <= 0.0f)

@@ -761,15 +761,17 @@ int main(int argc, char **argv)
         {
             // Headless runs export the window surface directly; Vulkan runs
             // schedule the export on the renderer's vulkan extension.
-            screenshotTaken = demo::harness::exportScreenshotPpm(context,
+            std::string screenshotWrittenPath;
+            screenshotTaken = demo::harness::exportScreenshot(context,
                 windowCapability,
                 windowHandle,
                 renderCapability,
                 rendererHandle,
-                options.screenshotPath);
+                options.screenshotPath,
+                screenshotWrittenPath);
             if (screenshotTaken)
             {
-                std::cout << "demo_lumen_gi: screenshot written to " << options.screenshotPath << "\n";
+                std::cout << "demo_lumen_gi: screenshot written to " << screenshotWrittenPath << "\n";
             }
             else
             {

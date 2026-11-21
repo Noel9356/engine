@@ -7,6 +7,7 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
+#include <engine/util/png.hpp>
 #include <engine/util/ppm.hpp>
 #include <engine/window/capabilities.hpp>
 
@@ -853,6 +854,19 @@ private:
     // errors.
     bool exportSurfacePpmImpl(WindowHandle window, const char *filePath, WindowError *error) const
     {
+        return exportSurfaceImageImpl(window, filePath, false, error);
+    }
+
+    // Writes the same pixel payload as a truecolor PNG (deflate-compressed).
+    bool exportSurfacePngImpl(WindowHandle window, const char *filePath, WindowError *error) const
+    {
+        return exportSurfaceImageImpl(window, filePath, true, error);
+    }
+
+    // Shared export path for the PPM and PNG writers: both consume the same
+    // RGBA software surface, so the pixel geometry checks live here once.
+    bool exportSurfaceImageImpl(WindowHandle window, const char *filePath, bool png, WindowError *error) const
+    {
         const WindowRecord *record = recordFor(window);
         if (record == nullptr || record->headlessRgba.empty())
         {
@@ -872,7 +886,10 @@ private:
             return false;
         }
         const std::size_t stride = static_cast<std::size_t>(width) * 4;
-        if (!util::writePpmRgba(filePath, width, height, record->headlessRgba.data(), stride, false, false))
+        const bool written = png
+            ? util::writePngRgba(filePath, width, height, record->headlessRgba.data(), stride, false, false)
+            : util::writePpmRgba(filePath, width, height, record->headlessRgba.data(), stride, false, false);
+        if (!written)
         {
             reportError(error, WindowError::CreationFailed);
             return false;
@@ -945,6 +962,7 @@ private:
         ENGINE_WINDOW_BIND(glfwCapability_, nativeHandles, nativeHandlesImpl);
 
         ENGINE_WINDOW_BIND(headlessCapability_, exportSurfacePpm, exportSurfacePpmImpl);
+        ENGINE_WINDOW_BIND(headlessCapability_, exportSurfacePng, exportSurfacePngImpl);
 #undef ENGINE_WINDOW_BIND
     }
 

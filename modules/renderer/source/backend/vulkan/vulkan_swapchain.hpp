@@ -187,13 +187,14 @@ public:
         }
     }
 
-    // PPM export support: lazily (re)creates a host-visible buffer of
+    // PPM/PNG export support: lazily (re)creates a host-visible buffer of
     // extent * 4 bytes; finishReadback maps it after the copy's submission
     // completed on the GPU (the copy itself is recorded by the backend into
     // the frame's command buffer) and writes the file (R/B swapped for BGRA
-    // surfaces). The pixel geometry is passed in by the caller because the
-    // swapchain may have resized between the copy and the flush - the
-    // captured values belong to the recorded copy.
+    // surfaces) in the format the caller recorded. The pixel geometry is
+    // passed in by the caller because the swapchain may have resized between
+    // the copy and the flush - the captured values belong to the recorded
+    // copy.
     bool ensureReadbackBuffer();
 
     VkBuffer readbackBuffer() const
@@ -201,8 +202,12 @@ public:
         return readbackBuffer_;
     }
 
-    void finishReadback(
-        const char *filePath, std::uint32_t width, std::uint32_t height, bool bgra, RenderError *error);
+    void finishReadback(const char *filePath,
+        std::uint32_t              width,
+        std::uint32_t              height,
+        bool                       bgra,
+        bool                       png,
+        RenderError               *error);
 
 private:
     bool pickDepthFormat(VkFormat *outFormat) const;

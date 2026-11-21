@@ -280,9 +280,15 @@ water_shore_sand_brightness = 1.35
 water_enabled           = true
 water_color_shallow     = [0.070, 0.255, 0.275]
 water_color_deep        = [0.012, 0.060, 0.130]
-# gloss of the ocean surface: low = mirror-sharp sun glints (the coarse
-# far-water facets then band at grazing angles), high = matte.
-water_roughness         = 0.55
+# gloss of the ocean surface at close range: low values give the sea a
+# crisp sun-glint path that the per-vertex wave normals break into glitter.
+water_roughness         = 0.22
+# the high-altitude blend target for the same hint: orbital eyes look down
+# on flat far-water facets whose per-facet mirror would sparkle, so the
+# material widens the lobe toward this value with eye altitude - kept well
+# under 1 so the sun glint survives as the broad patch orbital photographs
+# of the ocean show.
+water_roughness_orbital = 0.20
 # Surf: a white breaker band where the water shallows toward the shore,
 # noise-modulated so it breaks into wave crests instead of a painted stripe.
 # Strength 0 disables; width is the depth band under the surface that reads
@@ -309,7 +315,7 @@ water_color_ice         = [0.78, 0.85, 0.94]
 # radial direction, giving the sea sun-glint texture at close range. The
 # amplitude is a radian-scale tilt and fades out under the LOD band limit
 # like every other noise term, so coarse chunks keep a smooth sea.
-water_wave_amplitude          = 0.16
+water_wave_amplitude          = 0.22
 water_wave_wavelength_meters  = 8.0
 # amplitude of the half-wavelength chop riding the swell, as a fraction of the
 # swell tilt (the chop breaks the sun glint into sparkle). 0 = single-scale
@@ -356,7 +362,7 @@ cloud_color                  = [0.985, 0.975, 0.955]
 # through each point (see cloud_shadow_sun_direction), so the shadows fall
 # away from their banks and agree with the cloud layer from orbit and from
 # the ground. 0 disables.
-cloud_shadow_strength        = 0.45
+cloud_shadow_strength        = 0.55
 # penumbra softening of the cast shadows: the shadow field widens the coverage
 # edge band by this fraction, so shadows read as soft-edged darkening under
 # their banks instead of a hard copy of the cloud outlines. 0 keeps the shadow
@@ -408,16 +414,16 @@ max_live_planets        = 16
 atmosphere_enabled         = true
 atmosphere_height_meters   = 20000.0
 # Aerial perspective: how fast sight lines through the air haze over. The
-# scale fraction is the distance (as a fraction of atmosphere_height_meters)
-# at which the haze saturates - larger values keep the midground clear and
-# let the far ridge dissolve gradually; the asymptote caps the haze weight
-# at infinite distance, keeping the farthest terrain faintly readable as
-# terrain instead of fading fully into sky. Set the asymptote to 0 to see
-# the terrain without any aerial perspective.
-aerial_perspective_scale_fraction = 0.70
-aerial_perspective_asymptote      = 0.62
+# scale is the exponential's scale length in meters (the distance at which
+# the haze has covered ~63% of its asymptote) - larger values keep the
+# midground clear and let the far ridge dissolve gradually; the asymptote
+# caps the haze weight at infinite distance, keeping the farthest terrain
+# faintly readable as terrain instead of fading fully into sky. Set the
+# asymptote to 0 to see the terrain without any aerial perspective.
+aerial_perspective_scale_meters  = 3600.0
+aerial_perspective_asymptote     = 0.72
 atmosphere_zenith_color    = [0.040, 0.130, 0.460]
-atmosphere_horizon_color   = [0.220, 0.400, 0.780]
+atmosphere_horizon_color   = [0.260, 0.420, 0.780]
 
 # climate
 equator_temperature        = 1.0
@@ -457,7 +463,7 @@ moisture_belt_equator_amplitude     = 0.20
 moisture_belt_subtropical_amplitude = -0.26
 moisture_belt_temperate_amplitude   = 0.10
 moisture_belt_polar_amplitude       = -0.06
-color_variation            = 0.34
+color_variation            = 0.30
 # feature size of the albedo jitter field (the mottling that keeps large
 # biomes from reading as flat plastic sheets).
 color_variation_wavelength_meters = 260.0
@@ -501,9 +507,20 @@ rock_strata_contrast       = 0.75
 # projection of the dominant normal axis. These keys set how many meters one
 # texture tile spans per group (see docs/configuration.md): the consumer's
 # textures meet the generator's tiling here.
-terrain_texture_tile_meters_ground = 3.0
-terrain_texture_tile_meters_rock   = 6.0
+terrain_texture_tile_meters_ground = 8.0
+terrain_texture_tile_meters_rock   = 14.0
 water_texture_tile_meters          = 8.0
+# Anti-repetition of the tiled terrain frames (see docs/configuration.md):
+# the UV warp bends the tile lattice with a low-frequency noise field so the
+# world never photographs every tile at the same phase, and the per-chunk
+# frame rotation turns each chunk's tiling by a deterministic multiple of 90
+# degrees so neighboring chunks never photograph the same scan in the same
+# orientation. The warp amplitude is in texture tiles (it scales with the
+# tile sizes); 0 disables the warp, texture_chunk_rotation = false keeps
+# every chunk's frame unrotated.
+texture_uv_warp_strength          = 0.35
+texture_uv_warp_wavelength_meters = 64.0
+texture_chunk_rotation            = true
 
 # biome color BLENDING (see docs/configuration.md): biome colors interpolate
 # between palette rows over these widths instead of hard-switching per vertex
@@ -523,9 +540,9 @@ elevation_blend_fraction   = 0.12
 biome_palette = [
     0.006, 0.024, 0.055,   0.013, 0.048, 0.100,   0.034, 0.115, 0.165,
     0.550, 0.460, 0.280,   0.480, 0.360, 0.180,   0.340, 0.300, 0.110,
-    0.130, 0.220, 0.050,   0.150, 0.190, 0.070,   0.060, 0.130, 0.035,
+    0.070, 0.185, 0.045,   0.150, 0.190, 0.070,   0.060, 0.130, 0.035,
     0.050, 0.130, 0.030,   0.035, 0.100, 0.025,   0.030, 0.090, 0.030,
-    0.060, 0.100, 0.050,   0.260, 0.240, 0.170,   0.870, 0.900, 0.930,
+    0.055, 0.105, 0.055,   0.260, 0.240, 0.170,   0.870, 0.900, 0.930,
     0.280, 0.250, 0.210,
 ]
 

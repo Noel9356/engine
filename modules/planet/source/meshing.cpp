@@ -996,39 +996,100 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
     };
 
     // World-space tiling frame for the surface textures (see the UV emission
-    // below): each vertex projects onto the plane perpendicular to its
-    // DOMINANT NORMAL AXIS (a cubemap-style projection), so cliff walls tile
-    // by their horizontal coordinates instead of smearing the ground texture
-    // across them. The two non-dominant planet-local coordinates divided by
-    // the group's tile size form the texture coordinates; a shared vertex
-    // evaluates the identical normal, position and tile scale from either
-    // side of a chunk boundary, so the tiling continues across chunks.
+    // below). The frame is a CONTINUOUS cubemap-style projection: the three
+    // axis-plane projections (each dropping the coordinate the surface
+    // faces) blend by |normal_axis|^4 weights, so the frame hands over
+    // smoothly wherever two axis weights tie instead of switching planes -
+    // a hard per-vertex axis pick smeared every diagonal cliff face (the
+    // triangles straddling the switch carried mixed-plane coordinates) and
+    // tilted flat water onto a vertical plane beyond 45 degrees of
+    // latitude. Axis-plane projections of the planet-local position never
+    // degenerate (a coordinate is always dropped, never projected against
+    // the position's own radial), and the frame stays a pure function of
+    // (position, normal, chunk, group - see the anti-repetition frame
+    // setup below), so a shared vertex evaluates identical
+    // coordinates from either side of a same-depth chunk boundary and the
+    // tiling continues across chunks.
     const double tileMeters[terrainSurfaceGroupCount] = {
         std::max(0.1, params.terrainTextureTileMetersGround),
         std::max(0.1, params.terrainTextureTileMetersRock)};
-    const auto tiledSurfaceUv = [](const Vec3 &point, const double normal[3], double tileMeters) -> std::pair<float, float>
+    // Anti-repetition of the tiled frames (see the params' surface texturing
+    // section): the per-chunk frame rotation hashes a quarter-turn count per
+    // surface group from the planet seed and the chunk address, and the UV
+    // warp bends the tile lattice with a low-frequency simplex field that
+    // band-limits like every other noise term of the module. Both are pure
+    // functions of (position, chunk, group), so a shared vertex still
+    // evaluates identical coordinates from either side of a chunk boundary
+    // of the same depth; the pattern continuity the tiling keeps within a
+    // chunk is what the repeat-breaking is worth, and 90-degree turns map
+    // the tile lattice onto itself so tileable scans keep tiling.
+    const std::uint64_t frameRotationSeed = hashCombine64(params.seed, makeChunkKey(coord.depth, coord.x, coord.y, coord.z));
+    std::uint32_t frameQuarterTurns[terrainSurfaceGroupCount] = {0u, 0u};
+    if (params.textureChunkRotation)
     {
-        const double absX = std::abs(normal[0]);
-        const double absY = std::abs(normal[1]);
-        const double absZ = std::abs(normal[2]);
-        double u = 0.0;
-        double v = 0.0;
-        if (absX >= absY && absX >= absZ)
+        for (std::uint32_t group = 0; group < terrainSurfaceGroupCount; ++group)
         {
-            u = point.y;
-            v = point.z;
+            frameQuarterTurns[group] = static_cast<std::uint32_t>(hashCombine64(frameRotationSeed, group) & 3u);
         }
-        else if (absY >= absZ)
+    }
+    const double warpFade = params.textureUvWarpStrength > 0.0
+        ? lowPassFade(ownCutoff, params.textureUvWarpWavelengthMeters) : 0.0;
+    const std::int64_t seedWarpU = static_cast<std::int64_t>(hashCombine64(params.seed, 0x2C1B3F6DULL));
+    const std::int64_t seedWarpV = static_cast<std::int64_t>(hashCombine64(params.seed, 0x71E9AD24ULL));
+    const double warpWavelength = std::max(1.0, params.textureUvWarpWavelengthMeters);
+    const double warpAmplitude = params.textureUvWarpStrength * warpFade;
+    const auto tiledSurfaceUv = [&](const Vec3 &point, const Vec3 &unitNormal, double tileMetersPerTile,
+        std::uint32_t quarterTurns) -> std::pair<float, float>
+    {
+        const double weightX = std::pow(std::abs(unitNormal.x), 4.0);
+        const double weightY = std::pow(std::abs(unitNormal.y), 4.0);
+        const double weightZ = std::pow(std::abs(unitNormal.z), 4.0);
+        const double weightSum = std::max(1.0e-12, weightX + weightY + weightZ);
+        const double blendX = weightX / weightSum;
+        const double blendY = weightY / weightSum;
+        const double blendZ = weightZ / weightSum;
+        // The x-facing plane keeps (y, z), the y-facing plane (x, z) and the
+        // z-facing plane (x, y); the blends mix the shared coordinates so a
+        // pure axis normal reproduces its plane exactly.
+        double u = (blendX * point.y + (blendY + blendZ) * point.x) / tileMetersPerTile;
+        double v = ((blendX + blendY) * point.z + blendZ * point.y) / tileMetersPerTile;
+        // The chunk's quarter-turn of the tile lattice (rotation about the
+        // frame origin; tile boundaries stay on the same world grid).
+        switch (quarterTurns)
         {
-            u = point.x;
-            v = point.z;
-        }
-        else
+        case 1u:
         {
-            u = point.x;
-            v = point.y;
+            const double rotated = u;
+            u = -v;
+            v = rotated;
+            break;
         }
-        return {static_cast<float>(u / tileMeters), static_cast<float>(v / tileMeters)};
+        case 2u:
+            u = -u;
+            v = -v;
+            break;
+        case 3u:
+        {
+            const double rotated = u;
+            u = v;
+            v = -rotated;
+            break;
+        }
+        default:
+            break;
+        }
+        // The low-frequency warp of the tile coordinates (the breaking of the
+        // global phase alignment): two independent simplex streams offset the
+        // rotated frame, bounded well under one tile by validate()'s clamp.
+        if (warpAmplitude > 0.0)
+        {
+            const double warpX = point.x / warpWavelength;
+            const double warpY = point.y / warpWavelength;
+            const double warpZ = point.z / warpWavelength;
+            u += warpAmplitude * noise::simplex3ImproveXY(seedWarpU, warpX, warpY, warpZ);
+            v += warpAmplitude * noise::simplex3ImproveXY(seedWarpV, warpX, warpY, warpZ);
+        }
+        return {static_cast<float>(u), static_cast<float>(v)};
     };
 
     // Terrain pass: own cells [0, n)^3 always march (cellNeedsMarching
@@ -1090,10 +1151,11 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         vertex.color[1]    = climate.color[1] * static_cast<float>(cloudShade);
         vertex.color[2]    = climate.color[2] * static_cast<float>(cloudShade);
         applyDebugBorderTint(vertex.color, chunkBorderWeight(point));
-        // Texture coordinates: the cubemap-style projection of the dominant
-        // normal axis (see tiledSurfaceUv), scaled by the group's tile size.
-        const double unitNormal[3] = {nx, ny, nz};
-        const auto [tileU, tileV] = tiledSurfaceUv(point, unitNormal, tileMeters[group]);
+        // Texture coordinates: the continuous flat/wall projective frame
+        // (see tiledSurfaceUv), scaled by the group's tile size and carried
+        // through the chunk's own quarter-turn of the tile lattice.
+        const Vec3 unitNormal{nx, ny, nz};
+        const auto [tileU, tileV] = tiledSurfaceUv(point, unitNormal, tileMeters[group], frameQuarterTurns[group]);
         vertex.uv[0] = tileU;
         vertex.uv[1] = tileV;
 
@@ -1492,8 +1554,8 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             // Texture coordinates: the sea sheet tiles by the same cubemap
             // projection of the RADIAL direction (stable across the wave
             // slope's normal wiggles), scaled by the water tile size.
-            const double radialUnit[3] = {radial.x, radial.y, radial.z};
-            const auto [waterU, waterV] = tiledSurfaceUv(point, radialUnit, params.waterTextureTileMeters);
+            const Vec3 radialUnit{radial.x, radial.y, radial.z};
+            const auto [waterU, waterV] = tiledSurfaceUv(point, radialUnit, params.waterTextureTileMeters, 0u);
             vertex.uv[0] = waterU;
             vertex.uv[1] = waterV;
 

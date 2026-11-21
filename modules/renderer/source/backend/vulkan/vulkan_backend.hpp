@@ -113,6 +113,10 @@ public:
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) override;
     void destroyTexture(TextureHandle texture) override;
 
+    // Reports the creation-time mean color stored on the texture record
+    // (see VulkanResources::textureMean).
+    bool textureMean(TextureHandle texture, float outMeanRGB[3]) const override;
+
     FrameStatistics statistics() const override
     {
         FrameStatistics result = statistics_;
@@ -144,6 +148,16 @@ public:
     bool infoStrings(RendererInfoStrings *outInfo) const;
     bool nativeHandles(VulkanDeviceHandles *outHandles) const;
     bool exportFramePpm(const char *filePath, RenderError *error);
+
+    // PNG variant of the same deferred export (identical copy; the file
+    // write picks the truecolor PNG writer). Both route through the shared
+    // exportFrameImage request path below.
+    bool exportFramePng(const char *filePath, RenderError *error);
+
+    // Shared deferred-export request path: records the path and format, the
+    // copy runs at the next endFrame, and the file write picks the writer
+    // the requested format names.
+    bool exportFrameImage(const char *filePath, bool png, RenderError *error);
 
     // Attaches the shared profiler here and forwards it to the device
     // context, whose upload queue records its oldest-fence and drain waits.
@@ -326,8 +340,9 @@ private:
 
     FrameStatistics statistics_{};
 
-    bool        exportRequested_ = false; // a PPM export was requested; the copy runs at the next endFrame
+    bool        exportRequested_ = false; // a screenshot export was requested; the copy runs at the next endFrame
     std::string exportPath_;
+    bool        exportPng_       = false; // file format of the requested export
 
     // Deferred PPM export (P99 hybrid round, H2 - asynchronous readback):
     // the frame's copy is recorded into the frame command buffer and lands
@@ -343,6 +358,7 @@ private:
     {
         bool          active        = false;
         std::string   path;
+        bool          png           = false; // file format of the pending export
         std::uint32_t frameSlot     = 0; // slot whose fence retires the copy
         std::uint32_t width         = 0; // pixel geometry captured at copy time
         std::uint32_t height        = 0;

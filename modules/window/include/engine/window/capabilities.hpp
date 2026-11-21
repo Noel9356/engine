@@ -20,7 +20,9 @@ namespace window
 // 9 -> 10 added mouse button state and button events.
 // 10 -> 11 added cursor movement, scroll, and Unicode text-input events.
 // 11 -> 12 added standardized gamepad events and a platform-neutral touch ingress; 12 -> 13 added clipboard text access; 13 -> 14 added dropped-file batches; 14 -> 15 added runtime window control (visibility, attributes, opacity, focus/attention, iconify/restore/maximize), position/content-scale queries, event waiting, the Hidden cursor mode, and twelve text-editing keys.
-inline constexpr std::uint32_t windowCapabilityAbi = 15u;
+// 15 -> 16 added the headless PNG surface export (exportSurfacePng appended to
+// HeadlessWindowCapability).
+inline constexpr std::uint32_t windowCapabilityAbi = 16u;
 
 // Opaque window identifier; 0 (invalidWindow) means "none".
 using WindowHandle = std::uint32_t;
@@ -539,7 +541,7 @@ struct GlfwWindowCapability
 };
 
 // Secondary "window.headless" capability: writes the software surface to a
-// binary PPM (P6) file, used for CI snapshot checks.
+// binary PPM (P6) file or a truecolor PNG file, used for CI snapshot checks.
 struct HeadlessWindowCapability
 {
     static constexpr const char *capabilityName = "window.headless";
@@ -549,6 +551,10 @@ struct HeadlessWindowCapability
     void *self = nullptr;
 
     bool (*exportSurfacePpm)(void *self, WindowHandle window, const char *filePath, WindowError *error);
+
+    // Writes the software surface as a truecolor PNG (deflate-compressed, the
+    // same pixel payload the PPM export writes).
+    bool (*exportSurfacePng)(void *self, WindowHandle window, const char *filePath, WindowError *error);
 };
 
 } // namespace window

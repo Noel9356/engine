@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <vector>
 
@@ -94,6 +95,14 @@ struct CoverageShellSpec
     // above the grid spacing, so the marching-squares polygons read as
     // organic bank outlines instead of angular cutouts.
     std::uint32_t smoothingPasses = 1;
+    // Greedy interior merge (see the merge pass): runs of solid interior
+    // quads collapse into maximal grid-aligned rectangles. On shells whose
+    // cells project to a handful of pixels or fewer (the macro shell at
+    // orbit distance) this is pure savings, but on the sky deck - where one
+    // cell spans a dozen pixels - the merged rectangles read as blocky
+    // grid-aligned slabs, so the deck keeps its per-quad tessellation and
+    // pays the extra triangles.
+    bool mergeInterior = true;
     // Per-quad floor jitter (0 = off): every quad's inclusion threshold is
     // modulated by a deterministic hash noise at a few quads' scale, so the
     // cutout boundary wiggles between quads instead of following the grid's
@@ -109,6 +118,15 @@ struct CoverageShellSpec
     // Optional sun direction (world space) for the baked directional shading
     // above; null leaves the deck's shading flat.
     const planet::Vec3 *sunDirection = nullptr;
+    // Threshold-band widening for the coverage sampling (see
+    // CloudField::coverage softnessScale): the coverage function thresholds
+    // the fBm field, and a band this narrow maps to a spatial transition a
+    // couple of grid samples wide on a shell whose cells project a dozen
+    // pixels - the sampled field then reads as near-binary speckle, and no
+    // amount of post-smoothing turns it back into smooth banks. Widening the
+    // band spreads the same threshold over several samples, so the sampled
+    // field keeps the banks' own smooth gradients.
+    double coverageSoftnessScale = 1.0;
     // Optional environment lighting for an EXACT unlit bake (see
     // BackdropLighting): when set, the vertex color carries the full
     // hemispheric ambient plus the sun's Lambertian term against the shell's
@@ -152,7 +170,18 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
     // boundary inside it); quads inside the band still sub-divide at the
     // contour walk, because merging them would flatten their coverage-
     // shaded colors into rectangle steps the eye reads as stair edges.
-    constexpr std::uint32_t kSub = 4;
+    // Boundary subdivision: the fringe COLOR blend (hazeEdgeBlend) is what
+    // actually softens the deck's outlines - it fades the vertex colors to
+    // the sky behind over a coverage band wider than a cell, and the
+    // geometry edge hides inside the fade. That alignment holds while the
+    // colors and the isoline come from the SAME smoothed field (see the
+    // smoothing note above); the widened threshold band keeps the sampled
+    // field smooth, so the single-cell march's linear crossings already
+    // follow smooth isolines and kSub stays at the cheap interior rate.
+    // Saddle cells still resolve through the cell mean below (see the
+    // saddle note in the walk): their bilinear isoline is a hyperbola whose
+    // center-outside case must not fill.
+    constexpr std::uint32_t kSub = 1;
     constexpr float kBoundaryBand = 0.30f;
 
     for (std::uint32_t band = 0; band <= spec.bands; ++band)
@@ -168,7 +197,8 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             const glm::dvec3 shellDirection(std::cos(azimuth) * cosLatitude, sinLatitude, std::sin(azimuth) * cosLatitude);
             const glm::dvec3 fieldDirection = spec.frame * shellDirection;
             const float coverage = static_cast<float>(planet::clamp01(field.coverage(
-                planet::Vec3{fieldDirection.x, fieldDirection.y, fieldDirection.z}, spec.lowPassCutoffMeters)));
+                planet::Vec3{fieldDirection.x, fieldDirection.y, fieldDirection.z}, spec.lowPassCutoffMeters,
+                spec.coverageSoftnessScale)));
             coverageGrid.push_back(coverage);
 
             planet::PlanetVertex vertex{};
@@ -180,6 +210,63 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             vertex.normal[2] = static_cast<float>(shellDirection.z);
             vertices.push_back(vertex);
         }
+    }
+
+    // One box pass per smoothing round over the coverage grid (wrap the
+    // segments; clamp the bands): rounds the quad inclusion boundary the same
+    // way an alpha edge would soften a textured deck. Two rounds give the
+    // contour walk a field whose curvature stays above the grid spacing, so
+    // the polygons read as bank outlines instead of angular cutouts.
+    // Smoothing runs BEFORE the color pass below: the contour walk, the
+    // vertex colors and the greedy merge must all read the same smoothed
+    // field (see the sampling note above the grid loop). Coloring from the
+    // pre-smoothing samples aligns the thinning fringe with the raw field's
+    // band limit - which sits at the sampling grid's Nyquist frequency, so
+    // the raw samples beat against the grid - and the rendered deck then
+    // shows grid-pitch stair-stepped color blocks and row-coherent sawtooth
+    // fringes wherever the raw and smoothed crossings disagree.
+    // The kernel reaches round(sec(latitude)) segments per row: on a lat-long
+    // grid the azimuth arc shrinks with cos(latitude), so a fixed 3x3 kernel
+    // covers an ever narrower physical footprint toward a shell's pole and
+    // the smoothed field terraces into latitude-row plateaus. The floor
+    // cutout follows the terraces - banks read as stacked planks with
+    // sawtooth fringe rows - and the read worsens with the bank rows'
+    // elevation, which is why eye-level views whose banks ride high in the
+    // dome frame showed it while low-horizon views did not. Widening the
+    // segment reach per row restores an approximately circular physical
+    // kernel (the cap keeps polar rows affordable; there the azimuth cells
+    // are slivers a few pixels wide, below the terrace read).
+    for (std::uint32_t pass = 0; pass < std::max(1u, spec.smoothingPasses); ++pass)
+    {
+        std::vector<float> smoothed(coverageGrid.size());
+        for (std::uint32_t band = 0; band <= spec.bands; ++band)
+        {
+            const double kernelLatitude = spec.latitudeLowRadians
+                + (spec.latitudeHighRadians - spec.latitudeLowRadians)
+                    * (static_cast<double>(band) / static_cast<double>(spec.bands));
+            const std::uint32_t segmentSpan = std::clamp(
+                static_cast<std::uint32_t>(std::lround(1.0 / std::max(std::cos(kernelLatitude), 0.08))), 1u, 6u);
+            const std::uint32_t bandRows[3] = {band > 0 ? band - 1u : 0u, band,
+                band < spec.bands ? band + 1u : spec.bands};
+            const float kernelSize = static_cast<float>(3u * (2u * segmentSpan + 1u));
+            for (std::uint32_t segment = 0; segment <= spec.segments; ++segment)
+            {
+                float sum = 0.0f;
+                for (std::uint32_t row = 0; row < 3u; ++row)
+                {
+                    const std::size_t rowBase = static_cast<std::size_t>(bandRows[row]) * stride;
+                    for (std::int32_t offset = -static_cast<std::int32_t>(segmentSpan);
+                        offset <= static_cast<std::int32_t>(segmentSpan); ++offset)
+                    {
+                        const std::int32_t wrapped = (static_cast<std::int32_t>(segment) + offset
+                            + static_cast<std::int32_t>(spec.segments)) % static_cast<std::int32_t>(spec.segments);
+                        sum += coverageGrid[rowBase + static_cast<std::size_t>(wrapped)];
+                    }
+                }
+                smoothed[static_cast<std::size_t>(band) * stride + segment] = sum / kernelSize;
+            }
+        }
+        coverageGrid.swap(smoothed);
     }
 
     // ---- color pass over the smoothed field ---------------------------------------------
@@ -206,7 +293,7 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             const float coverage = coverageGrid[static_cast<std::size_t>(band) * stride + segment];
             const float shade = 0.88f + 0.12f * coverage;
             float sunFacing = spec.sunDirection != nullptr
-                ? static_cast<float>(0.30 + 0.70 * planet::clamp01(0.5 + 0.5
+                ? static_cast<float>(0.55 + 0.45 * planet::clamp01(0.5 + 0.5
                     * planet::dot(planet::Vec3{shellDirection.x, shellDirection.y, shellDirection.z},
                         *spec.sunDirection)))
                 : 1.0f;
@@ -274,52 +361,9 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
         }
     }
 
-    // One 3x3 box pass per smoothing round over the coverage grid (wrap the
-    // segments; clamp the bands): rounds the quad inclusion boundary the same
-    // way an alpha edge would soften a textured deck. Two rounds give the
-    // contour walk a field whose curvature stays above the grid spacing, so
-    // the polygons read as bank outlines instead of angular cutouts.
-    for (std::uint32_t pass = 0; pass < std::max(1u, spec.smoothingPasses); ++pass)
-    {
-        std::vector<float> smoothed(coverageGrid.size());
-        for (std::uint32_t band = 0; band <= spec.bands; ++band)
-        {
-            const std::uint32_t bandDown = band > 0 ? band - 1u : 0u;
-            const std::uint32_t bandUp = band < spec.bands ? band + 1u : spec.bands;
-            for (std::uint32_t segment = 0; segment <= spec.segments; ++segment)
-            {
-                const std::uint32_t left = (segment + spec.segments) % spec.segments;
-                const std::uint32_t right = (segment + 1u) % spec.segments;
-                const float sum = coverageGrid[band * stride + left] + coverageGrid[band * stride + segment]
-                    + coverageGrid[band * stride + right]
-                    + coverageGrid[bandDown * stride + left] + coverageGrid[bandDown * stride + segment]
-                    + coverageGrid[bandDown * stride + right]
-                    + coverageGrid[bandUp * stride + left] + coverageGrid[bandUp * stride + segment]
-                    + coverageGrid[bandUp * stride + right];
-                smoothed[band * stride + segment] = sum / 9.0f;
-            }
-        }
-        coverageGrid.swap(smoothed);
-    }
-
     const auto coverageAt = [&coverageGrid, stride](std::uint32_t band, std::uint32_t segment)
     {
         return coverageGrid[static_cast<std::size_t>(band) * stride + segment];
-    };
-    const auto interpolatedVertex = [&vertices](std::uint32_t indexA, std::uint32_t indexB, float t) -> std::uint32_t
-    {
-        const planet::PlanetVertex &va = vertices[indexA];
-        const planet::PlanetVertex &vb = vertices[indexB];
-        planet::PlanetVertex v{};
-        for (std::uint32_t k = 0; k < 3; ++k)
-        {
-            v.position[k] = va.position[k] + (vb.position[k] - va.position[k]) * t;
-            v.normal[k] = va.normal[k] + (vb.normal[k] - va.normal[k]) * t;
-            v.color[k] = va.color[k] + (vb.color[k] - va.color[k]) * t;
-        }
-        const std::uint32_t slot = static_cast<std::uint32_t>(vertices.size());
-        vertices.push_back(v);
-        return slot;
     };
 
     // Per-quad threshold noise: a deterministic hash of the quad index mixed
@@ -348,6 +392,28 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
         return std::abs(denominator) < 1.0e-6f
             ? 0.5f
             : std::clamp((coverageA - floor) / denominator, 0.0f, 1.0f);
+    };
+
+    // One interpolated floor-crossing vertex between two corner slots (the
+    // saddle pockets and the ring walk below share it): position, normal and
+    // color blend at the crossing parameter, so a crossing pushed per cell
+    // still lands on the same point its neighbor computes for the shared
+    // edge and the emitted shapes weld geometrically.
+    const auto crossingVertex = [&vertices, &crossingT](std::uint32_t slotA, std::uint32_t slotB,
+        float coverageA, float coverageB, float floor) -> std::uint32_t
+    {
+        const planet::PlanetVertex &vertexA = vertices[slotA];
+        const planet::PlanetVertex &vertexB = vertices[slotB];
+        const float t = crossingT(coverageA, coverageB, floor);
+        planet::PlanetVertex vertex{};
+        for (std::uint32_t k = 0; k < 3; ++k)
+        {
+            vertex.position[k] = vertexA.position[k] + (vertexB.position[k] - vertexA.position[k]) * t;
+            vertex.normal[k] = vertexA.normal[k] + (vertexB.normal[k] - vertexA.normal[k]) * t;
+            vertex.color[k] = vertexA.color[k] + (vertexB.color[k] - vertexA.color[k]) * t;
+        }
+        vertices.push_back(vertex);
+        return static_cast<std::uint32_t>(vertices.size() - 1u);
     };
 
     // ---- per-quad inclusion floors ----------------------------------------------------
@@ -490,7 +556,7 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
         }
         return true;
     };
-    for (std::uint32_t band = 0; band < spec.bands; ++band)
+    for (std::uint32_t band = 0; spec.mergeInterior && band < spec.bands; ++band)
     {
         if (!rowAllowed[band])
         {
@@ -605,64 +671,27 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
                     indices.insert(indices.end(), {tl, tr, br, tl, br, bl});
                     continue;
                 }
+                // fall through to the sub-cell march below
             }
             else
             {
-                // Ambiguous diagonal case (TL/BR or TR/BL inside): the
-                // saddle either joins the diagonal pair into one bank or
-                // splits it into two wedges - the cell average picks which
-                // corners join. Resolving the saddle at COARSE resolution
-                // keeps the boundary walk's polygon ring-shaped (sub-testing
-                // a saddle instead scatters corner islands along the edge).
-                const float cellMean = 0.25f * (cornerCoverage[0] + cornerCoverage[1] + cornerCoverage[2] + cornerCoverage[3]);
-                if (insideCount == 2 && inside[0] != inside[1] && inside[1] != inside[2])
-                {
-                    for (std::uint32_t corner = 0; corner < 4; ++corner)
-                    {
-                        inside[corner] = cornerCoverage[corner] >= floorThisQuad
-                            && cornerCoverage[corner] >= cellMean;
-                    }
-                    insideCount = (inside[0] ? 1u : 0u) + (inside[1] ? 1u : 0u)
-                        + (inside[2] ? 1u : 0u) + (inside[3] ? 1u : 0u);
-                    if (insideCount == 0)
-                    {
-                        continue;
-                    }
-                    if (insideCount == 4)
-                    {
-                        indices.insert(indices.end(), {tl, tr, br, tl, br, bl});
-                        continue;
-                    }
-                }
-
-                // Boundary walk: for each ring edge, the crossing point (if
-                // the edge straddles the floor) or the inside corner itself;
-                // the polygon is the crossing points plus inside corners in
-                // ring order, fan-triangulated from its first point.
-                std::uint32_t polygon[8];
-                std::uint32_t polygonCount = 0;
-                for (std::uint32_t corner = 0; corner < 4; ++corner)
-                {
-                    const std::uint32_t next = (corner + 1u) % 4u;
-                    const bool straddles = inside[corner] != inside[next];
-                    if (inside[corner])
-                    {
-                        polygon[polygonCount++] = ring[corner];
-                    }
-                    if (straddles)
-                    {
-                        polygon[polygonCount++] = interpolatedVertex(ring[corner], ring[next],
-                            crossingT(cornerCoverage[corner], cornerCoverage[next], floorThisQuad));
-                    }
-                }
-                for (std::uint32_t fan = 1; fan + 1 < polygonCount; ++fan)
-                {
-                    indices.insert(indices.end(), {polygon[0], polygon[fan], polygon[fan + 1]});
-                }
-                continue;
+                // PARTIAL quad (the bank's outer boundary). The coarse
+                // boundary walk interpolated its crossings along the grid
+                // edges but still snapped the polygon to whole grid
+                // vertices wherever a corner sat inside, so every bank
+                // outline carried a grid-pitch staircase (one deck cell is
+                // about ten pixels at eye level). The sub-cell march below
+                // resolves partial coverage natively - the bilinear corners
+                // feed (kSub+1)^2 sub-samples and each sub-cell walks its
+                // own crossings - so boundary quads take it too, and the
+                // isoline curves at sub-cell precision on every boundary.
+                // Deep-interior saddles (all four corners well above the
+                // floor, only the bilinear middle dipping) cannot reach
+                // here: a partial quad has at least one corner below the
+                // floor by construction.
             }
 
-            // Fully-inside near-boundary quad: subdivide into kSub x kSub
+            // Boundary or fully-inside near-boundary quad: subdivide into kSub x kSub
             // cells (bilinear coverage + corner colors over the quad) and
             // march the cells. Sub-cell coverage values are shared arithmetic
             // between neighboring sub-cells (bilinear from the same corners),
@@ -763,6 +792,48 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
                             static_cast<std::uint32_t>(cellSlot[3])});
                         continue;
                     }
+                    // Saddle resolution (see the builder's header comment):
+                    // with two OPPOSITE corners inside, the ring walk below
+                    // emits one hexagon fanned from the first corner. That
+                    // hexagon is the correct region only when the bilinear
+                    // cell center sits INSIDE the floor (the inside band
+                    // connects through the middle and the hexagon stays
+                    // convex). When the center sits OUTSIDE, the two inside
+                    // corners own disconnected triangle pockets, and the
+                    // hexagon additionally fills the clear-sky center: the
+                    // fan paints cloud-colored polygons past the isoline
+                    // into the sky while clipping the pockets' outer halves.
+                    // Whether a quad saddles center-inside or center-outside
+                    // follows the bank edges' phase against the sample grid,
+                    // so the unresolved case surfaced as rows of sawtooth
+                    // triangles along stretched, row-aligned bank boundaries.
+                    // Resolve by the cell mean: center inside keeps the
+                    // hexagon walk, center outside emits each inside
+                    // corner's own pocket triangle.
+                    const bool saddle = cellInsideCount == 2 && cellInside[0] == cellInside[2]
+                        && cellInside[1] == cellInside[3];
+                    const float cellCenterCoverage
+                        = 0.25f * (cellCorner[0] + cellCorner[1] + cellCorner[2] + cellCorner[3]);
+                    if (saddle && cellCenterCoverage < cellFloor)
+                    {
+                        for (std::uint32_t corner = 0; corner < 4; ++corner)
+                        {
+                            if (!cellInside[corner])
+                            {
+                                continue;
+                            }
+                            const std::uint32_t previous = (corner + 3u) % 4u;
+                            const std::uint32_t next = (corner + 1u) % 4u;
+                            std::uint32_t pocket[3];
+                            pocket[0] = static_cast<std::uint32_t>(cellSlot[corner]);
+                            pocket[1] = crossingVertex(cellSlot[previous], cellSlot[corner],
+                                cellCorner[previous], cellCorner[corner], cellFloor);
+                            pocket[2] = crossingVertex(cellSlot[corner], cellSlot[next],
+                                cellCorner[corner], cellCorner[next], cellFloor);
+                            indices.insert(indices.end(), {pocket[0], pocket[1], pocket[2]});
+                        }
+                        continue;
+                    }
                     // Boundary walk over the sub-cell; interpolated crossings
                     // reuse the same arithmetic so adjacent sub-cells weld.
                     std::uint32_t polygon[8];
@@ -777,20 +848,8 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
                         }
                         if (straddles)
                         {
-                            const std::uint32_t slotA = static_cast<std::uint32_t>(cellSlot[corner]);
-                            const std::uint32_t slotB = static_cast<std::uint32_t>(cellSlot[next]);
-                            const planet::PlanetVertex &vertexA = vertices[slotA];
-                            const planet::PlanetVertex &vertexB = vertices[slotB];
-                            const float t = crossingT(cellCorner[corner], cellCorner[next], cellFloor);
-                            planet::PlanetVertex vertex{};
-                            for (std::uint32_t k = 0; k < 3; ++k)
-                            {
-                                vertex.position[k] = vertexA.position[k] + (vertexB.position[k] - vertexA.position[k]) * t;
-                                vertex.normal[k] = vertexA.normal[k] + (vertexB.normal[k] - vertexA.normal[k]) * t;
-                                vertex.color[k] = vertexA.color[k] + (vertexB.color[k] - vertexA.color[k]) * t;
-                            }
-                            vertices.push_back(vertex);
-                            polygon[polygonCount++] = static_cast<std::uint32_t>(vertices.size() - 1u);
+                            polygon[polygonCount++] = crossingVertex(cellSlot[corner], cellSlot[next],
+                                cellCorner[corner], cellCorner[next], cellFloor);
                         }
                     }
                     for (std::uint32_t fan = 1; fan + 1 < polygonCount; ++fan)
@@ -951,13 +1010,28 @@ void PlanetChunkRenderer::setBackdropLighting(const BackdropLighting &lighting)
     backdropLightingValid_ = true;
 }
 
-void PlanetChunkRenderer::setTerrainTextures(renderer::TextureHandle groundDetail, renderer::TextureHandle rockDetail,
-    renderer::TextureHandle rockNormal, double groundTextureMaxDistanceMeters,
+void PlanetChunkRenderer::setTerrainTextures(const std::vector<TerrainTextureVariant> &groundVariants,
+    const std::vector<TerrainTextureVariant> &rockVariants, double groundTextureMaxDistanceMeters,
     double rockTextureMaxDistanceMeters)
 {
-    groundDetailTexture_ = groundDetail;
-    rockDetailTexture_ = rockDetail;
-    rockNormalTexture_ = rockNormal;
+    // Variants with no loadable detail map cannot multiply - drop them so
+    // the per-chunk pick only ever selects a textured variant.
+    groundTextureVariants_.clear();
+    rockTextureVariants_.clear();
+    for (const TerrainTextureVariant &variant : groundVariants)
+    {
+        if (variant.detail != renderer::invalidTexture)
+        {
+            groundTextureVariants_.push_back(variant);
+        }
+    }
+    for (const TerrainTextureVariant &variant : rockVariants)
+    {
+        if (variant.detail != renderer::invalidTexture)
+        {
+            rockTextureVariants_.push_back(variant);
+        }
+    }
     groundTextureMaxDistanceMetersSquared_ = groundTextureMaxDistanceMeters > 0.0
         ? groundTextureMaxDistanceMeters * groundTextureMaxDistanceMeters : 0.0;
     rockTextureMaxDistanceMetersSquared_ = rockTextureMaxDistanceMeters > 0.0
@@ -1169,14 +1243,14 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     // the LOD band limit, so from above the sea is a sheet of flat coarse
     // facets and a tight specular term turns each facet into a separate
     // sharp glint - a field of sparkles around the sun point. The material
-    // therefore widens toward a near-mirror-diffuse sheen as the eye climbs
-    // the atmosphere column (roughness 0.95 by twice the atmosphere height):
-    // a broad, soft sun glint like the one real oceans throw at orbital
-    // eye heights, instead of per-facet sparkles; close-range views keep
-    // the configured sea texture.
+    // therefore widens toward the configured orbital gloss as the eye
+    // climbs the atmosphere column: a broad, soft sun glint like the one
+    // real oceans throw at orbital eye heights, instead of per-facet
+    // sparkles; close-range views keep the configured sea texture.
     const double orbitBlend = planet::smoothstep(params_.atmosphereHeightMeters, 2.0 * params_.atmosphereHeightMeters,
         eyeAltitudeMeters);
-    const float waterRoughness = static_cast<float>(params_.waterRoughness + (0.95f - params_.waterRoughness) * orbitBlend);
+    const float waterRoughness = static_cast<float>(
+        params_.waterRoughness + (params_.waterRoughnessOrbital - params_.waterRoughness) * orbitBlend);
 
     // Aerial perspective: the atmosphere model's haze for the eye's sight
     // lines, composed as exact fog through the material - the renderer's
@@ -1276,21 +1350,37 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
 
         if (handles.terrain != renderer::invalidMesh)
         {
+            // This chunk's ground variant, hashed from the chunk address so
+            // the pick is deterministic across frames and build orders (see
+            // setTerrainTextures): neighboring chunks photograph different
+            // scans and no single scan repeats across the visible disk. An
+            // empty variant set (every scan failed to load) draws the group
+            // untextured through the neutral stand-in, like a missing gate.
+            static const TerrainTextureVariant untextured{};
+            const bool groundTextured
+                = !groundTextureVariants_.empty() && draw.distanceSquared <= groundTextureMaxDistanceMetersSquared_;
+            const std::uint64_t chunkSeed = engine::planet::hashCombine64(
+                draw.entry->first, static_cast<std::uint64_t>(groundTextureVariants_.size()));
+            const TerrainTextureVariant &groundVariant = groundTextured
+                ? groundTextureVariants_[static_cast<std::size_t>(chunkSeed % groundTextureVariants_.size())]
+                : untextured;
             renderer::MeshMaterial material{};
-            material.baseColor[0] = keepTerrain;
-            material.baseColor[1] = keepTerrain;
-            material.baseColor[2] = keepTerrain;
+            // Inside the texture gate the base color carries the SELECTED
+            // variant's mean compensation (see setTerrainTextures), so the
+            // multiply preserves the vertex albedo on average; outside the
+            // gate neither applies and the boundary cannot read.
+            material.baseColor[0] = keepTerrain * (groundTextured ? groundVariant.meanCompensation[0] : 1.0f);
+            material.baseColor[1] = keepTerrain * (groundTextured ? groundVariant.meanCompensation[1] : 1.0f);
+            material.baseColor[2] = keepTerrain * (groundTextured ? groundVariant.meanCompensation[2] : 1.0f);
             material.emissiveColor[0] = addHaze[0];
             material.emissiveColor[1] = addHaze[1];
             material.emissiveColor[2] = addHaze[2];
             material.roughnessFactor = 0.95f;
             // The ground detail multiplies in only where one tile still
-            // spans its pixel budget (see the gate setup in main.cpp):
-            // beyond the gate the texels are sub-pixel, the vertex colors
-            // photograph identically without the sample, and the mip-less
-            // CPU sampler would only pay for minification shimmer.
-            material.baseColorTexture = draw.distanceSquared <= groundTextureMaxDistanceMetersSquared_
-                ? groundDetailTexture_ : renderer::invalidTexture;
+            // spans its pixel budget (see the gate setup in main.cpp);
+            // beyond the gate the minified sample could no longer move the
+            // pixel and the sampler would only pay for it.
+            material.baseColorTexture = groundTextured ? groundVariant.detail : renderer::invalidTexture;
             // The planet mesher's terrain winding is fixed (see the
             // meshing module): declaring it enables exact per-triangle
             // back-face culling, so a rugged chunk's hidden far side
@@ -1307,10 +1397,21 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         }
         if (handles.rock != renderer::invalidMesh)
         {
+            // This chunk's rock variant (see the ground pick above); each
+            // variant carries its own matching normal map so relief and
+            // albedo stay the same scan.
+            static const TerrainTextureVariant untextured{};
+            const bool rockTextured
+                = !rockTextureVariants_.empty() && draw.distanceSquared <= rockTextureMaxDistanceMetersSquared_;
+            const std::uint64_t chunkSeed = engine::planet::hashCombine64(
+                draw.entry->first, static_cast<std::uint64_t>(rockTextureVariants_.size()) + 0x9E3779B97F4A7C15ull);
+            const TerrainTextureVariant &rockVariant = rockTextured
+                ? rockTextureVariants_[static_cast<std::size_t>(chunkSeed % rockTextureVariants_.size())]
+                : untextured;
             renderer::MeshMaterial material{};
-            material.baseColor[0] = keepTerrain;
-            material.baseColor[1] = keepTerrain;
-            material.baseColor[2] = keepTerrain;
+            material.baseColor[0] = keepTerrain * (rockTextured ? rockVariant.meanCompensation[0] : 1.0f);
+            material.baseColor[1] = keepTerrain * (rockTextured ? rockVariant.meanCompensation[1] : 1.0f);
+            material.baseColor[2] = keepTerrain * (rockTextured ? rockVariant.meanCompensation[2] : 1.0f);
             material.emissiveColor[0] = addHaze[0];
             material.emissiveColor[1] = addHaze[1];
             material.emissiveColor[2] = addHaze[2];
@@ -1318,10 +1419,8 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             // Rock tiles span twice the ground tile's meters, so the rock
             // texture stays useful to twice the distance (same pixel
             // budget, see main.cpp).
-            material.baseColorTexture = draw.distanceSquared <= rockTextureMaxDistanceMetersSquared_
-                ? rockDetailTexture_ : renderer::invalidTexture;
-            material.normalTexture = draw.distanceSquared <= rockTextureMaxDistanceMetersSquared_
-                ? rockNormalTexture_ : renderer::invalidTexture;
+            material.baseColorTexture = rockTextured ? rockVariant.detail : renderer::invalidTexture;
+            material.normalTexture = rockTextured ? rockVariant.normal : renderer::invalidTexture;
             // Subtle tangent-space relief: the headless backend rebuilds the
             // tangent frame per triangle from the tiled UVs, so the value
             // stays small to keep the frame continuous where the projection
@@ -1480,11 +1579,14 @@ void PlanetChunkRenderer::ensureCloudLayer()
     // pattern of the cutout (see CoverageShellSpec::floorJitter).
     spec.floorJitter = 0.25;
     spec.floorJitterSeed = 0xC10D5C0Full;
-    // Thinning fringes: quad corners just above the floor blend their color
-    // toward the sky behind them, so the banks' outer boundary reads as
-    // thinning cloud instead of a hard polygon cutout at orbit distance.
-    spec.hazeEdgeBlend = true;
-    spec.hazeEdgeWidth = 0.30;
+    // Thinning fringes stay OFF on the macro shell: the edge blend fades
+    // bank rims toward the SKY gradient, which over the globe reads as a
+    // cyan bleed wherever ocean sits behind the bank (the blend cannot know
+    // the backdrop). Orbit distance resolves the contour walk's smoothed,
+    // jittered outlines on their own; the sky deck keeps the blend (see
+    // ensureSkyCloudLayer), where the sky genuinely is what sits behind the
+    // banks.
+    spec.hazeEdgeBlend = false;
     // The shell bakes the environment lighting per vertex and draws unlit
     // (see BackdropLighting): a matte white deck's lit response has no
     // visible specular, so the per-pixel PBR evaluation over the disk-sized
@@ -1978,22 +2080,25 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // Grid resolution: fine enough that the deck's contoured edges stay
     // curved at eye level - the deck spans the whole upper hemisphere, and a
     // standing camera resolves roughly half a degree of azimuth per pixel
-    // pair at 1920x1080; the 0.7-degree cells (with the contour walk's 4x4
-    // subdivision of near-boundary quads) keep bank outlines smooth at that
-    // scale. Coarser grids terrace the smoothed coverage into grid-row
+    // pair at 1920x1080; the 0.56-degree cells (with the contour walk's 6x6
+    // subdivision of near-boundary quads) keep bank outlines smooth past
+    // that scale. Coarser grids terrace the smoothed coverage into grid-row
     // plateaus, and the floor cutout follows the terraces: banks read as
     // stacked horizontal planks. The grid is ISOTROPIC in angle - segments
     // per degree of azimuth equal bands per degree of latitude
-    // (512/360 ~ 128/90): an anisotropic grid smears the banks along the
+    // (640/360 ~ 160/90): an anisotropic grid smears the banks along the
     // azimuth rows through the coverage smoothing.
-    constexpr std::uint32_t kSegments = 512;
-    constexpr std::uint32_t kBands = 128;
+    constexpr std::uint32_t kSegments = 640;
+    constexpr std::uint32_t kBands = 160;
     // The deck's coverage floor sits BELOW the visual cloud edge on purpose:
     // quads between the floor and the floor + haze width carry the thinning
     // fringe (their color fades from the sky gradient into the cloud tone),
     // so the deck dissolves into the sky instead of cutting off at a polygon
     // boundary. The opaque cutout then happens where quads are already
-    // nearly sky-colored and its silhouette cannot read.
+    // nearly sky-colored and its silhouette cannot read. With the widened
+    // threshold band (see coverageSoftnessScale) the sampled field ramps
+    // smoothly across this band, so the fringe's low end stays connected to
+    // the bank bodies instead of shedding isolated flecks.
     constexpr double kCoverageFloor = 0.22;
     // The guard spans the low sky band where the deck's grid cells project
     // at extreme grazing angles (a 0.7-degree cell is a couple of pixels
@@ -2001,8 +2106,8 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // detail there reads as horizontal smears. The deck thins into the sky
     // gradient over the band instead - the same place the atmosphere's own
     // haze swallows distant detail, so the read stays natural.
-    constexpr double kHorizonGuardRadians = 0.06981317007977318;   // 4 deg above the horizon
-    constexpr double kGuardFadeRadians = 0.20943951023931953;      // 12 deg of thinning cloud above it
+    constexpr double kHorizonGuardRadians = 0.13962634015954636;  // 8 deg above the horizon
+    constexpr double kGuardFadeRadians = 0.24434609527920614;     // 14 deg of thinning cloud above it
 
     if (cloudField_ == nullptr)
     {
@@ -2038,13 +2143,20 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     spec.latitudeLowRadians = 0.0;
     spec.latitudeHighRadians = glm::pi<double>() * 0.5;
     spec.shellRadiusMeters = 1.0; // scaled per frame with the dome
-    // Same contour discipline as the macro shell (see ensureCloudLayer): the
-    // field band-limits at twice the vertex spacing and three smoothing
-    // rounds round the inclusion boundary, so the deck's outline stays
-    // curved at the grid scale.
+    // Contour discipline for the deck: the field band-limits at twice the
+    // vertex spacing (octaves the grid cannot represent fade out) and four
+    // arc-isotropic smoothing rounds round the inclusion boundary, so the
+    // deck's outline stays curved at the grid scale. The coverage threshold
+    // band widens six-fold (see CoverageShellSpec::coverageSoftnessScale):
+    // at the deck's viewing distance one grid cell spans a dozen pixels, and
+    // the configured band maps to a spatial transition only a couple of
+    // samples wide - without the widening the sampled field is near-binary
+    // speckle and the contoured cutout terraces into stair steps and
+    // sawtooth fringe rows no smoothing can repair.
     spec.lowPassCutoffMeters = 2.0 * vertexSpacing;
+    spec.coverageSoftnessScale = 6.0;
     spec.coverageFloor = kCoverageFloor;
-    spec.smoothingPasses = 3;
+    spec.smoothingPasses = 4;
     // No per-quad floor jitter on the deck (unlike the macro shell): the
     // jittered threshold is per-QUAD, so two quads sharing a grid edge each
     // interpolate their own crossing position on that edge and the polygons
@@ -2054,9 +2166,14 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     // sub-resolution), which is the stair-breaking the jitter was for.
     spec.floorJitter = 0.0;
     spec.floorJitterSeed = 0xC10D5C11ull;
+    // The deck's cells span a dozen pixels at eye level, so merged interior
+    // rectangles would read as blocky grid-aligned slabs (see
+    // CoverageShellSpec::mergeInterior); the deck keeps per-quad
+    // tessellation.
+    spec.mergeInterior = false;
     spec.minQuadLatitudeRadians = kHorizonGuardRadians;
     spec.guardFadeRadians = kGuardFadeRadians;
-    spec.guardFloorLift = 0.30; // banks crumble into fragments through the guard band
+    spec.guardFloorLift = 0.12; // banks thin into sparse fragments through the guard band
     spec.hazeEdgeBlend = true;
     spec.hazeEdgeWidth = 0.55;
     spec.frame = glm::dmat3(tangent, upNormalized, third);

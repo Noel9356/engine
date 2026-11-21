@@ -35,6 +35,10 @@ struct PlanetDemoOptions
     bool chunkBorders = false;
     bool selfTest = false;
     bool benchmark = false;
+    // Screen pixels one texture tile must span for the terrain detail
+    // multiply to apply (see the gate setup in main.cpp); 0 disables the
+    // terrain textures outright.
+    std::uint32_t textureTilePixels = 6;
 };
 
 struct Viewpoint

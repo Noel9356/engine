@@ -473,11 +473,30 @@ struct PlanetGenerationParams
     // with a 1024-texel texture photographs at ~3 mm per texel). Keep every
     // tile at or above the finest voxel's band limit - a tile much smaller
     // than a coarse chunk's voxel fades out with the LOD anyway.
-    double terrainTextureTileMetersGround = 3.0;  // meters per texture tile on ground surfaces
-    double terrainTextureTileMetersRock   = 6.0;  // meters per texture tile on rock surfaces
+    double terrainTextureTileMetersGround = 8.0;  // meters per texture tile on ground surfaces
+    double terrainTextureTileMetersRock   = 14.0;  // meters per texture tile on rock surfaces
     // The water sheet tiles the same projection keyed to the radial
     // direction (stable against the wave-slope normal wiggles).
     double waterTextureTileMeters = 8.0;          // meters per texture tile on the sea sheet
+    // Anti-repetition of the tiled terrain frames. The UV warp bends the
+    // tile lattice with a low-frequency noise field (a pure world-space
+    // function of position, so chunk borders and LOD transitions keep their
+    // shared-vertex semantics), which breaks the global phase alignment
+    // that otherwise photographs every tile at the same world offset; the
+    // warp amplitude is expressed in texture tiles, so it scales with the
+    // tile sizes automatically. Values above ~0.4 begin to fight the rock
+    // normal map's per-triangle tangent reconstruction, whose UV gradient
+    // must keep dominating the warp's. The warp band-limits like every
+    // other noise term (it fades out below the chunk's own LOD cutoff).
+    double textureUvWarpStrength          = 0.35;
+    double textureUvWarpWavelengthMeters  = 64.0;
+    // The per-chunk frame rotation turns each chunk's terrain tiling by a
+    // deterministic multiple of 90 degrees (hashed from the planet seed and
+    // the chunk address, one draw per surface group), so neighboring chunks
+    // never photograph the same scan in the same orientation. 90-degree
+    // turns map the tile lattice onto itself, so the frames stay seamless
+    // inside every chunk and tileable textures keep tiling.
+    bool textureChunkRotation = true;
 
     // Biome colors are BLENDED, not hard-switched: per-vertex hard switches smear
     // into pale stains across triangles (the "blotch" artefact). These widths
@@ -540,21 +559,30 @@ struct PlanetGenerationParams
     float atmosphereZenithColor[3]  = {0.040f, 0.130f, 0.460f};
     float atmosphereHorizonColor[3] = {0.220f, 0.400f, 0.780f};
     // Aerial perspective (see atmosphere.hpp): the haze weight along a sight
-    // line saturates exponentially with distance. The scale is the fraction
-    // of the air column at which it saturates - larger values keep the
+    // line saturates exponentially with distance. The scale is the
+    // exponential's scale length in meters - larger values keep the
     // midground clear and let the far ridge dissolve gradually instead of
     // the whole distance range hazing over at once. The asymptote caps the
     // haze weight even at infinite distance, keeping the farthest terrain
     // faintly readable as terrain instead of fading fully into sky.
-    double aerialPerspectiveScaleFraction = 0.70; // sight-line scale as a fraction of the air column
-    double aerialPerspectiveAsymptote     = 0.62; // haze weight the profile approaches at infinite distance
+    double aerialPerspectiveScaleMeters   = 3600.0; // sight-line distance at which the haze has covered
+                                                    // ~63% of its asymptote (the exponential's scale
+                                                    // length, in meters - short enough that a ground
+                                                    // view's midground starts dissolving and the far
+                                                    // ridge melts into the horizon band)
+    double aerialPerspectiveAsymptote     = 0.72; // haze weight the profile approaches at infinite distance
 
     // ---- water -----------------------------------------------------------------
     bool  waterEnabled        = true;
     float waterColorShallow[3] = {0.070f, 0.255f, 0.275f};
     float waterColorDeep[3]    = {0.012f, 0.060f, 0.130f};
-    float waterRoughness      = 0.55f; // consumer hint (exposed via chunk material); low values make the
-                                       // coarse far-water facets band with sharp mirror glints
+    float waterRoughness      = 0.22f; // consumer hint (exposed via chunk material); low values give the
+                                       // close-range sea a crisp sun-glint path (the per-vertex wave
+                                       // normals break it into glitter)
+    float waterRoughnessOrbital = 0.20f; // the hint's high-altitude blend target: orbital eyes see flat
+                                         // far-water facets, so the lobe widens from the close-range
+                                         // value toward this - kept well under 1 so the sun glint
+                                         // survives as the broad patch orbital photographs show
     // Depth tint per channel: water absorbs red fastest, green next, blue
     // last, so the surface tint runs shallow turquoise -> green-teal mid shelf
     // -> navy deep instead of one gray-blue mix. The configured

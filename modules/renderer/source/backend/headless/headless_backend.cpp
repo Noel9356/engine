@@ -731,6 +731,20 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                 texture.pixelsRGB[i * 3 + 1] = static_cast<float>(description.pixels[i * 4 + 1]) * inv;
                 texture.pixelsRGB[i * 3 + 2] = static_cast<float>(description.pixels[i * 4 + 2]) * inv;
             }
+            // The texture's mean color rides the same pass (see
+            // HeadlessTexture::meanRGB): one sum over the freshly built RGB
+            // floats, alpha ignored.
+            double mean[3] = {0.0, 0.0, 0.0};
+            for (std::size_t i = 0; i < pc * 3; i += 3)
+            {
+                mean[0] += texture.pixelsRGB[i];
+                mean[1] += texture.pixelsRGB[i + 1];
+                mean[2] += texture.pixelsRGB[i + 2];
+            }
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                texture.meanRGB[channel] = static_cast<float>(mean[channel] / static_cast<double>(pc));
+            }
         }
         // Mip chain (box-filtered quarters, level 1 down to 1x1): minified
         // fragments sample the level whose footprint matches their screen
@@ -776,6 +790,10 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                 levelHeight = nextHeight;
             }
             texture.mipChain = std::move(chain);
+            // Warm the sampler's mip-selection cache on the main thread, so
+            // the first worker-thread sample never pays the lazy refresh
+            // (see HeadlessTexture::warmMipSelectionCache).
+            texture.warmMipSelectionCache();
         }
         textures.emplace(id, std::move(texture));
         reportError(error, RenderError::None);
@@ -791,6 +809,21 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
 void HeadlessBackend::destroyTexture(TextureHandle texture)
 {
     textures.erase(texture);
+}
+
+// Reports the creation-time mean color stored on the texture record (see
+// createTexture, where the sum rides the RGB build pass).
+bool HeadlessBackend::textureMean(TextureHandle texture, float outMeanRGB[3]) const
+{
+    const auto found = textures.find(texture);
+    if (found == textures.end())
+    {
+        return false;
+    }
+    outMeanRGB[0] = found->second.meanRGB[0];
+    outMeanRGB[1] = found->second.meanRGB[1];
+    outMeanRGB[2] = found->second.meanRGB[2];
+    return true;
 }
 
 // Worker-count hint for the parallel-rasterization triggers: lock-free (the
@@ -3005,6 +3038,47 @@ std::size_t HeadlessBackend::prepareFanTriangles(
             continue;
         }
 
+        // Sub-sample rejection: a fan whose whole screen extent lies inside
+        // one sample cell can cover at most that cell's centre, so the scan
+        // would either shade exactly that sample or nothing at all. Testing
+        // the centre here with the scan's own coverage expressions (same
+        // arithmetic, bit for bit) and dropping the uncovered case keeps
+        // far-LOD slivers - the majority of a streamed planet's triangles at
+        // any one view - out of the record stream entirely: no record copy,
+        // no binning, no per-tile list walk, no bbox scan. A covered centre
+        // still emits, so the visible output is unchanged.
+        {
+            const float minX = std::min({screenX[cornerA], screenX[cornerB], screenX[cornerC]});
+            const float maxX = std::max({screenX[cornerA], screenX[cornerB], screenX[cornerC]});
+            const float minY = std::min({screenY[cornerA], screenY[cornerB], screenY[cornerC]});
+            const float maxY = std::max({screenY[cornerA], screenY[cornerB], screenY[cornerC]});
+            const std::int32_t cellX = static_cast<std::int32_t>(minX);
+            const std::int32_t cellY = static_cast<std::int32_t>(minY);
+            if (cellX >= 0 && cellY >= 0 && static_cast<std::int32_t>(maxX) == cellX
+                && static_cast<std::int32_t>(maxY) == cellY)
+            {
+                // Coverage at the cell centre, evaluated exactly like the
+                // scan's row start (see rasterizeFanRecord).
+                const float invArea   = 1.0f / area;
+                const float samplePix = static_cast<float>(cellX) + 0.5f;
+                const float samplePiy = static_cast<float>(cellY) + 0.5f;
+                const float offsetAX  = samplePix - screenX[cornerB];
+                const float offsetAY  = samplePiy - screenY[cornerB];
+                const float offsetBX  = samplePix - screenX[cornerC];
+                const float offsetBY  = samplePiy - screenY[cornerC];
+                const float weightA   = ((screenX[cornerC] - screenX[cornerB]) * offsetAY
+                                      - (screenY[cornerC] - screenY[cornerB]) * offsetAX)
+                                    * invArea;
+                const float weightB = ((screenX[cornerA] - screenX[cornerC]) * offsetBY
+                                      - (screenY[cornerA] - screenY[cornerC]) * offsetBX)
+                                    * invArea;
+                if (weightA < 0.0f || weightB < 0.0f || weightA + weightB > 1.0f)
+                {
+                    continue; // covers no sample centre: invisible, drop it
+                }
+            }
+        }
+
         TileBinRecord     &record      = outFans[fanCount++];
         const std::uint32_t sources[3] = {cornerA, cornerB, cornerC};
         record.corners[0]              = clipped[cornerA];
@@ -3259,11 +3333,30 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
 // (exclusive ownership means the writes need no locks). Returns whether at
 // least one pixel was written.
 bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
-    std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd)
+    std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
+    TileOcclusion *occlusion)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
         return false;
+    }
+
+    // Whole-record occlusion rejection (see TileOcclusion): a record whose
+    // NEAREST corner lies beyond the farthest depth the tile's already-drawn
+    // geometry established would fail the per-sample depth test everywhere in
+    // this tile, so the scan is skipped outright. The corner minimum is the
+    // true minimum of the affine depth interpolant over the triangle, and the
+    // stored farthest depth is an upper bound of the tile's current maximum
+    // (later writes only lower samples), so the rejection is conservative;
+    // the epsilon margin keeps float rounding from turning a visible sample
+    // into a rejected one.
+    if (occlusion != nullptr && occlusion->closed)
+    {
+        const float nearestCorner = std::min({record.depth[0], record.depth[1], record.depth[2]});
+        if (nearestCorner > occlusion->farthestDepth + 1.0e-6f)
+        {
+            return false;
+        }
     }
 
     std::int32_t firstX = 0;
@@ -3318,6 +3411,108 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     const float weightBDx = -(screenYA - screenYC) * inverseArea;
     const float sampleX   = static_cast<float>(firstX) + 0.5f;
     const float depthADx  = weightADx * depthA + weightBDx * depthB - (weightADx + weightBDx) * depthC;
+    // Per-sample-row increments (the analytic y derivatives of the edge
+    // functions and the depth planar interpolant). The row loop below
+    // re-derives the row start from the screen-space formula, so these are
+    // only read by the MSAA interior fast path, whose neighbor coverage and
+    // depth checks evaluate the same affine fields at the block's other
+    // samples (values agree with the row re-derivation to the last ulp;
+    // where they differ the per-sample path re-walks the sample).
+    const float weightADy = (screenXC - screenXB) * inverseArea;
+    const float weightBDy = (screenXA - screenXC) * inverseArea;
+    const float depthADy  = weightADy * depthA + weightBDy * depthB - (weightADy + weightBDy) * depthC;
+
+    // MSAA interior shading (see HeadlessBackendOptions::msaaInteriorShadingEnabled):
+    // only on the 2x2 supersampling grid, never for draws whose commit reads
+    // the samples' own background (transparent blends) or crops per-sample
+    // strand fields (shell fur), and only while the sample columns fit the
+    // row-skip masks below.
+    constexpr std::size_t kSkipMaskWords = 128; // 8192 sample columns
+    bool interiorShading = msaaInteriorShadingEnabled_ && sampleScaleX_ == 2u && sampleScaleY_ == 2u
+        && !setup.transparent && !setup.fur && framebufferWidth <= static_cast<std::uint32_t>(kSkipMaskWords * 64);
+    if (interiorShading && setup.unlit)
+    {
+        // Unlit ramp guard: an unlit draw's output IS its interpolated vertex
+        // color (times the material tint), so shading a whole block at the
+        // centre loses exactly the within-block color ramp the per-sample
+        // path would average - visible where a backdrop carries a steep ramp
+        // (a star disc's radial falloff, the atmosphere limb's fade). The
+        // barycentric color gradients are constant over the triangle, so one
+        // evaluation bounds the change across any block: blocks are only
+        // fast-pathed when no channel can move more than a couple of
+        // quantization steps over the block diagonal. Lit draws skip the
+        // guard: their shading varies gently (the surface-view A/B diff
+        // stays at a handful of pixels in two million), and lighting plus
+        // texture filtering have no cheap per-record bound.
+        const glm::vec3 &colorA = record.corners[0].color;
+        const glm::vec3 &colorB = record.corners[1].color;
+        const glm::vec3 &colorC = record.corners[2].color;
+        const glm::vec3  tint   = glm::abs(setup.baseColorFactor);
+        for (std::uint32_t channel = 0; channel < 3; ++channel)
+        {
+            const float gradientX = weightADx * (colorA[channel] - colorC[channel])
+                + weightBDx * (colorB[channel] - colorC[channel]);
+            const float gradientY = weightADy * (colorA[channel] - colorC[channel])
+                + weightBDy * (colorB[channel] - colorC[channel]);
+            if ((std::fabs(gradientX) + std::fabs(gradientY)) * tint[channel] > 2.0f / 255.0f)
+            {
+                interiorShading = false;
+                break;
+            }
+        }
+    }
+
+    // Row-skip masks: the samples an interior fast-path commit already wrote
+    // never need to be walked again by THIS record (their own coverage plus
+    // depth test would only take the early-out). Two masks alternate between
+    // the current and the next sample row; only the words the record's
+    // x-extent touches are cleared per record (a couple of words for a
+    // typical chunk triangle), so the setup cost stays trivial.
+    std::uint64_t skipMasks[2][kSkipMaskWords];
+    std::uint64_t *skipThisRow = skipMasks[0];
+    std::uint64_t *skipNextRow = skipMasks[1];
+    if (interiorShading)
+    {
+        const std::size_t wordFirst = static_cast<std::size_t>(firstX) >> 6;
+        const std::size_t wordLast  = static_cast<std::size_t>(lastX) >> 6;
+        for (std::size_t word = wordFirst; word <= wordLast; ++word)
+        {
+            skipThisRow[word] = 0;
+            skipNextRow[word] = 0;
+        }
+    }
+
+    // Marks one sample as carrying depth-written geometry in the tile's
+    // occlusion state; the first mark that completes the tile computes the
+    // farthest depth the scan will reject later records against.
+    const auto markOcclusion = [&](std::int32_t x, std::int32_t y)
+    {
+        if (occlusion == nullptr || occlusion->closed)
+        {
+            return;
+        }
+        const std::uint64_t bit = 1ull << ((x - xBandBegin) & 63);
+        const std::size_t  row = static_cast<std::size_t>(y - yBandBegin);
+        if ((occlusion->coveredWords[row] & bit) == 0ull)
+        {
+            occlusion->coveredWords[row] |= bit;
+            ++occlusion->coveredCount;
+            if (occlusion->coveredCount >= occlusion->sampleCount)
+            {
+                occlusion->closed = true;
+                float farthest   = 0.0f;
+                for (std::int32_t yy = yBandBegin; yy <= yBandEnd; ++yy)
+                {
+                    const float *rowDepth = depthBuffer + static_cast<std::size_t>(yy) * framebufferWidth;
+                    for (std::int32_t xx = xBandBegin; xx <= xBandEnd; ++xx)
+                    {
+                        farthest = std::max(farthest, rowDepth[xx]);
+                    }
+                }
+                occlusion->farthestDepth = farthest;
+            }
+        }
+    };
 
     bool wrote = false;
     // The shaded pixel's reflection-field response flag (transmissive
@@ -3335,14 +3530,111 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
         float       pixelDepth = weightA * depthA + weightB * depthB + (1.0f - weightA - weightB) * depthC;
         std::size_t pixelIndex = static_cast<std::size_t>(y) * framebufferWidth + firstX;
 
+        if (interiorShading)
+        {
+            // The previous row's "next" mask becomes this row's skip mask;
+            // the retired mask clears and starts collecting this row's
+            // fast-path blocks for the row below.
+            std::swap(skipThisRow, skipNextRow);
+            const std::size_t wordFirst = static_cast<std::size_t>(firstX) >> 6;
+            const std::size_t wordLast  = static_cast<std::size_t>(lastX) >> 6;
+            for (std::size_t word = wordFirst; word <= wordLast; ++word)
+            {
+                skipNextRow[word] = 0;
+            }
+        }
+
         for (std::int32_t x = firstX; x <= lastX; ++x, ++pixelIndex)
         {
 #if defined(__GNUC__) || defined(__clang__)
             __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
 #endif
+            if (interiorShading && (skipThisRow[x >> 6] & (1ull << (x & 63))) != 0ull)
+            {
+                // Already committed by this record's interior fast path (the
+                // block below): the sample's own pass would only confirm the
+                // stored depth and take the early-out, so skip straight to
+                // the increments.
+                weightA += weightADx;
+                weightB += weightBDx;
+                pixelDepth += depthADx;
+                continue;
+            }
             const float weightC = 1.0f - weightA - weightB;
             if (weightA >= 0.0f && weightB >= 0.0f && weightC >= 0.0f)
             {
+                // ---- MSAA interior fast path ---------------------------------------
+                // An output pixel whose whole 2x2 sample block this triangle
+                // covers, with every sample passing the depth test, shades
+                // ONCE at the block centre and commits that color to all four
+                // samples (per-sample depths still written exactly, coverage
+                // still tested per sample): the software twin of hardware
+                // MSAA, where the pixel shader runs once per pixel and only
+                // coverage/depth run per sample. Edge pixels - any sample
+                // uncovered, or any sample failing depth - keep the per-sample
+                // path below, so silhouettes and depth intersections keep the
+                // exact supersampled result. The other three samples of the
+                // block are marked in the row-skip masks, so the scan never
+                // re-walks them.
+                if (interiorShading && (x & 1) == 0 && (y & 1) == 0 && x + 1 <= lastX && y + 1 <= lastY)
+                {
+                    const float weightA10 = weightA + weightADx;
+                    const float weightB10 = weightB + weightBDx;
+                    const float weightA01 = weightA + weightADy;
+                    const float weightB01 = weightB + weightBDy;
+                    const float weightA11 = weightA + weightADx + weightADy;
+                    const float weightB11 = weightB + weightBDx + weightBDy;
+                    if (weightA10 >= 0.0f && weightB10 >= 0.0f && weightA10 + weightB10 <= 1.0f
+                        && weightA01 >= 0.0f && weightB01 >= 0.0f && weightA01 + weightB01 <= 1.0f
+                        && weightA11 >= 0.0f && weightB11 >= 0.0f && weightA11 + weightB11 <= 1.0f)
+                    {
+                        const float depth00 = pixelDepth;
+                        const float depth10 = pixelDepth + depthADx;
+                        const float depth01 = pixelDepth + depthADy;
+                        const float depth11 = pixelDepth + depthADx + depthADy;
+                        const std::size_t sample00 = pixelIndex;
+                        const std::size_t sample10 = sample00 + 1u;
+                        const std::size_t sample01 = sample00 + framebufferWidth;
+                        const std::size_t sample11 = sample01 + 1u;
+                        if (depth00 < depthBuffer[sample00] && depth10 < depthBuffer[sample10]
+                            && depth01 < depthBuffer[sample01] && depth11 < depthBuffer[sample11])
+                        {
+                            // Barycentrics at the block centre: sample (x, y)
+                            // sits at (x + 0.5, y + 0.5) in continuous sample
+                            // coordinates, so the centre of the 2x2 block is a
+                            // half-sample step diagonally.
+                            const float centreWeightA = weightA + 0.5f * (weightADx + weightADy);
+                            const float centreWeightB = weightB + 0.5f * (weightBDx + weightBDy);
+                            const glm::vec3 shaded = shadeTrianglePixel(setup, record, centreWeightA, centreWeightB,
+                                inverseWA, inverseWB, inverseWC, &fieldTraced);
+                            const std::uint32_t packed = encodeColorRgba(shaded);
+                            *reinterpret_cast<std::uint32_t *>(colorBuffer + sample00 * 4) = packed;
+                            *reinterpret_cast<std::uint32_t *>(colorBuffer + sample10 * 4) = packed;
+                            *reinterpret_cast<std::uint32_t *>(colorBuffer + sample01 * 4) = packed;
+                            *reinterpret_cast<std::uint32_t *>(colorBuffer + sample11 * 4) = packed;
+                            if (writeDepth)
+                            {
+                                depthBuffer[sample00] = depth00;
+                                depthBuffer[sample10] = depth10;
+                                depthBuffer[sample01] = depth01;
+                                depthBuffer[sample11] = depth11;
+                                markOcclusion(x, y);
+                                markOcclusion(x + 1, y);
+                                markOcclusion(x, y + 1);
+                                markOcclusion(x + 1, y + 1);
+                            }
+                            wrote = true;
+                            skipThisRow[(x + 1) >> 6] |= 1ull << ((x + 1) & 63);
+                            skipNextRow[x >> 6] |= 1ull << (x & 63);
+                            skipNextRow[(x + 1) >> 6] |= 1ull << ((x + 1) & 63);
+                            weightA += weightADx;
+                            weightB += weightBDx;
+                            pixelDepth += depthADx;
+                            continue;
+                        }
+                    }
+                }
+
                 const float currentDepth = depthBuffer[pixelIndex];
                 if (pixelDepth >= currentDepth)
                 {
@@ -3404,6 +3696,7 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                     if (writeDepth)
                     {
                         depthBuffer[pixelIndex] = pixelDepth;
+                        markOcclusion(x, y);
                     }
                     *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = encodeColorRgba(shaded);
                     wrote                                                            = true;
@@ -3561,10 +3854,23 @@ void HeadlessBackend::rasterizeTileRecords(
         const std::int32_t yBandBegin = static_cast<std::int32_t>(tileY * tileHeight_);
         const std::int32_t yBandEnd = static_cast<std::int32_t>(
             std::min<std::int64_t>(framebufferHeightInt, static_cast<std::int64_t>(yBandBegin) + tileHeight_) - 1);
+        // Per-tile occlusion state (see TileOcclusion): coverage bits for the
+        // depth-written samples and, once the tile is fully covered, the
+        // farthest depth later records are rejected against. Stack lifetime
+        // spans the tile's whole record list; the tile's single owning worker
+        // is the only reader and writer.
+        TileOcclusion tileOcclusion;
+        if (tileWidth_ <= 64u && tileHeight_ <= 64u)
+        {
+            tileOcclusion.sampleCount = static_cast<std::uint32_t>(xBandEnd - xBandBegin + 1)
+                * static_cast<std::uint32_t>(yBandEnd - yBandBegin + 1);
+        }
+        TileOcclusion *const tileOcclusionPtr = tileOcclusion.sampleCount != 0u ? &tileOcclusion : nullptr;
         for (std::uint32_t entry = begin; entry < end; ++entry)
         {
             const TileBinRecord &record = tileRecords_[tileItems_[entry]];
-            if (rasterizeFanRecord(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin, yBandEnd))
+            if (rasterizeFanRecord(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin, yBandEnd,
+                tileOcclusionPtr))
             {
                 // Counted per (record, tile): a fan record spanning several
                 // tiles owned by different workers is counted once per tile

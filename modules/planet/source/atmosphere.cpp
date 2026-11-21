@@ -209,16 +209,14 @@ AerialPerspective aerialPerspective(const PlanetGenerationParams &params, const 
         return result; // the eye is in space: the limb shell owns the depth cue
     }
     // Absorption profile: the haze saturates exponentially along the sight
-    // line, with a scale riding the atmosphere height (a tall air column
-    // hazes over longer sight lines) and an asymptote that keeps even the
-    // farthest terrain faintly readable as terrain instead of sky. Both are
-    // configured (aerial_perspective_scale_fraction / _asymptote): a larger
-    // scale keeps the midground clear, a lower asymptote hands less of the
-    // far distance to the haze color.
-    const double scaleFraction = std::max(0.05, params.aerialPerspectiveScaleFraction);
+    // line, with a configured scale length in meters (aerial_perspective_
+    // scale_meters) and an asymptote that keeps even the farthest terrain
+    // faintly readable as terrain instead of sky. A larger scale keeps the
+    // midground clear; a lower asymptote hands less of the far distance to
+    // the haze color.
     const double asymptote = std::clamp(params.aerialPerspectiveAsymptote, 0.0, 1.0);
     const double pathMeters = length(targetPlanetLocal - eyePlanetLocal);
-    const double scale = std::max(1.0, scaleFraction * params.atmosphereHeightMeters);
+    const double scale = std::max(1.0, params.aerialPerspectiveScaleMeters);
     result.weight = asymptote * (1.0 - std::exp(-pathMeters / scale)) * airWeight;
     // The haze color is the horizon band of the sky gradient under the same
     // sun tint the consumer paints the sky with, so distant ground fades

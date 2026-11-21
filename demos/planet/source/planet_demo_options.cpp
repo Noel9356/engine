@@ -15,7 +15,8 @@ const char *planetOptionsUsage() noexcept
            "  --seed <n>                Planet seed override (0 keeps config).\n"
            "  --radius <meters>         Planet radius override (0 keeps config).\n"
            "  --frames <n>              Render exactly n frames, then exit.\n"
-           "  --screenshot <file.ppm>   Export the rendered frame as PPM.\n"
+           "  --screenshot <file.png>   Export the rendered frame as PNG (default; a\n"
+           "                            .ppm suffix keeps the legacy P6 PPM).\n"
            "  --screenshot-frame <n>    Frame index for --screenshot (default last rendered;\n"
            "                            0 is a valid index).\n"
            "  --frame-times <file.csv>  Export per-frame timings as CSV (a percentile summary\n"
@@ -35,6 +36,9 @@ const char *planetOptionsUsage() noexcept
            "                            and exit (exit code 0 = pass).\n"
            "  --bench                   Benchmark the generation core (field sampling,\n"
            "                            per-depth chunk builds, streaming rate) and exit.\n"
+           "  --texture-tile-pixels <n> Screen pixels one terrain texture tile must span for\n"
+           "                            the detail multiply to apply (default 6; larger values\n"
+           "                            keep the texture closer to the camera, 0 disables it).\n"
            "Windowed controls: mouse look, WASD move, Space jump (walk) or up, Ctrl down,\n"
            "                  Shift sprint, arrows look, Left Alt toggles cursor capture.\n"
            "--orbit uses the automated camera path instead of manual input.\n";
@@ -109,6 +113,10 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
         else if (argument == "--bench")
         {
             options.benchmark = true;
+        }
+        else if (argument == "--texture-tile-pixels" && hasValue)
+        {
+            options.textureTilePixels = static_cast<std::uint32_t>(std::strtoul(arguments[++index].c_str(), nullptr, 10));
         }
         else
         {

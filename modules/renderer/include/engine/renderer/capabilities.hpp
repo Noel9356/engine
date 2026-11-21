@@ -40,7 +40,11 @@ namespace renderer
 // MeshMaterial.sheenFactor / MeshMaterial.doubleSided pair driving the cloth
 // shading path (Charlie sheen lobe, wrap diffuse, two-sided rendering) in
 // both backends, and the two-sided pipeline variants in the Vulkan backend.
-inline constexpr std::uint32_t renderCapabilityAbi = 14u;
+// 14 -> 15 adds the Vulkan PNG frame export (exportFramePng appended to
+// VulkanRenderCapability; the deferred copy is identical, only the file
+// writer differs) and the textureMean query (appended to RenderCapability;
+// the per-texture mean is computed once at creation in both backends).
+inline constexpr std::uint32_t renderCapabilityAbi = 15u;
 
 // Renderer, mesh, and texture handles are module-assigned ids starting at 1;
 // handles are never reused and 0 always means "none".
@@ -365,6 +369,20 @@ struct RenderCapability
     // before the draw that consumes the new data inside beginFrame/endFrame.
     bool (*updateMeshVertices)(void *self, RendererHandle renderer, MeshHandle mesh, const void *vertices,
         std::uint32_t vertexCount, RenderError *error);
+
+    // ---- ABI 15 additions -------------------------------------------------------
+
+    // Mean color of a texture's pixel payload, computed once at creation
+    // over the decoded RGBA pixels (alpha ignored) and reported as linear
+    // 0..1 floats. Consumers that multiply a texture over a calibrated
+    // albedo (terrain detail scans over vertex colors) divide by the mean
+    // instead of shipping hardcoded constants per asset, so any texture
+    // swap stays albedo-preserving without an offline preparation step.
+    // Writes 1,1,1 and returns false with RenderError::InvalidTexture when
+    // the handle is unknown. Callers must null-check the entry (a module
+    // built before ABI 15 leaves it null).
+    bool (*textureMean)(void *self, RendererHandle renderer, TextureHandle texture, float outMeanRGB[3],
+        RenderError *error);
 };
 
 // The "renderer.vulkan" secondary capability: Vulkan-specific introspection and
@@ -390,6 +408,10 @@ struct VulkanRenderCapability
     // submission provably completed on the GPU (next rotation of its frame
     // slot, or at renderer destruction if the engine stops first).
     bool (*exportFramePpm)(void *self, RendererHandle renderer, const char *filePath, RenderError *error);
+
+    // PNG variant of the same deferred screenshot export (identical copy;
+    // the file is written as a truecolor PNG).
+    bool (*exportFramePng)(void *self, RendererHandle renderer, const char *filePath, RenderError *error);
 };
 
 // CPU rasterizer counters (no GPU timing on the headless backend).

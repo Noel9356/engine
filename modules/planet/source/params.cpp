@@ -270,6 +270,10 @@ bool PlanetGenerationParams::validate(std::string &error)
     terrainTextureTileMetersGround = clampRange(terrainTextureTileMetersGround, 0.1, 0.25 * radiusMeters);
     terrainTextureTileMetersRock   = clampRange(terrainTextureTileMetersRock, 0.1, 0.25 * radiusMeters);
     waterTextureTileMeters         = clampRange(waterTextureTileMeters, 0.1, 0.25 * radiusMeters);
+    // The warp amplitude stays well under one tile (a full tile would fold
+    // the frame onto itself) and its wavelength cannot outgrow the planet.
+    textureUvWarpStrength         = clampRange(textureUvWarpStrength, 0.0, 0.45);
+    textureUvWarpWavelengthMeters = clampRange(textureUvWarpWavelengthMeters, 4.0, 0.25 * radiusMeters);
     biomeBlendWidth        = clampRange(biomeBlendWidth, 0.005, 0.2);
     slopeBlendWidth        = clampRange(slopeBlendWidth, 0.01, 0.5);
     elevationBlendFraction = clampRange(elevationBlendFraction, 0.02, 1.0);
@@ -306,7 +310,8 @@ bool PlanetGenerationParams::validate(std::string &error)
         waterColorShallow[channel] = std::clamp(waterColorShallow[channel], 0.0f, 1.0f);
         waterColorDeep[channel]    = std::clamp(waterColorDeep[channel], 0.0f, 1.0f);
     }
-    waterRoughness = std::clamp(waterRoughness, 0.0f, 1.0f);
+    waterRoughness        = std::clamp(waterRoughness, 0.0f, 1.0f);
+    waterRoughnessOrbital = std::clamp(waterRoughnessOrbital, 0.0f, 1.0f);
 
     // ---- clouds --------------------------------------------------------------------
     cloudCoverageAmount    = clampRange(cloudCoverageAmount, 0.0, 1.0);
@@ -360,8 +365,8 @@ bool PlanetGenerationParams::validate(std::string &error)
     waterWaveChopFraction     = clampRange(waterWaveChopFraction, 0.0, 1.0);
 
     // ---- atmosphere (aerial perspective) / debug -----------------------------------
-    aerialPerspectiveScaleFraction = clampRange(aerialPerspectiveScaleFraction, 0.05, 4.0);
-    aerialPerspectiveAsymptote     = clampRange(aerialPerspectiveAsymptote, 0.0, 1.0);
+    aerialPerspectiveScaleMeters = clampRange(aerialPerspectiveScaleMeters, 50.0, std::max(50.0, atmosphereHeightMeters));
+    aerialPerspectiveAsymptote   = clampRange(aerialPerspectiveAsymptote, 0.0, 1.0);
     debugChunkBorderWidthMeters    = clampRange(debugChunkBorderWidthMeters, 0.05, 0.01 * radiusMeters);
 
     // ---- derived values -------------------------------------------------------------
