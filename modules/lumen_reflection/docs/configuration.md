@@ -23,6 +23,7 @@ Every key of the `[lumen_reflection]` configuration section, in TOML path form. 
 | --- | --- | --- | --- |
 | `lumen_reflection.screen_scale` | 1..64 | `2` | Field resolution divisor per axis: the field covers 1/screen_scale of the viewport's width and height. The default (half of the viewport per axis) keeps curved reflectors smooth at typical viewport sizes while staying well below full resolution, matching Lumen's sub-resolution reflection tracing; coarser divisors trade texel detail for CPU cost. |
 | `lumen_reflection.rays_per_pixel` | 1..64 | `1` | Stochastic rays per field texel per frame; the temporal accumulation is the effective sample multiplier (a converged frame is hundreds of samples). |
+| `lumen_reflection.mirror_band_taps` | 1..16 | `4` | Sub-texel-jittered taps per texel for the near-mirror band (roughness below `roughness.ray_band_max`, transmissive texels included). A mirror surface's traced content is high-frequency at field resolution, so one texel-center sample aliases bright/dark edges into single-texel outliers; the jittered taps integrate the texel's world footprint (estimated from the GBuffer's neighboring surface positions) and the temporal accumulation converges the per-frame rejittered draws into a smooth response. `1` disables the supersampling. |
 | `lumen_reflection.screen_ray_distance_m` | 0.05..64 | `2.0` | Screen-trace length: screen traces resolve only what the frame GBuffer covers within this radius; longer rays hand the remainder to the scene trace (Lumen's short screen-ray budget). |
 
 ## Screen traces
@@ -52,7 +53,7 @@ Every key of the `[lumen_reflection]` configuration section, in TOML path form. 
 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
-| `lumen_reflection.temporal.strength` | 0..0.95 | `0.9` | History weight when the reprojection validates: the published texel is `(1-strength) * current + strength * clamped history`. 0 replaces every frame; high values accumulate more effective samples. The static-frame skip's convergence threshold derives from this value: the fresh-trace share falls below 1% after `ceil(log(0.01) / log(1 - strength))` clean frames (clamped to 1..128), so a frozen field is always a converged one. |
+| `lumen_reflection.temporal.strength` | 0..1 | `0.99` | Cap on the temporal history weight: the blend follows the running-mean ramp N/(N+1) over the texel's accumulated history length and never exceeds this value, so a static stochastic field converges like an accumulated average (1.0 runs the unbounded running mean; the neighborhood clamp and the change detection below keep a long history honest). The history restarts on disocclusion and when a whole-neighborhood move marks the texel changed, so relit content re-converges instead of ghosting. The static-frame skip's convergence threshold derives from this value: the ramp reaches the cap at `ceil(strength / (1 - strength))` clean frames (a 1.0 running mean needs about a hundred, where its per-frame share 1/(N+1) crosses 1%), so a frozen field is always a converged one. |
 | `lumen_reflection.temporal.neighborhood_clamp_sigma` | 0..16 | `1.0` | Neighborhood clamp width: the history is clamped to mean +/- sigma * value of the current 3x3 neighborhood before blending, so a changed scene cannot ghost through the accumulation. |
 
 ## Spatial reuse and bilateral filter

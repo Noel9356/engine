@@ -3262,7 +3262,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
 // least one pixel was written.
 bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
     std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-    GiQuadCache *giQuads)
+    GiAmortizationCache *giAmortization)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
@@ -3326,16 +3326,19 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
     bool fieldTraced = false;
-    // Quad amortization of the probe-grid ambient (see GiQuadCache): only
-    // draws whose shading normal IS the interpolated geometry normal can
-    // share a quad sample (a normal map perturbs it per pixel, a two-sided
-    // draw flips it on back-facing fragments; unlit and fur draws never
-    // consult the probe grid).
-    const bool giQuadEligible = giQuads != nullptr && preparedProbeGrid_.valid && !setup.unlit && !setup.fur
+    // Probe-grid amortization tiers (see GiAmortizationCache): only draws
+    // whose shading normal IS the interpolated geometry normal can share a
+    // cached sample (a normal map perturbs it per pixel, a two-sided draw
+    // flips it on back-facing fragments; unlit and fur draws never consult
+    // the probe grid). The coarse block tier first, the quad tier next.
+    const bool giQuadEligible = giAmortization != nullptr && preparedProbeGrid_.valid && !setup.unlit && !setup.fur
         && !setup.hasNormalMap && !setup.doubleSided;
+    GiQuadCache::Entry *const blockEntries
+        = giQuadEligible && !giAmortization->blocks.entries.empty() ? giAmortization->blocks.entries.data() : nullptr;
+    const std::uint32_t blockStride = giAmortization != nullptr ? giAmortization->blocks.stride : 0u;
     GiQuadCache::Entry *const quadEntries
-        = giQuadEligible && !giQuads->entries.empty() ? giQuads->entries.data() : nullptr;
-    const std::uint32_t quadStride = giQuads != nullptr ? giQuads->stride : 0u;
+        = giQuadEligible && !giAmortization->quads.entries.empty() ? giAmortization->quads.entries.data() : nullptr;
+    const std::uint32_t quadStride = giAmortization != nullptr ? giAmortization->quads.stride : 0u;
     for (std::int32_t y = firstY; y <= lastY; ++y)
     {
         const float sampleY  = static_cast<float>(y) + 0.5f;
@@ -3375,15 +3378,16 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                 // one tile) the calling thread is the only depth writer, so the
                 // pixel's depth still holds the value that test read.
                 //
-                // Quad-amortized probe-grid ambient: interpolate this pixel's
+                // Tiered probe-grid amortization: interpolate this pixel's
                 // surface pair (the same perspective-correct math the shading
-                // kernel runs) and either reuse the quad's cached walk or
-                // evaluate and publish it. The gates - same plane (the normal
-                // projection of the position delta stays small) and a
-                // near-identical normal - are what the walk's own inputs vary
-                // smoothly over, so a passing neighbor returns the sample the
-                // per-pixel walk would have produced to within the gates'
-                // tolerance.
+                // kernel runs) and reuse the coarse 4x4 block's cached walk
+                // when its gates pass, else the 2x2 quad's, else evaluate the
+                // walk and publish it to the tier that missed it. The gates -
+                // same plane (the normal projection of the position delta
+                // stays small) and a near-identical normal - are what the
+                // walk's own inputs vary smoothly over, so a passing
+                // neighbor returns the sample the per-pixel walk would have
+                // produced to within the gates' tolerance.
                 GiAmbientSample quadSample;
                 const GiAmbientSample *giSample = nullptr;
                 if (quadEntries != nullptr)
@@ -3405,26 +3409,48 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                     const float     pixelNormalLength = glm::length(pixelNormalRaw);
                     const glm::vec3 pixelNormal = pixelNormalLength > 1.0e-8f ? pixelNormalRaw / pixelNormalLength
                                                                           : glm::vec3(0.0f, 1.0f, 0.0f);
-                    GiQuadCache::Entry &entry
-                        = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1) * quadStride
-                                      + static_cast<std::size_t>((x - xBandBegin) >> 1)];
-                    const glm::vec3 positionDelta = entry.position - pixelPosition;
-                    if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
-                        && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
+                    GiQuadCache::Entry &blockEntry
+                        = blockEntries[static_cast<std::size_t>((y - yBandBegin) >> 2) * blockStride
+                                      + static_cast<std::size_t>((x - xBandBegin) >> 2)];
+                    const glm::vec3 blockPositionDelta = blockEntry.position - pixelPosition;
+                    if (blockEntry.valid && glm::dot(pixelNormal, blockEntry.normal) >= 0.995f
+                        && std::fabs(glm::dot(pixelNormal, blockPositionDelta)) <= 0.05f)
                     {
-                        quadSample.irradiance = entry.irradiance;
-                        quadSample.coverage   = entry.coverage;
+                        quadSample.irradiance = blockEntry.irradiance;
+                        quadSample.coverage   = blockEntry.coverage;
                         quadSample.valid      = true;
                     }
                     else
                     {
-                        quadSample.valid = giProbeGridIrradiance(
-                            preparedProbeGrid_, pixelPosition, pixelNormal, quadSample.irradiance, quadSample.coverage);
-                        entry.position   = pixelPosition;
-                        entry.normal     = pixelNormal;
-                        entry.irradiance = quadSample.irradiance;
-                        entry.coverage   = quadSample.coverage;
-                        entry.valid      = true;
+                        GiQuadCache::Entry &entry
+                            = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1) * quadStride
+                                          + static_cast<std::size_t>((x - xBandBegin) >> 1)];
+                        const glm::vec3 positionDelta = entry.position - pixelPosition;
+                        if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
+                            && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
+                        {
+                            quadSample.irradiance = entry.irradiance;
+                            quadSample.coverage   = entry.coverage;
+                            quadSample.valid      = true;
+                        }
+                        else
+                        {
+                            quadSample.valid = giProbeGridIrradiance(
+                                preparedProbeGrid_, pixelPosition, pixelNormal, quadSample.irradiance, quadSample.coverage);
+                            entry.position   = pixelPosition;
+                            entry.normal     = pixelNormal;
+                            entry.irradiance = quadSample.irradiance;
+                            entry.coverage   = quadSample.coverage;
+                            entry.valid      = true;
+                        }
+                        // A rejected coarse block still learns the walk for
+                        // its remaining pixels (curved regions converge back
+                        // toward block sharing as the block's pixels agree).
+                        blockEntry.position   = pixelPosition;
+                        blockEntry.normal     = pixelNormal;
+                        blockEntry.irradiance = quadSample.irradiance;
+                        blockEntry.coverage   = quadSample.coverage;
+                        blockEntry.valid      = true;
                     }
                     giSample = &quadSample;
                 }
@@ -3628,21 +3654,21 @@ void HeadlessBackend::rasterizeTileRecords(
         const std::int32_t yBandBegin = static_cast<std::int32_t>(tileY * tileHeight_);
         const std::int32_t yBandEnd = static_cast<std::int32_t>(
             std::min<std::int64_t>(framebufferHeightInt, static_cast<std::int64_t>(yBandBegin) + tileHeight_) - 1);
-        // One probe-grid quad cache per worker thread, reset per owned tile:
-        // the amortization is only valid within a tile's pixels (see
-        // GiQuadCache), and concurrent tile owners must never share entries.
-        // The thread-local keeps its capacity across tiles and frames, so a
-        // steady-state tile costs one allocation-free clear.
-        static thread_local GiQuadCache quadCache;
+        // One probe-grid amortization cache per worker thread, reset per
+        // owned tile: the amortization is only valid within a tile's pixels
+        // (see GiAmortizationCache), and concurrent tile owners must never
+        // share entries. The thread-local keeps its capacity across tiles
+        // and frames, so a steady-state tile costs one allocation-free clear.
+        static thread_local GiAmortizationCache amortization;
         if (preparedProbeGrid_.valid)
         {
-            quadCache.resetForTile((tileWidth_ + 1u) / 2u, (tileHeight_ + 1u) / 2u);
+            amortization.resetForTile(tileWidth_, tileHeight_);
         }
         for (std::uint32_t entry = begin; entry < end; ++entry)
         {
             const TileBinRecord &record = tileRecords_[tileItems_[entry]];
             if (rasterizeFanRecord(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin, yBandEnd,
-                    preparedProbeGrid_.valid ? &quadCache : nullptr))
+                    preparedProbeGrid_.valid ? &amortization : nullptr))
             {
                 // Counted per (record, tile): a fan record spanning several
                 // tiles owned by different workers is counted once per tile

@@ -10,7 +10,7 @@ namespace demo::lumen_gi
 const char *giOptionsUsage() noexcept
 {
     return "GI demo options:\n"
-           "  --view interior|outdoor  Scene to render (default interior).\n"
+           "  --view interior|outdoor|gallery  Scene to render (default interior).\n"
            "  --frames <n>             Render exactly n frames, then exit (deterministic).\n"
            "                           Without it a windowed run keeps going until the\n"
            "                           window is closed or Escape is pressed; headless\n"
@@ -32,9 +32,10 @@ const char *giOptionsUsage() noexcept
            "                           under --frames).\n"
            "  --spin                   Rotate one scene object around its own center every\n"
            "                           frame (the interior occluder, the outdoor chrome\n"
-           "                           sphere): renderer, lumen_gi, and lumen_reflection\n"
-           "                           all receive the same per-frame model matrix, so the\n"
-           "                           dynamic-surface path runs without manual input.\n"
+           "                           sphere, the gallery chrome cube): renderer, lumen_gi,\n"
+           "                           and lumen_reflection all receive the same per-frame\n"
+           "                           model matrix, so the dynamic-surface path runs\n"
+           "                           without manual input.\n"
            "  --no-reflections         Skip the lumen_reflection module: the same scene\n"
            "                           renders without the indirect specular term (A/B\n"
            "                           against the default run).\n"
@@ -53,9 +54,9 @@ bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &op
         if (argument == "--view" && hasValue)
         {
             const std::string &value = arguments[++index];
-            if (value != "interior" && value != "outdoor")
+            if (value != "interior" && value != "outdoor" && value != "gallery")
             {
-                outError = "invalid view '" + value + "'; expected 'interior' or 'outdoor'";
+                outError = "invalid view '" + value + "'; expected 'interior', 'outdoor' or 'gallery'";
                 return false;
             }
             options.viewName = value;

@@ -19,6 +19,7 @@ add_library(
     source/lumen_gi_scene.cpp
     source/lumen_gi_lighting.cpp
     source/lumen_gi_pipeline.cpp
+    source/lumen_gi_caustics.cpp
     source/lumen_gi_debug.cpp
     source/lumen_gi_debug_views.cpp
 )

@@ -16,10 +16,10 @@ add_library(
     engine_module_lumen_reflection
     MODULE
     source/lumen_reflection.cpp
-    source/reflection_scene.cpp
-    source/reflection_pipeline.cpp
-    source/reflection_denoise.cpp
-    source/reflection_debug.cpp
+    source/lumen_reflection_scene.cpp
+    source/lumen_reflection_pipeline.cpp
+    source/lumen_reflection_denoise.cpp
+    source/lumen_reflection_debug.cpp
 )
 target_link_libraries(
     engine_module_lumen_reflection

@@ -85,15 +85,27 @@ void applySettingsToState(const ReflectionSettings &settings, RfPipelineState &s
         state.settings.spatialReuseRadius = std::max<std::uint32_t>(
             static_cast<std::uint32_t>(std::lround(static_cast<float>(settings.spatialReuseRadius) * scale)), 0u);
     }
-    // Static-frame skip convergence: after N clean frames the temporal
-    // history's fresh-trace share is (1 - strength)^N; the skip may freeze
-    // the field once that falls below 1%, so a frozen field is a converged
-    // one (the same contract as lumen_gi's budget-derived convergenceFrames).
-    const float strength = std::clamp(settings.temporalStrength, 0.0f, 0.95f);
+    // Static-frame skip convergence: after N clean frames a published texel
+    // changes by less than 1% of the fresh trace - exponentially,
+    // (1 - strength)^N, once the length ramp reaches the strength cap, or as
+    // the running mean's per-frame share 1/(N+1) when strength runs at the
+    // unbounded 1.0 - so a frozen field is a converged one (the same contract
+    // as lumen_gi's budget-derived convergenceFrames).
+    const float strength = std::clamp(settings.temporalStrength, 0.0f, 1.0f);
+    // The blend weight is the running-mean ramp N/(N+1) until it reaches the
+    // strength cap (at N = strength / (1 - strength)), then the exponential
+    // (1 - strength) share. A static frame is converged when a fresh sample
+    // moves a published texel by about one percent: that is the ramp's end -
+    // freezing earlier would publish a field whose texels are still mostly
+    // their last few fresh draws (for strength 0.98 the old exponential-only
+    // estimate returned 2 frames, which froze the field long before its
+    // history had accumulated anything).
     state.convergenceFrames = strength <= 1.0e-3f
         ? 1u
-        : static_cast<std::uint32_t>(std::clamp(
-              std::ceil(std::log(0.01f) / std::log(1.0f - strength)), 1.0f, 128.0f));
+        : strength >= 0.999f
+              ? 100u
+              : static_cast<std::uint32_t>(std::clamp(
+                    std::ceil(strength / (1.0f - strength)), 1.0f, 128.0f));
     // The registry capacity follows the configured scene bound (the setting
     // is the documented limit createSurface enforces).
     state.registryCapacity = settings.maxSurfaces;
@@ -235,12 +247,15 @@ private:
             integer("scene.max_triangles_per_surface", 200000, 3, 100000000));
         settings.screenScale           = static_cast<std::uint32_t>(integer("screen_scale", 2, 1, 64));
         settings.raysPerPixel          = static_cast<std::uint32_t>(integer("rays_per_pixel", 1, 1, 64));
+        settings.mirrorBandTaps        = static_cast<std::uint32_t>(integer("mirror_band_taps", 4, 1, 16));
         settings.screenRayDistance     = static_cast<float>(floating("screen_ray_distance_m", 2.0, 0.05, 64.0));
         settings.roughRayBandMax       = static_cast<float>(floating("roughness.ray_band_max", 0.3, 0.0, 1.0));
         settings.roughMaxTrace         = static_cast<float>(floating("roughness.max_trace", 0.4, 0.0, 1.0));
         settings.maxTraceDistance      = static_cast<float>(floating("trace.max_distance_m", 50.0, 1.0, 2000.0));
         settings.traceBias             = static_cast<float>(floating("trace.bias_m", 0.02, 0.001, 0.5));
-        settings.temporalStrength      = static_cast<float>(floating("temporal.strength", 0.9, 0.0, 0.95));
+        settings.skySunDiscDegrees     = static_cast<float>(
+            floating("sky.sun_disc_angular_radius_deg", 2.3, 0.05, 15.0));
+        settings.temporalStrength      = static_cast<float>(floating("temporal.strength", 0.99, 0.0, 1.0));
         settings.neighborhoodClampSigma = static_cast<float>(
             floating("temporal.neighborhood_clamp_sigma", 1.0, 0.0, 16.0));
         settings.varianceThreshold    = static_cast<float>(floating("filter.variance_threshold", 0.02, 0.0, 4.0));
@@ -580,56 +595,33 @@ private:
         RfEnvironmentSnapshot snapshot;
         std::uint64_t         pbrVersion    = 0;
         std::uint64_t         lightsVersion = 0;
-        snapshot.sunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
-        snapshot.sunColor     = glm::vec3(1.0f, 0.96f, 0.88f);
-        snapshot.sunIntensity = 3.0f;
-        snapshot.sunEnabled   = true;
-        snapshot.ambientSky     = glm::vec3(0.55f, 0.65f, 0.80f);
-        snapshot.ambientGround  = glm::vec3(0.35f, 0.30f, 0.25f);
-        snapshot.ambientIntensity = 0.5f;
-        snapshot.exposure       = 1.0f;
-        snapshot.toneMapping    = pbr::ToneMapping::AcesFilmic;
-        if (pbrCapability_ != nullptr && pbrCapability_->copyEnvironment != nullptr)
-        {
-            pbr::PbrEnvironment environment{};
-            std::uint64_t       version = 0;
-            if (pbrCapability_->copyEnvironment(pbrCapability_->self, &environment, &version))
-            {
-                pbrVersion = version;
-                snapshot.hasSun           = true;
-                snapshot.sunEnabled       = environment.sun.enabled;
-                const glm::vec3 sun(environment.sun.direction[0], environment.sun.direction[1], environment.sun.direction[2]);
-                if (glm::dot(sun, sun) > 1.0e-12f)
-                {
-                    snapshot.sunDirection = glm::normalize(sun);
-                }
-                snapshot.sunColor         = glm::vec3(
-                    environment.sun.color[0], environment.sun.color[1], environment.sun.color[2]);
-                snapshot.sunIntensity     = environment.sun.intensity;
-                snapshot.ambientSky       = glm::vec3(environment.ambient.skyColor[0], environment.ambient.skyColor[1],
-                    environment.ambient.skyColor[2]);
-                snapshot.ambientGround    = glm::vec3(environment.ambient.groundColor[0],
-                    environment.ambient.groundColor[1], environment.ambient.groundColor[2]);
-                snapshot.ambientIntensity = environment.ambient.intensity;
-                snapshot.exposure         = environment.exposure;
-                snapshot.toneMapping      = environment.toneMapping;
-            }
-        }
+        // Defaults first (the built-in environment every other engine
+        // component falls back to); the provider's values replace them when
+        // its copy succeeds (lumen::copyPbrEnvironment leaves the fields
+        // untouched otherwise).
+        snapshot.hasSun           = true;
+        snapshot.sunEnabled       = true;
+        pbrVersion = lumen::copyPbrEnvironment(pbrCapability_, snapshot);
         if (directLightingCapability_ != nullptr && directLightingCapability_->copyLights != nullptr)
         {
-            std::vector<direct_lighting::DirectLight> lights(direct_lighting::maxDirectLights);
+            // The scratch is a member, not a local (the same steady-state
+            // allocation rule lumen_gi's snapshot applies): evaluate() runs
+            // every frame, so the worst-case light buffer is reserved once
+            // instead of reallocated per frame.
+            directLightsScratch_.resize(direct_lighting::maxDirectLights);
             const std::uint32_t count = directLightingCapability_->copyLights(directLightingCapability_->self,
-                lights.data(), static_cast<std::uint32_t>(lights.size()), &lightsVersion);
-            lights.resize(std::min<std::size_t>(count, lights.size()));
+                directLightsScratch_.data(), static_cast<std::uint32_t>(directLightsScratch_.size()), &lightsVersion);
+            const direct_lighting::DirectLight *lights = directLightsScratch_.data();
+            const std::size_t lightCount = std::min<std::size_t>(count, directLightsScratch_.size());
             // Precompute the per-light constants the shading loop needs and
             // drop inactive lights; the shared lumen::prepareLight fills the
             // same structure lumen_gi snapshots, so the two modules' direct
             // terms stay identical.
-            snapshot.preparedLights.reserve(lights.size());
-            for (const direct_lighting::DirectLight &light : lights)
+            snapshot.preparedLights.reserve(lightCount);
+            for (std::size_t index = 0; index < lightCount; ++index)
             {
                 RfEnvironmentSnapshot::PreparedDirectLight prepared;
-                if (lumen::prepareLight(light, prepared))
+                if (lumen::prepareLight(lights[index], prepared))
                 {
                     snapshot.preparedLights.push_back(prepared);
                 }
@@ -948,6 +940,8 @@ private:
     direct_lighting::DirectLightingCapability *directLightingCapability_ = nullptr;
     lumen_gi::LumenGiCapability           *lumenGiCapability_ = nullptr;
     SubscriptionToken                      reloadSubscription_ = 0;
+    // Worst-case light buffer reused by the per-frame environment snapshot.
+    std::vector<direct_lighting::DirectLight> directLightsScratch_;
     // Host shape queried once (the Auto quality preset derives its scale from
     // it; system queries must not run per frame).
     std::uint32_t                          processorCount_ = util::logicalProcessorCount();

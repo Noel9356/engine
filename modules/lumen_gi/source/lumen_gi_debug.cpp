@@ -453,14 +453,19 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
                     // fraction of the strata the per-pass ray budget covers.
                     // A budget that reaches every candidate (the default
                     // rays_per_probe over the ~32 above-horizon texels of the
-                    // 8x8 map) writes fresh samples each pass, so the
-                    // downstream pixel temporal filter averages independent
-                    // draws; a smaller budget accumulates over passes instead
-                    // (the map fills in as the strata rotate).
+                    // 8x8 map) writes fresh samples each pass; the
+                    // probe-temporal blend below keeps an accumulation weight
+                    // regardless, so each texel's radiance is the running mean
+                    // of its traces rather than one sample the interpolation
+                    // would re-show as blotchy structure. A smaller budget
+                    // accumulates over passes instead (the map fills in as the
+                    // strata rotate).
                     const float strataHistory = std::clamp(
                         (static_cast<float>(candidates.size()) - static_cast<float>(rayCount))
                             / static_cast<float>(candidates.size()),
                         0.0f, 1.0f);
+                    const float texelHistory
+                        = std::max(strataHistory, state.settings.gatherProbeTemporalBlend);
                     // Strata coverage first: the first min(rayCount, strata)
                     // rays rotate through every above-horizon texel, and only
                     // the surplus rays reuse the previous radiance. The
@@ -510,9 +515,11 @@ void traceScreenProbes(GiPipelineState &state, TaskScheduler *scheduler)
                         // target wander migrates energy between texels).
                         glm::vec3 &target = radiance[selected];
                         // An untouched texel takes the fresh sample whole;
-                        // touched ones blend with the strata-coverage history
-                        // weight above.
-                        target = glm::dot(target, target) > 0.0f ? glm::mix(value, target, strataHistory) : value;
+                        // touched ones blend with the texel history weight
+                        // above (strata coverage for starved budgets, the
+                        // probe-temporal blend for full ones), so the map
+                        // converges to the mean of its traces.
+                        target = glm::dot(target, target) > 0.0f ? glm::mix(value, target, texelHistory) : value;
                     }
                     projectRadianceToSh2(state.screenProbeDirectionBasis.data(), radiance,
                         state.screenProbeDirectionWeights.data(), directionCount, &state.screenProbeSh2[probeIndex * 27]);

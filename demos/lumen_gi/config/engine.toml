@@ -30,6 +30,15 @@ sun_intensity = 0.0
 backend = "headless"
 clear_color = [0.02, 0.02, 0.03, 1.0]
 
+[lumen_gi.debug]
+# Debug views (final image, GI only, probes, reference path trace) render at
+# the same half resolution the reflection field traces at, so exported
+# captures line up pixel-for-pixel with the renderer's 1920x1080 output
+# downscaled for comparison; the module's default 320x180 is sized for quick
+# interactive checks, not for side-by-side validation imagery.
+internal_width  = 960
+internal_height = 540
+
 [trust]
 # The renderer acquires six capabilities now that it consumes the optional
 # lumen_gi probe grid and the lumen_reflection field, which the trust gate

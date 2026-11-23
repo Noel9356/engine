@@ -14,7 +14,18 @@
 //                    Sun disabled (profiles/config); all light is bounced.
 //   --view outdoor   Sunlit ground plane with colored blocks, unlit sky dome
 //                    and sun disc (excluded from GI tracing; probes fall
-//                    back to the hemispheric skylight on miss).
+//                    back to the hemispheric skylight on miss), a polished
+//                    water slab, and a crystal ball the sun shines through
+//                    (the caustics transmitter: the photon pass deposits the
+//                    focused light onto the ground beside it).
+//   --view gallery   Exhibition hall (14 x 4.2 x 12 m): raised platform with
+//                    steps, a half-height partition with a frosted pane,
+//                    columns, a polished-metal floor strip, a reflecting
+//                    pool with a glass sphere in it, chrome/gold spheres, a
+//                    ruby cube, brushed-metal panels, stacked crates, and a
+//                    spinning chrome cube. Three emissive light temperatures
+//                    (warm pool panel, cool cove strips, warm sconce); the
+//                    sun stays disabled like the interior view.
 //
 // The frame loop pumps window events every frame, so the OS window stays
 // responsive even while a GI evaluate takes tens of milliseconds on the CPU.
@@ -205,10 +216,18 @@ int main(int argc, char **argv)
 
     // Camera pose per view; the engine camera module owns the matrices and
     // the interactive WASD/mouse-look controls (Fly mode).
-    const glm::vec3 viewEye
-        = options.viewName == "outdoor" ? glm::vec3(7.0f, 3.4f, 9.0f) : glm::vec3(0.0f, 1.5f, 1.7f);
-    const glm::vec3 viewTarget
-        = options.viewName == "outdoor" ? glm::vec3(-0.5f, 0.9f, -2.5f) : glm::vec3(0.0f, 1.1f, -1.2f);
+    glm::vec3 viewEye(0.0f, 1.5f, 1.7f);
+    glm::vec3 viewTarget(0.0f, 1.1f, -1.2f);
+    if (options.viewName == "outdoor")
+    {
+        viewEye    = glm::vec3(7.0f, 3.4f, 9.0f);
+        viewTarget = glm::vec3(-0.5f, 0.9f, -2.5f);
+    }
+    else if (options.viewName == "gallery")
+    {
+        viewEye    = glm::vec3(0.0f, 1.75f, 3.2f);
+        viewTarget = glm::vec3(0.2f, 1.15f, -2.6f);
+    }
 
     camera::CameraParameters cameraParameters{};
     cameraParameters.position[0]  = viewEye.x;
@@ -235,10 +254,18 @@ int main(int argc, char **argv)
 
     // --orbit sweeps the camera on a circular path. The interior circle is
     // centered in the room so the sweep stays inside the walls; the outdoor
-    // view circles the default target in the open field. Both start from the
-    // view's default pose.
-    const glm::vec3 orbitCenter
-        = options.viewName == "outdoor" ? viewTarget : glm::vec3(0.0f, 1.1f, 0.0f);
+    // view circles the default target in the open field; the gallery view
+    // circles the hall's center on a radius that clears the partition, the
+    // columns, and the props. All start from the view's default pose.
+    glm::vec3 orbitCenter(0.0f, 1.1f, 0.0f);
+    if (options.viewName == "outdoor")
+    {
+        orbitCenter = viewTarget;
+    }
+    else if (options.viewName == "gallery")
+    {
+        orbitCenter = glm::vec3(0.0f, 1.1f, -0.8f);
+    }
     const float orbitRadius       = std::max(0.5f,
         glm::length(glm::vec2(viewEye.x, viewEye.z) - glm::vec2(orbitCenter.x, orbitCenter.z)));
     const float orbitHeightOffset = viewEye.y - orbitCenter.y;
@@ -306,7 +333,19 @@ int main(int argc, char **argv)
     // renderer draws it, lumen_gi bounces light off it. Vertex attributes are
     // shared (one interleaved buffer, per-attribute strides), which mirrors
     // what a real engine integration would do.
-    std::vector<SceneMesh> scene = options.viewName == "outdoor" ? buildOutdoorScene() : buildInteriorScene();
+    std::vector<SceneMesh> scene;
+    if (options.viewName == "outdoor")
+    {
+        scene = buildOutdoorScene();
+    }
+    else if (options.viewName == "gallery")
+    {
+        scene = buildGalleryScene();
+    }
+    else
+    {
+        scene = buildInteriorScene();
+    }
     std::cout << "demo_lumen_gi: view '" << options.viewName << "', " << scene.size() << " surfaces\n";
 
     constexpr std::uint32_t vertexStride = sizeof(SceneVertex);
@@ -424,7 +463,9 @@ int main(int argc, char **argv)
     const SceneMesh *spinTarget = nullptr;
     if (options.spin)
     {
-        const char *spinName = options.viewName == "outdoor" ? "chrome sphere" : "occluder";
+        const char *spinName = options.viewName == "outdoor"
+            ? "chrome sphere"
+            : (options.viewName == "gallery" ? "chrome cube" : "occluder");
         for (const SceneMesh &mesh : scene)
         {
             if (mesh.name == spinName)

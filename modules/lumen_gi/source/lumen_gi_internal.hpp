@@ -145,6 +145,10 @@ struct GiSettings
     float         texelsPerMeter             = 24.0f;
     std::uint32_t maxTexelsPerCardAxis       = 128;
     std::uint32_t cardDepthLayers            = 2;
+    // Total layered texels one surface's card set may hold: placeSurfaceCards
+    // lowers the texel density until the set fits, bounding the per-surface
+    // memory a single registered mesh can claim (cards.max_texels_per_surface).
+    std::uint64_t maxTexelsPerSurface        = 524288;
     std::uint64_t captureTexelsPerFrame      = 262144;
     std::uint64_t directTexelsPerFrame       = 65536;
     std::uint64_t indirectTexelsPerFrame     = 65536;
@@ -183,8 +187,21 @@ struct GiSettings
     std::uint32_t gatherRaysPerProbe         = 32;
     bool          gatherImportanceSampling   = true;
     float         gatherTemporalBlend        = 0.85f;
+    // Per-probe accumulation weight (see gather.probe_temporal_blend): the
+    // weight of a probe direction texel's previous radiance when the pass
+    // retraces it, so a probe's SH2 field converges over passes instead of
+    // re-showing each pass' single-sample noise through the interpolation.
+    float         gatherProbeTemporalBlend   = 0.9f;
     std::uint32_t gatherSpatialFilter        = 3;
     float         gatherPlaneDepthTolerance  = 0.35f;
+    // Caustics (see [lumen_gi.caustics]): photon-differential splatting of
+    // light focused by transmissive surfaces into the card surface cache.
+    bool          causticsEnabled            = true;
+    std::uint32_t causticsPhotonsPerFrame     = 1024;
+    float         causticsTemporalBlend       = 0.9f;
+    float         causticsFootprintMinM       = 0.01f;
+    float         causticsFootprintMaxM       = 0.75f;
+    bool          causticsEmissiveSources     = true;
     std::uint32_t debugInternalWidth         = 320;
     std::uint32_t debugInternalHeight        = 180;
     std::uint32_t referenceSamples           = 64;
@@ -226,6 +243,15 @@ struct GiCard
     std::vector<glm::vec3>    normal;            // local-space smooth normal
     std::vector<glm::vec3>    directRadiance;    // Lumen "Lumen Scene" direct term (+ emission)
     std::vector<glm::vec3>    indirectRadiance;  // committed propagated bounce term
+    // Caustic irradiance deposited by the photon pass: causticIrradiance is
+    // the temporal-blended state (energy per texel, NOT yet multiplied by the
+    // texel albedo / pi) and causticRadiance the cached outgoing radiance the
+    // surface-cache reads blend in with the direct term (albedo / pi * E),
+    // refreshed whenever the state changes so the read paths never pay the
+    // conversion. causticSamples counts the blend updates (history ramp).
+    std::vector<glm::vec3>    causticIrradiance;
+    std::vector<glm::vec3>    causticRadiance;
+    std::vector<std::uint8_t> causticSamples;
     std::vector<std::uint8_t> indirectSamples;   // updates seen (history ramp, saturates at 255)
 
     // Amortization progress. Capture is incremental (a cursor over the xy
@@ -315,6 +341,12 @@ struct GiSurface
     // shadow rays transmit through surfaces with opacity below 1.
     float             opacity      = 1.0f;
     float             indexOfRefraction = 1.5f;
+    // True while the caustics pass owns this surface's transmitted light
+    // (opacity below 1): the direct, gather, and probe rays then treat it
+    // as a stopper so its focused share is counted exactly once - by the
+    // photon deposits. Maintained with the caustics transmitter list at
+    // frame-plan time (see runGiFrame).
+    bool              causticTransmitter = false;
     std::uint32_t     flagBits     = 0;
     bool              excluded     = false;
     bool              unlit        = false;
@@ -334,40 +366,21 @@ struct GiTlasNode
 };
 
 // Snapshot of the pbr environment + direct lights taken each evaluate().
-struct GiEnvironmentSnapshot
+struct GiEnvironmentSnapshot : engine::lumen::EnvironmentCore
 {
     // Direct light with the per-light constants the shading loop needs,
     // shared with lumen_reflection through engine/renderer/lumen_ray_core.hpp
     // (normalized direction, cone cosines) prepared at snapshot time, so
     // per-texel evaluation does not re-normalize or re-trigonometrise every
     // frame. Inactive lights (zero intensity or black color) are dropped.
+    // The sun, skylight, and tone-mapping fields come from the shared
+    // EnvironmentCore so the two lumen modules shade the environment
+    // identically.
     using PreparedDirectLight = engine::lumen::PreparedLight;
 
-    bool     hasSun       = false;
-    bool     sunEnabled   = false;
-    glm::vec3 sunDirection{0.45f, 0.62f, 0.35f}; // toward the sun (unit)
-    glm::vec3 sunColor{1.0f, 0.96f, 0.88f};
-    float     sunIntensity = 3.0f;
-    glm::vec3 ambientSky{0.55f, 0.65f, 0.80f};
-    glm::vec3 ambientGround{0.35f, 0.30f, 0.25f};
-    float     ambientIntensity = 0.5f;
     bool      hasDirectLights  = false;
     std::vector<direct_lighting::DirectLight> directLights;
     std::vector<PreparedDirectLight>          preparedLights;
-    float            exposure   = 1.0f;
-    pbr::ToneMapping toneMapping = pbr::ToneMapping::AcesFilmic;
-
-    // Hemisphere skylight standing in for Lumen's Skylight (the environment
-    // is the engine's only "infinitely far" lighting source).
-    glm::vec3 skyRadiance(const glm::vec3 &direction) const
-    {
-        const float up = direction.y * 0.5f + 0.5f;
-        return glm::mix(ambientGround, ambientSky, up) * ambientIntensity;
-    }
-    glm::vec3 sunRadiance() const
-    {
-        return (hasSun && sunEnabled) ? sunColor * sunIntensity : glm::vec3(0.0f);
-    }
 };
 
 // World-space ray with normalized direction; hits reference the surface array.
@@ -530,6 +543,11 @@ struct GiPipelineState
     // Registry (mirrors the module's registry under the module mutex).
     std::vector<GiSurface>   surfaces;
     std::vector<GiCardRef>   cardRefs;        // flat view over every surface's cards
+    // Flat-texel prefix over cardRefs (rebuilt with cardRefs): cardTexelOffsets
+    // holds card i's first texel index and totalCardTexels the grand total,
+    // so the caustics staging buffers index texels across cards directly.
+    std::vector<std::uint64_t> cardTexelOffsets;
+    std::uint64_t              totalCardTexels = 0;
     std::uint32_t            registryCapacity = 256;
     GiSurfaceHandle          nextHandle       = 1;
     std::uint64_t            frameIndex       = 0;
@@ -636,6 +654,20 @@ struct GiPipelineState
     std::vector<glm::vec3>      scratchRadiance;   // indirect gather output, committed after the stage
     std::vector<GiProbeItem>    scratchProbeItems;
     std::vector<std::uint8_t>   scratchTaken;      // probe refresh dedup flags (zeroed per level)
+    // Caustics scratch (see lumen_gi_caustics.cpp): transmitters and the
+    // per-frame deposit staging, reused across frames.
+    std::vector<std::uint32_t>  scratchCausticTransmitters;
+    std::vector<std::uint32_t>  scratchCausticEmissiveCards; // flat card indices with emission
+    std::vector<glm::vec3>      scratchCausticFrame;        // per-flat-texel frame energy estimate
+    std::vector<std::uint64_t>  scratchCausticTouched;      // flat texel indices deposited this frame
+    // Caustics pass bookkeeping: the emitter-card list and transmitter list
+    // rebuild when the registry changes; causticsDecayFrames keeps the
+    // decay/commit pass alive this many frames after the last deposit (a
+    // caustic whose source vanished keeps fading instead of ghosting, and a
+    // long-idle field stops paying the pass entirely).
+    std::uint32_t               causticsDecayFrames     = 0;
+    bool                        causticTransmittersDirty = true;
+    bool                        causticEmissiveCardsDirty = true;
 
     GiCard &card(std::uint32_t flatIndex)
     {
@@ -650,6 +682,12 @@ struct GiPipelineState
     const GiSurface &cardSurface(std::uint32_t flatIndex) const
     {
         return surfaces[cardRefs[flatIndex].surface];
+    }
+    // First flat-texel index of one flat card index (0 when the offsets are
+    // not built yet).
+    std::uint64_t cardTexelBase(std::uint32_t flatIndex) const
+    {
+        return flatIndex < cardTexelOffsets.size() ? cardTexelOffsets[flatIndex] : 0;
     }
 };
 
@@ -682,6 +720,29 @@ void captureCardTexels(const GiSurface &surface, GiCard &card, std::uint32_t tex
 // passed in because the lighting loops track it incrementally (the flat
 // index still selects the depth layer, so the caller hands both over).
 glm::vec3 cardTexelLocalPositionXY(const GiCard &card, std::uint32_t x, std::uint32_t y, std::size_t texel);
+
+// ---- caustics.cpp --------------------------------------------------------------------
+
+// Rebuilds the caustics transmitter list (and the per-surface
+// causticTransmitter flags the direct / gather / probe rays read); called at
+// frame-plan time while the pipeline state is exclusive, so the pass that
+// runs later in the same frame and the direct stage that runs earlier agree.
+void rebuildCausticsTransmitters(GiPipelineState &state);
+
+// Runs one amortized caustics photon pass (see lumen_gi_caustics.cpp): spawns
+// photon differentials from the sun, the direct lights, and emissive card
+// texels, walks them through the transmissive surfaces with the same Snell /
+// total-internal-reflection rules the gather rays use, and deposits the focused
+// flux into the receivers' card texels as caustic irradiance. Mutates only the
+// caustic arrays of the cards; deposits are staged per worker and blended in
+// a single-threaded commit.
+void runCausticsPass(GiPipelineState &state, TaskScheduler *scheduler);
+// Reads the deposited caustic irradiance of one surface at a world-space
+// point (the FinalImage debug view's direct term composes it); returns false
+// when no card texel covers the point.
+bool sampleSurfaceCausticsIrradiance(
+    const GiPipelineState &state, std::uint32_t surfaceIndex, const glm::vec3 &position, const glm::vec3 &normal,
+    glm::vec3 &outIrradiance);
 
 // ---- pipeline.cpp ------------------------------------------------------------------
 

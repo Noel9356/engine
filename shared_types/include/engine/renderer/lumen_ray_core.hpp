@@ -21,6 +21,7 @@
 #include <limits>
 
 #include <engine/direct_lighting/capabilities.hpp>
+#include <engine/pbr/capabilities.hpp>
 
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
@@ -141,6 +142,73 @@ bool rayTriangle(const Ray &ray, const PackedTriangle &triangle, float &outT, gl
     outT           = t;
     outBarycentric = glm::vec3(1.0f - u - v, u, v);
     return true;
+}
+
+// ---- shared environment core -------------------------------------------------
+
+// The pbr environment fields both lumen modules snapshot into their frame
+// state on every evaluate() (the optional provider's values when present,
+// otherwise the caller's defaults). One definition here keeps the two
+// modules' sun, skylight, and tone mapping behavior identical, the way
+// prepareLight keeps their direct terms identical.
+struct EnvironmentCore
+{
+    bool     hasSun       = false;
+    bool     sunEnabled   = false;
+    glm::vec3 sunDirection{0.45f, 0.62f, 0.35f}; // toward the sun (unit)
+    glm::vec3 sunColor{1.0f, 0.96f, 0.88f};
+    float    sunIntensity = 3.0f;
+    glm::vec3 ambientSky{0.55f, 0.65f, 0.80f};
+    glm::vec3 ambientGround{0.35f, 0.30f, 0.25f};
+    float    ambientIntensity = 0.5f;
+    float    exposure      = 1.0f;
+    pbr::ToneMapping toneMapping = pbr::ToneMapping::AcesFilmic;
+
+    // Hemisphere skylight standing in for Lumen's Skylight (the environment is
+    // the engine's only "infinitely far" lighting source).
+    glm::vec3 skyRadiance(const glm::vec3 &direction) const
+    {
+        const float up = direction.y * 0.5f + 0.5f;
+        return glm::mix(ambientGround, ambientSky, up) * ambientIntensity;
+    }
+    glm::vec3 sunRadiance() const
+    {
+        return (hasSun && sunEnabled) ? sunColor * sunIntensity : glm::vec3(0.0f);
+    }
+};
+
+// Copies the pbr provider's environment over `out` and reports its version;
+// returns false (leaving `out` untouched) when the provider is absent or its
+// copy fails, so the caller's defaults stay in effect.
+inline std::uint64_t copyPbrEnvironment(const pbr::PbrCapability *capability, EnvironmentCore &out)
+{
+    std::uint64_t version = 0;
+    if (capability == nullptr || capability->copyEnvironment == nullptr)
+    {
+        return version;
+    }
+    pbr::PbrEnvironment environment{};
+    if (!capability->copyEnvironment(capability->self, &environment, &version))
+    {
+        return 0;
+    }
+    out.hasSun           = true;
+    out.sunEnabled       = environment.sun.enabled;
+    const glm::vec3 sun(environment.sun.direction[0], environment.sun.direction[1], environment.sun.direction[2]);
+    if (glm::dot(sun, sun) > 1.0e-12f)
+    {
+        out.sunDirection = glm::normalize(sun);
+    }
+    out.sunColor         = glm::vec3(environment.sun.color[0], environment.sun.color[1], environment.sun.color[2]);
+    out.sunIntensity     = environment.sun.intensity;
+    out.ambientSky       = glm::vec3(environment.ambient.skyColor[0], environment.ambient.skyColor[1],
+        environment.ambient.skyColor[2]);
+    out.ambientGround    = glm::vec3(environment.ambient.groundColor[0], environment.ambient.groundColor[1],
+        environment.ambient.groundColor[2]);
+    out.ambientIntensity = environment.ambient.intensity;
+    out.exposure         = environment.exposure;
+    out.toneMapping      = environment.toneMapping;
+    return version;
 }
 
 // ---- shared direct-light preparation and evaluation --------------------------

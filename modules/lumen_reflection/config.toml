@@ -21,6 +21,13 @@ screen_scale                = 2
 # Stochastic rays per field pixel per frame; the temporal accumulation is the
 # effective sample multiplier (a converged frame is hundreds of samples).
 rays_per_pixel              = 1
+# Sub-texel-jittered taps per texel for the near-mirror band (roughness below
+# roughness.ray_band_max, transmissive texels included): a mirror surface's
+# traced content is high-frequency at field resolution, so one texel-center
+# sample aliases bright/dark edges into single-texel outliers; the jittered
+# taps integrate the texel's world footprint and the temporal accumulation
+# converges the per-frame rejittered draws. 1 disables the supersampling.
+mirror_band_taps            = 4
 # Short screen-trace distance: screen traces resolve only what the depth
 # buffer covers within this radius, then hand off to the scene trace.
 screen_ray_distance_m       = 2.0
@@ -59,13 +66,30 @@ bias_m                      = 0.02
 # (entering and exiting the medium).
 max_transmission_segments   = 3
 
+[lumen_reflection.sky]
+# Angular radius of the analytic sun disc the reflection module's sky answer
+# carries: the sun disc geometry a scene draws for the eye is excluded from
+# tracing by the environment contract (rays that reach it answer the
+# environment's skylight instead), so mirror surfaces catch the sun only
+# through this disc. The GI probes deliberately do not see it (their skylight
+# excludes the direct sun term the pbr sun adds). Match the visible sun disc's
+# angular size for glints that agree with the sky's rendering.
+sun_disc_angular_radius_deg = 2.3
+
 [lumen_reflection.temporal]
-# Weight of the previous frame's reprojected response when the history is
-# valid (0 = replace every frame, 0.95 = long accumulation).
-strength                    = 0.9
+# Cap on the temporal history weight. The blend follows the running-mean
+# ramp N/(N+1) over the texel's accumulated frames and never exceeds this
+# value: 0 replaces every frame, 0.9 keeps an exponential tail of about ten
+# frames, and 1.0 runs the unbounded running mean (the neighborhood clamp
+# and the change detection below keep a long history honest). The history
+# restarts on disocclusion and on a fresh sample that disagrees with the
+# clamped history by more than the neighborhood spread.
+strength                    = 0.99
 # Neighborhood clamp width in standard deviations; the history is clamped to
-# mean +/- sigma * value of the current 3x3 neighborhood before blending so a
-# changed scene cannot ghost through.
+# the current 3x3 neighborhood's mean +/- sigma * value, widened to the
+# neighborhood's own min/max range so deterministic high-dynamic-range
+# structure (an emissive edge's mirror image) survives the clamp, before
+# blending so a changed scene cannot ghost through.
 neighborhood_clamp_sigma    = 1.0
 
 [lumen_reflection.filter]

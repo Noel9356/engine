@@ -76,5 +76,6 @@ const char *giOptionsUsage() noexcept;
 bool parseGiOptions(const std::vector<std::string> &arguments, GiDemoOptions &options, std::string &outError);
 std::vector<SceneMesh> buildInteriorScene();
 std::vector<SceneMesh> buildOutdoorScene();
+std::vector<SceneMesh> buildGalleryScene();
 } // namespace demo::lumen_gi
 

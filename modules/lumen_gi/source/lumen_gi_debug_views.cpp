@@ -54,6 +54,135 @@ glm::vec3 viewRayDirection(const GiPipelineState &state, const glm::mat4 &invers
     return glm::normalize(unproject(1.0f) - unproject(-1.0f));
 }
 
+// The transmitted share a transparent surface shows of the scene behind it:
+// the `(1 - opacity)` share of the view ray that enters the medium, tinted by
+// the surface's albedo once at the entering interface and bent by Snell's
+// law, walked as a deterministic chain until it reaches an opaque responder
+// (shaded with shadowed sun + direct lights + caustics plus the world
+// radiance cache's indirect estimate at that point), a further transparent
+// interface (its own scattered share composes, the tint accumulates), or the
+// sky. One interface consumes one segment of the module's transmission
+// budget; a chain that exhausts it stops tracing. The walk mirrors the
+// reference path tracer's transmitted branch one interface at a time, so the
+// composed image and the reference agree on what a glass body shows of the
+// room behind it.
+glm::vec3 transmittedShareRadiance(const GiPipelineState &state, const GiEnvironmentSnapshot &snapshot,
+    const glm::vec3 &position, const glm::vec3 &normal, const glm::vec3 &viewDirection,
+    const glm::vec3 &albedo, float opacityShare, const GiSurface &surface, bool hasSun)
+{
+    glm::vec3 throughput = albedo * (1.0f - opacityShare);
+    const glm::vec3 interfaceNormal = glm::dot(normal, viewDirection) < 0.0f ? normal : -normal;
+    glm::vec3 bent = glm::refract(viewDirection, interfaceNormal,
+        1.0f / glm::max(surface.indexOfRefraction, 1.0f));
+    if (glm::dot(bent, bent) < 1.0e-8f)
+    {
+        bent = glm::reflect(viewDirection, interfaceNormal);
+    }
+    bent        = glm::normalize(bent);
+    glm::vec3 origin = position + bent * state.settings.traceBias;
+    glm::vec3 radiance(0.0f);
+    std::uint32_t segments = state.settings.maxTransmissionSegments;
+    while (segments-- > 0u)
+    {
+        const GiHit hit = traceScene(state, GiRay{origin, bent, state.settings.maxTraceDistance});
+        if (!hit.hit)
+        {
+            radiance += throughput * snapshot.skyRadiance(bent);
+            break;
+        }
+        const GiSurface &hitSurface = state.surfaces[hit.surfaceIndex];
+        const float     hitOpacity  = glm::clamp(hitSurface.opacity, 0.0f, 1.0f);
+        const glm::vec3 hitInterfaceNormal
+            = glm::dot(hit.normal, bent) < 0.0f ? hit.normal : -hit.normal;
+        glm::vec3 hitAlbedo(0.0f);
+        sampleSurfaceAlbedoLocal(state, hitSurface, hit.localPosition, hit.localNormal, hitAlbedo);
+        if (glm::dot(hitAlbedo, hitAlbedo) <= 0.0f)
+        {
+            hitAlbedo = hitSurface.albedo;
+        }
+        if (hitOpacity >= 1.0f)
+        {
+            if (hit.backface)
+            {
+                // Inside opaque geometry: the share ends (the module's
+                // anti-leak rule).
+                break;
+            }
+            if (hitSurface.unlit)
+            {
+                radiance += throughput * hitAlbedo;
+                break;
+            }
+            glm::vec3 irradiance(0.0f);
+            const float nDotL = glm::dot(hitInterfaceNormal, snapshot.sunDirection);
+            if (hasSun && nDotL > 0.0f)
+            {
+                irradiance += snapshot.sunRadiance() * nDotL
+                    * sunShadowTransmittance(state, hit.position, hitInterfaceNormal);
+            }
+            irradiance += directLightRadiance(state, hit.position, hitInterfaceNormal);
+            glm::vec3 causticIrradiance(0.0f);
+            if (sampleSurfaceCausticsIrradiance(
+                    state, hit.surfaceIndex, hit.position, hitInterfaceNormal, causticIrradiance))
+            {
+                irradiance += causticIrradiance;
+            }
+            glm::vec3 indirect(0.0f);
+            worldCacheIrradiance(state, hit.position, hitInterfaceNormal, indirect);
+            radiance += throughput
+                * (hitAlbedo * ((irradiance + indirect) * (1.0f / kPi)) + hitSurface.emissive);
+            break;
+        }
+        if (hit.backface)
+        {
+            // Medium exit: the share leaves untinted (the albedo absorption
+            // applied once, at the entering interface) and bent by the
+            // inverse Snell ratio; total internal reflection mirrors the
+            // share back inside.
+            glm::vec3 exited = glm::refract(bent, hitInterfaceNormal,
+                glm::max(hitSurface.indexOfRefraction, 1.0f));
+            if (glm::dot(exited, exited) < 1.0e-8f)
+            {
+                exited = glm::reflect(bent, hitInterfaceNormal);
+            }
+            bent = glm::normalize(exited);
+        }
+        else
+        {
+            // Entering another medium: its scattered share composes here (a
+            // shadowed sun and the direct lights behind the tint), then the
+            // share continues tinted by the surface's albedo and bent into
+            // the medium.
+            if (hitSurface.unlit)
+            {
+                radiance += throughput * hitOpacity * hitAlbedo;
+            }
+            else
+            {
+                glm::vec3 irradiance(0.0f);
+                const float nDotL = glm::dot(hitInterfaceNormal, snapshot.sunDirection);
+                if (hasSun && nDotL > 0.0f)
+                {
+                    irradiance += snapshot.sunRadiance() * nDotL
+                        * sunShadowTransmittance(state, hit.position, hitInterfaceNormal);
+                }
+                irradiance += directLightRadiance(state, hit.position, hitInterfaceNormal);
+                radiance += throughput * hitOpacity * hitAlbedo * (irradiance * (1.0f / kPi));
+            }
+            throughput *= hitSurface.albedo * (1.0f - hitOpacity);
+            glm::vec3 entering = glm::refract(bent, hitInterfaceNormal,
+                1.0f / glm::max(hitSurface.indexOfRefraction, 1.0f));
+            if (glm::dot(entering, entering) < 1.0e-8f)
+            {
+                entering = glm::reflect(bent, hitInterfaceNormal);
+            }
+            bent = glm::normalize(entering);
+        }
+        origin = hit.position + bent * state.settings.traceBias;
+    }
+    return radiance;
+}
+
 } // namespace
 
 // ---- composition -------------------------------------------------------------
@@ -152,12 +281,33 @@ void composeDebugView(
                             }
                         }
                         irradiance += directLightRadiance(constState, position, normal);
+                        // The caustic term: focused light the transmissive
+                        // surfaces redirected onto this receiver (the photon
+                        // pass deposits it into the surface cache).
+                        glm::vec3 causticIrradiance(0.0f);
+                        if (sampleSurfaceCausticsIrradiance(
+                                constState, surfaceIndex, position, normal, causticIrradiance))
+                        {
+                            irradiance += causticIrradiance;
+                        }
                         color += albedo * (irradiance * (1.0f / kPi)) * opacityShare;
                         if (constState.settings.debugIncludeAmbient)
                         {
                             color += albedo * snapshot.skyRadiance(normal) * opacityShare;
                         }
                         color += albedo / kPi * constState.gatherFiltered[pixelIndex] * opacityShare;
+                        // The transmitted share: what the surface shows of the
+                        // scene behind it (the `(1 - opacity)` part of the
+                        // view ray), so a glass body reads as glass - the
+                        // refracted room through it - instead of only its
+                        // scattered share darkening the pixel.
+                        if (opacityShare < 1.0f)
+                        {
+                            const glm::vec3 viewRay = viewRayDirection(constState, inverseViewProjection,
+                                static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
+                            color += transmittedShareRadiance(constState, snapshot, position, normal, viewRay,
+                                albedo, opacityShare, constState.surfaces[surfaceIndex], hasSun);
+                        }
                         break;
                     }
                     }

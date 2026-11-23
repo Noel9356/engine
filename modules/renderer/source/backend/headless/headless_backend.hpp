@@ -77,6 +77,28 @@ struct GiQuadCache
     }
 };
 
+// The probe-grid amortization tiers of one rasterizing worker: the coarse
+// 4x4 block tier and the 2x2 quad tier share one entry layout and one set of
+// gates (same plane, same normal), so a pixel consults the block tier first,
+// falls back to the quad tier when the block gates reject it, and only walks
+// the probe grid when both reject, publishing the result to whichever tier
+// accepted it. Flat expanses (most of a typical frame) then share one walk
+// per 4x4 block, curved or silhouetted regions fall back to the exact quad
+// or pixel evaluation, and the amortization never changes what a walk
+// returns - only how often it runs.
+struct GiAmortizationCache
+{
+    using Entry = GiQuadCache::Entry;
+    GiQuadCache blocks; // 4x4 tier
+    GiQuadCache quads;  // 2x2 tier
+
+    void resetForTile(std::uint32_t tileWidth, std::uint32_t tileHeight)
+    {
+        blocks.resetForTile((tileWidth + 3u) / 4u, (tileHeight + 3u) / 4u);
+        quads.resetForTile((tileWidth + 1u) / 2u, (tileHeight + 1u) / 2u);
+    }
+};
+
 // Options forwarded from [renderer] configuration at renderer creation.
 struct HeadlessBackendOptions
 {
@@ -512,11 +534,12 @@ private:
     // the inclusive pixel window; barycentric coverage with edge-function
     // increments, depth-test, shade, write. Tile owners pass their tile;
     // writes only touch the window, so concurrent calls with disjoint
-    // windows never share a pixel. giQuads, when non-null, amortizes the
-    // probe-grid ambient walk over 2x2 pixel quads (see GiQuadCache).
+    // windows never share a pixel. giAmortization, when non-null, amortizes the
+    // probe-grid ambient walk over 4x4 blocks and 2x2 pixel quads (see
+    // GiAmortizationCache).
     ENGINE_RASTERIZER_INLINE bool rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
         std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-        GiQuadCache *giQuads = nullptr);
+        GiAmortizationCache *giAmortization = nullptr);
 
     // Integer pixel window (inclusive) a fan record can write, clamped to
     // the framebuffer. Shared verbatim by the rasteriser core and the tile

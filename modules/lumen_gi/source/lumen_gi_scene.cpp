@@ -398,8 +398,10 @@ GiShadingHit traceSceneShading(const GiPipelineState &state, const GiRay &ray)
 // Transmittance of a shadow ray: transparent surfaces attenuate the
 // remaining light by (1 - opacity) per covering hit instead of blocking it;
 // the first opaque surface (or an exhausted transmission budget) blocks the
-// rest. Each continuation advances past the covering hit by the trace bias
-// so the same pane is not re-hit.
+// rest. A caustics transmitter blocks too - its transmitted share is carried
+// by the photon deposits (single-counted), so the direct lighting hands that
+// light to the caustics pass. Each continuation advances past the covering
+// hit by the trace bias so the same pane is not re-hit.
 float traceSceneTransmittance(const GiPipelineState &state, const GiRay &ray)
 {
     float transmittance = 1.0f;
@@ -413,7 +415,11 @@ float traceSceneTransmittance(const GiPipelineState &state, const GiRay &ray)
             return transmittance;
         }
         const GiSurface &surface = state.surfaces[surfaceHit.surfaceIndex];
-        if (surface.opacity >= 1.0f)
+        // A caustics transmitter's share is carried by the photon deposits
+        // (the focused image the pass splats into the surface cache), so the
+        // direct lighting must not also soften through it: the surface blocks
+        // here and the photons return the transmitted light concentrated.
+        if (surface.opacity >= 1.0f || surface.causticTransmitter)
         {
             return 0.0f;
         }
@@ -914,11 +920,16 @@ bool updateSurfaceTransform(GiSurface &surface, const glm::mat4 &transform)
     updateSurfaceWorldBounds(surface);
     // The cards are local-space, so a moved surface keeps its captured data;
     // only the cached lighting is stale (new shadows / light angles). Mark it
-    // for the front of the relight queue.
+    // for the front of the relight queue. The caustic deposits describe
+    // world-space landings on the card's texels, so a moved receiver drops
+    // them: the photon pass re-deposits at the new positions.
     for (GiCard &card : surface.cards)
     {
         card.lastDirectFrame   = 0;
         card.lastIndirectFrame = 0;
+        std::fill(card.causticIrradiance.begin(), card.causticIrradiance.end(), glm::vec3(0.0f));
+        std::fill(card.causticRadiance.begin(), card.causticRadiance.end(), glm::vec3(0.0f));
+        std::fill(card.causticSamples.begin(), card.causticSamples.end(), static_cast<std::uint8_t>(0));
     }
     return true;
 }
@@ -965,6 +976,9 @@ void invalidateSurfaceCards(GiSurface &surface)
         std::fill(card.depthTexels.begin(), card.depthTexels.end(), invalidCardDepth);
         std::fill(card.directRadiance.begin(), card.directRadiance.end(), glm::vec3(0.0f));
         std::fill(card.indirectRadiance.begin(), card.indirectRadiance.end(), glm::vec3(0.0f));
+        std::fill(card.causticIrradiance.begin(), card.causticIrradiance.end(), glm::vec3(0.0f));
+        std::fill(card.causticRadiance.begin(), card.causticRadiance.end(), glm::vec3(0.0f));
+        std::fill(card.causticSamples.begin(), card.causticSamples.end(), static_cast<std::uint8_t>(0));
         std::fill(card.indirectSamples.begin(), card.indirectSamples.end(), static_cast<std::uint8_t>(0));
     }
 }
@@ -1088,7 +1102,22 @@ void placeSurfaceCards(const GiSettings &settings, GiSurface &surface)
 
     float density = settings.texelsPerMeter;
     std::vector<CardCandidate> pieces = buildCardCandidates(boundsMin, boundsMax, extent, axisScale, density, maxAxisTexels);
-    for (std::uint32_t attempt = 0; attempt < 24 && pieces.size() > maxCards && density > 0.05f; ++attempt)
+    // The per-surface texel budget: with the depth layers multiplying every
+    // texel, a large mesh at a high configured density could otherwise claim
+    // an unbounded card-set memory footprint. The density lowers (the same
+    // lever the card-count rule uses) until the layered texel total fits.
+    const std::uint64_t maxTexelsPerSurface = std::max<std::uint64_t>(settings.maxTexelsPerSurface, 4096u);
+    const auto totalTexelCount = [&pieces](std::uint32_t layers)
+    {
+        std::uint64_t total = 0;
+        for (const CardCandidate &candidate : pieces)
+        {
+            total += static_cast<std::uint64_t>(candidate.texelWidth) * candidate.texelHeight * layers;
+        }
+        return total;
+    };
+    for (std::uint32_t attempt = 0; attempt < 32 && density > 0.05f
+            && (pieces.size() > maxCards || totalTexelCount(layers) > maxTexelsPerSurface); ++attempt)
     {
         density *= 0.75f;
         pieces = buildCardCandidates(boundsMin, boundsMax, extent, axisScale, density, maxAxisTexels);
@@ -1127,6 +1156,9 @@ void placeSurfaceCards(const GiSettings &settings, GiSurface &surface)
         card.normal.assign(texels, glm::vec3(0.0f, 1.0f, 0.0f));
         card.directRadiance.assign(texels, glm::vec3(0.0f));
         card.indirectRadiance.assign(texels, glm::vec3(0.0f));
+        card.causticIrradiance.assign(texels, glm::vec3(0.0f));
+        card.causticRadiance.assign(texels, glm::vec3(0.0f));
+        card.causticSamples.assign(texels, static_cast<std::uint8_t>(0));
         card.indirectSamples.assign(texels, static_cast<std::uint8_t>(0));
         surface.cards.push_back(std::move(card));
     }
@@ -1143,6 +1175,15 @@ void rebuildCardRefs(GiPipelineState &state)
             state.cardRefs.push_back(GiCardRef{surfaceIndex, cardIndex});
         }
     }
+    // Flat-texel prefix over the rebuilt card list (the caustics staging
+    // buffers index texels across cards through it).
+    state.cardTexelOffsets.assign(state.cardRefs.size() + 1, 0);
+    for (std::uint32_t flatCard = 0; flatCard < state.cardRefs.size(); ++flatCard)
+    {
+        const GiCard &card = state.card(flatCard);
+        state.cardTexelOffsets[flatCard + 1] = state.cardTexelOffsets[flatCard] + card.totalTexels();
+    }
+    state.totalCardTexels = state.cardRefs.empty() ? 0 : state.cardTexelOffsets.back();
 }
 
 // ---- top-level BVH ------------------------------------------------------------

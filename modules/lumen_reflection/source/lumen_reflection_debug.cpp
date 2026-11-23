@@ -78,7 +78,7 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                             const float ndcY = 1.0f - (static_cast<float>(y) + 0.5f) / static_cast<float>(viewHeight) * 2.0f;
                             const glm::vec4 nearPlane = inverseViewProjection * glm::vec4(ndcX, ndcY, -1.0f, 1.0f);
                             const glm::vec3 direction = glm::normalize(glm::vec3(nearPlane) / nearPlane.w - state.cameraPosition);
-                            color = state.environment.skyRadiance(direction);
+                            color = rfSkyRadiance(state, direction);
                         }
                         storePixel(outRgb, index, color, state.environment.exposure, state.environment.toneMapping);
                     }
@@ -96,7 +96,8 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                     for (std::uint32_t x = 0; x < viewWidth; ++x)
                     {
                         const std::size_t index = y * viewWidth + x;
-                        storePixel(outRgb, index, state.fieldFiltered[index], state.environment.exposure, state.environment.toneMapping);
+                        storePixel(outRgb, index, state.fieldFiltered[index],
+                            state.environment.exposure, state.environment.toneMapping);
                     }
                 }
             });
@@ -181,40 +182,62 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                             {
                                 const glm::vec3 direction = rfSampleGgxVndf(basis, localView, alpha, seed);
                                 const glm::vec3 fresnel  = rfFresnelWeight(view, direction, f0);
-                                glm::vec3 chainWeight(1.0f);
+                                glm::vec3 chainWeight(0.0f);
                                 glm::vec3 chainDirection(0.0f);
                                 glm::vec3 chainOrigin(0.0f);
-                                bool      chainReflected = true;
-                                if (!rfSplitFirstSegment(transmits, fresnel, texelOpacity, albedo, refractedView,
-                                    direction, clampedRoughness, alpha, refractedBasis, position, rayOrigin,
+                                bool      transmitRuns = false;
+                                glm::vec3 transmitWeight(0.0f);
+                                glm::vec3 transmitDirection(0.0f);
+                                glm::vec3 transmitOrigin(0.0f);
+                                rfSplitFirstSegment(transmits, fresnel, texelOpacity, albedo,
+                                    direction, alpha, refractedBasis, position, rayOrigin,
                                     state.settings.traceBias, chainDirection, chainOrigin, chainWeight,
-                                    chainReflected, seed))
-                                {
-                                    continue; // absorbed share
-                                }
-                                const glm::vec4 chainClipOrigin = chainReflected
-                                    ? clipOrigin
-                                    : state.viewProjection * glm::vec4(chainOrigin, 1.0f);
+                                    transmitRuns, transmitDirection, transmitOrigin, transmitWeight, seed);
                                 RfChainResolve chain = resolveRayChain(
-                                    state, chainClipOrigin, chainOrigin, chainDirection, chainWeight,
-                                    state.settings.maxTransmissionSegments, chainReflected, seed);
+                                    state, clipOrigin, chainOrigin, chainDirection, chainWeight,
+                                    state.settings.maxTransmissionSegments, !transmits, seed);
                                 // The reference brute-forces scene traces only
                                 // (no screen tier), so a deferred chain answer is
                                 // shaded right here (the texel's own response as
                                 // seen from the camera, specular included).
-                                if (chain.deferred)
+                                for (std::uint32_t entry = 0; entry < chain.deferredCount; ++entry)
                                 {
-                                    chain.radiance = rfShadeHitPoint(state,
-                                        state.gbufferPosition[chain.hitTexel],
-                                        state.gbufferNormal[chain.hitTexel],
-                                        state.gbufferAlbedo[chain.hitTexel],
-                                        state.gbufferEmissive[chain.hitTexel],
+                                    const std::uint32_t hitTexel = chain.deferred[entry].hitTexel;
+                                    chain.radiance += rfShadeHitPoint(state,
+                                        state.gbufferPosition[hitTexel],
+                                        state.gbufferNormal[hitTexel],
+                                        state.gbufferAlbedo[hitTexel],
+                                        state.gbufferEmissive[hitTexel],
                                         glm::normalize(state.cameraPosition
-                                            - state.gbufferPosition[chain.hitTexel]),
-                                        state.gbufferRoughness[chain.hitTexel],
-                                        state.gbufferMetallic[chain.hitTexel]) * chain.tint;
+                                            - state.gbufferPosition[hitTexel]),
+                                        state.gbufferRoughness[hitTexel],
+                                        state.gbufferMetallic[hitTexel]) * chain.deferred[entry].tint;
                                 }
                                 sum += chain.radiance;
+                                // The transmitted share: scene traces only from
+                                // inside the medium.
+                                if (transmitRuns)
+                                {
+                                    const glm::vec4 transmitClip
+                                        = state.viewProjection * glm::vec4(transmitOrigin, 1.0f);
+                                    RfChainResolve transmitChain = resolveRayChain(
+                                        state, transmitClip, transmitOrigin, transmitDirection, transmitWeight,
+                                        state.settings.maxTransmissionSegments, false, seed);
+                                    for (std::uint32_t entry = 0; entry < transmitChain.deferredCount; ++entry)
+                                    {
+                                        const std::uint32_t hitTexel = transmitChain.deferred[entry].hitTexel;
+                                        transmitChain.radiance += rfShadeHitPoint(state,
+                                            state.gbufferPosition[hitTexel],
+                                            state.gbufferNormal[hitTexel],
+                                            state.gbufferAlbedo[hitTexel],
+                                            state.gbufferEmissive[hitTexel],
+                                            glm::normalize(state.cameraPosition
+                                                - state.gbufferPosition[hitTexel]),
+                                            state.gbufferRoughness[hitTexel],
+                                            state.gbufferMetallic[hitTexel]) * transmitChain.deferred[entry].tint;
+                                    }
+                                    sum += transmitChain.radiance;
+                                }
                             }
                             color = sum / static_cast<float>(samples);
                         }

@@ -24,6 +24,11 @@ max_triangles_per_surface   = 200000
 per_surface_max             = 12
 texels_per_meter            = 24.0
 max_texels_per_card_axis    = 128
+# Total layered texels one surface's card set may hold (depth layers
+# multiply every texel). A mesh whose cards would exceed the budget has its
+# texel density lowered until it fits, so one registration cannot claim an
+# unbounded card-set footprint.
+max_texels_per_surface      = 524288
 # Depth layers per card texel: each (x, y) texel keeps up to this many
 # front-facing hits, so a concave mesh (a room modelled as one mesh) keeps the
 # faces that sit behind a nearer one. 1 = the old single-layer capture.
@@ -94,8 +99,35 @@ rays_per_probe              = 32
 importance_sampling         = true
 screen_ray_distance_m       = 2.0
 temporal_blend              = 0.85
+# Weight of a screen probe direction texel's previous radiance when the pass
+# retraces it: the probe maps converge to the running mean of their traces
+# instead of re-showing each pass' single-sample variance through the pixel
+# interpolation. 0 disables the accumulation (each pass traces from scratch).
+probe_temporal_blend        = 0.9
 spatial_filter              = 3
 plane_depth_tolerance       = 0.35
+
+[lumen_gi.caustics]
+# Photon-differential caustics: photons traced from the sun (and the
+# registry's directional lights) through the transmissive surfaces, refracted
+# with the same Snell rules every other ray uses, and deposited onto the
+# receivers' card texels as focused irradiance. The deposits live in the
+# surface cache, so the indirect gathers, the world radiance cache probes
+# (SH2-softened), and the final gather all carry them.
+enabled                    = true
+photons_per_frame          = 1024
+# Weight of the previous estimate when a texel receives a fresh deposit;
+# untouched texels decay toward the current (usually zero) estimate by the
+# same weight, so a caustic whose source moved fades instead of ghosting.
+temporal_blend             = 0.9
+# Footprint radius clamps: the floor stops single-texel fireflies, the
+# ceiling stops a degenerate differential from smearing the whole card.
+footprint_min_m            = 0.01
+footprint_max_m            = 0.75
+# Emit caustic photons from emissive card texels (interior scenes lit only
+# by emissive panels get their caustics this way; the sun covers outdoor
+# scenes).
+emissive_sources           = true
 
 [lumen_gi.debug]
 internal_width              = 320
@@ -108,7 +140,7 @@ include_ambient             = false
 # first so the temporal filter has converged). Set continuous_gather = true to
 # run one pass every evaluate() instead (costs CPU every frame).
 continuous_gather           = false
-export_gather_frames        = 16
+export_gather_frames        = 24
 
 [lumen_gi.environment]
 # The built-in fallback environment the module shades with when the optional

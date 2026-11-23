@@ -201,7 +201,7 @@ bool sampleCardsPass(const GiSurface &surface, const glm::vec3 &localPosition, c
                         continue;
                     }
                     const float weight = alignment * bilinear;
-                    radianceSum += (card.directRadiance[texel]
+                    radianceSum += (card.directRadiance[texel] + card.causticRadiance[texel]
                                        + (includeIndirect ? card.indirectRadiance[texel] : glm::vec3(0.0f)))
                         * weight;
                     if constexpr (WantAlbedo)
@@ -629,9 +629,10 @@ void gatherIndirectLightingUnit(GiPipelineState &state, const GiTexelWork &unit,
                     glm::vec3 hitRadiance(0.0f);
                     radianceAtHit(state, hit, true, hitRadiance);
                     gather += weight * opacity * hitRadiance;
-                    if (opacity <= 0.0f || segment == state.settings.maxTransmissionSegments)
+                    if (opacity <= 0.0f || surface.causticTransmitter
+                        || segment == state.settings.maxTransmissionSegments)
                     {
-                        break; // nothing (or no budget) left to transmit
+                        break; // caustics pass owns the transmitted share
                     }
                     // The albedo absorption applies once per medium traversal,
                     // at the entering interface; the matching exit passes
@@ -813,9 +814,10 @@ void updateProbe(GiPipelineState &state, std::uint32_t levelIndex, std::uint32_t
                 glm::vec3 hitRadiance(0.0f);
                 radianceAtHit(state, hit, true, hitRadiance);
                 value += weight * opacity * hitRadiance;
-                if (opacity <= 0.0f || segment == state.settings.maxTransmissionSegments)
+                if (opacity <= 0.0f || surface.causticTransmitter
+                    || segment == state.settings.maxTransmissionSegments)
                 {
-                    break; // nothing (or no budget) left to transmit
+                    break; // caustics pass owns the transmitted share
                 }
                 // The albedo absorption applies once per medium traversal, at
                 // the entering interface; the matching exit passes untinted.

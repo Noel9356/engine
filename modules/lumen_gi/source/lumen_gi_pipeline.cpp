@@ -79,6 +79,13 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
     try
     {
         ensureSceneTlas(state);
+        // Caustics transmitter flags first: the direct, gather, and probe
+        // stages of this frame must agree with the photon pass that runs
+        // later (the pass owns the transmitters' transmitted light).
+        if (state.causticTransmittersDirty)
+        {
+            rebuildCausticsTransmitters(state);
+        }
         const GiSettings &settings = state.settings;
 
         // Camera distance priorities (per surface center).
@@ -267,6 +274,11 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
                     gatherDirectLightingUnit(state, directWork[item]);
                 }
             });
+        // Caustic photons deposit into their own card arrays (disjoint from
+        // the direct pass's outputs), so the pass runs between the direct and
+        // the indirect/probe stages: the gathers and probes that follow read
+        // the committed caustic radiance exactly like the direct term.
+        runCausticsPass(state, scheduler);
         const std::size_t indirectCount = indirectWork.size();
         parallelRange(scheduler, indirectCount, 1,
             [&](std::size_t begin, std::size_t end)
@@ -299,6 +311,16 @@ bool runGiFrame(GiPipelineState &state, TaskScheduler *scheduler)
         needed = std::max(needed, cycles(eligibleTexels, settings.directTexelsPerFrame) + 1);
         needed = std::max(needed, cycles(eligibleTexels, settings.indirectTexelsPerFrame) * indirectSettlePasses);
         needed = std::max(needed, cycles(pendingTexels, settings.captureTexelsPerFrame) + 1);
+        // Caustics settle at the temporal blend's convergence rate (the
+        // (1 - blend)^N < 1% rule) when the pass has anything to converge.
+        if (settings.causticsEnabled && !state.scratchCausticTransmitters.empty())
+        {
+            const double history = std::clamp(settings.causticsTemporalBlend, 0.0f, 0.99f);
+            std::uint64_t causticSettle = history > 0.0
+                ? static_cast<std::uint64_t>(std::ceil(std::log(0.01) / std::log(history))) + 2
+                : 2;
+            needed = std::max(needed, causticSettle);
+        }
         state.convergenceFrames = static_cast<std::uint32_t>(std::min<std::uint64_t>(needed + 2, 100000000ull));
 
         state.totalRaysTraced.fetch_add(

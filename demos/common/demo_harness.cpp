@@ -84,11 +84,20 @@ bool exportScreenshot(engine::ParticipantContext &context, engine::window::Windo
         if (vulkanCapability != nullptr
             && renderCapability.activeBackendName(renderCapability.self, rendererHandle) == std::string("vulkan"))
         {
+            // The renderer's vulkan extension exports PPM only (its ABI has
+            // no PNG entry); a PNG request on a vulkan backend writes the
+            // same pixels as a .ppm sibling so the file on disk always
+            // matches the format that was actually produced.
+            if (png)
+            {
+                const std::size_t lastDot = writtenPath.rfind('.');
+                writtenPath = lastDot == std::string::npos || lastDot == 0u
+                    ? writtenPath + ".ppm"
+                    : writtenPath.substr(0, lastDot) + ".ppm";
+            }
             engine::renderer::RenderError exportError = engine::renderer::RenderError::None;
-            exported = png ? vulkanCapability->exportFramePng(
-                               vulkanCapability->self, rendererHandle, writtenPath.c_str(), &exportError)
-                           : vulkanCapability->exportFramePpm(
-                               vulkanCapability->self, rendererHandle, writtenPath.c_str(), &exportError);
+            exported = vulkanCapability->exportFramePpm(
+                vulkanCapability->self, rendererHandle, writtenPath.c_str(), &exportError);
         }
     }
     return exported;

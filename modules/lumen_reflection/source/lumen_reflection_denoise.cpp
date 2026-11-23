@@ -12,9 +12,15 @@
 //   the stored matrices, validated against the current depth (disocclusion
 //   detection), clamped to the current neighborhood (mean +/-
 //   neighborhood_clamp_sigma * sigma so a changed scene cannot ghost
-//   through), and blended with the configurable history weight. Freshly
-//   revealed texels take the fresh frame whole and are marked for the
-//   bilateral filter's double strength.
+//   through), and blended with a history-length-driven weight: a texel whose
+//   history has survived N clean frames blends as the running mean of N
+//   fresh samples (weight N/(N+1), capped at temporal.strength), so a static
+//   stochastic signal converges instead of re-showing each frame's variance
+//   (an exponentially weighted average forgets at strength; a fresh sample
+//   whose value disagrees with the clamped history by more than the
+//   neighborhood spread marks the texel changed and restarts its history, so
+//   relit content re-converges). Freshly revealed texels take the fresh frame
+//   whole and are marked for the bilateral filter's double strength.
 //
 //   Bilateral filter: Lumen's "last ditch effort" - only texels whose
 //   post-reuse variance is high are smoothed, with tone-mapped weights so a
@@ -46,6 +52,24 @@ inline float tonemappedWeight(float centerLuminance, float neighborLuminance)
     const float difference = std::fabs(centerLuminance - neighborLuminance);
     return 1.0f / (1.0f + difference);
 }
+
+// History-length depth cap: the running-mean weight N/(N+1) saturates long
+// before this, so the counter only needs room to say "converged".
+inline constexpr std::uint32_t historyLengthCap = 1024u;
+
+// A neighborhood mean this far outside the clamped history (in standard
+// errors of the mean, with an absolute floor for near-uniform neighborhoods)
+// marks the texel changed and restarts its accumulation. Testing the mean of
+// the 3x3 (not the single fresh sample) is what keeps a static stochastic
+// texel converged: one firefly draw - the stochastic Fresnel pick that
+// occasionally returns a bright lamp at full weight - moves a single sample
+// far outside any bound, but it does not move the neighborhood mean, so the
+// history survives it and the running mean converges instead of restarting
+// every time a rare bright draw lands. A real relight moves the whole
+// neighborhood together: the mean travels while its spread stays small, so
+// the standard-error bound catches it within a few frames.
+inline constexpr float historyChangeSigma   = 2.5f;
+inline constexpr float historyChangeFloor    = 0.02f;
 
 } // namespace
 
@@ -102,6 +126,7 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
                     glm::vec3 sum(0.0f);
                     float     weightSum = 0.0f;
                     // The texel itself is one sample of the variance estimate.
+                    float     sampleCount = 1.0f;
                     const float centerLuminance = state.fieldLuminance[index];
                     float luminanceSum        = centerLuminance;
                     float luminanceSquaredSum = centerLuminance * centerLuminance;
@@ -152,11 +177,25 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
                                 continue;
                             }
                             const glm::vec3 sampled = state.fieldRaw[sampledIndex];
-                            sum += sampled;
-                            weightSum += 1.0f;
                             const float sampledLuminance = state.fieldLuminance[sampledIndex];
+                            // Value-aware neighbor weight: the reuse averages
+                            // NOISY estimates of the same signal, but the
+                            // deterministic estimator this pipeline traces
+                            // also produces real high-dynamic-range edges
+                            // (an emissive panel's mirror image towers over its
+                            // surround by an order of magnitude), and an
+                            // unweighted mean would smear those into the dark
+                            // rim the eye reads first. The tone-mapped weight
+                            // lets a neighbor with a similar luminance share
+                            // fully while a far-brighter or far-dimmer one
+                            // contributes a bounded share, so noise averages
+                            // out and structure stays put.
+                            const float value = tonemappedWeight(centerLuminance, sampledLuminance);
+                            sum += sampled * value;
+                            weightSum += value;
                             luminanceSum += sampledLuminance;
                             luminanceSquaredSum += sampledLuminance * sampledLuminance;
+                            sampleCount += 1.0f;
                         }
                     }
                     if (weightSum <= 0.0f)
@@ -168,7 +207,6 @@ void rfSpatialReuse(RfPipelineState &state, TaskScheduler *scheduler)
                     state.scratchSpatial[index] = mean;
                     // Luminance variance of the texel and its accepted
                     // neighbors (E[x^2] - E[x]^2 over the sample set).
-                    const float sampleCount = weightSum + 1.0f;
                     const float meanLuminance = luminanceSum / sampleCount;
                     state.scratchVariance[index] = std::max(0.0f,
                         luminanceSquaredSum / sampleCount - meanLuminance * meanLuminance);
@@ -190,10 +228,16 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
     state.historyField.swap(state.fieldFiltered);
     state.fieldFiltered.assign(pixelCount, glm::vec3(0.0f));
     state.scratchDisoccluded.assign(pixelCount, 0u);
+    // The per-texel accumulation depth travels with the field: a resolution
+    // change invalidates every texel's history, so every length restarts.
+    if (state.historyLength.size() != pixelCount)
+    {
+        state.historyLength.assign(pixelCount, 0u);
+    }
 
     const bool hasHistory = state.historyValid && state.historyWidth == state.fieldWidth
         && state.historyHeight == state.fieldHeight && !state.historyField.empty();
-    const float strength = std::clamp(state.settings.temporalStrength, 0.0f, 0.95f);
+    const float strength = std::clamp(state.settings.temporalStrength, 0.0f, 1.0f);
     const float sigmaScale = std::max(state.settings.neighborhoodClampSigma, 0.0f);
 
     parallelRange(scheduler, state.fieldHeight, 1,
@@ -209,6 +253,7 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
                     {
                         state.fieldFiltered[index] = glm::vec3(0.0f);
                         state.scratchDisoccluded[index] = 1u;
+                        state.historyLength[index]   = 0u;
                         continue;
                     }
 
@@ -287,14 +332,25 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
                         // bilateral filter runs here at double strength.
                         state.fieldFiltered[index] = current;
                         state.scratchDisoccluded[index] = 1u;
+                        state.historyLength[index]   = 0u;
                         continue;
                     }
 
-                    // Neighborhood clamp: mean +/- sigma * scale of the
-                    // current 3x3, so a changed scene cannot ghost through
-                    // the accumulated history.
+                    // Neighborhood clamp bounds: the mean +/- sigma band of
+                    // the current 3x3, widened to the neighborhood's own
+                    // min/max so a changed scene cannot ghost through the
+                    // accumulated history while deterministic
+                    // high-dynamic-range structure survives. A mean +/- sigma
+                    // band alone reads an emissive edge - a lamp's mirror
+                    // image, radiance an order of magnitude over its
+                    // surround - as an outlier and crushes its border texels
+                    // into a dark rim; the range extension keeps any value
+                    // the neighborhood already holds legal (a firefly still
+                    // lands outside a uniform neighborhood's band).
                     glm::vec3 mean(0.0f);
                     glm::vec3 squaredMean(0.0f);
+                    glm::vec3 neighborhoodMin(std::numeric_limits<float>::max());
+                    glm::vec3 neighborhoodMax(-std::numeric_limits<float>::max());
                     float     count = 0.0f;
                     for (std::int32_t offsetY = -1; offsetY <= 1; ++offsetY)
                     {
@@ -319,18 +375,61 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
                             const glm::vec3 sampled = state.scratchSpatial[sampledIndex];
                             mean += sampled;
                             squaredMean += sampled * sampled;
+                            neighborhoodMin = glm::min(neighborhoodMin, sampled);
+                            neighborhoodMax = glm::max(neighborhoodMax, sampled);
                             count += 1.0f;
                         }
                     }
                     glm::vec3 clamped = history;
+                    glm::vec3 boundLow(0.0f);
+                    glm::vec3 boundHigh(0.0f);
+                    // History-length blend: N clean frames hold the running
+                    // mean of N fresh samples (weight N/(N+1), capped at the
+                    // configured strength), so a static stochastic field
+                    // converges like an accumulated average instead of an
+                    // exponentially forgetting one. The change test reads the
+                    // NEIGHBORHOOD MEAN against the raw history (see the
+                    // historyChangeSigma note above): a whole-neighborhood
+                    // move is a changed scene and restarts the history so the
+                    // new content re-converges instead of ghosting out over
+                    // the length ramp, while a single outlier draw does not
+                    // restart anything.
+                    const std::uint32_t historyAge = state.historyLength[index];
+                    bool changed = false;
+                    glm::vec3 sigma(0.0f);
                     if (count > 0.0f)
                     {
                         mean /= count;
                         squaredMean /= count;
-                        const glm::vec3 sigma = glm::sqrt(glm::max(squaredMean - mean * mean, glm::vec3(0.0f)));
-                        clamped = glm::clamp(history, mean - sigma * sigmaScale, mean + sigma * sigmaScale);
+                        sigma = glm::sqrt(glm::max(squaredMean - mean * mean, glm::vec3(0.0f)));
+                        boundLow  = glm::min(mean - sigma * sigmaScale, neighborhoodMin);
+                        boundHigh = glm::max(mean + sigma * sigmaScale, neighborhoodMax);
+                        clamped = glm::clamp(history, boundLow, boundHigh);
+                        const glm::vec3 standardError = sigma / glm::vec3(glm::sqrt(count));
+                        const glm::vec3 changeBound = standardError * historyChangeSigma
+                            + glm::vec3(historyChangeFloor);
+                        changed = glm::any(glm::greaterThan(glm::abs(mean - history), changeBound));
                     }
-                    state.fieldFiltered[index] = glm::mix(current, clamped, strength);
+                    if (changed)
+                    {
+                        state.fieldFiltered[index]     = current;
+                        state.scratchDisoccluded[index] = 1u;
+                        state.historyLength[index]      = 0u;
+                        continue;
+                    }
+                    // The fresh sample joins the running mean clamped into
+                    // the neighborhood bound (the same bound the history was
+                    // clamped into): a firefly draw contributes its clamped
+                    // value instead of dragging the mean, and the variance-
+                    // driven bilateral filter below still sees the texel as
+                    // high-variance through the spatial pass' estimate.
+                    const glm::vec3 blendedSample = count > 0.0f
+                        ? glm::clamp(current, boundLow, boundHigh)
+                        : current;
+                    const float historyWeight = std::min(strength,
+                        static_cast<float>(historyAge) / (static_cast<float>(historyAge) + 1.0f));
+                    state.fieldFiltered[index] = glm::mix(blendedSample, clamped, historyWeight);
+                    state.historyLength[index] = std::min(historyAge + 1u, historyLengthCap);
                 }
             }
         });

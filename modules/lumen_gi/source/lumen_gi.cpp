@@ -83,6 +83,10 @@ void applySettingsToState(const GiSettings &settings, GiPipelineState &state, fl
         static_cast<std::uint64_t>(static_cast<double>(settings.indirectTexelsPerFrame) * lightingScale));
     state.settings.probeUpdatesPerFrame =
         std::max(4u, static_cast<std::uint32_t>(static_cast<float>(settings.probeUpdatesPerFrame) * scale));
+    // Caustic photon counts scale with the quality preset like every other
+    // amortized budget (a floor keeps every tier converging).
+    state.settings.causticsPhotonsPerFrame = std::max(64u,
+        static_cast<std::uint32_t>(static_cast<float>(settings.causticsPhotonsPerFrame) * scale));
 }
 
 
@@ -240,6 +244,8 @@ private:
             integer("cards.max_texels_per_card_axis", 128, 4, 512));
         settings.cardDepthLayers          = static_cast<std::uint32_t>(
             integer("cards.depth_layers", 2, 1, static_cast<std::int64_t>(maxCardLayers)));
+        settings.maxTexelsPerSurface      = static_cast<std::uint64_t>(
+            integer("cards.max_texels_per_surface", 524288, 4096, 8388608));
         settings.captureTexelsPerFrame    = static_cast<std::uint64_t>(
             integer("capture.texels_per_frame", 262144, 4096, 16777216));
         settings.directTexelsPerFrame     = static_cast<std::uint64_t>(
@@ -279,9 +285,19 @@ private:
         settings.gatherRaysPerProbe       = static_cast<std::uint32_t>(integer("gather.rays_per_probe", 32, 1, 256));
         settings.gatherImportanceSampling = boolean("gather.importance_sampling", true);
         settings.gatherTemporalBlend      = static_cast<float>(floating("gather.temporal_blend", 0.85, 0.0, 0.99));
+        settings.gatherProbeTemporalBlend = static_cast<float>(floating("gather.probe_temporal_blend", 0.9, 0.0, 0.99));
         settings.gatherSpatialFilter      = static_cast<std::uint32_t>(integer("gather.spatial_filter", 3, 0, 9));
         settings.gatherPlaneDepthTolerance = static_cast<float>(
             floating("gather.plane_depth_tolerance", 0.35, 0.01, 4.0));
+        settings.causticsEnabled           = boolean("caustics.enabled", true);
+        settings.causticsPhotonsPerFrame   = static_cast<std::uint32_t>(
+            integer("caustics.photons_per_frame", 1024, 16, 65536));
+        settings.causticsTemporalBlend     = static_cast<float>(floating("caustics.temporal_blend", 0.9, 0.0, 0.99));
+        settings.causticsFootprintMinM     = static_cast<float>(
+            floating("caustics.footprint_min_m", 0.01, 0.001, 0.25));
+        settings.causticsFootprintMaxM     = static_cast<float>(
+            floating("caustics.footprint_max_m", 0.75, 0.05, 8.0));
+        settings.causticsEmissiveSources   = boolean("caustics.emissive_sources", true);
         settings.debugInternalWidth       = static_cast<std::uint32_t>(integer("debug.internal_width", 320, 16, 1920));
         settings.debugInternalHeight      = static_cast<std::uint32_t>(integer("debug.internal_height", 180, 16, 1080));
         settings.referenceSamples         = static_cast<std::uint32_t>(integer("debug.reference_samples", 64, 1, 4096));
@@ -352,7 +368,7 @@ private:
             }
         }
         const CardKey cardKey{settings_.texelsPerMeter, settings_.maxTexelsPerCardAxis, settings_.maxCardsPerSurface,
-            settings_.cardDepthLayers};
+            settings_.cardDepthLayers, settings_.maxTexelsPerSurface};
         if (!(cardKey == builtCardKey_))
         {
             builtCardKey_ = cardKey;
@@ -367,6 +383,8 @@ private:
         state_.screenProbeRadiance.clear();
         state_.gatherHasHistory = false;
         state_.sceneDirty       = true;
+        state_.causticTransmittersDirty = true;
+        state_.causticEmissiveCardsDirty = true;
         publishSnapshotLocked();
     }
 
@@ -430,6 +448,11 @@ private:
         rebuildCardRefs(state_);
         state_.tlasDirty  = true;
         state_.sceneDirty = true;
+        // Caustics source lists follow the registry (new transmitters, new
+        // emitters, changed emission).
+        state_.causticTransmittersDirty = true;
+        state_.causticEmissiveCardsDirty = true;
+        state_.causticsDecayFrames = std::max<std::uint32_t>(state_.causticsDecayFrames, 256);
     }
 
     // Marks the probes around a changed world volume for a full retrace (the
@@ -690,7 +713,13 @@ private:
         GiEnvironmentSnapshot snapshot;
         std::uint64_t         pbrVersion    = 0;
         std::uint64_t         lightsVersion = 0;
-        snapshot.sunDirection = glm::normalize(fallbackEnvironment_.sunDirection);
+        // Fallback environment first (used when the optional pbr capability is
+        // absent or its copy fails): the same defaults the renderer's built-in
+        // environment carries, overridable through the [lumen_gi.environment]
+        // keys so a headless consumer without pbr can still tune the sun and
+        // the hemispheric skylight.
+        snapshot.hasSun           = true;
+        snapshot.sunDirection     = glm::normalize(fallbackEnvironment_.sunDirection);
         if (!std::isfinite(snapshot.sunDirection.x) || !std::isfinite(snapshot.sunDirection.y)
             || !std::isfinite(snapshot.sunDirection.z))
         {
@@ -698,40 +727,13 @@ private:
             // built-in default instead of a NaN direction.
             snapshot.sunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
         }
-        snapshot.sunColor     = fallbackEnvironment_.sunColor;
-        snapshot.sunIntensity = fallbackEnvironment_.sunIntensity;
-        snapshot.sunEnabled   = fallbackEnvironment_.sunEnabled;
-        snapshot.ambientSky     = fallbackEnvironment_.ambientSky;
-        snapshot.ambientGround  = fallbackEnvironment_.ambientGround;
+        snapshot.sunColor        = fallbackEnvironment_.sunColor;
+        snapshot.sunIntensity    = fallbackEnvironment_.sunIntensity;
+        snapshot.sunEnabled      = fallbackEnvironment_.sunEnabled;
+        snapshot.ambientSky      = fallbackEnvironment_.ambientSky;
+        snapshot.ambientGround   = fallbackEnvironment_.ambientGround;
         snapshot.ambientIntensity = fallbackEnvironment_.ambientIntensity;
-        snapshot.exposure       = 1.0f;
-        snapshot.toneMapping    = pbr::ToneMapping::AcesFilmic;
-        if (pbrCapability_ != nullptr && pbrCapability_->copyEnvironment != nullptr)
-        {
-            pbr::PbrEnvironment environment{};
-            std::uint64_t       version = 0;
-            if (pbrCapability_->copyEnvironment(pbrCapability_->self, &environment, &version))
-            {
-                pbrVersion = version;
-                snapshot.hasSun           = true;
-                snapshot.sunEnabled       = environment.sun.enabled;
-                const glm::vec3 sun(environment.sun.direction[0], environment.sun.direction[1], environment.sun.direction[2]);
-                if (glm::dot(sun, sun) > 1.0e-12f)
-                {
-                    snapshot.sunDirection = glm::normalize(sun);
-                }
-                snapshot.sunColor         = glm::vec3(
-                    environment.sun.color[0], environment.sun.color[1], environment.sun.color[2]);
-                snapshot.sunIntensity     = environment.sun.intensity;
-                snapshot.ambientSky       = glm::vec3(environment.ambient.skyColor[0], environment.ambient.skyColor[1],
-                    environment.ambient.skyColor[2]);
-                snapshot.ambientGround    = glm::vec3(environment.ambient.groundColor[0],
-                    environment.ambient.groundColor[1], environment.ambient.groundColor[2]);
-                snapshot.ambientIntensity = environment.ambient.intensity;
-                snapshot.exposure         = environment.exposure;
-                snapshot.toneMapping      = environment.toneMapping;
-            }
-        }
+        pbrVersion = lumen::copyPbrEnvironment(pbrCapability_, snapshot);
         if (directLightingCapability_ != nullptr && directLightingCapability_->copyLights != nullptr)
         {
             // The scratch is a member, not a local: steady-state evaluates
@@ -1040,10 +1042,11 @@ private:
         std::uint32_t maxAxis;
         std::uint32_t maxCards;
         std::uint32_t layers;
+        std::uint64_t maxTexels;
         bool operator==(const CardKey &other) const
         {
             return texelsPerMeter == other.texelsPerMeter && maxAxis == other.maxAxis && maxCards == other.maxCards
-                && layers == other.layers;
+                && layers == other.layers && maxTexels == other.maxTexels;
         }
     };
 
@@ -1079,7 +1082,7 @@ private:
     std::uint32_t      builtDirectionResolution_ = 0;
     float              builtProbeSpacing_        = 0.0f;
     float              builtLevel1Factor_        = 0.0f;
-    CardKey            builtCardKey_{0.0f, 0, 0, 0};
+    CardKey            builtCardKey_{0.0f, 0, 0, 0, 0};
     double             lastEvaluateMilliseconds_ = 0.0;
     std::atomic<std::uint64_t> probeVersion_{0};
     mutable std::mutex                     snapshotMutex_;

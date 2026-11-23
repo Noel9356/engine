@@ -382,6 +382,32 @@ std::vector<SceneMesh> buildOutdoorScene()
     waterSlab.name = "water slab";
     scene.push_back(std::move(waterSlab));
 
+    // Crystal ball next to the water: a curved dielectric the sun shines
+    // through, so the field shows focused caustics on the ground beside it
+    // (the photon pass deposits them into the surface cache; the probes
+    // carry the soft remainder). Kept clear and small so the effect reads as
+    // light, not as a prop.
+    SceneMesh crystalBall;
+    appendSphere(crystalBall, {-3.6f, 0.45f, 0.9f}, 0.45f, 48, 24);
+    crystalBall.material.baseColor[0] = 0.96f;
+    crystalBall.material.baseColor[1] = 0.98f;
+    crystalBall.material.baseColor[2] = 1.0f;
+    // The renderer material carries the same near-mirror roughness the
+    // reflection module traces with (rfRoughness below): a transparent
+    // surface outside the traced roughness band composites through the
+    // plain alpha blend, and a default-rough crystal ball would render as a
+    // faint 5%-opacity smudge over the field's traced refraction response.
+    crystalBall.material.roughnessFactor = 0.02f;
+    crystalBall.material.opacity           = 0.05f;
+    crystalBall.material.indexOfRefraction = 1.5f;
+    crystalBall.giAlbedo[0]           = 0.96f;
+    crystalBall.giAlbedo[1]           = 0.98f;
+    crystalBall.giAlbedo[2]           = 1.0f;
+    crystalBall.rfRoughness           = 0.02f;
+    crystalBall.rfMetallic            = 0.0f;
+    crystalBall.name = "crystal ball";
+    scene.push_back(std::move(crystalBall));
+
     // Unlit sky dome + sun disc: the renderer shows raw albedo/emission, GI
     // ignores them (excluded) and answers those rays with the skylight.
     SceneMesh skyDome;
@@ -404,6 +430,258 @@ std::vector<SceneMesh> buildOutdoorScene()
     sunDisc.giFlagBits                = lumen_gi::giSurfaceFlagExcluded;
     sunDisc.name = "sun disc";
     scene.push_back(std::move(sunDisc));
+
+    return scene;
+}
+
+// Exhibition gallery: a 14 x 4.2 x 12 m hall with a raised platform and
+// steps on the left, a half-height partition with a frosted glass pane across
+// the middle, two columns, a polished-metal floor strip, and a reflecting
+// pool under the main warm ceiling panel. The props cover every lighting and
+// reflection band the two modules trace: chrome sphere and gold sphere
+// (dedicated-ray metals), a glass sphere resting IN the pool and a ruby cube
+// on the platform (transmission chains plus caustics under the emissive
+// panels), a spinning chrome cube on the metal strip (dynamic surfaces),
+// brushed-metal back-wall panels (the radiance-cache band), and stacked
+// crates for multi-bounce color bleeding off the tinted side walls (cool
+// blue left, warm terracotta right). All light comes from the emissive
+// panels: one large warm panel over the pool, two cool cove strips along the
+// ceiling edges, and a warm sconce on the back wall between the brushed
+// panels - three color temperatures for the GI to mix.
+std::vector<SceneMesh> buildGalleryScene()
+{
+    std::vector<SceneMesh> scene;
+
+    auto pushBox = [&scene](const char *name, const glm::vec3 &center, const glm::vec3 &halfExtent,
+        const glm::vec3 &albedo) -> SceneMesh &
+    {
+        SceneMesh mesh;
+        appendBox(mesh, center, halfExtent);
+        for (SceneVertex &vertex : mesh.vertices)
+        {
+            vertex.color = albedo;
+        }
+        mesh.material.baseColor[0] = albedo.r;
+        mesh.material.baseColor[1] = albedo.g;
+        mesh.material.baseColor[2] = albedo.b;
+        mesh.giAlbedo[0]           = albedo.r;
+        mesh.giAlbedo[1]           = albedo.g;
+        mesh.giAlbedo[2]           = albedo.b;
+        mesh.name = name;
+        scene.push_back(std::move(mesh));
+        return scene.back();
+    };
+
+    // Shell: floor, ceiling, back and front walls.
+    pushBox("floor", {0.0f, -0.05f, 0.0f}, {7.0f, 0.05f, 6.0f}, glm::vec3(0.60f, 0.57f, 0.54f));
+    pushBox("ceiling", {0.0f, 4.25f, 0.0f}, {7.0f, 0.05f, 6.0f}, glm::vec3(0.88f, 0.87f, 0.85f));
+    pushBox("back wall", {0.0f, 2.1f, -6.05f}, {7.0f, 2.1f, 0.05f}, glm::vec3(0.82f, 0.80f, 0.77f));
+    pushBox("front wall", {0.0f, 2.1f, 6.05f}, {7.0f, 2.1f, 0.05f}, glm::vec3(0.80f, 0.78f, 0.75f));
+    // Tinted side walls (the GI bleeds both tints across the hall).
+    pushBox("left wall", {-7.05f, 2.1f, 0.0f}, {0.05f, 2.1f, 6.0f}, glm::vec3(0.30f, 0.36f, 0.55f));
+    pushBox("right wall", {7.05f, 2.1f, 0.0f}, {0.05f, 2.1f, 6.0f}, glm::vec3(0.62f, 0.42f, 0.30f));
+
+    // Polished-metal floor strip across the hall's width: the full room
+    // (lamps, spheres, walls) mirrored at the floor.
+    {
+        SceneMesh &strip = pushBox(
+            "metal floor strip", {0.0f, 0.012f, -1.0f}, {7.0f, 0.012f, 0.28f}, glm::vec3(0.72f, 0.73f, 0.75f));
+        strip.material.roughnessFactor = 0.05f;
+        strip.material.metallicFactor  = 1.0f;
+        strip.giAlbedo[0]           = 0.05f;
+        strip.giAlbedo[1]           = 0.05f;
+        strip.giAlbedo[2]           = 0.055f;
+        strip.rfRoughness           = 0.05f;
+        strip.rfMetallic            = 1.0f;
+    }
+
+    // Mid-hall half-height partition (two leaves with a gap the frosted pane
+    // fills) and the columns flanking the back wall.
+    pushBox("partition left", {-1.75f, 1.35f, -1.2f}, {1.75f, 1.35f, 0.1f}, glm::vec3(0.85f, 0.83f, 0.80f));
+    pushBox("partition right", {2.9f, 1.35f, -1.2f}, {0.7f, 1.35f, 0.1f}, glm::vec3(0.85f, 0.83f, 0.80f));
+    pushBox("column left", {-4.5f, 2.1f, -3.5f}, {0.35f, 2.1f, 0.35f}, glm::vec3(0.52f, 0.50f, 0.47f));
+    pushBox("column right", {4.5f, 2.1f, -3.5f}, {0.35f, 2.1f, 0.35f}, glm::vec3(0.52f, 0.50f, 0.47f));
+
+    // Left-back raised platform with three steps down toward the hall.
+    pushBox("platform", {-4.2f, 0.35f, -4.2f}, {2.8f, 0.35f, 1.8f}, glm::vec3(0.66f, 0.63f, 0.58f));
+    pushBox("step low", {-4.2f, 0.117f, -2.15f}, {1.4f, 0.117f, 0.25f}, glm::vec3(0.64f, 0.61f, 0.56f));
+    pushBox("step mid", {-4.2f, 0.35f, -1.65f}, {1.4f, 0.35f, 0.25f}, glm::vec3(0.64f, 0.61f, 0.56f));
+    pushBox("step high", {-4.2f, 0.583f, -1.15f}, {1.4f, 0.583f, 0.25f}, glm::vec3(0.64f, 0.61f, 0.56f));
+
+    // Reflecting pool: a wide transmissive slab under the main ceiling panel.
+    // The warm light passes through the water (and the glass sphere resting
+    // in it) and the photon pass deposits the focused irradiance on the floor
+    // texels beneath - the caustics showcase of the scene.
+    {
+        SceneMesh &pool = pushBox("pool water", {2.8f, 0.06f, -0.5f}, {1.6f, 0.06f, 1.5f}, glm::vec3(0.12f, 0.18f, 0.24f));
+        pool.material.roughnessFactor = 0.06f;
+        pool.material.metallicFactor  = 0.0f;
+        pool.material.opacity           = 0.3f;
+        pool.material.indexOfRefraction = 1.33f;
+        pool.giAlbedo[0]           = 0.10f;
+        pool.giAlbedo[1]           = 0.16f;
+        pool.giAlbedo[2]           = 0.22f;
+        pool.rfRoughness           = 0.06f;
+        pool.rfMetallic            = 0.0f;
+    }
+
+    // Stacked crates on the right back corner.
+    pushBox("crate large", {5.8f, 0.4f, -4.6f}, {0.4f, 0.4f, 0.4f}, glm::vec3(0.48f, 0.34f, 0.20f));
+    pushBox("crate small", {5.8f, 1.05f, -4.6f}, {0.3f, 0.25f, 0.3f}, glm::vec3(0.42f, 0.30f, 0.18f));
+
+    // Emissive panels: the hall's only light sources. One large warm panel
+    // above the pool, two cool cove strips along the ceiling's side edges,
+    // and a warm sconce on the back wall.
+    SceneMesh lamps;
+    appendQuad(lamps, {2.0f, 4.19f, -1.8f}, {1.6f, 0.0f, 0.0f}, {0.0f, 0.0f, 2.6f}, {0.0f, -1.0f, 0.0f});
+    appendQuad(lamps, {-6.95f, 4.19f, -5.0f}, {0.3f, 0.0f, 0.0f}, {0.0f, 0.0f, 10.0f}, {0.0f, -1.0f, 0.0f});
+    appendQuad(lamps, {6.65f, 4.19f, -5.0f}, {0.3f, 0.0f, 0.0f}, {0.0f, 0.0f, 10.0f}, {0.0f, -1.0f, 0.0f});
+    appendQuad(lamps, {-0.9f, 2.25f, -5.93f}, {1.8f, 0.0f, 0.0f}, {0.0f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f});
+    lamps.material.emissiveColor[0] = 14.5f;
+    lamps.material.emissiveColor[1] = 13.6f;
+    lamps.material.emissiveColor[2] = 12.2f;
+    lamps.giEmissive[0]             = 14.5f;
+    lamps.giEmissive[1]             = 13.6f;
+    lamps.giEmissive[2]             = 12.2f;
+    lamps.name = "lamps";
+    scene.push_back(std::move(lamps));
+
+    // Brushed-metal back-wall panels flanking the sconce (the
+    // radiance-cache band: no dedicated rays, the rough lobe resamples the
+    // world cache with the emissive highlight capture).
+    for (std::int32_t side = 0; side < 2; ++side)
+    {
+        SceneMesh panel;
+        const float x = side == 0 ? -2.6f : 2.6f;
+        appendBox(panel, {x, 2.3f, -5.94f}, {0.9f, 0.65f, 0.012f});
+        panel.material.baseColor[0] = 0.66f;
+        panel.material.baseColor[1] = 0.62f;
+        panel.material.baseColor[2] = 0.58f;
+        panel.material.roughnessFactor = 0.35f;
+        panel.material.metallicFactor  = 1.0f;
+        panel.giAlbedo[0]           = 0.66f;
+        panel.giAlbedo[1]           = 0.62f;
+        panel.giAlbedo[2]           = 0.58f;
+        panel.rfRoughness           = 0.35f;
+        panel.rfMetallic            = 1.0f;
+        panel.name = side == 0 ? "brushed panel left" : "brushed panel right";
+        scene.push_back(std::move(panel));
+    }
+
+    // Chrome sphere on the platform and a small gold sphere by the pool:
+    // dedicated-ray metals at two color temperatures.
+    {
+        SceneMesh chromeSphere;
+        appendSphere(chromeSphere, {-3.4f, 1.12f, -4.4f}, 0.42f, 48, 24);
+        chromeSphere.material.baseColor[0] = 0.72f;
+        chromeSphere.material.baseColor[1] = 0.73f;
+        chromeSphere.material.baseColor[2] = 0.75f;
+        chromeSphere.material.roughnessFactor = 0.15f;
+        chromeSphere.material.metallicFactor  = 1.0f;
+        chromeSphere.giAlbedo[0]           = 0.05f;
+        chromeSphere.giAlbedo[1]           = 0.05f;
+        chromeSphere.giAlbedo[2]           = 0.055f;
+        chromeSphere.rfRoughness           = 0.15f;
+        chromeSphere.rfMetallic            = 1.0f;
+        chromeSphere.name = "chrome sphere";
+        scene.push_back(std::move(chromeSphere));
+    }
+    {
+        SceneMesh goldSphere;
+        appendSphere(goldSphere, {5.6f, 0.22f, 1.8f}, 0.22f, 32, 16);
+        goldSphere.material.baseColor[0] = 0.94f;
+        goldSphere.material.baseColor[1] = 0.71f;
+        goldSphere.material.baseColor[2] = 0.29f;
+        goldSphere.material.roughnessFactor = 0.1f;
+        goldSphere.material.metallicFactor  = 1.0f;
+        goldSphere.giAlbedo[0]           = 0.05f;
+        goldSphere.giAlbedo[1]           = 0.04f;
+        goldSphere.giAlbedo[2]           = 0.02f;
+        goldSphere.rfRoughness           = 0.1f;
+        goldSphere.rfMetallic            = 1.0f;
+        goldSphere.name = "gold sphere";
+        scene.push_back(std::move(goldSphere));
+    }
+
+    // Spinning chrome cube on the metal strip: the dynamic-surface test piece
+    // (renderer + lumen_gi + lumen_reflection all receive its per-frame
+    // rotation), catching the moving room reflection.
+    {
+        SceneMesh chromeCube;
+        appendBox(chromeCube, {0.0f, 0.31f, -1.0f}, {0.28f, 0.28f, 0.28f});
+        chromeCube.material.baseColor[0] = 0.72f;
+        chromeCube.material.baseColor[1] = 0.73f;
+        chromeCube.material.baseColor[2] = 0.75f;
+        chromeCube.material.roughnessFactor = 0.1f;
+        chromeCube.material.metallicFactor  = 1.0f;
+        chromeCube.giAlbedo[0]           = 0.05f;
+        chromeCube.giAlbedo[1]           = 0.05f;
+        chromeCube.giAlbedo[2]           = 0.055f;
+        chromeCube.rfRoughness           = 0.1f;
+        chromeCube.rfMetallic            = 1.0f;
+        chromeCube.name = "chrome cube";
+        scene.push_back(std::move(chromeCube));
+    }
+
+    // Transparent and translucent props, pushed last and drawn last.
+    // Glass sphere resting in the pool: transmission chains under the warm
+    // panel plus the caustics it focuses onto the floor beneath the water.
+    {
+        SceneMesh glassSphere;
+        appendSphere(glassSphere, {1.6f, 0.46f, 0.4f}, 0.34f, 48, 24);
+        glassSphere.material.baseColor[0] = 0.96f;
+        glassSphere.material.baseColor[1] = 0.98f;
+        glassSphere.material.baseColor[2] = 0.97f;
+        glassSphere.material.roughnessFactor = 0.06f;
+        glassSphere.material.metallicFactor  = 0.0f;
+        glassSphere.material.opacity           = 0.04f;
+        glassSphere.material.indexOfRefraction = 1.5f;
+        glassSphere.giAlbedo[0]           = 0.05f;
+        glassSphere.giAlbedo[1]           = 0.05f;
+        glassSphere.giAlbedo[2]           = 0.055f;
+        glassSphere.rfRoughness           = 0.06f;
+        glassSphere.rfMetallic            = 0.0f;
+        glassSphere.name = "glass sphere";
+        scene.push_back(std::move(glassSphere));
+    }
+    // Frosted pane filling the partition's gap.
+    {
+        SceneMesh frostedPane;
+        appendBox(frostedPane, {1.1f, 1.05f, -1.2f}, {1.1f, 1.05f, 0.025f});
+        frostedPane.material.baseColor[0] = 0.92f;
+        frostedPane.material.baseColor[1] = 0.88f;
+        frostedPane.material.baseColor[2] = 0.82f;
+        frostedPane.material.roughnessFactor = 0.3f;
+        frostedPane.material.metallicFactor  = 0.0f;
+        frostedPane.material.opacity           = 0.55f;
+        frostedPane.material.indexOfRefraction = 1.45f;
+        frostedPane.giAlbedo[0]           = 0.55f;
+        frostedPane.giAlbedo[1]           = 0.52f;
+        frostedPane.giAlbedo[2]           = 0.48f;
+        frostedPane.rfRoughness           = 0.3f;
+        frostedPane.rfMetallic            = 0.0f;
+        frostedPane.name = "frosted pane";
+        scene.push_back(std::move(frostedPane));
+    }
+    // Ruby glass cube on the platform next to the chrome sphere.
+    {
+        SceneMesh rubyCube;
+        appendBox(rubyCube, {-4.6f, 0.83f, -3.6f}, {0.13f, 0.13f, 0.13f});
+        rubyCube.material.baseColor[0] = 0.72f;
+        rubyCube.material.baseColor[1] = 0.08f;
+        rubyCube.material.baseColor[2] = 0.10f;
+        rubyCube.material.roughnessFactor = 0.05f;
+        rubyCube.material.metallicFactor  = 0.0f;
+        rubyCube.material.opacity           = 0.15f;
+        rubyCube.material.indexOfRefraction = 1.5f;
+        rubyCube.giAlbedo[0]           = 0.05f;
+        rubyCube.giAlbedo[1]           = 0.01f;
+        rubyCube.giAlbedo[2]           = 0.015f;
+        rubyCube.rfRoughness           = 0.05f;
+        rubyCube.rfMetallic            = 0.0f;
+        rubyCube.name = "ruby cube";
+        scene.push_back(std::move(rubyCube));
+    }
 
     return scene;
 }
