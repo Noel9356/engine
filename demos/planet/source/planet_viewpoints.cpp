@@ -75,10 +75,110 @@ void clampCameraPitch(const glm::dvec3 &eye, const glm::dvec3 &localUp, glm::dve
            - localUp * (viewLength * std::sin(pitch));
 }
 
+// The biome name table: the classifier's 16 climate zones with their CLI
+// spellings (shared by --biome validation and the biome-pinned view).
+const std::vector<std::string> &biomeNames()
+{
+    static const std::vector<std::string> names = {
+        "deep_ocean", "ocean", "shallow_ocean", "beach", "desert", "savanna", "grassland",
+        "shrubland", "temperate_forest", "seasonal_forest", "tropical_rainforest",
+        "temperate_rainforest", "taiga", "tundra", "snow", "rock",
+    };
+    return names;
+}
+
+bool biomeFromName(const std::string &name, planet::Biome &outBiome)
+{
+    const std::vector<std::string> &names = biomeNames();
+    for (std::size_t index = 0; index < names.size(); ++index)
+    {
+        if (name == names[index])
+        {
+            outBiome = static_cast<planet::Biome>(index);
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *biomeName(planet::Biome biome)
+{
+    const std::uint32_t id = static_cast<std::uint32_t>(biome);
+    return id < biomeNames().size() ? biomeNames()[id].c_str() : "unknown";
+}
+
+// The three open-water climate zones (depth-banded by the classifier).
+bool isWaterBiome(planet::Biome biome)
+{
+    return biome == planet::Biome::DeepOcean || biome == planet::Biome::Ocean
+        || biome == planet::Biome::ShallowOcean;
+}
+
+std::size_t runBiomeCensus(planet::PlanetCapability &planetCapability, planet::PlanetHandle planet,
+    const planet::PlanetGenerationParams &params, std::uint32_t samples)
+{
+    const std::vector<std::string>                 &names = biomeNames();
+    std::vector<std::size_t>                        counts(names.size(), 0);
+    const std::vector<planet::Vec3>                 directions = goldenSpiralDirections(samples);
+    std::size_t                                     sampled   = 0;
+    for (const planet::Vec3 &direction : directions)
+    {
+        double radius = 0.0;
+        const double dirArray[3] = {direction.x, direction.y, direction.z};
+        if (!planetCapability.sampleSurfaceRadius(planetCapability.self, planet, dirArray, &radius))
+        {
+            continue;
+        }
+        engine::planet::ClimateSample climate{};
+        if (!planetCapability.sampleClimate(planetCapability.self, planet, dirArray, radius, &climate))
+        {
+            continue;
+        }
+        engine::planet::Biome biome = climate.biome;
+        // Slope-derived reclassification, same as the pin machinery: climate
+        // samples always carry a flat-ground slope, so bare rock never shows
+        // up in climate.biome; the relief field's cliff factor (the mesher's
+        // rock-row gate) is where rock actually lives.
+        planet::ReliefSample relief{};
+        if (planetCapability.sampleRelief(planetCapability.self, planet, dirArray, &relief)
+            && relief.cliffFactor >= params.cliffSteepnessLow)
+        {
+            biome = planet::Biome::Rock;
+        }
+        const std::size_t id = static_cast<std::size_t>(biome);
+        if (id < counts.size())
+        {
+            counts[id] += 1;
+        }
+        sampled += 1;
+    }
+    std::size_t present = 0;
+    std::string absent;
+    for (std::size_t id = 0; id < names.size(); ++id)
+    {
+        if (counts[id] == 0)
+        {
+            absent += (absent.empty() ? "" : ", ") + names[id];
+            continue;
+        }
+        present += 1;
+        std::printf("demo_planet:   %-22s %8zu  %6.2f%%\n", names[id].c_str(), counts[id],
+            100.0 * static_cast<double>(counts[id]) / static_cast<double>(sampled));
+    }
+    std::printf("demo_planet: biome census over %zu of %u golden-spiral samples: %zu of %zu climate zones present\n",
+        sampled, samples, present, names.size());
+    if (!absent.empty())
+    {
+        std::printf("demo_planet:   absent on this seed: %s\n", absent.c_str());
+    }
+    return present;
+}
+
 bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHandle planet,
     const std::function<bool(double elevation, engine::planet::Biome biome, double temperature01,
         const planet::PlanetGenerationParams &params)>& predicate, ProbePolicy policy, double eyeHeight,
-    const planet::Vec3 &sunDirection, Viewpoint &out)
+    const planet::Vec3 &sunDirection, Viewpoint &out, const planet::Biome *neighborhoodBiome,
+    std::size_t choiceIndex)
 {
     planet::PlanetGenerationParams params{};
     planetCapability.copyGenerationParams(planetCapability.self, planet, &params);
@@ -91,7 +191,80 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
     // the fine spiral down to candidates that already stand on terraced
     // mountain country; the full probe/fan machinery then runs on those.
     std::vector<planet::Vec3> candidates;
-    if (policy == ProbePolicy::Mountain)
+    // Pinned views (and pinned beach views riding the coastline machinery)
+    // need the fine spiral: a single-biome predicate is far sparser than any
+    // windowed one (deserts and bare-rock faces each cover a few percent of
+    // the globe), and the coarse 256-point spiral can miss a zone entirely -
+    // the pin then silently degraded to the generic surface spot and
+    // photographed the wrong biome. The pre-filter matches the PINNED BIOME's
+    // own surface sample (not the mountain pre-filter - that gate would
+    // exclude exactly the flat desert basins and low rock terraces a pin
+    // wants). The candidates list itself is only a pre-filter: the predicate
+    // still runs on the full climate/elevation state, and the neighborhood
+    // probes below still dominate the score.
+    const bool prefilterByBiome = neighborhoodBiome != nullptr
+        && (policy == ProbePolicy::Pinned || policy == ProbePolicy::Coastline);
+    if (prefilterByBiome)
+    {
+        std::uint32_t spiralCount = 2048;
+        candidates.reserve(96);
+        for (int attempt = 0; attempt < 2 && candidates.empty(); ++attempt)
+        {
+            const std::vector<planet::Vec3> fine = goldenSpiralDirections(spiralCount);
+            for (const planet::Vec3 &direction : fine)
+            {
+                if (candidates.size() >= 128)
+                {
+                    break;
+                }
+                double radius = 0.0;
+                const double dirArray[3] = {direction.x, direction.y, direction.z};
+                if (!planetCapability.sampleSurfaceRadius(planetCapability.self, planet, dirArray, &radius))
+                {
+                    continue;
+                }
+                engine::planet::ClimateSample climate{};
+                if (!planetCapability.sampleClimate(planetCapability.self, planet, dirArray, radius, &climate))
+                {
+                    continue;
+                }
+                bool keep = climate.biome == *neighborhoodBiome;
+                if (!keep && *neighborhoodBiome == planet::Biome::Rock)
+                {
+                    // Rock is slope-only through the capability (climate samples
+                    // always carry a flat-ground slope), so the pre-filter probes
+                    // the relief field's cliff factor - the same steepness gate
+                    // the mesher's rock row keys on.
+                    planet::ReliefSample relief{};
+                    if (planetCapability.sampleRelief(planetCapability.self, planet, dirArray, &relief))
+                    {
+                        // cliffFactor is the terraced-country mask (saturating at
+                        // cliffSteepnessHigh, opening at cliffSteepnessLow) - NOT
+                        // the slope threshold the classifier uses; a face the
+                        // mask calls terraced IS the bare-rock face the mesher's
+                        // rock row paints on its steep risers.
+                        keep = relief.cliffFactor >= params.cliffSteepnessLow;
+                    }
+                }
+                if (keep)
+                {
+                    candidates.push_back(direction);
+                }
+            }
+            // A zone can exist only in pockets smaller than the spiral's
+            // footprint: escalate once to an 8x denser spiral before calling
+            // the biome absent (the failure log then distinguishes "rare"
+            // from "absent").
+            if (candidates.empty() && attempt == 0)
+            {
+                std::cout << "demo_planet: biome '" << biomeName(*neighborhoodBiome)
+                          << "' produced no candidates on the " << spiralCount
+                          << "-point spiral; escalating to " << (spiralCount * 8) << " points\n";
+                spiralCount *= 8;
+            }
+        }
+    }
+    else if (policy == ProbePolicy::Mountain)
     {
         const std::vector<planet::Vec3> fine = goldenSpiralDirections(2048);
         candidates.reserve(96);
@@ -130,6 +303,17 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
     double      bestElevation   = 0.0;
     double      bestTemperature = 0.0;
     int         bestBiome       = 0;
+    // Runner-up (choiceIndex > 0): the second-strongest candidate at least
+    // kRunnerSeparationDot apart on the globe. Substitution pins reuse it so
+    // a substituted sample photographs a DIFFERENT pocket of the same zone
+    // instead of duplicating that zone's own pin pixel-for-pixel.
+    Viewpoint   runner{};
+    double      runnerScore = 0.0;
+    double      runnerElevation = 0.0;
+    double      runnerTemperature = 0.0;
+    int         runnerBiome = 0;
+    bool        haveRunner = false;
+    static constexpr double kRunnerSeparationDot = 0.995; // ~7.6 km apart on the 60 km globe
     // Diagnostics: the strongest candidate that FAILED the sight gate (its
     // probe quality and the gate that rejected it), printed when the pick
     // fails so tuning sees what rejected the best spots.
@@ -174,6 +358,25 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             biome         = climate.biome;
             temperature01 = climate.temperature01;
         }
+        // Slope-derived biomes (bare rock) need the terrain's own steepness:
+        // the capability samples climate with a flat-ground slope, so a spot
+        // on a cliff face reports the biome of the flats at its feet. The
+        // relief sample's cliff factor IS the terrain's steepness gate (the
+        // same field the mesher's rock row keys on), so re-classify from it
+        // and re-run the predicate so the pin gates see the honest biome.
+        {
+            planet::ReliefSample spotRelief{};
+            const double spotDirArray[3] = {direction.x, direction.y, direction.z};
+            if (planetCapability.sampleRelief(planetCapability.self, planet, spotDirArray, &spotRelief)
+                && spotRelief.cliffFactor >= params.cliffSteepnessLow)
+            {
+                biome = planet::Biome::Rock;
+                if (!predicate(elevation, biome, temperature01, params))
+                {
+                    continue;
+                }
+            }
+        }
         if (!predicate(elevation, biome, temperature01, params))
         {
             continue;
@@ -216,6 +419,7 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         }
         tangent       = tangent * (1.0 / tangentLength);
         const planet::Vec3 bitangent = planet::cross(direction, tangent);
+
         // Mountain policy rings pull in to a quarter-kilometer first hop:
         // the cliff view's showcase is the terrace RISER and the strata beds
         // riding it, and the angular LOD rule only resolves a step's wall
@@ -229,6 +433,13 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         const std::size_t ringCount  = policy == ProbePolicy::Coastline ? 1u : 3u;
         std::size_t probesOk = 0;
         std::size_t probes   = 0;
+        // Rock pins count steep hops (cliff-masked or high mountain
+        // country): the score below prefers canyons and terrace systems over
+        // gentle semi-arid hills with a passing cliff factor, while keeping
+        // the weak spots eligible (a hard hop gate would strand seeds whose
+        // warm rock country is all low-relief).
+        std::size_t steepHops = 0;
+        std::size_t aridHops   = 0;
         std::vector<double> probeElevations;
         probeElevations.reserve(24);
         // Cliff-wall bookkeeping (Mountain policy): the strongest terraced
@@ -271,17 +482,92 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                         || b == engine::planet::Biome::Taiga;
                 };
                 bool probeOk = false;
-                if (policy == ProbePolicy::Coastline)
+                if (policy == ProbePolicy::Pinned)
                 {
-                    // The coast view wants water in frame: sea probes are
-                    // fine, and land probes should be green behind the beach.
-                    // The temperature gate is low: shoreline air is cooled by
-                    // the lapse rate whenever the beach sits on high ground.
-                    probeOk = hopElevation < 0.0
-                        || (hopClimate.biome != engine::planet::Biome::Snow
-                            && hopClimate.biome != engine::planet::Biome::Tundra
-                            && hopClimate.temperature01 > 0.32
-                            && isGreenBiome(hopClimate.biome));
+                    // Biome-pinned sample views: the spot's biome identity is
+                    // the predicate's own gate, and the ring probes score how
+                    // deeply the spot sits INSIDE the pinned zone (a fringe
+                    // spot's ring is mostly the neighboring biome - it
+                    // photographs as that neighbor with a few stray pins).
+                    // Water views pass no neighborhood biome: every hop is
+                    // open sea and all count. Bare-rock faces are the one
+                    // zone that can never own a whole ring: the biome exists
+                    // only on steep faces, whose 420+ m ring hops land on the
+                    // terraces and slopes around them, so rock accepts the
+                    // cold high-country neighbors a cliff stands in.
+                    if (neighborhoodBiome == nullptr)
+                    {
+                        probeOk = true;
+                    }
+                    else if (*neighborhoodBiome == planet::Biome::Rock)
+                    {
+                        // A cliff face's ring hops land on the terraces, scree
+                        // and slopes of the massif it belongs to - the rock
+                        // country the sample photographs. Bare-rock faces
+                        // cover only a few percent of any globe, so no ring
+                        // is ever uniformly rock; accept every hop that
+                        // sampled at all (the spot predicate and the
+                        // cliff-mask pre-filter already guarantee the spot
+                        // itself is terraced mountain country).
+                        probeOk = true;
+                        // Steep-hop bookkeeping: hops that land on
+                        // cliff-masked faces or real mountain country mark
+                        // the spot as sitting inside a canyon/terrace system
+                        // rather than beside one lone bluff.
+                        engine::planet::ReliefSample hopRelief{};
+                        if (planetCapability.sampleRelief(planetCapability.self, planet, hopArray, &hopRelief)
+                            && (hopRelief.cliffFactor >= params.cliffSteepnessLow
+                                || hopRelief.mountainFactor >= 0.40))
+                        {
+                            ++steepHops;
+                        }
+                        // Arid-hop bookkeeping: rock reads strongest as
+                        // canyon/strata country in dry belts (desert and
+                        // savanna surroundings); green farmland around a
+                        // cliff reads as an outcrop in a meadow. The score
+                        // prefers arid settings when the seed offers them.
+                        if (hopClimate.biome == planet::Biome::Desert
+                            || hopClimate.biome == planet::Biome::Savanna)
+                        {
+                            ++aridHops;
+                        }
+                    }
+                    else
+                    {
+                        probeOk = hopClimate.biome == *neighborhoodBiome;
+                    }
+                }
+                else if (policy == ProbePolicy::Coastline)
+                {
+                    if (neighborhoodBiome != nullptr && isWaterBiome(*neighborhoodBiome))
+                    {
+                        // Pinned water sample (deep_ocean / ocean /
+                        // shallow_ocean): the pin's own depth window chose
+                        // the zone, every hop is open sea, and the odd islet
+                        // in a ring is a bonus, not a disqualifier.
+                        probeOk = true;
+                    }
+                    else if (neighborhoodBiome != nullptr)
+                    {
+                        // Pinned coastline zone (beach): sea probes pass, the
+                        // pinned zone's own hops pass (beach-to-beach), and
+                        // the green hinterland behind the shoreline passes.
+                        probeOk = hopElevation < 0.0
+                            || hopClimate.biome == *neighborhoodBiome
+                            || (hopClimate.temperature01 > 0.32 && isGreenBiome(hopClimate.biome));
+                    }
+                    else
+                    {
+                        // The coast view wants water in frame: sea probes are
+                        // fine, and land probes should be green behind the beach.
+                        // The temperature gate is low: shoreline air is cooled by
+                        // the lapse rate whenever the beach sits on high ground.
+                        probeOk = hopElevation < 0.0
+                            || (hopClimate.biome != engine::planet::Biome::Snow
+                                && hopClimate.biome != engine::planet::Biome::Tundra
+                                && hopClimate.temperature01 > 0.32
+                                && isGreenBiome(hopClimate.biome));
+                    }
                 }
                 else if (policy == ProbePolicy::Mountain)
                 {
@@ -535,6 +821,23 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         // located the strongest terraced rise; that wall IS the
         // cliff-ahead signal (the camera aims at it below).
         cliffAhead = hasCliffWall;
+        // Pinned water sample (deep_ocean / ocean / shallow_ocean): open
+        // water IS the subject. The coast gates below demand land AND water
+        // in the fan - right for a coast view, wrong for a deep-ocean pin
+        // (every candidate fails "no land in sight fan" and the pin silently
+        // degrades to the generic fallback spot). Water pins keep the wall
+        // caps (they still frame a readable horizon) but skip the
+        // composition gates.
+        const bool waterPin = policy == ProbePolicy::Coastline && neighborhoodBiome != nullptr
+            && isWaterBiome(*neighborhoodBiome);
+        // Water-pin land fraction: an ocean-band sample photographs open
+        // water, not a coastline; a shallow-band sample is nearshore by
+        // nature. Scoring the fraction of fan probes that hit land lets the
+        // best-of search put the ocean-band pin offshore while the shallow
+        // band keeps its shelf framing (adjacent depth bands would otherwise
+        // pick near-identical shoreline spots and duplicate the sample).
+        std::size_t landFanProbes  = 0;
+        std::size_t totalFanProbes = 0;
         for (std::size_t ring = 0; ring < kSightRingCount && sightClear; ++ring)
         {
             for (std::size_t yaw = 0; yaw < 5 && sightClear; ++yaw)
@@ -584,6 +887,14 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                     break;
                 }
                 const double sightElevation = sightRadius - params.derivedSeaRadiusMeters;
+                if (waterPin)
+                {
+                    ++totalFanProbes;
+                    if (sightElevation > 2.0)
+                    {
+                        ++landFanProbes;
+                    }
+                }
                 if (policy == ProbePolicy::Coastline)
                 {
                     // Land/water flags key on the probe's ABSOLUTE elevation
@@ -624,14 +935,14 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 }
             }
         }
-        if (policy == ProbePolicy::Coastline && !(sawLand && sawWater))
+        if (policy == ProbePolicy::Coastline && !waterPin && !(sawLand && sawWater))
         {
             // No shoreline inside the frame's whole sight fan: this is open
             // ocean or deep inland, not a coast view.
             sightClear = false;
             failReason = sawLand ? "no water in sight fan" : (sawWater ? "no land in sight fan" : "fan all level (no land, no water)");
         }
-        if (policy == ProbePolicy::Coastline && sightClear && !(sawLandNear && sawWaterNear))
+        if (policy == ProbePolicy::Coastline && !waterPin && sightClear && !(sawLandNear && sawWaterNear))
         {
             // The shoreline is farther than 220 m on every fan yaw: from a
             // 120 m eye the near field renders as open ocean even though a
@@ -662,9 +973,42 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         probeSpread = std::sqrt(probeSpread / static_cast<double>(probeElevations.size()));
         const double targetSpread = policy == ProbePolicy::Mountain ? 150.0 : (policy == ProbePolicy::Coastline ? 45.0 : 60.0);
         const double reliefBonus  = 0.5 + 0.5 * std::min(1.0, probeSpread / targetSpread);
+        // Pinned samples score on the neighborhood fraction ALONE: the relief
+        // bonus exists for showcase landscape views (a perfectly flat plain
+        // photographs as an empty sheet), but a climate-zone sample's subject
+        // is the zone itself - flat taiga bogs and low forest shelves are the
+        // HONEST sample for those climates, and the relief factor was pushing
+        // exactly those pins under the pass threshold.
+        const double probeFraction = static_cast<double>(probesOk) / static_cast<double>(probes);
 
-        double score = sightClear ? (static_cast<double>(probesOk) / static_cast<double>(probes)) * reliefBonus : 0.0;
-        const double probeQuality = (static_cast<double>(probesOk) / static_cast<double>(probes)) * reliefBonus;
+        double score = sightClear ? probeFraction * (policy == ProbePolicy::Pinned ? 1.0 : reliefBonus) : 0.0;
+        if (waterPin && totalFanProbes > 0 && sightClear)
+        {
+            // Water-pin land avoidance: the ocean band should photograph open
+            // water, and adjacent depth bands (ocean vs shallow_ocean) hug the
+            // same shorelines - without this term both bands' best-of picks
+            // land on the same coast and the two samples duplicate each other.
+            // A 60% penalty at all-land keeps any nearshore spot eligible
+            // (pathological all-coast seeds) while making the offshore
+            // candidate win whenever one exists.
+            score *= 1.0 - 0.6 * (static_cast<double>(landFanProbes) / static_cast<double>(totalFanProbes));
+        }
+        if (neighborhoodBiome != nullptr && *neighborhoodBiome == planet::Biome::Rock && probes > 0 && sightClear)
+        {
+            // Rock-pin terracing preference: a warm cliff spot whose ring is
+            // full of cliff-masked or mountainous hops sits inside a real
+            // canyon/terrace system (0.75x .. 2.0x), while a lone bluff on
+            // gentle hills keeps a passing score. The best-of search then
+            // lands the rock sample on the strongest strata country the warm
+            // belt offers instead of the first qualifying slope.
+            score *= 0.75 + 1.25 * (static_cast<double>(steepHops) / static_cast<double>(probes));
+            // Rock-pin arid preference: dry surroundings (desert/savanna
+            // country) let the strata walls read as canyon country; the
+            // term stays a preference so seeds with only green rock country
+            // still place a pin.
+            score *= 0.85 + 0.90 * (static_cast<double>(aridHops) / static_cast<double>(probes));
+        }
+        const double probeQuality = probeFraction * reliefBonus;
         if (!sightClear && probeQuality > bestFailQuality)
         {
             bestFailQuality   = probeQuality;
@@ -720,6 +1064,17 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         }
         if (score > bestScore)
         {
+            // Demote the previous best to the runner-up slot (it is the
+            // strongest known alternative distinct from the new best).
+            if (haveBest && planet::dot(best.direction, direction) < kRunnerSeparationDot)
+            {
+                runner          = best;
+                runnerScore     = bestScore;
+                runnerElevation = bestElevation;
+                runnerTemperature = bestTemperature;
+                runnerBiome     = bestBiome;
+                haveRunner      = true;
+            }
             bestScore   = score;
             best.direction     = direction;
             best.surfaceRadius = radius;
@@ -739,13 +1094,45 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             bestTemperature = temperature01;
             bestBiome = static_cast<int>(biome);
         }
+        else if (score > runnerScore && haveBest
+            && planet::dot(best.direction, direction) < kRunnerSeparationDot)
+        {
+            runnerScore     = score;
+            runner.direction = direction;
+            runner.surfaceRadius = radius;
+            runner.hasLookTangent = hasWaterward || sunValid || hasCliffWall;
+            runner.lookTangent    = hasWaterward ? waterwardTangent
+                                : (hasCliffWall ? cliffWallTangent
+                                : (sunValid ? yawedTangents[bestYaw] : planet::Vec3{}));
+            haveRunner      = true;
+            runnerElevation = elevation;
+            runnerTemperature = temperature01;
+            runnerBiome     = static_cast<int>(biome);
+        }
     }
 
-    if (haveBest && bestScore >= 0.5)
+    // Pass threshold: 0.5 for showcase views. Pinned samples take a quarter
+    // of the ring: a climate zone covering a fraction of a percent of the
+    // globe (the census's rarest rows) sits as mosaic patches inside other
+    // biomes' country, and the best achievable neighborhood fraction is
+    // small - the predicate already guarantees the SPOT itself is the
+    // pinned zone, so the threshold only guards the degenerate all-fringe
+    // case, not showcase composition.
+    const double passThreshold = policy == ProbePolicy::Pinned ? 0.25 : 0.5;
+    if (haveBest && bestScore >= passThreshold)
     {
-        out = best;
-        std::cout << "demo_planet: viewpoint (best-of-planet " << bestScore << ") - elevation " << bestElevation
-                  << " m, temperature " << bestTemperature << ", biome " << bestBiome << "\n";
+        const bool useRunner = choiceIndex > 0 && haveRunner;
+        out = useRunner ? runner : best;
+        std::cout << "demo_planet: viewpoint (" << (useRunner ? "runner-up" : "best-of-planet") << " "
+                  << (useRunner ? runnerScore : bestScore) << ") - elevation "
+                  << (useRunner ? runnerElevation : bestElevation)
+                  << " m, temperature " << (useRunner ? runnerTemperature : bestTemperature) << ", biome "
+                  << (useRunner ? runnerBiome : bestBiome) << "\n";
+        if (useRunner && choiceIndex > 1)
+        {
+            std::cout << "demo_planet: viewpoint choice index " << choiceIndex
+                      << " beyond the tracked runner-up; using the runner-up\n";
+        }
         return true;
     }
     // Diagnostics for tuning: show how close the best candidate came, so a

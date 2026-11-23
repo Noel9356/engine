@@ -237,6 +237,7 @@ void setDryPatchStrength(PlanetGenerationParams &params, double value) { params.
 void setDryPatchWavelength(PlanetGenerationParams &params, double value) { params.dryPatchWavelengthMeters = value; }
 void setSnowLine(PlanetGenerationParams &params, double value) { params.snowLineMeters = value; }
 void setBeachWidth(PlanetGenerationParams &params, double value) { params.beachWidthMeters = value; }
+void setBeachShorelineWobble(PlanetGenerationParams &params, double value) { params.beachShorelineWobble = value; }
 void setRockSlopeThreshold(PlanetGenerationParams &params, double value) { params.rockSlopeThreshold = value; }
 void setRockStrataContrast(PlanetGenerationParams &params, double value) { params.rockStrataContrast = value; }
 void setTerrainTextureTileGround(PlanetGenerationParams &params, double value) { params.terrainTextureTileMetersGround = value; }
@@ -277,6 +278,7 @@ void setAerialPerspectiveScaleMeters(PlanetGenerationParams &params, double valu
     params.aerialPerspectiveScaleMeters = value;
 }
 void setAerialPerspectiveAsymptote(PlanetGenerationParams &params, double value) { params.aerialPerspectiveAsymptote = value; }
+void setSunDirectTintStrength(PlanetGenerationParams &params, double value) { params.sunDirectTintStrength = value; }
 void setDebugChunkBorders(PlanetGenerationParams &params, double value) { params.debugChunkBorders = value != 0.0; }
 void setDebugChunkBorderWidth(PlanetGenerationParams &params, double value) { params.debugChunkBorderWidthMeters = value; }
 void setCliffSteepnessLow(PlanetGenerationParams &params, double value) { params.cliffSteepnessLow = value; }
@@ -294,6 +296,7 @@ void setCloudCoverage(PlanetGenerationParams &params, double value) { params.clo
 void setCloudWavelength(PlanetGenerationParams &params, double value) { params.cloudWavelengthMeters = value; }
 void setCloudAltitude(PlanetGenerationParams &params, double value) { params.cloudAltitudeMeters = value; }
 void setCloudDetailStrength(PlanetGenerationParams &params, double value) { params.cloudDetailStrength = value; }
+void setCloudBillowStrength(PlanetGenerationParams &params, double value) { params.cloudBillowStrength = value; }
 void setCloudEdgeSoftness(PlanetGenerationParams &params, double value) { params.cloudEdgeSoftness = value; }
 void setCloudWeatherStrength(PlanetGenerationParams &params, double value) { params.cloudWeatherStrength = value; }
 void setCloudWeatherWavelengthMultiple(PlanetGenerationParams &params, double value) { params.cloudWeatherWavelengthMultiple = value; }
@@ -304,6 +307,52 @@ void setCloudShadowSoftness(PlanetGenerationParams &params, double value) { para
 void setStarsEnabled(PlanetGenerationParams &params, double value) { params.starsEnabled = value != 0.0; }
 void setStarsDensity(PlanetGenerationParams &params, double value) { params.starsDensity = value; }
 void setStarsBrightness(PlanetGenerationParams &params, double value) { params.starsBrightness = value; }
+void setGalaxyBandStrength(PlanetGenerationParams &params, double value) { params.galaxyBandStrength = value; }
+void setGalaxyBandWidthRadians(PlanetGenerationParams &params, double value)
+{
+    params.galaxyBandWidthRadians = value;
+}
+void setMoonEnabled(PlanetGenerationParams &params, double value) { params.moonEnabled = value != 0.0; }
+void setMoonAngularRadius(PlanetGenerationParams &params, double value) { params.moonAngularRadiusRadians = value; }
+void setMoonOrbitalPeriodSeconds(PlanetGenerationParams &params, double value)
+{
+    params.moonOrbitalPeriodSeconds = value;
+}
+void setMoonOrbitInclinationRadians(PlanetGenerationParams &params, double value)
+{
+    params.moonOrbitInclinationRadians = value;
+}
+void setMoonAlbedo(PlanetGenerationParams &params, double value) { params.moonAlbedo = value; }
+void setAuroraEnabled(PlanetGenerationParams &params, double value) { params.auroraEnabled = value != 0.0; }
+void setAuroraStrength(PlanetGenerationParams &params, double value) { params.auroraStrength = value; }
+void setVegetationEnabled(PlanetGenerationParams &params, double value) { params.vegetationEnabled = value != 0.0; }
+void setVegetationTreeDensity(PlanetGenerationParams &params, double value) { params.vegetationTreeDensity = value; }
+void setVegetationBushDensity(PlanetGenerationParams &params, double value) { params.vegetationBushDensity = value; }
+void setVegetationGrassDensity(PlanetGenerationParams &params, double value) { params.vegetationGrassDensity = value; }
+void setVegetationTreeRadius(PlanetGenerationParams &params, double value) { params.vegetationTreeRadiusMeters = value; }
+void setVegetationGrassRadius(PlanetGenerationParams &params, double value) { params.vegetationGrassRadiusMeters = value; }
+void setSurfaceRockDensity(PlanetGenerationParams &params, double value) { params.surfaceRockDensity = value; }
+void setSurfaceRockRadius(PlanetGenerationParams &params, double value) { params.surfaceRockRadiusMeters = value; }
+void setWhitecapsEnabled(PlanetGenerationParams &params, double value) { params.whitecapsEnabled = value != 0.0; }
+void setWhitecapStrength(PlanetGenerationParams &params, double value) { params.whitecapStrength = value; }
+void setWhitecapWindSpeed(PlanetGenerationParams &params, double value) { params.whitecapWindSpeedMps = value; }
+void setSurfFoamEnabled(PlanetGenerationParams &params, double value) { params.surfFoamEnabled = value != 0.0; }
+void setSurfFoamStrength(PlanetGenerationParams &params, double value) { params.surfFoamStrength = value; }
+void setBirdsEnabled(PlanetGenerationParams &params, double value) { params.birdsEnabled = value != 0.0; }
+void setBirdFlockCount(PlanetGenerationParams &params, double value) { params.birdFlockCount = value; }
+void setBirdFlockSize(PlanetGenerationParams &params, double value) { params.birdFlockSize = value; }
+void setValleyMistEnabled(PlanetGenerationParams &params, double value) { params.valleyMistEnabled = value != 0.0; }
+void setValleyMistStrength(PlanetGenerationParams &params, double value) { params.valleyMistStrength = value; }
+void setScatterRebuildDistance(PlanetGenerationParams &params, double value) { params.scatterRebuildDistanceMeters = value; }
+void setSurfaceShadowStrength(PlanetGenerationParams &params, double value) { params.surfaceShadowStrength = value; }
+void setStarDiscRadiusMin(PlanetGenerationParams &params, double value)
+{
+    params.starDiscRadiusMinRadians = value;
+}
+void setStarDiscRadiusMax(PlanetGenerationParams &params, double value)
+{
+    params.starDiscRadiusMaxRadians = value;
+}
 
 constexpr SettingRow kSettingRows[] = {
     {"seed",                      SettingKind::Integer, setSeed, setSeedRaw},
@@ -449,6 +498,7 @@ constexpr SettingRow kSettingRows[] = {
     {"dry_patch_wavelength_meters",   SettingKind::Floating, setDryPatchWavelength},
     {"snow_line_meters",              SettingKind::Floating, setSnowLine},
     {"beach_width_meters",            SettingKind::Floating, setBeachWidth},
+    {"beach_shoreline_wobble",         SettingKind::Floating, setBeachShorelineWobble},
     {"beach_wet_width_meters",        SettingKind::Floating, setBeachWetWidth},
     {"beach_wet_darkening",           SettingKind::Floating, setBeachWetDarkening},
     {"rock_slope_threshold",          SettingKind::Floating, setRockSlopeThreshold},
@@ -473,6 +523,7 @@ constexpr SettingRow kSettingRows[] = {
     {"cloud_wavelength_meters",       SettingKind::Floating, setCloudWavelength},
     {"cloud_altitude_meters",         SettingKind::Floating, setCloudAltitude},
     {"cloud_detail_strength",         SettingKind::Floating, setCloudDetailStrength},
+    {"cloud_billow_strength",         SettingKind::Floating, setCloudBillowStrength},
     {"cloud_edge_softness",           SettingKind::Floating, setCloudEdgeSoftness},
     {"cloud_weather_strength",        SettingKind::Floating, setCloudWeatherStrength},
     {"cloud_weather_wavelength_multiple", SettingKind::Floating, setCloudWeatherWavelengthMultiple},
@@ -483,6 +534,37 @@ constexpr SettingRow kSettingRows[] = {
     {"stars_enabled",                 SettingKind::Boolean,  setStarsEnabled},
     {"stars_density",                 SettingKind::Floating, setStarsDensity},
     {"stars_brightness",              SettingKind::Floating, setStarsBrightness},
+    {"star_disc_radius_min_radians",  SettingKind::Floating, setStarDiscRadiusMin},
+    {"star_disc_radius_max_radians",  SettingKind::Floating, setStarDiscRadiusMax},
+    {"galaxy_band_strength",          SettingKind::Floating, setGalaxyBandStrength},
+    {"galaxy_band_width_radians",     SettingKind::Floating, setGalaxyBandWidthRadians},
+    {"moon_enabled",                  SettingKind::Boolean,  setMoonEnabled},
+    {"moon_angular_radius_radians",   SettingKind::Floating, setMoonAngularRadius},
+    {"moon_orbital_period_seconds",   SettingKind::Floating, setMoonOrbitalPeriodSeconds},
+    {"moon_orbit_inclination_radians", SettingKind::Floating, setMoonOrbitInclinationRadians},
+    {"moon_albedo",                   SettingKind::Floating, setMoonAlbedo},
+    {"aurora_enabled",                SettingKind::Boolean,  setAuroraEnabled},
+    {"aurora_strength",               SettingKind::Floating, setAuroraStrength},
+    {"vegetation_enabled",             SettingKind::Boolean,  setVegetationEnabled},
+    {"vegetation_tree_density",        SettingKind::Floating, setVegetationTreeDensity},
+    {"vegetation_bush_density",        SettingKind::Floating, setVegetationBushDensity},
+    {"vegetation_grass_density",       SettingKind::Floating, setVegetationGrassDensity},
+    {"vegetation_tree_radius_meters",  SettingKind::Floating, setVegetationTreeRadius},
+    {"vegetation_grass_radius_meters", SettingKind::Floating, setVegetationGrassRadius},
+    {"surface_rock_density",           SettingKind::Floating, setSurfaceRockDensity},
+    {"surface_rock_radius_meters",     SettingKind::Floating, setSurfaceRockRadius},
+    {"whitecap_enabled",               SettingKind::Boolean,  setWhitecapsEnabled},
+    {"whitecap_strength",              SettingKind::Floating, setWhitecapStrength},
+    {"whitecap_wind_speed_mps",        SettingKind::Floating, setWhitecapWindSpeed},
+    {"surf_foam_enabled",              SettingKind::Boolean,  setSurfFoamEnabled},
+    {"surf_foam_strength",             SettingKind::Floating, setSurfFoamStrength},
+    {"birds_enabled",                  SettingKind::Boolean,  setBirdsEnabled},
+    {"bird_flock_count",               SettingKind::Floating, setBirdFlockCount},
+    {"bird_flock_size",                SettingKind::Floating, setBirdFlockSize},
+    {"valley_mist_enabled",            SettingKind::Boolean,  setValleyMistEnabled},
+    {"valley_mist_strength",           SettingKind::Floating, setValleyMistStrength},
+    {"scatter_rebuild_distance_meters", SettingKind::Floating, setScatterRebuildDistance},
+    {"surface_shadow_strength",        SettingKind::Floating, setSurfaceShadowStrength},
     {"sea_ice_temperature",           SettingKind::Floating, setSeaIceTemperature},
     {"sea_ice_transition",            SettingKind::Floating, setSeaIceTransition},
     {"water_wave_amplitude",          SettingKind::Floating, setWaterWaveAmplitude},
@@ -505,6 +587,7 @@ constexpr SettingRow kSettingRows[] = {
     {"atmosphere_height_meters",      SettingKind::Floating, setAtmosphereHeight},
     {"aerial_perspective_scale_meters",  SettingKind::Floating, setAerialPerspectiveScaleMeters},
     {"aerial_perspective_asymptote",  SettingKind::Floating, setAerialPerspectiveAsymptote},
+    {"sun_direct_tint_strength",      SettingKind::Floating, setSunDirectTintStrength},
     {"debug_chunk_borders",           SettingKind::Boolean,  setDebugChunkBorders},
     {"debug_chunk_border_width_meters", SettingKind::Floating, setDebugChunkBorderWidth},
 };

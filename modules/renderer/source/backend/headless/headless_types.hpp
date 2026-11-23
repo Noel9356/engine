@@ -194,8 +194,16 @@ struct HeadlessTexture
         {
             return sampleBilinearAt(low, u, v);
         }
-        const glm::vec3 coarse = sampleBilinearAt(low, u, v);
-        const glm::vec3 fine   = sampleBilinearAt(low + 1 <= mipChain.size() ? low + 1 : low, u, v);
+        // Level low is the FINER of the floor/ceil pair (level 0 is the base
+        // image; sampleBilinearAt(k) walks coarser as k grows): blend = 0 at
+        // the band's floor footprint, 1 at its ceiling, so the finer level
+        // holds the band's start and the coarser takes over as the footprint
+        // grows. The weights follow that direction - swapping them flips the
+        // interpolation end to end, and the level then jumps a whole step at
+        // every integer footprint crossing instead of blending (visible as
+        // concentric sharpness rings around the eye over textured terrain).
+        const glm::vec3 fine   = sampleBilinearAt(low, u, v);
+        const glm::vec3 coarse = sampleBilinearAt(low + 1 <= mipChain.size() ? low + 1 : low, u, v);
         return fine * (1.0f - blend) + coarse * blend;
     }
 

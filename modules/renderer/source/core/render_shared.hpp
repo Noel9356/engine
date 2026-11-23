@@ -23,6 +23,7 @@
 #include <engine/lumen_reflection/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
+#include <engine/util/png.hpp>
 #include <engine/util/ppm.hpp>
 
 #include <glm/common.hpp>
@@ -215,6 +216,20 @@ inline bool writePpm(const char *filePath, std::uint32_t width, std::uint32_t he
     std::size_t sourceStrideBytes, bool flipVertically, bool swapRedBlue, RenderError *error)
 {
     if (!util::writePpmRgba(filePath, width, height, rgba, sourceStrideBytes, flipVertically, swapRedBlue))
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+    reportError(error, RenderError::None);
+    return true;
+}
+
+// Writes an 8-bit truecolor PNG from the same RGBA8 raster (the PPM
+// writer's PNG twin: same flip/swap conventions, same error reporting).
+inline bool writePng(const char *filePath, std::uint32_t width, std::uint32_t height, const std::uint8_t *rgba,
+    std::size_t sourceStrideBytes, bool flipVertically, bool swapRedBlue, RenderError *error)
+{
+    if (!util::writePngRgba(filePath, width, height, rgba, sourceStrideBytes, flipVertically, swapRedBlue))
     {
         reportError(error, RenderError::CreationFailed);
         return false;

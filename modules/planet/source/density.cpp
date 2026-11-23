@@ -702,9 +702,14 @@ double DensityField::cloudShadow(const Vec3 &unitDirection, double lowPassCutoff
     // sunlight around a cloud comes through a penumbra, so the shadow's
     // edges blur beyond the outline that casts them instead of repeating it
     // as a hard copy - the harsh dark blotches a 1:1 shade produces read as
-    // stencil cuts, not weather.
+    // stencil cuts, not weather. The field omits the billow lobe octave
+    // (see CloudField::coverage includeBillow): a penumbra-widened shadow
+    // cannot resolve lobe-scale detail, and this evaluation runs per
+    // streaming chunk, where the octave's 27-cell walk would tax every
+    // build.
     const double shadowSoftness = 1.0 + 2.0 * params_.cloudShadowSoftness;
-    return params_.cloudShadowStrength * clouds_.coverage(normalized(samplePoint), lowPassCutoffMeters, shadowSoftness);
+    return params_.cloudShadowStrength
+        * clouds_.coverage(normalized(samplePoint), lowPassCutoffMeters, shadowSoftness, false);
 }
 
 } // namespace planet

@@ -1,0 +1,17 @@
+# Capture-host profile for demo_planet sample photography: relaxes the
+# screen-space LOD one step (0.02 -> 0.04 radians per finest voxel) so the
+# whole visible chunk set fits the meshing budget of a small capture host.
+#
+# The default planet config keeps the reference look. Load this profile only
+# when photographing on a machine that cannot fill the default visible set
+# inside the capture's settle window:
+#   demo_planet --profile config/profiles/capture_host.toml --biome beach ...
+#
+# The relaxation costs little at the sample cameras' ranges (the finest
+# voxels only apply within ~100 m of a 140 m eye, and the vegetation sprites
+# are billboards whose detail does not ride the terrain LOD), while removing
+# the mid-stream ancestor-sheet artifacts a partially filled visible set
+# leaves across the far water and mid-ground.
+
+[planet]
+lod_angular_voxel_radians = 0.04

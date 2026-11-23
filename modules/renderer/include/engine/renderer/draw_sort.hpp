@@ -65,6 +65,8 @@ inline int compareRenderMaterialValues(const MeshMaterial &lhs, const MeshMateri
         return result;
     if ((result = compareInteger(lhs.unlit, rhs.unlit)) != 0)
         return result;
+    if ((result = compareFloat(lhs.alphaCutoff, rhs.alphaCutoff)) != 0)
+        return result;
     // Last: the depth-write flag, then the transmission pair. Equal
     // materials only batch together when they also agree on depth writes -
     // the two states bind different pipeline variants (and, in the
@@ -133,6 +135,7 @@ inline std::uint64_t renderDrawCommandSortSignature(
             mixFloat(component);
         mix(static_cast<std::uint64_t>(material.emissiveTexture));
         mix(static_cast<std::uint64_t>(material.unlit));
+        mixFloat(material.alphaCutoff);
         mix(static_cast<std::uint64_t>(material.depthWrite));
         mixFloat(material.opacity);
         mixFloat(material.indexOfRefraction);

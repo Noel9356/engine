@@ -1,6 +1,9 @@
 #include "planet_chunk_renderer.hpp"
+#include "planet_scatter.hpp"
 
 #include <engine/planet/capabilities.hpp>
+#include <engine/planet/fbm.hpp>
+#include <engine/planet/noise.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/planet.hpp>
 #include <engine/planet/types.hpp>
@@ -629,14 +632,10 @@ bool buildCoverageShellMesh(const planet::CloudField &field, const planet::Plane
             {
                 continue; // already part of a merged interior rectangle
             }
-            // Ring order: top-left, top-right, bottom-right, bottom-left;
-            // each ring step crosses one cell edge (top, right, bottom,
-            // left).
             const std::uint32_t tl = band * stride + segment;
             const std::uint32_t tr = tl + 1u;
             const std::uint32_t br = tl + stride + 1u;
             const std::uint32_t bl = tl + stride;
-            const std::uint32_t ring[4] = {tl, tr, br, bl};
             const float cornerCoverage[4] = {coverageAt(band, segment), coverageAt(band, segment + 1u),
                 coverageAt(band + 1u, segment + 1u), coverageAt(band + 1u, segment)};
             const float floorThisQuad = quadFloors[static_cast<std::size_t>(band) * quadStride + segment];
@@ -928,6 +927,262 @@ void buildSunDiscMesh(std::vector<planet::PlanetVertex> &vertices, std::vector<s
     }
 }
 
+// Builds the moon companion's sphere on the unit ball: a lat-long grid
+// whose vertex colors bake the regolith albedo - dark basaltic maria
+// provinces under bright cratered highlands (a provincial simplex-fBm plus a
+// fine mottling octave, both seed-derived) - and whose normals point
+// outward, so the LIT draw shades the phase from the sun direction by
+// itself. The maria span a third of the ball at most, the way a real
+// companion's dark provinces read against its cratered highs.
+void buildMoonMesh(const planet::PlanetGenerationParams &params, std::vector<planet::PlanetVertex> &vertices,
+    std::vector<std::uint32_t> &indices, std::uint32_t segments, std::uint32_t bands)
+{
+    const std::int64_t mariaSeed
+        = static_cast<std::int64_t>(planet::hashCombine64(params.seed, 0x4D4142ULL)); // "MAB" maria basalt
+    const planet::FbmStreamSeeds mariaSeeds = planet::makeFbmSeeds(mariaSeed, 3);
+    const planet::FbmStreamSeeds mottleSeeds = planet::makeFbmSeeds(
+        static_cast<std::int64_t>(planet::hashCombine64(static_cast<std::uint64_t>(mariaSeed), 0x4077ULL)), 2);
+
+    vertices.reserve(static_cast<std::size_t>((segments + 1u) * (bands + 1u)));
+    indices.reserve(static_cast<std::size_t>(segments * bands * 6u));
+    for (std::uint32_t band = 0; band <= bands; ++band)
+    {
+        const double latitude = -glm::pi<double>() * 0.5
+            + glm::pi<double>() * (static_cast<double>(band) / static_cast<double>(bands));
+        const double cosLatitude = std::cos(latitude);
+        const double sinLatitude = std::sin(latitude);
+        for (std::uint32_t segment = 0; segment <= segments; ++segment)
+        {
+            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(segments);
+            const glm::dvec3 direction(std::cos(azimuth) * cosLatitude, sinLatitude,
+                std::sin(azimuth) * cosLatitude);
+            // Maria provinces: one three-octave stream at hemispheric scale;
+            // the threshold picks the dark basalt flats out of the highlands.
+            const planet::Vec3 unit{direction.x, direction.y, direction.z};
+            const double maria = planet::fbm(mariaSeeds, unit, 1.1, planet::FbmParams{3, 2.0, 0.5}, 0.0);
+            double albedo = planet::mix(0.27, 0.60, planet::smoothstep(-0.22, 0.28, maria));
+            // Fine mottling: crater-floor brightness noise so the highs do
+            // not read as one flat tone.
+            const double mottle = planet::fbm(mottleSeeds, unit, 0.14, planet::FbmParams{2, 2.0, 0.5}, 0.0);
+            albedo *= 0.93 + 0.07 * planet::clamp01(0.5 + 0.5 * mottle);
+            // Regolith grey with a faint warm lean (the real surface's
+            // spectral slope); the albedo carries the maria structure.
+            planet::PlanetVertex vertex{};
+            vertex.position[0] = static_cast<float>(direction.x);
+            vertex.position[1] = static_cast<float>(direction.y);
+            vertex.position[2] = static_cast<float>(direction.z);
+            vertex.normal[0]   = static_cast<float>(direction.x);
+            vertex.normal[1]   = static_cast<float>(direction.y);
+            vertex.normal[2]   = static_cast<float>(direction.z);
+            vertex.color[0]    = static_cast<float>(albedo * 0.985);
+            vertex.color[1]    = static_cast<float>(albedo * 0.965);
+            vertex.color[2]    = static_cast<float>(albedo * 0.945);
+            vertices.push_back(vertex);
+        }
+    }
+    for (std::uint32_t band = 0; band < bands; ++band)
+    {
+        for (std::uint32_t segment = 0; segment < segments; ++segment)
+        {
+            const std::uint32_t a = band * (segments + 1u) + segment;
+            const std::uint32_t b = a + 1u;
+            const std::uint32_t c = a + (segments + 1u);
+            const std::uint32_t d = c + 1u;
+            indices.insert(indices.end(), {a, b, c, b, d, c});
+        }
+    }
+}
+
+// Builds the aurora curtain: one narrow oval above each spin pole whose
+// CURTAINS STAND VERTICALLY - the latitude band spans a few degrees while
+// the altitude climbs from the curtain's foot to its top (see the aurora
+// constants in atmosphere.hpp; real curtains rise radially from a tight
+// oval, and a latitude-equals-altitude tilt reads as a tent from space).
+// The split of work matters: the VERTEX COLORS carry only the curtain's
+// chroma (oxygen-green foot, nitrogen-violet crown) while the whole
+// INTENSITY field - night gate, ray striations, altitude fade - is baked
+// into a small RGBA texture's alpha channel (white RGB, alpha = intensity).
+// The transparent route composites at opacity * texel alpha, so a day-side
+// column's texels carry alpha ~0 and vanish instead of alpha-darkening the
+// sky behind them - the old bake put the intensity into the colors alone,
+// and a drawn-but-black column then read as a dark smear across the bright
+// limb and the daylight sky. The night gate is keyed against the run's sun
+// direction (the mesh is static after upload). Quads whose every corner
+// falls below the gate are still skipped outright so the day side does not
+// even rasterize. The vertices are planet-local meters, world-anchored at
+// the planet center like the cloud shell.
+void buildAuroraMesh(const planet::PlanetGenerationParams &params, const glm::dvec3 &sunDirection,
+    std::vector<planet::PlanetVertex> &vertices, std::vector<std::uint32_t> &indices,
+    std::vector<std::uint8_t> &alphaPixels)
+{
+    const glm::dvec3 spin = glm::normalize(glm::dvec3(params.axis[0], params.axis[1], params.axis[2]));
+    glm::dvec3 prime = glm::cross(spin, glm::dvec3(0.0, 0.0, 1.0));
+    if (glm::length(prime) < 1.0e-6)
+    {
+        prime = glm::cross(spin, glm::dvec3(1.0, 0.0, 0.0));
+    }
+    prime = glm::normalize(prime);
+    const glm::dvec3 coPrime = glm::cross(spin, prime);
+    const glm::dvec3 sun = glm::length(sunDirection) > 1.0e-9 ? glm::normalize(sunDirection) : glm::dvec3(0.0, 1.0, 0.0);
+    const std::int64_t raySeed
+        = static_cast<std::int64_t>(planet::hashCombine64(params.seed, 0xA04AULL)); // "AOA" aurora rays
+    // Curtain rays ~2.6 deg of azimuth apart: the striation field is keyed
+    // to the ring's azimuth only (constant along a ray's climb), so the
+    // rays stand vertically around the pole the way real curtains do.
+    const double rayWavenumber = 24.0;
+
+    constexpr std::uint32_t kSegments = 192;
+    constexpr std::uint32_t kBands = 7;
+    // Green line at the foot, nitrogen violet at the crown (the real
+    // curtain's altitude chemistry); linear RGB emissive tones.
+    constexpr double kAuroraGreen[3]  = {0.18, 0.98, 0.45};
+    constexpr double kAuroraViolet[3] = {0.44, 0.22, 0.62};
+    // A curtain column renders only when its foot clears this gate value:
+    // fully-day columns would alpha-darken the terrain behind them, and the
+    // vertical cut reads as a curtain end.
+    constexpr double kQuadGateFloor = 0.10;
+    // The intensity texture: one azimuth column per 256 texels, one band row
+    // per pole half (rows 0..kBands north, kBands+1..2*kBands+1 south).
+    constexpr std::uint32_t kAlphaWidth = 256;
+    constexpr std::uint32_t kAlphaHeight = 2u * (kBands + 1u);
+
+    // The curtain's intensity field, shared by the alpha texture and the
+    // column gate: night gate x ray striation x altitude fade.
+    const auto intensityAt = [&](int pole, double azimuth, double bandT)
+    {
+        const double latitude = planet::auroraOvalLatitudeLowRadians
+            + (planet::auroraOvalLatitudeHighRadians - planet::auroraOvalLatitudeLowRadians) * bandT;
+        const glm::dvec3 direction = prime * (std::cos(azimuth) * std::cos(latitude))
+            + coPrime * (std::sin(azimuth) * std::cos(latitude))
+            + spin * (static_cast<double>(pole) * std::sin(latitude));
+        const double ray = 0.5 + 0.5 * planet::noise::simplex3ImproveXY(raySeed,
+            std::cos(azimuth) * rayWavenumber, std::sin(azimuth) * rayWavenumber,
+            static_cast<double>(pole) * 7.0);
+        // Night gate: the curtain glows through the terminator into deep
+        // night (orbital photographs show the oval as a faint arc crossing
+        // even the twilight limb) and fades out on the day side, so a
+        // bright-blue morning sky stays clean.
+        const double nightGate = 1.0 - planet::smoothstep(-0.05, 0.32, glm::dot(direction, sun));
+        // Vertical profile: brightest at the foot and thinning to NOTHING
+        // at the crown (a curtain that ends at partial brightness shows a
+        // hard rectangular rim against the sky); the ray field breaks the
+        // ring into curtains.
+        const double fade = std::pow(1.0 - bandT, 1.45);
+        return nightGate * (0.35 + 0.65 * std::pow(ray, 1.7)) * fade;
+    };
+
+    struct RingPoint
+    {
+        planet::PlanetVertex vertex;
+    };
+    const auto ringPoint = [&](int pole, std::uint32_t band, std::uint32_t segment)
+    {
+        const double bandT = static_cast<double>(band) / static_cast<double>(kBands);
+        const double latitude = planet::auroraOvalLatitudeLowRadians
+            + (planet::auroraOvalLatitudeHighRadians - planet::auroraOvalLatitudeLowRadians) * bandT;
+        const double altitude = planet::auroraBaseAltitudeMeters
+            + (planet::auroraTopAltitudeMeters - planet::auroraBaseAltitudeMeters) * bandT;
+        const double radius = params.radiusMeters + altitude;
+        const double azimuth
+            = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(kSegments);
+        const glm::dvec3 direction = prime * (std::cos(azimuth) * std::cos(latitude))
+            + coPrime * (std::sin(azimuth) * std::cos(latitude))
+            + spin * (static_cast<double>(pole) * std::sin(latitude));
+        RingPoint point{}; // value-init: the untouched uv pair must read as finite zeros
+        // Chroma only - the intensity field rides the alpha texture, so the
+        // blend carries the glow's brightness (the composite multiplies the
+        // same way: chroma x strength x opacity x intensity).
+        const double violet = bandT * bandT;
+        point.vertex.color[0]    = static_cast<float>(planet::mix(kAuroraGreen[0], kAuroraViolet[0], violet));
+        point.vertex.color[1]    = static_cast<float>(planet::mix(kAuroraGreen[1], kAuroraViolet[1], violet));
+        point.vertex.color[2]    = static_cast<float>(planet::mix(kAuroraGreen[2], kAuroraViolet[2], violet));
+        // Intensity texture coordinates: u wraps the ring (the seam vertex
+        // repeats direction azimuth 0 with u = 1), v lands on the pole's own
+        // row block with the +0.5 putting band centers on texel centers.
+        const std::uint32_t row = static_cast<std::uint32_t>(band)
+            + (pole == 1 ? 0u : kBands + 1u);
+        point.vertex.uv[0]       = static_cast<float>(static_cast<double>(segment) / static_cast<double>(kSegments));
+        point.vertex.uv[1]       = static_cast<float>((static_cast<double>(row) + 0.5)
+            / static_cast<double>(kAlphaHeight));
+        point.vertex.position[0] = static_cast<float>(direction.x * radius);
+        point.vertex.position[1] = static_cast<float>(direction.y * radius);
+        point.vertex.position[2] = static_cast<float>(direction.z * radius);
+        point.vertex.normal[0]   = static_cast<float>(direction.x);
+        point.vertex.normal[1]   = static_cast<float>(direction.y);
+        point.vertex.normal[2]   = static_cast<float>(direction.z);
+        return point;
+    };
+
+    // The intensity texture: RGB is a neutral white multiplier (the vertex
+    // colors carry the chroma); the alpha channel is the curtain's intensity
+    // field - night gate x ray striation x altitude fade - sampled at the
+    // same bandT the ring rows interpolate. The transparent route's blend
+    // factor is opacity * texel alpha, so a day-side column's texels carry
+    // alpha ~0 and composite to nothing.
+    alphaPixels.assign(static_cast<std::size_t>(kAlphaWidth) * kAlphaHeight * 4u, 255u);
+    for (int pole = 1; pole >= -1; pole -= 2)
+    {
+        const std::uint32_t rowOffset = pole == 1 ? 0u : kBands + 1u;
+        for (std::uint32_t band = 0; band <= kBands; ++band)
+        {
+            const double bandT = static_cast<double>(band) / static_cast<double>(kBands);
+            for (std::uint32_t column = 0; column < kAlphaWidth; ++column)
+            {
+                const double azimuth = glm::two_pi<double>() * static_cast<double>(column)
+                    / static_cast<double>(kAlphaWidth);
+                const double intensity = intensityAt(pole, azimuth, bandT);
+                const std::size_t index
+                    = (static_cast<std::size_t>(rowOffset + band) * kAlphaWidth + column) * 4u;
+                alphaPixels[index + 3] = static_cast<std::uint8_t>(
+                    std::clamp(intensity, 0.0, 1.0) * 255.0);
+            }
+        }
+    }
+
+    vertices.reserve(static_cast<std::size_t>(2u * (kSegments + 1u) * (kBands + 1u)));
+    indices.reserve(static_cast<std::size_t>(2u * kSegments * kBands * 6u));
+    for (int pole = 1; pole >= -1; pole -= 2)
+    {
+        // One grid per pole: the pole sign folds into the ring direction
+        // (and into the night gate and the ray field's seed offset), so the
+        // southern oval glows on ITS night side with its own curtain rays.
+        const std::uint32_t base = static_cast<std::uint32_t>(vertices.size());
+        for (std::uint32_t band = 0; band <= kBands; ++band)
+        {
+            for (std::uint32_t segment = 0; segment <= kSegments; ++segment)
+            {
+                vertices.push_back(ringPoint(pole, band, segment).vertex);
+            }
+        }
+        // Curtain columns: a column whose foot falls below the gate floor is
+        // skipped WHOLE (every altitude band), so the ring's boundary is a
+        // set of vertical cuts aligned with its own ray striations - the
+        // edges read as curtain ends, never as a sliced sheet. Inside a kept
+        // column the altitude fade rides the alpha texture alone.
+        for (std::uint32_t segment = 0; segment < kSegments; ++segment)
+        {
+            const auto footIntensity = [&](std::uint32_t column)
+            {
+                const double azimuth = glm::two_pi<double>() * static_cast<double>(column % kSegments)
+                    / static_cast<double>(kSegments);
+                return intensityAt(pole, azimuth, 0.0);
+            };
+            if (std::max(footIntensity(segment), footIntensity(segment + 1u)) < kQuadGateFloor)
+            {
+                continue;
+            }
+            for (std::uint32_t band = 0; band < kBands; ++band)
+            {
+                const std::uint32_t a = base + band * (kSegments + 1u) + segment;
+                const std::uint32_t b = a + 1u;
+                const std::uint32_t c = a + (kSegments + 1u);
+                const std::uint32_t d = c + 1u;
+                indices.insert(indices.end(), {a, b, c, b, d, c});
+            }
+        }
+    }
+}
+
 // The one description shape every upload in this file uses: canonical
 // attributes, 32-bit indices, the canonical vertex stride. The attribute
 // array is cached once (canonicalAttributes returns by value).
@@ -1173,13 +1428,17 @@ void PlanetChunkRenderer::updateVisibleChunks()
     }
 }
 
+void PlanetChunkRenderer::setSurfaceScatter(PlanetScatterSystem *scatter)
+{
+    surfaceScatter_ = scatter;
+}
+
 void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, const glm::dvec3 &eyePlanetLocal,
     const planet::Vec3 &sunTint, const glm::dvec3 &renderShift)
 {
     drawCommands_.clear();
-    terrainMaterials_.clear();
-    rockMaterials_.clear();
-    waterMaterials_.clear();
+    // The material stores clear (and below, reserve) before any command
+    // takes pointers into them.
 
     // Draw order: opaque scene geometry first, transparent/cloudy geometry
     // depth-tested against it, then the backdrop shells.
@@ -1212,13 +1471,24 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         return glm::mat4(shiftToEye * glm::dmat4(absolute));
     };
     frameBackdropMatrices_.clear();
-    frameBackdropMatrices_.reserve(6);
+    frameBackdropMatrices_.reserve(8);
+    // The scatter matrices back the OPAQUE scatter pass and the transparent
+    // scatter tail below; clearing per frame keeps the store bounded and
+    // every push inside the reserve, so the draw commands' modelMatrix
+    // pointers stay valid until the frame is submitted (an uncleared,
+    // growing store reallocates mid-frame and the earlier commands then
+    // read freed memory - observed as a billboard stretched across the
+    // whole sky by a garbage transform).
+    frameScatterMatrices_.clear();
+    frameScatterMatrices_.reserve(16);
     frameBackdropMatrices_.push_back(composeShifted(atmosphereShellTransform_));
     frameBackdropMatrices_.push_back(composeShifted(skyCloudTransform_));
     frameBackdropMatrices_.push_back(composeShifted(cloudLayerTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(moonTransform_));
     frameBackdropMatrices_.push_back(composeShifted(sunDiscTransform_));
     frameBackdropMatrices_.push_back(composeShifted(starDomeTransform_));
     frameBackdropMatrices_.push_back(composeShifted(skyDomeTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(auroraTransform_));
 
     if (atmosphereShellActive_ && atmosphereShell_ != renderer::invalidMesh && !atmosphereShellMaterials_.empty())
     {
@@ -1461,6 +1731,33 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         }
     }
 
+    // Surface scatter (opaque pass): vegetation, surface rocks and birds
+    // right after the terrain they stand on (depth-tested against it, depth
+    // writes on - the alpha-cutout foliage keeps its own depth consistent).
+    // The matrices compose the scatter anchors exactly like the chunk
+    // placements: f64 subtract of the render shift, then the f32 pipeline
+    // sees eye-relative coordinates only.
+    if (surfaceScatter_ != nullptr)
+    {
+        const std::vector<renderer::RenderDrawCommand> &scatterCommands = surfaceScatter_->drawCommands();
+        const std::vector<glm::dvec3> &scatterAnchors = surfaceScatter_->commandAnchors();
+        for (std::size_t index = 0; index < scatterCommands.size(); ++index)
+        {
+            const renderer::MeshMaterial *material = scatterCommands[index].material;
+            const bool transparent = material != nullptr && material->opacity < 1.0f;
+            if (transparent)
+            {
+                continue; // foam and mist ride the transparent tail below
+            }
+            const glm::dmat4 placement = glm::translate(
+                glm::dmat4(1.0), planetCenter + scatterAnchors[index]);
+            frameScatterMatrices_.push_back(composeShifted(glm::mat4(placement)));
+            renderer::RenderDrawCommand command = scatterCommands[index];
+            command.modelMatrix = glm::value_ptr(frameScatterMatrices_.back());
+            drawCommands_.push_back(command);
+        }
+    }
+
     // Backdrop shells behind and above the scene: the cloud geometry first
     // (depth-tested against the terrain drawn above), then the unlit space
     // shells and the sky dome. See the draw-order comment at the top.
@@ -1485,7 +1782,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     {
         renderer::RenderDrawCommand command{};
         command.mesh = sunDisc_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[3]);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[4]);
         command.material = &sunDiscMaterials_.front();
         drawCommands_.push_back(command);
     }
@@ -1493,17 +1790,68 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     {
         renderer::RenderDrawCommand command{};
         command.mesh = starDome_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[4]);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[5]);
         command.material = &starDomeMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    // The moon rides the backdrop list AFTER the star dome and BEFORE the
+    // sky dome: the depth comparison is strict-less, so a companion placed
+    // just inside the dome's radius both survives the later dome draw (the
+    // dome's equal-or-farther fragments fail against the moon's depth) and
+    // stays hidden behind the nearer cloud deck's banks. Its own depth
+    // writes then hide the stars behind it.
+    if (moonActive_ && moon_ != renderer::invalidMesh && !moonMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = moon_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[3]);
+        command.material = &moonMaterials_.front();
         drawCommands_.push_back(command);
     }
     if (skyDomeActive_ && skyDome_ != renderer::invalidMesh && !skyDomeMaterials_.empty())
     {
         renderer::RenderDrawCommand command{};
         command.mesh = skyDome_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[5]);
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[6]);
         command.material = &skyDomeMaterials_.front();
         drawCommands_.push_back(command);
+    }
+    // The aurora is translucent (opacity < 1): the backend routes it into
+    // the transparent pass regardless of its list position, alpha-blending
+    // it over the finished opaque scene. Emitted last so the command list
+    // reads far-to-near inside its own class (the rings sit behind
+    // everything but the star dome).
+    if (auroraActive_ && aurora_ != renderer::invalidMesh && !auroraMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = aurora_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[7]);
+        command.material = &auroraMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+
+    // Surface scatter (transparent tail): breaking-wave foam and valley mist
+    // alpha-blend over the finished opaque scene, depth writes off, ordered
+    // after the aurora with it (the backend routes both by their materials).
+    if (surfaceScatter_ != nullptr)
+    {
+        const std::vector<renderer::RenderDrawCommand> &scatterCommands = surfaceScatter_->drawCommands();
+        const std::vector<glm::dvec3> &scatterAnchors = surfaceScatter_->commandAnchors();
+        for (std::size_t index = 0; index < scatterCommands.size(); ++index)
+        {
+            const renderer::MeshMaterial *material = scatterCommands[index].material;
+            const bool transparent = material != nullptr && material->opacity < 1.0f;
+            if (!transparent)
+            {
+                continue;
+            }
+            const glm::dmat4 placement = glm::translate(
+                glm::dmat4(1.0), planetCenter + scatterAnchors[index]);
+            frameScatterMatrices_.push_back(composeShifted(glm::mat4(placement)));
+            renderer::RenderDrawCommand command = scatterCommands[index];
+            command.modelMatrix = glm::value_ptr(frameScatterMatrices_.back());
+            drawCommands_.push_back(command);
+        }
     }
 }
 
@@ -1679,12 +2027,25 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // stays dense past half the ring and thins out only over the last
     // stretch before the rim - an early fade leaves a dark ring between the
     // terrain silhouette and the air glow, which reads as a gap instead of
-    // atmosphere.
+    // atmosphere. The fade end sits exactly at the rim (90 degrees) so the
+    // outer boundary reaches zero brightness at the mesh edge instead of
+    // stopping a few degrees short with a visible step.
     constexpr double kLimbFadeStartRadians = 0.8726646259971648; // 50 deg
-    constexpr double kLimbFadeEndRadians = 1.5184364497350968;  // 87 deg
-    // Day/night azimuth falloff: full glow toward the sun, a faint airglow
-    // residue on the night side.
-    constexpr double kLimbNightFloor = 0.05;
+    constexpr double kLimbFadeEndRadians = 1.5707963267948966;  // 90 deg (the annulus rim)
+    // Fade exponent: 1.25 keeps a dense glow past half the ring and eases
+    // out to zero exactly at the annulus rim, so the ring's outer boundary
+    // dissolves into space over the last stretch instead of ending in a
+    // perceptible step (a steeper exponent steepens the final approach into
+    // a hard edge).
+    constexpr double kLimbFadeExponent = 1.25;
+    // Day/night azimuth falloff: full glow toward the sun, a distinct faint
+    // airglow residue on the night side. The floor is high enough that the
+    // night limb still carries a visible thin ring - from space a real
+    // atmosphere stays limb-bright all around the disc (airglow plus
+    // scattered starlight) while glowing on the sun side; a near-zero floor
+    // made the night limb's ring vanish, which read as a broken/asymmetric
+    // halo instead of a lit planet.
+    constexpr double kLimbNightFloor = 0.22;
     // Sunset warmth: the limb ring glows warm where the terminator crosses
     // it (the sun grazes the atmosphere there, so the light path reddens the
     // way sunrise/sunset light does). The warm band rides the azimuthal
@@ -1711,8 +2072,9 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
         const double angleFromPole = glm::pi<double>() * 0.5 - latitude;
         // Exponential-ish falloff: dense air right at the terrain silhouette,
         // thinning rapidly toward the top of the glow (a smoothstep alone
-        // reads as a flat band with a hard edge).
-        const double fade = std::pow(1.0 - planet::smoothstep(kLimbFadeStartRadians, kLimbFadeEndRadians, angleFromPole), 1.6);
+        // reads as a flat band with a hard edge). The exponent and the fade
+        // end above both shape the outer approach; see their notes.
+        const double fade = std::pow(1.0 - planet::smoothstep(kLimbFadeStartRadians, kLimbFadeEndRadians, angleFromPole), kLimbFadeExponent);
         for (std::uint32_t segment = 0; segment <= kSegments; ++segment)
         {
             const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(kSegments);
@@ -1856,19 +2218,22 @@ void PlanetChunkRenderer::ensureStarDome()
     {
         std::vector<planet::PlanetVertex> *vertices;
         std::vector<std::uint32_t> *indices;
+        // Disc size range from the module configuration
+        // (star_disc_radius_min/max_radians); StarVisitor is a plain function
+        // pointer, so the lambda reads them through the context.
+        double discRadiusMinRadians = 0.0011;
+        double discRadiusMaxRadians = 0.0040;
         std::size_t count = 0;
     };
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
-    StarDiscContext context{&vertices, &indices};
+    StarDiscContext context{&vertices, &indices, params_.starDiscRadiusMinRadians, params_.starDiscRadiusMaxRadians};
     constexpr std::uint32_t kDiscSegments = 10;
-    constexpr double kDiscRadiusRadiansMin = 0.0018; // ~0.1 degrees: a point at any capture scale
-    constexpr double kDiscRadiusRadiansMax = 0.0055; // ~0.3 degrees: the brightest stars
     const auto visitor = [](const planet::Vec3 &direction, const planet::Vec3 &color, double brightness, void *raw)
     {
         auto *ctx       = static_cast<StarDiscContext *>(raw);
-        const double radius = kDiscRadiusRadiansMin
-            + (kDiscRadiusRadiansMax - kDiscRadiusRadiansMin) * planet::clamp01(std::sqrt(brightness));
+        const double radius = ctx->discRadiusMinRadians
+            + (ctx->discRadiusMaxRadians - ctx->discRadiusMinRadians) * planet::clamp01(std::sqrt(brightness));
         // Tangent basis at the star direction (any perpendicular pair).
         planet::Vec3 tangent = planet::cross(direction, std::abs(direction.y) < 0.9
                 ? planet::Vec3{0.0, 1.0, 0.0}
@@ -1923,6 +2288,94 @@ void PlanetChunkRenderer::ensureStarDome()
     if (indices.empty())
     {
         return; // stars disabled by density/brightness: no dome
+    }
+
+    // Milky Way glow: the module's galaxy band weight paints the band's
+    // unresolved-star glow as dim quads between the band's own stars, so the
+    // strip reads as a continuous band (the star lattice alone is far too
+    // sparse at capture resolutions - a ~4 deg lattice leaves the visible
+    // sky a handful of band stars). One quad per ~1.4 deg cell whose corner
+    // weights clear a floor; each corner samples the weight at its own
+    // direction, so the strip's edges and the dust rift fade smoothly
+    // instead of stepping at cell boundaries.
+    if (params_.galaxyBandStrength > 0.0)
+    {
+        constexpr std::uint32_t kGlowAzimuthSteps  = 256;
+        constexpr std::uint32_t kGlowLatitudeSteps = 128;
+        // Linear RGB of the glow at full band weight: a dim warm wash that
+        // displays in the high-30s after the shared tone mapping.
+        constexpr double kGlowTone[3] = {3.0, 2.7, 2.1};
+        constexpr double kGlowFloor    = 0.16;
+        // Corner weights first (shared by adjacent quads; the seam row/column
+        // repeats the first to keep the grid watertight).
+        std::vector<double> weightGrid(static_cast<std::size_t>(kGlowLatitudeSteps + 1u)
+            * (kGlowAzimuthSteps + 1u));
+        for (std::uint32_t latitudeStep = 0; latitudeStep <= kGlowLatitudeSteps; ++latitudeStep)
+        {
+            const double latitude = -glm::pi<double>() * 0.5
+                + glm::pi<double>() * static_cast<double>(latitudeStep) / static_cast<double>(kGlowLatitudeSteps);
+            const double cosLatitude = std::cos(latitude);
+            const double sinLatitude = std::sin(latitude);
+            for (std::uint32_t azimuthStep = 0; azimuthStep <= kGlowAzimuthSteps; ++azimuthStep)
+            {
+                const double azimuth = glm::two_pi<double>() * static_cast<double>(azimuthStep)
+                    / static_cast<double>(kGlowAzimuthSteps);
+                const planet::Vec3 direction{std::cos(azimuth) * cosLatitude, sinLatitude,
+                    std::sin(azimuth) * cosLatitude};
+                weightGrid[static_cast<std::size_t>(latitudeStep) * (kGlowAzimuthSteps + 1u) + azimuthStep]
+                    = planet::galaxyBandWeight(params_, direction);
+            }
+        }
+        for (std::uint32_t latitudeStep = 0; latitudeStep < kGlowLatitudeSteps; ++latitudeStep)
+        {
+            const double latitudeLow = -glm::pi<double>() * 0.5
+                + glm::pi<double>() * static_cast<double>(latitudeStep) / static_cast<double>(kGlowLatitudeSteps);
+            const double latitudeHigh = -glm::pi<double>() * 0.5
+                + glm::pi<double>() * static_cast<double>(latitudeStep + 1u) / static_cast<double>(kGlowLatitudeSteps);
+            for (std::uint32_t azimuthStep = 0; azimuthStep < kGlowAzimuthSteps; ++azimuthStep)
+            {
+                const std::size_t rowLow  = static_cast<std::size_t>(latitudeStep) * (kGlowAzimuthSteps + 1u);
+                const std::size_t rowHigh = rowLow + (kGlowAzimuthSteps + 1u);
+                const std::size_t corner00 = rowLow + azimuthStep;
+                const std::size_t corner01 = corner00 + 1u;
+                const std::size_t corner10 = rowHigh + azimuthStep;
+                const std::size_t corner11 = corner10 + 1u;
+                const double maxWeight = std::max(std::max(weightGrid[corner00], weightGrid[corner01]),
+                    std::max(weightGrid[corner10], weightGrid[corner11]));
+                if (maxWeight <= kGlowFloor)
+                {
+                    continue;
+                }
+                const double azimuthLow = glm::two_pi<double>() * static_cast<double>(azimuthStep)
+                    / static_cast<double>(kGlowAzimuthSteps);
+                const double azimuthHigh = glm::two_pi<double>() * static_cast<double>(azimuthStep + 1u)
+                    / static_cast<double>(kGlowAzimuthSteps);
+                const double cornerWeights[4] = {weightGrid[corner00], weightGrid[corner01],
+                    weightGrid[corner11], weightGrid[corner10]};
+                const double cornerAngles[4][2] = {{azimuthLow, latitudeLow}, {azimuthHigh, latitudeLow},
+                    {azimuthHigh, latitudeHigh}, {azimuthLow, latitudeHigh}};
+                const std::uint32_t first = static_cast<std::uint32_t>(vertices.size());
+                for (std::size_t corner = 0; corner < 4u; ++corner)
+                {
+                    const double cosLatitude = std::cos(cornerAngles[corner][1]);
+                    const glm::dvec3 direction(std::cos(cornerAngles[corner][0]) * cosLatitude,
+                        std::sin(cornerAngles[corner][1]), std::sin(cornerAngles[corner][0]) * cosLatitude);
+                    const double weight = cornerWeights[corner];
+                    planet::PlanetVertex vertex{};
+                    vertex.position[0] = static_cast<float>(direction.x);
+                    vertex.position[1] = static_cast<float>(direction.y);
+                    vertex.position[2] = static_cast<float>(direction.z);
+                    vertex.normal[0]   = static_cast<float>(direction.x);
+                    vertex.normal[1]   = static_cast<float>(direction.y);
+                    vertex.normal[2]   = static_cast<float>(direction.z);
+                    vertex.color[0]    = static_cast<float>(kGlowTone[0] * weight);
+                    vertex.color[1]    = static_cast<float>(kGlowTone[1] * weight);
+                    vertex.color[2]    = static_cast<float>(kGlowTone[2] * weight);
+                    vertices.push_back(vertex);
+                }
+                indices.insert(indices.end(), {first, first + 1u, first + 2u, first, first + 2u, first + 3u});
+            }
+        }
     }
 
     starDome_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
@@ -2046,16 +2499,206 @@ void PlanetChunkRenderer::updateSunDisc(const glm::dvec3 &eyePlanetLocal, const 
         * glm::scale(glm::mat4(1.0f), glm::vec3(discRadius));
 
     // Tint: the sun's own color lifted well above 1 so the core saturates to
-    // white through the shared tone mapping, times the atmosphere model's
-    // sun tint (gold at low elevation, dark at night). Space views keep the
-    // disc tight and bright; the in-air halo spreads the same energy.
+    // white through the shared tone mapping, times the atmosphere's DIRECT
+    // transmittance tint (see planet::sunDirectTint) - the disc is the sun
+    // itself, so its color follows transmission (white -> warm -> deep red
+    // toward the horizon) rather than the scattered-light sky tint. The
+    // eye's atmosphere weight keeps a space view's disc unattenuated; the
+    // in-air halo spreads the same energy.
     const double sunUp = glm::dot(sun, upNormalized);
-    const planet::Vec3 tint = planet::sunSkyTint(params_, sunUp, sunEnabled);
+    const double discAirWeight = planet::atmosphereWeight(params_, eyeAltitude);
+    const planet::Vec3 directTint = planet::sunDirectTint(params_, sunUp, sunEnabled);
+    const double discTint[3] = {
+        1.0 + (directTint.x - 1.0) * discAirWeight,
+        1.0 + (directTint.y - 1.0) * discAirWeight,
+        1.0 + (directTint.z - 1.0) * discAirWeight};
     renderer::MeshMaterial &material = sunDiscMaterials_.front();
     const float discBrightness = inAir ? 5.0f : 8.0f;
-    material.baseColor[0] = static_cast<float>(sunColor[0] * tint.x) * discBrightness;
-    material.baseColor[1] = static_cast<float>(sunColor[1] * tint.y) * discBrightness;
-    material.baseColor[2] = static_cast<float>(sunColor[2] * tint.z) * discBrightness;
+    material.baseColor[0] = static_cast<float>(sunColor[0] * discTint[0]) * discBrightness;
+    material.baseColor[1] = static_cast<float>(sunColor[1] * discTint[1]) * discBrightness;
+    material.baseColor[2] = static_cast<float>(sunColor[2] * discTint[2]) * discBrightness;
+}
+
+void PlanetChunkRenderer::ensureMoon()
+{
+    if (!params_.moonEnabled || params_.moonAngularRadiusRadians <= 0.0 || renderer_ == nullptr
+        || rendererHandle_ == renderer::invalidRenderer || moon_ != renderer::invalidMesh)
+    {
+        return;
+    }
+
+    // 48 x 24 rings: the companion spans a dozen-odd pixels at the default
+    // angular radius, and that tessellation keeps the silhouette round and
+    // the terminator's gradient clean at capture resolutions (coarser grids
+    // read as a faceted ball once the disc crosses ~10 px).
+    constexpr std::uint32_t kSegments = 48;
+    constexpr std::uint32_t kBands = 24;
+
+    std::vector<planet::PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    buildMoonMesh(params_, vertices, indices, kSegments, kBands);
+    moon_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
+    if (moon_ == renderer::invalidMesh)
+    {
+        return;
+    }
+    renderer::MeshMaterial &material = moonMaterials_.emplace_back();
+    // LIT draw (unlit stays false): the sun-facing hemisphere shades bright
+    // and the trailing one dark - the phase is the shading's own output and
+    // never desynchronizes from the scene's sun.
+    material.roughnessFactor = 0.95f; // matte regolith
+    material.metallicFactor = 0.0f;
+    // The builder's grid winds the opposite way from the demo's other
+    // outward shells (the star-disc fan convention), so the declared sign
+    // here is negative; the wrong sign culls the sphere entirely, and
+    // leaving it to the winding vote leaves the interior shading dim.
+    material.frontFaceWinding = -1.0f;
+    // depthWrite stays true (the default): the companion hides the stars
+    // behind it and is hidden by whatever stands in front of it.
+}
+
+void PlanetChunkRenderer::updateMoon(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &up,
+    const glm::dvec3 &moonDirection, bool sunEnabled, double farZ)
+{
+    moonActive_ = moon_ != renderer::invalidMesh && !moonMaterials_.empty();
+    if (!moonActive_)
+    {
+        return;
+    }
+    if (glm::length(moonDirection) < 1.0e-9)
+    {
+        moonActive_ = false;
+        return;
+    }
+    const glm::dvec3 direction = glm::normalize(moonDirection);
+
+    // Backdrop distance along the moon direction: in space it sits between
+    // the sun disc (0.45 farZ) and the star dome (0.5 farZ), so the planet
+    // and its weather hide it when they stand in the way and it hides the
+    // stars behind it. In air it must land JUST INSIDE the sky dome's own
+    // radius while staying BEYOND the cloud deck (0.9 dome): the depth
+    // comparison is strict-less, so a companion inside the dome survives the
+    // dome's later draw (the dome's equal-or-farther fragments fail against
+    // the companion's nearer depth) while the deck's banks still occlude it.
+    const double eyeAltitude = glm::length(eyePlanetLocal) - params_.radiusMeters;
+    const bool inAir = planet::atmosphereWeight(params_, eyeAltitude) > 0.0;
+    const double reliefTop = std::max(0.0, params_.derivedMaxReliefMeters);
+    const double sightCeiling = std::max(1.0, eyeAltitude + reliefTop);
+    const double horizonDistance = std::sqrt(std::max(0.0, sightCeiling * (2.0 * params_.radiusMeters + sightCeiling)));
+    const double sunBackdropRadius = glm::clamp(1.25 * horizonDistance, 1.0e3, 0.45 * std::max(1.0, farZ));
+    const double backdropRadius = inAir
+        ? std::min(0.98 * sunBackdropRadius, 0.97 * 0.40 * std::max(1.0, farZ))
+        : 0.47 * std::max(1.0, farZ);
+
+    const glm::vec3 worldEye(static_cast<float>(params_.centerMeters[0] + eyePlanetLocal.x),
+        static_cast<float>(params_.centerMeters[1] + eyePlanetLocal.y),
+        static_cast<float>(params_.centerMeters[2] + eyePlanetLocal.z));
+    const glm::vec3 worldDirection(static_cast<float>(direction.x), static_cast<float>(direction.y),
+        static_cast<float>(direction.z));
+    const glm::vec3 place = worldEye + worldDirection * static_cast<float>(backdropRadius);
+    // Tidally locked orientation: the sphere's local +Z points at the planet
+    // (the same face turns planetward every orbit, the way a real companion
+    // reads); the seed-fixed spin about that axis carries the maria around.
+    glm::vec3 right = glm::cross(worldDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+    if (glm::length(right) < 1.0e-5f)
+    {
+        right = glm::cross(worldDirection, glm::vec3(1.0f, 0.0f, 0.0f));
+    }
+    right = glm::normalize(right);
+    const glm::vec3 down = glm::cross(right, worldDirection);
+    const glm::mat3 rotation(glm::mat3(right, down, -worldDirection));
+    const float sphereRadius = static_cast<float>(backdropRadius * std::tan(params_.moonAngularRadiusRadians));
+    moonTransform_ = glm::translate(glm::mat4(1.0f), place) * glm::mat4(rotation)
+        * glm::scale(glm::mat4(1.0f), glm::vec3(sphereRadius));
+
+    // Tint: the regolith's reflected light passes the same air column the
+    // sun's direct light does, so the companion reddens and dims toward the
+    // horizon exactly like the low sun (see planet::sunDirectTint, keyed on
+    // the moon's own elevation here); the eye's atmosphere weight fades the
+    // curve back to the bare regolith for space views.
+    const glm::dvec3 upNormalized = glm::length(up) > 1.0e-9 ? glm::normalize(up) : glm::dvec3(0.0, 1.0, 0.0);
+    const double moonUp = glm::dot(direction, upNormalized);
+    const double moonAirWeight = planet::atmosphereWeight(params_, eyeAltitude);
+    const planet::Vec3 directTint = planet::sunDirectTint(params_, moonUp, sunEnabled);
+    const double albedo = std::max(0.0, params_.moonAlbedo);
+    renderer::MeshMaterial &material = moonMaterials_.front();
+    material.baseColor[0] = static_cast<float>(albedo * (1.0 + (directTint.x - 1.0) * moonAirWeight));
+    material.baseColor[1] = static_cast<float>(albedo * (1.0 + (directTint.y - 1.0) * moonAirWeight));
+    material.baseColor[2] = static_cast<float>(albedo * (1.0 + (directTint.z - 1.0) * moonAirWeight));
+}
+
+void PlanetChunkRenderer::ensureAurora(const glm::dvec3 &sunDirection)
+{
+    if (!params_.auroraEnabled || params_.auroraStrength <= 0.0 || renderer_ == nullptr
+        || rendererHandle_ == renderer::invalidRenderer || aurora_ != renderer::invalidMesh)
+    {
+        return;
+    }
+
+    std::vector<planet::PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    std::vector<std::uint8_t> alphaPixels;
+    buildAuroraMesh(params_, sunDirection, vertices, indices, alphaPixels);
+    if (indices.empty())
+    {
+        return;
+    }
+    aurora_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
+    if (aurora_ == renderer::invalidMesh)
+    {
+        return;
+    }
+    // The curtain's intensity field (night gate, rays, altitude fade) rides
+    // the alpha channel; the transparent route multiplies the material's
+    // opacity by the texel alpha, so the day side composites to nothing
+    // instead of alpha-darkening the sky behind it.
+    renderer::TextureDescription alphaDescription;
+    alphaDescription.width = 256;
+    alphaDescription.height = 16;
+    alphaDescription.pixels = alphaPixels.data();
+    alphaDescription.filter = renderer::TextureFilter::Linear;
+    alphaDescription.address = renderer::TextureAddress::ClampEdge;
+    renderer::RenderError alphaError = renderer::RenderError::None;
+    auroraTexture_ = renderer_->createTexture(renderer_->self, rendererHandle_, &alphaDescription, &alphaError);
+    // Planet-local ring vertices: the placement mirrors the cloud shell
+    // (planet-local geometry shifted by the planet's center offset); the
+    // mesh is static after this (the night gate is baked against the run's
+    // fixed sun direction).
+    auroraTransform_ = glm::translate(glm::mat4(1.0f),
+        glm::vec3(static_cast<float>(params_.centerMeters[0]), static_cast<float>(params_.centerMeters[1]),
+            static_cast<float>(params_.centerMeters[2])));
+    renderer::MeshMaterial &material = auroraMaterials_.emplace_back();
+    // Unlit emissive: the vertex colors carry the curtain's chroma (green
+    // foot, violet crown) scaled by the configured strength; the intensity
+    // field (night gate, rays, fade) rides the alpha texture. Opacity below
+    // 1 routes the draw into the renderer's transparent pass: alpha-blended
+    // over the opaque scene (limb, terrain, clouds, companion) with depth
+    // writes off, depth-tested so the planet hides each ring's far side.
+    material.unlit = true;
+    material.opacity = 0.32f;
+    material.doubleSided = true; // the crown reads from both sides of the ring
+    material.baseColorTexture = auroraTexture_;
+    material.baseColor[0] = static_cast<float>(params_.auroraStrength);
+    material.baseColor[1] = static_cast<float>(params_.auroraStrength);
+    material.baseColor[2] = static_cast<float>(params_.auroraStrength);
+    auroraActive_ = true;
+}
+
+void PlanetChunkRenderer::updateAurora(const glm::dvec3 &eyePlanetLocal)
+{
+    auroraActive_ = aurora_ != renderer::invalidMesh && !auroraMaterials_.empty();
+    if (!auroraActive_)
+    {
+        return;
+    }
+    // Space-view backdrop (see the header note): inside the atmosphere the
+    // ring only blends a near-transparent wash over the horizon haze - the
+    // green oval belongs to the dark limb an orbital camera reads.
+    const double eyeAltitude = glm::length(eyePlanetLocal) - params_.radiusMeters;
+    if (planet::atmosphereWeight(params_, eyeAltitude) > 0.0)
+    {
+        auroraActive_ = false;
+    }
 }
 
 void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &sunDirection)
@@ -2226,6 +2869,36 @@ void PlanetChunkRenderer::destroySkyCloudLayer()
     skyCloudActive_ = false;
 }
 
+void PlanetChunkRenderer::destroyMoon()
+{
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && moon_ != renderer::invalidMesh)
+    {
+        renderer_->destroyMesh(renderer_->self, rendererHandle_, moon_);
+    }
+    moon_ = renderer::invalidMesh;
+    moonMaterials_.clear();
+    moonActive_ = false;
+}
+
+void PlanetChunkRenderer::destroyAurora()
+{
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && aurora_ != renderer::invalidMesh)
+    {
+        renderer_->destroyMesh(renderer_->self, rendererHandle_, aurora_);
+    }
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && auroraTexture_ != renderer::invalidTexture && renderer_->destroyTexture != nullptr)
+    {
+        renderer_->destroyTexture(renderer_->self, rendererHandle_, auroraTexture_);
+    }
+    aurora_ = renderer::invalidMesh;
+    auroraTexture_ = renderer::invalidTexture;
+    auroraMaterials_.clear();
+    auroraActive_ = false;
+}
+
 void PlanetChunkRenderer::destroy()
 {
     for (auto &entry : uploadedMeshes_)
@@ -2241,6 +2914,8 @@ void PlanetChunkRenderer::destroy()
     destroySkyCloudLayer();
     destroyStarDome();
     destroySunDisc();
+    destroyMoon();
+    destroyAurora();
     cloudField_.reset();
     drawCommands_.clear();
     planet_ = nullptr;

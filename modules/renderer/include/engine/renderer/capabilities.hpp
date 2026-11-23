@@ -365,6 +365,19 @@ struct RenderCapability
     // before the draw that consumes the new data inside beginFrame/endFrame.
     bool (*updateMeshVertices)(void *self, RendererHandle renderer, MeshHandle mesh, const void *vertices,
         std::uint32_t vertexCount, RenderError *error);
+
+    // Mean linear RGB (each channel averaged over every texel of the level-0
+    // pixels the renderer uploaded, in the same linear space the sampler
+    // reads: RGBA8 bytes scaled by 1/255, no gamma) of a live texture, written
+    // to outMean[3]. Consumers that multiply a material's base color by a
+    // texture divide by this mean so the multiply preserves the base color's
+    // overall brightness on average and only adds detail. Returns false with
+    // RenderError::InvalidTexture when the handle is unknown. Appended at the
+    // end of the struct: field offsets of the existing entries and the ABI
+    // version are unchanged; callers must null-check the entry (a module
+    // built before this field leaves it null).
+    bool (*textureMean)(void *self, RendererHandle renderer, TextureHandle texture, float *outMean,
+        RenderError *error);
 };
 
 // The "renderer.vulkan" secondary capability: Vulkan-specific introspection and
@@ -390,6 +403,12 @@ struct VulkanRenderCapability
     // submission provably completed on the GPU (next rotation of its frame
     // slot, or at renderer destruction if the engine stops first).
     bool (*exportFramePpm)(void *self, RendererHandle renderer, const char *filePath, RenderError *error);
+
+    // The PNG twin of exportFramePpm: same deferred readback pipeline, an
+    // 8-bit truecolor PNG instead of the legacy binary P6 raster. Appended
+    // at the end of the struct; callers must null-check the entry (a module
+    // built before this field leaves it null).
+    bool (*exportFramePng)(void *self, RendererHandle renderer, const char *filePath, RenderError *error);
 };
 
 // CPU rasterizer counters (no GPU timing on the headless backend).

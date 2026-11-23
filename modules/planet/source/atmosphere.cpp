@@ -29,8 +29,9 @@ namespace
 // field along the flow, elongating the banks into the organized streaks real
 // weather systems follow - unwarped, the banks read as round popcorn blobs.
 // A two-octave swirl bends the bank shapes so their edges stay organic. The
-// profiles stay constants of the model; coverage, scale, edge softness and
-// the weather strength are configured.
+// profiles stay constants of the model; coverage, scale, edge softness, the
+// billow octave's amplitude (cloud_billow_strength) and the weather strength
+// are configured.
 constexpr FbmParams kCloudBaseFbm{3, 2.0, 0.55};
 constexpr FbmParams kCloudDetailFbm{2, 2.0, 0.5};
 constexpr FbmParams kCloudWeatherFbm{2, 2.0, 0.5};
@@ -45,7 +46,6 @@ constexpr FbmParams kCloudSwirlFbm{2, 2.0, 0.5};
 // the amplitude below as its share of the field.
 constexpr double kCloudStretchFactor = 0.62;
 constexpr double kCloudSwirlAmplitude = 0.35;
-constexpr double kCloudBillowStrength = 0.0; // DEBUG isolation
 constexpr double kCloudBillowWavelengthFraction = 0.70;
 
 constexpr std::uint64_t kCloudSeedTag    = 0xC10D1ULL;
@@ -64,6 +64,49 @@ constexpr double kStarCellScaleLow  = 14.0;  // cells per axis at stars_density 
 constexpr double kStarCellScaleHigh = 44.0;  // cells per axis at stars_density = 1
 constexpr double kStarPresence = 0.16;       // fraction of cells holding a star
 constexpr double kStarFalloffCells = 0.34;   // star radius in cell units
+
+// Galactic band shape constants (see the galaxy_band_* keys): how much more
+// often a band cell lights up (multiplier on the presence probability), how
+// much brighter the band stars run, and the dust rift's depth along the dark
+// lane that snakes through the plane's midline. The rift noise wavelength
+// (~0.28 rad of sky) keeps the lane a long, continuous feature the way the
+// real Great Rift reads; a shorter wavelength would shatter it into speckle.
+constexpr std::uint64_t kGalaxySeedTag = 0x6A1AB5ULL;
+constexpr std::uint64_t kGalaxyDustSeedTag = 0xD057ULL;
+// The band needs to READ over the uniform field at capture resolutions,
+// where the power-law tail leaves most stars below the display floor: the
+// presence boost saturates the band cells (nearly every in-plane cell
+// holds a star - the unresolved-star glow of the real band), and the
+// brightness boost lifts the band's stars over that floor by a factor of
+// nearly three (with the disc radius growing as sqrt(brightness), the
+// band's stars also draw visibly larger).
+constexpr double kGalaxyPresenceBoost = 6.5;   // band cells hold stars this much more often
+constexpr double kGalaxyBrightnessBoost = 1.8; // band stars run this much brighter
+constexpr double kGalaxyDustDepth = 0.80;       // rift presence suppression at the lane
+constexpr double kGalaxyDustWavelengthRadians = 0.28;
+
+// Moon model constants (see moonDirection): the orbital phase offset from
+// the sub-sun meridian at t = 0. The anchor adds a quarter-orbit-rotation
+// clearance only through the seed phase itself (about 0.3 rad east for the
+// showcase seed), which places the companion above the horizon of every
+// view whose sun is up while riding the clear sky above the cloud deck's
+// horizon guard - a ~34-degree elongation reads as a gibbous disc under
+// the lit-sphere shading (most of the face lit, the terminator shading
+// still visible).
+constexpr std::uint64_t kMoonSeedTag = 0x300BULL;
+constexpr double kMoonLeadRadians = 0.0;
+
+// Unit normal of the galactic plane (a seed-derived great circle): hashed
+// from the planet seed exactly the way the cloud field's wind frame is, so
+// every consumer of the star field agrees on one plane. Pure function.
+Vec3 galaxyPlaneNormal(const PlanetGenerationParams &params)
+{
+    const std::uint64_t hash = hashCombine64(params.seed, kGalaxySeedTag);
+    const double longitude = static_cast<double>(hash & 0xFFFFull) / 65536.0 * 6.283185307179586;
+    const double latitude  = (static_cast<double>((hash >> 16) & 0x7FFFull) / 32768.0 - 0.5) * 1.5707963267948966;
+    return normalized(Vec3{std::cos(latitude) * std::cos(longitude), std::sin(latitude),
+        std::cos(latitude) * std::sin(longitude)});
+}
 
 } // namespace
 
@@ -99,7 +142,8 @@ CloudField::CloudField(const PlanetGenerationParams &params)
     flowSide_ = normalized(tangent);
 }
 
-double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale) const
+double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale,
+    bool includeBillow) const
 {
     if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0)
     {
@@ -140,12 +184,17 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
 
     // Base banks plus the breakup octave; both fade under the consumer's
     // band limit like every other noise term of the module. The billow
-    // octave rides at half the bank scale: inverted cellular distance (one
+    // octave rides at 0.7x the bank scale: inverted cellular distance (one
     // at the lobe centers, zero at the cell walls) packs the rounded
-    // cumulus lobes into the bank bodies.
+    // cumulus lobes into the bank bodies. Cloud shadows pass
+    // includeBillow = false - the penumbra widening erases lobe-scale
+    // shadow detail, and the shadow field's evaluation runs per streaming
+    // chunk, where the octave's 27-cell neighbor walk would tax every build.
     double field = fbm(seedsBase_, shellPosition, params_.cloudWavelengthMeters, kCloudBaseFbm, lowPassCutoffMeters);
-    const double billowFade = kCloudBillowStrength
-        * lowPassFade(lowPassCutoffMeters, params_.cloudWavelengthMeters * kCloudBillowWavelengthFraction);
+    const double billowFade = includeBillow
+        ? params_.cloudBillowStrength
+            * lowPassFade(lowPassCutoffMeters, params_.cloudWavelengthMeters * kCloudBillowWavelengthFraction)
+        : 0.0;
     if (billowFade > 0.0)
     {
         const double billowWavelength = params_.cloudWavelengthMeters * kCloudBillowWavelengthFraction;
@@ -282,10 +331,6 @@ StarCell starOfCell(const PlanetGenerationParams &params, double cellsPerAxis, s
                         ^ static_cast<std::uint64_t>(cell[2]) * 0x165667B19E3779F9ull
                         ^ params.seed;
     mixed = splitMix64(mixed);
-    if ((static_cast<double>(mixed >> 11) / 9007199254740992.0) >= kStarPresence)
-    {
-        return star; // no star in this cell
-    }
     std::uint64_t starA = splitMix64(mixed);
     std::uint64_t starB = splitMix64(starA);
     std::uint64_t starC = splitMix64(starB);
@@ -303,17 +348,56 @@ StarCell starOfCell(const PlanetGenerationParams &params, double cellsPerAxis, s
     star.direction = normalized(Vec3{starLattice[0] / (0.5 * cellsPerAxis), starLattice[1] / (0.5 * cellsPerAxis),
         starLattice[2] / (0.5 * cellsPerAxis)});
 
+    // Galactic band (galaxy_band_strength / galaxy_band_width_radians):
+    // cells near the seed-derived galactic plane light up more often and
+    // brighter, streaked by a dust rift along the plane's midline, so the
+    // backdrop reads as a Milky Way band over the uniform scatter. Both the
+    // presence and the brightness ride the STAR's own direction (not the
+    // cell's center), so the sampler and the geometry sweep describe one
+    // sky. Strength 0 keeps the historical uniform field exactly.
+    double bandWeight = 0.0;
+    double dustWeight = 0.0;
+    if (params.galaxyBandStrength > 0.0)
+    {
+        const Vec3 galaxyNormal = galaxyPlaneNormal(params);
+        const double sineLatitude = dot(star.direction, galaxyNormal);
+        const double scaled = sineLatitude / params.galaxyBandWidthRadians;
+        bandWeight = params.galaxyBandStrength * std::exp(-scaled * scaled);
+        if (bandWeight > 0.0)
+        {
+            // Dust rift: a long-wavelength simplex lane keyed to the star's
+            // direction; the smoothstep keeps it a continuous dark streak
+            // through the band's brightest stretch instead of isolated
+            // pinpricks of missing sky.
+            const double inverseWavelength = 1.0 / kGalaxyDustWavelengthRadians;
+            const double dust = noise::simplex3ImproveXY(
+                static_cast<std::int64_t>(hashCombine64(params.seed, kGalaxyDustSeedTag)),
+                star.direction.x * inverseWavelength, star.direction.y * inverseWavelength,
+                star.direction.z * inverseWavelength);
+            dustWeight = smoothstep(0.1, 0.62, 0.5 + 0.5 * dust) * bandWeight;
+        }
+    }
+
+    const double presence = std::min(0.9, kStarPresence
+        * (1.0 + kGalaxyPresenceBoost * bandWeight * (1.0 - kGalaxyDustDepth * dustWeight)));
+    if (unit01(mixed) >= presence)
+    {
+        return star; // no star in this cell
+    }
+
     // Power-law brightness: most stars are faint, a few are bright (the real
     // magnitude distribution is roughly a power law). The floor keeps the
     // power law finite; the brightest stars saturate to white through the
     // per-channel clamp, exactly what a bright star reads as after tone
-    // mapping.
+    // mapping. Band stars run brighter still (the unresolved-glow read).
     const double magnitude01 = std::max(1.0e-4, unit01(splitMix64(starC)));
-    star.brightness = params.starsBrightness * (0.04 + 0.96 * std::pow(magnitude01, -0.55) * 0.18);
+    star.brightness = params.starsBrightness * (0.04 + 0.96 * std::pow(magnitude01, -0.55) * 0.18)
+        * (1.0 + kGalaxyBrightnessBoost * bandWeight * (1.0 - 0.5 * dustWeight));
 
     // Color temperature: hash-driven mix between warm (red giant), neutral
     // white and hot blue. The weights stay subtle - stars read as points of
-    // slightly different character, not as colored confetti.
+    // slightly different character, not as colored confetti. Band stars lean
+    // toward the warm galactic-core tone away from the dust lane.
     std::uint64_t temperatureHash = starB ^ 0xB5297A4D11D5ull;
     const double temperature = unit01(splitMix64(temperatureHash));
     if (temperature < 0.28)
@@ -328,6 +412,9 @@ StarCell starOfCell(const PlanetGenerationParams &params, double cellsPerAxis, s
     {
         star.color = Vec3{0.76, 0.85, 1.0}; // blue
     }
+    const double coreLean = 0.55 * bandWeight * (1.0 - dustWeight);
+    star.color = Vec3{mix(star.color.x, 1.00, coreLean), mix(star.color.y, 0.93, coreLean),
+        mix(star.color.z, 0.84, coreLean)};
     star.present = true;
     return star;
 }
@@ -424,12 +511,46 @@ void forEachStar(const PlanetGenerationParams &params, StarVisitor visitor, void
     }
 }
 
+double galaxyBandWeight(const PlanetGenerationParams &params, const Vec3 &unitDirection)
+{
+    if (params.galaxyBandStrength <= 0.0)
+    {
+        return 0.0;
+    }
+    const Vec3 direction = normalized(unitDirection);
+    if (lengthSquared(direction) < 0.5)
+    {
+        return 0.0; // a (near-)zero direction has no sky position
+    }
+    const Vec3 galaxyNormal = galaxyPlaneNormal(params);
+    const double sineLatitude = dot(direction, galaxyNormal);
+    const double scaled = sineLatitude / params.galaxyBandWidthRadians;
+    const double band = params.galaxyBandStrength * std::exp(-scaled * scaled);
+    if (band <= 0.0)
+    {
+        return 0.0;
+    }
+    // The dust rift carves the Great Rift lane out of the glow the same
+    // way it suppresses the band's own stars, so the painted band and the
+    // enumerated stars describe one sky.
+    const double inverseWavelength = 1.0 / kGalaxyDustWavelengthRadians;
+    const double dust = noise::simplex3ImproveXY(
+        static_cast<std::int64_t>(hashCombine64(params.seed, kGalaxyDustSeedTag)),
+        direction.x * inverseWavelength, direction.y * inverseWavelength,
+        direction.z * inverseWavelength);
+    const double dustWeight = smoothstep(0.1, 0.62, 0.5 + 0.5 * dust) * band;
+    return std::clamp(band * (1.0 - kGalaxyDustDepth * dustWeight), 0.0, 1.0);
+}
+
 Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled)
 {
     (void)params;
     // Three bands: neutral through the day, warm gold as the sun grazes the
     // horizon, deep blue night past twilight. The bands overlap so walking
-    // across a terminator never pops.
+    // across a terminator never pops. This is the SCATTERED-light tint: the
+    // sky gradient and the aerial haze carry it (they are the air's own
+    // glow). Direct sun light uses sunDirectTint() below, whose reddening
+    // follows transmission instead of scattering.
     const Vec3 day   = {1.0, 1.0, 1.0};
     const Vec3 gold  = {1.0, 0.58, 0.34};
     const Vec3 night = {0.045, 0.07, 0.14};
@@ -450,6 +571,100 @@ Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunE
         *out[channel] = std::clamp(nights[channel] + (lowSun - nights[channel]) * (1.0 - nightW), 0.0, 1.0);
     }
     return tint;
+}
+
+namespace
+{
+
+// Rayleigh vertical optical depths of the whole air column at three
+// representative wavelengths (red 680 nm, green 550 nm, blue 440 nm), from
+// the lambda^-4 scattering profile. These are constants of the atmosphere
+// model the way the sky gradient's band edges are; the amplitude of the
+// whole curve is the configured sun_direct_tint_strength.
+constexpr double kSunDirectOpticalDepth[3] = {0.035, 0.090, 0.225};
+
+} // namespace
+
+Vec3 sunDirectTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled)
+{
+    if (!sunEnabled)
+    {
+        return Vec3{1.0, 1.0, 1.0};
+    }
+    // Plane-parallel airmass along the sun ray, clamped at the horizon: the
+    // transmission curve runs white -> warm -> deep red as the path through
+    // the air lengthens - the wavelength selectivity real low sun shows
+    // (blue scatters away first, red survives the longest sight line). The
+    // max() with the elevation floor caps the airmass at the horizon value
+    // (1/0.035 ~ 28.6), the deepest transmission a visible disc or terrain
+    // slope can carry.
+    const double airmass = 1.0 / std::max(sunDotUp, 0.035);
+    const double strength = std::clamp(params.sunDirectTintStrength, 0.0, 1.0);
+    Vec3 tint{};
+    double *out[3] = {&tint.x, &tint.y, &tint.z};
+    for (std::size_t channel = 0; channel < 3; ++channel)
+    {
+        const double transmitted = std::exp(-kSunDirectOpticalDepth[channel] * airmass);
+        // The strength blends the physical curve against white, so 0 keeps
+        // the consumer's configured sun color at every elevation.
+        *out[channel] = std::clamp(1.0 + (transmitted - 1.0) * strength, 0.0, 1.0);
+    }
+    return tint;
+}
+
+Vec3 moonDirection(const PlanetGenerationParams &params, double seconds)
+{
+    if (!params.moonEnabled)
+    {
+        return Vec3{0.0, 0.0, 0.0};
+    }
+
+    // Orbit plane: the spin axis tilted by the configured inclination toward
+    // a seed-derived equatorial azimuth (an inclined circular orbit whose
+    // node longitude varies planet to planet, like real satellite families).
+    const Vec3 spinAxis = normalized(Vec3{params.axis[0], params.axis[1], params.axis[2]});
+    Vec3 node = cross(spinAxis, Vec3{0.0, 1.0, 0.0});
+    if (lengthSquared(node) < 1.0e-6)
+    {
+        node = cross(spinAxis, Vec3{1.0, 0.0, 0.0});
+    }
+    const std::uint64_t nodeHash = hashCombine64(params.seed, kMoonSeedTag);
+    const double nodeLongitude = static_cast<double>(nodeHash & 0xFFFFull) / 65536.0 * 6.283185307179586;
+    // Rotate the node around the spin axis by the hashed longitude, then
+    // tilt the plane normal toward it by the inclination.
+    const double cosNode = std::cos(nodeLongitude);
+    const double sinNode = std::sin(nodeLongitude);
+    const Vec3 tiltedNode = normalized(node * cosNode + cross(spinAxis, node) * sinNode
+        + spinAxis * (dot(spinAxis, node) * (1.0 - cosNode)));
+    const Vec3 orbitNormal = normalized(spinAxis * std::cos(params.moonOrbitInclinationRadians)
+        + tiltedNode * std::sin(params.moonOrbitInclinationRadians));
+
+    // Orbit basis: two orthonormal directions in the plane. The reference
+    // meridian is the sun's projection onto the plane (the sub-sun crossing),
+    // so the phase-zero anchor is the configured sunlight direction - the
+    // same convention cloud_shadow_sun_direction documents.
+    const Vec3 sunDirection = normalized(
+        Vec3{params.cloudShadowSunDirection[0], params.cloudShadowSunDirection[1], params.cloudShadowSunDirection[2]});
+    Vec3 reference = sunDirection - orbitNormal * dot(sunDirection, orbitNormal);
+    if (lengthSquared(reference) < 1.0e-9)
+    {
+        // Sun sits on the orbit pole: any in-plane meridian works.
+        reference = cross(orbitNormal, Vec3{0.0, 1.0, 0.0});
+        if (lengthSquared(reference) < 1.0e-9)
+        {
+            reference = cross(orbitNormal, Vec3{1.0, 0.0, 0.0});
+        }
+    }
+    reference = normalized(reference);
+    const Vec3 companion = cross(orbitNormal, reference);
+
+    // Phase: kMoonLeadRadians ahead of the sub-sun meridian (see the constant
+    // above), plus a seed-derived offset so sibling planets do not share one
+    // calendar, swept at the configured period.
+    const double seedPhase = static_cast<double>((nodeHash >> 24) & 0xFFFFull) / 65536.0 * 0.5;
+    const double period = std::max(60.0, params.moonOrbitalPeriodSeconds);
+    const double angle = kMoonLeadRadians + seedPhase + 6.283185307179586 * seconds / period;
+    return normalized(reference * std::cos(angle) + companion * std::sin(angle));
 }
 
 } // namespace planet

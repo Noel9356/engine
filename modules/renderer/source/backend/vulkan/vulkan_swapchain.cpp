@@ -668,11 +668,12 @@ bool VulkanSwapchain::ensureReadbackBuffer()
     return true;
 }
 
-// Maps the readback buffer and writes the PPM (invalidate first so the CPU
-// sees the GPU's writes on non-coherent memory). Pixel geometry comes from
-// the caller: the recorded copy may predate a swapchain resize.
+// Maps the readback buffer and writes the screenshot file (PNG or binary
+// P6 PPM; invalidate first so the CPU sees the GPU's writes on
+// non-coherent memory). Pixel geometry comes from the caller: the recorded
+// copy may predate a swapchain resize.
 void VulkanSwapchain::finishReadback(
-    const char *filePath, std::uint32_t width, std::uint32_t height, bool bgra, RenderError *error)
+    const char *filePath, std::uint32_t width, std::uint32_t height, bool bgra, bool png, RenderError *error)
 {
     if (readbackBuffer_ == VK_NULL_HANDLE || readbackSize_ == 0 || filePath == nullptr || width == 0 || height == 0
         || static_cast<VkDeviceSize>(width) > std::numeric_limits<VkDeviceSize>::max() / 4u / height)
@@ -699,14 +700,16 @@ void VulkanSwapchain::finishReadback(
         return;
     }
     RenderError exportError = RenderError::None;
-    writePpm(filePath,
-        width,
-        height,
-        static_cast<const std::uint8_t *>(mapped),
-        static_cast<std::size_t>(width) * 4,
-        false,
-        bgra,
-        &exportError);
+    if (png)
+    {
+        writePng(filePath, width, height, static_cast<const std::uint8_t *>(mapped),
+            static_cast<std::size_t>(width) * 4, false, bgra, &exportError);
+    }
+    else
+    {
+        writePpm(filePath, width, height, static_cast<const std::uint8_t *>(mapped),
+            static_cast<std::size_t>(width) * 4, false, bgra, &exportError);
+    }
     device_.unmapAllocation(readbackAllocation_);
     if (error != nullptr)
     {

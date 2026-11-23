@@ -452,6 +452,16 @@ struct PlanetGenerationParams
                                             // pinned to high country and polar air.
     double beachWidthMeters = 5.0;          // shoreline band width above sea level (wide
                                             // enough to read as sand from a standing eye)
+    // Shoreline wobble: the band's effective width undulates along the shore
+    // with a low-frequency simplex stream (a fixed wavelength of a few dozen
+    // meters, band-limited like every other colour term), so the sand/grass
+    // boundary follows an irregular, meandering line instead of the
+    // ruler-straight elevation contour the coastal flattening leaves behind -
+    // on a flattened coast the constant-width band photographs as a cut-out
+    // slab. Stretches where the wobble pinches the width toward zero simply
+    // have no beach, the way real coasts alternate dune, marsh and rock.
+    // 0 keeps the constant configured width everywhere.
+    double beachShorelineWobble = 0.45;     // +- fraction of the beach width the shoreline meanders
     // Wet-sand band above the waterline: real beaches darken sharply in the
     // swash zone. Two keys keep the band a configuration decision - width and
     // how dark the wet sand reads.
@@ -520,7 +530,7 @@ struct PlanetGenerationParams
         // seasonal forest tropical forest   temperate rainforest
         0.050f, 0.130f, 0.030f,   0.035f, 0.100f, 0.025f,   0.030f, 0.090f, 0.030f,
         // taiga           tundra           snow
-        0.060f, 0.100f, 0.050f,   0.260f, 0.240f, 0.170f,   0.870f, 0.900f, 0.930f,
+        0.050f, 0.085f, 0.048f,   0.260f, 0.240f, 0.170f,   0.870f, 0.900f, 0.930f,
         // rock (cliff faces)
         0.280f, 0.250f, 0.210f,
     };
@@ -571,6 +581,13 @@ struct PlanetGenerationParams
                                                     // view's midground starts dissolving and the far
                                                     // ridge melts into the horizon band)
     double aerialPerspectiveAsymptote     = 0.72; // haze weight the profile approaches at infinite distance
+    // How strongly the DIRECT sun light (terrain/water/specular lighting, the
+    // sun disc) adopts the atmosphere's transmittance tint (see
+    // sunDirectTint in atmosphere.hpp): 1 gives the physical curve, 0 keeps
+    // the consumer's configured sun color unchanged at every elevation.
+    // Scattered light (the sky gradient, the haze) keeps its own tint either
+    // way, so 0 restores the look of a scene lit by one fixed sun color.
+    double sunDirectTintStrength = 1.0;
 
     // ---- water -----------------------------------------------------------------
     bool  waterEnabled        = true;
@@ -579,7 +596,7 @@ struct PlanetGenerationParams
     float waterRoughness      = 0.22f; // consumer hint (exposed via chunk material); low values give the
                                        // close-range sea a crisp sun-glint path (the per-vertex wave
                                        // normals break it into glitter)
-    float waterRoughnessOrbital = 0.20f; // the hint's high-altitude blend target: orbital eyes see flat
+    float waterRoughnessOrbital = 0.36f; // the hint's high-altitude blend target: orbital eyes see flat
                                          // far-water facets, so the lobe widens from the close-range
                                          // value toward this - kept well under 1 so the sun glint
                                          // survives as the broad patch orbital photographs show
@@ -643,6 +660,12 @@ struct PlanetGenerationParams
                                              // the globe, so keep the wavelength at ~0.2 of the radius
     double cloudAltitudeMeters    = 1200.0; // height of the cloud shell above the datum
     double cloudDetailStrength    = 0.35;   // amplitude of the fine breakup octave relative to the base field
+    // Amplitude of the inverted-cellular billow octave relative to the base
+    // field: one-at-lobe-centers cellular distance packs the rounded
+    // cumulus lobes into the bank bodies (the Perlin-Worley pairing
+    // volumetric-cloud pipelines use - smooth fBm alone reads as soft
+    // cotton). 0 keeps purely smooth banks.
+    double cloudBillowStrength    = 0.32;
     // Softness of the cloud edge: the coverage field crosses into cloud over
     // a band of this half-width. Narrow values scatter crisp cloud clumps;
     // wide values grow soft decks with veiled edges whose thinning fringes
@@ -700,6 +723,74 @@ struct PlanetGenerationParams
     bool   starsEnabled    = true;
     double starsDensity    = 0.5;  // star spacing: 0 sparse, 1 dense skies
     double starsBrightness = 1.0;  // luminance multiplier of the whole field
+    // Disc size range the consumer's backdrop meshes draw per star (the
+    // demo's star dome): the radius a faintest star's disc covers and the
+    // radius the brightest one grows to (radius scales with sqrt
+    // brightness between them). Point-like defaults keep the field crisp at
+    // capture resolutions - larger maxima read as soft blobs once the
+    // 2x2 supersampling resolve averages them.
+    double starDiscRadiusMinRadians = 0.0011; // faintest star: a tight point
+    double starDiscRadiusMaxRadians = 0.0040; // brightest star: a small disc
+    // Galactic band (the Milky Way read): a seed-derived great circle the
+    // star field concentrates along - stars appear there several times more
+    // often, run brighter, and sit in a seed-derived dark rift of dust lanes
+    // the way the real galaxy's unresolved-star glow organizes against its
+    // dust. 0 keeps the uniform field (every cell an equal chance).
+    double galaxyBandStrength = 1.0;     // 0 = latitude-blind star scatter
+    double galaxyBandWidthRadians = 0.35; // angular half-width of the band (radians of sky)
+
+    // ---- moon (backdrop companion; see atmosphere.hpp moonDirection) -----------
+    // A second celestial body: the module owns the pure orbital model (a
+    // direction on the sky), consumers mesh it. The demo shades it as a lit
+    // sphere - the same sun that lights the terrain lights the moon, so the
+    // phase, the terminator and the crescent read for free and stay consistent
+    // with the scene from every view height. Angular size is configured
+    // directly (the demo places the mesh at its backdrop distance and scales
+    // to this radius), so the read does not depend on the orbit radius.
+    bool   moonEnabled = true;
+    double moonAngularRadiusRadians = 0.0080; // ~0.46 deg - the showcase's disc radius on the sky
+    double moonOrbitalPeriodSeconds = 1200.0; // one revolution per this many seconds
+    double moonOrbitInclinationRadians = 0.35; // tilt of the orbit plane off the equator
+    double moonAlbedo = 1.0;                    // brightness multiplier of the regolith
+
+    // ---- aurora (polar night glow; the demo meshes the ring) ------------------
+    // An emissive curtain ring above the magnetic (here: spin) poles that
+    // only glows on the night side - baked against the run's sun direction -
+    // so a space view reads a green arc along the dark limb while day-side
+    // and twilight ground views stay clean. 0 strength disables the glow.
+    bool   auroraEnabled = true;
+    double auroraStrength = 0.55; // 0 = no glow, 1 = the full curtain brightness
+
+    // ---- surface scatter (ground-level life; consumers mesh it) ---------------
+    // The ground-level real-world elements the terrain's color field cannot
+    // express: vegetation, surface rocks, bird flocks, breaking-wave foam and
+    // valley mist. The module owns the DENSITY RULES (which climate state
+    // carries which element, how much of it, where it stops) and these knobs;
+    // consumers scatter their own geometry against them (the demo does this
+    // deterministically from the planet seed, camera cell and biome gates).
+    // Densities multiply each element's climate-derived presence (0 disables
+    // that element outright); radii bound the scatter ring around the eye.
+    bool   vegetationEnabled    = true;
+    double vegetationTreeDensity  = 1.0;  // forest/taiga/savanna trees
+    double vegetationBushDensity  = 1.0;  // shrubs and bushes
+    double vegetationGrassDensity = 1.0;  // grass tufts on grassy ground
+    double vegetationTreeRadiusMeters  = 1400.0; // trees scatter out to here
+    double vegetationGrassRadiusMeters = 18.0;   // grass lives close to the eye; the ring
+                                               // fade thins the sward at its edge
+    double surfaceRockDensity        = 1.0; // scattered boulders on open ground
+    double surfaceRockRadiusMeters   = 260.0;
+    double surfaceShadowStrength     = 1.0; // sun-aligned contact shadows under the scattered elements
+    bool   whitecapsEnabled       = true;
+    double whitecapStrength       = 0.65; // 0 = glassy calm, 1 = heavy sea speckle
+    double whitecapWindSpeedMps   = 9.0;  // the 10 m wind speed the sea state follows
+    bool   surfFoamEnabled        = true; // shore-parallel breaking-wave foam bands
+    double surfFoamStrength       = 0.70;
+    bool   birdsEnabled           = true;
+    double birdFlockCount         = 2.0;  // flocks within the scatter radius
+    double birdFlockSize          = 9.0;  // birds per flock
+    bool   valleyMistEnabled      = true;
+    double valleyMistStrength     = 0.50; // 0 = clear valleys, 1 = heavy ground fog
+    double scatterRebuildDistanceMeters = 18.0; // camera movement that triggers a re-scatter
 
     // ---- debug ------------------------------------------------------------------
     // Chunk-border overlay: tints terrain and water vertices that sit within

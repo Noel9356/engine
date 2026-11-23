@@ -46,8 +46,29 @@ Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot);
 // the sun direction's dot product with the local up): neutral through the
 // day, warm gold through the low-sun band, deep blue at night. Linear RGB
 // multiplier for skyGradientColor(). A disabled sun (see PbrEnvironment)
-// counts as permanently high noon.
+// counts as permanently high noon. This is the SCATTERED-light tint - the
+// sky gradient and the aerial haze are the air's own glow, so they carry
+// it. Direct sun light (terrain/water/specular lighting, the sun disc)
+// takes sunDirectTint() below instead: its color follows transmission, not
+// scattering, and the two models deliberately disagree toward the horizon
+// (a red sun under a gold sky is the real sunset read).
 Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled);
+
+// Transmittance tint of the DIRECT sun light for one sun elevation
+// (sunDotUp, the sun direction's dot product with the local up): a
+// Rayleigh-style transmission curve whose airmass grows as the sun
+// approaches the horizon, so the sun's own light runs white -> warm ->
+// deep red the way real low sun does (blue is scattered out of the ray
+// first, red survives the longest path). Feed the result into the sun
+// color consumers light terrain and water with and into the sun disc's
+// color, scaled by the eye's atmosphereWeight() so a camera above the
+// atmosphere sees the unattenuated disc and a ground camera sees the
+// full curve (a ground-level surface and the eye above it share
+// approximately one airmass in a plane-parallel column). The amplitude
+// rides the sun_direct_tint_strength key: 0 returns white at every
+// elevation (the configured sun color stands unchanged), 1 gives the
+// full physical curve. Linear RGB in [0, 1]; a disabled sun is white.
+Vec3 sunDirectTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled);
 
 // Aerial perspective for one sight line: the sun-tinted haze the air adds
 // between the eye and a distant point, so terrain fades toward the horizon
@@ -78,7 +99,13 @@ AerialPerspective aerialPerspective(const PlanetGenerationParams &params, const 
 // follows stars_density, each cell hashes (seed + cell) into at most one
 // star with a jittered position, a power-law brightness (most stars dim, a
 // few bright) and a color temperature (red through white through blue), and
-// the sample reads a smooth radial falloff around the star. Small stars are
+// the sample reads a smooth radial falloff around the star. When
+// galaxy_band_strength is positive the distribution additionally
+// concentrates along a seed-derived great circle - the galactic plane:
+// cells near the plane light up several times more often and brighter,
+// streaked by a seed-derived dark rift of dust lanes, so the backdrop
+// reads as a Milky Way band over the uniform field instead of an
+// undifferentiated scatter. Small stars are
 // band-limited away below the consumer's sample spacing like every other
 // field of the module (sampleSpacingRadians <= 0 keeps everything), with the
 // surviving stars brightened so the field's energy survives a coarse
@@ -96,6 +123,37 @@ using StarVisitor = bool (*)(const Vec3 &direction, const Vec3 &color, double br
 // backdrop. The sweep covers the full direction sphere; visitors that only
 // need a hemisphere can early-out by returning false (the sweep stops).
 void forEachStar(const PlanetGenerationParams &params, StarVisitor visitor, void *context);
+
+// Visual weight (0..1) of the galactic band for one sky direction: the
+// seed-derived great circle's proximity faded by the seed-derived dust
+// rift along its midline - the quantity a consumer paints as the band's
+// unresolved glow between the band's own stars (the demo's star dome emits
+// dim glow quads keyed to it, so the band reads as a continuous Milky Way
+// strip instead of a scatter of points). Pure function of its inputs.
+double galaxyBandWeight(const PlanetGenerationParams &params, const Vec3 &unitDirection);
+
+// Direction (unit, planet-local) of the moon companion at a given elapsed
+// seconds count: a circular orbit around the planet whose plane is tilted
+// off the equator by moon_orbit_inclination_radians, swept at
+// 2*pi/moon_orbital_period_seconds radians per second. The orbital phase at
+// t = 0 is seed-derived and anchored to the configured sunlight direction
+// (the same cloud_shadow_sun_direction convention), so a consumer whose sun
+// is up sees the moon in that sky too instead of a random placement. Pure
+// function of its inputs - no state, safe from any thread. Returns a zero
+// vector when the moon is disabled.
+Vec3 moonDirection(const PlanetGenerationParams &params, double seconds);
+
+// Aurora ring geometry facts for consumers that mesh the curtain: the
+// latitude band the polar oval occupies (radians off the equator, keyed to
+// the spin axis) and the altitude band the curtains climb above the datum.
+// Real curtains stand vertically from a narrow oval, so the latitude span
+// is tight while the altitude span is broad - from space the ring reads as
+// a crown of vertical rays around each pole. The glow itself is the
+// consumer's bake - the model owns only the oval's shape.
+constexpr double auroraOvalLatitudeLowRadians  = 1.127; // ~64.6 deg off the equator
+constexpr double auroraOvalLatitudeHighRadians = 1.222; // ~70.0 deg off the equator
+constexpr double auroraBaseAltitudeMeters      = 2000.0;  // curtain foot above the datum
+constexpr double auroraTopAltitudeMeters       = 8000.0; // curtain top above the datum
 
 // Cloud coverage field: a band-limited noise field sampled on a spherical
 // shell at cloudAltitudeMeters above the datum, thresholded into [0, 1]
@@ -124,7 +182,14 @@ public:
     // threshold band (1 = the configured cloud_edge_softness; 2 doubles it):
     // cloud SHADOWS sample with a wider band than the painted banks so the
     // cast shade reads as penumbra instead of a hard copy of the outline.
-    double coverage(const Vec3 &unitDirection, double lowPassCutoffMeters = 0.0, double softnessScale = 1.0) const;
+    // includeBillow gates the cellular billow octave (the cumulus lobes):
+    // rendered banks sample it (the lobes are the point), while cloud
+    // shadows pass false - a penumbra-widened shadow field cannot resolve
+    // lobe-scale detail anyway, and the shadow's field evaluation runs
+    // per streaming chunk, where the octave's 27-cell walk would tax every
+    // build.
+    double coverage(const Vec3 &unitDirection, double lowPassCutoffMeters = 0.0, double softnessScale = 1.0,
+        bool includeBillow = true) const;
 
 private:
     const PlanetGenerationParams &params_;

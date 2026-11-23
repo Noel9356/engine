@@ -1096,6 +1096,8 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
     push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
     push.cloth[0]             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
     push.cloth[1]             = material.doubleSided ? 1.0f : 0.0f;
+    push.cloth[2]             = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
+    push.cloth[3]             = glm::clamp(material.opacity, 0.0f, 1.0f);
     if (!hasLastPushConstants_ || std::memcmp(&push, &lastPushConstants_, sizeof(PushConstants)) != 0)
     {
         vkCmdPushConstants(command,
@@ -1305,6 +1307,9 @@ void VulkanBackend::drawMeshInstances(
         push.emissive[3]          = material.unlit ? 1.0f : 0.0f;
         push.cloth[0]             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
         push.cloth[1]             = material.doubleSided ? 1.0f : 0.0f;
+        push.cloth[2]             = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
+        push.cloth[3]             = glm::clamp(material.opacity, 0.0f, 1.0f);
+    push.cloth[3]             = glm::clamp(material.opacity, 0.0f, 1.0f);
         if (!hasLastPushConstants_ || std::memcmp(&push, &lastPushConstants_, sizeof(PushConstants)) != 0)
         {
             vkCmdPushConstants(command,
@@ -2425,6 +2430,7 @@ void VulkanBackend::endFrame()
         pendingExportResult_.width         = exportWidth;
         pendingExportResult_.height        = exportHeight;
         pendingExportResult_.bgra          = exportBgra;
+        pendingExportResult_.png           = exportPng_;
         pendingExportResult_.timelineValue = frameSignalValue;
         exportRequested_                   = false;
     }
@@ -2526,12 +2532,40 @@ bool VulkanBackend::nativeHandles(VulkanDeviceHandles *outHandles) const
     return true;
 }
 
-// exportFramePpm is asynchronous by design: it records the request, the
-// copy runs at the next endFrame, and the file is written once the copy's
-// submission provably completed (next rotation of its frame slot, an
-// explicit flush, or renderer destruction). A second request while one is
+// exportFramePng/exportFramePpm are asynchronous by design: they record the
+// request, the copy runs at the next endFrame, and the file is written once
+// the copy's submission provably completed (next rotation of its frame slot,
+// an explicit flush, or renderer destruction). A second request while one is
 // still outstanding flushes the first precisely - order is preserved and
 // the shared readback buffer is never overwritten by two pending copies.
+bool VulkanBackend::exportFramePng(const char *filePath, RenderError *error)
+{
+    if (pendingExportResult_.active)
+    {
+        // Rare (two screenshots back to back): complete the outstanding
+        // copy first, before any validation returns early. This is a
+        // diagnostic path off the frame loop, so the precise wait here
+        // costs nothing on the frame-time tail.
+        flushPendingExport(true);
+    }
+    if (swapchain_->extent().width == 0 || swapchain_->extent().height == 0)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+    if (filePath == nullptr)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+
+    exportRequested_ = true;
+    exportPath_      = filePath;
+    exportPng_       = true;
+    reportError(error, RenderError::None);
+    return true;
+}
+
 bool VulkanBackend::exportFramePpm(const char *filePath, RenderError *error)
 {
     if (pendingExportResult_.active)
@@ -2555,6 +2589,7 @@ bool VulkanBackend::exportFramePpm(const char *filePath, RenderError *error)
 
     exportRequested_ = true;
     exportPath_      = filePath;
+    exportPng_       = false;
     reportError(error, RenderError::None);
     return true;
 }
@@ -2573,6 +2608,7 @@ void VulkanBackend::completePendingExportIfReady()
         pendingExportResult_.width,
         pendingExportResult_.height,
         pendingExportResult_.bgra,
+        pendingExportResult_.png,
         &exportError);
     if (exportError != RenderError::None)
     {
@@ -2612,6 +2648,7 @@ void VulkanBackend::flushPendingExport(bool allowBlocking)
             pendingExportResult_.width,
             pendingExportResult_.height,
             pendingExportResult_.bgra,
+            pendingExportResult_.png,
             &exportError);
         if (exportError != RenderError::None)
         {

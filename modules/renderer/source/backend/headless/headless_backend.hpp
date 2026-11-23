@@ -77,28 +77,6 @@ struct GiQuadCache
     }
 };
 
-// The probe-grid amortization tiers of one rasterizing worker: the coarse
-// 4x4 block tier and the 2x2 quad tier share one entry layout and one set of
-// gates (same plane, same normal), so a pixel consults the block tier first,
-// falls back to the quad tier when the block gates reject it, and only walks
-// the probe grid when both reject, publishing the result to whichever tier
-// accepted it. Flat expanses (most of a typical frame) then share one walk
-// per 4x4 block, curved or silhouetted regions fall back to the exact quad
-// or pixel evaluation, and the amortization never changes what a walk
-// returns - only how often it runs.
-struct GiAmortizationCache
-{
-    using Entry = GiQuadCache::Entry;
-    GiQuadCache blocks; // 4x4 tier
-    GiQuadCache quads;  // 2x2 tier
-
-    void resetForTile(std::uint32_t tileWidth, std::uint32_t tileHeight)
-    {
-        blocks.resetForTile((tileWidth + 3u) / 4u, (tileHeight + 3u) / 4u);
-        quads.resetForTile((tileWidth + 1u) / 2u, (tileHeight + 1u) / 2u);
-    }
-};
-
 // Options forwarded from [renderer] configuration at renderer creation.
 struct HeadlessBackendOptions
 {
@@ -408,6 +386,13 @@ private:
         float         uvDenominatorY;
         std::uint32_t sourceTriangle;
         std::uint32_t setupIndex;
+        // Run-shading dispatch flag (see rasterizeFanRecordRuns), computed at
+        // emission: the draw's shading path fits the 4-wide run kernel and
+        // the record's framebuffer window amortizes a run. Read per record
+        // by the tile loops - a flag read keeps the loop's hoisted state
+        // intact (an eligibility CALL per record measurably regressed the
+        // inlined per-sample core's codegen).
+        bool          shadeRuns = false;
     };
 
     struct StripResult
@@ -481,6 +466,10 @@ private:
         // viewer (shaders/mesh.frag's uCloth pair).
         float                  sheenFactor             = 0.0f;
         bool                   doubleSided             = false;
+        // Alpha-cutout masking (MeshMaterial::alphaCutoff, mesh.frag's
+        // uCloth.z): textured opaque draws cull pixels whose sampled
+        // base-color alpha lands below the cutoff; 0 keeps every texel.
+        float                  alphaCutoff             = 0.0f;
         bool                   hasBaseColorMap         = false;
         bool                   hasNormalMap            = false;
         bool                   hasMetallicRoughnessMap = false;
@@ -534,12 +523,26 @@ private:
     // the inclusive pixel window; barycentric coverage with edge-function
     // increments, depth-test, shade, write. Tile owners pass their tile;
     // writes only touch the window, so concurrent calls with disjoint
-    // windows never share a pixel. giAmortization, when non-null, amortizes the
-    // probe-grid ambient walk over 4x4 blocks and 2x2 pixel quads (see
-    // GiAmortizationCache).
+    // windows never share a pixel. giQuads, when non-null, amortizes the
+    // probe-grid ambient walk over 2x2 pixel quads (see GiQuadCache).
     ENGINE_RASTERIZER_INLINE bool rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
         std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-        GiAmortizationCache *giAmortization = nullptr);
+        GiQuadCache *giQuads = nullptr);
+
+    // Run-shading dispatch predicate (see rasterizeFanRecordRuns): the draw's
+    // shading path fits the 4-wide run kernel and the record's window is wide
+    // enough to amortize a run. Evaluated once per record at emission (the
+    // shadeRuns flag), never inside the rasterization loops.
+    bool recordRunsEligible(const RasterSetup &setup, const TileBinRecord &record) const;
+
+    // The 4-wide run variant of rasterizeFanRecord (see quad_shading.hpp):
+    // identical window, coverage, depth and commit semantics - run-eligible
+    // records shade four consecutive samples per SoA pass. Deliberately
+    // outlined (not ENGINE_RASTERIZER_INLINE): keeping the run machinery out
+    // of the shared core preserves the per-sample loop's codegen.
+    bool rasterizeFanRecordRuns(const RasterSetup &setup, const TileBinRecord &record,
+        std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
+        GiQuadCache *giQuads = nullptr);
 
     // Integer pixel window (inclusive) a fan record can write, clamped to
     // the framebuffer. Shared verbatim by the rasteriser core and the tile

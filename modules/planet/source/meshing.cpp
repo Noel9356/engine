@@ -1154,8 +1154,18 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // Texture coordinates: the continuous flat/wall projective frame
         // (see tiledSurfaceUv), scaled by the group's tile size and carried
         // through the chunk's own quarter-turn of the tile lattice.
+        // The frame key is the group's own: GROUND surfaces key the
+        // projection to the RADIAL direction (the water sheet's convention -
+        // the grass normal's noise-driven wiggles kink the tile lattice
+        // triangle-to-triangle, and the kinks photograph as a herringbone of
+        // stripe-direction flips at every triangle edge; the radial varies
+        // one part in thousands over a chunk, so the lattice stays
+        // world-continuous), while ROCK keeps the normal-keyed cubemap blend
+        // (steep faces genuinely face an axis plane, and the normal map's
+        // per-triangle tangent frame needs the UVs to follow the face).
         const Vec3 unitNormal{nx, ny, nz};
-        const auto [tileU, tileV] = tiledSurfaceUv(point, unitNormal, tileMeters[group], frameQuarterTurns[group]);
+        const Vec3 &textureFrameKey = group == terrainSurfaceGroupGround ? unitRadial : unitNormal;
+        const auto [tileU, tileV] = tiledSurfaceUv(point, textureFrameKey, tileMeters[group], frameQuarterTurns[group]);
         vertex.uv[0] = tileU;
         vertex.uv[1] = tileV;
 
@@ -1457,12 +1467,13 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             // with a noisy organic edge instead of a latitude
             // ring. 0 disables.
             double iceWeight = 0.0;
+            double seaTemperature = 0.5;
             if (params.seaIceTemperature > 0.0)
             {
                 const double freeze = params.seaIceTemperature;
                 const double transition = std::max(1.0e-4, params.seaIceTransition);
-                iceWeight = 1.0 - smoothstep(freeze - transition, freeze + transition,
-                    field.climate().seaLevelTemperature(radial));
+                seaTemperature = field.climate().seaLevelTemperature(radial);
+                iceWeight = 1.0 - smoothstep(freeze - transition, freeze + transition, seaTemperature);
             }
 
             // Wave slope: two deterministic noise streams tilt
@@ -1523,6 +1534,18 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
             ClimateMacroSample macro;
             macroSampleInterpolated(point, macro);
             const double cloudShade = 1.0 - macro.cloudShadow;
+            // Cold seas lose the tropical turquoise: approaching the freeze
+            // point, the water column's absorption eats the warm channels
+            // first, so high-latitude and winter water reads steel-blue and
+            // muted beside the tropical shelf teal (a single global water
+            // palette photographs the boreal coast as a Caribbean lagoon).
+            double coldWater = 0.0;
+            if (params.seaIceTemperature > 0.0)
+            {
+                coldWater = 1.0 - smoothstep(params.seaIceTemperature + 0.04,
+                    params.seaIceTemperature + 0.34, seaTemperature);
+            }
+            constexpr double kColdWaterChannelGain[3] = {0.45, 0.62, 0.88};
             for (std::uint32_t channel = 0; channel < 3; ++channel)
             {
                 const float shallow = params.waterColorShallow[channel];
@@ -1545,6 +1568,7 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
                             * smoothstep(0.0, params.waterShoreMixMeters, terrainDepth));
                     }
                 }
+                blended       = static_cast<float>(blended * (1.0 - coldWater * (1.0 - kColdWaterChannelGain[channel])));
                 blended       = static_cast<float>(blended + (1.0f - blended) * foam);
                 const float icy     = params.waterColorIce[channel];
                 blended             = static_cast<float>(blended + (icy - blended) * iceWeight);

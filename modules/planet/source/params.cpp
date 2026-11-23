@@ -259,6 +259,9 @@ bool PlanetGenerationParams::validate(std::string &error)
     dryPatchWavelengthMeters     = clampRange(dryPatchWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     snowLineMeters       = clampRange(snowLineMeters, 0.0, 0.5 * radiusMeters);
     beachWidthMeters     = clampRange(beachWidthMeters, 0.0, 0.05 * radiusMeters);
+    // The wobble may pinch the band to zero width but must never invert it
+    // (a negative width would beach the INLAND side of the contour).
+    beachShorelineWobble = clampRange(beachShorelineWobble, 0.0, 1.0);
     beachWetWidthMeters  = clampRange(beachWetWidthMeters, 0.0, 0.05 * radiusMeters);
     beachWetDarkening    = clampRange(beachWetDarkening, 0.0, 0.95);
     rockSlopeThreshold   = clampRange(rockSlopeThreshold, 0.05, 1.0);
@@ -298,6 +301,7 @@ bool PlanetGenerationParams::validate(std::string &error)
 
     // ---- atmosphere -------------------------------------------------------------
     atmosphereHeightMeters = clampRange(atmosphereHeightMeters, radiusMeters / 1024.0, radiusMeters / 2.0);
+    sunDirectTintStrength  = clampRange(sunDirectTintStrength, 0.0, 1.0);
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
         atmosphereZenithColor[channel]  = std::clamp(atmosphereZenithColor[channel], 0.0f, 1.0f);
@@ -318,6 +322,7 @@ bool PlanetGenerationParams::validate(std::string &error)
     cloudWavelengthMeters  = clampRange(cloudWavelengthMeters, radiusMeters / 1024.0, radiusMeters * 4.0);
     cloudAltitudeMeters    = clampRange(cloudAltitudeMeters, radiusMeters / 8192.0, radiusMeters / 4.0);
     cloudDetailStrength    = clampRange(cloudDetailStrength, 0.0, 1.0);
+    cloudBillowStrength    = clampRange(cloudBillowStrength, 0.0, 1.0);
     cloudEdgeSoftness      = clampRange(cloudEdgeSoftness, 0.01, 0.6);
     cloudWeatherStrength   = clampRange(cloudWeatherStrength, 0.0, 1.0);
     cloudWeatherWavelengthMultiple = clampRange(cloudWeatherWavelengthMultiple, 1.0, 16.0);
@@ -348,6 +353,18 @@ bool PlanetGenerationParams::validate(std::string &error)
     }
     starsDensity    = clampRange(starsDensity, 0.0, 1.0);
     starsBrightness = clampRange(starsBrightness, 0.0, 4.0);
+    // The disc range must stay inside the pixel scale of a capture: a
+    // minimum above a few milliradians reads as a coin, a maximum above
+    // half a degree as a blob; and the range itself must be ordered.
+    starDiscRadiusMinRadians = clampRange(starDiscRadiusMinRadians, 0.0002, 0.006);
+    starDiscRadiusMaxRadians = clampRange(starDiscRadiusMaxRadians, 0.0003, 0.012);
+    if (starDiscRadiusMaxRadians < starDiscRadiusMinRadians)
+    {
+        std::swap(starDiscRadiusMinRadians, starDiscRadiusMaxRadians);
+    }
+    galaxyBandStrength     = clampRange(galaxyBandStrength, 0.0, 1.0);
+    galaxyBandWidthRadians = clampRange(galaxyBandWidthRadians, 0.05, 1.2);
+
     seaIceTemperature = clampRange(seaIceTemperature, 0.0, 1.0);
     seaIceTransition  = clampRange(seaIceTransition, 0.005, 0.5);
     for (std::size_t channel = 0; channel < 3; ++channel)
@@ -363,6 +380,30 @@ bool PlanetGenerationParams::validate(std::string &error)
     waterWaveAmplitude        = clampRange(waterWaveAmplitude, 0.0, 1.0);
     waterWaveWavelengthMeters = clampRange(waterWaveWavelengthMeters, radiusMeters / 16384.0, radiusMeters);
     waterWaveChopFraction     = clampRange(waterWaveChopFraction, 0.0, 1.0);
+
+    // ---- moon / aurora ---------------------------------------------------------------
+    moonAngularRadiusRadians    = clampRange(moonAngularRadiusRadians, 0.0005, 0.02);
+    moonOrbitalPeriodSeconds    = clampRange(moonOrbitalPeriodSeconds, 60.0, 1.0e6);
+    moonOrbitInclinationRadians = clampRange(moonOrbitInclinationRadians, 0.0, 1.55);
+    moonAlbedo                  = clampRange(moonAlbedo, 0.0, 8.0);
+    auroraStrength              = clampRange(auroraStrength, 0.0, 1.0);
+
+    // ---- surface scatter ----------------------------------------------------------
+    vegetationTreeDensity      = clampRange(vegetationTreeDensity, 0.0, 4.0);
+    vegetationBushDensity      = clampRange(vegetationBushDensity, 0.0, 4.0);
+    vegetationGrassDensity     = clampRange(vegetationGrassDensity, 0.0, 4.0);
+    vegetationTreeRadiusMeters  = clampRange(vegetationTreeRadiusMeters, 100.0, 20000.0);
+    vegetationGrassRadiusMeters = clampRange(vegetationGrassRadiusMeters, 5.0, 200.0);
+    surfaceRockDensity      = clampRange(surfaceRockDensity, 0.0, 4.0);
+    surfaceRockRadiusMeters = clampRange(surfaceRockRadiusMeters, 20.0, 4000.0);
+    surfaceShadowStrength   = clampRange(surfaceShadowStrength, 0.0, 2.0);
+    whitecapStrength        = clampRange(whitecapStrength, 0.0, 1.0);
+    whitecapWindSpeedMps    = clampRange(whitecapWindSpeedMps, 0.0, 40.0);
+    surfFoamStrength        = clampRange(surfFoamStrength, 0.0, 1.0);
+    birdFlockCount          = clampRange(birdFlockCount, 0.0, 16.0);
+    birdFlockSize           = clampRange(birdFlockSize, 0.0, 64.0);
+    valleyMistStrength      = clampRange(valleyMistStrength, 0.0, 1.0);
+    scatterRebuildDistanceMeters = clampRange(scatterRebuildDistanceMeters, 4.0, 500.0);
 
     // ---- atmosphere (aerial perspective) / debug -----------------------------------
     aerialPerspectiveScaleMeters = clampRange(aerialPerspectiveScaleMeters, 50.0, std::max(50.0, atmosphereHeightMeters));

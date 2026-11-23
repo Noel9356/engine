@@ -7,6 +7,7 @@ engine_add_application(
     source/planet_chunk_renderer.cpp
     source/planet_demo_tests.cpp
     source/planet_benchmark.cpp
+    source/planet_scatter.cpp
     source/planet_viewpoints.cpp
     source/planet_walk_controller.cpp
     ../common/demo_harness.cpp
@@ -28,3 +29,4 @@ engine_add_application(
     CONFIG_DIRECTORY
     "${CMAKE_CURRENT_SOURCE_DIR}/config"
 )
+

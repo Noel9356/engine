@@ -1,7 +1,5 @@
 #version 450
 
-layout(early_fragment_tests) in;
-
 layout(constant_id = 0) const uint MAX_LIGHTS = 32u;
 layout(constant_id = 6) const int SRGB_OUTPUT = 0;
 // Fragment stage of the renderer module's Vulkan backend: the engine's PBR
@@ -16,11 +14,10 @@ layout(constant_id = 6) const int SRGB_OUTPUT = 0;
 // requires updating the rasterizer; the build recompiles this file to
 // SPIR-V automatically (cmake/engine_module_compile_shaders.cmake).
 //
-// SAFETY: layout(early_fragment_tests) declares the hardware should run the
-// depth/stencil test BEFORE the fragment shader. This shader does not modify
-// gl_FragDepth or discard, so the early test is safe and free; fragments
-// behind existing geometry skip the expensive PBR math entirely. Zero
-// regression risk — the shader produces identical output, just faster.
+// NOTE on early fragment tests: this shader DOES discard (the material's
+// alphaCutoff masking, uCloth.z), so layout(early_fragment_tests) is
+// deliberately absent - a discard would invalidate the early test anyway
+// and the depth pre-test's benefit is lost exactly on masked draws.
 
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec3 vColor;
@@ -41,7 +38,7 @@ layout(push_constant) uniform PushData
     vec4 uBaseColorFactor;
     vec4 uMetallicRoughness; // x metallicFactor, y roughnessFactor, z normalScale, w occlusionStrength
     vec4 uEmissive;          // rgb emissiveColor, a unlit flag
-    vec4 uCloth;             // x sheenFactor, y doubleSided flag (1 = two-sided draw)
+    vec4 uCloth;             // x sheenFactor, y doubleSided flag (1 = two-sided draw), z alphaCutoff, w opacity
 } pushData;
 
 struct LightData
@@ -350,8 +347,17 @@ void main()
     }
 
     // ---- material assembly: the five maps times their factors
+    // The base-color map samples ONCE: its RGB shades the surface and its
+    // alpha feeds both the cutoff mask (uCloth.z, 0 = disabled - the
+    // rasterizer's per-texel skip twin) and the transparent commit's
+    // effective opacity (see oColor below).
+    const vec4 baseColorSample = texture(uBaseColorTexture, vUv);
+    if (pushData.uCloth.z > 0.0 && baseColorSample.a < pushData.uCloth.z)
+    {
+        discard;
+    }
     const vec3  baseColor = vColor * pushData.uBaseColorFactor.rgb
-                          * texture(uBaseColorTexture, vUv).rgb;
+                          * baseColorSample.rgb;
 
     // Perturbed normal: decode the tangent-space map, scale the tangential
     // part by normalScale, and rotate into world space. The neutral flat
@@ -480,5 +486,10 @@ void main()
         color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
     }
 
-    oColor = vec4(color, 1.0);
+    // The alpha channel carries the material's opacity times the base-color
+    // map's texel alpha (1 for the neutral stand-in), so the transparent
+    // pipeline's SRC_ALPHA blend matches the headless rasterizer's
+    // opacity-times-texel-alpha commit: foam patches and mist banks with
+    // soft alpha textures fade per texel, opaque draws ignore the channel.
+    oColor = vec4(color, pushData.uCloth.w * baseColorSample.a);
 }

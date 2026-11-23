@@ -86,6 +86,11 @@ private:
     std::int64_t seedTemperature_;
     std::int64_t seedMoisture_;
     std::int64_t seedMoistureWarp_;
+    // Shoreline wobble: the low-frequency stream the beach band's effective
+    // width undulates with (see the beach_shoreline_wobble key), so the
+    // sand/grass boundary meanders instead of following the ruler-straight
+    // elevation contour the coastal flattening leaves.
+    std::int64_t seedBeachWobble_;
     // Rock-face sediment stripes: shares its tag with the density field's
     // strata stream, so the color stripes and the geometric strata bands
     // correlate (the stripe's phase warp uses the same seed and scale).

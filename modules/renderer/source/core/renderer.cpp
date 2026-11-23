@@ -92,6 +92,12 @@ struct RendererRecord
     std::chrono::steady_clock::time_point frameStart{};
     bool                                  frameTimingActive = false;
 
+    // Level-0 mean linear RGB of each live texture, computed once at
+    // creation from the exact pixels handed to the backend (see
+    // textureMeanImpl). Lets consumers divide a texture multiply so it
+    // preserves the base color's brightness on average.
+    std::unordered_map<TextureHandle, std::array<float, 3>> textureMeans;
+
     std::unique_ptr<RenderBackend> backendInstance = nullptr;
 };
 
@@ -652,6 +658,29 @@ private:
             {
                 return invalidTexture;
             }
+            // Mean over the uploaded level-0 pixels (linear /255 per
+            // channel, matching the sampler's view of the bytes).
+            {
+                const std::uint8_t *pixels = normalized.pixels;
+                const std::size_t   texels  = static_cast<std::size_t>(normalized.width) * normalized.height;
+                std::array<float, 3> mean{0.0f, 0.0f, 0.0f};
+                if (texels > 0)
+                {
+                    double sum[3]{0.0, 0.0, 0.0};
+                    for (std::size_t i = 0; i < texels; ++i)
+                    {
+                        sum[0] += pixels[i * 4 + 0];
+                        sum[1] += pixels[i * 4 + 1];
+                        sum[2] += pixels[i * 4 + 2];
+                    }
+                    const double texelInv = 1.0 / (static_cast<double>(texels) * 255.0);
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        mean[static_cast<std::size_t>(channel)] = static_cast<float>(sum[channel] * texelInv);
+                    }
+                }
+                record->textureMeans[textureId] = mean;
+            }
             reportError(error, RenderError::None);
             return textureId;
         }
@@ -707,7 +736,30 @@ private:
         {
             return;
         }
+        record->textureMeans.erase(texture);
         record->backendInstance->destroyTexture(texture);
+    }
+
+    // See RenderCapability::textureMean for the contract.
+    bool textureMeanImpl(RendererHandle renderer, TextureHandle texture, float *outMean, RenderError *error)
+    {
+        RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || outMean == nullptr)
+        {
+            reportError(error, RenderError::InvalidHandle);
+            return false;
+        }
+        const auto entry = record->textureMeans.find(texture);
+        if (entry == record->textureMeans.end())
+        {
+            reportError(error, RenderError::InvalidTexture);
+            return false;
+        }
+        outMean[0] = entry->second[0];
+        outMean[1] = entry->second[1];
+        outMean[2] = entry->second[2];
+        reportError(error, RenderError::None);
+        return true;
     }
 
     DeviceClass deviceClassImpl(RendererHandle renderer) const
@@ -830,6 +882,24 @@ private:
 #endif
     }
 
+    bool vulkanExportFramePngImpl(RendererHandle renderer, const char *filePath, RenderError *error)
+    {
+#if defined(ENGINE_RENDERER_BACKEND_VULKAN)
+        const RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backend != Backend::Vulkan)
+        {
+            reportError(error, RenderError::Unsupported);
+            return false;
+        }
+        return static_cast<VulkanBackend *>(record->backendInstance.get())->exportFramePng(filePath, error);
+#else
+        (void)renderer;
+        (void)filePath;
+        reportError(error, RenderError::Unsupported);
+        return false;
+#endif
+    }
+
     void headlessStatisticsImpl(RendererHandle renderer, HeadlessRenderStatistics *outStatistics) const
     {
         const RendererRecord *record = recordFor(renderer);
@@ -903,6 +973,9 @@ private:
         { return static_cast<RenderModule *>(self)->createTextureFromFileImpl(renderer, filePath, error); };
         renderCapability_.destroyTexture = [](void *self, RendererHandle renderer, TextureHandle texture)
         { static_cast<RenderModule *>(self)->destroyTextureImpl(renderer, texture); };
+        renderCapability_.textureMean = [](void *self, RendererHandle renderer, TextureHandle texture,
+            float *outMean, RenderError *error)
+        { return static_cast<RenderModule *>(self)->textureMeanImpl(renderer, texture, outMean, error); };
         renderCapability_.beginFrame = [](void *self, RendererHandle renderer, const FrameParameters *frame)
         { static_cast<RenderModule *>(self)->beginFrameImpl(renderer, frame); };
         renderCapability_.endFrame
@@ -939,6 +1012,9 @@ private:
         vulkanCapability_.exportFramePpm
             = [](void *self, RendererHandle renderer, const char *filePath, RenderError *error)
         { return static_cast<RenderModule *>(self)->vulkanExportFramePpmImpl(renderer, filePath, error); };
+        vulkanCapability_.exportFramePng
+            = [](void *self, RendererHandle renderer, const char *filePath, RenderError *error)
+        { return static_cast<RenderModule *>(self)->vulkanExportFramePngImpl(renderer, filePath, error); };
 
         headlessCapability_.statistics
             = [](void *self, RendererHandle renderer, HeadlessRenderStatistics *outStatistics)

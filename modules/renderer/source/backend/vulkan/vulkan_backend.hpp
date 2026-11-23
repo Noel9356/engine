@@ -143,6 +143,12 @@ public:
 
     bool infoStrings(RendererInfoStrings *outInfo) const;
     bool nativeHandles(VulkanDeviceHandles *outHandles) const;
+    // Both share the deferred readback pipeline (see the PendingExport
+    // comment): the copy runs at the next endFrame and the file is written
+    // once the copy provably completed. exportFramePng writes an 8-bit
+    // truecolor PNG (the default screenshot format), exportFramePpm the
+    // legacy binary P6 PPM.
+    bool exportFramePng(const char *filePath, RenderError *error);
     bool exportFramePpm(const char *filePath, RenderError *error);
 
     // Attaches the shared profiler here and forwards it to the device
@@ -326,16 +332,17 @@ private:
 
     FrameStatistics statistics_{};
 
-    bool        exportRequested_ = false; // a PPM export was requested; the copy runs at the next endFrame
+    bool        exportRequested_ = false; // a screenshot export was requested; the copy runs at the next endFrame
     std::string exportPath_;
+    bool        exportPng_ = false; // requested file format: PNG (true) or P6 PPM (false)
 
-    // Deferred PPM export (P99 hybrid round, H2 - asynchronous readback):
-    // the frame's copy is recorded into the frame command buffer and lands
-    // in the shared readback buffer at submit; the file write is deferred
-    // until the copy provably completed, so submit -> present is never
-    // stalled by a readback wait. The copy provably completed once its frame
-    // slot retires (the slot's fence/timeline wait in waitForFrameSlot), so
-    // the common path completes at the next beginFrame of the same slot
+    // Deferred screenshot export (P99 hybrid round, H2 - asynchronous
+    // readback): the frame's copy is recorded into the frame command buffer
+    // and lands in the shared readback buffer at submit; the file write is
+    // deferred until the copy provably completed, so submit -> present is
+    // never stalled by a readback wait. The copy provably completed once its
+    // frame slot retires (the slot's fence/timeline wait in waitForFrameSlot),
+    // so the common path completes at the next beginFrame of the same slot
     // with no wait at all; explicit flushes (a new export request, swapchain
     // recreation, shutdown) wait the recording slot's fence precisely. At
     // most one export is outstanding because the readback buffer is shared.
@@ -347,6 +354,7 @@ private:
         std::uint32_t width         = 0; // pixel geometry captured at copy time
         std::uint32_t height        = 0;
         bool          bgra          = false;
+        bool          png           = false; // requested file format
         std::uint64_t timelineValue = 0; // device timeline value, when used
     };
     PendingExport pendingExportResult_{};

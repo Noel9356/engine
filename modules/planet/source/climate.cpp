@@ -70,6 +70,13 @@ void blendColors(const double *rowA, const double *rowB, double weight, double o
 constexpr double kMoistureBeltCenters[] = {0.0, 26.0, 54.0, 88.0};
 constexpr double kMoistureBeltWidths[]  = {11.0, 10.0, 13.0, 10.0};
 
+// Shoreline wobble wavelength (see params.beachShorelineWobble): long
+// enough that the sand/grass boundary meanders over tens of meters the way
+// a real dune line does, short enough to curve visibly along one beach;
+// well above every spacing the beach band itself survives, so the wobble
+// never band-limits out before the band it shapes does.
+constexpr double kBeachWobbleWavelengthMeters = 55.0;
+
 constexpr double kPi = 3.14159265358979323846;
 
 } // namespace
@@ -79,6 +86,7 @@ ClimateSampler::ClimateSampler(const PlanetGenerationParams &params)
     , seedTemperature_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x51A7E0)))
     , seedMoisture_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x40157)))
     , seedMoistureWarp_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x3A9E51)))
+    , seedBeachWobble_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x5E4C0)))
     , seedRockStripes_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x572A7A)))
     , seedSoilPatches_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x50117A)))
     , seedDryPatches_(static_cast<std::int64_t>(hashCombine64(params.seed, 0x327174A)))
@@ -244,6 +252,30 @@ ClimateSample ClimateSampler::sample(const ClimateMacroSample &macro, const Vec3
     const double t = sample.temperature01;
     const double m = sample.moisture01;
 
+    // Shoreline wobble: the beach band's effective width for this point - the
+    // configured width scaled by a low-frequency simplex stream keyed to the
+    // planet-local position - so the sand/grass boundary meanders along the
+    // shore instead of tracing the ruler-straight elevation contour the
+    // coastal flattening leaves (on a planed-off shore a constant-width band
+    // photographs as a cut-out slab). The stream is evaluated only near the
+    // shore: points above the widest possible band keep the configured
+    // width, which the beach gates below compare against anyway. Pinched
+    // stretches simply have no beach, the way real coasts alternate dune,
+    // marsh and rock; the clamp at zero width keeps the inland side of the
+    // contour dry (see validate()).
+    double effectiveBeachWidth = params_.beachWidthMeters;
+    const double widestBeachMeters = params_.beachWidthMeters * (1.0 + params_.beachShorelineWobble);
+    if (params_.beachShorelineWobble > 0.0 && elevation < widestBeachMeters)
+    {
+        const Vec3 shorelinePosition = direction * radiusMeters;
+        const double wobble = noise::simplex3ImproveXY(seedBeachWobble_,
+            shorelinePosition.x / kBeachWobbleWavelengthMeters,
+            shorelinePosition.y / kBeachWobbleWavelengthMeters,
+            shorelinePosition.z / kBeachWobbleWavelengthMeters);
+        effectiveBeachWidth = std::max(0.0, params_.beachWidthMeters
+            * (1.0 + params_.beachShorelineWobble * wobble));
+    }
+
     // ---- biome id (discrete classification, unchanged) ------------------------
     // Snow: altitude snow line drops as the climate cools toward the
     // poles; hard freeze line overrides the altitude rule.
@@ -259,7 +291,7 @@ ClimateSample ClimateSampler::sample(const ClimateMacroSample &macro, const Vec3
         // Steep faces scrape off soil and snow: bare rock.
         sample.biome = Biome::Rock;
     }
-    else if (elevation < params_.beachWidthMeters && t > 0.25)
+    else if (elevation < effectiveBeachWidth && t > 0.25)
     {
         sample.biome = Biome::Beach;
     }
@@ -349,7 +381,11 @@ ClimateSample ClimateSampler::sample(const ClimateMacroSample &macro, const Vec3
     // Layered overrides, each fading over a blend width:
     // beach (warm, flat, within the shoreline band) under snow, snow under rock.
     const double sBlend     = params_.slopeBlendWidth;
-    const double beachBand  = std::max(1.0, params_.beachWidthMeters * params_.elevationBlendFraction);
+    // The beach band keys on the WOBBLED effective width (see the shoreline
+    // wobble above): the blend band and the sub-spacing fade scale with it,
+    // so wide stretches of shore read a proportionally wider sand belt and
+    // pinched stretches dissolve their transition with the band itself.
+    const double beachBand  = std::max(1.0, effectiveBeachWidth * params_.elevationBlendFraction);
     // Sub-spacing fades: the beach strip and the wet swash rim are sharp
     // bands a few meters wide, and the altitude snow crossing is one over
     // the blend width. When a band is much narrower than the color's sample
@@ -357,9 +393,9 @@ ClimateSample ClimateSampler::sample(const ClimateMacroSample &macro, const Vec3
     // cloud-like snow patches at globe scale); it fades out instead. The
     // freeze-line snow (a smooth temperature field) is not a narrow band and
     // stays.
-    const double beachFade = bandBelowSpacingFade(params_.beachWidthMeters + beachBand, lowPassCutoffMeters);
+    const double beachFade = bandBelowSpacingFade(effectiveBeachWidth + beachBand, lowPassCutoffMeters);
     const double beachW    = beachFade
-        * (1.0 - smoothstep(params_.beachWidthMeters - beachBand, params_.beachWidthMeters + beachBand, elevation))
+        * (1.0 - smoothstep(effectiveBeachWidth - beachBand, effectiveBeachWidth + beachBand, elevation))
         * smoothstep(0.25 - tBlend, 0.25 + tBlend, t)
         * (1.0 - smoothstep(params_.rockSlopeThreshold * 0.5, params_.rockSlopeThreshold, slope01));
     const double snowBand   = std::max(1.0, params_.snowLineMeters * params_.elevationBlendFraction);

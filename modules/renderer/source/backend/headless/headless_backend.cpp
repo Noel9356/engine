@@ -7,6 +7,7 @@
 // blitted into the window module's locked surface pixels.
 
 #include "headless_backend.hpp"
+#include "quad_shading.hpp"
 #include "render_shared.hpp"
 #include "tile_bins.hpp"
 
@@ -16,6 +17,11 @@
 #include <engine/renderer/material.hpp>
 #include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
+
+#if defined(__SSSE3__) || defined(__AVX2__) || defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64) \
+    || defined(_M_AMD64)
+#include <immintrin.h>
+#endif
 
 #include <glm/common.hpp>
 #include <glm/exponential.hpp>
@@ -232,6 +238,7 @@ void HeadlessBackend::setCamera(const CameraMatrices &camera)
 // overflow/bad_alloc paths leave the framebuffer empty, which silently skips
 // drawing), then clears color to the clear color, depth to 1.0, and the
 // parallel-rasterization lock bytes to 0.
+
 void HeadlessBackend::beginFrame(const FrameParameters &frame)
 {
     std::uint32_t width  = viewportWidth;
@@ -423,6 +430,81 @@ void HeadlessBackend::endFrame()
         }
         const auto resolveRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd)
         {
+            // 2x2 supersampling (the default): a widened-add fast path computes
+            // the same rounding average the generic loop below computes - the
+            // per-sample bytes widen to 16-bit lanes exactly, the sums stay
+            // exact (max 4 * 255 + half fits 16 bits), and the +half >> shift
+            // rounding is the same arithmetic - while covering two output
+            // pixels per SIMD pass. _mm_shuffle_epi8 needs SSSE3; builds
+            // without it keep the generic loop.
+#if defined(__SSSE3__) || defined(__AVX2__)
+            const bool resolve22 = sampleScaleX_ == 2u && sampleScaleY_ == 2u && sampleCountIsPowerOfTwo
+                && outputColumns >= 2u;
+            if (resolve22)
+            {
+                // Byte masks: the 8-byte swap adds each sample pair's matching
+                // channels (output pixel's sums land in lanes 0-3), and the
+                // final gather picks the four packed bytes of each output
+                // pixel out of the pack result.
+                const __m128i swapGroups = _mm_setr_epi8(8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7);
+                const __m128i gatherBytes = _mm_setr_epi8(0, 1, 2, 3, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0);
+                const __m128i zero = _mm_setzero_si128();
+                const __m128i halfWord = _mm_set1_epi16(static_cast<short>(1u << (sampleShift - 1u)));
+                for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
+                {
+                    std::uint8_t *destination = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+                    const std::uint8_t *rowA = color.data()
+                        + static_cast<std::size_t>(y * 2u) * framebufferWidth * 4u;
+                    const std::uint8_t *rowB = rowA + static_cast<std::size_t>(framebufferWidth) * 4u;
+                    std::uint32_t x = 0;
+                    for (; x + 2u <= outputColumns; x += 2u)
+                    {
+                        const __m128i samplesA = _mm_loadu_si128(reinterpret_cast<const __m128i *>(rowA + x * 8u));
+                        const __m128i samplesB = _mm_loadu_si128(reinterpret_cast<const __m128i *>(rowB + x * 8u));
+                        // Per-byte row sums (bytes widen to 16-bit lanes).
+                        const __m128i sumLo = _mm_add_epi16(
+                            _mm_unpacklo_epi8(samplesA, zero), _mm_unpacklo_epi8(samplesB, zero));
+                        const __m128i sumHi = _mm_add_epi16(
+                            _mm_unpackhi_epi8(samplesA, zero), _mm_unpackhi_epi8(samplesB, zero));
+                        // Sample-pair sums: each output pixel's four samples
+                        // are two 4-byte groups; the swap adds group to group.
+                        const __m128i pairsLo = _mm_add_epi16(sumLo, _mm_shuffle_epi8(sumLo, swapGroups));
+                        const __m128i pairsHi = _mm_add_epi16(sumHi, _mm_shuffle_epi8(sumHi, swapGroups));
+                        // Rounding shift, then pack each lane's low byte.
+                        const __m128i roundedLo = _mm_srli_epi16(_mm_add_epi16(pairsLo, halfWord), sampleShift);
+                        const __m128i roundedHi = _mm_srli_epi16(_mm_add_epi16(pairsHi, halfWord), sampleShift);
+                        const __m128i packed = _mm_shuffle_epi8(
+                            _mm_packus_epi16(roundedLo, roundedHi), gatherBytes);
+                        _mm_storel_epi64(reinterpret_cast<__m128i *>(destination + x * 4u), packed);
+                    }
+                    // Odd trailing column: one output pixel from four samples.
+                    if (x < outputColumns)
+                    {
+                        const std::uint8_t *sampleBase = rowA + static_cast<std::size_t>(x) * 8u;
+                        std::uint32_t accumulated[4] = {0, 0, 0, 0};
+                        for (std::uint32_t subY = 0; subY < 2u; ++subY)
+                        {
+                            const std::uint8_t *sampleRow
+                                = sampleBase + static_cast<std::size_t>(subY) * framebufferWidth * 4u;
+                            for (std::uint32_t subX = 0; subX < 2u; ++subX)
+                            {
+                                const std::uint8_t *sample = sampleRow + static_cast<std::size_t>(subX) * 4u;
+                                accumulated[0] += sample[0];
+                                accumulated[1] += sample[1];
+                                accumulated[2] += sample[2];
+                                accumulated[3] += sample[3];
+                            }
+                        }
+                        const std::uint32_t half = 1u << (sampleShift - 1u);
+                        destination[x * 4u + 0] = static_cast<std::uint8_t>((accumulated[0] + half) >> sampleShift);
+                        destination[x * 4u + 1] = static_cast<std::uint8_t>((accumulated[1] + half) >> sampleShift);
+                        destination[x * 4u + 2] = static_cast<std::uint8_t>((accumulated[2] + half) >> sampleShift);
+                        destination[x * 4u + 3] = static_cast<std::uint8_t>((accumulated[3] + half) >> sampleShift);
+                    }
+                }
+                return;
+            }
+#endif
             for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
             {
                 std::uint8_t *destination = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
@@ -1277,9 +1359,13 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
             // parallel path, one record at a time.
             for (const TileBinRecord &record : tileRecords_)
             {
-                if (rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
-                        static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                        static_cast<std::int32_t>(framebufferHeight) - 1))
+                if (record.shadeRuns
+                        ? rasterizeFanRecordRuns(batchSetups_[record.setupIndex], record, 0,
+                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
+                        : rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
+                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                            static_cast<std::int32_t>(framebufferHeight) - 1))
                 {
                     ++statistics_.trianglesRasterized;
                 }
@@ -1301,9 +1387,13 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
             // exactly once either way.
             for (const TileBinRecord &record : tileRecords_)
             {
-                if (rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
-                        static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                        static_cast<std::int32_t>(framebufferHeight) - 1))
+                if (record.shadeRuns
+                        ? rasterizeFanRecordRuns(batchSetups_[record.setupIndex], record, 0,
+                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
+                        : rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
+                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                            static_cast<std::int32_t>(framebufferHeight) - 1))
                 {
                     ++statistics_.trianglesRasterized;
                 }
@@ -1930,6 +2020,8 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.emissiveColor           = glm::make_vec3(material.emissiveColor);
     outSetup.sheenFactor             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
     outSetup.doubleSided             = material.doubleSided;
+    outSetup.alphaCutoff             = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
+
     outSetup.hasBaseColorMap         = outSetup.baseColorMap != &neutralWhite_;
     outSetup.hasNormalMap            = outSetup.normalMap != &flatNormal_;
     outSetup.hasMetallicRoughnessMap = outSetup.metallicRoughnessMap != &neutralWhite_;
@@ -2137,6 +2229,11 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
     const bool                   hasEmissiveMap          = setup.hasEmissiveMap;
     const bool                   hasEmissive             = setup.hasEmissive;
     const bool                   hasOcclusion            = setup.hasOcclusion;
+    // Alpha cutout threshold, 0 when inactive (no cutoff, transparent draws,
+    // or no base-color map): the per-pixel check folds to one compare.
+    const float alphaCutoffActive = (setup.alphaCutoff > 0.0f && !setup.transparent && setup.hasBaseColorMap)
+        ? setup.alphaCutoff
+        : 0.0f;
     float *const ENGINE_RESTRICT        depthBuffer       = this->depth.data();
     std::uint8_t *const ENGINE_RESTRICT colorBuffer       = this->color.data();
     const std::uint32_t                 framebufferWidth  = this->framebufferWidth;
@@ -2478,6 +2575,23 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         const glm::vec3 interpolatedColor = correctedA * clipped[cornerA].color
                                                           + correctedB * clipped[cornerB].color
                                                           + correctedC * clipped[cornerC].color;
+                        // Alpha cutout (MeshMaterial::alphaCutoff, mesh.frag's
+                        // uCloth.z discard mirror): a texel below the cutoff
+                        // skips shading and every commit exactly like the
+                        // fur crop below - opaque draws keep depth writes, so
+                        // masked foliage's own depth is consistent everywhere.
+                        // Transparent draws blend instead; the cutoff does not
+                        // apply to them.
+                        if (alphaCutoffActive)
+                        {
+                            if (baseColorMap->sampleAlpha(interpolatedUv.x, interpolatedUv.y) < alphaCutoffActive)
+                            {
+                                weightA += weightADx;
+                                weightB += weightBDx;
+                                pixelDepth += depthADx;
+                                continue;
+                            }
+                        }
                         glm::vec3       baseColor         = interpolatedColor * baseColorFactor;
                         if (hasBaseColorMap)
                         {
@@ -2690,17 +2804,27 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 // No traced response (outside the traced
                                 // roughness band, or no reflection module):
                                 // the classic encoded-space alpha blend, with
-                                // the material's opacity as the blend factor
-                                // (the depth write is already off through the
-                                // setup; the pre-shade depth test above still
-                                // applied, so opaque geometry in front keeps
-                                // occluding).
-                                const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
-                                const float   oneMinus = 1.0f - setup.opacity;
-                                pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
-                                pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
-                                pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
-                                pixel[3] = 255;
+                                // the material's opacity TIMES the base-color
+                                // map's texel alpha as the blend factor (the
+                                // mesh.frag oColor.a twin: uCloth.w * texel.a
+                                // on the GPU side) - a textured transparent
+                                // sprite (foam patch, mist bank) fades per
+                                // texel instead of compositing as a solid
+                                // card. Fully transparent texels skip the
+                                // blend entirely.
+                                const float texelAlpha = setup.hasBaseColorMap
+                                    ? setup.baseColorMap->sampleAlpha(interpolatedUv.x, interpolatedUv.y)
+                                    : 1.0f;
+                                const float effectiveOpacity = setup.opacity * texelAlpha;
+                                if (effectiveOpacity > 0.0039f)
+                                {
+                                    const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                                    const float   oneMinus = 1.0f - effectiveOpacity;
+                                    pixel[0] = toByte(encoded.x * effectiveOpacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                                    pixel[1] = toByte(encoded.y * effectiveOpacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                                    pixel[2] = toByte(encoded.z * effectiveOpacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                                    pixel[3] = 255;
+                                }
                             }
                             rasterized = true;
                             weightA += weightADx;
@@ -3046,6 +3170,10 @@ std::size_t HeadlessBackend::prepareFanTriangles(
             record.uvDenominatorY = gradAy * wA + gradBy * wB + gradCy * wC;
         }
         record.sourceTriangle    = static_cast<std::uint32_t>(triangleIndex);
+        // Run-shading dispatch flag (see rasterizeFanRecordRuns): computed at
+        // emission, where the draw's setup and the record's window are both
+        // known; the rasterization loops read only the flag.
+        record.shadeRuns = recordRunsEligible(setup, record);
     }
     return fanCount;
 }
@@ -3260,9 +3388,317 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
 // sequential path passes the whole framebuffer; tile owners pass their tile
 // (exclusive ownership means the writes need no locks). Returns whether at
 // least one pixel was written.
+// Run-shading dispatch predicate: the draw's shading path fits the 4-wide
+// run kernel (no normal map, no cloth sheen, no direct lights, and either an
+// unlit draw or no probe grid - a lit draw under a probe grid keeps the
+// per-sample path so the probe walk cannot silently drop to the hemispheric
+// ambient), and the record's framebuffer window is wide enough to amortize a
+// run (narrow records keep the per-sample core; their lanes mostly reject
+// and the run bookkeeping would cost more than the SoA pass saves).
+// Evaluated once per record at emission (the shadeRuns flag), never inside
+// the rasterization loops - an eligibility call per record measurably
+// regressed the inlined per-sample core's codegen.
+bool HeadlessBackend::recordRunsEligible(const RasterSetup &setup, const TileBinRecord &record) const
+{
+    // Alpha-cutoff draws stay on the per-sample cores: the run kernel shades
+    // four lanes at once and cannot drop a single masked pixel mid-run.
+    // Textured transparent draws too: their commit modulates the blend by
+    // the base-color map's texel alpha, a per-lane fetch the run kernel's
+    // shared commit does not carry.
+    if (setup.fur || setup.sheenFactor > 0.0f || setup.alphaCutoff > 0.0f
+        || (setup.transparent && setup.hasBaseColorMap) || !directLights_.empty())
+    {
+        return false;
+    }
+    if (!setup.unlit && preparedProbeGrid_.valid)
+    {
+        return false;
+    }
+    std::int32_t firstX = 0;
+    std::int32_t lastX  = 0;
+    std::int32_t firstY = 0;
+    std::int32_t lastY  = 0;
+    fanPixelWindow(record, framebufferWidth, framebufferHeight, firstX, lastX, firstY, lastY);
+    return lastX - firstX + 1 >= 16;
+}
+
 bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
     std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-    GiAmortizationCache *giAmortization)
+    GiQuadCache *giQuads)
+{
+    if (framebufferWidth == 0 || framebufferHeight == 0)
+    {
+        return false;
+    }
+
+    std::int32_t firstX = 0;
+    std::int32_t lastX  = 0;
+    std::int32_t firstY = 0;
+    std::int32_t lastY  = 0;
+    fanPixelWindow(record, framebufferWidth, framebufferHeight, firstX, lastX, firstY, lastY);
+    if (firstX > lastX || firstY > lastY)
+    {
+        return false;
+    }
+    // Window restriction (tile owners pass a tile; the sequential path passes
+    // the whole framebuffer, which leaves the window unchanged because
+    // fanPixelWindow already clamped it to the framebuffer).
+    firstX = std::max<std::int32_t>(firstX, xBandBegin);
+    lastX  = std::min<std::int32_t>(lastX, xBandEnd);
+    firstY = std::max<std::int32_t>(firstY, yBandBegin);
+    lastY  = std::min<std::int32_t>(lastY, yBandEnd);
+    if (firstX > lastX || firstY > lastY)
+    {
+        return false;
+    }
+
+    // Record fields are value-copied into locals before the scan loops: the
+    // depth/colour stores below are restrict-qualified, so these become
+    // registers (reading record.* directly would re-load per row/pixel).
+    // Constant indices only, so the arrays scalarise.
+    const float screenXA = record.screenX[0];
+    const float screenXB = record.screenX[1];
+    const float screenXC = record.screenX[2];
+    const float screenYA = record.screenY[0];
+    const float screenYB = record.screenY[1];
+    const float screenYC = record.screenY[2];
+    const float depthA   = record.depth[0];
+    const float depthB   = record.depth[1];
+    const float depthC   = record.depth[2];
+    const float inverseWA = record.inverseClipW[0];
+    const float inverseWB = record.inverseClipW[1];
+    const float inverseWC = record.inverseClipW[2];
+    const bool  writeDepth = setup.depthWrite;
+
+    // Same area expression prepareFanTriangles used, on the same stored
+    // screen coordinates: bit-identical value, so |area| >= 1e-9 holds here.
+    const float area = (screenXB - screenXA) * (screenYC - screenYA)
+                     - (screenXC - screenXA) * (screenYB - screenYA);
+    const float inverseArea = 1.0f / area;
+
+    float *const ENGINE_RESTRICT        depthBuffer = this->depth.data();
+    std::uint8_t *const ENGINE_RESTRICT colorBuffer = this->color.data();
+
+    const float weightADx = -(screenYC - screenYB) * inverseArea;
+    const float weightBDx = -(screenYA - screenYC) * inverseArea;
+    const float sampleX   = static_cast<float>(firstX) + 0.5f;
+    const float depthADx  = weightADx * depthA + weightBDx * depthB - (weightADx + weightBDx) * depthC;
+
+    bool wrote = false;
+    // Alpha cutout threshold, 0 when inactive (see the sequential core's
+    // hoist): one compare per covered pixel. Runs-path records never reach
+    // this function for cutoff draws (recordRunsEligible excludes them).
+    const float alphaCutoffActive = (setup.alphaCutoff > 0.0f && !setup.transparent) ? setup.alphaCutoff : 0.0f;
+    // The shaded pixel's reflection-field response flag (transmissive
+    // commits read it; see the transparent commit below).
+    bool fieldTraced = false;
+    // Quad amortization of the probe-grid ambient (see GiQuadCache): only
+    // draws whose shading normal IS the interpolated geometry normal can
+    // share a quad sample (a normal map perturbs it per pixel, a two-sided
+    // draw flips it on back-facing fragments; unlit and fur draws never
+    // consult the probe grid).
+    const bool giQuadEligible = giQuads != nullptr && preparedProbeGrid_.valid && !setup.unlit && !setup.fur
+        && !setup.hasNormalMap && !setup.doubleSided;
+    GiQuadCache::Entry *const quadEntries
+        = giQuadEligible && !giQuads->entries.empty() ? giQuads->entries.data() : nullptr;
+    const std::uint32_t quadStride = giQuads != nullptr ? giQuads->stride : 0u;
+    for (std::int32_t y = firstY; y <= lastY; ++y)
+    {
+        const float sampleY  = static_cast<float>(y) + 0.5f;
+        const float offsetAX = sampleX - screenXB;
+        const float offsetAY = sampleY - screenYB;
+        const float offsetBX = sampleX - screenXC;
+        const float offsetBY = sampleY - screenYC;
+        float       weightA  = ((screenXC - screenXB) * offsetAY - (screenYC - screenYB) * offsetAX) * inverseArea;
+        float       weightB  = ((screenXA - screenXC) * offsetBY - (screenYA - screenYC) * offsetBX) * inverseArea;
+        float       pixelDepth = weightA * depthA + weightB * depthB + (1.0f - weightA - weightB) * depthC;
+        std::size_t pixelIndex = static_cast<std::size_t>(y) * framebufferWidth + firstX;
+
+        for (std::int32_t x = firstX; x <= lastX; ++x, ++pixelIndex)
+        {
+#if defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+#endif
+            const float weightC = 1.0f - weightA - weightB;
+            if (weightA >= 0.0f && weightB >= 0.0f && weightC >= 0.0f)
+            {
+                const float currentDepth = depthBuffer[pixelIndex];
+                if (pixelDepth >= currentDepth)
+                {
+                    // Behind geometry: advance the edge functions now and
+                    // skip shading (covered pixels advance at the loop tail).
+                    weightA += weightADx;
+                    weightB += weightBDx;
+                    pixelDepth += depthADx;
+                    continue;
+                }
+
+                // Alpha cutout (MeshMaterial::alphaCutoff, mesh.frag's
+                // discard mirror): a texel below the cutoff skips the
+                // shading kernel and every commit, exactly like the
+                // sequential core's check. The perspective-correct UV
+                // mirrors the shading kernel's own interpolation.
+                if (alphaCutoffActive)
+                {
+                    const float cutInverseW = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
+                    const float cutW = 1.0f / cutInverseW;
+                    const float cutA = weightA * inverseWA * cutW;
+                    const float cutB = weightB * inverseWB * cutW;
+                    const float cutC = 1.0f - cutA - cutB;
+                    const glm::vec2 cutUv = cutA * record.corners[0].uv + cutB * record.corners[1].uv
+                        + cutC * record.corners[2].uv;
+                    if (setup.baseColorMap->sampleAlpha(cutUv.x, cutUv.y) < alphaCutoffActive)
+                    {
+                        weightA += weightADx;
+                        weightB += weightBDx;
+                        pixelDepth += depthADx;
+                        continue;
+                    }
+                }
+
+                // Perspective-correct attributes are interpolated inside the
+                // shading kernel, which returns the tone-mapped linear color;
+                // the commit folds the sRGB encode and quantization into one
+                // packed word. The pre-shade depth test above is the early-out;
+                // the commit reuses it directly: within one record scan (and
+                // one tile) the calling thread is the only depth writer, so the
+                // pixel's depth still holds the value that test read.
+                //
+                // Quad-amortized probe-grid ambient: interpolate this pixel's
+                // surface pair (the same perspective-correct math the shading
+                // kernel runs) and either reuse the quad's cached walk or
+                // evaluate and publish it. The gates - same plane (the normal
+                // projection of the position delta stays small) and a
+                // near-identical normal - are what the walk's own inputs vary
+                // smoothly over, so a passing neighbor returns the sample the
+                // per-pixel walk would have produced to within the gates'
+                // tolerance.
+                GiAmbientSample quadSample;
+                const GiAmbientSample *giSample = nullptr;
+                if (quadEntries != nullptr)
+                {
+                    const float inverseWSum = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
+                    const float inversePerspective = 1.0f / inverseWSum;
+                    const float correctedA         = weightA * inverseWA * inversePerspective;
+                    const float correctedB         = weightB * inverseWB * inversePerspective;
+                    const float correctedC         = 1.0f - correctedA - correctedB;
+                    const RasterVertex &cornerA    = record.corners[0];
+                    const RasterVertex &cornerB    = record.corners[1];
+                    const RasterVertex &cornerC    = record.corners[2];
+                    const glm::vec3 pixelPosition  = correctedA * cornerA.worldPosition
+                                                    + correctedB * cornerB.worldPosition
+                                                    + correctedC * cornerC.worldPosition;
+                    const glm::vec3 pixelNormalRaw = correctedA * cornerA.worldNormal
+                                                    + correctedB * cornerB.worldNormal
+                                                    + correctedC * cornerC.worldNormal;
+                    const float     pixelNormalLength = glm::length(pixelNormalRaw);
+                    const glm::vec3 pixelNormal = pixelNormalLength > 1.0e-8f ? pixelNormalRaw / pixelNormalLength
+                                                                          : glm::vec3(0.0f, 1.0f, 0.0f);
+                    GiQuadCache::Entry &entry
+                        = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1) * quadStride
+                                      + static_cast<std::size_t>((x - xBandBegin) >> 1)];
+                    const glm::vec3 positionDelta = entry.position - pixelPosition;
+                    if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
+                        && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
+                    {
+                        quadSample.irradiance = entry.irradiance;
+                        quadSample.coverage   = entry.coverage;
+                        quadSample.valid      = true;
+                    }
+                    else
+                    {
+                        quadSample.valid = giProbeGridIrradiance(
+                            preparedProbeGrid_, pixelPosition, pixelNormal, quadSample.irradiance, quadSample.coverage);
+                        entry.position   = pixelPosition;
+                        entry.normal     = pixelNormal;
+                        entry.irradiance = quadSample.irradiance;
+                        entry.coverage   = quadSample.coverage;
+                        entry.valid      = true;
+                    }
+                    giSample = &quadSample;
+                }
+                const glm::vec3 shaded
+                    = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC,
+                        &fieldTraced, giSample);
+
+                if (setup.transparent)
+                {
+                    // Perspective-correct UV for the texel-alpha modulation
+                    // the commit below applies (the same interpolation the
+                    // shading kernel runs; computed only for transparent
+                    // textured draws).
+                    const float transparentInverseW
+                        = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
+                    const float transparentW = 1.0f / transparentInverseW;
+                    const float transparentA = weightA * inverseWA * transparentW;
+                    const float transparentB = weightB * inverseWB * transparentW;
+                    const float transparentC = 1.0f - transparentA - transparentB;
+                    const glm::vec2 transparentUv = transparentA * record.corners[0].uv
+                        + transparentB * record.corners[1].uv + transparentC * record.corners[2].uv;
+                    std::uint8_t *pixel = colorBuffer + pixelIndex * 4;
+                    if (fieldTraced)
+                    {
+                        // Transmissive commit: the reflection field's response
+                        // at this pixel already contains what the surface
+                        // shows of the scene behind it (the reflected share
+                        // off the interface plus the transmitted share
+                        // refracted through it), so the shaded result commits
+                        // directly - blending the raw background in as well
+                        // would show the scene behind twice. Depth writes stay
+                        // off: co-transmissive surfaces stack through the
+                        // field's chains, not through occlusion.
+                        *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
+                    }
+                    else
+                    {
+                        // No traced response here (the surface is outside the
+                        // traced roughness band, or the reflection module is
+                        // absent): the classic alpha blend over the
+                        // framebuffer, with the material's opacity TIMES the
+                        // base-color map's texel alpha (the sequential core's
+                        // rule and mesh.frag's oColor.a twin). Tile ownership
+                        // keeps the per-pixel order equal to the submission
+                        // order, so co-transparent surfaces stack far-to-near
+                        // exactly as the sequential path blends them.
+                        const float texelAlpha = setup.hasBaseColorMap
+                            ? setup.baseColorMap->sampleAlpha(transparentUv.x, transparentUv.y)
+                            : 1.0f;
+                        const float effectiveOpacity = setup.opacity * texelAlpha;
+                        if (effectiveOpacity > 0.0039f)
+                        {
+                            const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                            const float     oneMinus = 1.0f - effectiveOpacity;
+                            pixel[0] = toByte(encoded.x * effectiveOpacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                            pixel[1] = toByte(encoded.y * effectiveOpacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                            pixel[2] = toByte(encoded.z * effectiveOpacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                            pixel[3] = 255;
+                        }
+                    }
+                    wrote = true;
+                }
+                else
+                {
+                    if (writeDepth)
+                    {
+                        depthBuffer[pixelIndex] = pixelDepth;
+                    }
+                    *reinterpret_cast<std::uint32_t *>(colorBuffer + pixelIndex * 4) = encodeColorRgba(shaded);
+                    wrote                                                            = true;
+                }
+            }
+
+            weightA += weightADx;
+            weightB += weightBDx;
+            pixelDepth += depthADx;
+        }
+    }
+    return wrote;
+}
+
+
+bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const TileBinRecord &record,
+    std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
+    GiQuadCache *giQuads)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
@@ -3326,19 +3762,175 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
     bool fieldTraced = false;
-    // Probe-grid amortization tiers (see GiAmortizationCache): only draws
-    // whose shading normal IS the interpolated geometry normal can share a
-    // cached sample (a normal map perturbs it per pixel, a two-sided draw
-    // flips it on back-facing fragments; unlit and fur draws never consult
-    // the probe grid). The coarse block tier first, the quad tier next.
-    const bool giQuadEligible = giAmortization != nullptr && preparedProbeGrid_.valid && !setup.unlit && !setup.fur
+    // Quad amortization of the probe-grid ambient (see GiQuadCache): only
+    // draws whose shading normal IS the interpolated geometry normal can
+    // share a quad sample (a normal map perturbs it per pixel, a two-sided
+    // draw flips it on back-facing fragments; unlit and fur draws never
+    // consult the probe grid).
+    const bool giQuadEligible = giQuads != nullptr && preparedProbeGrid_.valid && !setup.unlit && !setup.fur
         && !setup.hasNormalMap && !setup.doubleSided;
-    GiQuadCache::Entry *const blockEntries
-        = giQuadEligible && !giAmortization->blocks.entries.empty() ? giAmortization->blocks.entries.data() : nullptr;
-    const std::uint32_t blockStride = giAmortization != nullptr ? giAmortization->blocks.stride : 0u;
     GiQuadCache::Entry *const quadEntries
-        = giQuadEligible && !giAmortization->quads.entries.empty() ? giAmortization->quads.entries.data() : nullptr;
-    const std::uint32_t quadStride = giAmortization != nullptr ? giAmortization->quads.stride : 0u;
+        = giQuadEligible && !giQuads->entries.empty() ? giQuads->entries.data() : nullptr;
+    const std::uint32_t quadStride = giQuads != nullptr ? giQuads->stride : 0u;
+
+    // 4-wide shading runs (see quad_shading.hpp): the run kernel models the
+    // whole !unlit shading path for draws without direct lights, cloth sheen,
+    // or an unamortized probe-grid walk, and shades four horizontally
+    // consecutive samples of one record together in a single SoA pass -
+    // normal-mapped draws included, with the caller running the per-lane TBN
+    // chain (the fetch needs per-sample UVs) and the kernel lighting the
+    // finished normals. What the kernel does not model (texture fetches, the
+    // reflection field, emissive, tone mapping, the commits) stays per sample
+    // with the caller.
+    const RasterVertex &cornerA = record.corners[0];
+    const RasterVertex &cornerB = record.corners[1];
+    const RasterVertex &cornerC = record.corners[2];
+    const glm::vec3    runPositions[3] = {cornerA.worldPosition, cornerB.worldPosition, cornerC.worldPosition};
+    const glm::vec3    runNormals[3]    = {cornerA.worldNormal, cornerB.worldNormal, cornerC.worldNormal};
+    const glm::vec3    runColors[3]     = {cornerA.color, cornerB.color, cornerC.color};
+    // The dispatcher (recordRunsEligible) guarantees this variant only sees
+    // records whose draws the run kernel models and whose windows amortize a
+    // 4-wide run.
+    const bool hasBaseColorMap = setup.hasBaseColorMap;
+    // Normal-mapped lit lanes fetch the map and build the TBN in the run loop
+    // (shadeTrianglePixel's exact normal chain, per lane); the kernel then
+    // lights the finished normals. Unlit lanes never fetch (the per-sample
+    // path only reads the map inside !unlit).
+    const bool normalMapped = setup.hasNormalMap && !setup.unlit;
+    const HeadlessTexture *const normalMap = setup.normalMap;
+    const float normalScale = setup.normalScale;
+    const glm::vec3 tangentScaled = record.tangent * record.tangentInverseMax;
+    const glm::vec3 bitangentScaled = record.bitangent * record.tangentInverseMax;
+    const bool hasMetallicRoughnessMap = setup.hasMetallicRoughnessMap;
+    const bool hasOcclusion = setup.hasOcclusion;
+    const bool hasEmissiveMap = setup.hasEmissiveMap;
+    const bool anySampledMap = hasBaseColorMap || normalMapped || hasMetallicRoughnessMap || hasOcclusion || hasEmissiveMap;
+    shadingrun::RunContext runContext;
+    runContext.cameraPosition  = cameraPosition_;
+    runContext.lightDirection  = lightDirection_;
+    runContext.sunRadiance     = sunRadiance_;
+    runContext.ambientSky      = ambientSky_;
+    runContext.ambientGround   = ambientGround_;
+    runContext.baseColorFactor = setup.baseColorFactor;
+    runContext.opacity         = setup.opacity;
+    runContext.sheenFactor     = setup.sheenFactor;
+    runContext.doubleSided     = setup.doubleSided;
+    runContext.albedoFilled    = hasBaseColorMap;
+    runContext.unlit           = setup.unlit;
+    runContext.normalMapped    = normalMapped;
+    runContext.exposure        = environment_.exposure;
+    runContext.toneMapping     = environment_.toneMapping;
+    // The reflection-field response and emissive add in LINEAR space (the
+    // per-sample path applies them before the output transform), so the run
+    // defers the transform to the caller whenever those paths are live.
+    runContext.toneMapInside = !(setup.hasEmissive || (preparedReflectionField_.valid && !setup.unlit));
+
+    // The commit both paths share: transparent draws blend over the
+    // framebuffer, opaque draws write depth and the packed color. The depth
+    // value is the caller's interpolated sample depth.
+    const auto commitSample = [&](const glm::vec3 &shaded, float sampleDepth, std::size_t index, bool sampleFieldTraced)
+    {
+        if (setup.transparent)
+        {
+            std::uint8_t *pixel = colorBuffer + index * 4;
+            if (sampleFieldTraced)
+            {
+                // Transmissive commit: the reflection field's response at
+                // this pixel already contains what the surface shows of the
+                // scene behind it (the reflected share off the interface plus
+                // the transmitted share refracted through it), so the shaded
+                // result commits directly - blending the raw background in
+                // as well would show the scene behind twice. Depth writes
+                // stay off: co-transmissive surfaces stack through the
+                // field's chains, not through occlusion.
+                *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
+            }
+            else
+            {
+                // No traced response here (the surface is outside the traced
+                // roughness band, or the reflection module is absent): the
+                // classic alpha blend over the framebuffer. Tile ownership
+                // keeps the per-pixel order equal to the submission order, so
+                // co-transparent surfaces stack far-to-near exactly as the
+                // sequential path blends them.
+                const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                const float     oneMinus = 1.0f - setup.opacity;
+                pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                pixel[3] = 255;
+            }
+        }
+        else
+        {
+            if (writeDepth)
+            {
+                depthBuffer[index] = sampleDepth;
+            }
+            *reinterpret_cast<std::uint32_t *>(colorBuffer + index * 4) = encodeColorRgba(shaded);
+        }
+        wrote = true;
+    };
+
+    // The run path's per-lane epilogue: reflection field, emissive, tone map,
+    // commit (the per-sample path's tail, per lane).
+    const auto commitRunLane = [&](const glm::vec3 &shaded, float sampleDepth, std::size_t index,
+        const float laneWeightA_, const float laneWeightB_, const float runRoughness, const glm::vec2 &laneUv,
+        const glm::vec2 &laneUvDerivativeX, const glm::vec2 &laneUvDerivativeY)
+    {
+        glm::vec3 shadedOut = shaded;
+        bool      sampleFieldTraced = false;
+        if (preparedReflectionField_.valid && !setup.unlit)
+        {
+            // The reflection field's add is the whole composite (see the
+            // per-sample path); the lane's perspective-correct position feeds
+            // the field sample.
+            const float weightC = 1.0f - laneWeightA_ - laneWeightB_;
+            const float inverseWSum = laneWeightA_ * inverseWA + laneWeightB_ * inverseWB + weightC * inverseWC;
+            const float inversePerspective = 1.0f / inverseWSum;
+            const float correctedA = laneWeightA_ * inverseWA * inversePerspective;
+            const float correctedB = laneWeightB_ * inverseWB * inversePerspective;
+            const float correctedC = 1.0f - correctedA - correctedB;
+            const glm::vec3 pixelPosition = correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
+                + correctedC * cornerC.worldPosition;
+            const float roughnessClamped = std::clamp(runRoughness, minimumRoughness, 1.0f);
+            bool      traced = false;
+            shadedOut += sampleReflectionField(preparedReflectionField_, pixelPosition, roughnessClamped, &traced);
+            sampleFieldTraced = traced;
+        }
+        if (setup.hasEmissive)
+        {
+            if (hasEmissiveMap)
+            {
+                shadedOut += setup.emissiveColor
+                    * setup.emissiveMap->sampleTrilinear(laneUv.x, laneUv.y, laneUvDerivativeX, laneUvDerivativeY);
+            }
+            else
+            {
+                shadedOut += setup.emissiveColor;
+            }
+        }
+        // The run kernel already applied the output transform (exposure +
+        // tone map) unless it deferred it behind the linear-space adds above.
+        if (!runContext.toneMapInside)
+        {
+            shadedOut = toneMapColor(shadedOut, environment_.exposure, environment_.toneMapping);
+        }
+        commitSample(shadedOut, sampleDepth, index, sampleFieldTraced);
+    };
+
+    // Scratch for the 4-wide runs below, hoisted out of the scan loops: the
+    // struct's zero-initialization pays once per record instead of once per
+    // run (the shadeNormal fields tripled its footprint), and every field an
+    // accepted lane reads is still written fresh in the lane loop - giValid
+    // is the one field the old per-run zero-init used to clear for lanes the
+    // quad-cache block does not touch, so the lane loop clears it
+    // explicitly; discarded lanes carry garbage the committed outputs never
+    // read.
+    shadingrun::RunInputs run{};
+    glm::vec2             laneUv[4];
+    glm::vec2             laneUvDerivativeX[4];
+    glm::vec2             laneUvDerivativeY[4];
     for (std::int32_t y = firstY; y <= lastY; ++y)
     {
         const float sampleY  = static_cast<float>(y) + 0.5f;
@@ -3351,7 +3943,220 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
         float       pixelDepth = weightA * depthA + weightB * depthB + (1.0f - weightA - weightB) * depthC;
         std::size_t pixelIndex = static_cast<std::size_t>(y) * framebufferWidth + firstX;
 
-        for (std::int32_t x = firstX; x <= lastX; ++x, ++pixelIndex)
+        {
+            // Runs of four horizontally consecutive samples; leftover columns
+            // fall through to the per-sample loop below. The lane weights and
+            // depths step through the same incremental sequence the per-sample
+            // loop's tail stepping produces, so a lane sees exactly the value
+            // the per-sample scan would compute for it.
+            const std::int32_t runEnd = firstX + static_cast<std::int32_t>((lastX - firstX + 1) & ~3);
+            for (std::int32_t x = firstX; x < runEnd; x += 4, pixelIndex += 4)
+            {
+                float laneWeightA[4];
+                float laneWeightB[4];
+                float laneDepth[4];
+                float stepWeightA = weightA;
+                float stepWeightB = weightB;
+                float stepDepth   = pixelDepth;
+                for (int lane = 0; lane < 4; ++lane)
+                {
+                    laneWeightA[lane] = stepWeightA;
+                    laneWeightB[lane] = stepWeightB;
+                    laneDepth[lane]    = stepDepth;
+                    stepWeightA += weightADx;
+                    stepWeightB += weightBDx;
+                    stepDepth   += depthADx;
+                }
+                bool accepted[4] = {false, false, false, false};
+                bool anyAccepted = false;
+                for (int lane = 0; lane < 4; ++lane)
+                {
+                    const float weightC = 1.0f - laneWeightA[lane] - laneWeightB[lane];
+                    if (weightC >= 0.0f && laneWeightA[lane] >= 0.0f && laneWeightB[lane] >= 0.0f
+                        && laneDepth[lane] < depthBuffer[pixelIndex + static_cast<std::size_t>(lane)])
+                    {
+                        accepted[lane] = true;
+                        anyAccepted    = true;
+                    }
+                }
+                if (!anyAccepted)
+                {
+                    weightA    = stepWeightA;
+                    weightB    = stepWeightB;
+                    pixelDepth = stepDepth;
+                    continue;
+                }
+
+                for (int lane = 0; lane < 4; ++lane)
+                {
+                    run.active[lane] = accepted[lane];
+                    if (!accepted[lane])
+                    {
+                        continue;
+                    }
+                    // Fresh per run: the hoisted scratch keeps the previous
+                    // run's probe-grid verdict otherwise (see the scratch
+                    // hoist comment above).
+                    run.giValid[lane] = false;
+                    const float weightC = 1.0f - laneWeightA[lane] - laneWeightB[lane];
+                    const float inverseWSum = laneWeightA[lane] * inverseWA + laneWeightB[lane] * inverseWB
+                                             + weightC * inverseWC;
+                    const float inversePerspective = 1.0f / inverseWSum;
+                    const float correctedA = laneWeightA[lane] * inverseWA * inversePerspective;
+                    const float correctedB = laneWeightB[lane] * inverseWB * inversePerspective;
+                    const float correctedC = 1.0f - correctedA - correctedB;
+                    run.correctedA[lane] = correctedA;
+                    run.correctedB[lane] = correctedB;
+                    run.correctedC[lane] = correctedC;
+
+                    float metallic  = setup.metallicFactor;
+                    float roughness = setup.roughnessFactor;
+                    float occlusion = 1.0f;
+                    if (anySampledMap)
+                    {
+                        laneUv[lane] = correctedA * cornerA.uv + correctedB * cornerB.uv + correctedC * cornerC.uv;
+                        // Per-lane UV derivatives from the record's affine
+                        // gradients (the quotient rule; see the per-sample
+                        // path).
+                        laneUvDerivativeX[lane] = glm::vec2(record.uvNumeratorX[0] - laneUv[lane].x * record.uvDenominatorX,
+                            record.uvNumeratorX[1] - laneUv[lane].y * record.uvDenominatorX) * inversePerspective;
+                        laneUvDerivativeY[lane] = glm::vec2(record.uvNumeratorY[0] - laneUv[lane].x * record.uvDenominatorY,
+                            record.uvNumeratorY[1] - laneUv[lane].y * record.uvDenominatorY) * inversePerspective;
+                        if (hasBaseColorMap)
+                        {
+                            const glm::vec3 interpolatedColor = correctedA * cornerA.color + correctedB * cornerB.color
+                                + correctedC * cornerC.color;
+                            const glm::vec3 textured = interpolatedColor * setup.baseColorFactor
+                                * setup.baseColorMap->sampleTrilinear(laneUv[lane].x, laneUv[lane].y,
+                                    laneUvDerivativeX[lane], laneUvDerivativeY[lane]);
+                            run.albedo[0][lane] = textured.r;
+                            run.albedo[1][lane] = textured.g;
+                            run.albedo[2][lane] = textured.b;
+                        }
+                        // Unlit draws stop at the albedo (the per-sample
+                        // path's `if (!unlit)`): the material maps only load
+                        // for lit lanes.
+                        if (!setup.unlit && (hasMetallicRoughnessMap || hasOcclusion))
+                        {
+                            if (hasMetallicRoughnessMap)
+                            {
+                                const glm::vec3 sample = setup.metallicRoughnessMap->sampleTrilinear(laneUv[lane].x,
+                                    laneUv[lane].y, laneUvDerivativeX[lane], laneUvDerivativeY[lane]);
+                                metallic  *= sample.b;
+                                roughness *= sample.g;
+                            }
+                            if (hasOcclusion)
+                            {
+                                occlusion = 1.0f - setup.occlusionStrength
+                                    * (1.0f - setup.occlusionMap->sampleTrilinear(laneUv[lane].x, laneUv[lane].y,
+                                                 laneUvDerivativeX[lane], laneUvDerivativeY[lane]).r);
+                            }
+                        }
+                        // Normal-mapped lanes: the per-sample path's normal
+                        // chain, per lane (shadeTrianglePixel's twin block -
+                        // the exact expressions, so each lane's normal bits
+                        // equal the value the per-sample scan computes). The
+                        // kernel then lights the finished normals in SoA.
+                        if (normalMapped)
+                        {
+                            const glm::vec3 interpolatedPosition = correctedA * cornerA.worldPosition
+                                + correctedB * cornerB.worldPosition + correctedC * cornerC.worldPosition;
+                            const glm::vec3 interpolatedNormal = correctedA * cornerA.worldNormal
+                                + correctedB * cornerB.worldNormal + correctedC * cornerC.worldNormal;
+                            const glm::vec3 geometryNormal = glm::normalize(interpolatedNormal);
+                            glm::vec3       orientedNormal = geometryNormal;
+                            if (setup.doubleSided)
+                            {
+                                const glm::vec3 viewForFlip = glm::normalize(cameraPosition_ - interpolatedPosition);
+                                if (glm::dot(orientedNormal, viewForFlip) < 0.0f)
+                                {
+                                    orientedNormal = -orientedNormal;
+                                }
+                            }
+                            const glm::vec3 normalMapSample = normalMap->sampleTrilinear(laneUv[lane].x,
+                                laneUv[lane].y, laneUvDerivativeX[lane], laneUvDerivativeY[lane]) * 2.0f - 1.0f;
+                            const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
+                                normalMapSample.y * normalScale,
+                                normalMapSample.z));
+                            // The (possibly flipped) oriented normal is the
+                            // TBN's third axis, matching the per-sample path's
+                            // flipped-geometry-normal frame.
+                            const glm::mat3 tbn(tangentScaled, bitangentScaled, orientedNormal);
+                            const glm::vec3 shadedNormal = glm::normalize(tbn * tangentNormal);
+                            run.shadeNormal[0][lane] = shadedNormal.x;
+                            run.shadeNormal[1][lane] = shadedNormal.y;
+                            run.shadeNormal[2][lane] = shadedNormal.z;
+                        }
+                    }
+                    run.metallic[lane]  = metallic;
+                    run.roughness[lane] = roughness;
+                    run.occlusion[lane] = occlusion;
+
+                    // Probe-grid quad sample: the per-sample path's entry
+                    // logic, per lane.
+                    if (quadEntries != nullptr)
+                    {
+                        const glm::vec3 pixelPosition = correctedA * cornerA.worldPosition
+                            + correctedB * cornerB.worldPosition + correctedC * cornerC.worldPosition;
+                        const glm::vec3 pixelNormalRaw = correctedA * cornerA.worldNormal
+                            + correctedB * cornerB.worldNormal + correctedC * cornerC.worldNormal;
+                        const float     pixelNormalLength = glm::length(pixelNormalRaw);
+                        const glm::vec3 pixelNormal = pixelNormalLength > 1.0e-8f
+                            ? pixelNormalRaw / pixelNormalLength
+                            : glm::vec3(0.0f, 1.0f, 0.0f);
+                        GiQuadCache::Entry &entry = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1)
+                            * quadStride + static_cast<std::size_t>((x + lane - xBandBegin) >> 1)];
+                        const glm::vec3 positionDelta = entry.position - pixelPosition;
+                        if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
+                            && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
+                        {
+                            run.giValid[lane]         = true;
+                            run.giCoverage[lane]       = entry.coverage;
+                            run.giIrradiance[0][lane] = entry.irradiance.x;
+                            run.giIrradiance[1][lane] = entry.irradiance.y;
+                            run.giIrradiance[2][lane] = entry.irradiance.z;
+                        }
+                        else
+                        {
+                            glm::vec3 irradiance(0.0f);
+                            float     coverage = 0.0f;
+                            const bool valid = giProbeGridIrradiance(
+                                preparedProbeGrid_, pixelPosition, pixelNormal, irradiance, coverage);
+                            entry.position   = pixelPosition;
+                            entry.normal     = pixelNormal;
+                            entry.irradiance = irradiance;
+                            entry.coverage   = coverage;
+                            entry.valid      = true;
+                            run.giValid[lane]         = valid;
+                            run.giCoverage[lane]      = coverage;
+                            run.giIrradiance[0][lane] = irradiance.x;
+                            run.giIrradiance[1][lane] = irradiance.y;
+                            run.giIrradiance[2][lane] = irradiance.z;
+                        }
+                    }
+                }
+
+                glm::vec3 shadedRun[4];
+                shadingrun::shadeRun4(runContext, runPositions, runNormals, runColors, run, shadedRun);
+
+                for (int lane = 0; lane < 4; ++lane)
+                {
+                    if (!accepted[lane])
+                    {
+                        continue;
+                    }
+                    commitRunLane(shadedRun[lane], laneDepth[lane], pixelIndex + static_cast<std::size_t>(lane),
+                        laneWeightA[lane], laneWeightB[lane], run.roughness[lane], laneUv[lane],
+                        laneUvDerivativeX[lane], laneUvDerivativeY[lane]);
+                }
+
+                weightA    = stepWeightA;
+                weightB    = stepWeightB;
+                pixelDepth = stepDepth;
+            }
+        }
+
+        for (std::int32_t x = firstX + ((lastX - firstX + 1) & ~3); x <= lastX; ++x, ++pixelIndex)
         {
 #if defined(__GNUC__) || defined(__clang__)
             __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
@@ -3378,16 +4183,15 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                 // one tile) the calling thread is the only depth writer, so the
                 // pixel's depth still holds the value that test read.
                 //
-                // Tiered probe-grid amortization: interpolate this pixel's
+                // Quad-amortized probe-grid ambient: interpolate this pixel's
                 // surface pair (the same perspective-correct math the shading
-                // kernel runs) and reuse the coarse 4x4 block's cached walk
-                // when its gates pass, else the 2x2 quad's, else evaluate the
-                // walk and publish it to the tier that missed it. The gates -
-                // same plane (the normal projection of the position delta
-                // stays small) and a near-identical normal - are what the
-                // walk's own inputs vary smoothly over, so a passing
-                // neighbor returns the sample the per-pixel walk would have
-                // produced to within the gates' tolerance.
+                // kernel runs) and either reuse the quad's cached walk or
+                // evaluate and publish it. The gates - same plane (the normal
+                // projection of the position delta stays small) and a
+                // near-identical normal - are what the walk's own inputs vary
+                // smoothly over, so a passing neighbor returns the sample the
+                // per-pixel walk would have produced to within the gates'
+                // tolerance.
                 GiAmbientSample quadSample;
                 const GiAmbientSample *giSample = nullptr;
                 if (quadEntries != nullptr)
@@ -3397,9 +4201,6 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                     const float correctedA         = weightA * inverseWA * inversePerspective;
                     const float correctedB         = weightB * inverseWB * inversePerspective;
                     const float correctedC         = 1.0f - correctedA - correctedB;
-                    const RasterVertex &cornerA    = record.corners[0];
-                    const RasterVertex &cornerB    = record.corners[1];
-                    const RasterVertex &cornerC    = record.corners[2];
                     const glm::vec3 pixelPosition  = correctedA * cornerA.worldPosition
                                                     + correctedB * cornerB.worldPosition
                                                     + correctedC * cornerC.worldPosition;
@@ -3409,48 +4210,26 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                     const float     pixelNormalLength = glm::length(pixelNormalRaw);
                     const glm::vec3 pixelNormal = pixelNormalLength > 1.0e-8f ? pixelNormalRaw / pixelNormalLength
                                                                           : glm::vec3(0.0f, 1.0f, 0.0f);
-                    GiQuadCache::Entry &blockEntry
-                        = blockEntries[static_cast<std::size_t>((y - yBandBegin) >> 2) * blockStride
-                                      + static_cast<std::size_t>((x - xBandBegin) >> 2)];
-                    const glm::vec3 blockPositionDelta = blockEntry.position - pixelPosition;
-                    if (blockEntry.valid && glm::dot(pixelNormal, blockEntry.normal) >= 0.995f
-                        && std::fabs(glm::dot(pixelNormal, blockPositionDelta)) <= 0.05f)
+                    GiQuadCache::Entry &entry
+                        = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1) * quadStride
+                                      + static_cast<std::size_t>((x - xBandBegin) >> 1)];
+                    const glm::vec3 positionDelta = entry.position - pixelPosition;
+                    if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
+                        && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
                     {
-                        quadSample.irradiance = blockEntry.irradiance;
-                        quadSample.coverage   = blockEntry.coverage;
+                        quadSample.irradiance = entry.irradiance;
+                        quadSample.coverage   = entry.coverage;
                         quadSample.valid      = true;
                     }
                     else
                     {
-                        GiQuadCache::Entry &entry
-                            = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1) * quadStride
-                                          + static_cast<std::size_t>((x - xBandBegin) >> 1)];
-                        const glm::vec3 positionDelta = entry.position - pixelPosition;
-                        if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
-                            && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
-                        {
-                            quadSample.irradiance = entry.irradiance;
-                            quadSample.coverage   = entry.coverage;
-                            quadSample.valid      = true;
-                        }
-                        else
-                        {
-                            quadSample.valid = giProbeGridIrradiance(
-                                preparedProbeGrid_, pixelPosition, pixelNormal, quadSample.irradiance, quadSample.coverage);
-                            entry.position   = pixelPosition;
-                            entry.normal     = pixelNormal;
-                            entry.irradiance = quadSample.irradiance;
-                            entry.coverage   = quadSample.coverage;
-                            entry.valid      = true;
-                        }
-                        // A rejected coarse block still learns the walk for
-                        // its remaining pixels (curved regions converge back
-                        // toward block sharing as the block's pixels agree).
-                        blockEntry.position   = pixelPosition;
-                        blockEntry.normal     = pixelNormal;
-                        blockEntry.irradiance = quadSample.irradiance;
-                        blockEntry.coverage   = quadSample.coverage;
-                        blockEntry.valid      = true;
+                        quadSample.valid = giProbeGridIrradiance(
+                            preparedProbeGrid_, pixelPosition, pixelNormal, quadSample.irradiance, quadSample.coverage);
+                        entry.position   = pixelPosition;
+                        entry.normal     = pixelNormal;
+                        entry.irradiance = quadSample.irradiance;
+                        entry.coverage   = quadSample.coverage;
+                        entry.valid      = true;
                     }
                     giSample = &quadSample;
                 }
@@ -3460,6 +4239,18 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
 
                 if (setup.transparent)
                 {
+                    // Perspective-correct UV for the texel-alpha modulation
+                    // the commit below applies (the same interpolation the
+                    // shading kernel runs; computed only for transparent
+                    // textured draws).
+                    const float transparentInverseW
+                        = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
+                    const float transparentW = 1.0f / transparentInverseW;
+                    const float transparentA = weightA * inverseWA * transparentW;
+                    const float transparentB = weightB * inverseWB * transparentW;
+                    const float transparentC = 1.0f - transparentA - transparentB;
+                    const glm::vec2 transparentUv = transparentA * record.corners[0].uv
+                        + transparentB * record.corners[1].uv + transparentC * record.corners[2].uv;
                     std::uint8_t *pixel = colorBuffer + pixelIndex * 4;
                     if (fieldTraced)
                     {
@@ -3479,16 +4270,25 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                         // No traced response here (the surface is outside the
                         // traced roughness band, or the reflection module is
                         // absent): the classic alpha blend over the
-                        // framebuffer. Tile ownership keeps the per-pixel
-                        // order equal to the submission order, so
-                        // co-transparent surfaces stack far-to-near exactly as
-                        // the sequential path blends them.
-                        const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
-                        const float     oneMinus = 1.0f - setup.opacity;
-                        pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
-                        pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
-                        pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
-                        pixel[3] = 255;
+                        // framebuffer, with the material's opacity TIMES the
+                        // base-color map's texel alpha (the sequential core's
+                        // rule and mesh.frag's oColor.a twin). Tile ownership
+                        // keeps the per-pixel order equal to the submission
+                        // order, so co-transparent surfaces stack far-to-near
+                        // exactly as the sequential path blends them.
+                        const float texelAlpha = setup.hasBaseColorMap
+                            ? setup.baseColorMap->sampleAlpha(transparentUv.x, transparentUv.y)
+                            : 1.0f;
+                        const float effectiveOpacity = setup.opacity * texelAlpha;
+                        if (effectiveOpacity > 0.0039f)
+                        {
+                            const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                            const float     oneMinus = 1.0f - effectiveOpacity;
+                            pixel[0] = toByte(encoded.x * effectiveOpacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                            pixel[1] = toByte(encoded.y * effectiveOpacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                            pixel[2] = toByte(encoded.z * effectiveOpacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                            pixel[3] = 255;
+                        }
                     }
                     wrote = true;
                 }
@@ -3510,7 +4310,6 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     }
     return wrote;
 }
-
 
 // Tile-parallel path, phase 1: run the shared geometry pipeline over every
 // triangle (identical to the sequential path), then bin the fan records into
@@ -3654,21 +4453,31 @@ void HeadlessBackend::rasterizeTileRecords(
         const std::int32_t yBandBegin = static_cast<std::int32_t>(tileY * tileHeight_);
         const std::int32_t yBandEnd = static_cast<std::int32_t>(
             std::min<std::int64_t>(framebufferHeightInt, static_cast<std::int64_t>(yBandBegin) + tileHeight_) - 1);
-        // One probe-grid amortization cache per worker thread, reset per
-        // owned tile: the amortization is only valid within a tile's pixels
-        // (see GiAmortizationCache), and concurrent tile owners must never
-        // share entries. The thread-local keeps its capacity across tiles
-        // and frames, so a steady-state tile costs one allocation-free clear.
-        static thread_local GiAmortizationCache amortization;
+        // One probe-grid quad cache per worker thread, reset per owned tile:
+        // the amortization is only valid within a tile's pixels (see
+        // GiQuadCache), and concurrent tile owners must never share entries.
+        // The thread-local keeps its capacity across tiles and frames, so a
+        // steady-state tile costs one allocation-free clear.
+        static thread_local GiQuadCache quadCache;
         if (preparedProbeGrid_.valid)
         {
-            amortization.resetForTile(tileWidth_, tileHeight_);
+            quadCache.resetForTile((tileWidth_ + 1u) / 2u, (tileHeight_ + 1u) / 2u);
         }
+        // Run-shading dispatch (see rasterizeFanRecordRuns): wide records of
+        // run-eligible draws shade in 4-wide SoA passes; every other record
+        // (and every narrow window) keeps the shared per-sample core, whose
+        // codegen this dispatch keeps pristine by keeping the run machinery
+        // in its own outlined function.
+        GiQuadCache *const tileQuadCache = preparedProbeGrid_.valid ? &quadCache : nullptr;
         for (std::uint32_t entry = begin; entry < end; ++entry)
         {
             const TileBinRecord &record = tileRecords_[tileItems_[entry]];
-            if (rasterizeFanRecord(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin, yBandEnd,
-                    preparedProbeGrid_.valid ? &amortization : nullptr))
+            const bool rasterized = record.shadeRuns
+                ? rasterizeFanRecordRuns(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin,
+                    yBandEnd, tileQuadCache)
+                : rasterizeFanRecord(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin, yBandEnd,
+                    tileQuadCache);
+            if (rasterized)
             {
                 // Counted per (record, tile): a fan record spanning several
                 // tiles owned by different workers is counted once per tile

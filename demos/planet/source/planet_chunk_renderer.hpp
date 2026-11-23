@@ -173,6 +173,46 @@ public:
     void updateSunDisc(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &up, const glm::dvec3 &sunDirection,
         const float sunColor[3], bool sunEnabled, double farZ);
 
+    // Moon companion (backdrop, LIT): a small sphere the module's orbital
+    // model places on the sky (see atmosphere.hpp moonDirection). The draw
+    // rides the regular lit path - the same sun that lights the terrain
+    // lights the sphere, so the phase, the terminator and the crescent are
+    // the shading's own output, at every eye height and for every orbit
+    // position, with no baked phase to desynchronize. Placed like the sun
+    // disc at the backdrop distance along the moon direction (the sky
+    // dome's own radius in air, between the disc and the star dome in
+    // space), depth writes ON: banks in front hide it, and it hides the
+    // stars behind it. The material tints with the atmosphere's direct
+    // transmittance keyed on the moon's own elevation (the regolith's
+    // reflected light passes the same air column the sun's direct light
+    // does), so a horizon moon reddens exactly the way the low sun does.
+    void ensureMoon();
+    void updateMoon(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &up, const glm::dvec3 &moonDirection,
+        bool sunEnabled, double farZ);
+
+    // Aurora curtain (polar night glow): a translucent emissive ring above
+    // each spin pole (see atmosphere.hpp aurora constants) whose vertex
+    // colors bake the oxygen-green foot, the violet top, the azimuthal ray
+    // striations and the night gate against the run's sun direction -
+    // space views read a green arc along the dark limb while day-side and
+    // twilight ground views stay clean. Drawn in the renderer's transparent
+    // pass over the opaque scene, depth-tested so the planet hides the far
+    // side of the rings. A space-view backdrop like the limb shell: once the
+    // eye is inside the air the ring's sky-projected footprint only blends
+    // a near-transparent wash over the horizon haze (nothing it shows pays
+    // for its raster), so updateAurora hides it there.
+    void ensureAurora(const glm::dvec3 &sunDirection);
+    void updateAurora(const glm::dvec3 &eyePlanetLocal);
+
+    // Surface scatter (see planet_scatter.hpp): the ground-level life the
+    // terrain's color field cannot express - vegetation, surface rocks, bird
+    // flocks, breaking-wave foam and valley mist. The system owns its meshes,
+    // materials and update cadence; this renderer only composes the shifted
+    // model matrices and appends the draw commands (opaque scatter rides the
+    // opaque scene pass, the translucent foam/mist commands land in the
+    // transparent tail like the aurora). Null keeps the scene bare ground.
+    void setSurfaceScatter(class PlanetScatterSystem *scatter);
+
     [[nodiscard]] const std::vector<engine::renderer::RenderDrawCommand> &drawCommands() const noexcept
     {
         return drawCommands_;
@@ -207,6 +247,8 @@ private:
     void destroySkyCloudLayer();
     void destroyStarDome();
     void destroySunDisc();
+    void destroyMoon();
+    void destroyAurora();
 
     engine::planet::PlanetCapability *planet_ = nullptr;
     engine::planet::PlanetHandle planetHandle_ = engine::planet::invalidPlanet;
@@ -225,6 +267,11 @@ private:
         double distanceSquared = 0.0;
     };
     std::vector<VisibleChunkDraw> frameVisibleDraws_;
+    // Surface scatter command plumbing (see setSurfaceScatter): per-command
+    // composed matrices, refreshed inside rebuildDrawCommands from the
+    // scatter system's anchors. Borrowed pointer; the demo owns the system.
+    class PlanetScatterSystem *surfaceScatter_ = nullptr;
+    std::vector<glm::mat4> frameScatterMatrices_;
 
     // Per-frame model matrices for the camera-relative pass. Sized exactly
     // before the commands that point into them are emitted, so the pointers
@@ -302,6 +349,24 @@ private:
     bool sunDiscActive_ = false;
     std::deque<engine::renderer::MeshMaterial> sunDiscMaterials_;
     double sunDiscAngularRadiusRadians_ = 0.0;
+
+    // Moon companion (backdrop, lit; see ensureMoon): unit-ball sphere with
+    // baked regolith albedo (maria provinces, crater mottling), placed and
+    // scaled per frame along the module's orbital moon direction.
+    engine::renderer::MeshHandle moon_ = engine::renderer::invalidMesh;
+    glm::mat4 moonTransform_{1.0f};
+    bool moonActive_ = false;
+    std::deque<engine::renderer::MeshMaterial> moonMaterials_;
+
+    // Aurora curtain rings (see ensureAurora): planet-local translucent
+    // emissive mesh, world-anchored at the planet center like the cloud
+    // shell, static after upload (the night gate is baked against the run's
+    // fixed sun direction).
+    engine::renderer::MeshHandle aurora_ = engine::renderer::invalidMesh;
+    engine::renderer::TextureHandle auroraTexture_ = engine::renderer::invalidTexture;
+    glm::mat4 auroraTransform_{1.0f};
+    bool auroraActive_ = false;
+    std::deque<engine::renderer::MeshMaterial> auroraMaterials_;
 };
 
 } // namespace demo::planet_demo

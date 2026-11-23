@@ -285,10 +285,11 @@ water_color_deep        = [0.012, 0.060, 0.130]
 water_roughness         = 0.22
 # the high-altitude blend target for the same hint: orbital eyes look down
 # on flat far-water facets whose per-facet mirror would sparkle, so the
-# material widens the lobe toward this value with eye altitude - kept well
-# under 1 so the sun glint survives as the broad patch orbital photographs
-# of the ocean show.
-water_roughness_orbital = 0.20
+# material widens the lobe toward this value with eye altitude. 0.36 matches
+# the sea-state slope spread Cox-Munk statistics give a real ocean, so the
+# glint reads as the broad, smoothly attenuating glitter patch orbital
+# photographs show instead of a small clipped highlight.
+water_roughness_orbital = 0.36
 # Surf: a white breaker band where the water shallows toward the shore,
 # noise-modulated so it breaks into wave crests instead of a painted stripe.
 # Strength 0 disables; width is the depth band under the surface that reads
@@ -327,8 +328,10 @@ water_wave_chop_fraction      = 0.33
 # consumers can paint the same field anywhere. cloud_coverage is the
 # approximate sky fraction under cloud, cloud_wavelength_meters the feature
 # scale (raise it with radius_meters like the other large-scale layers),
-# cloud_altitude_meters the shell height, and cloud_detail_strength the
-# amplitude of the fine breakup octave (bank edges read as ragged cumulus).
+# cloud_altitude_meters the shell height, cloud_detail_strength the
+# amplitude of the fine breakup octave (bank edges read as ragged cumulus)
+# and cloud_billow_strength the amplitude of the cellular lobe octave
+# (rounded cumulus clumping inside the banks).
 # cloud_edge_softness is the threshold band half-width: narrow values scatter
 # crisp clumps, wide ones grow soft decks with veiled edges.
 # cloud_weather_strength is the amplitude of the very-low-frequency regional
@@ -344,6 +347,11 @@ cloud_coverage               = 0.42
 cloud_wavelength_meters      = 13000.0
 cloud_altitude_meters        = 1200.0
 cloud_detail_strength        = 0.35
+# cloud_billow_strength is the amplitude of the inverted-cellular billow
+# octave relative to the base field: it packs the rounded cumulus lobes into
+# the bank bodies (the Perlin-Worley pairing volumetric-cloud pipelines use
+# - smooth fBm alone reads as soft cotton). 0 keeps purely smooth banks.
+cloud_billow_strength        = 0.32
 cloud_edge_softness          = 0.22
 cloud_weather_strength       = 0.45
 # cloud_weather_wavelength_multiple is the weather field's wavelength as a
@@ -382,6 +390,85 @@ cloud_shadow_sun_direction   = [0.50, 0.45, 0.74]
 stars_enabled     = true
 stars_density     = 0.5
 stars_brightness  = 1.0
+# Disc size range the star backdrop draws per star (radius grows with the
+# square root of the star's brightness between the two): radians of sky the
+# faintest and the brightest star's discs subtend. Point-like defaults keep
+# the field crisp at capture resolutions; raise the maximum for deliberately
+# prominent bright stars (a coin at 0.006, a soft blob past 0.012 - the
+# validate() clamp).
+star_disc_radius_min_radians = 0.0011
+star_disc_radius_max_radians = 0.0040
+
+# galaxy: the star field concentrates along a seed-derived great circle -
+# the galactic plane. Cells near the plane light up several times more often
+# and run brighter, streaked by a seed-derived dark rift of dust lanes, so a
+# space backdrop reads as a Milky Way band over the uniform scatter instead
+# of an undifferentiated star field. galaxy_band_strength 0 keeps the
+# uniform field; the width is the band's angular half-width on the sky.
+galaxy_band_strength      = 1.0
+galaxy_band_width_radians = 0.35
+
+# moon: a companion body the module places by a pure orbital model (a
+# direction on the sky; see moonDirection in atmosphere.hpp) and the demo
+# shades as a LIT sphere - the same sun that lights the terrain lights it,
+# so the phase, terminator and crescent come from the shading itself and
+# stay consistent with the scene from every view height. The angular radius
+# is configured directly (the demo scales its backdrop mesh to it), the
+# orbital period drives the sweep (in seconds; the phase anchor sits about a
+# quarter radian ahead of the sub-sun meridian so a waxing gibbous companion
+# rides the daylight sky in every daytime view), the inclination tilts the orbit plane
+# off the equator, and the albedo scales the regolith's brightness.
+moon_enabled                  = true
+moon_angular_radius_radians    = 0.0080
+moon_orbital_period_seconds    = 1200.0
+moon_orbit_inclination_radians = 0.35
+moon_albedo                    = 1.0
+
+# aurora: a translucent emissive curtain ring above each spin pole that
+# glows only on the night side (baked against the run's sun direction), so
+# space views read a green arc along the dark limb while day-side and
+# twilight ground views stay clean. aurora_strength 0 disables the glow.
+aurora_enabled  = true
+aurora_strength = 0.55
+
+# surface scatter: the ground-level real-world elements the terrain's color
+# field cannot express - vegetation, surface rocks, bird flocks, breaking-wave
+# foam and valley mist. The module owns the density rules (which climate state
+# carries which element and how much); consumers scatter their own geometry
+# against them (the demo deterministically, seeded from the planet seed and
+# camera cell). *_density multiplies each element's climate-derived presence
+# (0 disables that element); the radii bound the scatter ring around the eye;
+# scatter_rebuild_distance_meters is the camera movement that triggers a
+# re-scatter. whitecap_strength reads as breaking-crest speckle on open water
+# and follows whitecap_wind_speed_mps (the 10 m wind speed the sea state
+# tracks; whitecaps start forming near 3 m/s and the fraction climbs roughly
+# with the cube of the wind). surf_foam lays the shore-parallel bands of
+# breaking foam along the waterline. valley_mist pools soft fog banks in low
+# ground (strongest toward sunrise, when real radiation fog peaks).
+vegetation_enabled               = true
+vegetation_tree_density          = 1.0
+vegetation_bush_density          = 1.0
+vegetation_grass_density         = 1.0
+vegetation_tree_radius_meters    = 1400.0
+vegetation_grass_radius_meters   = 18.0
+surface_rock_density             = 1.0
+surface_rock_radius_meters       = 260.0
+# contact shadows: soft dark quads laid on the ground under every scattered
+# tree, bush and rock, offset and stretched along the away-from-sun direction
+# by the site's sun elevation (a low sun drags the shadow long and pale).
+# Strength 0 disables them.
+surface_shadow_strength          = 1.0
+whitecap_enabled                 = true
+whitecap_strength                = 0.65
+whitecap_wind_speed_mps          = 9.0
+surf_foam_enabled                = true
+surf_foam_strength               = 0.70
+birds_enabled                    = true
+bird_flock_count                 = 2.0
+bird_flock_size                  = 9.0
+valley_mist_enabled              = true
+valley_mist_strength             = 0.50
+scatter_rebuild_distance_meters  = 18.0
 
 # surface walking (kinematic controller; see walker.hpp): planet-centric
 # gravity with the movement/collision windows a point-feet character needs.
@@ -422,6 +509,14 @@ atmosphere_height_meters   = 20000.0
 # asymptote to 0 to see the terrain without any aerial perspective.
 aerial_perspective_scale_meters  = 3600.0
 aerial_perspective_asymptote     = 0.72
+# sun_direct_tint_strength: how strongly the DIRECT sun light (terrain,
+# water, specular glints, the sun disc) adopts the atmosphere's
+# transmittance tint - the warm-to-red shift the sun's own light gains as
+# its path through the air lengthens toward the horizon (see
+# sunDirectTint in atmosphere.hpp). 1 gives the physical curve, 0 keeps the
+# consumer's configured sun color unchanged at every elevation. The
+# scattered light (sky gradient, haze) keeps its own sunset tint either way.
+sun_direct_tint_strength         = 1.0
 atmosphere_zenith_color    = [0.040, 0.130, 0.460]
 atmosphere_horizon_color   = [0.260, 0.420, 0.780]
 
@@ -492,6 +587,13 @@ dry_patch_wavelength_meters   = 30.0
 # glaciated, polar caps come from latitude alone).
 snow_line_meters           = 2400.0
 beach_width_meters         = 5.0
+# Shoreline wobble: the beach band's width undulates along the shore with a
+# low-frequency noise stream (feature size ~55 m), so the sand/grass boundary
+# meanders like a real dune line instead of tracing the ruler-straight
+# elevation contour the coastal flattening leaves; stretches the wobble
+# pinches toward zero width simply have no beach. 0 keeps the constant
+# beach_width_meters everywhere.
+beach_shoreline_wobble     = 0.45
 # Swash band: sand right above the waterline reads wet and dark. Width 0
 # disables; the darkening keys how dark the wet sand gets (0.45 = clearly
 # darker but still sand-colored).
@@ -503,9 +605,10 @@ rock_slope_threshold       = 0.46
 rock_strata_contrast       = 0.75
 
 # surface texturing: the mesher partitions terrain into ground and rock
-# surface groups and tiles texture coordinates over each with a cubemap-style
-# projection of the dominant normal axis. These keys set how many meters one
-# texture tile spans per group (see docs/configuration.md): the consumer's
+# surface groups and tiles texture coordinates over each with a continuous
+# projective frame (ground keyed to the radial direction, rock to the
+# cubemap-style blend of the axis planes - see docs/configuration.md). These
+# keys set how many meters one texture tile spans per group: the consumer's
 # textures meet the generator's tiling here.
 terrain_texture_tile_meters_ground = 8.0
 terrain_texture_tile_meters_rock   = 14.0

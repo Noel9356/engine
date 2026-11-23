@@ -12,6 +12,13 @@ const char *planetOptionsUsage() noexcept
 {
     return "planet demo options:\n"
            "  --view globe|orbit|coast|cliffs|surface|walk  View to render (default globe).\n"
+           "  --biome <name>             Pin the surface view to one climate zone (any of\n"
+           "                            deep_ocean|ocean|shallow_ocean|beach|desert|savanna|\n"
+           "                            grassland|shrubland|temperate_forest|seasonal_forest|\n"
+           "                            tropical_rainforest|temperate_rainforest|taiga|\n"
+           "                            tundra|snow|rock); the picker then requires the\n"
+           "                            spot's biome to match exactly (water biomes stand\n"
+           "                            over open sea).\n"
            "  --seed <n>                Planet seed override (0 keeps config).\n"
            "  --radius <meters>         Planet radius override (0 keeps config).\n"
            "  --frames <n>              Render exactly n frames, then exit.\n"
@@ -22,10 +29,20 @@ const char *planetOptionsUsage() noexcept
            "  --frame-times <file.csv>  Export per-frame timings as CSV (a percentile summary\n"
            "                            of the rendered frames is always printed).\n"
            "  --stats-every <n>         Print planet statistics every n frames.\n"
+           "  --biome-census <n>        Sample the climate field over n points and print\n"
+           "                            the biome histogram (which climate zones this seed\n"
+           "                            actually realizes), then exit.\n"
            "  --warmup <n>              Build-only frames before the rendered run (they extend it).\n"
            "                            Warmup is a budget: it ends early once the visible set is\n"
            "                            fully built, so a value just needs to cover the view's\n"
            "                            chunk population on the current machine.\n"
+           "  --settle-seconds <s>      Wall-clock warmup window: while it is open the\n"
+           "                            warmup budget is not consumed - warmup runs until the\n"
+           "                            visible set is fully built or this many seconds elapse\n"
+           "                            (0 keeps the pure frame budget; the frame budget still\n"
+           "                            applies after the window closes). Deep ground views want\n"
+           "                            thousands of chunks whose delivery rate is the build\n"
+           "                            pool's, not the frame count's - use this for captures.\n"
            "  --orbit                   Sweep the camera (globe: around the planet;\n"
            "                            surface views: a short circle at the pose;\n"
            "                            walk: a deterministic forward walk).\n"
@@ -37,8 +54,13 @@ const char *planetOptionsUsage() noexcept
            "  --bench                   Benchmark the generation core (field sampling,\n"
            "                            per-depth chunk builds, streaming rate) and exit.\n"
            "  --texture-tile-pixels <n> Screen pixels one terrain texture tile must span for\n"
-           "                            the detail multiply to apply (default 6; larger values\n"
-           "                            keep the texture closer to the camera, 0 disables it).\n"
+           "                            the detail multiply to apply (default 48; larger values\n"
+           "                            keep the texture further out, 0 disables it). The budget\n"
+           "                            cuts the multiply where the tile's motif has minified into\n"
+           "                            a repeating stamp - past a few dozen pixels per tile the\n"
+           "                            lattice itself starts reading, and the multiply photographs\n"
+           "                            as wallpaper over the terrain. The vertex colors' own\n"
+           "                            large-scale mottle carries those distances instead.\n"
            "Windowed controls: mouse look, WASD move, Space jump (walk) or up, Ctrl down,\n"
            "                  Shift sprint, arrows look, Left Alt toggles cursor capture.\n"
            "--orbit uses the automated camera path instead of manual input.\n";
@@ -60,6 +82,18 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
                 return false;
             }
             options.viewName = value;
+        }
+        else if (argument == "--biome" && hasValue)
+        {
+            options.biomeName = arguments[++index];
+            engine::planet::Biome biome = engine::planet::Biome::Ocean;
+            if (!biomeFromName(options.biomeName, biome))
+            {
+                outError = "invalid biome '" + options.biomeName + "'; expected one of "
+                    + std::string("deep_ocean|ocean|shallow_ocean|beach|desert|savanna|grassland|shrubland|")
+                    + "temperate_forest|seasonal_forest|tropical_rainforest|temperate_rainforest|taiga|tundra|snow|rock";
+                return false;
+            }
         }
         else if (argument == "--seed" && hasValue)
         {
@@ -90,9 +124,27 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
         {
             options.statsEveryFrames = static_cast<std::uint32_t>(std::strtoul(arguments[++index].c_str(), nullptr, 10));
         }
+        else if (argument == "--biome-census" && hasValue)
+        {
+            options.biomeCensusSamples = static_cast<std::uint32_t>(std::strtoul(arguments[++index].c_str(), nullptr, 10));
+            if (options.biomeCensusSamples == 0)
+            {
+                outError = "--biome-census needs at least 1 sample";
+                return false;
+            }
+        }
         else if (argument == "--warmup" && hasValue)
         {
             options.warmupFrames = static_cast<std::uint32_t>(std::strtoul(arguments[++index].c_str(), nullptr, 10));
+        }
+        else if (argument == "--settle-seconds" && hasValue)
+        {
+            options.settleSeconds = std::strtod(arguments[++index].c_str(), nullptr);
+            if (options.settleSeconds < 0.0)
+            {
+                outError = std::string("--settle-seconds must be >= 0\n") + planetOptionsUsage();
+                return false;
+            }
         }
         else if (argument == "--orbit")
         {
