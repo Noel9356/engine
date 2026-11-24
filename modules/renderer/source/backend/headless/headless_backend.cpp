@@ -3395,17 +3395,18 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
 // ambient), and the record's framebuffer window is wide enough to amortize a
 // run (narrow records keep the per-sample core; their lanes mostly reject
 // and the run bookkeeping would cost more than the SoA pass saves).
+// Alpha-cutout draws FIT the kernel: the lane loop fetches each lane's texel
+// alpha and drops masked lanes exactly like the per-sample core's discard -
+// foliage canopies shade four samples per pass instead of one.
 // Evaluated once per record at emission (the shadeRuns flag), never inside
 // the rasterization loops - an eligibility call per record measurably
 // regressed the inlined per-sample core's codegen.
 bool HeadlessBackend::recordRunsEligible(const RasterSetup &setup, const TileBinRecord &record) const
 {
-    // Alpha-cutoff draws stay on the per-sample cores: the run kernel shades
-    // four lanes at once and cannot drop a single masked pixel mid-run.
-    // Textured transparent draws too: their commit modulates the blend by
-    // the base-color map's texel alpha, a per-lane fetch the run kernel's
-    // shared commit does not carry.
-    if (setup.fur || setup.sheenFactor > 0.0f || setup.alphaCutoff > 0.0f
+    // Textured transparent draws stay on the per-sample cores: their commit
+    // modulates the blend by the base-color map's texel alpha, a per-lane
+    // fetch the run kernel's shared commit does not carry.
+    if (setup.fur || setup.sheenFactor > 0.0f
         || (setup.transparent && setup.hasBaseColorMap) || !directLights_.empty())
     {
         return false;
@@ -3486,8 +3487,9 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
 
     bool wrote = false;
     // Alpha cutout threshold, 0 when inactive (see the sequential core's
-    // hoist): one compare per covered pixel. Runs-path records never reach
-    // this function for cutoff draws (recordRunsEligible excludes them).
+    // hoist): one compare per covered pixel. Runs-path records reach this
+    // function only for narrow windows (recordRunsEligible routes wide ones
+    // to the run kernel, whose lane loop carries its own check).
     const float alphaCutoffActive = (setup.alphaCutoff > 0.0f && !setup.transparent) ? setup.alphaCutoff : 0.0f;
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
@@ -3759,6 +3761,10 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     const float depthADx  = weightADx * depthA + weightBDx * depthB - (weightADx + weightBDx) * depthC;
 
     bool wrote = false;
+    // Alpha cutout threshold, 0 when inactive (see the sequential core's
+    // hoist): the lane loop compares one fetched texel alpha per accepted
+    // lane, and the leftover-column tail keeps the per-sample core's check.
+    const float alphaCutoffActive = (setup.alphaCutoff > 0.0f && !setup.transparent) ? setup.alphaCutoff : 0.0f;
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
     bool fieldTraced = false;
@@ -3779,9 +3785,11 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     // consecutive samples of one record together in a single SoA pass -
     // normal-mapped draws included, with the caller running the per-lane TBN
     // chain (the fetch needs per-sample UVs) and the kernel lighting the
-    // finished normals. What the kernel does not model (texture fetches, the
-    // reflection field, emissive, tone mapping, the commits) stays per sample
-    // with the caller.
+    // finished normals. Alpha-cutout draws join the same passes: the lane
+    // loop fetches each lane's texel alpha first and drops masked lanes, so
+    // a canopy shades only its surviving lanes. What the kernel does not
+    // model (the albedo and map fetches themselves, the reflection field,
+    // emissive, tone mapping, the commits) stays per sample with the caller.
     const RasterVertex &cornerA = record.corners[0];
     const RasterVertex &cornerB = record.corners[1];
     const RasterVertex &cornerC = record.corners[2];
@@ -3987,6 +3995,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     continue;
                 }
 
+                bool anyShaded = false;
                 for (int lane = 0; lane < 4; ++lane)
                 {
                     run.active[lane] = accepted[lane];
@@ -4008,6 +4017,24 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     run.correctedA[lane] = correctedA;
                     run.correctedB[lane] = correctedB;
                     run.correctedC[lane] = correctedC;
+
+                    // Alpha cutout (MeshMaterial::alphaCutoff, mesh.frag's
+                    // discard mirror): a texel below the cutoff drops the
+                    // lane before any other fetch - no albedo read, no map
+                    // chain, no shading, no commit, exactly the per-sample
+                    // core's skip. The perspective-correct UV mirrors the
+                    // shading kernel's own interpolation.
+                    if (alphaCutoffActive)
+                    {
+                        const glm::vec2 cutUv = correctedA * cornerA.uv + correctedB * cornerB.uv
+                            + correctedC * cornerC.uv;
+                        if (setup.baseColorMap->sampleAlpha(cutUv.x, cutUv.y) < alphaCutoffActive)
+                        {
+                            run.active[lane] = false;
+                            continue;
+                        }
+                    }
+                    anyShaded = true;
 
                     float metallic  = setup.metallicFactor;
                     float roughness = setup.roughnessFactor;
@@ -4136,18 +4163,24 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     }
                 }
 
-                glm::vec3 shadedRun[4];
-                shadingrun::shadeRun4(runContext, runPositions, runNormals, runColors, run, shadedRun);
-
-                for (int lane = 0; lane < 4; ++lane)
+                // Every accepted lane can sit behind its own cutout mask; a
+                // run whose lanes all dropped skips the kernel and commits
+                // outright.
+                if (anyShaded)
                 {
-                    if (!accepted[lane])
+                    glm::vec3 shadedRun[4];
+                    shadingrun::shadeRun4(runContext, runPositions, runNormals, runColors, run, shadedRun);
+
+                    for (int lane = 0; lane < 4; ++lane)
                     {
-                        continue;
+                        if (!run.active[lane])
+                        {
+                            continue;
+                        }
+                        commitRunLane(shadedRun[lane], laneDepth[lane], pixelIndex + static_cast<std::size_t>(lane),
+                            laneWeightA[lane], laneWeightB[lane], run.roughness[lane], laneUv[lane],
+                            laneUvDerivativeX[lane], laneUvDerivativeY[lane]);
                     }
-                    commitRunLane(shadedRun[lane], laneDepth[lane], pixelIndex + static_cast<std::size_t>(lane),
-                        laneWeightA[lane], laneWeightB[lane], run.roughness[lane], laneUv[lane],
-                        laneUvDerivativeX[lane], laneUvDerivativeY[lane]);
                 }
 
                 weightA    = stepWeightA;
@@ -4173,6 +4206,28 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     weightB += weightBDx;
                     pixelDepth += depthADx;
                     continue;
+                }
+
+                // Alpha cutout for the leftover columns (the lane loop above
+                // cutout-tests its lanes; this tail keeps the per-sample
+                // core's check so a record's tail pixels discard exactly
+                // like its run pixels).
+                if (alphaCutoffActive)
+                {
+                    const float cutInverseW = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
+                    const float cutW = 1.0f / cutInverseW;
+                    const float cutA = weightA * inverseWA * cutW;
+                    const float cutB = weightB * inverseWB * cutW;
+                    const float cutC = 1.0f - cutA - cutB;
+                    const glm::vec2 cutUv = cutA * record.corners[0].uv + cutB * record.corners[1].uv
+                        + cutC * record.corners[2].uv;
+                    if (setup.baseColorMap->sampleAlpha(cutUv.x, cutUv.y) < alphaCutoffActive)
+                    {
+                        weightA += weightADx;
+                        weightB += weightBDx;
+                        pixelDepth += depthADx;
+                        continue;
+                    }
                 }
 
                 // Perspective-correct attributes are interpolated inside the

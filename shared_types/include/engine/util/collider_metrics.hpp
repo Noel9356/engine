@@ -45,6 +45,29 @@ inline double colliderVolume(const engine::physics_rigid::ShapeDescription &shap
     }
 }
 
+// Mass of one body as the force-scaling passes read it (the physics_rigid
+// world's body construction semantics): dynamic bodies derive it from the
+// shape volume and density when a density is given, else carry their
+// explicit mass; static and kinematic bodies stay massless (zero inverse
+// mass regardless of the description's fields). Forces scaled by this mass
+// accelerate a body exactly as the same force does inside the rigid world.
+inline double colliderMass(const engine::physics_rigid::BodyDescription &body)
+{
+    if (body.kind != engine::physics_rigid::BodyKind::Dynamic)
+    {
+        return 0.0;
+    }
+    if (body.density > 0.0)
+    {
+        return colliderVolume(body.shape) * body.density;
+    }
+    if (body.mass > 0.0)
+    {
+        return body.mass;
+    }
+    return 0.0;
+}
+
 // Reference area and drag coefficient of one solid shape for the quadratic
 // drag law (force = 0.5 * density * coefficient * area * speed^2). The
 // coefficients follow the standard bluff-body table: a sphere crosses

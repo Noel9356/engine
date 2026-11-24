@@ -45,18 +45,23 @@ radius_meters          = 60000.0
 # Cloud shadows are cast by the [pbr] sun above; keep the two directions
 # identical or the shadows disagree with the banks that should cast them.
 cloud_shadow_sun_direction = [0.50, 0.45, 0.74]
+# Sky-shell cloud tuning: the module defaults read crisp near the zenith
+# (walking views look straight up into the bank bodies), so the demo widens
+# the edge band and eases the billow lobes - banks dissolve into the sky
+# instead of cutting off at hard blob boundaries.
+cloud_edge_softness   = 0.30
+cloud_billow_strength = 0.26
 
 [renderer]
 backend     = "headless"
 clear_color = [0.012, 0.014, 0.028, 1.0]
 lod_enabled = false
 # Terrain must render TWO-SIDED: the planet's marching-cubes meshes carry
-# legitimate inward-facing surfaces (overhang undersides, cave walls), and the
-# headless backend's per-mesh winding vote (geometric face normal vs smoothed
-# vertex normal) misclassifies rugged near-field terrain - its majority vote
-# flips on noise-creased meshes and the front faces are culled away, leaving
-# clear-color holes wherever the camera looks across rough ground at grazing
-# angles. Disable the cull; the overdraw cost is acceptable for the demo.
+# legitimate inward-facing surfaces (overhang undersides, cave walls), and
+# the headless backend's per-triangle cull test on the declared winding
+# (MeshMaterial::frontFaceWinding) costs more than it saves on these views -
+# the chunk triangles are small, the view fills the frame with front faces,
+# and the hidden far side rejects per pixel at the depth test anyway.
 back_face_culling = false
 # Draw-command sorting groups state changes; every planet chunk is its own
 # mesh with a one-material draw, so sorting buys nothing here - and the

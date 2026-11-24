@@ -69,14 +69,14 @@ SpeciesCard treeSpeciesFor(Biome biome, std::uint64_t hash)
     {
         case Biome::TropicalRainforest:
         case Biome::TemperateRainforest:
-            return {0, 0.82f, 9.0, 16.0};
+            return {0, 0.82f, 11.0, 19.0};
         case Biome::TemperateForest:
-            return mix < 0.75 ? SpeciesCard{0, 0.80f, 7.0, 13.0} : SpeciesCard{1, 1.00f, 6.0, 11.0};
+            return mix < 0.75 ? SpeciesCard{0, 0.80f, 9.0, 16.0} : SpeciesCard{1, 1.00f, 8.0, 13.0};
         case Biome::SeasonalForest:
-            return mix < 0.45 ? SpeciesCard{1, 1.00f, 6.0, 12.0}
-                : (mix < 0.80 ? SpeciesCard{0, 0.80f, 6.0, 12.0} : SpeciesCard{3, 0.78f, 5.0, 10.0});
+            return mix < 0.45 ? SpeciesCard{1, 1.00f, 8.0, 14.0}
+                : (mix < 0.80 ? SpeciesCard{0, 0.80f, 8.0, 14.0} : SpeciesCard{3, 0.78f, 6.0, 12.0});
         case Biome::Taiga:
-            return {2, 0.52f, 8.0, 15.0};
+            return {2, 0.52f, 10.0, 17.0};
         case Biome::Savanna:
             return mix < 0.70 ? SpeciesCard{1, 1.05f, 6.0, 10.0} : SpeciesCard{3, 0.78f, 4.0, 7.0};
         case Biome::Grassland:
@@ -277,6 +277,52 @@ inline std::array<float, 3> grassTint(Biome biome, double moisture01, double var
         b /= tallest;
     }
     return {clamp01(static_cast<float>(r)), clamp01(static_cast<float>(g)), clamp01(static_cast<float>(b))};
+}
+
+// Sward tint for one ground sample: grassTint's biome/moisture hue pulled
+// toward the local terrain albedo by a moisture-weighted share. The drier
+// the ground, the more a tuft reads as the straw tone of the soil it stands
+// in (a moisture-0.24 steppe sward carries most of the soil's ochre chroma;
+// even a rain-soaked sward keeps a small ground pull, since real swards
+// always carry some soil-intermixed color) - without the pull, a tuft's
+// saturated blade green sits on olive ground and reads as decal plastic.
+// hueJitter shifts the tuft's own moisture verdict per tuft, so neighbors
+// on one soil patch differ in tone the way real swards do (a clump catches
+// more drainage, its neighbor dries out first). The blend is hue-preserving
+// like grassTint: it mixes the albedo's chroma (the luminance-normalized
+// tint), never its brightness, so the sward's own shading and variation
+// still set how bright a tuft is.
+inline std::array<float, 3> grassSwardTint(const ClimateSample &sample, double variation, double hueJitter)
+{
+    ClimateSample tuftSample = sample;
+    tuftSample.moisture01 = clamp01(static_cast<float>(sample.moisture01 + hueJitter));
+    const std::array<float, 3> blade = grassTint(tuftSample.biome, tuftSample.moisture01, variation);
+    const double ground[3] = {static_cast<double>(sample.color[0]),
+        static_cast<double>(sample.color[1]), static_cast<double>(sample.color[2])};
+    const double groundLuminance = 0.2126 * ground[0] + 0.7152 * ground[1] + 0.0722 * ground[2];
+    if (groundLuminance <= 1.0e-4)
+    {
+        return blade;
+    }
+    const double dryness = 1.0 - std::clamp(sample.moisture01, 0.0, 1.0);
+    std::array<float, 3> mixed{};
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        mixed[channel] = clamp01(static_cast<float>(
+            std::lerp(static_cast<double>(blade[channel]), ground[channel] / groundLuminance,
+                0.12 + 0.50 * dryness)));
+    }
+    // Same hue-preserving normalization as grassTint (see the note there):
+    // rescale by the tallest channel instead of flattening per channel.
+    const double tallest = std::max({mixed[0], mixed[1], mixed[2]});
+    if (tallest > 1.0f)
+    {
+        for (float &channel : mixed)
+        {
+            channel = static_cast<float>(channel / tallest);
+        }
+    }
+    return mixed;
 }
 
 inline std::array<float, 3> speciesTint(const ClimateSample &sample, const float tint[3], double variation)
@@ -1258,14 +1304,16 @@ void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm:
         return; // sun at zenith: the element covers its own shadow footprint
     }
     // Shadow length ~ height / tan(elevation), clamped to the reach even a
-    // sunset shadow keeps readable through the soft falloff.
+    // sunset shadow keeps readable through the soft falloff. The quad spans
+    // from half a footprint BEHIND the trunk to the stretched toe, so the
+    // shaded patch always touches the element that casts it.
     const double stretchMeters = std::clamp(heightMeters * horizontal / std::max(0.12, sunUp),
-        0.0, 3.5 * heightMeters);
-    const double baseExtent = sizeMeters * 0.35;
+        0.0, 2.5 * heightMeters);
+    const double baseExtent = std::max(sizeMeters * 0.45, 0.5);
     const glm::dvec3 shadowDir = -(sunHorizontal / horizontal);
-    const glm::dvec3 center = groundPoint + shadowDir * (0.5 * (stretchMeters - baseExtent))
-        + up * 0.30;
-    const double halfLength = 0.5 * (stretchMeters + baseExtent);
+    const glm::dvec3 center = groundPoint + shadowDir * (0.5 * stretchMeters)
+        + up * 0.12;
+    const double halfLength = 0.5 * stretchMeters + 0.5 * baseExtent;
     const double halfWidth = sizeMeters;
     glm::dvec3 across = glm::cross(up, shadowDir);
     if (glm::length(across) < 1.0e-6)
@@ -1325,6 +1373,19 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         vertices.reserve(1024);
         indices.reserve(1536);
         constexpr std::uint32_t kMaxTrees = 1200;
+        // Dense forest biomes double up: a passing cell plants a companion
+        // tree at its own hashed offset (the lattice cell stays the walk's
+        // cost unit, so the forest floor thickens without doubling the
+        // surface and climate samples). Companions draw from the same size
+        // band with an independent hash lane, so stands read as mixed-age
+        // growth instead of cloned pairs.
+        const auto denseStand = [](Biome biome)
+        {
+            return biome == Biome::Taiga || biome == Biome::TropicalRainforest
+                               || biome == Biome::TemperateRainforest
+                               || biome == Biome::TemperateForest
+                               || biome == Biome::SeasonalForest;
+        };
         walkLattice(eyePlanetLocal, east, north, 12.0, treeRadius, kTreeCellMeters,
             [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
             {
@@ -1442,6 +1503,55 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     height, color, anchorEye_, speciesUv(species.tile));
                 appendShadow(point, up, halfWidth * 1.15, height * 0.82);
                 ++treeCount;
+                // The companion lane follows the configured tree density the
+                // way the primary lane does: thinning the forests must thin
+                // BOTH stands of a cell, not leave the companion rate at full
+                // strength inside whatever cells still plant a primary. The
+                // full-density fill stays 0.72 - a mixed-age companion in
+                // roughly three of four forest cells reads as a stand, while
+                // a 1.0 rate would butt canopies into hedges.
+                if (treeCount < kMaxTrees && denseStand(sample.biome)
+                    && hashUnit(hash, 9) < 0.72 * clamp01(params_.vegetationTreeDensity))
+                {
+                    const std::uint64_t companionHash = cellHash(params_.seed, kSaltTree ^ 0xA5A5A5A5A5A5A5A5ull,
+                        cx * 2 + 1, cy * 2 + 1, cz * 2 + 1);
+                    const glm::dvec3 companionJitter = east * (hashUnit(companionHash, 1) - 0.5) * kTreeCellMeters * 0.8
+                        + north * (hashUnit(companionHash, 2) - 0.5) * kTreeCellMeters * 0.8;
+                    const glm::dvec3 companionDirection = glm::normalize(cellCenter + companionJitter);
+                    double companionRadius = 0.0;
+                    if (sampleSurfaceRadius(companionDirection, companionRadius)
+                        && companionRadius >= seaRadius + kTreeMinElevationMeters)
+                    {
+                        const SpeciesCard companionSpecies = treeSpeciesFor(sample.biome, companionHash);
+                        const double companionHeight = companionSpecies.minHeightMeters
+                            + hashUnit(companionHash, 4)
+                                * (companionSpecies.maxHeightMeters - companionSpecies.minHeightMeters);
+                        const double companionHalfWidth = 0.5 * companionHeight * companionSpecies.aspect
+                            * (0.85 + 0.30 * hashUnit(companionHash, 5));
+                        const glm::dvec3 companionPoint = companionDirection * companionRadius;
+                        const glm::dvec3 companionBase = companionPoint - up * (0.06 * companionHeight);
+                        std::array<float, 3> companionColor
+                            = speciesTint(sample, kTreeTint, 0.85 + 0.3 * hashUnit(companionHash, 6));
+                        if (companionSpecies.tile == 2)
+                        {
+                            companionColor[0] *= 0.86f;
+                            companionColor[1] *= 1.00f;
+                            companionColor[2] *= 0.90f;
+                        }
+                        const double companionGroundFade = smoothStepLocal(160.0, 620.0, cellDistance);
+                        const float companionGroundMix = static_cast<float>(0.55 * companionGroundFade);
+                        for (std::uint32_t channel = 0; channel < 3; ++channel)
+                        {
+                            companionColor[channel] = std::lerp(companionColor[channel],
+                                clamp01(static_cast<float>(sample.color[channel]) * 0.9f), companionGroundMix);
+                        }
+                        pushBillboard(vertices, indices, companionBase, up,
+                            anchorEye_ - companionBase, companionHalfWidth, companionHeight, companionColor,
+                            anchorEye_, speciesUv(companionSpecies.tile));
+                        appendShadow(companionPoint, up, companionHalfWidth * 1.15, companionHeight * 0.82);
+                        ++treeCount;
+                    }
+                }
             });
         treeMesh_.anchorPlanetLocal = anchorEye_;
         uploadMesh(treeMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
@@ -1549,7 +1659,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         // past arm's reach). The split keeps the fill cost of the near disc
         // while the old one-scale 0.62 m ring across the full radius doubled
         // the frame for no visual gain beyond nine meters.
-        constexpr std::uint32_t kMaxGrassNear = 900;
+        constexpr std::uint32_t kMaxGrassNear = 1500;
         constexpr std::uint32_t kMaxGrassMid = 360;
         const double nearDiscMeters = std::min(grassRadius, 7.0);
         walkLattice(eyePlanetLocal, east, north, 1.8, nearDiscMeters, kGrassCellMeters,
@@ -1609,7 +1719,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 const double moisture = clamp01(static_cast<float>(sample.moisture01));
                 const double height = (species.minHeightMeters
                     + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters))
-                    * (0.78 + 0.44 * moisture);
+                    * (0.78 + 0.44 * moisture) * 1.30;
                 const double halfWidth = 0.5 * height * species.aspect * (0.95 + 0.5 * hashUnit(hash, 5));
                 const glm::dvec3 up = direction;
                 const glm::dvec3 center = direction * radius - up * (0.08 * height);
@@ -1623,7 +1733,8 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 const glm::dvec3 rotated = right1 * std::cos(angle) + glm::cross(up, right1) * std::sin(angle);
                 const glm::dvec3 right2 = glm::normalize(glm::cross(up, rotated));
                 right1 = glm::normalize(rotated);
-                const std::array<float, 3> color = grassTint(sample.biome, sample.moisture01, 0.92 + 0.28 * hashUnit(hash, 7));
+                const std::array<float, 3> color = grassSwardTint(sample,
+                    0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
                 const SpeciesUvRect grassUv = speciesUv(species.tile);
                 pushBillboard(vertices, indices, center, up, right1, halfWidth, height, color, anchorEye_, grassUv);
                 pushBillboard(vertices, indices, center, up, right2, halfWidth, height, color, anchorEye_, grassUv);
@@ -1698,14 +1809,15 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     const double angle = hashUnit(hash, 6) * 2.0 * kPi;
                     const glm::dvec3 rotated = right1 * std::cos(angle) + glm::cross(up, right1) * std::sin(angle);
                     right1 = glm::normalize(rotated);
-                    const std::array<float, 3> color = grassTint(sample.biome, sample.moisture01, 0.92 + 0.28 * hashUnit(hash, 7));
+                    const std::array<float, 3> color = grassSwardTint(sample,
+                        0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
                     pushBillboard(vertices, indices, center, up, right1, halfWidth, height, color, anchorEye_,
                         speciesUv(species.tile));
                     ++grassCount;
                 });
         }
         grassMesh_.anchorPlanetLocal = anchorEye_;
-        uploadMesh(grassMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
+        uploadMesh(grassMesh_, vertices, indices, true, false, false, 1.0f, false); // cutout blades keep hard edges
         grassMesh_.material.baseColorTexture = grassTexture_;
     }
     else

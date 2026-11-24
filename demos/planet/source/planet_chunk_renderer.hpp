@@ -267,6 +267,16 @@ private:
         double distanceSquared = 0.0;
     };
     std::vector<VisibleChunkDraw> frameVisibleDraws_;
+    // Per-frame scratch for the far-to-near transparent-tail ordering (see
+    // rebuildDrawCommands): the scatter system's transparent commands (foam,
+    // mist) with their squared eye distances, sorted farthest first so the
+    // alpha-blended banks composite back-to-front. Reused across frames.
+    struct TransparentScatterDraw
+    {
+        std::size_t index = 0;
+        double distanceSquared = 0.0;
+    };
+    std::vector<TransparentScatterDraw> frameTransparentScatter_;
     // Surface scatter command plumbing (see setSurfaceScatter): per-command
     // composed matrices, refreshed inside rebuildDrawCommands from the
     // scatter system's anchors. Borrowed pointer; the demo owns the system.

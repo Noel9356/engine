@@ -87,6 +87,15 @@ struct MeshMaterial
     // applies only where the renderer culls at all; a negative sign is
     // ignored on double-sided draws. Field order is append-only.
     float frontFaceWinding = 0.0f;
+
+    // Alpha-cutout threshold for opaque textured draws (the mesh.frag
+    // uCloth.z discard mirror): texels whose sampled alpha falls below the
+    // threshold are discarded before shading and depth commits, so foliage
+    // canopies and sprite cards read as cut-out silhouettes rather than
+    // textured quads. 0.0f (the default) disables the test; a value in
+    // (0, 1) on a transparent draw is ignored (transparent draws blend by
+    // texel alpha instead). Field order is append-only.
+    float alphaCutoff = 0.0f;
 };
 
 } // namespace engine::renderer

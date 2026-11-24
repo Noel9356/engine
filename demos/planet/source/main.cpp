@@ -816,6 +816,15 @@ int main(int argc, char **argv)
     // is complete, but no longer than this" directly.
     const std::chrono::steady_clock::time_point settleStart = std::chrono::steady_clock::now();
     bool settleWindowOpen = options.settleSeconds > 0.0;
+    // Completion must HOLD before warmup ends: the build pool drains in waves
+    // (an octree pass discovers the next refinement ring only after the
+    // current one finishes), so a single idle snapshot can catch the trough
+    // between waves and end warmup with later rings still unbuilt - the
+    // rendered frames would then draw coarse parent chunks (and re-stream)
+    // where fine children were still in flight. Warmup ends only after this
+    // many consecutive fully-built iterations.
+    constexpr std::uint64_t settleHoldIterations = 90;
+    std::uint64_t           settleHoldProgress   = 0;
     const double        frameDelta     = 1.0 / 30.0;
     if (!options.screenshotFrameSet)
     {
@@ -1174,12 +1183,45 @@ int main(int argc, char **argv)
             // its duration: warmup then runs until the visible set is
             // complete or the window closes, whichever comes first, and the
             // frame budget (with its exhaustion warning) resumes after it.
+            // Finished meshes also upload to the renderer during warmup:
+            // the first RENDERED frame then draws with the whole visible
+            // set already resident instead of spending its own frame budget
+            // on the initial upload wave. The scatter system joins the same
+            // pre-upload: its first rebuild carries the vegetation and
+            // sea-state meshes (the next-largest first-frame upload after
+            // the chunk wave). The delta stays 0 so every time-driven
+            // element - bird flight, foam churn, mist re-roll - holds the
+            // exact phase the first rendered frame expects, and the settle
+            // iterations only refresh vertices the rendered frames would
+            // have refreshed anyway.
+            chunkRenderer.updateVisibleChunks();
+            scatterSystem.update(eye - planetCenter,
+                environment.sun.enabled
+                    ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z)
+                    : glm::dvec3(0.0),
+                environment.sun.enabled, 0.0);
             planet::PlanetStatistics warmStats{};
+            // The completion hold (see settleHoldIterations): fully-built
+            // snapshots must repeat before warmup trusts them, and the held
+            // iterations still run the pre-upload path above, so the visible
+            // set stays resident while the wave trough passes.
+            bool warmupSettled = false;
             if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &warmStats)
                 && warmStats.chunksVisible > 0 && warmStats.chunksBuilding == 0
                 && warmStats.chunksReady >= warmStats.chunksVisible)
             {
-                warmupRemaining = 0;
+                if (++settleHoldProgress >= settleHoldIterations)
+                {
+                    warmupSettled = true;
+                }
+            }
+            else
+            {
+                settleHoldProgress = 0;
+            }
+            if (warmupSettled)
+            {
+                warmupRemaining   = 0;
                 settleWindowOpen = false;
             }
             else if (settleWindowOpen)

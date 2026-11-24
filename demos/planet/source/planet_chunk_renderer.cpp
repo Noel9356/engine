@@ -1442,6 +1442,11 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
 
     // Draw order: opaque scene geometry first, transparent/cloudy geometry
     // depth-tested against it, then the backdrop shells.
+    //   0. star dome (space views): the deepest backdrop - the limb shell's
+    //      airglow ring and the terrain silhouette both overwrite it, so
+    //      stars stay hidden behind the sunlit air the way real starlight
+    //      is lost through the limb's slanted air column instead of shining
+    //      through the glow ring.
     //   1. atmosphere limb (space views): unlit, depth writes off; the ring
     //      outside the terrain silhouette survives as glowing air - the
     //      limb's disk interior is MEANT to be overwritten by the opaque
@@ -1455,7 +1460,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     //      shading a pixel, and near-side banks composite over the terrain
     //      the way the previous backdrop-first order composited them over
     //      the limb.
-    //   4. sun disc, star dome, sky dome: the unlit backdrop shells. Every
+    //   4. sun disc, moon, sky dome: the unlit backdrop shells. Every
     //      pixel they cover that the terrain already drew depth-fails (they
     //      all sit beyond the terrain from any camera the demo uses), so
     //      they only fill the sky the terrain does not reach - or, where
@@ -1489,6 +1494,15 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     frameBackdropMatrices_.push_back(composeShifted(starDomeTransform_));
     frameBackdropMatrices_.push_back(composeShifted(skyDomeTransform_));
     frameBackdropMatrices_.push_back(composeShifted(auroraTransform_));
+
+    if (starDomeActive_ && starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = starDome_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[5]);
+        command.material = &starDomeMaterials_.front();
+        drawCommands_.push_back(command);
+    }
 
     if (atmosphereShellActive_ && atmosphereShell_ != renderer::invalidMesh && !atmosphereShellMaterials_.empty())
     {
@@ -1786,15 +1800,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         command.material = &sunDiscMaterials_.front();
         drawCommands_.push_back(command);
     }
-    if (starDomeActive_ && starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = starDome_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[5]);
-        command.material = &starDomeMaterials_.front();
-        drawCommands_.push_back(command);
-    }
-    // The moon rides the backdrop list AFTER the star dome and BEFORE the
+    // The moon rides the backdrop list AFTER the sun disc and BEFORE the
     // sky dome: the depth comparison is strict-less, so a companion placed
     // just inside the dome's radius both survives the later dome draw (the
     // dome's equal-or-farther fragments fail against the moon's depth) and
@@ -1831,12 +1837,19 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     }
 
     // Surface scatter (transparent tail): breaking-wave foam and valley mist
-    // alpha-blend over the finished opaque scene, depth writes off, ordered
-    // after the aurora with it (the backend routes both by their materials).
+    // alpha-blend over the finished opaque scene, depth writes off. The
+    // banks re-roll their pool slots on a churn interval, so slot order is
+    // depth-chaotic; the tail is ordered far to near by anchor distance
+    // (chunk key as the deterministic tie-break) so overlapping banks
+    // composite back-to-front the way alpha blending assumes - a near mist
+    // bank gathers the far bank behind it instead of stranding its order in
+    // the pool's churn. Stable ordering also keeps the aurora (emitted just
+    // above, planet-scale distance) the farthest member of the class.
     if (surfaceScatter_ != nullptr)
     {
         const std::vector<renderer::RenderDrawCommand> &scatterCommands = surfaceScatter_->drawCommands();
         const std::vector<glm::dvec3> &scatterAnchors = surfaceScatter_->commandAnchors();
+        frameTransparentScatter_.clear();
         for (std::size_t index = 0; index < scatterCommands.size(); ++index)
         {
             const renderer::MeshMaterial *material = scatterCommands[index].material;
@@ -1845,10 +1858,28 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             {
                 continue;
             }
+            // Planet-local distance: the anchors and the eye both live in
+            // planet-local meters (the model matrix adds planetCenter back
+            // for the f32 pipeline) - the same frame the chunk ordering uses.
+            const glm::dvec3 eyeVector = scatterAnchors[index] - eyePlanetLocal;
+            frameTransparentScatter_.push_back(
+                TransparentScatterDraw{index, glm::dot(eyeVector, eyeVector)});
+        }
+        std::sort(frameTransparentScatter_.begin(), frameTransparentScatter_.end(),
+            [](const TransparentScatterDraw &a, const TransparentScatterDraw &b)
+            {
+                if (a.distanceSquared != b.distanceSquared)
+                {
+                    return a.distanceSquared > b.distanceSquared;
+                }
+                return a.index < b.index;
+            });
+        for (const TransparentScatterDraw &draw : frameTransparentScatter_)
+        {
             const glm::dmat4 placement = glm::translate(
-                glm::dmat4(1.0), planetCenter + scatterAnchors[index]);
+                glm::dmat4(1.0), planetCenter + scatterAnchors[draw.index]);
             frameScatterMatrices_.push_back(composeShifted(glm::mat4(placement)));
-            renderer::RenderDrawCommand command = scatterCommands[index];
+            renderer::RenderDrawCommand command = scatterCommands[draw.index];
             command.modelMatrix = glm::value_ptr(frameScatterMatrices_.back());
             drawCommands_.push_back(command);
         }
