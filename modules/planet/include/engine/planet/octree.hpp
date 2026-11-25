@@ -75,7 +75,12 @@ public:
     // Selects the visible node set for this frame's eye position (planet-
     // local, meters). Appends to outVisible in sorted (depth, x, y, z) order
     // and refreshes per-node selection bookkeeping. Cheap: no geometry.
-    void selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &outVisible);
+    // culling (optional, may be null) adds view-frustum rejection: nodes
+    // whose bounding sphere lies fully outside any plane are Hidden, so the
+    // streamer generates only what the camera can see. The pointer is used
+    // for this call only (never stored).
+    void selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &outVisible,
+        const PlanetCullingVolume *culling = nullptr);
 
     // Computes the conforming mask for one chunk against the hash index of
     // the visible leaf set emitted by selectVisible: a face segment conforms
@@ -125,6 +130,9 @@ private:
     double                        seaOccluderRadius2_   = 0.0;  // squared sea-sphere radius (occludes when the eye is above the water)
     double                        seaOccluderEyeMarginMeters = 0.5; // eye height above the sea sphere the sea-sphere occluder requires
     std::uint64_t                 updateIndex_ = 0;
+    // Per-call culling volume (see selectVisible): borrowed, never owned,
+    // cleared when the pass ends so a stale pointer cannot survive.
+    const PlanetCullingVolume    *culling_ = nullptr;
 
     // Sparse node map: only nodes touched by selection (visited + pruned).
     // Keys via makeChunkKey; the depth cap keeps coordinates in 20 bits.
@@ -139,6 +147,10 @@ private:
     // Geometric tests shared with selection.
     bool cubeIntersectsShell(double minCubeRadius, double maxCubeRadius) const;
     bool horizonHidden(const Vec3 &nodeCenter, double nodeSize, const Vec3 &eyeLocal) const;
+    // True when the node's bounding sphere lies fully outside any culling
+    // plane (see selectVisible): sphere-vs-plane, the negative vertex of the
+    // sphere is what the plane test scores.
+    bool frustumHidden(const Vec3 &nodeCenter, double boundRadius) const;
 
     // Applies the pruning + refinement tests of one node without touching the
     // node map. Returns the resulting state (Empty, Hidden, Split, or a

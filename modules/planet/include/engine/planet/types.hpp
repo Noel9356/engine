@@ -210,6 +210,20 @@ struct ClimateSample
     float     color[3]      = {1.0f, 1.0f, 1.0f}; // linear RGB, palette × local variation
 };
 
+// ---- view culling -----------------------------------------------------------
+
+// View-frustum culling volume for streaming selection. Planes live in
+// planet-LOCAL meters, each stored as {nx, ny, nz, d} with the half space
+// n*p + d >= 0 INSIDE. A node whose bounding sphere lies fully outside any
+// plane can never touch the camera's view, so the streamer skips it entirely
+// (see Planet::update): only the chunks the camera can actually see are ever
+// generated. planeCount 0 disables the volume (whole-horizon selection).
+struct PlanetCullingVolume
+{
+    std::uint32_t planeCount   = 0;
+    double        planes[8][4] = {}; // {nx, ny, nz, d}, n unit length
+};
+
 // ---- statistics -------------------------------------------------------------
 
 struct PlanetStatistics

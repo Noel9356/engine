@@ -96,6 +96,19 @@ struct MeshMaterial
     // (0, 1) on a transparent draw is ignored (transparent draws blend by
     // texel alpha instead). Field order is append-only.
     float alphaCutoff = 0.0f;
+
+    // Procedural surface mottle (headless shading path): a footprint-adaptive
+    // two-octave 3D value noise that perturbs the shaded albedo at the
+    // sample's world position. The wavelength rides the pixel's ground
+    // footprint - never below the base scale, never under what one pixel
+    // covers - so the mottle photographs as soil/sward variation at every
+    // distance: grain at a metre, patchiness at a hundred, gentle tonal
+    // drift from orbit. Unlike a tiled scan there is no lattice to read, no
+    // gate where the detail stops, and no minification moire (the noise
+    // band-limits itself). 0.0f on either field disables the pass. Field
+    // order is append-only.
+    float noiseScaleMeters = 0.0f;
+    float noiseStrength    = 0.0f;
 };
 
 } // namespace engine::renderer

@@ -27,7 +27,7 @@ worker_count            = 0
 # NdotL) should land mid-tones (~0.2-0.4) for land, ~0.9+ only for snow.
 # NOTE: the [planet] cloud_shadow_sun_direction below must carry the SAME
 # direction - the planet module's cloud shadows are cast by this sun.
-ambient_intensity = 0.06
+ambient_intensity = 0.10
 sun_color         = [1.0, 0.96, 0.88]
 sun_direction     = [0.50, 0.45, 0.74]
 sun_enabled       = true
@@ -45,12 +45,15 @@ radius_meters          = 60000.0
 # Cloud shadows are cast by the [pbr] sun above; keep the two directions
 # identical or the shadows disagree with the banks that should cast them.
 cloud_shadow_sun_direction = [0.50, 0.45, 0.74]
-# Sky-shell cloud tuning: the module defaults read crisp near the zenith
-# (walking views look straight up into the bank bodies), so the demo widens
-# the edge band and eases the billow lobes - banks dissolve into the sky
-# instead of cutting off at hard blob boundaries.
-cloud_edge_softness   = 0.30
-cloud_billow_strength = 0.26
+# Sky-shell cloud tuning: the clouds draw PER-PIXEL through the baked cloud
+# texture (the shell and deck meshes only place the sheet), so the edge band
+# stays moderate - each texel carries its own thinning fringe while the
+# billow lobes run at the module's full strength (the cauliflower clumping
+# the per-pixel read resolves). A very narrow band smears the whole deck;
+# a very wide one erases the bank boundaries.
+cloud_edge_softness   = 0.24
+cloud_billow_strength = 0.50
+cloud_detail_strength = 0.38
 
 [renderer]
 backend     = "headless"

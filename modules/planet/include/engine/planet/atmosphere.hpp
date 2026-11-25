@@ -24,6 +24,8 @@
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 
+#include <array>
+
 namespace engine
 {
 namespace planet
@@ -132,6 +134,19 @@ void forEachStar(const PlanetGenerationParams &params, StarVisitor visitor, void
 // strip instead of a scatter of points). Pure function of its inputs.
 double galaxyBandWeight(const PlanetGenerationParams &params, const Vec3 &unitDirection);
 
+// High cirrus streak field (see the params' cirrus section): the visual
+// weight (0..1) of the thin ice-crystal deck at cirrusAltitudeMeters for one
+// unit sky direction (planet-local). The streaks run along the latitude
+// circles (the zonal wind), stretched by a fixed anisotropy, broken up by a
+// fine filament octave and thresholded by the cirrus_coverage_amount
+// quantile - a translucent veil of filaments instead of the cumulus
+// shell's banks. lowPassCutoffMeters band-limits the field (0 = raw) the
+// way CloudField::coverage's does, so a consumer with a coarse sample grid
+// keeps the streaks its grid can resolve instead of aliasing the fine
+// breakup into speckle. Pure function of its inputs.
+double cirrusStreakWeight(const PlanetGenerationParams &params, const Vec3 &unitDirection,
+    double lowPassCutoffMeters = 0.0);
+
 // Direction (unit, planet-local) of the moon companion at a given elapsed
 // seconds count: a circular orbit around the planet whose plane is tilted
 // off the equator by moon_orbit_inclination_radians, swept at
@@ -191,16 +206,48 @@ public:
     double coverage(const Vec3 &unitDirection, double lowPassCutoffMeters = 0.0, double softnessScale = 1.0,
         bool includeBillow = true) const;
 
+    // Full-resolution coverage for texture consumers: the same field
+    // coverage() paints, evaluated with no band limit plus the detail a
+    // texture resolves that no mesh grid can - a pair of wisp octaves whose
+    // feature size sits below every shell's vertex spacing, and a set of
+    // seed-derived cyclone vortices that swirl the nearby banks into spiral
+    // storm systems (the comma heads and spiral arms satellite photography
+    // shows over the mid-latitudes; mesh shells band-limit the vortex shear
+    // out at their grid spacing, so the two reads stay consistent at the
+    // scale each resolves). Pure and thread safe like every sampler here.
+    // The default wispDetail 1 keeps the octaves at the configured strength;
+    // 0 collapses coverageTexel onto coverage's raw field exactly.
+    double coverageTexel(const Vec3 &unitDirection, double wispDetail = 1.0) const;
+
 private:
     const PlanetGenerationParams &params_;
     FbmStreamSeeds seedsBase_{};
     FbmStreamSeeds seedsDetail_{};
     FbmStreamSeeds seedsWeather_{};
     FbmStreamSeeds seedsSwirl_{};
+    FbmStreamSeeds seedsWisp_[2]{};
     std::int64_t seedBillow_ = 0;
     Vec3 flowAxis_{};
     Vec3 flowSide_{};
     Vec3 spinAxis_{};
+    // Cyclone vortices (see coverageTexel): each entry is center (unit),
+    // core radius and strength in meters/radians of the shell the shear acts
+    // over. Derived once from the seed like every other stream.
+    struct Cyclone
+    {
+        Vec3   center{};
+        double coreMeters = 0.0;
+        double strength    = 0.0;
+    };
+    std::array<Cyclone, 8> cyclones_{};
+
+    // Shared body of coverage() and coverageTexel(): assembles the full
+    // field value (wind stretch, swirl, cyclone shear, base/billow/detail/
+    // wisp octaves) and thresholds it into [0, 1]. texelDetail gates the
+    // sub-grid octaves and the vortex shear - coverage() passes false and
+    // stays bit-identical to its historical output.
+    double sampleCoverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale,
+        bool includeBillow, bool texelDetail, double wispDetail) const;
 };
 
 } // namespace planet

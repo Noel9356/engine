@@ -276,7 +276,7 @@ private:
 
     bool frameActive_ = false; // true between a successful beginFrame and endFrame; draw calls check it
 
-    // Bind-state caches so repeated draws skip redundant vkCmd* calls.
+    // Bind-state caches so repeated draws skip duplicate vkCmd* calls.
     // lastBoundPipeline_ tracks which of the backend's graphics pipelines
     // is current (mesh vs fur): the fur path binds the alpha-blended fur
     // pipeline and every mesh draw binds the mesh pipeline back, pushing its

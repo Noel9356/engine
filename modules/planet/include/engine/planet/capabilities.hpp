@@ -68,6 +68,17 @@ struct PlanetCapability
     // coordinates; the module translates into planet-local space).
     void (*updatePlanet)(void *self, PlanetHandle planet, const double eyeWorld[3]);
 
+    // updatePlanet with view-frustum culling (appended in place within ABI 2;
+    // tables built before the field existed leave it null and consumers must
+    // null-check): cullingPlanetLocal carries the camera's frustum as planes
+    // in PLANET-LOCAL meters (see PlanetCullingVolume), so the streamer
+    // generates only the chunks the camera can see - a static view never
+    // builds its hidden half, and a panning camera streams newly revealed
+    // ground lazily instead of upfront. Null or zero-plane-count volume
+    // disables culling (identical to updatePlanet).
+    void (*updatePlanetCulled)(void *self, PlanetHandle planet, const double eyeWorld[3],
+        const PlanetCullingVolume *cullingPlanetLocal);
+
     // Copies borrowed views of the visible ready chunks (terrain + water).
     // Pointers stay valid until the next updatePlanet. Returns the count
     // written; call visibleChunkCapacity first to size the buffer.

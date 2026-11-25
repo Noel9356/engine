@@ -70,7 +70,7 @@ void *CapabilityProviderIndex::capabilityPointerOrNull(
     return nullptr;
 }
 
-// Strict resolve: a declared-but-missing implementation is a kernel bug.
+// Strict resolve: a declared-but-missing implementation is a kernel contract violation.
 void *CapabilityProviderIndex::capabilityPointerOf(
     const CapabilityProviderEntry &provider, const std::string &capabilityName)
 {

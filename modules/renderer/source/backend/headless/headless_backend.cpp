@@ -818,12 +818,19 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
         // fragments sample the level whose footprint matches their screen
         // texel instead of a shimmering base-level fetch (see
         // HeadlessTexture::sampleTrilinear). Non-square and non-pow2 sources
-        // still chain cleanly - each level halves its own extents.
+        // still chain cleanly - each level halves its own extents. Repeat-
+        // addressed textures wrap their horizontal taps: the seam column
+        // averages with column 0 the way the base-level sampler wraps, so a
+        // continuous field baked around a sphere keeps its continuity at every
+        // mip level instead of showing a hard discontinuity column wherever
+        // the chain clamps (the vertical seam line a deep-mip deck draw
+        // otherwise paints across the sky).
         {
             std::vector<HeadlessTexture::MipLevel> chain;
             std::uint32_t levelWidth  = description.width;
             std::uint32_t levelHeight = description.height;
             const float   *source     = texture.pixelsRGB.data();
+            const bool    wrapX      = texture.address == TextureAddress::Repeat;
             while (levelWidth > 1u || levelHeight > 1u)
             {
                 const std::uint32_t nextWidth  = std::max(1u, levelWidth / 2u);
@@ -837,10 +844,13 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                     for (std::uint32_t x = 0; x < nextWidth; ++x)
                     {
                         // 2x2 box; odd extents clamp their far tap to the
-                        // last texel so edge texels keep full weight.
+                        // last texel so edge texels keep full weight, except
+                        // the horizontal pair of a wrapping texture, whose
+                        // far tap wraps to column 0.
                         const std::uint32_t x0 = x * 2u;
                         const std::uint32_t y0 = y * 2u;
-                        const std::uint32_t x1 = std::min(x0 + 1u, levelWidth - 1u);
+                        const std::uint32_t x1 = wrapX ? (x0 + 1u) % levelWidth
+                                                        : std::min(x0 + 1u, levelWidth - 1u);
                         const std::uint32_t y1 = std::min(y0 + 1u, levelHeight - 1u);
                         for (std::uint32_t channel = 0; channel < 3u; ++channel)
                         {
@@ -2021,6 +2031,15 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.sheenFactor             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
     outSetup.doubleSided             = material.doubleSided;
     outSetup.alphaCutoff             = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
+    // Procedural mottle: the material's own scale/strength plus the frame's
+    // angular pixel size (an ~62-degree vertical field over the framebuffer
+    // height lands within a few percent of the true projection derivative -
+    // the mottle's footprint rule only needs the right order, not exact
+    // perspective). 0 strength keeps the pass off entirely.
+    outSetup.noiseScaleMeters        = material.noiseScaleMeters;
+    outSetup.noiseStrength           = material.noiseStrength;
+    outSetup.pixelAngleRadians       = framebufferHeight > 0u
+        ? 1.15f / static_cast<float>(framebufferHeight) : 0.0f;
 
     outSetup.hasBaseColorMap         = outSetup.baseColorMap != &neutralWhite_;
     outSetup.hasNormalMap            = outSetup.normalMap != &flatNormal_;
@@ -2592,6 +2611,26 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 continue;
                             }
                         }
+                        // Transparent texel discard (the commit's own
+                        // threshold, opacity * texel alpha): a texel that
+                        // cannot move the pixel needs no shading, no BRDF and
+                        // no RGB fetch - the skip mirrors the alpha-cutout
+                        // discard above. Per-texel-alpha sheets (cloud shells,
+                        // veils) spend most of their footprint at alpha ~0
+                        // where the blend already no-ops; this keeps the
+                        // per-sample cores from shading them first.
+                        if (setup.transparent && hasBaseColorMap)
+                        {
+                            const float transparentTexelAlpha
+                                = setup.opacity * baseColorMap->sampleAlpha(interpolatedUv.x, interpolatedUv.y);
+                            if (transparentTexelAlpha <= 0.0039f)
+                            {
+                                weightA += weightADx;
+                                weightB += weightBDx;
+                                pixelDepth += depthADx;
+                                continue;
+                            }
+                        }
                         glm::vec3       baseColor         = interpolatedColor * baseColorFactor;
                         if (hasBaseColorMap)
                         {
@@ -2713,6 +2752,19 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             }
                             metallic  = std::clamp(metallic, 0.0f, 1.0f);
                             roughness = std::clamp(roughness, minimumRoughness, 1.0f);
+                            // Procedural surface mottle (MeshMaterial::noiseScaleMeters,
+                            // quad_shading.hpp's surfaceMottle): same field the run
+                            // kernel samples, at the same footprint rule - the two
+                            // paths photograph one surface.
+                            if (setup.noiseStrength > 0.0f)
+                            {
+                                const glm::vec3 toSample = interpolatedPosition - cameraPosition_;
+                                const float mottleLambda = std::max(setup.noiseScaleMeters,
+                                    glm::length(toSample) * setup.pixelAngleRadians * 2.4f);
+                                baseColor *= 1.0f + setup.noiseStrength
+                                    * shadingrun::surfaceMottle(interpolatedPosition.x, interpolatedPosition.y,
+                                        interpolatedPosition.z, mottleLambda);
+                            }
                             const float occlusion
                                 = hasOcclusion
                                     ? 1.0f
@@ -3322,6 +3374,19 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         }
         metallic  = std::clamp(metallic, 0.0f, 1.0f);
         roughness = std::clamp(roughness, minimumRoughness, 1.0f);
+        // Procedural surface mottle (MeshMaterial::noiseScaleMeters,
+        // quad_shading.hpp's surfaceMottle): the per-record path's twin of
+        // the per-sample and run-kernel applications - one world-anchored
+        // field, one footprint rule, three call sites.
+        if (setup.noiseStrength > 0.0f)
+        {
+            const glm::vec3 toSample = interpolatedPosition - cameraPosition;
+            const float mottleLambda = std::max(setup.noiseScaleMeters,
+                glm::length(toSample) * setup.pixelAngleRadians * 2.4f);
+            baseColor *= 1.0f + setup.noiseStrength
+                * shadingrun::surfaceMottle(interpolatedPosition.x, interpolatedPosition.y,
+                    interpolatedPosition.z, mottleLambda);
+        }
         const float occlusion
             = hasOcclusion
                   ? 1.0f
@@ -3420,7 +3485,11 @@ bool HeadlessBackend::recordRunsEligible(const RasterSetup &setup, const TileBin
     std::int32_t firstY = 0;
     std::int32_t lastY  = 0;
     fanPixelWindow(record, framebufferWidth, framebufferHeight, firstX, lastX, firstY, lastY);
-    return lastX - firstX + 1 >= 16;
+    // The width floor stays at 1: the measured A/B (globe 938 -> 696 ms on
+    // the 2-core sandbox) shows narrow records shade faster inside the 4-wide
+    // kernel than through the per-sample core, and the inactive lanes cost
+    // nothing next to the per-sample path's scalar shading.
+    return lastX - firstX + 1 >= 1;
 }
 
 bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
@@ -3826,6 +3895,9 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     runContext.albedoFilled    = hasBaseColorMap;
     runContext.unlit           = setup.unlit;
     runContext.normalMapped    = normalMapped;
+    runContext.noiseScaleMeters  = setup.noiseScaleMeters;
+    runContext.noiseStrength     = setup.noiseStrength;
+    runContext.pixelAngleRadians = setup.pixelAngleRadians;
     runContext.exposure        = environment_.exposure;
     runContext.toneMapping     = environment_.toneMapping;
     // The reflection-field response and emissive add in LINEAR space (the

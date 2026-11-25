@@ -36,6 +36,7 @@
 #pragma once
 
 #include <engine/planet/capabilities.hpp>
+#include <engine/planet/density.hpp>
 #include <engine/planet/params.hpp>
 #include <engine/planet/types.hpp>
 #include <engine/renderer/capabilities.hpp>
@@ -188,6 +189,13 @@ private:
     engine::planet::PlanetCapability &capability_;
     engine::planet::PlanetHandle planet_ = 0;
     const engine::planet::PlanetGenerationParams &params_;
+    // The module's density field instance used ONLY for cloud-shadow
+    // sampling: every scattered element shades with the same shadow field
+    // the terrain's vertex albedo carries, so a cloud bank darkens the
+    // ground AND the plants standing on it together (an unshaded sprite
+    // glows like a sticker against its own shaded ground). Pure field
+    // sampling; no streaming state.
+    engine::planet::DensityField shadowField_;
 
     engine::renderer::RenderCapability *renderCapability_ = nullptr;
     engine::renderer::RendererHandle rendererHandle_ = 0;

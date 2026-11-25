@@ -110,7 +110,7 @@ const PlanetStatistics &Planet::statistics() const
     return statistics_;
 }
 
-void Planet::update(const Vec3 &eyeLocal)
+void Planet::update(const Vec3 &eyeLocal, const PlanetCullingVolume *culling)
 {
     const auto updateStart = std::chrono::steady_clock::now();
     ++updateCount_;
@@ -120,23 +120,47 @@ void Planet::update(const Vec3 &eyeLocal)
     const std::uint32_t delivered = collectPendingBuilds();
 
     // 2. Select the visible set for this eye. The selection is a pure
-    //    function of (eye, params, field): an eye that has moved less than
-    //    the selection threshold pins the list, so the descent, the 2:1
-    //    balancing fixpoint, the conform-mask pass and the per-node stamping
-    //    are skipped entirely - a static camera (or a warming-up streamer
-    //    that renders nothing) costs an update only what streaming actually
-    //    delivered, and a walking camera re-selects only when its movement
-    //    since the last selection can change the LOD decision anywhere
-    //    (the threshold defaults to the finest voxel: a finer step cannot
-    //    change which chunk any point resolves to, because the refinement
-    //    rings at every depth are many voxels wide).
+    //    function of (eye, culling volume, params, field): an eye that has
+    //    moved less than the selection threshold with an unchanged culling
+    //    volume pins the list, so the descent, the 2:1 balancing fixpoint,
+    //    the conform-mask pass and the per-node stamping are skipped
+    //    entirely - a static camera (or a warming-up streamer that renders
+    //    nothing) costs an update only what streaming actually delivered,
+    //    and a walking camera re-selects only when its movement since the
+    //    last selection can change the LOD decision anywhere (the threshold
+    //    defaults to the finest voxel: a finer step cannot change which
+    //    chunk any point resolves to, because the refinement rings at every
+    //    depth are many voxels wide).
+    //    The culling volume joins the comparison: a camera that only ROTATES
+    //    still changes which chunks the frustum can touch, so a changed
+    //    volume reselects even at a pinned eye (the newly revealed ground
+    //    streams lazily as it appears - nothing is generated upfront).
+    const bool cullingPresent = culling != nullptr && culling->planeCount > 0;
+    bool cullingChanged = cullingPresent != hasSelectionCulling_;
+    if (!cullingChanged && cullingPresent)
+    {
+        for (std::uint32_t plane = 0; plane < culling->planeCount && plane < 8u && !cullingChanged; ++plane)
+        {
+            for (std::uint32_t component = 0; component < 4u; ++component)
+            {
+                const double current  = culling->planes[plane][component];
+                const double selected = selectionCulling_.planes[plane][component];
+                const double scale    = std::max(1.0, std::abs(current));
+                if (std::abs(current - selected) > 1.0e-9 * scale)
+                {
+                    cullingChanged = true;
+                }
+            }
+        }
+    }
     bool selectionChanged = false;
     const double selectionThreshold = params_.selectionUpdateDistanceMeters > 0.0
         ? params_.selectionUpdateDistanceMeters
         : params_.derivedVoxelMeters;
-    if (!hasSelectionEye_ || lengthSquared(eyeLocal - selectionEye_) > selectionThreshold * selectionThreshold)
+    if (!hasSelectionEye_ || cullingChanged
+        || lengthSquared(eyeLocal - selectionEye_) > selectionThreshold * selectionThreshold)
     {
-        octree_.selectVisible(eyeLocal, lastVisible_);
+        octree_.selectVisible(eyeLocal, lastVisible_, culling);
         visibleLeafSet_.assign(lastVisible_);
         visibleMasks_.resize(lastVisible_.size());
         for (std::size_t index = 0; index < lastVisible_.size(); ++index)
@@ -146,6 +170,11 @@ void Planet::update(const Vec3 &eyeLocal)
         selectionChanged = true;
         selectionEye_    = eyeLocal;
         hasSelectionEye_ = true;
+        hasSelectionCulling_ = cullingPresent;
+        if (cullingPresent)
+        {
+            selectionCulling_ = *culling;
+        }
     }
 
     const std::vector<ChunkCoord> &visible = lastVisible_;

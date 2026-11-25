@@ -60,9 +60,12 @@ struct PlanetDemoOptions
     // the multiply where a tile still photographs as detail and cuts it
     // where the scan's motif has minified into a repeating stamp (the
     // per-chunk gate plus the mip chain fade the boundary so no ring
-    // shows where the multiply stops). 0 disables the terrain textures
-    // outright.
-    std::uint32_t textureTilePixels = 48;
+    // shows where the multiply stops). The floor sits at the edge of the
+    // wallpaper band: between roughly 12 and 30 pixels per tile the eye
+    // stops reading a tile's content as grain and starts matching the tile
+    // lattice itself, so the multiply only earns its cost past that band.
+    // 0 disables the terrain textures outright.
+    std::uint32_t textureTilePixels = 64;
 };
 
 struct Viewpoint

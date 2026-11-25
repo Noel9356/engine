@@ -1145,11 +1145,40 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // Cloud shadows ride the macro sample (see macroSampleAt): the same
         // coverage field the cloud layer renders from, keyed to the sun ray
         // through the point, darkens the albedo. The banks overhead and
-        // their shadows agree from orbit and from the ground.
+        // their shadows agree from orbit and from the ground. The terrain
+        // self-shadow rides with it (see DensityField::terrainSelfShadow):
+        // the relief up-sun of the point shades its lee, so escarpments and
+        // ravine walls read as lit-and-shaded relief instead of lit relief
+        // alone - and both shades carry the SAME configured sun, so a cloud
+        // bank's shadow and a ridge's shadow never disagree about where the
+        // light stands.
         const double cloudShade = 1.0 - macro.cloudShadow;
-        vertex.color[0]    = climate.color[0] * static_cast<float>(cloudShade);
-        vertex.color[1]    = climate.color[1] * static_cast<float>(cloudShade);
-        vertex.color[2]    = climate.color[2] * static_cast<float>(cloudShade);
+        const double selfShade = 1.0 - field.terrainSelfShadow(point);
+        // Wave wash: the beach inside the run-up band above the sea surface
+        // stays periodically soaked - real shorelines photograph a darker,
+        // slightly cooler sand strip between the waterline and the dry
+        // back-beach, and without it the sand meets the water at a hard
+        // painted edge (the dry palette runs right up to the surf). The
+        // wash darkens most near the waterline and fades over the band's
+        // few metres; the blue channel keeps the largest share so the wet
+        // strip reads cooler the way wetted sand does. The slope gate keeps
+        // the wash off vertical shore cliffs (their faces are rock, and a
+        // uniform wet band would paint a horizontal stripe across them).
+        double washShade[3] = {1.0, 1.0, 1.0};
+        if (group == terrainSurfaceGroupGround && radius >= params.derivedSeaRadiusMeters)
+        {
+            const double aboveSea = radius - params.derivedSeaRadiusMeters;
+            if (aboveSea < 6.0 && slope01 < 0.45)
+            {
+                const double wet = 1.0 - smoothstep(0.0, 4.5, aboveSea);
+                washShade[0] = 1.0 - 0.34 * wet;
+                washShade[1] = 1.0 - 0.30 * wet;
+                washShade[2] = 1.0 - 0.24 * wet;
+            }
+        }
+        vertex.color[0]    = climate.color[0] * static_cast<float>(cloudShade * selfShade * washShade[0]);
+        vertex.color[1]    = climate.color[1] * static_cast<float>(cloudShade * selfShade * washShade[1]);
+        vertex.color[2]    = climate.color[2] * static_cast<float>(cloudShade * selfShade * washShade[2]);
         applyDebugBorderTint(vertex.color, chunkBorderWeight(point));
         // Texture coordinates: the continuous flat/wall projective frame
         // (see tiledSurfaceUv), scaled by the group's tile size and carried

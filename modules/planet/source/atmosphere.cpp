@@ -37,6 +37,19 @@ constexpr FbmParams kCloudDetailFbm{2, 2.0, 0.5};
 constexpr FbmParams kCloudWeatherFbm{2, 2.0, 0.5};
 constexpr FbmParams kCloudSwirlFbm{2, 2.0, 0.5};
 
+// Wisp octaves for texture consumers (see coverageTexel): the wavelengths
+// ride at a 24th and a 40th of the bank scale, under every practical mesh
+// grid's vertex spacing but ABOVE the bake's own texel footprint - a
+// 2048-wide equirect over the 60 km showcase puts ~187 m per texel at the
+// equator, so both octaves resolve (a sub-texel octave would alias into
+// uncorrelated salt-and-pepper instead of ragged fringes). The pair's
+// amplitude halves for the finer octave, carrying the hierarchy real
+// cloud decks photograph (large torn sheets, finer ragged fringes on
+// their edges).
+constexpr FbmParams kCloudWispFbm{2, 2.0, 0.5};
+constexpr double kCloudWispWavelengthFractionA = 1.0 / 24.0;
+constexpr double kCloudWispWavelengthFractionB = 1.0 / 40.0;
+
 // Amplitude of the bank-elongation (1.0 = features stretch to about twice
 // their width along the flow) and of the swirl bend, in units of the cloud
 // wavelength. The billow octave's wavelength rides at 0.7x the bank scale -
@@ -44,15 +57,37 @@ constexpr FbmParams kCloudSwirlFbm{2, 2.0, 0.5};
 // shells' own grids at six-plus samples per lobe wavelength (the contour
 // walk needs that headroom to keep lobe outlines off the grid stairs) - with
 // the amplitude below as its share of the field.
-constexpr double kCloudStretchFactor = 0.62;
-constexpr double kCloudSwirlAmplitude = 0.35;
+constexpr double kCloudStretchFactor = 0.50;
+constexpr double kCloudSwirlAmplitude = 0.20;
 constexpr double kCloudBillowWavelengthFraction = 0.70;
+
+// Fixed shape of the cirrus deck: three smooth octaves carry the streak
+// field at half the cumulus wavelength, a two-octave filament stream tears
+// the thresholded streaks into bundles, and the zonal stretch compresses the
+// field across latitude by the factor below (1.7 stretches the streaks to
+// roughly 2.7 times their width along the latitude circles - cirrus decks
+// photograph with directional coherence, but an over-stretched field reads
+// as motion-blurred scratches instead of wind-sheared ice). The threshold
+// band stays wider than the cumulus deck's so each filament keeps a soft
+// feathered fringe; hard-edged white scratches are the single most
+// synthetic-looking failure a cirrus pass can show.
+constexpr FbmParams kCirrusBaseFbm{3, 2.0, 0.55};
+constexpr FbmParams kCirrusFilamentFbm{2, 2.0, 0.5};
+constexpr double kCirrusStretchFactor = 1.7;
+constexpr double kCirrusWavelengthFraction = 0.6;
+constexpr double kCirrusFilamentWavelengthFraction = 0.16;
+constexpr double kCirrusFilamentStrength = 0.32;
+constexpr double kCirrusEdgeHalfWidth = 0.15;
+constexpr std::uint64_t kCirrusSeedTag = 0x5177ULL;
+constexpr std::uint64_t kCirrusFilamentSeedTag = 0x5178ULL;
 
 constexpr std::uint64_t kCloudSeedTag    = 0xC10D1ULL;
 constexpr std::uint64_t kCloudDetailSeedTag  = 0xC10D2ULL;
 constexpr std::uint64_t kCloudWeatherSeedTag = 0xC10D3ULL;
 constexpr std::uint64_t kCloudSwirlSeedTag   = 0xC10D4ULL;
 constexpr std::uint64_t kCloudBillowSeedTag  = 0xC10D5ULL;
+constexpr std::uint64_t kCloudWispSeedTagA   = 0xC10D6ULL;
+constexpr std::uint64_t kCloudWispSeedTagB   = 0xC10D7ULL;
 
 // Star field constants: the lattice spans the unit-cube projection of the
 // direction sphere (cellsPerAxis across [-1, 1]), the presence probability
@@ -86,15 +121,16 @@ constexpr double kGalaxyDustDepth = 0.80;       // rift presence suppression at 
 constexpr double kGalaxyDustWavelengthRadians = 0.28;
 
 // Moon model constants (see moonDirection): the orbital phase offset from
-// the sub-sun meridian at t = 0. The anchor adds a quarter-orbit-rotation
-// clearance only through the seed phase itself (about 0.3 rad east for the
-// showcase seed), which places the companion above the horizon of every
-// view whose sun is up while riding the clear sky above the cloud deck's
-// horizon guard - a ~34-degree elongation reads as a gibbous disc under
-// the lit-sphere shading (most of the face lit, the terminator shading
-// still visible).
+// the sub-sun meridian at t = 0. The lead sits near quadrature: an anchor
+// that rides the sun's own meridian (or within a few tenths of a radian of
+// it) photographs a near-NEW companion from the planet - the lit-sphere
+// shading then draws its unlit face as a hard black disc against the
+// daylight sky, which reads as a floating artifact where a real new moon
+// is simply invisible. At quadrature the visible face is roughly half lit,
+// the terminator runs down the disc's middle, and the companion reads as
+// the moon every daytime photograph shows.
 constexpr std::uint64_t kMoonSeedTag = 0x300BULL;
-constexpr double kMoonLeadRadians = 0.0;
+constexpr double kMoonLeadRadians = 1.57;
 
 // Unit normal of the galactic plane (a seed-derived great circle): hashed
 // from the planet seed exactly the way the cloud field's wind frame is, so
@@ -121,6 +157,10 @@ CloudField::CloudField(const PlanetGenerationParams &params)
         kCloudWeatherFbm.octaves);
     seedsSwirl_   = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudSwirlSeedTag)),
         kCloudSwirlFbm.octaves);
+    seedsWisp_[0] = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudWispSeedTagA)),
+        kCloudWispFbm.octaves);
+    seedsWisp_[1] = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudWispSeedTagB)),
+        kCloudWispFbm.octaves);
     seedBillow_  = static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudBillowSeedTag));
 
     // Deterministic wind frame: a unit flow direction derived from the cloud
@@ -140,10 +180,48 @@ CloudField::CloudField(const PlanetGenerationParams &params)
         tangent = cross(flowAxis_, Vec3{1.0, 0.0, 0.0});
     }
     flowSide_ = normalized(tangent);
+
+    // Cyclone vortices (see coverageTexel): eight seed-derived storms over
+    // the mid-latitudes, where the general circulation actually spawns them
+    // (a cyclone riding the equatorial belt or the polar cap reads as a
+    // swirl placed by a random brush). The core radius spans a 25th to a
+    // 18th of the circumference - several bank wavelengths across, the
+    // comma-head scale orbital photography resolves - and the shear
+    // strength several core radii of displacement: the shear must dominate
+    // the bank wavelength so the arms wrap fully (a displacement under a
+    // wavelength only dents the banks), while the Rankine envelope keeps
+    // the far field untouched.
+    const double shellCircumference = 6.283185307179586
+        * (params.radiusMeters + params.cloudAltitudeMeters);
+    for (std::size_t storm = 0; storm < cyclones_.size(); ++storm)
+    {
+        const std::uint64_t stormHash = hashCombine64(static_cast<std::uint64_t>(baseSeed),
+            0xC7C10E5ull + static_cast<std::uint64_t>(storm) * 0x9E3779B97F4A7C15ull);
+        const double stormLongitude = static_cast<double>(stormHash & 0xFFFFull) / 65536.0 * 6.283185307179586;
+        const double stormLatitude  = (static_cast<double>((stormHash >> 16) & 0x7FFFull) / 32768.0 - 0.5) * 1.2;
+        cyclones_[storm].center = normalized(Vec3{
+            std::cos(stormLatitude) * std::cos(stormLongitude), std::sin(stormLatitude),
+            std::cos(stormLatitude) * std::sin(stormLongitude)});
+        cyclones_[storm].coreMeters = shellCircumference
+            * (0.040 + 0.014 * static_cast<double>((stormHash >> 28) & 0xFull) / 15.0);
+        cyclones_[storm].strength = params_.cloudCycloneStrength
+            * (3.4 + 2.6 * static_cast<double>((stormHash >> 32) & 0xFull) / 15.0);
+    }
 }
 
 double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale,
     bool includeBillow) const
+{
+    return sampleCoverage(unitDirection, lowPassCutoffMeters, softnessScale, includeBillow, false, 0.0);
+}
+
+double CloudField::coverageTexel(const Vec3 &unitDirection, double wispDetail) const
+{
+    return sampleCoverage(unitDirection, 0.0, 1.0, true, true, wispDetail);
+}
+
+double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale,
+    bool includeBillow, bool texelDetail, double wispDetail) const
 {
     if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0)
     {
@@ -182,6 +260,47 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
                 kCloudSwirlFbm, lowPassCutoffMeters)}
             * swirl;
 
+    // Cyclone shear (texture consumers only): each storm's Rankine-like
+    // vortex displaces the sample position azimuthally around the storm's
+    // axis - speed rising linearly through the core, falling like 1/r
+    // outside it - which shears whatever banks the field already owns into
+    // trailing spiral arms, exactly the way a real cyclone rearranges the
+    // cloud deck it forms in. A slight inward radial drift through the
+    // influence tightens the wrap toward the eyewall without dragging the
+    // far-field banks around. The displacement stays a pure function of the
+    // position, so the texture bake remains deterministic.
+    if (texelDetail)
+    {
+        for (const Cyclone &storm : cyclones_)
+        {
+            const Vec3 offset = shellPosition - storm.center
+                * (params_.radiusMeters + params_.cloudAltitudeMeters);
+            const double radial = length(offset);
+            if (radial < 1.0e-6 || radial > 4.0 * storm.coreMeters)
+            {
+                continue;
+            }
+            // Tangential (azimuthal) direction around the storm axis.
+            Vec3 tangential = cross(storm.center, offset);
+            const double tangentialLength = length(tangential);
+            if (tangentialLength < 1.0e-9)
+            {
+                continue;
+            }
+            tangential = tangential * (1.0 / tangentialLength);
+            // Rankine envelope: speed ~ r/core inside the eyewall, ~ core/r
+            // outside it, tapered to zero at the influence's rim.
+            const double speed = (radial < storm.coreMeters
+                    ? radial / storm.coreMeters
+                    : storm.coreMeters / radial)
+                * (1.0 - smoothstep(3.0 * storm.coreMeters, 4.0 * storm.coreMeters, radial));
+            const Vec3 inward = offset * (1.0 / radial);
+            shellPosition = shellPosition
+                + tangential * (storm.strength * storm.coreMeters * speed)
+                - inward * (0.35 * storm.strength * storm.coreMeters * speed);
+        }
+    }
+
     // Base banks plus the breakup octave; both fade under the consumer's
     // band limit like every other noise term of the module. The billow
     // octave rides at 0.7x the bank scale: inverted cellular distance (one
@@ -206,6 +325,25 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
     {
         field += detailFade
             * fbm(seedsDetail_, shellPosition, params_.cloudWavelengthMeters * 0.25, kCloudDetailFbm, lowPassCutoffMeters);
+    }
+
+    // Wisp octaves (texture consumers only): two octaves whose feature size
+    // sits under every mesh grid's vertex spacing, so only a texture's texel
+    // lattice resolves them. They carry the torn fringes and ragged holes
+    // real decks photograph at close range - the structure a contoured mesh
+    // cannot hold at any practical resolution. The amplitude follows the
+    // configured detail strength so cloud_detail_strength keeps tuning the
+    // whole breakup family together.
+    if (texelDetail && wispDetail > 0.0)
+    {
+        const double wispStrength = wispDetail * params_.cloudWispStrength
+            * std::max(params_.cloudDetailStrength, 0.12);
+        field += wispStrength
+            * fbm(seedsWisp_[0], shellPosition, params_.cloudWavelengthMeters * kCloudWispWavelengthFractionA,
+                kCloudWispFbm, 0.0);
+        field += 0.5 * wispStrength
+            * fbm(seedsWisp_[1], shellPosition, params_.cloudWavelengthMeters * kCloudWispWavelengthFractionB,
+                kCloudWispFbm, 0.0);
     }
 
     // Threshold into coverage: the crossing band centers on the quantile the
@@ -279,11 +417,13 @@ Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot)
 {
     // Pale band along the horizon, deepening toward the zenith: real skies
     // keep their horizon haze over roughly the first quarter of the climb,
-    // which the smoothstep edges encode. Below the horizon the haze darkens
-    // gently instead of cutting off, so any ground-level gap (a chunk still
-    // streaming in, the sliver between a sky dome's rim and the visual
-    // horizon) photographs as atmosphere, not as a hole to space.
-    const double climb = smoothstep(0.02, 0.5, upDot);
+    // which the smoothstep edges encode (the band saturates by ~20 degrees
+    // of elevation, where a standing eye reads the transition). Below the
+    // horizon the haze darkens gently instead of cutting off, so any
+    // ground-level gap (a chunk still streaming in, the sliver between a
+    // sky dome's rim and the visual horizon) photographs as atmosphere, not
+    // as a hole to space.
+    const double climb = smoothstep(0.01, 0.36, upDot);
     const double channels[3] = {
         static_cast<double>(params.atmosphereHorizonColor[0]),
         static_cast<double>(params.atmosphereHorizonColor[1]),
@@ -540,6 +680,61 @@ double galaxyBandWeight(const PlanetGenerationParams &params, const Vec3 &unitDi
         direction.z * inverseWavelength);
     const double dustWeight = smoothstep(0.1, 0.62, 0.5 + 0.5 * dust) * band;
     return std::clamp(band * (1.0 - kGalaxyDustDepth * dustWeight), 0.0, 1.0);
+}
+
+double cirrusStreakWeight(const PlanetGenerationParams &params, const Vec3 &unitDirection,
+    double lowPassCutoffMeters)
+{
+    if (!params.cirrusEnabled || params.cirrusStrength <= 0.0 || params.cirrusCoverageAmount <= 0.0)
+    {
+        return 0.0;
+    }
+    const Vec3 direction = normalized(unitDirection);
+    if (lengthSquared(direction) < 0.5)
+    {
+        return 0.0; // a (near-)zero direction has no sky position
+    }
+    Vec3 shellPosition = direction * (params.radiusMeters + params.cirrusAltitudeMeters);
+
+    // Zonal stretch: the ice-crystal veil rides the upper-level wind, whose
+    // prevailing direction runs along the latitude circles. The sample
+    // position's component along the spin axis scales UP by the stretch
+    // factor, compressing the field across latitude - the streaks then run
+    // several times longer than wide around each latitude circle, the
+    // anisotropy cirrus photographs show (cumulus banks organize along a
+    // seed-derived flow instead; cirrus follows the zonal circulation).
+    const Vec3 spinAxis = normalized(Vec3{params.axis[0], params.axis[1], params.axis[2]});
+    const double spinComponent = dot(shellPosition, spinAxis);
+    shellPosition = shellPosition + spinAxis * (spinComponent * kCirrusStretchFactor);
+
+    const double wavelength = std::max(1.0, params.cloudWavelengthMeters * kCirrusWavelengthFraction);
+    const FbmStreamSeeds baseSeeds
+        = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(params.seed, kCirrusSeedTag)), kCirrusBaseFbm.octaves);
+    double field = fbm(baseSeeds, shellPosition, wavelength, kCirrusBaseFbm, lowPassCutoffMeters);
+
+    // Filament breakup: a fine octave in the SAME stretched frame tears the
+    // thresholded streaks into the filament bundles real cirrus decks show -
+    // without it the threshold returns smooth ribbons that read as painted
+    // arcs. The octave rides at a fixed fraction of the streak scale and
+    // band-limits like every other noise term of the module.
+    const double filamentWavelength = std::max(1.0, wavelength * kCirrusFilamentWavelengthFraction);
+    const FbmStreamSeeds filamentSeeds = makeFbmSeeds(
+        static_cast<std::int64_t>(hashCombine64(params.seed, kCirrusFilamentSeedTag)), kCirrusFilamentFbm.octaves);
+    const double filamentFade = kCirrusFilamentStrength
+        * lowPassFade(lowPassCutoffMeters, filamentWavelength);
+    if (filamentFade > 0.0)
+    {
+        field += filamentFade * fbm(filamentSeeds, shellPosition, filamentWavelength, kCirrusFilamentFbm,
+            lowPassCutoffMeters);
+    }
+
+    // Threshold into the streak weight: the crossing centers on the quantile
+    // the configured coverage implies (the fbm output is roughly symmetric
+    // around zero, exactly the cloud field's convention), and the band stays
+    // narrow - cirrus edges ARE crisp filaments, unlike the cumulus deck's
+    // soft fringes.
+    const double crossing = 1.0 - 2.0 * params.cirrusCoverageAmount;
+    return smoothstep(crossing - kCirrusEdgeHalfWidth, crossing + kCirrusEdgeHalfWidth, field);
 }
 
 Vec3 sunSkyTint(const PlanetGenerationParams &params, double sunDotUp, bool sunEnabled)

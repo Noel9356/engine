@@ -334,6 +334,12 @@ bool PlanetGenerationParams::validate(std::string &error)
     }
     cloudShadowStrength = clampRange(cloudShadowStrength, 0.0, 1.0);
     cloudShadowSoftness = clampRange(cloudShadowSoftness, 0.0, 1.0);
+    terrainSelfShadowStrength = clampRange(terrainSelfShadowStrength, 0.0, 1.0);
+    // The march's taps must span at least the relief it resolves, and a
+    // reach beyond a quarter of the radius would outspan every shadow the
+    // terrain band's own relief can cast.
+    terrainSelfShadowReachMeters = clampRange(terrainSelfShadowReachMeters, radiusMeters / 65536.0,
+        0.25 * radiusMeters);
     {
         const double sunLength = std::sqrt(cloudShadowSunDirection[0] * cloudShadowSunDirection[0]
             + cloudShadowSunDirection[1] * cloudShadowSunDirection[1]
@@ -351,6 +357,13 @@ bool PlanetGenerationParams::validate(std::string &error)
             cloudShadowSunDirection[2] /= sunLength;
         }
     }
+    cirrusStrength = clampRange(cirrusStrength, 0.0, 4.0);
+    // The veil stays a high deck above the cumulus shell (its streak scale
+    // rides fractions of the cloud wavelength), and the coverage quantile
+    // keeps the sky majority clear the way a thin veil reads.
+    cirrusAltitudeMeters = clampRange(cirrusAltitudeMeters, cloudAltitudeMeters + radiusMeters / 8192.0,
+        radiusMeters / 4.0);
+    cirrusCoverageAmount = clampRange(cirrusCoverageAmount, 0.0, 0.6);
     starsDensity    = clampRange(starsDensity, 0.0, 1.0);
     starsBrightness = clampRange(starsBrightness, 0.0, 4.0);
     // The disc range must stay inside the pixel scale of a capture: a

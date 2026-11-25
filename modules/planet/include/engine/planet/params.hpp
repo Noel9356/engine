@@ -566,8 +566,8 @@ struct PlanetGenerationParams
     // more saturated than the sky they finally display.
     bool  atmosphereEnabled       = true;
     double atmosphereHeightMeters = 20000.0; // sky fades to space over this altitude
-    float atmosphereZenithColor[3]  = {0.040f, 0.130f, 0.460f};
-    float atmosphereHorizonColor[3] = {0.220f, 0.400f, 0.780f};
+    float atmosphereZenithColor[3]  = {0.060f, 0.170f, 0.580f};
+    float atmosphereHorizonColor[3] = {0.470f, 0.620f, 0.860f};
     // Aerial perspective (see atmosphere.hpp): the haze weight along a sight
     // line saturates exponentially with distance. The scale is the
     // exponential's scale length in meters - larger values keep the
@@ -684,6 +684,13 @@ struct PlanetGenerationParams
     // dry subtropics, stormy mid-latitudes), keyed to the spin axis. 0 gives
     // a latitude-blind field.
     double cloudLatitudeBandStrength = 0.16;
+    // Texture-consumer detail (see CloudField::coverageTexel): the wisp
+    // octave pair's amplitude share (the torn fringes and ragged holes only
+    // a texture's texel lattice resolves) and the cyclone vortex family's
+    // strength multiplier (the spiral shear that wraps the banks near each
+    // seed-derived storm into comma heads and arms).
+    double cloudWispStrength      = 0.40;
+    double cloudCycloneStrength   = 0.70;
     // Frequency of those bands over latitude (radians of phase per radian of
     // latitude): ~3.4 places a wet equatorial belt, dry subtropics and wet
     // mid-latitudes the way Earth's circulation cells do.
@@ -709,8 +716,41 @@ struct PlanetGenerationParams
     // shadows - the one lighting the scene the consumer renders (the demo
     // pairs it with its [pbr] sun_direction). The default matches the
     // demo's shipped sun; a sun below the local horizon turns the shadows
-    // off for that point (night side).
+    // off for that point (night side). The terrain self-shading below
+    // reads the SAME direction, so the relief's own shade and the cloud
+    // shade always agree about where the sun stands.
     double cloudShadowSunDirection[3] = {0.50, 0.45, 0.74};
+
+    // Terrain self-shading: the mesher darkens each surface vertex by the
+    // relief the sun ray out of it actually meets (a fixed-resolution march
+    // of the density field up-sun), so escarpments, ridgelines and ravine
+    // walls cast shade into the ground behind them the way real relief
+    // photographs. The shade rides the vertex albedo the same way the cloud
+    // shadow does - the renderer's own lighting stays the authority on
+    // slope shading; this term only adds what slopes alone cannot express,
+    // terrain occluding terrain. 0 disables.
+    double terrainSelfShadowStrength = 0.55;
+    // Sun-ray travel the per-vertex march resolves (a tall escarpment's
+    // shadow reach): occluders farther up-sun than this stop mattering, and
+    // the march's density cutoff rides at a fraction of it (relief finer
+    // than that fraction is the renderer's slope shading's own scale, not
+    // shadow casting). Kept LOD-independent - the same march from the same
+    // point whatever chunk depth samples it - so neighboring chunks at
+    // different depths agree on every shared boundary vertex.
+    double terrainSelfShadowReachMeters = 160.0;
+
+    // ---- high cirrus deck (streak field; see atmosphere.hpp) ---------------------
+    // A thin ice-crystal deck above the cumulus shell: filamentary streaks
+    // stretched along the zonal wind, sampled as a pure direction-space
+    // field the same way clouds and stars are. The streaks run at a fixed
+    // angular scale (the deck's own feature size in radians), so the field
+    // reads consistently from orbit and from closer space views. The demo
+    // meshes the deck as a translucent shell for its globe and orbit
+    // views; consumers that ignore it lose the wisps and nothing else.
+    bool   cirrusEnabled       = true;
+    double cirrusStrength      = 1.0;   // brightness of the deck (0 reads as a clear sky)
+    double cirrusAltitudeMeters = 3400.0; // deck height above the datum (above the cumulus shell)
+    double cirrusCoverageAmount = 0.30;  // approximate sky fraction under streak (0 = clear)
 
     // ---- stars (space backdrop; see atmosphere.hpp) ------------------------------
     // A seed-derived star field for the space behind the planet: consumers
@@ -730,7 +770,7 @@ struct PlanetGenerationParams
     // capture resolutions - larger maxima read as soft blobs once the
     // 2x2 supersampling resolve averages them.
     double starDiscRadiusMinRadians = 0.0011; // faintest star: a tight point
-    double starDiscRadiusMaxRadians = 0.0040; // brightest star: a small disc
+    double starDiscRadiusMaxRadians = 0.0024; // brightest star: a small disc
     // Galactic band (the Milky Way read): a seed-derived great circle the
     // star field concentrates along - stars appear there several times more
     // often, run brighter, and sit in a seed-derived dark rift of dust lanes

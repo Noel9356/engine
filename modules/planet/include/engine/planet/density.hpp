@@ -100,6 +100,20 @@ public:
     // when cloud shadows are disabled.
     double cloudShadow(const Vec3 &unitDirection, double lowPassCutoffMeters) const;
 
+    // Terrain self-shadow factor in [0, 1] for one surface point: how much of
+    // the sunlight the RELIEF up-sun of the point blocks (an escarpment's
+    // lee, the far wall of a ravine - terrain occluding terrain, the one
+    // thing slope shading alone cannot express). The march samples the
+    // density field along the configured sun ray over
+    // terrainSelfShadowReachMeters of travel, band-limited at a fixed
+    // fraction of that reach so the answer is LOD-independent: every chunk
+    // depth evaluating the same point agrees, and shared boundary vertices
+    // never disagree across chunk depths. Night points (the sun at or below
+    // the local horizon) return 0 - no direct sun for the relief to block.
+    // Returns 0 when terrain self-shading is disabled. Pure function of
+    // (point, parameters); thread safe like every sampler of the field.
+    double terrainSelfShadow(const Vec3 &surfacePoint) const;
+
     // Full single-point climate classification (macro fields evaluated
     // exactly for this point, then classified). The single-point path for
     // capability consumers and tooling; the mesher routes through

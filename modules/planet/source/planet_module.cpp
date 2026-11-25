@@ -301,9 +301,23 @@ void setCloudEdgeSoftness(PlanetGenerationParams &params, double value) { params
 void setCloudWeatherStrength(PlanetGenerationParams &params, double value) { params.cloudWeatherStrength = value; }
 void setCloudWeatherWavelengthMultiple(PlanetGenerationParams &params, double value) { params.cloudWeatherWavelengthMultiple = value; }
 void setCloudLatitudeBandStrength(PlanetGenerationParams &params, double value) { params.cloudLatitudeBandStrength = value; }
+void setCloudWispStrength(PlanetGenerationParams &params, double value) { params.cloudWispStrength = value; }
+void setCloudCycloneStrength(PlanetGenerationParams &params, double value) { params.cloudCycloneStrength = value; }
 void setCloudBandFrequency(PlanetGenerationParams &params, double value) { params.cloudBandFrequency = value; }
 void setCloudShadowStrength(PlanetGenerationParams &params, double value) { params.cloudShadowStrength = value; }
 void setCloudShadowSoftness(PlanetGenerationParams &params, double value) { params.cloudShadowSoftness = value; }
+void setTerrainSelfShadowStrength(PlanetGenerationParams &params, double value)
+{
+    params.terrainSelfShadowStrength = value;
+}
+void setTerrainSelfShadowReach(PlanetGenerationParams &params, double value)
+{
+    params.terrainSelfShadowReachMeters = value;
+}
+void setCirrusEnabled(PlanetGenerationParams &params, double value) { params.cirrusEnabled = value != 0.0; }
+void setCirrusStrength(PlanetGenerationParams &params, double value) { params.cirrusStrength = value; }
+void setCirrusAltitude(PlanetGenerationParams &params, double value) { params.cirrusAltitudeMeters = value; }
+void setCirrusCoverage(PlanetGenerationParams &params, double value) { params.cirrusCoverageAmount = value; }
 void setStarsEnabled(PlanetGenerationParams &params, double value) { params.starsEnabled = value != 0.0; }
 void setStarsDensity(PlanetGenerationParams &params, double value) { params.starsDensity = value; }
 void setStarsBrightness(PlanetGenerationParams &params, double value) { params.starsBrightness = value; }
@@ -528,9 +542,17 @@ constexpr SettingRow kSettingRows[] = {
     {"cloud_weather_strength",        SettingKind::Floating, setCloudWeatherStrength},
     {"cloud_weather_wavelength_multiple", SettingKind::Floating, setCloudWeatherWavelengthMultiple},
     {"cloud_latitude_band_strength",  SettingKind::Floating, setCloudLatitudeBandStrength},
+    {"cloud_wisp_strength",         SettingKind::Floating, setCloudWispStrength},
+    {"cloud_cyclone_strength",      SettingKind::Floating, setCloudCycloneStrength},
     {"cloud_band_frequency",          SettingKind::Floating, setCloudBandFrequency},
     {"cloud_shadow_strength",         SettingKind::Floating, setCloudShadowStrength},
     {"cloud_shadow_softness",         SettingKind::Floating, setCloudShadowSoftness},
+    {"terrain_self_shadow_strength",  SettingKind::Floating, setTerrainSelfShadowStrength},
+    {"terrain_self_shadow_reach_meters", SettingKind::Floating, setTerrainSelfShadowReach},
+    {"cirrus_enabled",                SettingKind::Boolean,  setCirrusEnabled},
+    {"cirrus_strength",               SettingKind::Floating, setCirrusStrength},
+    {"cirrus_altitude_meters",        SettingKind::Floating, setCirrusAltitude},
+    {"cirrus_coverage_amount",        SettingKind::Floating, setCirrusCoverage},
     {"stars_enabled",                 SettingKind::Boolean,  setStarsEnabled},
     {"stars_density",                 SettingKind::Floating, setStarsDensity},
     {"stars_brightness",              SettingKind::Floating, setStarsBrightness},
@@ -860,6 +882,17 @@ private:
             }
             const Vec3 eyeLocal = worldPointToPlanetLocal(planet->params(), eyeWorld);
             planet->update(eyeLocal);
+        };
+        capability_.updatePlanetCulled = [](void *self, PlanetHandle handle, const double eyeWorld[3],
+            const PlanetCullingVolume *cullingPlanetLocal)
+        {
+            Planet *planet = static_cast<PlanetModule *>(self)->planetFor(handle);
+            if (planet == nullptr)
+            {
+                return;
+            }
+            const Vec3 eyeLocal = worldPointToPlanetLocal(planet->params(), eyeWorld);
+            planet->update(eyeLocal, cullingPlanetLocal);
         };
         capability_.visibleChunkCapacity = [](void *self, PlanetHandle handle) -> std::uint32_t
         {

@@ -123,19 +123,37 @@ public:
         bool sunEnabled, double nearZ, double farZ, float outClearColor[3]);
 
     // Cloud layer (see engine/planet/atmosphere.hpp CloudField): a static
-    // shell above the surface meshed once per run from the module's coverage
-    // field - quads whose corners all read clear are skipped, so the layer is
-    // geometry with organic cloud-shaped edges. Vertices carry the coverage-
-    // shaded cloud color and radial normals, and the draw is LIT, so the sun
-    // shades the banks (bright tops on the day side, dim banks at the limb).
-    // World-anchored: macro (globe/orbit) cameras see the swirling layer
-    // against the surface from outside the shell.
-    void ensureCloudLayer();
+    // shell above the surface, drawn PER-PIXEL through the baked cloud
+    // texture (ensureCloudTexture) - the shell's UV grid hands every pixel
+    // to the texture, whose alpha carries the full-resolution coverage
+    // field (bank bodies, wisp octaves, cyclone arms) and whose RGB carries
+    // the sun-lit bake (thickness ramp, sun-facing gradient, terminator
+    // silver lining). Quads whose corners all read clear skip, so the mesh
+    // only covers the cloudy provinces. World-anchored: macro
+    // (globe/orbit) cameras see the layer against the surface from outside
+    // the shell, alpha-blended over the terrain and the limb glow.
+    void ensureCloudLayer(const glm::dvec3 &sunDirection);
     // The shell is built for cameras OUTSIDE it: a camera between the
     // surface and the shell would see the far side of the sphere through the
     // sky above the horizon (the demo renders terrain two-sided, so the
     // inside-out quads are not culled), so ground views hide the layer.
     void setCloudLayerVisible(bool visible);
+
+    // The bake behind every cloud draw (shell and deck): the module's
+    // coverage field sampled per equirect texel with the texel-only wisp
+    // octaves and cyclone shear, lit by the run's fixed sun. The pixel copy
+    // stays owned by the renderer so mesh gates can consult it without
+    // going through the texture handle.
+    void ensureCloudTexture(const glm::dvec3 &sunDirection);
+
+    // Close-range sea surface detail (see waterNormalTexture_): a pair of
+    // tileable sheets - wave normals and albedo variation - the near-water
+    // draws sample; baked once, gated per draw by distance.
+    void ensureWaterDetailTextures();
+
+    // The sky deck's own bake (see deckTexture_): the coverage field with
+    // ground-sky lighting for overhead cameras.
+    void ensureDeckTexture(const glm::dvec3 &sunDirection, const glm::dmat3 &domeToPlanet);
 
     // Atmosphere limb (space views): a hemisphere around the planet at the
     // top of the atmosphere, drawn unlit with depth writes off ahead of
@@ -204,6 +222,18 @@ public:
     void ensureAurora(const glm::dvec3 &sunDirection);
     void updateAurora(const glm::dvec3 &eyePlanetLocal);
 
+    // High cirrus deck (space views): a translucent streak veil above the
+    // cumulus shell meshed from the module's cirrus field (see
+    // atmosphere.hpp cirrusStreakWeight) - the deck's alpha texture carries
+    // the filament intensity times a day-side gate, so the veil reads as
+    // wisps over the sunlit planet and composites to nothing over the night
+    // hemisphere, exactly the aurora's intensity-texture route. Drawn in the
+    // renderer's transparent pass, depth-tested against the terrain and the
+    // cumulus shell, depth writes off; like the aurora it hides once the eye
+    // is inside the air (the sky deck owns in-air skies).
+    void ensureCirrusLayer(const glm::dvec3 &sunDirection);
+    void updateCirrusLayer(const glm::dvec3 &eyePlanetLocal);
+
     // Surface scatter (see planet_scatter.hpp): the ground-level life the
     // terrain's color field cannot express - vegetation, surface rocks, bird
     // flocks, breaking-wave foam and valley mist. The system owns its meshes,
@@ -236,6 +266,15 @@ private:
         bool waterPlacementBuilt = false;   // waterTransform carries the chunk's placement
         std::uint64_t lastSeenUpdate = 0;  // update that last listed this chunk as visible
         std::uint64_t terrainHash = 0;     // content hash of the uploaded ground-group mesh
+        // Snow-gate scratch (computed lazily at first ground-material emit):
+        // whether the chunk's center classifies as the snow biome. A snow
+        // chunk's ground group draws UNTEXTURED - the grass detail pair's
+        // blade streaks magnified over a snowfield photograph as combed
+        // parallel lines (the meltwater-flow texture no snowpack shows).
+        // Mutable: the emit pass sees the map's values const, and the cache
+        // only memoizes a pure function of the chunk key.
+        mutable bool groundSnowy = false;
+        mutable bool groundSnowyBuilt = false;
         std::uint64_t rockHash = 0;        // content hash of the uploaded rock-group mesh
         std::uint64_t waterHash = 0;       // content hash of the uploaded water mesh
     };
@@ -249,6 +288,9 @@ private:
     void destroySunDisc();
     void destroyMoon();
     void destroyAurora();
+    void destroyCirrusLayer();
+    void destroyCloudTexture();
+    void destroyWaterDetailTextures();
 
     engine::planet::PlanetCapability *planet_ = nullptr;
     engine::planet::PlanetHandle planetHandle_ = engine::planet::invalidPlanet;
@@ -320,14 +362,51 @@ private:
     bool skyDomeActive_ = false;
     std::deque<engine::renderer::MeshMaterial> skyDomeMaterials_;
 
-    // Cloud layer: static shell mesh from the module's cloud coverage field
-    // (built once; world-anchored, so it never follows the camera).
+    // Cloud layer: world-anchored shell drawn from the module's cloud
+    // coverage field, per-pixel through the baked cloud texture (see
+    // cloudTexture_): the shell mesh carries equirectangular UVs into the
+    // texture, whose alpha holds the coverage and RGB the sun-lit bake.
     engine::renderer::MeshHandle cloudLayer_ = engine::renderer::invalidMesh;
     glm::mat4 cloudLayerTransform_{1.0f};
     bool cloudLayerActive_ = false;
     bool cloudLayerVisible_ = false;
     std::deque<engine::renderer::MeshMaterial> cloudLayerMaterials_;
     std::unique_ptr<engine::planet::CloudField> cloudField_;
+
+    // Cloud texture (shared by the world shell and the sky deck): the
+    // module's coverage field baked once at startup into an equirectangular
+    // RGBA tile - alpha carries per-texel coverage (bank bodies, ragged
+    // wisp fringes, cyclone arms), RGB the cloud color under the run's fixed
+    // sun (thickness ramp, sun-facing gradient, terminator silver lining).
+    // The pixel copy stays owned here so the mesh builders can gate quads
+    // and remap UVs against the same bake the shell draws.
+    engine::renderer::TextureHandle cloudTexture_ = engine::renderer::invalidTexture;
+    std::vector<std::uint8_t> cloudTexturePixels_;
+    std::uint32_t cloudTextureWidth_ = 0;
+    std::uint32_t cloudTextureHeight_ = 0;
+
+    // The deck's own bake (see ensureSkyCloudLayer): the same coverage
+    // field with GROUND-SKY lighting - a lifted ambient floor so the whole
+    // dome's banks read bright against the blue (real midday decks
+    // scatter the sky's own light), the sun side a touch brighter, a
+    // subtle warm rim toward the low-sun horizon. The space bake's
+    // terminator contrast paints the anti-sun sky nearly black - right
+    // for orbit, wrong overhead. The pixel copy stays owned here (like the
+    // space bake's own copy): the deck's vertex colors bilinear this
+    // array per rebuild, so the bake must outlive its texture upload.
+    engine::renderer::TextureHandle deckTexture_ = engine::renderer::invalidTexture;
+    std::vector<std::uint8_t> deckTexturePixels_;
+    std::uint32_t deckTextureWidth_ = 0;
+    std::uint32_t deckTextureHeight_ = 0;
+
+    // Water surface detail (see setWaterDetailTextures): a tileable wave-
+    // normal texture and a low-frequency albedo variation sheet the near-
+    // water draws sample, so close-range seas ripple under the sun instead
+    // of reading as a flat painted sheet. Both gate by distance like the
+    // terrain scans (minified normal maps alias into open-ocean sparkle).
+    engine::renderer::TextureHandle waterNormalTexture_ = engine::renderer::invalidTexture;
+    engine::renderer::TextureHandle waterAlbedoTexture_ = engine::renderer::invalidTexture;
+    double waterTextureMaxDistanceMetersSquared_ = 0.0;
 
     // Atmosphere limb hemisphere (space backdrop; see ensureAtmosphereShell).
     engine::renderer::MeshHandle atmosphereShell_ = engine::renderer::invalidMesh;
@@ -355,6 +434,9 @@ private:
     // night). Drawn after the sky dome (and star dome) but before the cloud
     // deck, so banks occlude the sun.
     engine::renderer::MeshHandle sunDisc_ = engine::renderer::invalidMesh;
+    // The disc's radial halo (alpha falloff; see ensureSunDisc): the disc
+    // blends at opacity x texel alpha, fading into the sky behind it.
+    engine::renderer::TextureHandle sunHaloTexture_ = engine::renderer::invalidTexture;
     glm::mat4 sunDiscTransform_{1.0f};
     bool sunDiscActive_ = false;
     std::deque<engine::renderer::MeshMaterial> sunDiscMaterials_;
@@ -377,6 +459,16 @@ private:
     glm::mat4 auroraTransform_{1.0f};
     bool auroraActive_ = false;
     std::deque<engine::renderer::MeshMaterial> auroraMaterials_;
+
+    // High cirrus deck (see ensureCirrusLayer): planet-local translucent
+    // streak veil above the cumulus shell, world-anchored at the planet
+    // center and static after upload (the day-side gate is baked against
+    // the run's fixed sun direction, like the aurora's night gate).
+    engine::renderer::MeshHandle cirrusLayer_ = engine::renderer::invalidMesh;
+    engine::renderer::TextureHandle cirrusTexture_ = engine::renderer::invalidTexture;
+    glm::mat4 cirrusLayerTransform_{1.0f};
+    bool cirrusLayerActive_ = false;
+    std::deque<engine::renderer::MeshMaterial> cirrusLayerMaterials_;
 };
 
 } // namespace demo::planet_demo

@@ -154,14 +154,14 @@ A very-low-frequency field classifies every landmass region into layered sedimen
 | `sea_ice_temperature` | `0.10` | Sea-level temperature below which the water surface freezes. The field is the same climate field that drives the land's freeze line, so polar oceans ice over where the land turns tundra, with an organic, noise-shaped edge. `0` disables sea ice. |
 | `sea_ice_transition` | `0.05` | Temperature range around `sea_ice_temperature` over which the ice color blends in. |
 | `water_color_ice` | `[0.78, 0.85, 0.94]` | Linear RGB of the frozen water surface; slightly blue against the warm-white cloud tops so polar caps read as ice, not weather. |
-| `water_wave_amplitude` | `0.16` | Radian-scale tilt applied to the water surface normals by a deterministic two-scale noise field (the configured swell plus a half-wavelength chop at a third of the tilt), giving the sea a sun-glint texture with sparkle at close range. The tilt fades out under the LOD band limit like every other noise term, so coarse chunks keep a smooth sea. `0` gives a perfectly smooth surface. |
+| `water_wave_amplitude` | `0.28` | Radian-scale tilt applied to the water surface normals by a deterministic two-scale noise field (the configured swell plus a half-wavelength chop at a third of the tilt), giving the sea a sun-glint texture with sparkle at close range. The tilt fades out under the LOD band limit like every other noise term, so coarse chunks keep a smooth sea. `0` gives a perfectly smooth surface. |
 | `water_wave_wavelength_meters` | `8.0` | Feature size of the wave-swell field (the chop rides at half of it). |
 | `water_wave_chop_fraction` | `0.33` | Amplitude of the half-wavelength chop as a fraction of the swell tilt (the chop breaks the sun glint into sparkle). `0` gives a single-scale swell. |
-| `water_foam_width_meters` | `2.5` | Depth band under the surface that reads as surf - the breaker rim hugging the waterline. The band's falloff exponent (see `water_foam_falloff_exponent`) keeps the bright rim at the shore even on ultra-gentle shelves (a plain smoothstep would wash whole shallow lagoons white). |
+| `water_foam_width_meters` | `14.0` | Depth band under the surface that reads as surf - the breaker rim hugging the waterline. The band's falloff exponent (see `water_foam_falloff_exponent`) keeps the bright rim at the shore even on ultra-gentle shelves (a plain smoothstep would wash whole shallow lagoons white). |
 | `water_foam_falloff_exponent` | `3.0` | Falloff exponent of the breaker band across its depth range: 2 keeps a broad wash of surf over the shelf, 4 squeezes it into a tight rim at the waterline. |
 | `water_foam_strength` | `0.60` | 0 = no surf, 1 = a solid white breaker band. The crest modulation keys to the offshore direction (read from the terrain gradient at the waterline), so the band breaks into elongated breaker ranks running parallel to the coast instead of isotropic patches; between ranks a base wash keeps the rim continuous. |
 | `water_shore_sand_brightness` | `1.35` | Brightness lift of the sand seen through the shallow shelf (sunlit flats under a thin sheet read brighter than the raw beach row). |
-| `water_shore_mix_meters` | `3.0` | Depth over which the water surface blends toward the beach-sand tone transmitted by the water's own hue, so very shallow flats read as sandy turquoise (the bottom seen through the sheet) instead of one pale sheet. `0` disables the blend. |
+| `water_shore_mix_meters` | `12.0` | Depth over which the water surface blends toward the beach-sand tone transmitted by the water's own hue, so very shallow flats read as sandy turquoise (the bottom seen through the sheet) instead of one pale sheet. `0` disables the blend. |
 
 ## Climate and biomes
 
@@ -210,7 +210,7 @@ The mesher partitions terrain into two surface groups - ground (soil, grass, sno
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `terrain_texture_tile_meters_ground` | `8.0` | World meters one ground-group texture tile spans (soil/grass detail scale). |
+| `terrain_texture_tile_meters_ground` | `6.0` | World meters one ground-group texture tile spans (soil/grass detail scale). |
 | `terrain_texture_tile_meters_rock` | `14.0` | World meters one rock-group texture tile spans; rock faces read coarser beds than soil reads grain. |
 | `water_texture_tile_meters` | `8.0` | World meters one water-surface texture tile spans (wave/glint detail scale). |
 | `texture_uv_warp_strength` | `0.35` | Amplitude (in texture tiles) of the low-frequency simplex field that bends each group's tile lattice, so the world never photographs every tile at the same phase and the visible repeat of a tiled scan breaks up into organic variation. A pure world-space function of position, band-limited like every other noise term (it fades out below the chunk's own LOD cutoff), and clamped well under one tile so the frame never folds onto itself. `0` restores the unbent world-space tiling. |
@@ -244,10 +244,10 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 | --- | --- | --- |
 | `atmosphere_enabled` | `true` | Master switch; `false` leaves the sky entirely to the consumer. |
 | `atmosphere_height_meters` | `20000.0` | Eye altitude over which the sky fades to black (space). The sky is at full strength below 15% of this height. |
-| `atmosphere_zenith_color` | `[0.040, 0.130, 0.460]` | Linear RGB at the zenith. The defaults are chosen for the renderer's shared tone mapping (which brightens midtones), so the pre-tone-map values sit deeper and more saturated than the sky they finally display. |
-| `atmosphere_horizon_color` | `[0.220, 0.400, 0.780]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
-| `aerial_perspective_scale_meters` | `3600.0` | Scale length of the aerial-perspective haze's exponential, in meters (the distance at which the haze has covered ~63% of its asymptote). Larger values keep the midground clear and let the far ridge dissolve gradually; smaller values haze the whole distance range over at once. |
-| `aerial_perspective_asymptote` | `0.72` | Haze weight the profile approaches at infinite distance. Keeps the farthest terrain faintly readable as terrain instead of fading fully into sky; `0` disables the aerial perspective entirely. |
+| `atmosphere_zenith_color` | `[0.060, 0.170, 0.580]` | Linear RGB at the zenith. The defaults are chosen for the renderer's shared tone mapping (which brightens midtones), so the pre-tone-map values sit deeper and more saturated than the sky they finally display. |
+| `atmosphere_horizon_color` | `[0.470, 0.620, 0.860]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
+| `aerial_perspective_scale_meters` | `5400.0` | Scale length of the aerial-perspective haze's exponential, in meters (the distance at which the haze has covered ~63% of its asymptote). Larger values keep the midground clear and let the far ridge dissolve gradually; smaller values haze the whole distance range over at once. |
+| `aerial_perspective_asymptote` | `0.52` | Haze weight the profile approaches at infinite distance. Keeps the farthest terrain faintly readable as terrain instead of fading fully into sky; `0` disables the aerial perspective entirely. |
 | `sun_direct_tint_strength` | `1.0` | How strongly the DIRECT sun light (terrain/water/specular lighting, the sun disc) adopts the atmosphere's transmittance tint - the white -> warm -> deep red shift the sun's own light gains as its path through the air lengthens toward the horizon (Rayleigh-style curve, see `sunDirectTint` in `atmosphere.hpp`). `1` gives the full physical curve, `0` keeps the consumer's configured sun color unchanged at every elevation. The scattered light (sky gradient, haze) keeps its own sunset tint either way, so `0` restores the look of a scene lit by one fixed sun color. |
 
 ## Clouds
@@ -255,6 +255,8 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 The sky model also carries a `CloudField` (`atmosphere.hpp`): a band-limited coverage field sampled on a spherical shell at `cloud_altitude_meters` above the datum, thresholded so `cloud_coverage` is the approximate sky fraction under cloud, with a fine breakup octave (amplitude `cloud_detail_strength`) for ragged cumulus edges and an inverted-cellular billow octave (amplitude `cloud_billow_strength`) that packs the rounded cumulus lobes into the bank bodies, a seed-derived wind frame that stretches the banks along a deterministic flow direction (real weather systems organize into elongated streaks, not round blobs) with a low-frequency swirl bending their shapes, a very-low-frequency weather field that shifts the threshold regionally so banks organize into large cloudy and clear systems, and a latitude-band term keyed to the spin axis that adds the circulation-cell pattern every rotating atmosphere shows (a wet equatorial belt, dry subtropics, stormy mid-latitudes). Sampling is a pure function with a per-octave seed schedule derived from the planet seed, and the field is band-limited by the optional low-pass cutoff like every other noise term, so consumers with a coarse sample spacing fade the sub-spacing octaves out instead of aliasing them into speckle. The demo meshes the shell for its globe and orbit views (quads whose corners read clear are skipped, so the layer is geometry with organic cloud-shaped edges); the layer renders only for cameras outside the shell, since a camera between the surface and the shell would see the far side of the sphere through the sky above the horizon.
 
 The same coverage field also drives the cloud SHADOWS: chunk meshes darken their terrain and water albedo under the coverage sampled along the sun ray through each surface point (see `cloud_shadow_strength`), so a bank's shadow falls away from the bank the way real cloud shadows do, and the shadow agrees with the cloud layer a consumer paints from the same field. The shadow reads the base field without the billow lobe octave: the shadow's penumbra widening (see `cloud_shadow_softness`) cannot resolve lobe-scale detail, and keeping the octave out of the per-chunk evaluation holds the streaming build cost at its pre-billow level.
+
+Terrain vertices also carry SELF-SHADING (`terrainSelfShadow` in `density.hpp`): the mesher darkens each surface vertex by the relief the sun ray out of it actually meets - a fixed-resolution march of the density field up-sun over `terrain_self_shadow_reach_meters`, band-limited at a fixed fraction of the reach so every chunk depth evaluating a shared boundary vertex agrees. Escarpments, ridgelines and ravine walls then cast shade into their lee the way real relief photographs, beside the cloud shade and under the renderer's own slope lighting (which stays the authority on face direction). The march reads the same configured sun as the cloud shadows (`cloud_shadow_sun_direction`), so the two shades never disagree about where the light stands; night-side points (that sun at or below the local horizon) stay unshaded, and the whole evaluation runs at mesh-build time on the worker threads, costing the rendered frame nothing.
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -268,11 +270,26 @@ The same coverage field also drives the cloud SHADOWS: chunk meshes darken their
 | `cloud_weather_strength` | `0.45` | Amplitude of the very-low-frequency regional weather shift (positive weather = cloudier); stronger values organize the banks into larger cloudy and clear systems. |
 | `cloud_weather_wavelength_multiple` | `4.0` | Wavelength of the regional weather field as a multiple of the cloud field's own wavelength: larger values organize the banks into fewer, broader weather systems. |
 | `cloud_latitude_band_strength` | `0.16` | Amplitude of the latitudinal coverage bands (a wet equatorial belt, dry subtropics, stormy mid-latitudes), keyed to the spin axis. `0` gives a latitude-blind field. |
+| `cloud_wisp_strength` | `0.18` | Amplitude share of the wisp octave pair the texture-consumer path resolves (see `CloudField::coverageTexel` in `engine/planet/atmosphere.hpp`): the torn fringes and ragged holes whose feature size sits under every mesh grid's vertex spacing, so only a baked cloud texture shows them. Mesh shells band-limit the pair out at their own grid spacing, so the two reads stay consistent at the scale each resolves. `0` leaves the texture at the plain field's structure.
+| `cloud_cyclone_strength` | `0.45` | Strength multiplier of the seed-derived cyclone vortices that swirl the coverage field's nearby banks into spiral comma heads and trailing arms (the storm systems satellite imagery resolves over the mid-latitudes). Evaluated on the texture path; mesh consumers band-limit the shear out. `0` leaves the deck unstirred, `2` doubles every storm's wrap. |
 | `cloud_band_frequency` | `3.4` | Frequency of those bands over latitude (radians of phase per radian of latitude): ~3.4 places a wet equatorial belt, dry subtropics and wet mid-latitudes the way Earth's circulation cells do. |
 | `cloud_color` | `[0.985, 0.975, 0.955]` | Linear RGB of the cloud tops; warm white, so the layer reads against the bluer sea ice at globe scale. |
-| `cloud_shadow_strength` | `0.45` | How strongly the terrain and water albedo darkens under the coverage field (sampled along the sun ray through each point). `0` disables cloud shadows. |
-| `cloud_shadow_softness` | `0.50` | Penumbra softening of the cast shadows: the shadow field widens the coverage edge band by this fraction, so shadows read as soft-edged darkening under their banks instead of a hard copy of the cloud outlines. `0` keeps the shadow exactly as sharp as the banks. |
-| `cloud_shadow_sun_direction` | `[0.50, 0.45, 0.74]` | Unit vector of the sunlight that casts the cloud shadows - pair it with the direction your scene's lighting uses (the demo ships it next to its `[pbr] sun_direction` and warns when the two disagree). Points on the night side of this sun get no shadow. |
+| `cloud_shadow_strength` | `0.12` | How strongly the terrain and water albedo darkens under the coverage field (sampled along the sun ray through each point). `0` disables cloud shadows. |
+| `cloud_shadow_softness` | `0.72` | Penumbra softening of the cast shadows: the shadow field widens the coverage edge band by this fraction, so shadows read as soft-edged darkening under their banks instead of a hard copy of the cloud outlines. `0` keeps the shadow exactly as sharp as the banks. |
+| `cloud_shadow_sun_direction` | `[0.50, 0.45, 0.74]` | Unit vector of the sunlight that casts the cloud shadows and the terrain self-shading - pair it with the direction your scene's lighting uses (the demo ships it next to its `[pbr] sun_direction` and warns when the two disagree). Points on the night side of this sun get no shadow. |
+| `terrain_self_shadow_strength` | `0.55` | How strongly the terrain albedo darkens under relief the sun ray out of each vertex meets (the fixed-resolution march described above). `0` disables terrain self-shading. |
+| `terrain_self_shadow_reach_meters` | `160.0` | Sun-ray travel the march resolves: an occluder farther up-sun than this stops shading the vertex, and the march's own density band rides at a sixth of it (finer relief is the renderer's slope lighting's own scale). Kept LOD-independent so chunks at different depths agree on shared vertices. Clamped to `radius_meters/65536 .. radius_meters/4`. |
+
+## High cirrus deck
+
+Above the cumulus shell the module models a thin ice-crystal deck (`cirrusStreakWeight` in `atmosphere.hpp`): a direction-space field of filamentary streaks stretched along the latitude circles (the zonal wind's prevailing direction), torn into bundles by a fine filament octave and thresholded by the `cirrus_coverage_amount` quantile - a translucent veil rather than banks. Sampling is a pure function of direction with the planet seed's per-stream schedule, band-limited by the consumer's own sample spacing the way every field is. The demo meshes the deck as a translucent shell for its globe and orbit views (the streak intensity rides an alpha texture, with a day-side gate that lets the veil fall to nothing through the terminator), so orbital views read the filaments over the sunlit planet; consumers that ignore the deck simply keep a clear high sky.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `cirrus_enabled` | `true` | Master switch of the streak field; `false` reports a clear high sky everywhere. |
+| `cirrus_strength` | `1.0` | Brightness of the deck a consumer paints from the field; `0` disables (the field reports clear). |
+| `cirrus_altitude_meters` | `3400.0` | Height of the veil's shell above the datum; `validate()` keeps it above the cumulus shell. |
+| `cirrus_coverage_amount` | `0.30` | Approximate sky fraction under streak (the threshold's quantile); `0` reads as a clear high sky. Clamped to `0..0.6`. |
 
 ## Stars
 
@@ -284,13 +301,13 @@ The module exposes a seed-derived star field for the space backdrop (`atmosphere
 | `stars_density` | `0.5` | Star spacing: `0` sparse skies, `1` dense skies (the lattice tightens quadratically). |
 | `stars_brightness` | `1.0` | Luminance multiplier of the whole field; the brightest stars saturate to white through the tone mapping. |
 | `star_disc_radius_min_radians` | `0.0011` | Sky angle the faintest star's backdrop disc subtends; the radius a consumer's mesh draws grows with the square root of the star's brightness. Point-like defaults keep the field crisp at capture resolutions. |
-| `star_disc_radius_max_radians` | `0.0040` | Sky angle the brightest star's disc grows to. Larger maxima read as soft blobs once a supersampling resolve averages them; `validate()` orders a reversed range and clamps both inside `0.0002..0.012`. |
+| `star_disc_radius_max_radians` | `0.0024` | Sky angle the brightest star's disc grows to. Larger maxima read as soft blobs once a supersampling resolve averages them; `validate()` orders a reversed range and clamps both inside `0.0002..0.012`. |
 | `galaxy_band_strength` | `1.0` | How strongly the star field concentrates along the seed-derived galactic plane: band cells hold stars several times more often, run brighter and lean warm, and a dark dust rift snakes through the plane's midline. `0` keeps the uniform field exactly. |
 | `galaxy_band_width_radians` | `0.35` | Angular half-width of the band on the sky; the presence and brightness weights fall off exponentially in sine-galactic-latitude over it. Clamped to `0.05..1.2`. |
 
 ## Moon companion
 
-The module places a companion body by a pure orbital model (`moonDirection` in `atmosphere.hpp`): a circular orbit whose plane tilts off the equator by `moon_orbit_inclination_radians` around a seed-derived node longitude, swept at `2*pi / moon_orbital_period_seconds`, with the phase at time zero anchored by a seed-derived offset east of the sub-sun meridian (the `cloud_shadow_sun_direction` convention supplies the sun reference) - so the companion rides the clear daylight sky above the cloud deck's horizon guard in every view whose sun is up, at roughly thirty-four degrees of elongation (a gibbous disc: most of the face lit, the terminator still shading). The function returns a unit direction from the planet's center; consumers place their own geometry at whatever distance their far plane allows. The demo shades the companion as a LIT sphere (the same sun that lights the terrain lights it, so the phase, terminator and crescent are the shading's own output at every eye height), scales it to `moon_angular_radius_radians`, orients one face planetward (tidally locked), and tints it with the atmosphere's direct transmittance keyed on the companion's own elevation - a horizon moon reddens the way the low sun does.
+The module places a companion body by a pure orbital model (`moonDirection` in `atmosphere.hpp`): a circular orbit whose plane tilts off the equator by `moon_orbit_inclination_radians` around a seed-derived node longitude, swept at `2*pi / moon_orbital_period_seconds`, with the phase at time zero anchored near quadrature plus a seed-derived offset (the `cloud_shadow_sun_direction` convention supplies the sun reference; the fixed lead keeps the visible face roughly half lit, so the companion reads as the daytime moon every photograph shows instead of a near-new disc whose unlit face would shade black against the daylight sky). The function returns a unit direction from the planet's center; consumers place their own geometry at whatever distance their far plane allows. The demo shades the companion as a LIT sphere (the same sun that lights the terrain lights it, so the phase, terminator and crescent are the shading's own output at every eye height), scales it to `moon_angular_radius_radians`, orients one face planetward (tidally locked), and tints it with the atmosphere's direct transmittance keyed on the companion's own elevation - a horizon moon reddens the way the low sun does.
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -307,7 +324,7 @@ The module owns the polar oval's shape constants (`auroraOvalLatitudeLowRadians`
 | Key | Default | Effect |
 | --- | --- | --- |
 | `aurora_enabled` | `true` | Master switch for the demo's curtain mesh. |
-| `aurora_strength` | `0.55` | Scales the curtain's emissive brightness; `0` disables the glow. Clamped to `0..1`. |
+| `aurora_strength` | `0.35` | Scales the curtain's emissive brightness; `0` disables the glow. Clamped to `0..1`. |
 
 ## Surface scatter
 
@@ -320,7 +337,7 @@ The ground-level real-world elements the terrain's color field cannot express: v
 | `vegetation_bush_density` | `1.0` | Multiplier for shrubs and bushes (shrubland, grassland, forest understory). Clamped to `0..4`. |
 | `vegetation_grass_density` | `1.0` | Multiplier for grass tufts on grassy ground (the near-camera layer). Clamped to `0..4`. |
 | `vegetation_tree_radius_meters` | `1400.0` | Scatter radius around the eye for trees and bushes. Clamped to `[100, 20000]`. |
-| `vegetation_grass_radius_meters` | `18.0` | Radius of the near-camera grass ring (grass is the most expensive element per pixel, so it keeps the tightest radius); the scatter system thins the sward across the ring's outer half so the boundary does not pop. Clamped to `[5, 200]`. |
+| `vegetation_grass_radius_meters` | `46.0` | Radius of the near-camera grass ring (grass is the most expensive element per pixel, so the ring stays bounded and the sward thins across the ring's outer half so the boundary does not pop). Clamped to `[5, 200]`. |
 | `surface_rock_density` | `1.0` | Multiplier for scattered boulders on open ground (rock, snow, desert and tundra carry more than farmland). Clamped to `0..4`. |
 | `surface_rock_radius_meters` | `260.0` | Scatter radius for the boulders. Clamped to `[20, 4000]`. |
 | `surface_shadow_strength` | `1.0` | Sun-aligned contact shadows under every scattered tree, bush and rock: soft dark quads laid on the ground, offset and stretched along the away-from-sun direction by the site's sun elevation (a low sun drags the shadow long and pale, a high sun bunches it under the element). `0` disables them. Clamped to `0..2`. |
@@ -329,11 +346,11 @@ The ground-level real-world elements the terrain's color field cannot express: v
 | `whitecap_wind_speed_mps` | `9.0` | The 10 m wind speed the sea state follows: whitecaps start forming near 3 m/s and the coverage climbs roughly with the cube of the wind (the parameterization follows the observational whitecap laws). Clamped to `[0, 40]`. |
 | `surf_foam_enabled` | `true` | Master switch for the shore-parallel foam bands (a breaker band seaward of the waterline plus a swash band at it). |
 | `surf_foam_strength` | `0.70` | Scales the bands' opacity. Clamped to `0..1`. |
-| `birds_enabled` | `true` | Master switch for the bird flocks. |
+| `birds_enabled` | `false` | Master switch for the bird flocks. Off by default: at capture resolutions a distant flock renders as a few-pixel sprite stack that the eye parses as a floating artifact rather than as birds. |
 | `bird_flock_count` | `2.0` | Flocks within the scatter radius (they ride closed elliptical paths over ground or water near the eye and roost when the sun is below the horizon at their site). Clamped to `0..16`. |
 | `bird_flock_size` | `9.0` | Birds per flock (they fly in a loose echelon with per-bird flap phases). Clamped to `0..64`. |
 | `valley_mist_enabled` | `true` | Master switch for the ground-fog banks. |
-| `valley_mist_strength` | `0.50` | Scales the mist opacity; banks pool in terrain depressions and over open water near the shore, denser toward sunrise (real radiation fog peaks at dawn). `0` clears the valleys. Clamped to `0..1`. |
+| `valley_mist_strength` | `0.30` | Scales the mist opacity; banks pool in terrain depressions and over open water near the shore, denser toward sunrise (real radiation fog peaks at dawn). `0` clears the valleys. Clamped to `0..1`. |
 | `scatter_rebuild_distance_meters` | `18.0` | Camera movement that triggers a re-scatter (between rebuilds the world stands still; the sea-state churn and the birds keep animating). Clamped to `[4, 500]`. |
 
 ## Debug

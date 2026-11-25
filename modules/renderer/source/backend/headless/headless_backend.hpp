@@ -470,6 +470,15 @@ private:
         // uCloth.z): textured opaque draws cull pixels whose sampled
         // base-color alpha lands below the cutoff; 0 keeps every texel.
         float                  alphaCutoff             = 0.0f;
+        // Procedural surface mottle (MeshMaterial::noiseScaleMeters /
+        // noiseStrength, headless shading path): a footprint-adaptive
+        // two-octave value noise perturbing the shaded albedo at the
+        // sample's world position. The setup also carries the frame's
+        // angular pixel size so the noise's wavelength can ride the pixel
+        // footprint (mottle finer than a pixel would alias into speckle).
+        float                  noiseScaleMeters        = 0.0f;
+        float                  noiseStrength           = 0.0f;
+        float                  pixelAngleRadians       = 0.0f;
         bool                   hasBaseColorMap         = false;
         bool                   hasNormalMap            = false;
         bool                   hasMetallicRoughnessMap = false;

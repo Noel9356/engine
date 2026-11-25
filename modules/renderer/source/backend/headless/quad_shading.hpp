@@ -85,6 +85,15 @@ struct RunContext
     bool      doubleSided = false;
     bool      albedoFilled = false; // caller multiplied the base color map in
     bool      unlit = false;        // skip the lighting block; result = albedo
+    // Procedural surface mottle (MeshMaterial::noiseScaleMeters /
+    // noiseStrength): a footprint-adaptive two-octave value noise perturbing
+    // the albedo at the sample's world position. The wavelength rides the
+    // pixel's ground footprint (pixelAngleRadians per frame), so the mottle
+    // photographs as soil/sward variation at every distance instead of
+    // stopping where a tiled scan's gate cuts. 0 strength disables.
+    float     noiseScaleMeters = 0.0f;
+    float     noiseStrength    = 0.0f;
+    float     pixelAngleRadians = 0.0f;
     // Normal-mapped draws supply the finished per-lane shading normal (see
     // RunInputs::shadeNormal): the caller ran the TBN chain per lane, so the
     // kernel consumes the normal as-is instead of interpolating and
@@ -122,6 +131,84 @@ struct RunInputs
     // Run coverage: lanes the caller wants shaded.
     bool active[4]{};
 };
+
+// ---- procedural surface mottle ----------------------------------------------
+//
+// MeshMaterial::noiseScaleMeters / noiseStrength's shading twin (shared by
+// the run kernel and the per-sample paths in headless_backend.cpp). A
+// two-octave value noise on a hashed 3D lattice, evaluated at the sample's
+// WORLD position: every chunk, every distance, every frame samples the same
+// field, so the mottle is world-anchored - no tile, no seam, no gate. The
+// octave wavelengths ride the caller's footprint-adaptive lambda (never
+// below the material's base scale, never under what one pixel covers), so
+// the pattern band-limits itself instead of aliasing into per-pixel speckle.
+inline std::uint32_t mottleHash(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t tag)
+{
+    std::uint32_t mixed = x * 0x9E3779B9u ^ y * 0xC2B2AE3Du ^ z * 0x27D4EB2Fu ^ tag;
+    mixed ^= mixed >> 16;
+    mixed *= 0x7FEB352Du;
+    mixed ^= mixed >> 15;
+    mixed *= 0x846CA68Bu;
+    mixed ^= mixed >> 16;
+    return mixed;
+}
+
+inline float mottleNoise(float x, float y, float z, std::uint32_t tag)
+{
+    const float fx = std::floor(x);
+    const float fy = std::floor(y);
+    const float fz = std::floor(z);
+    const float tx = x - fx;
+    const float ty = y - fy;
+    const float tz = z - fz;
+    const float sx = tx * tx * tx * (tx * (tx * 6.0f - 15.0f) + 10.0f);
+    const float sy = ty * ty * ty * (ty * (ty * 6.0f - 15.0f) + 10.0f);
+    const float sz = tz * tz * tz * (tz * (tz * 6.0f - 15.0f) + 10.0f);
+    const std::int32_t ix = static_cast<std::int32_t>(fx);
+    const std::int32_t iy = static_cast<std::int32_t>(fy);
+    const std::int32_t iz = static_cast<std::int32_t>(fz);
+    const auto lattice = [tag](std::int32_t cx, std::int32_t cy, std::int32_t cz)
+    {
+        // Negative coordinates flow through the cast to the hash's wrap
+        // (two's-complement truncation), so the field continues below zero.
+        return static_cast<float>(mottleHash(static_cast<std::uint32_t>(cx),
+            static_cast<std::uint32_t>(cy), static_cast<std::uint32_t>(cz), tag)) * (1.0f / 4294967296.0f);
+    };
+    const float h000 = lattice(ix, iy, iz);
+    const float h100 = lattice(ix + 1, iy, iz);
+    const float h010 = lattice(ix, iy + 1, iz);
+    const float h110 = lattice(ix + 1, iy + 1, iz);
+    const float h001 = lattice(ix, iy, iz + 1);
+    const float h101 = lattice(ix + 1, iy, iz + 1);
+    const float h011 = lattice(ix, iy + 1, iz + 1);
+    const float h111 = lattice(ix + 1, iy + 1, iz + 1);
+    const float x00 = h000 + (h100 - h000) * sx;
+    const float x10 = h010 + (h110 - h010) * sx;
+    const float x01 = h001 + (h101 - h001) * sx;
+    const float x11 = h011 + (h111 - h011) * sx;
+    const float y0 = x00 + (x10 - x00) * sy;
+    const float y1 = x01 + (x11 - x01) * sy;
+    return y0 + (y1 - y0) * sz;
+}
+
+// Three octaves: the footprint wavelength and its 2.7x-finer partner carry
+// grain, while the third rides 4.3x COARSER - the soil-patch/tussock scale
+// that keeps high camera altitudes from reading as flat paint (a 1 m grain
+// is sub-pixel mush at 300 m; a 5-30 m patch is the mottle those views
+// photograph). Mixed to roughly [-1, 1]; the caller scales by the
+// material's noiseStrength.
+inline float surfaceMottle(float x, float y, float z, float lambda)
+{
+    const float lambda2 = lambda * 0.37f;
+    const float lambda3 = lambda * 4.3f;
+    const float n = 0.42f * (mottleNoise(x / lambda, y / lambda, z / lambda, 0x51A7E11Bu)
+            - 0.5f)
+        + 0.30f * (mottleNoise(x / lambda2 + 13.7f, y / lambda2 + 5.1f, z / lambda2 + 29.3f,
+            0x6E115EEDu) - 0.5f)
+        + 0.28f * (mottleNoise(x / lambda3 + 61.9f, y / lambda3 + 47.3f, z / lambda3 + 3.7f,
+            0x2F0A4C9Du) - 0.5f);
+    return n * 2.2f;
+}
 
 // The tone mappers' SoA twin (mirrors toneMapColor's per-channel math; the
 // exposure multiply is the caller's). Operates on the run's X/Y/Z registers.
@@ -238,6 +325,37 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
     __m128 posX, posY, posZ;
     interpolate(position[0].x, position[0].y, position[0].z, position[1].x, position[1].y, position[1].z,
         position[2].x, position[2].y, position[2].z, posX, posY, posZ);
+
+    // Procedural surface mottle: the noise rides each lane's WORLD position
+    // and the pixel's own footprint, so near lanes photograph grain, far
+    // lanes photograph broad tonal drift, and nothing ever aliases. The
+    // scalar per-lane loop sits outside the SIMD math (8 hash-lattice
+    // lookups per run) - a hair next to the lane's lighting work.
+    if (context.noiseStrength > 0.0f)
+    {
+        alignas(16) float laneX[4];
+        alignas(16) float laneY[4];
+        alignas(16) float laneZ[4];
+        _mm_store_ps(laneX, posX);
+        _mm_store_ps(laneY, posY);
+        _mm_store_ps(laneZ, posZ);
+        alignas(16) float laneGain[4];
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            const float dx = laneX[lane] - context.cameraPosition.x;
+            const float dy = laneY[lane] - context.cameraPosition.y;
+            const float dz = laneZ[lane] - context.cameraPosition.z;
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            const float lambda = std::max(context.noiseScaleMeters,
+                dist * context.pixelAngleRadians * 2.4f);
+            laneGain[lane] = 1.0f + context.noiseStrength
+                * surfaceMottle(laneX[lane], laneY[lane], laneZ[lane], lambda);
+        }
+        const __m128 gain = _mm_load_ps(laneGain);
+        albX = _mm_mul_ps(albX, gain);
+        albY = _mm_mul_ps(albY, gain);
+        albZ = _mm_mul_ps(albZ, gain);
+    }
 
     // Lane-wise helper: the 3-component dot of two SoA vectors (no horizontal
     // reduction - each lane is one sample's dot).
@@ -485,6 +603,20 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         }
         glm::vec3 interpolatedPosition = inputs.correctedA[lane] * position[0] + inputs.correctedB[lane] * position[1]
             + inputs.correctedC[lane] * position[2];
+        // Procedural surface mottle: the scalar fallback's twin of the SIMD
+        // block above (same field, same footprint rule).
+        glm::vec3 shadedAlbedo = albedo;
+        if (context.noiseStrength > 0.0f)
+        {
+            const float dx = interpolatedPosition.x - context.cameraPosition.x;
+            const float dy = interpolatedPosition.y - context.cameraPosition.y;
+            const float dz = interpolatedPosition.z - context.cameraPosition.z;
+            const float lambda = std::max(context.noiseScaleMeters,
+                std::sqrt(dx * dx + dy * dy + dz * dz) * context.pixelAngleRadians * 2.4f);
+            const float gain = 1.0f + context.noiseStrength
+                * surfaceMottle(interpolatedPosition.x, interpolatedPosition.y, interpolatedPosition.z, lambda);
+            shadedAlbedo *= gain;
+        }
         // Normal-mapped lanes arrive with the caller's finished shading
         // normal (TBN chain output; the flip already applied) - consume it
         // instead of interpolating and flipping the corner normals.
@@ -520,7 +652,7 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
             context.sunRadiance,
             context.ambientSky,
             context.ambientGround,
-            albedo,
+            shadedAlbedo,
             inputs.metallic[lane],
             inputs.roughness[lane],
             inputs.occlusion[lane],

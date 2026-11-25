@@ -55,830 +55,19 @@ constexpr std::uint32_t kVertexStride = sizeof(planet::PlanetVertex);
 // with the shells intact confirms it - the wrong sign erases them).
 constexpr float macroShellFrontFaceWinding = 1.0f;
 
-// Spec for one contoured cloud-coverage shell mesh (see
-// engine/planet/atmosphere.hpp CloudField). Both backdrop layers the demo
-// draws from the coverage field - the world-anchored macro shell and the
-// eye-centered sky deck - go through this one builder; they differ only in
-// their latitude span, radius, sample cutoff and quad floor.
-struct CoverageShellSpec
-{
-    std::uint32_t segments = 0;                    // longitude quads
-    std::uint32_t bands = 0;                       // latitude quads over the span
-    double latitudeLowRadians = 0.0;               // band 0's latitude
-    double latitudeHighRadians = 0.0;              // band `bands`' latitude
-    double shellRadiusMeters = 0.0;                // vertex radius (unit ball: 1.0)
-    double lowPassCutoffMeters = 0.0;              // coverage field band limit at the sample spacing
-    double coverageFloor = 0.0;                    // coverage a quad corner needs to render
-    double minQuadLatitudeRadians = -6.283185307179586; // quads below this latitude are skipped
-    // Horizon-guard fade: when set, vertices within this many radians above
-    // minQuadLatitudeRadians blend their color toward the sky gradient behind
-    // them, so the deck's lower boundary reads as thinning cloud instead of
-    // the hard polygon cut the quad guard would otherwise leave.
-    double guardFadeRadians = 0.0;
-    // Inclusion-floor lift across the guard fade band (0 = off): quads inside
-    // the band raise their coverage floor proportionally, so banks
-    // DISINTEGRATE into fragments toward the horizon instead of staying bank
-    // sized and merely paling out - the color fade alone leaves flattened
-    // pale sheets hanging over the horizon, which reads as an artifact.
-    double guardFloorLift = 0.0;
-    // Edge softening: when set, quad corners with coverage near the floor
-    // blend their vertex color toward the sky gradient behind them (sampled
-    // at the corner's own elevation), so a deck's contoured boundary reads
-    // as thinning cloud instead of a hard polygon cutout. The per-frame sun
-    // tint applies to both the cloud and the sky colors, so the blend tracks
-    // the dome behind it.
-    bool hazeEdgeBlend = false;
-    // Half-width of the haze edge blend above the coverage floor: wider
-    // values stretch the thinning fringe (soft decks), narrow ones keep the
-    // contour crisp (puffy cumulus against the sky).
-    double hazeEdgeWidth = 0.45;
-    // Number of 3x3 box-smoothing passes over the coverage grid before the
-    // contour walk. Each pass rounds the quad inclusion boundary one grid
-    // step further; two passes give contour lines whose curvature stays
-    // above the grid spacing, so the marching-squares polygons read as
-    // organic bank outlines instead of angular cutouts.
-    std::uint32_t smoothingPasses = 1;
-    // Greedy interior merge (see the merge pass): runs of solid interior
-    // quads collapse into maximal grid-aligned rectangles. On shells whose
-    // cells project to a handful of pixels or fewer (the macro shell at
-    // orbit distance) this is pure savings, but on the sky deck - where one
-    // cell spans a dozen pixels - the merged rectangles read as blocky
-    // grid-aligned slabs, so the deck keeps its per-quad tessellation and
-    // pays the extra triangles.
-    bool mergeInterior = true;
-    // Per-quad floor jitter (0 = off): every quad's inclusion threshold is
-    // modulated by a deterministic hash noise at a few quads' scale, so the
-    // cutout boundary wiggles between quads instead of following the grid's
-    // stair pattern. Grid-aligned stair steps are the strongest tell of a
-    // polygon cutout; the jitter replaces them with ragged, cloud-like
-    // edges at zero extra geometry.
-    double floorJitter = 0.0;
-    std::uint64_t floorJitterSeed = 0;
-    // Frame applied to each unit direction before coverage sampling: the sky
-    // deck is built in the sky dome's initial frame (its +Y on the spawn
-    // up), the macro shell samples directions directly (identity).
-    glm::dmat3 frame{1.0};
-    // Optional sun direction (world space) for the baked directional shading
-    // above; null leaves the deck's shading flat.
-    const planet::Vec3 *sunDirection = nullptr;
-    // Threshold-band widening for the coverage sampling (see
-    // CloudField::coverage softnessScale): the coverage function thresholds
-    // the fBm field, and a band this narrow maps to a spatial transition a
-    // couple of grid samples wide on a shell whose cells project a dozen
-    // pixels - the sampled field then reads as near-binary speckle, and no
-    // amount of post-smoothing turns it back into smooth banks. Widening the
-    // band spreads the same threshold over several samples, so the sampled
-    // field keeps the banks' own smooth gradients.
-    double coverageSoftnessScale = 1.0;
-    // Optional environment lighting for an EXACT unlit bake (see
-    // BackdropLighting): when set, the vertex color carries the full
-    // hemispheric ambient plus the sun's Lambertian term against the shell's
-    // radial normals, and the shell draws unlit. Overridden when set together
-    // with sunDirection (the deck keeps its sky-dome-tinted fake term).
-    const BackdropLighting *bakedLighting = nullptr;
-};
-
-// Builds the contoured shell mesh: coverage is sampled on the lat-long grid,
-// smoothed, then every quad whose corner coverage clears the floor
-// contributes its inside polygon (marching squares with linearly
-// interpolated crossings, ambiguous saddles resolved by the cell mean).
-// Vertices carry the coverage-shaded cloud color and the radial normal, so
-// kept edge quads read as thinning cloud instead of a hard polygon boundary.
-// Crossing vertices are shared per cell boundary by construction (both
-// neighbors interpolate the same grid edge), so the shapes weld without
-// duplicated slivers. Returns false when nothing clears the floor.
-bool buildCoverageShellMesh(const planet::CloudField &field, const planet::PlanetGenerationParams &params,
-    const CoverageShellSpec &spec, std::vector<planet::PlanetVertex> &vertices,
-    std::vector<std::uint32_t> &indices)
-{
-    const std::uint32_t stride = spec.segments + 1u;
-    // The coverage grid is sampled RAW here, smoothed below, and only then
-    // colored: the contour walk, the vertex colors and the greedy merge all
-    // read the SAME smoothed field. (Coloring from the pre-smoothing samples
-    // painted a quad-aligned artifact band along every bank edge - the
-    // smoothing moves the inclusion crossing by up to half the edge band, so
-    // quads rendered from the smoothed field carried pre-smoothing colors of
-    // nearly clear sky, and vice versa.)
-    std::vector<float> coverageGrid;
-    coverageGrid.reserve(static_cast<std::size_t>(stride) * (spec.bands + 1u));
-    // Subdivision of near-boundary quads and the width of the near-boundary
-    // band in coverage units: quads whose corners sit within the band of the
-    // inclusion floor are marched at kSub x kSub sub-resolution, so every
-    // visual boundary lives at 1/kSub of the grid spacing and the
-    // marching-squares isolines curve at sub-quad precision instead of
-    // snapping to the grid stair pattern. Interior quads keep their
-    // single-pair cost. A quad whose corners clear its floor by the whole
-    // band joins an interior rectangle (the bilinear coverage of a merged
-    // rectangle stays above its corners, so the rectangle carries no
-    // boundary inside it); quads inside the band still sub-divide at the
-    // contour walk, because merging them would flatten their coverage-
-    // shaded colors into rectangle steps the eye reads as stair edges.
-    // Boundary subdivision: the fringe COLOR blend (hazeEdgeBlend) is what
-    // actually softens the deck's outlines - it fades the vertex colors to
-    // the sky behind over a coverage band wider than a cell, and the
-    // geometry edge hides inside the fade. That alignment holds while the
-    // colors and the isoline come from the SAME smoothed field (see the
-    // smoothing note above); the widened threshold band keeps the sampled
-    // field smooth, so the single-cell march's linear crossings already
-    // follow smooth isolines and kSub stays at the cheap interior rate.
-    // Saddle cells still resolve through the cell mean below (see the
-    // saddle note in the walk): their bilinear isoline is a hyperbola whose
-    // center-outside case must not fill.
-    constexpr std::uint32_t kSub = 1;
-    constexpr float kBoundaryBand = 0.30f;
-
-    for (std::uint32_t band = 0; band <= spec.bands; ++band)
-    {
-        const double latitude = spec.latitudeLowRadians
-            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
-                * (static_cast<double>(band) / static_cast<double>(spec.bands));
-        const double cosLatitude = std::cos(latitude);
-        const double sinLatitude = std::sin(latitude);
-        for (std::uint32_t segment = 0; segment <= spec.segments; ++segment)
-        {
-            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(spec.segments);
-            const glm::dvec3 shellDirection(std::cos(azimuth) * cosLatitude, sinLatitude, std::sin(azimuth) * cosLatitude);
-            const glm::dvec3 fieldDirection = spec.frame * shellDirection;
-            const float coverage = static_cast<float>(planet::clamp01(field.coverage(
-                planet::Vec3{fieldDirection.x, fieldDirection.y, fieldDirection.z}, spec.lowPassCutoffMeters,
-                spec.coverageSoftnessScale)));
-            coverageGrid.push_back(coverage);
-
-            planet::PlanetVertex vertex{};
-            vertex.position[0] = static_cast<float>(shellDirection.x * spec.shellRadiusMeters);
-            vertex.position[1] = static_cast<float>(shellDirection.y * spec.shellRadiusMeters);
-            vertex.position[2] = static_cast<float>(shellDirection.z * spec.shellRadiusMeters);
-            vertex.normal[0] = static_cast<float>(shellDirection.x);
-            vertex.normal[1] = static_cast<float>(shellDirection.y);
-            vertex.normal[2] = static_cast<float>(shellDirection.z);
-            vertices.push_back(vertex);
-        }
-    }
-
-    // One box pass per smoothing round over the coverage grid (wrap the
-    // segments; clamp the bands): rounds the quad inclusion boundary the same
-    // way an alpha edge would soften a textured deck. Two rounds give the
-    // contour walk a field whose curvature stays above the grid spacing, so
-    // the polygons read as bank outlines instead of angular cutouts.
-    // Smoothing runs BEFORE the color pass below: the contour walk, the
-    // vertex colors and the greedy merge must all read the same smoothed
-    // field (see the sampling note above the grid loop). Coloring from the
-    // pre-smoothing samples aligns the thinning fringe with the raw field's
-    // band limit - which sits at the sampling grid's Nyquist frequency, so
-    // the raw samples beat against the grid - and the rendered deck then
-    // shows grid-pitch stair-stepped color blocks and row-coherent sawtooth
-    // fringes wherever the raw and smoothed crossings disagree.
-    // The kernel reaches round(sec(latitude)) segments per row: on a lat-long
-    // grid the azimuth arc shrinks with cos(latitude), so a fixed 3x3 kernel
-    // covers an ever narrower physical footprint toward a shell's pole and
-    // the smoothed field terraces into latitude-row plateaus. The floor
-    // cutout follows the terraces - banks read as stacked planks with
-    // sawtooth fringe rows - and the read worsens with the bank rows'
-    // elevation, which is why eye-level views whose banks ride high in the
-    // dome frame showed it while low-horizon views did not. Widening the
-    // segment reach per row restores an approximately circular physical
-    // kernel (the cap keeps polar rows affordable; there the azimuth cells
-    // are slivers a few pixels wide, below the terrace read).
-    for (std::uint32_t pass = 0; pass < std::max(1u, spec.smoothingPasses); ++pass)
-    {
-        std::vector<float> smoothed(coverageGrid.size());
-        for (std::uint32_t band = 0; band <= spec.bands; ++band)
-        {
-            const double kernelLatitude = spec.latitudeLowRadians
-                + (spec.latitudeHighRadians - spec.latitudeLowRadians)
-                    * (static_cast<double>(band) / static_cast<double>(spec.bands));
-            const std::uint32_t segmentSpan = std::clamp(
-                static_cast<std::uint32_t>(std::lround(1.0 / std::max(std::cos(kernelLatitude), 0.08))), 1u, 6u);
-            const std::uint32_t bandRows[3] = {band > 0 ? band - 1u : 0u, band,
-                band < spec.bands ? band + 1u : spec.bands};
-            const float kernelSize = static_cast<float>(3u * (2u * segmentSpan + 1u));
-            for (std::uint32_t segment = 0; segment <= spec.segments; ++segment)
-            {
-                float sum = 0.0f;
-                for (std::uint32_t row = 0; row < 3u; ++row)
-                {
-                    const std::size_t rowBase = static_cast<std::size_t>(bandRows[row]) * stride;
-                    for (std::int32_t offset = -static_cast<std::int32_t>(segmentSpan);
-                        offset <= static_cast<std::int32_t>(segmentSpan); ++offset)
-                    {
-                        const std::int32_t wrapped = (static_cast<std::int32_t>(segment) + offset
-                            + static_cast<std::int32_t>(spec.segments)) % static_cast<std::int32_t>(spec.segments);
-                        sum += coverageGrid[rowBase + static_cast<std::size_t>(wrapped)];
-                    }
-                }
-                smoothed[static_cast<std::size_t>(band) * stride + segment] = sum / kernelSize;
-            }
-        }
-        coverageGrid.swap(smoothed);
-    }
-
-    // ---- color pass over the smoothed field ---------------------------------------------
-    // One color per grid vertex, sampled from the SMOOTHED grid the contour
-    // walk follows (see the sampling note above): coverage shades the cloud
-    // color (dense banks at full albedo, thin edges dimmer - a soft read for
-    // the geometry edges at shell resolution), the sun term shades the deck
-    // (the caller's sun direction against the shell-local vertex direction,
-    // or the exact environment bake below - banks facing the sun read
-    // bright, the anti-sun side cools off, and an unlit deck without one
-    // reads as flat paper cutouts), and the haze and horizon-guard blends
-    // thin the fringe into the sky behind it.
-    for (std::uint32_t band = 0; band <= spec.bands; ++band)
-    {
-        const double latitude = spec.latitudeLowRadians
-            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
-                * (static_cast<double>(band) / static_cast<double>(spec.bands));
-        const double sinLatitude = std::sin(latitude);
-        for (std::uint32_t segment = 0; segment <= spec.segments; ++segment)
-        {
-            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(spec.segments);
-            const glm::dvec3 shellDirection(std::cos(azimuth) * std::cos(latitude), sinLatitude,
-                std::sin(azimuth) * std::cos(latitude));
-            const float coverage = coverageGrid[static_cast<std::size_t>(band) * stride + segment];
-            const float shade = 0.88f + 0.12f * coverage;
-            float sunFacing = spec.sunDirection != nullptr
-                ? static_cast<float>(0.55 + 0.45 * planet::clamp01(0.5 + 0.5
-                    * planet::dot(planet::Vec3{shellDirection.x, shellDirection.y, shellDirection.z},
-                        *spec.sunDirection)))
-                : 1.0f;
-            glm::dvec3 color(params.cloudColor[0] * shade * sunFacing,
-                params.cloudColor[1] * shade * sunFacing,
-                params.cloudColor[2] * shade * sunFacing);
-            if (spec.bakedLighting != nullptr && spec.bakedLighting->sunEnabled)
-            {
-                // Exact unlit bake (see BackdropLighting): the hemispheric
-                // ambient against the shell's radial normal plus the sun's
-                // Lambertian term - the matte deck's whole lit response,
-                // evaluated per vertex instead of per pixel.
-                const double upMix = shellDirection.y * 0.5 + 0.5;
-                const glm::dvec3 bakedAmbient
-                    = glm::mix(spec.bakedLighting->ambientGround, spec.bakedLighting->ambientSky, upMix);
-                const double sunDot = std::max(0.0, planet::dot(
-                    planet::Vec3{shellDirection.x, shellDirection.y, shellDirection.z},
-                    planet::Vec3{spec.bakedLighting->sunDirection.x, spec.bakedLighting->sunDirection.y,
-                        spec.bakedLighting->sunDirection.z}));
-                const glm::dvec3 light = bakedAmbient
-                    + glm::dvec3(spec.bakedLighting->sunRadianceOverPi.x, spec.bakedLighting->sunRadianceOverPi.y,
-                        spec.bakedLighting->sunRadianceOverPi.z)
-                        * sunDot;
-                color = glm::dvec3(params.cloudColor[0] * shade * light.x,
-                    params.cloudColor[1] * shade * light.y,
-                    params.cloudColor[2] * shade * light.z);
-            }
-            const planet::Vec3 sky = planet::skyGradientColor(params, sinLatitude);
-            // Guard position of this vertex (0 at the guard latitude, 1 above
-            // the fade band) drives the guard's two thinning effects below.
-            const double guardFadeT = spec.guardFadeRadians > 0.0 && spec.minQuadLatitudeRadians > -3.0
-                ? planet::clamp01((latitude - spec.minQuadLatitudeRadians) / spec.guardFadeRadians)
-                : 1.0;
-            if (spec.hazeEdgeBlend)
-            {
-                // The thinning fringe runs over the configured haze width; a
-                // width past the contour walk's boundary band would keep
-                // blending where the merge operates, so it clamps to the
-                // band. Decks with a guard-floor lift WIDEN the fringe
-                // through the guard band: the lift leaves small dense
-                // fragments there, and without the wider fringe they render
-                // as hard-edged blades instead of haze-veiled wisps.
-                double hazeWidth = std::min(spec.hazeEdgeWidth, static_cast<double>(kBoundaryBand));
-                if (spec.guardFloorLift > 0.0)
-                {
-                    hazeWidth += (1.0 - guardFadeT) * 0.45;
-                }
-                const double blend = planet::smoothstep(spec.coverageFloor,
-                    std::min(1.0, spec.coverageFloor + hazeWidth), static_cast<double>(coverage));
-                color = glm::mix(glm::dvec3(sky.x, sky.y, sky.z), color, blend);
-            }
-            if (spec.guardFadeRadians > 0.0 && spec.minQuadLatitudeRadians > -3.0)
-            {
-                // Thin the deck out toward the horizon guard: the color fades
-                // into the sky behind it over the guard band, matching the
-                // haze blend's thinning read.
-                const double guardBlend = planet::smoothstep(spec.minQuadLatitudeRadians,
-                    spec.minQuadLatitudeRadians + spec.guardFadeRadians, latitude);
-                color = glm::mix(glm::dvec3(sky.x, sky.y, sky.z), color, guardBlend);
-            }
-            planet::PlanetVertex &vertex = vertices[static_cast<std::size_t>(band) * stride + segment];
-            vertex.color[0] = static_cast<float>(color.x);
-            vertex.color[1] = static_cast<float>(color.y);
-            vertex.color[2] = static_cast<float>(color.z);
-        }
-    }
-
-    const auto coverageAt = [&coverageGrid, stride](std::uint32_t band, std::uint32_t segment)
-    {
-        return coverageGrid[static_cast<std::size_t>(band) * stride + segment];
-    };
-
-    // Per-quad threshold noise: a deterministic hash of the quad index mixed
-    // into [0, 1) (see spec.floorJitter).
-    const auto quadFloor = [&spec](std::uint32_t band, std::uint32_t segment)
-    {
-        if (spec.floorJitter <= 0.0)
-        {
-            return spec.coverageFloor;
-        }
-        std::uint64_t mixed = static_cast<std::uint64_t>(segment) * 0x9E3779B97F4A7C15ull
-            ^ static_cast<std::uint64_t>(band) * 0xC2B2AE3D27D4EB4Full
-            ^ spec.floorJitterSeed;
-        mixed ^= mixed >> 33;
-        mixed *= 0xFF51AFD7ED558CCDull;
-        mixed ^= mixed >> 33;
-        const double unit = static_cast<double>(mixed >> 11) / 9007199254740992.0;
-        return spec.coverageFloor * (1.0 - spec.floorJitter) + spec.coverageFloor * 2.0 * spec.floorJitter * unit;
-    };
-
-    // Linear interpolation of the floor crossing along one grid edge (shared
-    // by the coarse boundary walk and the sub-cell walk below).
-    const auto crossingT = [](float coverageA, float coverageB, float floor) -> float
-    {
-        const float denominator = coverageA - coverageB;
-        return std::abs(denominator) < 1.0e-6f
-            ? 0.5f
-            : std::clamp((coverageA - floor) / denominator, 0.0f, 1.0f);
-    };
-
-    // One interpolated floor-crossing vertex between two corner slots (the
-    // saddle pockets and the ring walk below share it): position, normal and
-    // color blend at the crossing parameter, so a crossing pushed per cell
-    // still lands on the same point its neighbor computes for the shared
-    // edge and the emitted shapes weld geometrically.
-    const auto crossingVertex = [&vertices, &crossingT](std::uint32_t slotA, std::uint32_t slotB,
-        float coverageA, float coverageB, float floor) -> std::uint32_t
-    {
-        const planet::PlanetVertex &vertexA = vertices[slotA];
-        const planet::PlanetVertex &vertexB = vertices[slotB];
-        const float t = crossingT(coverageA, coverageB, floor);
-        planet::PlanetVertex vertex{};
-        for (std::uint32_t k = 0; k < 3; ++k)
-        {
-            vertex.position[k] = vertexA.position[k] + (vertexB.position[k] - vertexA.position[k]) * t;
-            vertex.normal[k] = vertexA.normal[k] + (vertexB.normal[k] - vertexA.normal[k]) * t;
-            vertex.color[k] = vertexA.color[k] + (vertexB.color[k] - vertexA.color[k]) * t;
-        }
-        vertices.push_back(vertex);
-        return static_cast<std::uint32_t>(vertices.size() - 1u);
-    };
-
-    // ---- per-quad inclusion floors ----------------------------------------------------
-    // Every quad's inclusion threshold (the base floor plus the ragged-edge
-    // wiggle, neighbor-gated) is computed once in a pre-pass: the greedy
-    // interior merge below and the contour walk share the same values, so a
-    // merged rectangle and the per-quad walk agree about what is inside.
-    // Quad-indexed arrays stride by SPEC.SEGMENTS (quads per row); the
-    // coverage grid itself strides by SEGMENTS+1 (grid corners per row).
-    const std::size_t quadStride = spec.segments;
-    const std::size_t quadSlotCount = static_cast<std::size_t>(spec.bands) * quadStride;
-    std::vector<float> quadFloors(quadSlotCount, static_cast<float>(spec.coverageFloor));
-    for (std::uint32_t band = 0; band < spec.bands; ++band)
-    {
-        // Guard-band floor lift (see CoverageShellSpec::guardFloorLift):
-        // quads inside the fade band raise their threshold with the fade
-        // position, thinning the banks into fragments near the horizon.
-        double guardLift = 0.0;
-        if (spec.guardFloorLift > 0.0 && spec.guardFadeRadians > 0.0 && spec.minQuadLatitudeRadians > -3.0)
-        {
-            const double quadLatitude = spec.latitudeLowRadians
-                + (spec.latitudeHighRadians - spec.latitudeLowRadians)
-                    * (static_cast<double>(band) / static_cast<double>(spec.bands));
-            const double fadeT = planet::clamp01(
-                (quadLatitude - spec.minQuadLatitudeRadians) / spec.guardFadeRadians);
-            guardLift = (1.0 - fadeT) * spec.guardFloorLift;
-        }
-        for (std::uint32_t segment = 0; segment < spec.segments; ++segment)
-        {
-            float floorThisQuad = static_cast<float>(quadFloor(band, segment) + guardLift);
-            if (floorThisQuad < static_cast<float>(spec.coverageFloor))
-            {
-                // Neighbor gate on the threshold wiggle: a quad may clear a
-                // LOWERED floor only while its neighborhood genuinely clears
-                // the base floor. A sub-floor bump that keeps its threshold
-                // lowered with no solid neighbor around renders as a lone
-                // speck floating in clear sky; restoring the base floor there
-                // keeps the ragged bank edges (their neighbors are solid) and
-                // drops the isolated fragments.
-                const float baseFloor = static_cast<float>(spec.coverageFloor);
-                bool neighborGround = false;
-                // Valid quad rows are [0, bands), valid columns [0, segments);
-                // clamp the 3x3 neighborhood to them (the grid's own corner
-                // rows/cols belong to quad corners, not quads).
-                const std::uint32_t bandLow = band > 0u ? band - 1u : 0u;
-                const std::uint32_t bandHigh = band + 2u < spec.bands ? band + 1u : spec.bands - 1u;
-                const std::uint32_t segmentLow = segment > 0u ? segment - 1u : 0u;
-                const std::uint32_t segmentHigh = segment + 2u < spec.segments ? segment + 1u : spec.segments - 1u;
-                for (std::uint32_t neighborBand = bandLow; neighborBand <= bandHigh && !neighborGround; ++neighborBand)
-                {
-                    for (std::uint32_t neighborSegment = segmentLow;
-                        neighborSegment <= segmentHigh && !neighborGround; ++neighborSegment)
-                    {
-                        if (neighborBand == band && neighborSegment == segment)
-                        {
-                            continue;
-                        }
-                        const std::uint32_t nl = neighborBand * stride + neighborSegment;
-                        neighborGround = coverageGrid[nl] >= baseFloor || coverageGrid[nl + 1u] >= baseFloor
-                            || coverageGrid[nl + stride] >= baseFloor || coverageGrid[nl + stride + 1u] >= baseFloor;
-                    }
-                }
-                if (!neighborGround)
-                {
-                    floorThisQuad = baseFloor;
-                }
-            }
-            quadFloors[static_cast<std::size_t>(band) * quadStride + segment] = floorThisQuad;
-        }
-    }
-
-    // ---- greedy interior merge ---------------------------------------------------------
-    // A quad is "solid interior" when all four corners clear its floor by
-    // the whole boundary band above the BASE floor (the interior shade
-    // saturates there, so the rectangle renders like the quads it absorbs).
-    // Banks are mostly interior, so runs of
-    // solid quads merge into maximal rectangles (a greedy row run extended
-    // downward while the whole run stays solid): the rectangle emits the
-    // same six indices its quads would have - as one quad over the
-    // rectangle's grid corners - so a filled bank interior costs two
-    // triangles per rectangle instead of a subdivided quad per quad, while
-    // every boundary quad keeps the contour walk's sub-quad precision.
-    // Bilinear coverage inside a rectangle is a convex combination of its
-    // corners, so a rectangle whose corners are all above the floor carries
-    // no boundary inside it. Rows below the
-    // guard latitude never merge: the contour walk skips them outright.
-    std::vector<std::uint8_t> rowAllowed(spec.bands, 0);
-    for (std::uint32_t band = 0; band < spec.bands; ++band)
-    {
-        const double quadLatitude = spec.latitudeLowRadians
-            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
-                * (static_cast<double>(band) / static_cast<double>(spec.bands));
-        // Rows inside the horizon-guard fade never merge: the fade blends
-        // per-vertex toward the sky behind the deck, and a rectangle
-        // spanning it would render the fade as visible steps.
-        rowAllowed[band] = quadLatitude >= spec.minQuadLatitudeRadians + spec.guardFadeRadians ? 1u : 0u;
-    }
-    std::vector<std::uint8_t> claimedQuad(quadSlotCount, 0);
-    // Plain inclusion of one quad against its own (jittered) floor - the
-    // per-quad walk's insideCount == 4 test.
-    const auto quadFullyInside = [&](std::uint32_t band, std::uint32_t segment) -> bool
-    {
-        const float floor = quadFloors[static_cast<std::size_t>(band) * quadStride + segment];
-        return coverageAt(band, segment) >= floor && coverageAt(band, segment + 1u) >= floor
-            && coverageAt(band + 1u, segment + 1u) >= floor && coverageAt(band + 1u, segment) >= floor;
-    };
-    const auto quadSolidInterior = [&](std::uint32_t band, std::uint32_t segment) -> bool
-    {
-        // A rectangle may only replace quads STRICTLY INSIDE a bank, with
-        // every 8-neighborhood quad also fully solid: the rectangle's edge
-        // is one straight grid-aligned segment, and only the deep interior
-        // has no visible boundary to straighten. The banks' ragged outer
-        // boundary - each quad's own jittered floor wiggling the cutout -
-        // then stays entirely with the per-quad contour walk, where it
-        // belongs. (The raw-grid color bar is gone: the shade and the haze
-        // blend are continuous functions of coverage, and the merge is now
-        // confined to the deep interior where their gradient across a
-        // rectangle is far below one encode step.)
-        if (!quadFullyInside(band, segment))
-        {
-            return false;
-        }
-        const std::uint32_t bandLow = band > 0u ? band - 1u : 0u;
-        const std::uint32_t bandHigh = band + 2u < spec.bands ? band + 1u : spec.bands - 1u;
-        const std::uint32_t segmentLow = segment > 0u ? segment - 1u : 0u;
-        const std::uint32_t segmentHigh = segment + 2u < spec.segments ? segment + 1u : spec.segments - 1u;
-        for (std::uint32_t neighborBand = bandLow; neighborBand <= bandHigh; ++neighborBand)
-        {
-            for (std::uint32_t neighborSegment = segmentLow; neighborSegment <= segmentHigh; ++neighborSegment)
-            {
-                if (neighborBand == band && neighborSegment == segment)
-                {
-                    continue;
-                }
-                if (!quadFullyInside(neighborBand, neighborSegment))
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-    for (std::uint32_t band = 0; spec.mergeInterior && band < spec.bands; ++band)
-    {
-        if (!rowAllowed[band])
-        {
-            continue; // below the guard latitude (the horizon rim, for sky decks)
-        }
-        for (std::uint32_t segment = 0; segment < spec.segments; ++segment)
-        {
-            if (claimedQuad[static_cast<std::size_t>(band) * quadStride + segment]
-                || !quadSolidInterior(band, segment))
-            {
-                continue;
-            }
-            // Extend the row run rightward, then grow the rectangle down
-            // while every quad of the run in the next row is solid too.
-            std::uint32_t runEnd = segment + 1u;
-            while (runEnd < spec.segments && quadSolidInterior(band, runEnd))
-            {
-                ++runEnd;
-            }
-            std::uint32_t runBottom = band + 1u;
-            const auto runSolid = [&quadSolidInterior, &rowAllowed, segment, runEnd](std::uint32_t row)
-            {
-                if (rowAllowed[row] == 0u)
-                {
-                    return false;
-                }
-                for (std::uint32_t column = segment; column < runEnd; ++column)
-                {
-                    if (!quadSolidInterior(row, column))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            };
-            while (runBottom < spec.bands && runSolid(runBottom))
-            {
-                ++runBottom;
-            }
-            for (std::uint32_t row = band; row < runBottom; ++row)
-            {
-                for (std::uint32_t column = segment; column < runEnd; ++column)
-                {
-                    claimedQuad[static_cast<std::size_t>(row) * quadStride + column] = 1u;
-                }
-            }
-            const std::uint32_t rectTopLeft = band * stride + segment;
-            const std::uint32_t rectTopRight = band * stride + runEnd;
-            const std::uint32_t rectBottomRight = runBottom * stride + runEnd;
-            const std::uint32_t rectBottomLeft = runBottom * stride + segment;
-            indices.insert(indices.end(), {rectTopLeft, rectTopRight, rectBottomRight, rectTopLeft, rectBottomRight,
-                rectBottomLeft});
-            segment = runEnd - 1u;
-        }
-    }
-
-    // ---- contour walk over the remaining quads ------------------------------------------
-    for (std::uint32_t band = 0; band < spec.bands; ++band)
-    {
-        const double quadLatitude = spec.latitudeLowRadians
-            + (spec.latitudeHighRadians - spec.latitudeLowRadians)
-                * (static_cast<double>(band) / static_cast<double>(spec.bands));
-        if (quadLatitude < spec.minQuadLatitudeRadians)
-        {
-            continue; // below the guard latitude (the horizon rim, for sky decks)
-        }
-        for (std::uint32_t segment = 0; segment < spec.segments; ++segment)
-        {
-            if (claimedQuad[static_cast<std::size_t>(band) * quadStride + segment])
-            {
-                continue; // already part of a merged interior rectangle
-            }
-            const std::uint32_t tl = band * stride + segment;
-            const std::uint32_t tr = tl + 1u;
-            const std::uint32_t br = tl + stride + 1u;
-            const std::uint32_t bl = tl + stride;
-            const float cornerCoverage[4] = {coverageAt(band, segment), coverageAt(band, segment + 1u),
-                coverageAt(band + 1u, segment + 1u), coverageAt(band + 1u, segment)};
-            const float floorThisQuad = quadFloors[static_cast<std::size_t>(band) * quadStride + segment];
-            bool inside[4];
-            std::uint32_t insideCount = 0;
-            for (std::uint32_t corner = 0; corner < 4; ++corner)
-            {
-                inside[corner] = cornerCoverage[corner] >= floorThisQuad;
-                insideCount += inside[corner] ? 1u : 0u;
-            }
-            if (insideCount == 0)
-            {
-                continue; // clear sky: no geometry, the surface shows through
-            }
-            if (insideCount == 4)
-            {
-                // Interior quads need one more test before the cheap full
-                // quad: a quad whose corners all clear the floor can still
-                // DIP below it inside (the bilinear saddle between its
-                // corners), and an outer boundary that snaps to the quad
-                // grid reads as stair steps against its cut-out neighbors.
-                // Quads fully above the floor + boundary band take the fast
-                // path; the rest are marched at kSub x kSub sub-resolution,
-                // where the isoline curves at sub-quad precision.
-                bool nearBoundary = false;
-                for (std::uint32_t corner = 0; corner < 4 && !nearBoundary; ++corner)
-                {
-                    nearBoundary = cornerCoverage[corner] < floorThisQuad + kBoundaryBand;
-                }
-                if (!nearBoundary)
-                {
-                    indices.insert(indices.end(), {tl, tr, br, tl, br, bl});
-                    continue;
-                }
-                // fall through to the sub-cell march below
-            }
-            else
-            {
-                // PARTIAL quad (the bank's outer boundary). The coarse
-                // boundary walk interpolated its crossings along the grid
-                // edges but still snapped the polygon to whole grid
-                // vertices wherever a corner sat inside, so every bank
-                // outline carried a grid-pitch staircase (one deck cell is
-                // about ten pixels at eye level). The sub-cell march below
-                // resolves partial coverage natively - the bilinear corners
-                // feed (kSub+1)^2 sub-samples and each sub-cell walks its
-                // own crossings - so boundary quads take it too, and the
-                // isoline curves at sub-cell precision on every boundary.
-                // Deep-interior saddles (all four corners well above the
-                // floor, only the bilinear middle dipping) cannot reach
-                // here: a partial quad has at least one corner below the
-                // floor by construction.
-            }
-
-            // Boundary or fully-inside near-boundary quad: subdivide into kSub x kSub
-            // cells (bilinear coverage + corner colors over the quad) and
-            // march the cells. Sub-cell coverage values are shared arithmetic
-            // between neighboring sub-cells (bilinear from the same corners),
-            // so edges weld; the sub-resolution pushes the polygonal boundary
-            // below one pixel of quantization at capture scales.
-            float subCoverage[kSub + 1][kSub + 1];
-            {
-                for (std::uint32_t row = 0; row <= kSub; ++row)
-                {
-                    const float v = static_cast<float>(row) / static_cast<float>(kSub);
-                    const float top = cornerCoverage[0] + (cornerCoverage[1] - cornerCoverage[0]) * v;
-                    const float bottom = cornerCoverage[3] + (cornerCoverage[2] - cornerCoverage[3]) * v;
-                    for (std::uint32_t column = 0; column <= kSub; ++column)
-                    {
-                        const float u = static_cast<float>(column) / static_cast<float>(kSub);
-                        subCoverage[row][column] = top + (bottom - top) * u;
-                    }
-                }
-            }
-            // Sub-cell vertex slots: -2 = not needed yet, >= 0 = vertex slot
-            // in the vertex buffer. The sub-grid's corner vertices reuse the
-            // coarse quad's grid vertices when they coincide, and create
-            // fresh (bilinear) vertices for the interior lattice points -
-            // their colors come from the same bilinear blend as the coverage,
-            // so shading stays continuous with the surrounding quads.
-            const auto subVertex = [&vertices, &tl, &tr, &br, &bl](
-                std::uint32_t row, std::uint32_t column) -> std::int32_t
-            {
-                if (row == 0 && column == 0) return static_cast<std::int32_t>(tl);
-                if (row == 0 && column == kSub) return static_cast<std::int32_t>(tr);
-                if (row == kSub && column == kSub) return static_cast<std::int32_t>(br);
-                if (row == kSub && column == 0) return static_cast<std::int32_t>(bl);
-                const float u = static_cast<float>(column) / static_cast<float>(kSub);
-                const float v = static_cast<float>(row) / static_cast<float>(kSub);
-                const planet::PlanetVertex &topLeft = vertices[tl];
-                const planet::PlanetVertex &topRight = vertices[tr];
-                const planet::PlanetVertex &bottomRight = vertices[br];
-                const planet::PlanetVertex &bottomLeft = vertices[bl];
-                planet::PlanetVertex vertex{};
-                for (std::uint32_t k = 0; k < 3; ++k)
-                {
-                    const float top = topLeft.position[k] + (topRight.position[k] - topLeft.position[k]) * u;
-                    const float bottom = bottomLeft.position[k] + (bottomRight.position[k] - bottomLeft.position[k]) * u;
-                    vertex.position[k] = top + (bottom - top) * v;
-                    const float normalTop = topLeft.normal[k] + (topRight.normal[k] - topLeft.normal[k]) * u;
-                    const float normalBottom = bottomLeft.normal[k] + (bottomRight.normal[k] - bottomLeft.normal[k]) * u;
-                    vertex.normal[k] = normalTop + (normalBottom - normalTop) * v;
-                    const float colorTop = topLeft.color[k] + (topRight.color[k] - topLeft.color[k]) * u;
-                    const float colorBottom = bottomLeft.color[k] + (bottomRight.color[k] - bottomLeft.color[k]) * u;
-                    vertex.color[k] = colorTop + (colorBottom - colorTop) * v;
-                }
-                vertices.push_back(vertex);
-                return static_cast<std::int32_t>(vertices.size() - 1u);
-            };
-            std::int32_t subSlots[kSub + 1][kSub + 1];
-            for (std::uint32_t row = 0; row <= kSub; ++row)
-            {
-                for (std::uint32_t column = 0; column <= kSub; ++column)
-                {
-                    subSlots[row][column] = -2;
-                }
-            }
-            for (std::uint32_t row = 0; row < kSub; ++row)
-            {
-                for (std::uint32_t column = 0; column < kSub; ++column)
-                {
-                    const float cellFloor = floorThisQuad;
-                    const float cellCorner[4] = {subCoverage[row][column], subCoverage[row][column + 1u],
-                        subCoverage[row + 1u][column + 1u], subCoverage[row + 1u][column]};
-                    bool cellInside[4];
-                    std::uint32_t cellInsideCount = 0;
-                    for (std::uint32_t corner = 0; corner < 4; ++corner)
-                    {
-                        cellInside[corner] = cellCorner[corner] >= cellFloor;
-                        cellInsideCount += cellInside[corner] ? 1u : 0u;
-                    }
-                    if (cellInsideCount == 0)
-                    {
-                        continue;
-                    }
-                    const std::uint32_t cornerRow[4] = {row, row, row + 1u, row + 1u};
-                    const std::uint32_t cornerColumn[4] = {column, column + 1u, column + 1u, column};
-                    std::int32_t cellSlot[4];
-                    for (std::uint32_t corner = 0; corner < 4; ++corner)
-                    {
-                        if (subSlots[cornerRow[corner]][cornerColumn[corner]] == -2)
-                        {
-                            subSlots[cornerRow[corner]][cornerColumn[corner]]
-                                = subVertex(cornerRow[corner], cornerColumn[corner]);
-                        }
-                        cellSlot[corner] = subSlots[cornerRow[corner]][cornerColumn[corner]];
-                    }
-                    if (cellInsideCount == 4)
-                    {
-                        indices.insert(indices.end(), {static_cast<std::uint32_t>(cellSlot[0]),
-                            static_cast<std::uint32_t>(cellSlot[1]), static_cast<std::uint32_t>(cellSlot[2]),
-                            static_cast<std::uint32_t>(cellSlot[0]), static_cast<std::uint32_t>(cellSlot[2]),
-                            static_cast<std::uint32_t>(cellSlot[3])});
-                        continue;
-                    }
-                    // Saddle resolution (see the builder's header comment):
-                    // with two OPPOSITE corners inside, the ring walk below
-                    // emits one hexagon fanned from the first corner. That
-                    // hexagon is the correct region only when the bilinear
-                    // cell center sits INSIDE the floor (the inside band
-                    // connects through the middle and the hexagon stays
-                    // convex). When the center sits OUTSIDE, the two inside
-                    // corners own disconnected triangle pockets, and the
-                    // hexagon additionally fills the clear-sky center: the
-                    // fan paints cloud-colored polygons past the isoline
-                    // into the sky while clipping the pockets' outer halves.
-                    // Whether a quad saddles center-inside or center-outside
-                    // follows the bank edges' phase against the sample grid,
-                    // so the unresolved case surfaced as rows of sawtooth
-                    // triangles along stretched, row-aligned bank boundaries.
-                    // Resolve by the cell mean: center inside keeps the
-                    // hexagon walk, center outside emits each inside
-                    // corner's own pocket triangle.
-                    const bool saddle = cellInsideCount == 2 && cellInside[0] == cellInside[2]
-                        && cellInside[1] == cellInside[3];
-                    const float cellCenterCoverage
-                        = 0.25f * (cellCorner[0] + cellCorner[1] + cellCorner[2] + cellCorner[3]);
-                    if (saddle && cellCenterCoverage < cellFloor)
-                    {
-                        for (std::uint32_t corner = 0; corner < 4; ++corner)
-                        {
-                            if (!cellInside[corner])
-                            {
-                                continue;
-                            }
-                            const std::uint32_t previous = (corner + 3u) % 4u;
-                            const std::uint32_t next = (corner + 1u) % 4u;
-                            std::uint32_t pocket[3];
-                            pocket[0] = static_cast<std::uint32_t>(cellSlot[corner]);
-                            pocket[1] = crossingVertex(cellSlot[previous], cellSlot[corner],
-                                cellCorner[previous], cellCorner[corner], cellFloor);
-                            pocket[2] = crossingVertex(cellSlot[corner], cellSlot[next],
-                                cellCorner[corner], cellCorner[next], cellFloor);
-                            indices.insert(indices.end(), {pocket[0], pocket[1], pocket[2]});
-                        }
-                        continue;
-                    }
-                    // Boundary walk over the sub-cell; interpolated crossings
-                    // reuse the same arithmetic so adjacent sub-cells weld.
-                    std::uint32_t polygon[8];
-                    std::uint32_t polygonCount = 0;
-                    for (std::uint32_t corner = 0; corner < 4; ++corner)
-                    {
-                        const std::uint32_t next = (corner + 1u) % 4u;
-                        const bool straddles = cellInside[corner] != cellInside[next];
-                        if (cellInside[corner])
-                        {
-                            polygon[polygonCount++] = static_cast<std::uint32_t>(cellSlot[corner]);
-                        }
-                        if (straddles)
-                        {
-                            polygon[polygonCount++] = crossingVertex(cellSlot[corner], cellSlot[next],
-                                cellCorner[corner], cellCorner[next], cellFloor);
-                        }
-                    }
-                    for (std::uint32_t fan = 1; fan + 1 < polygonCount; ++fan)
-                    {
-                        indices.insert(indices.end(), {polygon[0], polygon[fan], polygon[fan + 1]});
-                    }
-                }
-            }
-        }
-    }
-    return !indices.empty();
-}
-
 // Builds a radial disc mesh on the unit ball around +Z: a triangle fan of
-// `bands` rings whose vertex colors fall from the bright core to zero at the
-// rim. The material's per-frame baseColor tints the whole disc (the sun
-// tint); the vertex colors carry the core-to-halo falloff.
+// `bands` rings whose UVs map the unit disc onto a radial halo texture (the
+// alpha channel carries the core-to-rim falloff; see ensureSunDisc) and whose
+// vertex colors stay neutral - the material's per-frame baseColor tints the
+// whole disc (the sun tint), the texture's alpha does the fading. Vertex
+// colors fall to zero NO MORE: an opaque draw with a dark rim painted a
+// black ring over the sky dome behind it.
 void buildSunDiscMesh(std::vector<planet::PlanetVertex> &vertices, std::vector<std::uint32_t> &indices,
     std::uint32_t segments, std::uint32_t bands)
 {
     vertices.reserve(1u + segments * bands);
     indices.reserve(segments * bands * 6u);
-    // Ring radii and brightness: the core (inner ~55%) stays at full
-    // brightness, the halo falls smoothly to zero at the rim.
-    const auto ringBrightness = [bands](std::uint32_t band)
-    {
-        const double t = static_cast<double>(band) / static_cast<double>(bands);
-        return std::pow(1.0 - t, 1.7);
-    };
-    auto pushVertex = [&vertices](const glm::dvec2 &direction, double radius, double brightness)
+    auto pushVertex = [&vertices](const glm::dvec2 &direction, double radius)
     {
         planet::PlanetVertex vertex{};
         vertex.position[0] = static_cast<float>(direction.x * radius);
@@ -887,25 +76,28 @@ void buildSunDiscMesh(std::vector<planet::PlanetVertex> &vertices, std::vector<s
         vertex.normal[0]   = 0.0f;
         vertex.normal[1]   = 0.0f;
         vertex.normal[2]   = 1.0f;
-        vertex.color[0]    = static_cast<float>(brightness);
-        vertex.color[1]    = static_cast<float>(brightness);
-        vertex.color[2]    = static_cast<float>(brightness);
+        vertex.color[0]    = 1.0f;
+        vertex.color[1]    = 1.0f;
+        vertex.color[2]    = 1.0f;
+        // Unit disc -> texture space (the texture samples a radial falloff
+        // centered at its middle).
+        vertex.uv[0]       = static_cast<float>(direction.x * 0.5 + 0.5);
+        vertex.uv[1]       = static_cast<float>(direction.y * 0.5 + 0.5);
         vertices.push_back(vertex);
         return static_cast<std::uint32_t>(vertices.size() - 1u);
     };
-    const std::uint32_t center = pushVertex(glm::dvec2{0.0, 0.0}, 0.0, 1.0);
+    const std::uint32_t center = pushVertex(glm::dvec2{0.0, 0.0}, 0.0);
     std::uint32_t previousRingStart = center;
     bool previousIsCenter = true;
     for (std::uint32_t band = 1; band <= bands; ++band)
     {
         const double radius = static_cast<double>(band) / static_cast<double>(bands);
-        const double brightness = ringBrightness(band);
         std::uint32_t ringStart = 0;
         for (std::uint32_t segment = 0; segment < segments; ++segment)
         {
             const double azimuth = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(segments);
             const std::uint32_t current
-                = pushVertex(glm::dvec2{std::cos(azimuth), std::sin(azimuth)}, radius, brightness);
+                = pushVertex(glm::dvec2{std::cos(azimuth), std::sin(azimuth)}, radius);
             if (segment == 0)
             {
                 ringStart = current;
@@ -1476,7 +668,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         return glm::mat4(shiftToEye * glm::dmat4(absolute));
     };
     frameBackdropMatrices_.clear();
-    frameBackdropMatrices_.reserve(8);
+    frameBackdropMatrices_.reserve(10);
     // The scatter matrices back the OPAQUE scatter pass and the transparent
     // scatter tail below; clearing per frame keeps the store bounded and
     // every push inside the reserve, so the draw commands' modelMatrix
@@ -1494,6 +686,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     frameBackdropMatrices_.push_back(composeShifted(starDomeTransform_));
     frameBackdropMatrices_.push_back(composeShifted(skyDomeTransform_));
     frameBackdropMatrices_.push_back(composeShifted(auroraTransform_));
+    frameBackdropMatrices_.push_back(composeShifted(cirrusLayerTransform_));
 
     if (starDomeActive_ && starDome_ != renderer::invalidMesh && !starDomeMaterials_.empty())
     {
@@ -1510,6 +703,21 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         command.mesh = atmosphereShell_;
         command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[0]);
         command.material = &atmosphereShellMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+
+    // The sky dome (in-air views): the gradient's own geometry, drawn ahead
+    // of the scene with depth writes off - the terrain the eye stands on
+    // was pushed first and wins the sky-facing pixels by depth test, the
+    // dome fills every sky pixel the terrain leaves, and the later sun disc
+    // and cloud deck composite over it. Without this submission the sky's
+    // only paint was the flat clear color plus the cloud deck's fringe.
+    if (skyDomeActive_ && skyDome_ != renderer::invalidMesh && !skyDomeMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = skyDome_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[6]);
+        command.material = &skyDomeMaterials_.front();
         drawCommands_.push_back(command);
     }
 
@@ -1641,8 +849,40 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             // empty variant set (every scan failed to load) draws the group
             // untextured through the neutral stand-in, like a missing gate.
             static const TerrainTextureVariant untextured{};
+            // Snow gate: the chunk's center climate classifies once, lazily
+            // (the sample is cheap but per-frame would be waste). Snow-biome
+            // chunks keep the detail multiply (the composed scan's blades
+            // read as wind-textured snow at a distance) but drop the normal
+            // scale hard - the blade-relief sheet magnified across a
+            // snowfield photographs as combed parallel lines no real
+            // snowpack shows, while a faint diffuse mottle is exactly the
+            // wind-ripple texture fresh snow photographs with.
+            if (!handles.groundSnowyBuilt)
+            {
+                handles.groundSnowyBuilt = true;
+                if (planet_->sampleClimate != nullptr)
+                {
+                    const glm::dvec3 chunkLocalCenter
+                        = glm::dvec3(handles.placementCenter.x - params_.centerMeters[0],
+                            handles.placementCenter.y - params_.centerMeters[1],
+                            handles.placementCenter.z - params_.centerMeters[2]);
+                    const double centerRadius = glm::length(chunkLocalCenter);
+                    if (centerRadius > 1.0e-6)
+                    {
+                        const double centerDirection[3] = {chunkLocalCenter.x / centerRadius,
+                            chunkLocalCenter.y / centerRadius, chunkLocalCenter.z / centerRadius};
+                        planet::ClimateSample centerSample;
+                        if (planet_->sampleClimate(planet_->self, planetHandle_, centerDirection,
+                                centerRadius, &centerSample))
+                        {
+                            handles.groundSnowy = centerSample.biome == planet::Biome::Snow;
+                        }
+                    }
+                }
+            }
             const bool groundTextured
-                = !groundTextureVariants_.empty() && draw.distanceSquared <= groundTextureMaxDistanceMetersSquared_;
+                = !groundTextureVariants_.empty()
+                && draw.distanceSquared <= groundTextureMaxDistanceMetersSquared_;
             const std::uint64_t chunkSeed = engine::planet::hashCombine64(
                 draw.entry->first, static_cast<std::uint64_t>(groundTextureVariants_.size()));
             const TerrainTextureVariant &groundVariant = groundTextured
@@ -1665,6 +905,27 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             // beyond the gate the minified sample could no longer move the
             // pixel and the sampler would only pay for it.
             material.baseColorTexture = groundTextured ? groundVariant.detail : renderer::invalidTexture;
+            // Ground relief: variants that carry a normal map (the composed
+            // grass pair) shade through the same per-sample tangent frame the
+            // rock group uses, so blade-scale relief lights with the sun
+            // instead of the vertex gradient alone. The scale stays under
+            // the rock group's: soil and sward read as soft but present
+            // relief - strong enough that the near-camera ground breaks its
+            // smooth vertex-gradient shading (the clay look flat light
+            // gives untextured ground), while the per-triangle tangent
+            // frame the backend rebuilds from the tiled UVs stays continuous
+            // where the projection switches axes.
+            material.normalTexture = groundTextured ? groundVariant.normal : renderer::invalidTexture;
+            material.normalScale = handles.groundSnowy ? 0.16f : 0.55f;
+            // Procedural mottle (MeshMaterial::noiseScaleMeters): the world-
+            // anchored value noise the renderer shades per pixel. The base
+            // wavelength rides between the tussock scale and the soil-patch
+            // scale a real sward photographs - the texture pair's gate ends
+            // near the camera, the vertex colors carry the tens-of-metres
+            // mottle, and this fills the band between with variation no
+            // lattice repeats and no gate cuts off.
+            material.noiseScaleMeters = 1.0f;
+            material.noiseStrength = handles.groundSnowy ? 0.06f : 0.14f;
             // The planet mesher's terrain winding is fixed (see the
             // meshing module): declaring it enables exact per-triangle
             // back-face culling, so a rugged chunk's hidden far side
@@ -1705,11 +966,19 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             // budget, see main.cpp).
             material.baseColorTexture = rockTextured ? rockVariant.detail : renderer::invalidTexture;
             material.normalTexture = rockTextured ? rockVariant.normal : renderer::invalidTexture;
-            // Subtle tangent-space relief: the headless backend rebuilds the
-            // tangent frame per triangle from the tiled UVs, so the value
-            // stays small to keep the frame continuous where the projection
-            // switches axes.
-            material.normalScale = 0.35f;
+            // Tangent-space relief: the headless backend rebuilds the tangent
+            // frame per triangle from the tiled UVs, so the value stays
+            // moderate to keep the frame continuous where the projection
+            // switches axes - but strong enough that cliff faces read as
+            // fractured rock under the sun instead of painted tone (the
+            // cliff-side and rock-face scans carry real crack geometry in
+            // their normal maps, and a timid scale erases it).
+            material.normalScale = 0.75f;
+            // The rock group's mottle rides a coarser scale: strata-scale
+            // tonal drift (the same field the ground group samples, so a
+            // slope's grass-to-rock handover stays continuous).
+            material.noiseScaleMeters = 2.2f;
+            material.noiseStrength = 0.14f;
             material.frontFaceWinding = planet::terrainFrontFaceWinding;
             rockMaterials_.push_back(material);
 
@@ -1729,6 +998,24 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             material.emissiveColor[1] = addHaze[1];
             material.emissiveColor[2] = addHaze[2];
             material.roughnessFactor = waterRoughness;
+            // Water is a DIELECTRIC mirror: the sun glint and the grazing
+            // sky reflection carry most of its radiance from orbit (the
+            // classic bright ocean glint wedge), while the diffuse share
+            // stays the deep body color. Roughness follows the sea state
+            // (see waterRoughnessOrbital above): calm seas concentrate the
+            // glint, rough seas spread it.
+            material.metallicFactor = 0.45f;
+            // Close-range sea relief: inside the near-water gate the draw
+            // samples the wave-normal sheet (sun glints break across the
+            // wave facets) and the albedo variation sheet (the depth tint
+            // ripples instead of reading as a flat fill). Beyond the gate
+            // both drop away - a minified normal sheet aliases into
+            // open-ocean sparkle, and the orbital gloss owns the glint.
+            const bool waterTextured = waterNormalTexture_ != renderer::invalidTexture
+                && draw.distanceSquared <= waterTextureMaxDistanceMetersSquared_;
+            material.baseColorTexture = waterTextured ? waterAlbedoTexture_ : renderer::invalidTexture;
+            material.normalTexture = waterTextured ? waterNormalTexture_ : renderer::invalidTexture;
+            material.normalScale = 0.55f;
             // The sea sheet is a thin surface a swimmer sees from below as
             // well as above: double-sided keeps the sheet visible
             // underwater (the shading normal flips toward the viewer's
@@ -1772,26 +1059,6 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         }
     }
 
-    // Backdrop shells behind and above the scene: the cloud geometry first
-    // (depth-tested against the terrain drawn above), then the unlit space
-    // shells and the sky dome. See the draw-order comment at the top.
-    if (skyCloudActive_ && skyCloudVisible_ && skyCloudLayer_ != renderer::invalidMesh && !skyCloudMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = skyCloudLayer_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[1]);
-        command.material = &skyCloudMaterials_.front();
-        drawCommands_.push_back(command);
-    }
-    if (cloudLayerActive_ && cloudLayerVisible_ && cloudLayer_ != renderer::invalidMesh
-        && !cloudLayerMaterials_.empty())
-    {
-        renderer::RenderDrawCommand command{};
-        command.mesh = cloudLayer_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[2]);
-        command.material = &cloudLayerMaterials_.front();
-        drawCommands_.push_back(command);
-    }
     if (sunDiscActive_ && sunDisc_ != renderer::invalidMesh && !sunDiscMaterials_.empty())
     {
         renderer::RenderDrawCommand command{};
@@ -1814,25 +1081,52 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         command.material = &moonMaterials_.front();
         drawCommands_.push_back(command);
     }
-    if (skyDomeActive_ && skyDome_ != renderer::invalidMesh && !skyDomeMaterials_.empty())
+    // Backdrop shells behind and above the scene: the cloud geometry first
+    // (depth-tested against the terrain drawn above), then the unlit space
+    // shells and the sky dome. See the draw-order comment at the top.
+    if (skyCloudActive_ && skyCloudVisible_ && skyCloudLayer_ != renderer::invalidMesh && !skyCloudMaterials_.empty())
     {
         renderer::RenderDrawCommand command{};
-        command.mesh = skyDome_;
-        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[6]);
-        command.material = &skyDomeMaterials_.front();
+        command.mesh = skyCloudLayer_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[1]);
+        command.material = &skyCloudMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    if (cloudLayerActive_ && cloudLayerVisible_ && cloudLayer_ != renderer::invalidMesh
+        && !cloudLayerMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = cloudLayer_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[2]);
+        command.material = &cloudLayerMaterials_.front();
         drawCommands_.push_back(command);
     }
     // The aurora is translucent (opacity < 1): the backend routes it into
     // the transparent pass regardless of its list position, alpha-blending
-    // it over the finished opaque scene. Emitted last so the command list
-    // reads far-to-near inside its own class (the rings sit behind
-    // everything but the star dome).
+    // it over the finished opaque scene. Emitted ahead of the cirrus veil
+    // and the transparent scatter tail so the command list reads far-to-near
+    // inside its own class (the rings sit behind everything but the star
+    // dome; the cirrus deck and the near mist banks follow, each nearer).
     if (auroraActive_ && aurora_ != renderer::invalidMesh && !auroraMaterials_.empty())
     {
         renderer::RenderDrawCommand command{};
         command.mesh = aurora_;
         command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[7]);
         command.material = &auroraMaterials_.front();
+        drawCommands_.push_back(command);
+    }
+    // The cirrus veil rides the transparent class AFTER the aurora (its
+    // deck sits below the curtain's altitude, so from an orbital eye it is
+    // the nearer surface of the two) and stays ahead of the transparent
+    // scatter tail - the aurora stays the farthest member of the class,
+    // the near mist banks the nearest, and every member composites over the
+    // farther ones the way alpha blending assumes.
+    if (cirrusLayerActive_ && cirrusLayer_ != renderer::invalidMesh && !cirrusLayerMaterials_.empty())
+    {
+        renderer::RenderDrawCommand command{};
+        command.mesh = cirrusLayer_;
+        command.modelMatrix = glm::value_ptr(frameBackdropMatrices_[8]);
+        command.material = &cirrusLayerMaterials_.front();
         drawCommands_.push_back(command);
     }
 
@@ -1884,6 +1178,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             drawCommands_.push_back(command);
         }
     }
+
 }
 
 void PlanetChunkRenderer::destroySkyDome()
@@ -1910,7 +1205,806 @@ void PlanetChunkRenderer::destroyCloudLayer()
     cloudLayerActive_ = false;
 }
 
-void PlanetChunkRenderer::ensureCloudLayer()
+namespace
+{
+// Equirectangular bake mapping (the space cloud bake's own convention):
+// u wraps the azimuth around the spin axis (+Y), v runs 0 at the north
+// pole to 1 at the south pole, matching TextureOrigin::TopLeft rows (row
+// 0 = north). The bake texels and the shell's UVs share the convention,
+// so a texel is baked for exactly the direction its UV maps.
+planet::Vec3 equirectDirection(std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height)
+{
+    const double azimuth = glm::two_pi<double>() * (static_cast<double>(x) + 0.5) / static_cast<double>(width);
+    const double latitude = glm::pi<double>() * 0.5
+        - glm::pi<double>() * (static_cast<double>(y) + 0.5) / static_cast<double>(height);
+    const double cosLatitude = std::cos(latitude);
+    return planet::Vec3{std::cos(azimuth) * cosLatitude, std::sin(latitude),
+        std::sin(azimuth) * cosLatitude};
+}
+
+// Low-frequency domain warp shared by both cloud bakes (the space shell and
+// the ground deck): bending the sample position before the coverage lookup
+// breaks the wind shear's aligned streaking the way real turbulence does -
+// the cyclone arms and wisp fringes keep their shapes but lose the combed,
+// single-direction alignment a straight lookup shows. Two octaves of bend: a
+// broad one at a fraction of the field's own feature width (the bank-scale
+// meander) and a fine one an order of magnitude smaller (the turbulence that
+// breaks the wind shear's aligned, combed streaking). Pure in (params,
+// direction), so both bakes and every rebuild describe the same warped field.
+planet::Vec3 warpCloudSampleDirection(const planet::PlanetGenerationParams &params, const planet::Vec3 &direction)
+{
+    const std::int64_t warpSeed = static_cast<std::int64_t>(params.seed) + 0x2B7E151628AED2A6LL;
+    double bendAccumX = 0.0;
+    double bendAccumY = 0.0;
+    planet::Vec3 tangentA{};
+    planet::Vec3 tangentB{};
+    for (int octave = 0; octave < 2; ++octave)
+    {
+        const double featureMeters = octave == 0
+            ? 0.6 * std::max(1.0, params.cloudWavelengthMeters)
+            : 0.07 * std::max(1.0, params.cloudWavelengthMeters);
+        const double amplitudeMeters = octave == 0
+            ? 0.30 * std::max(1.0, params.cloudWavelengthMeters)
+            : 0.045 * std::max(1.0, params.cloudWavelengthMeters);
+        const double frequency = 1.0 / featureMeters;
+        const std::int64_t octaveSeed = warpSeed + octave;
+        const double bx = planet::noise::simplex3ImproveXY(octaveSeed,
+            direction.x * frequency, direction.y * frequency, direction.z * frequency);
+        const double by = planet::noise::simplex3ImproveXY(octaveSeed + 1,
+            direction.x * frequency, direction.y * frequency, direction.z * frequency);
+        if (octave == 0)
+        {
+            // Two tangents at the sample point carry the bend (any orthonormal
+            // pair spans the tangent plane; smoothness matters, not orientation).
+            tangentA = std::abs(direction.y) < 0.9
+                ? planet::Vec3{-direction.y, direction.x, 0.0}
+                : planet::Vec3{1.0, 0.0, 0.0};
+            tangentA = planet::normalized(tangentA);
+            tangentB = planet::normalized(planet::cross(direction, tangentA));
+        }
+        bendAccumX += bx * amplitudeMeters;
+        bendAccumY += by * amplitudeMeters;
+    }
+    const double totalBend = (0.30 + 0.045) * std::max(1.0, params.cloudWavelengthMeters);
+    const double bendRadians = totalBend / std::max(1.0, params.radiusMeters);
+    return planet::normalized(direction + tangentA * (bendAccumX / totalBend * bendRadians)
+        + tangentB * (bendAccumY / totalBend * bendRadians));
+}
+
+// Bilinear alpha lookup in the renderer's own cloud bake (see
+// ensureCloudTexture): the mesh builders gate their quads against exactly the
+// pixels the shell will draw, so the geometry cutout and the texture's own
+// thinning fringes agree. u wraps (the seam column repeats column 0).
+double cloudBakeAlpha(const std::vector<std::uint8_t> &pixels, std::uint32_t width, std::uint32_t height,
+    double u, double v)
+{
+    u = u - std::floor(u);
+    v = std::clamp(v, 0.0, 1.0);
+    const double x = u * static_cast<double>(width) - 0.5;
+    const double y = v * static_cast<double>(height) - 0.5;
+    const std::int64_t x0 = static_cast<std::int64_t>(std::floor(x)) - (x < 0.0 ? 1 : 0);
+    const std::int64_t y0 = static_cast<std::int64_t>(std::floor(y)) - (y < 0.0 ? 1 : 0);
+    const double fx = x - static_cast<double>(x0);
+    const double fy = y - static_cast<double>(y0);
+    const auto texel = [&](std::int64_t column, std::int64_t row)
+    {
+        column = ((column % static_cast<std::int64_t>(width)) + width) % static_cast<std::int64_t>(width);
+        row = std::clamp(row, static_cast<std::int64_t>(0), static_cast<std::int64_t>(height) - 1);
+        const std::size_t index
+            = (static_cast<std::size_t>(row) * width + static_cast<std::size_t>(column)) * 4u + 3u;
+        return static_cast<double>(pixels[index]) / 255.0;
+    };
+    const double a = texel(x0, y0);
+    const double b = texel(x0 + 1, y0);
+    const double c = texel(x0, y0 + 1);
+    const double d = texel(x0 + 1, y0 + 1);
+    return (a * (1.0 - fx) + b * fx) * (1.0 - fy) + (c * (1.0 - fx) + d * fx) * fy;
+}
+} // namespace
+
+void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
+{
+    if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0 || renderer_ == nullptr
+        || rendererHandle_ == renderer::invalidRenderer || cloudTexture_ != renderer::invalidTexture)
+    {
+        return;
+    }
+
+    if (cloudField_ == nullptr)
+    {
+        cloudField_ = std::make_unique<planet::CloudField>(params_);
+    }
+
+    // One equirect bake serves both cloud consumers (the world-anchored
+    // shell the macro views draw and the sky deck the ground views draw):
+    // 2048x1024 keeps the texel footprint (a third of a kilometer on the
+    // showcase) under the finest wisp octave's feature size, so the full
+    // field resolves - the cyclone arms, the wisp fringes and the bank
+    // bodies all draw at their own scale instead of band-limiting to
+    // whatever grid a mesh could carry.
+    constexpr std::uint32_t kWidth = 2048;
+    constexpr std::uint32_t kHeight = 1024;
+    const bool sunValid = glm::length(sunDirection) > 1.0e-9;
+    const glm::dvec3 sun = sunValid ? glm::normalize(sunDirection) : glm::dvec3(0.0, 1.0, 0.0);
+    const glm::dvec3 ambientSky = backdropLightingValid_
+        ? glm::dvec3(backdropLighting_.ambientSky.x, backdropLighting_.ambientSky.y, backdropLighting_.ambientSky.z)
+        : glm::dvec3(0.08, 0.10, 0.16);
+    const glm::dvec3 ambientGround = backdropLightingValid_
+        ? glm::dvec3(backdropLighting_.ambientGround.x, backdropLighting_.ambientGround.y,
+            backdropLighting_.ambientGround.z)
+        : glm::dvec3(0.05, 0.045, 0.04);
+    const glm::dvec3 sunRadiance = backdropLightingValid_ && backdropLighting_.sunEnabled
+        ? glm::dvec3(backdropLighting_.sunRadianceOverPi.x, backdropLighting_.sunRadianceOverPi.y,
+            backdropLighting_.sunRadianceOverPi.z)
+        : glm::dvec3(0.0);
+
+    // Phase 1: the coverage field alone (see the deck bake's recipe below -
+    // the shell follows the same three-phase structure): the raw thresholded
+    // coverage photographs as torn flakes from orbit, because every wisp
+    // octave's single-texel threshold crossing becomes an isolated fleck
+    // with a hard one-texel edge. Storing the coverage separately lets the
+    // fringe blur dissolve those flecks before anything reads them.
+    std::vector<std::uint8_t> coveragePixels(static_cast<std::size_t>(kWidth) * kHeight, 0u);
+    for (std::uint32_t y = 0; y < kHeight; ++y)
+    {
+        for (std::uint32_t x = 0; x < kWidth; ++x)
+        {
+            const planet::Vec3 direction = equirectDirection(x, y, kWidth, kHeight);
+            const double coverage = planet::clamp01(cloudField_->coverageTexel(warpCloudSampleDirection(params_, direction)));
+            if (coverage <= 0.003)
+            {
+                continue; // clear texel: keep the coverage buffer at zero
+            }
+            coveragePixels[static_cast<std::size_t>(y) * kWidth + x]
+                = static_cast<std::uint8_t>(coverage * 255.0);
+        }
+    }
+
+    // Phase 2: fringe softening - the deck bake's own three separable
+    // 3-tap passes over the coverage buffer. From orbit a 2048-wide bake
+    // minifies hard, and the mip chain would average the flecks away only
+    // where the deck minifies; the shell's near-limb texels photograph at
+    // one-to-one, where a hard one-texel flake edge survives every filter.
+    // The blur dissolves them at the source, keeping the bank bodies (whose
+    // coverage rides well above the fringe tail) untouched.
+    for (int blurPass = 0; blurPass < 3; ++blurPass)
+    {
+        std::vector<std::uint8_t> blurred(coveragePixels.size());
+        const auto alphaAt = [&](std::int64_t column, std::int64_t row)
+        {
+            column = ((column % static_cast<std::int64_t>(kWidth)) + static_cast<std::int64_t>(kWidth))
+                % static_cast<std::int64_t>(kWidth);
+            row = std::clamp(row, std::int64_t{0}, static_cast<std::int64_t>(kHeight) - 1);
+            return static_cast<double>(coveragePixels[static_cast<std::size_t>(row) * kWidth
+                + static_cast<std::size_t>(column)]);
+        };
+        for (std::uint32_t y = 0; y < kHeight; ++y)
+        {
+            for (std::uint32_t x = 0; x < kWidth; ++x)
+            {
+                const double horizontal = (alphaAt(x - 1, y) + 2.0 * alphaAt(x, y) + alphaAt(x + 1, y)) * 0.25;
+                const double vertical = (alphaAt(x, y - 1) + 2.0 * alphaAt(x, y) + alphaAt(x, y + 1)) * 0.25;
+                blurred[static_cast<std::size_t>(y) * kWidth + x]
+                    = static_cast<std::uint8_t>(std::clamp((horizontal + vertical) * 0.5, 0.0, 255.0));
+            }
+        }
+        coveragePixels.swap(blurred);
+    }
+
+    // Phase 3: the lit RGB, derived from the BLURRED coverage for every
+    // texel whose alpha survived it (deriving RGB from the raw field left
+    // the blur's fringe texels carrying alpha with a zero RGB - the dark
+    // outline band the deck bake's own note describes).
+    cloudTexturePixels_.assign(static_cast<std::size_t>(kWidth) * kHeight * 4u, 0u);
+    for (std::uint32_t y = 0; y < kHeight; ++y)
+    {
+        for (std::uint32_t x = 0; x < kWidth; ++x)
+        {
+            const double coverage = static_cast<double>(
+                coveragePixels[static_cast<std::size_t>(y) * kWidth + x]) / 255.0;
+            if (coverage <= 0.003)
+            {
+                continue; // clear texel: keep RGBA at zero (the blend skips it)
+            }
+            const planet::Vec3 direction = equirectDirection(x, y, kWidth, kHeight);
+
+            // Optical thickness ramp: thick cores scatter nearly all the
+            // incident light while the thinning rims transmit part of it, so
+            // the bank reads as a volume of scatterers; pow keeps the rim's
+            // own curvature where it matters (a linear ramp reads as paint).
+            // The floor sits high: a real cloud deck's shaded bases still
+            // scatter ~60% of the incident light (clouds are near-white
+            // scatterers at every thickness), and bases darker than that
+            // photograph as gray paint smears over the terrain.
+            const double thickness = std::pow(coverage, 0.7);
+            // Bank-top mottle: two seed-fixed simplex octaves at cloud-field
+            // feature fractions (a few kilometres on the showcase), riding
+            // the shading the way real decks photograph - a bank's interior
+            // carries bright crests and dimmer troughs from the convection
+            // that built it. Without this the minified bake reads as smooth
+            // poured cream: the thresholded coverage saturates thick
+            // interiors to one flat shade, and nothing inside a bank
+            // suggests the volume it stands for. The jitter stays gentle
+            // (the deck must stay near-white) but breaks every interior.
+            const double bankFreqA = params_.radiusMeters / 3000.0;
+            const double bankFreqB = params_.radiusMeters / 1200.0;
+            const double bankJitterA = planet::noise::simplex3ImproveXY(
+                static_cast<std::int64_t>(params_.seed) + 0x9E3779B9LL,
+                direction.x * bankFreqA, direction.y * bankFreqA, direction.z * bankFreqA);
+            const double bankJitterB = planet::noise::simplex3ImproveXY(
+                static_cast<std::int64_t>(params_.seed) + 0x71E9AD24LL,
+                direction.x * bankFreqB, direction.y * bankFreqB, direction.z * bankFreqB);
+            const double shade = (0.52 + 0.48 * thickness)
+                * (1.0 + 0.10 * bankJitterA + 0.06 * bankJitterB);
+            // Sun lighting: the same environment bake the lit terrain
+            // receives (hemispheric ambient plus the sun's Lambertian term),
+            // evaluated per texel - bright banks under the sun, cool banks
+            // at the limb, ambient-only banks through the night side.
+            const double sunDot = sunValid
+                ? planet::clamp01(planet::dot(direction,
+                    planet::Vec3{sun.x, sun.y, sun.z}))
+                : 1.0;
+            const double upMix = direction.y * 0.5 + 0.5;
+            const glm::dvec3 ambient = glm::mix(ambientGround, ambientSky, upMix);
+            glm::dvec3 light = ambient + sunRadiance * sunDot;
+            // Terminator silver lining: banks whose tops graze the sun ray
+            // forward-scatter strongly, so the cloud rims near the terminator
+            // catch a warm bright edge the way sunrise photos show. The gate
+            // is the twilight band itself - the lining fades OUT through the
+            // terminator (a lining that survived into the night would light
+            // the dark side's banks like a second sun).
+            const double silver = 0.55 * planet::smoothstep(-0.02, 0.10, sunDot)
+                * (1.0 - planet::smoothstep(0.10, 0.35, sunDot))
+                * std::pow(coverage, 0.5);
+            light += silver * glm::dvec3(1.0, 0.78, 0.55);
+
+            const std::size_t index = (static_cast<std::size_t>(y) * kWidth + x) * 4u;
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const double value = params_.cloudColor[channel] * shade
+                    * light[channel] * (channel == 0 ? 1.0 : channel == 1 ? 0.99 : 0.97);
+                cloudTexturePixels_[index + static_cast<std::size_t>(channel)]
+                    = static_cast<std::uint8_t>(std::clamp(value, 0.0, 1.0) * 255.0);
+            }
+            cloudTexturePixels_[index + 3u] = static_cast<std::uint8_t>(coverage * 255.0);
+        }
+    }
+
+    // Relief pass: the coverage field itself is the deck's height proxy -
+    // its per-texel gradient against the sun's tangential projection shades
+    // the billow slopes (sun-facing lobes brighten, lee lobes dim), the
+    // puffy self-shaded read a flat albedo texture cannot carry. The slope
+    // magnitude stays small: this is relief on top of the sun bake, not a
+    // replacement for it.
+    {
+        const auto alphaAt = [&](std::int64_t column, std::int64_t row)
+        {
+            column = ((column % static_cast<std::int64_t>(kWidth)) + static_cast<std::int64_t>(kWidth))
+                % static_cast<std::int64_t>(kWidth);
+            row = std::clamp(row, std::int64_t{0}, static_cast<std::int64_t>(kHeight) - 1);
+            return static_cast<double>(cloudTexturePixels_[(static_cast<std::size_t>(row) * kWidth
+                + static_cast<std::size_t>(column)) * 4u + 3u]) / 255.0;
+        };
+        std::vector<double> relief(kWidth * kHeight, 0.0);
+        for (std::uint32_t y = 0; y < kHeight; ++y)
+        {
+            const double latitude = glm::pi<double>() * 0.5
+                - glm::pi<double>() * (static_cast<double>(y) + 0.5) / static_cast<double>(kHeight);
+            const double cosLatitude = std::max(1.0e-6, std::cos(latitude));
+            for (std::uint32_t x = 0; x < kWidth; ++x)
+            {
+                const double azimuth = glm::two_pi<double>() * (static_cast<double>(x) + 0.5)
+                    / static_cast<double>(kWidth);
+                // The sun's projection onto the texel's own tangent frame:
+                // east (u+) and north (v-, since v grows toward the south
+                // pole in the bake's row order).
+                const planet::Vec3 east{-std::sin(azimuth), 0.0, std::cos(azimuth)};
+                const planet::Vec3 north{-std::sin(latitude) * std::cos(azimuth), std::cos(latitude),
+                    -std::sin(latitude) * std::sin(azimuth)};
+                const planet::Vec3 sunVector{sun.x, sun.y, sun.z};
+                const double sunEast = planet::dot(east, sunVector);
+                const double sunNorth = planet::dot(north, sunVector);
+                const std::size_t texel = static_cast<std::size_t>(y) * kWidth + x;
+                const double center = alphaAt(x, y);
+                if (center <= 0.02)
+                {
+                    continue; // clear sky has no relief
+                }
+                // Height gradient in texture space (per texel step).
+                const double dAlphaDu = (alphaAt(x + 1, y) - alphaAt(x - 1, y)) * 0.5;
+                const double dAlphaDv = (alphaAt(x, y + 1) - alphaAt(x, y - 1)) * 0.5;
+                // East shrinks toward the poles (u steps shrink by cos of
+                // latitude); normalize the physical slope by that factor.
+                const double slope = dAlphaDu * sunEast / cosLatitude - dAlphaDv * sunNorth;
+                relief[texel] = std::clamp(2.0 * slope, -0.45, 0.45);
+            }
+        }
+        for (std::size_t texel = 0; texel < relief.size(); ++texel)
+        {
+            const double gain = 1.0 + relief[texel];
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const std::size_t index = texel * 4u + static_cast<std::size_t>(channel);
+                const double value = static_cast<double>(cloudTexturePixels_[index]) * gain;
+                cloudTexturePixels_[index] = static_cast<std::uint8_t>(std::clamp(value, 0.0, 255.0));
+            }
+        }
+    }
+
+    // Post-bake fringe softening: three separable 3-tap passes over the alpha
+    // channel (a wide effective pyramid). The wisp octaves' finest fringe
+    // rides at under two texels, and the threshold band maps it to
+    // single-texel on/off flecks at the bank boundaries - salt-and-pepper
+    // that reads as dithered noise, not ragged cloud. The wider fringe also
+    // carries the alpha through the mesh gate's own coverage floor, so the
+    // quads the gate keeps never show their polygonal edges against the
+    // texels they cut off.
+    for (int blurPass = 0; blurPass < 3; ++blurPass)
+    {
+        std::vector<std::uint8_t> blurred(cloudTexturePixels_.size());
+        const auto alphaAt = [&](std::int64_t column, std::int64_t row)
+        {
+            column = ((column % static_cast<std::int64_t>(kWidth)) + static_cast<std::int64_t>(kWidth))
+                % static_cast<std::int64_t>(kWidth);
+            row = std::clamp(row, std::int64_t{0}, static_cast<std::int64_t>(kHeight) - 1);
+            return static_cast<double>(cloudTexturePixels_[(static_cast<std::size_t>(row) * kWidth
+                + static_cast<std::size_t>(column)) * 4u + 3u]);
+        };
+        for (std::uint32_t y = 0; y < kHeight; ++y)
+        {
+            for (std::uint32_t x = 0; x < kWidth; ++x)
+            {
+                const double horizontal = (alphaAt(x - 1, y) + 2.0 * alphaAt(x, y) + alphaAt(x + 1, y)) * 0.25;
+                const double vertical = (alphaAt(x, y - 1) + 2.0 * alphaAt(x, y) + alphaAt(x, y + 1)) * 0.25;
+                const std::size_t index = (static_cast<std::size_t>(y) * kWidth + x) * 4u;
+                blurred[index + 0u] = cloudTexturePixels_[index + 0u];
+                blurred[index + 1u] = cloudTexturePixels_[index + 1u];
+                blurred[index + 2u] = cloudTexturePixels_[index + 2u];
+                blurred[index + 3u] = static_cast<std::uint8_t>(std::clamp((horizontal + vertical) * 0.5, 0.0, 255.0));
+            }
+        }
+        cloudTexturePixels_.swap(blurred);
+    }
+
+    renderer::TextureDescription description;
+    description.width = kWidth;
+    description.height = kHeight;
+    description.pixels = cloudTexturePixels_.data();
+    description.filter = renderer::TextureFilter::Linear;
+    description.address = renderer::TextureAddress::Repeat;
+    renderer::RenderError error = renderer::RenderError::None;
+    cloudTexture_ = renderer_->createTexture(renderer_->self, rendererHandle_, &description, &error);
+    if (cloudTexture_ == renderer::invalidTexture)
+    {
+        cloudTexturePixels_.clear();
+        return;
+    }
+    cloudTextureWidth_ = kWidth;
+    cloudTextureHeight_ = kHeight;
+
+    // Optional bake inspection: CLOUD_BAKE_DUMP writes the raw RGBA bake to
+    // a PNG beside the run (tuning the field's coverage/structure is far
+    // easier against the exact pixels the shell draws).
+    if (std::getenv("CLOUD_BAKE_DUMP") != nullptr)
+    {
+        std::vector<std::uint8_t> rgb(static_cast<std::size_t>(kWidth) * kHeight * 3u);
+        for (std::size_t texel = 0; texel < static_cast<std::size_t>(kWidth) * kHeight; ++texel)
+        {
+            rgb[texel * 3u + 0u] = cloudTexturePixels_[texel * 4u + 0u];
+            rgb[texel * 3u + 1u] = cloudTexturePixels_[texel * 4u + 1u];
+            rgb[texel * 3u + 2u] = cloudTexturePixels_[texel * 4u + 2u];
+        }
+        const char *rawPath = std::getenv("CLOUD_BAKE_DUMP");
+        const std::string ppmPath = std::string(rawPath) + ".ppm";
+        std::FILE *out = std::fopen(ppmPath.c_str(), "wb");
+        if (out != nullptr)
+        {
+            std::fprintf(out, "P6\n%u %u\n255\n", kWidth, kHeight);
+            std::fwrite(rgb.data(), 1u, rgb.size(), out);
+            std::fclose(out);
+        }
+    }
+}
+
+void PlanetChunkRenderer::destroyCloudTexture()
+{
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && cloudTexture_ != renderer::invalidTexture && renderer_->destroyTexture != nullptr)
+    {
+        renderer_->destroyTexture(renderer_->self, rendererHandle_, cloudTexture_);
+    }
+    cloudTexture_ = renderer::invalidTexture;
+    cloudTexturePixels_.clear();
+    cloudTextureWidth_ = 0;
+    cloudTextureHeight_ = 0;
+}
+
+void PlanetChunkRenderer::ensureWaterDetailTextures()
+{
+    if (renderer_ == nullptr || rendererHandle_ == renderer::invalidRenderer
+        || waterNormalTexture_ != renderer::invalidTexture || params_.waterTextureTileMeters <= 0.0)
+    {
+        return;
+    }
+
+    // Close-range sea surface detail, baked as a pair of tileable sheets the
+    // near-water draws sample over the mesher's own 8 m tile lattice (the
+    // lattice's per-chunk quarter-turns and UV warp keep the tile from
+    // reading as a repeat):
+    //   - a wave NORMAL sheet: a sum of directional sine waves whose cycle
+    //     counts are integers over the tile (perfectly tileable), spanning
+    //     swell to chop. The set SPREADS over azimuths around one dominant
+    //     wind axis instead of marching along a single direction: waves all
+    //     parallel to one axis minify into the parallel brightness bands of
+    //     a brushed-metal sheet (the venetian-blind sea a single-axis set
+    //     photographed as), while a real sea runs a spectrum of crossed
+    //     swells whose glints break into irregular sparkle.
+    //   - an ALBEDO variation sheet: a low-contrast brightness mottle (mean
+    //     exactly 1.0) built from periodic value noise instead of directional
+    //     ripple bands - banded ripples minified into the same stripe read as
+    //     the normal sheet's, and the eye then sees stripes everywhere it
+    //     looks. Three wrapped noise octaves give the depth tint the uneven,
+    //     directionless breakup a sunlit sea photographs.
+    // Both gate by draw distance (see the water emit): a normal sheet
+    // minified to sub-pixel waves aliases into sparkle noise.
+    constexpr std::uint32_t kSize = 256;
+    // Wave set: {cycles per tile along u, cycles per tile along v, amplitude,
+    // phase} - integer cycles keep the sum seamless across the wrap. The
+    // directions fan out around the dominant swell axis (veered sets at
+    // +-20-50 degrees plus cross swells) so no direction owns the sheet.
+    const struct
+    {
+        double cu, cv, amplitude, phase;
+    } waves[] = {
+        {3.0, 1.0, 0.034, 0.0},
+        {7.0, 3.0, 0.026, 2.1},
+        {13.0, 6.0, 0.018, 4.2},
+        {4.0, 3.0, 0.022, 1.3},
+        {9.0, 8.0, 0.016, 5.0},
+        {6.0, 5.0, 0.014, 0.9},
+        {2.0, 3.0, 0.018, 3.4},
+        {5.0, 6.0, 0.012, 5.8},
+        {11.0, 4.0, 0.010, 2.6},
+    };
+    std::vector<std::uint8_t> normalPixels(static_cast<std::size_t>(kSize) * kSize * 4u, 255u);
+    std::vector<std::uint8_t> albedoPixels(static_cast<std::size_t>(kSize) * kSize * 4u, 255u);
+    double albedoSum = 0.0;
+    for (std::uint32_t y = 0; y < kSize; ++y)
+    {
+        for (std::uint32_t x = 0; x < kSize; ++x)
+        {
+            // Sample at the texel center of the tile's own lattice.
+            const double u = (static_cast<double>(x) + 0.5) / static_cast<double>(kSize);
+            const double v = (static_cast<double>(y) + 0.5) / static_cast<double>(kSize);
+
+            // Height and central-difference slope of the wave sum.
+            const auto waveAt = [&](double uu, double vv)
+            {
+                double height = 0.0;
+                for (const auto &wave : waves)
+                {
+                    height += wave.amplitude
+                        * std::sin(glm::two_pi<double>() * (wave.cu * uu + wave.cv * vv) + wave.phase);
+                }
+                return height;
+            };
+            const double eps = 0.5 / static_cast<double>(kSize);
+            const double dhdu = (waveAt(u + eps, v) - waveAt(u - eps, v)) / (2.0 * eps);
+            const double dhdv = (waveAt(u, v + eps) - waveAt(u, v - eps)) / (2.0 * eps);
+            glm::dvec3 normal(-dhdu, -dhdv, 1.0);
+            normal /= std::max(1.0e-9, glm::length(normal));
+            const std::size_t index = (static_cast<std::size_t>(y) * kSize + x) * 4u;
+            normalPixels[index + 0u] = static_cast<std::uint8_t>(std::clamp(normal.x * 0.5 + 0.5, 0.0, 1.0) * 255.0);
+            normalPixels[index + 1u] = static_cast<std::uint8_t>(std::clamp(normal.y * 0.5 + 0.5, 0.0, 1.0) * 255.0);
+            normalPixels[index + 2u] = static_cast<std::uint8_t>(std::clamp(normal.z * 0.5 + 0.5, 0.0, 1.0) * 255.0);
+            normalPixels[index + 3u] = 255u;
+
+            // Albedo variation: three wrapped value-noise octaves (integer
+            // grids over the tile keep every octave perfectly periodic), a
+            // broad mottle plus two finer ones. Directionless by design -
+            // the depth tint breaks up unevenly the way wind-brightened
+            // water does, instead of stacking into the parallel ripple
+            // bands a sine set minifies into.
+            const auto latticeHash = [](std::int64_t ix, std::int64_t iy, std::uint64_t tag)
+            {
+                std::uint64_t mixed = static_cast<std::uint64_t>(ix) * 0x9E3779B97F4A7C15ull
+                    ^ static_cast<std::uint64_t>(iy) * 0xC2B2AE3D27D4EB4Full ^ tag;
+                mixed ^= mixed >> 33;
+                mixed *= 0xFF51AFD7ED558CCDull;
+                mixed ^= mixed >> 33;
+                mixed *= 0xC4CEB9FE1A85EC53ull;
+                mixed ^= mixed >> 33;
+                return static_cast<double>(mixed >> 11) * (1.0 / 9007199254740992.0);
+            };
+            const auto periodicNoise = [&latticeHash](double uu, double vv, double grid, std::uint64_t tag)
+            {
+                const double fx = uu * grid;
+                const double fy = vv * grid;
+                const std::int64_t gx = static_cast<std::int64_t>(grid);
+                std::int64_t ix = static_cast<std::int64_t>(std::floor(fx));
+                std::int64_t iy = static_cast<std::int64_t>(std::floor(fy));
+                const double tx = fx - static_cast<double>(ix);
+                const double ty = fy - static_cast<double>(iy);
+                const double sx = tx * tx * tx * (tx * (tx * 6.0 - 15.0) + 10.0);
+                const double sy = ty * ty * ty * (ty * (ty * 6.0 - 15.0) + 10.0);
+                const auto wrap = [gx](std::int64_t c)
+                {
+                    return ((c % gx) + gx) % gx;
+                };
+                const std::int64_t x0 = wrap(ix);
+                const std::int64_t y0 = wrap(iy);
+                const std::int64_t x1 = wrap(ix + 1);
+                const std::int64_t y1 = wrap(iy + 1);
+                const double h00 = latticeHash(x0, y0, tag);
+                const double h10 = latticeHash(x1, y0, tag);
+                const double h01 = latticeHash(x0, y1, tag);
+                const double h11 = latticeHash(x1, y1, tag);
+                return (h00 * (1.0 - sx) + h10 * sx) * (1.0 - sy)
+                    + (h01 * (1.0 - sx) + h11 * sx) * sy;
+            };
+            double variation = 0.0;
+            variation += 0.036 * (periodicNoise(u, v, 5.0, 0xA11CE5C0DE5ull) - 0.5);
+            variation += 0.024 * (periodicNoise(u, v, 13.0, 0xB0B5EDC0DE5ull) - 0.5);
+            variation += 0.010 * (periodicNoise(u, v, 29.0, 0xC0FFEEC0DE5ull) - 0.5);
+            const double value = 1.0 + variation;
+            albedoSum += value;
+            const std::uint8_t encoded = static_cast<std::uint8_t>(std::clamp(value, 0.0, 1.0) * 255.0);
+            albedoPixels[index + 0u] = encoded;
+            albedoPixels[index + 1u] = encoded;
+            albedoPixels[index + 2u] = encoded;
+            albedoPixels[index + 3u] = 255u;
+        }
+    }
+    // Renormalize the albedo sheet's mean to exactly 1.0: the water draw's
+    // vertex colors carry the depth tint, and the sheet must not shift it.
+    const double mean = albedoSum / static_cast<double>(kSize * kSize);
+    const double correction = std::abs(mean) > 1.0e-6 ? 1.0 / mean : 1.0;
+    for (std::size_t index = 0; index + 3u < albedoPixels.size(); index += 4u)
+    {
+        const double value = static_cast<double>(albedoPixels[index]) * correction;
+        const std::uint8_t encoded = static_cast<std::uint8_t>(std::clamp(value, 0.0, 255.0));
+        albedoPixels[index + 0u] = encoded;
+        albedoPixels[index + 1u] = encoded;
+        albedoPixels[index + 2u] = encoded;
+    }
+
+    renderer::RenderError error = renderer::RenderError::None;
+    renderer::TextureDescription normalDescription;
+    normalDescription.width = kSize;
+    normalDescription.height = kSize;
+    normalDescription.pixels = normalPixels.data();
+    normalDescription.filter = renderer::TextureFilter::Linear;
+    normalDescription.address = renderer::TextureAddress::Repeat;
+    waterNormalTexture_ = renderer_->createTexture(renderer_->self, rendererHandle_, &normalDescription, &error);
+
+    error = renderer::RenderError::None;
+    renderer::TextureDescription albedoDescription;
+    albedoDescription.width = kSize;
+    albedoDescription.height = kSize;
+    albedoDescription.pixels = albedoPixels.data();
+    albedoDescription.filter = renderer::TextureFilter::Linear;
+    albedoDescription.address = renderer::TextureAddress::Repeat;
+    waterAlbedoTexture_ = renderer_->createTexture(renderer_->self, rendererHandle_, &albedoDescription, &error);
+
+    // The near-water detail gate: ~75 tile lattices of view depth. The
+    // sampler's own mip chain (sampleTrilinear with per-pixel UV
+    // derivatives) folds the minified wave sheet into its mips, so the far
+    // third of the gate fades gently to the mean - no sub-pixel sparkle -
+    // while the near and mid water carry the ripple relief and the depth
+    // tint's per-pixel breakup the coast and swimmer views read.
+    waterTextureMaxDistanceMetersSquared_ = 600.0 * 600.0;
+    if (waterNormalTexture_ == renderer::invalidTexture || waterAlbedoTexture_ == renderer::invalidTexture)
+    {
+        destroyWaterDetailTextures();
+    }
+}
+
+void PlanetChunkRenderer::destroyWaterDetailTextures()
+{
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && waterNormalTexture_ != renderer::invalidTexture && renderer_->destroyTexture != nullptr)
+    {
+        renderer_->destroyTexture(renderer_->self, rendererHandle_, waterNormalTexture_);
+    }
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && waterAlbedoTexture_ != renderer::invalidTexture && renderer_->destroyTexture != nullptr)
+    {
+        renderer_->destroyTexture(renderer_->self, rendererHandle_, waterAlbedoTexture_);
+    }
+    waterNormalTexture_ = renderer::invalidTexture;
+    waterAlbedoTexture_ = renderer::invalidTexture;
+    waterTextureMaxDistanceMetersSquared_ = 0.0;
+}
+
+void PlanetChunkRenderer::ensureDeckTexture(const glm::dvec3 &sunDirection, const glm::dmat3 &domeToPlanet)
+{
+    if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0 || renderer_ == nullptr
+        || rendererHandle_ == renderer::invalidRenderer || deckTexture_ != renderer::invalidTexture)
+    {
+        return;
+    }
+
+    if (cloudField_ == nullptr)
+    {
+        cloudField_ = std::make_unique<planet::CloudField>(params_);
+    }
+
+    // The deck bake lives in the SKY DOME'S INITIAL FRAME - the same frame
+    // the deck mesh's (segment, band) grid lives in - and its texel grid
+    // maps one-to-one onto that mesh grid: columns follow the mesh's
+    // azimuth stations, rows span the mesh's own latitude span (the
+    // horizon guard up to the zenith). The deck mesh's UVs are that same
+    // (segment, band) pair, so every per-pixel sample runs on
+    // well-conditioned UVs and reads the field at its own resolution.
+    // (The deck's first texture route sampled the PLANET-frame equirect
+    // through per-vertex remapped UVs; wherever the dome's frame crossed
+    // the planet's polar axis the UV footprint degenerated and the
+    // sampler collapsed those triangles into blocky texel picks.)
+    // The lighting is still planet-anchored - the GROUND-SKY substitute:
+    // every bank carries a bright floor (the dome's own diffuse sky light
+    // keeps real midday decks white even on the anti-sun side), the sun
+    // side runs brighter, and the low-sun rim keeps a whisper of warm -
+    // the space bake's full terminator drama would paint half the dome
+    // brown at a beach camera.
+    constexpr std::uint32_t kWidth = 2048;
+    constexpr std::uint32_t kHeight = 1024;
+    constexpr double kDeckGuardRadians = 0.03490658503988659;  // 2 deg above the horizon
+    constexpr double kDeckFadeRadians = 0.06981317007977318;   // full by 6 deg
+    const bool sunValid = glm::length(sunDirection) > 1.0e-9;
+    const glm::dvec3 sun = sunValid ? glm::normalize(sunDirection) : glm::dvec3(0.0, 1.0, 0.0);
+
+    // Phase 1: the coverage field alone (plus the horizon dissolve), as a
+    // single-channel buffer. The RGB is derived AFTER the fringe blur - see
+    // the phase-3 note.
+    std::vector<std::uint8_t> coveragePixels(static_cast<std::size_t>(kWidth) * kHeight, 0u);
+    for (std::uint32_t y = 0; y < kHeight; ++y)
+    {
+        const double latitude = kDeckGuardRadians
+            + (glm::pi<double>() * 0.5 - kDeckGuardRadians)
+                * (static_cast<double>(y) + 0.5) / static_cast<double>(kHeight);
+        const double cosLatitude = std::cos(latitude);
+        const double sinLatitude = std::sin(latitude);
+        // Horizon dissolve: alpha rises from nothing at the mesh's own
+        // lower rim to full ~6 degrees above it - the mesh boundary is a
+        // hard polygon cut, and the place it cuts (the low sky) is exactly
+        // where the atmosphere's haze band swallows detail, so a bank that
+        // fades in there reads as distance while the polygon edge hides
+        // inside the fade.
+        const double rimFade = planet::smoothstep(kDeckGuardRadians,
+            kDeckGuardRadians + kDeckFadeRadians, latitude);
+        for (std::uint32_t x = 0; x < kWidth; ++x)
+        {
+            const double azimuth = glm::two_pi<double>()
+                * (static_cast<double>(x) + 0.5) / static_cast<double>(kWidth);
+            const glm::dvec3 domeDirection(std::cos(azimuth) * cosLatitude, sinLatitude,
+                std::sin(azimuth) * cosLatitude);
+            const glm::dvec3 planetDirection = domeToPlanet * domeDirection;
+            double coverage = planet::clamp01(cloudField_->coverageTexel(
+                warpCloudSampleDirection(params_,
+                    planet::Vec3{planetDirection.x, planetDirection.y, planetDirection.z})));
+            if (coverage <= 0.003)
+            {
+                continue;
+            }
+            coverage *= rimFade;
+            if (coverage <= 0.003)
+            {
+                continue;
+            }
+            coveragePixels[static_cast<std::size_t>(y) * kWidth + x]
+                = static_cast<std::uint8_t>(coverage * 255.0);
+        }
+    }
+
+    // Phase 2: fringe softening - three separable 3-tap passes over the
+    // coverage buffer (the space bake's own recipe). The deck samples this
+    // bake PER PIXEL - a 0.176 degree texel magnifies to several screen
+    // pixels, so bilinear runs on the base level and no vertex-grid band
+    // limit applies - the passes only dissolve the coverage threshold's
+    // single-texel flecks.
+    for (int blurPass = 0; blurPass < 3; ++blurPass)
+    {
+        std::vector<std::uint8_t> blurred(coveragePixels.size());
+        const auto alphaAt = [&](std::int64_t column, std::int64_t row)
+        {
+            column = ((column % static_cast<std::int64_t>(kWidth)) + static_cast<std::int64_t>(kWidth))
+                % static_cast<std::int64_t>(kWidth);
+            row = std::clamp(row, std::int64_t{0}, static_cast<std::int64_t>(kHeight) - 1);
+            return static_cast<double>(coveragePixels[static_cast<std::size_t>(row) * kWidth
+                + static_cast<std::size_t>(column)]);
+        };
+        for (std::uint32_t y = 0; y < kHeight; ++y)
+        {
+            for (std::uint32_t x = 0; x < kWidth; ++x)
+            {
+                const double horizontal = (alphaAt(x - 1, y) + 2.0 * alphaAt(x, y) + alphaAt(x + 1, y)) * 0.25;
+                const double vertical = (alphaAt(x, y - 1) + 2.0 * alphaAt(x, y) + alphaAt(x, y + 1)) * 0.25;
+                blurred[static_cast<std::size_t>(y) * kWidth + x]
+                    = static_cast<std::uint8_t>(std::clamp((horizontal + vertical) * 0.5, 0.0, 255.0));
+            }
+        }
+        coveragePixels.swap(blurred);
+    }
+
+    // Phase 3: the lit RGB, derived from the BLURRED coverage for every
+    // texel whose alpha survived it. Deriving RGB only where the RAW
+    // coverage cleared the threshold (the previous order) left the blur's
+    // fringe texels carrying alpha with a ZERO RGB - every bank edge and
+    // the deck's own rim then blended a thin dark band into the sky behind
+    // them (the dark wisp outlines and the dark line the first textured
+    // deck photographed along its lower edge). The lighting is the
+    // GROUND-SKY substitute: a high brightness floor keeps the banks white
+    // even on the anti-sun side, the sun side runs brighter, and the
+    // low-sun rim keeps a whisper of warm.
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kWidth) * kHeight * 4u, 0u);
+    for (std::uint32_t y = 0; y < kHeight; ++y)
+    {
+        const double latitude = kDeckGuardRadians
+            + (glm::pi<double>() * 0.5 - kDeckGuardRadians)
+                * (static_cast<double>(y) + 0.5) / static_cast<double>(kHeight);
+        const double cosLatitude = std::cos(latitude);
+        const double sinLatitude = std::sin(latitude);
+        for (std::uint32_t x = 0; x < kWidth; ++x)
+        {
+            const double coverage = static_cast<double>(
+                coveragePixels[static_cast<std::size_t>(y) * kWidth + x]) / 255.0;
+            if (coverage <= 0.003)
+            {
+                continue;
+            }
+            const double azimuth = glm::two_pi<double>()
+                * (static_cast<double>(x) + 0.5) / static_cast<double>(kWidth);
+            const glm::dvec3 domeDirection(std::cos(azimuth) * cosLatitude, sinLatitude,
+                std::sin(azimuth) * cosLatitude);
+            const glm::dvec3 planetDirection = domeToPlanet * domeDirection;
+            const double thickness = std::pow(coverage, 0.7);
+            // Bank body shading: thin wisps run BRIGHTER than the pale sky
+            // behind them (sun-lit vapor against blue), and the ramp eases
+            // toward the bank bodies' slightly grayer base as coverage
+            // thickens - a single bright floor for every coverage read the
+            // thin wisps as gray smudges darker than the sky they crossed.
+            const double shade = 1.05 - 0.22 * thickness;
+            const double sunDot = sunValid
+                ? planet::clamp01(planet::dot(
+                    planet::Vec3{planetDirection.x, planetDirection.y, planetDirection.z},
+                    planet::Vec3{sun.x, sun.y, sun.z}))
+                : 1.0;
+            // Ground-sky light: a high floor with the sun's share on top.
+            const double light = 0.85 + 0.35 * sunDot;
+            // A whisper of warm rim where the sun grazes the sky's own
+            // horizon band (the sunrise/sunset side of the dome).
+            const double rim = 0.16 * planet::smoothstep(-0.02, 0.10, sunDot)
+                * (1.0 - planet::smoothstep(0.10, 0.35, sunDot));
+            const std::size_t index = (static_cast<std::size_t>(y) * kWidth + x) * 4u;
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const double warm = channel == 0 ? 1.0 : channel == 1 ? 0.82 : 0.62;
+                const double value = params_.cloudColor[channel] * shade
+                    * (light + rim * warm) * (channel == 0 ? 1.0 : channel == 1 ? 0.99 : 0.97);
+                pixels[index + static_cast<std::size_t>(channel)]
+                    = static_cast<std::uint8_t>(std::clamp(value, 0.0, 1.0) * 255.0);
+            }
+            pixels[index + 3u] = static_cast<std::uint8_t>(coverage * 255.0);
+        }
+    }
+
+    renderer::TextureDescription description;
+    description.width = kWidth;
+    description.height = kHeight;
+    description.pixels = pixels.data();
+    description.filter = renderer::TextureFilter::Linear;
+    description.address = renderer::TextureAddress::Repeat;
+    renderer::RenderError error = renderer::RenderError::None;
+    deckTexture_ = renderer_->createTexture(renderer_->self, rendererHandle_, &description, &error);
+    // The pixel copy stays owned here (like the space bake's own copy):
+    // the sky deck's quad gate bilinear this array per rebuild - the
+    // texture handle alone cannot answer those reads.
+    deckTexturePixels_ = std::move(pixels);
+    deckTextureWidth_ = kWidth;
+    deckTextureHeight_ = kHeight;
+}
+
+void PlanetChunkRenderer::ensureCloudLayer(const glm::dvec3 &sunDirection)
 {
     if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0 || renderer_ == nullptr
         || rendererHandle_ == renderer::invalidRenderer || cloudLayer_ != renderer::invalidMesh)
@@ -1918,68 +2012,103 @@ void PlanetChunkRenderer::ensureCloudLayer()
         return;
     }
 
-    // Lat-long grid on the cloud shell (datum radius + cloud altitude).
-    // 384 x 192 quads keep the vertex spacing (~1 km at the equator of the
-    // 60 km showcase) well under the configured cloud wavelength, so the
-    // shell resolves the banks while the coverage field's band limit (the
-    // spacing is passed as the cutoff) keeps sub-spacing octaves out. The
-    // greedy interior merge (see buildCoverageShellMesh) collapses the
-    // banks' solid middles, so the triangle count stays near the contoured
-    // boundary's own cost.
-    constexpr std::uint32_t kSegments = 384;
-    constexpr std::uint32_t kBands = 192;
-    constexpr double kCoverageFloor = 0.42;
-
-    if (cloudField_ == nullptr)
+    // The bake first (both the shell and the sky deck draw through it, and
+    // the mesh gates below read its pixels).
+    ensureCloudTexture(sunDirection);
+    if (cloudTexture_ == renderer::invalidTexture || cloudTexturePixels_.empty())
     {
-        cloudField_ = std::make_unique<planet::CloudField>(params_);
+        return;
     }
 
+    // Per-pixel cloud shell: a lat-long UV sphere over the cloud altitude.
+    // The 192x96 grid is dense enough that the geometry itself never
+    // limits the cloud structure - every bank edge, wisp fringe and cyclone
+    // arm comes from the texture's alpha, sampled per pixel through the
+    // transparent route (the bake's own fringe blur dissolves the hard
+    // one-texel flake edges, so the quad grid's straight cuts hide inside
+    // the softened fringes). Quads whose four corners all read clear in the
+    // bake are skipped outright, so the mesh only covers the cloudy
+    // provinces and the rasterizer never walks the clear two-thirds of the
+    // shell - the transparent per-sample path is the frame's most expensive
+    // shading, and the gate is what keeps it bounded.
+    constexpr std::uint32_t kSegments = 192;
+    constexpr std::uint32_t kBands = 96;
+    // The quad gate rides well above the blurred fringe's own tail: a quad
+    // whose corners sit at sub-visible alpha renders as a pale hard-edged
+    // rectangle (the geometry cut reads no matter what the texel alpha
+    // says), so the gate keeps only quads whose whole extent carries solid
+    // coverage - the fringe below it belongs to the texture alone.
+    constexpr double kCornerGate = 0.12;
     const double shellRadius = params_.radiusMeters + params_.cloudAltitudeMeters;
-    const double vertexSpacing = glm::two_pi<double>() * shellRadius / static_cast<double>(kSegments);
-
-    CoverageShellSpec spec;
-    spec.segments = kSegments;
-    spec.bands = kBands;
-    spec.latitudeLowRadians = -glm::pi<double>() * 0.5;
-    spec.latitudeHighRadians = glm::pi<double>() * 0.5;
-    spec.shellRadiusMeters = shellRadius;
-    // The contour walk interpolates the grid linearly, so the field it
-    // follows must not carry content the grid cannot represent: the band
-    // limit sits at twice the vertex spacing (content at four spacings
-    // renders at full strength, anything below two spacings fades out), and
-    // three grid-smoothing rounds round the inclusion boundary. Together
-    // they keep the bank outlines curved at the grid scale instead of
-    // angular.
-    spec.lowPassCutoffMeters = 2.0 * vertexSpacing;
-    spec.coverageFloor = kCoverageFloor;
-    spec.smoothingPasses = 3;
-    // Ragged bank edges: the per-quad threshold wiggle breaks the grid stair
-    // pattern of the cutout (see CoverageShellSpec::floorJitter).
-    spec.floorJitter = 0.25;
-    spec.floorJitterSeed = 0xC10D5C0Full;
-    // Thinning fringes stay OFF on the macro shell: the edge blend fades
-    // bank rims toward the SKY gradient, which over the globe reads as a
-    // cyan bleed wherever ocean sits behind the bank (the blend cannot know
-    // the backdrop). Orbit distance resolves the contour walk's smoothed,
-    // jittered outlines on their own; the sky deck keeps the blend (see
-    // ensureSkyCloudLayer), where the sky genuinely is what sits behind the
-    // banks.
-    spec.hazeEdgeBlend = false;
-    // The shell bakes the environment lighting per vertex and draws unlit
-    // (see BackdropLighting): a matte white deck's lit response has no
-    // visible specular, so the per-pixel PBR evaluation over the disk-sized
-    // shell only cost fill rate.
-    if (backdropLightingValid_)
-    {
-        spec.bakedLighting = &backdropLighting_;
-    }
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
-    if (!buildCoverageShellMesh(*cloudField_, params_, spec, vertices, indices))
+    vertices.reserve(static_cast<std::size_t>(kSegments + 1u) * (kBands + 1u));
+    indices.reserve(static_cast<std::size_t>(kSegments) * kBands * 6u);
+    for (std::uint32_t band = 0; band <= kBands; ++band)
     {
-        return; // coverage configured to zero: nothing to draw
+        const double latitude = -glm::pi<double>() * 0.5
+            + glm::pi<double>() * (static_cast<double>(band) / static_cast<double>(kBands));
+        const double cosLatitude = std::cos(latitude);
+        const double sinLatitude = std::sin(latitude);
+        for (std::uint32_t segment = 0; segment <= kSegments; ++segment)
+        {
+            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment)
+                / static_cast<double>(kSegments);
+            const planet::Vec3 direction{std::cos(azimuth) * cosLatitude, sinLatitude,
+                std::sin(azimuth) * cosLatitude};
+            planet::PlanetVertex vertex{};
+            vertex.position[0] = static_cast<float>(direction.x * shellRadius);
+            vertex.position[1] = static_cast<float>(direction.y * shellRadius);
+            vertex.position[2] = static_cast<float>(direction.z * shellRadius);
+            vertex.normal[0] = static_cast<float>(direction.x);
+            vertex.normal[1] = static_cast<float>(direction.y);
+            vertex.normal[2] = static_cast<float>(direction.z);
+            // The texture's RGB carries the full sun bake (see
+            // ensureCloudTexture); the vertex colors stay neutral and the
+            // per-frame tint rides the material.
+            vertex.color[0] = 1.0f;
+            vertex.color[1] = 1.0f;
+            vertex.color[2] = 1.0f;
+            const double u = static_cast<double>(segment) / static_cast<double>(kSegments);
+            const double v = (glm::pi<double>() * 0.5 - latitude) / glm::pi<double>();
+            vertex.uv[0] = static_cast<float>(u);
+            vertex.uv[1] = static_cast<float>(v);
+            vertices.push_back(vertex);
+        }
+    }
+    for (std::uint32_t band = 0; band < kBands; ++band)
+    {
+        for (std::uint32_t segment = 0; segment < kSegments; ++segment)
+        {
+            const auto cornerUv = [&](std::uint32_t row, std::uint32_t column)
+            {
+                const double u = static_cast<double>(column) / static_cast<double>(kSegments);
+                const double latitude = -glm::pi<double>() * 0.5
+                    + glm::pi<double>() * (static_cast<double>(row) / static_cast<double>(kBands));
+                return std::pair<double, double>{u, (glm::pi<double>() * 0.5 - latitude) / glm::pi<double>()};
+            };
+            const auto cornerAlpha = [&](std::uint32_t row, std::uint32_t column)
+            {
+                const auto [u, v] = cornerUv(row, column);
+                return cloudBakeAlpha(cloudTexturePixels_, cloudTextureWidth_, cloudTextureHeight_, u, v);
+            };
+            if (std::max(std::max(cornerAlpha(band, segment), cornerAlpha(band, segment + 1u)),
+                    std::max(cornerAlpha(band + 1u, segment), cornerAlpha(band + 1u, segment + 1u)))
+                < kCornerGate)
+            {
+                continue; // clear sky over this whole block: nothing to draw
+            }
+            const std::uint32_t a = band * (kSegments + 1u) + segment;
+            const std::uint32_t b = a + 1u;
+            const std::uint32_t c = a + (kSegments + 1u);
+            const std::uint32_t d = c + 1u;
+            indices.insert(indices.end(), {a, c, b, b, c, d});
+        }
+    }
+    if (indices.empty())
+    {
+        return; // the configured coverage keeps the whole shell clear
     }
 
     cloudLayer_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
@@ -1993,18 +2122,18 @@ void PlanetChunkRenderer::ensureCloudLayer()
         glm::vec3(static_cast<float>(params_.centerMeters[0]), static_cast<float>(params_.centerMeters[1]),
             static_cast<float>(params_.centerMeters[2])));
     renderer::MeshMaterial material{};
-    material.baseColor[0] = 1.0f;
-    material.baseColor[1] = 1.0f;
-    material.baseColor[2] = 1.0f;
-    // The vertex colors carry the environment bake (see the spec above); the
-    // material draws unlit with the coverage-shaded deck tones. Without a
-    // bake (no pbr environment) the deck falls back to the lit draw.
-    material.unlit = backdropLightingValid_ && backdropLighting_.sunEnabled;
-    material.roughnessFactor = 0.9f; // matte decks; the sun does the shading
-    // The shell is an outward sphere seen from outside at every view that
-    // draws it (globe and orbit keep the eye above the shell): declaring the
-    // winding culls the far hemisphere per triangle instead of letting its
-    // bounding boxes scan the framebuffer against the depth buffer.
+    // Unlit translucent deck: the RGB bake carries the whole lit response
+    // (thickness, sun gradient, silver lining), the alpha channel the
+    // per-texel coverage. Opacity just under 1 routes the draw into the
+    // renderer's transparent pass - alpha-blended per texel over the opaque
+    // scene (terrain, water, the limb glow) with depth writes
+    // off, depth-tested so the planet hides the far side of the shell.
+    material.unlit = true;
+    material.opacity = 0.999f;
+    material.baseColorTexture = cloudTexture_;
+    // Outward shell seen from outside at every view that draws it (globe and
+    // orbit keep the eye above the shell): the declared winding culls the
+    // far hemisphere per triangle where culling applies at all.
     material.frontFaceWinding = macroShellFrontFaceWinding;
     cloudLayerMaterials_.push_back(material);
     cloudLayerActive_ = true;
@@ -2043,8 +2172,8 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // night side keeps a faint blue airglow - a lit ring on one side of the
     // planet and a dark one on the other reads as a real sunlit atmosphere
     // (the uniform ring read as a painted halo).
-    constexpr std::uint32_t kSegments = 96;
-    constexpr std::uint32_t kBands = 22;
+    constexpr std::uint32_t kSegments = 128;
+    constexpr std::uint32_t kBands = 24;
     // Latitude span of the annulus (the fade band below starts at 50
     // degrees from the pole = 40 degrees of latitude).
     constexpr double kAnnulusLatitudeRadians = 0.6981317007977318; // 40 deg
@@ -2063,12 +2192,12 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // stopping a few degrees short with a visible step.
     constexpr double kLimbFadeStartRadians = 0.8726646259971648; // 50 deg
     constexpr double kLimbFadeEndRadians = 1.5707963267948966;  // 90 deg (the annulus rim)
-    // Fade exponent: 1.25 keeps a dense glow past half the ring and eases
-    // out to zero exactly at the annulus rim, so the ring's outer boundary
-    // dissolves into space over the last stretch instead of ending in a
-    // perceptible step (a steeper exponent steepens the final approach into
-    // a hard edge).
-    constexpr double kLimbFadeExponent = 1.25;
+    // Fade exponent: 1.6 concentrates the glow against the terrain
+    // silhouette the way the limb's real exponential air column does - a
+    // dense bright inner line falling off fast, instead of the flat wide
+    // band a lower exponent paints (a fat uniform ring reads as a glass
+    // marble coating; the thin bright one reads as air).
+    constexpr double kLimbFadeExponent = 1.6;
     // Day/night azimuth falloff: full glow toward the sun, a distinct faint
     // airglow residue on the night side. The floor is high enough that the
     // night limb still carries a visible thin ring - from space a real
@@ -2082,19 +2211,47 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
     // way sunrise/sunset light does). The warm band rides the azimuthal
     // gradient - azimuth 0 is the sunward limb (see updateAtmosphereShell),
     // so the warmth peaks where cos(azimuth) crosses zero and melts back to
-    // the plain horizon hue well inside the day side. The strength stays a
-    // minority share of the horizon hue: a full-strength warm ring reads as
-    // a painted salmon halo from orbit, while a subtle one reads as sunset
-    // light on the thin air the ring depicts.
-    const planet::Vec3 warmTint{1.0, 0.52, 0.26};
-    constexpr double kWarmStrength = 0.35;
-    constexpr double kWarmBandWidth = 0.35;
+    // the plain horizon hue well inside the day side. The strength is the
+    // majority share of the horizon hue through the band's core: orbital
+    // photography shows a striking orange-red arc where the terminator
+    // meets the limb, while a subtle-only tint reads as a faint salmon
+    // smear; the band stays NARROW so the day side keeps its blue.
+    const planet::Vec3 warmTint{1.0, 0.42, 0.18};
+    constexpr double kWarmStrength = 0.45;
+    constexpr double kWarmBandWidth = 0.20;
+    // Forward-scattering crescent: the air glows brightest around the sun's
+    // limb - aerosols and air molecules scatter strongly forward, so the
+    // ring carries a bright arc on the sunward side that eases off around
+    // the disc instead of a uniform band (the azimuthal day gradient alone
+    // saturates flat at 1 through the whole sun side). The gain rides on top
+    // of the day factor as a halving-weighted arc - half again as bright at
+    // the sunward limb, easing through the sun side the way a crescent
+    // photographs - and the HDR pipeline (exposure + tone mapping)
+    // compresses the overshoot the way film does a bright rim.
+    constexpr double kForwardScatterGain = 0.72;
+    // Radial Rayleigh hue: the dense air at the ring's inner edge reads the
+    // horizon color, while the thinning air toward the rim scatters a paler,
+    // washed-out blue (the deepest optical paths redden into the warm band
+    // above; the shallow ones desaturate toward white). A single flat hue
+    // through the annulus reads as a painted ring; the two-tone ramp reads
+    // as a stratified air column.
+    constexpr double kRimPaleFraction = 0.48;
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
     vertices.reserve((kSegments + 1u) * (kBands + 1u));
     indices.reserve(kSegments * kBands * 6u);
-    const planet::Vec3 limbColor = planet::skyGradientColor(params_, 0.0); // the horizon band color
+    // The dense air at the silhouette reads the MID-sky blue (the deeper
+    // scattering color a sight line through the thickest air returns), not
+    // the pale horizon band - an inner edge keyed to the horizon color went
+    // near-white with the pale horizon palette and read as a thin white
+    // ring instead of glowing air. The base hue keeps a measured white
+    // fraction: the full mid-sky saturation minified into a few-pixel ring
+    // photographs as a hard painted band, while the slightly lifted tone
+    // reads as dense air over the terrain edge.
+    const planet::Vec3 midSky = planet::skyGradientColor(params_, 0.30);
+    const planet::Vec3 limbColor{planet::mix(midSky.x, 1.0, 0.16),
+        planet::mix(midSky.y, 1.0, 0.16), planet::mix(midSky.z, 1.0, 0.16)};
     for (std::uint32_t band = 0; band <= kBands; ++band)
     {
         const double latitude = kAnnulusLatitudeRadians * (static_cast<double>(band) / static_cast<double>(kBands));
@@ -2112,18 +2269,34 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
             const glm::dvec3 direction(std::cos(azimuth) * cosLatitude, sinLatitude, std::sin(azimuth) * cosLatitude);
             const double day = planet::mix(kLimbNightFloor, 1.0,
                 planet::smoothstep(-0.85, 0.45, std::cos(azimuth)));
+            // Forward-scattering arc (see kForwardScatterGain): brightest at
+            // the sunward limb (azimuth 0), easing around the day side.
+            const double forward = 1.0
+                + kForwardScatterGain * std::pow(planet::clamp01(std::cos(azimuth)), 2.0);
             const double terminatorBand = 1.0 - planet::smoothstep(0.0, kWarmBandWidth, std::abs(std::cos(azimuth)));
+            // Radial Rayleigh ramp (see kRimPaleFraction): fade is the
+            // annulus's own air-column weight (1 at the terrain silhouette,
+            // 0 at the rim), so 1 - fade measures how far out through the
+            // thinning air the vertex sits.
+            const planet::Vec3 rimTint{
+                planet::mix(limbColor.x, planet::mix(limbColor.x, 1.0, 0.55), kRimPaleFraction * (1.0 - fade)),
+                planet::mix(limbColor.y, planet::mix(limbColor.y, 1.0, 0.55), kRimPaleFraction * (1.0 - fade)),
+                planet::mix(limbColor.z, planet::mix(limbColor.z, 1.0, 0.55), kRimPaleFraction * (1.0 - fade))};
             const planet::Vec3 limbTint{
-                planet::mix(limbColor.x, warmTint.x, kWarmStrength * terminatorBand),
-                planet::mix(limbColor.y, warmTint.y, kWarmStrength * terminatorBand),
-                planet::mix(limbColor.z, warmTint.z, kWarmStrength * terminatorBand)};
+                planet::mix(rimTint.x, warmTint.x, kWarmStrength * terminatorBand),
+                planet::mix(rimTint.y, warmTint.y, kWarmStrength * terminatorBand),
+                planet::mix(rimTint.z, warmTint.z, kWarmStrength * terminatorBand)};
             planet::PlanetVertex vertex{};
             vertex.position[0] = static_cast<float>(direction.x);
             vertex.position[1] = static_cast<float>(direction.y);
             vertex.position[2] = static_cast<float>(direction.z);
-            vertex.color[0] = static_cast<float>(limbTint.x * fade * day);
-            vertex.color[1] = static_cast<float>(limbTint.y * fade * day);
-            vertex.color[2] = static_cast<float>(limbTint.z * fade * day);
+            // The limb's own brightness lift: the visible ring is a thin
+            // sliver of the annulus, and a line-brightness glow there is what
+            // orbital photography actually shows.
+            constexpr double kLimbBrightness = 1.5;
+            vertex.color[0] = static_cast<float>(limbTint.x * fade * day * forward * kLimbBrightness);
+            vertex.color[1] = static_cast<float>(limbTint.y * fade * day * forward * kLimbBrightness);
+            vertex.color[2] = static_cast<float>(limbTint.z * fade * day * forward * kLimbBrightness);
             vertices.push_back(vertex);
         }
     }
@@ -2135,7 +2308,9 @@ void PlanetChunkRenderer::ensureAtmosphereShell()
             const std::uint32_t b = a + 1u;
             const std::uint32_t c = a + (kSegments + 1u);
             const std::uint32_t d = c + 1u;
-            indices.insert(indices.end(), {a, b, c, b, d, c});
+            // Outward winding for the +1 convention: (a, c, b) / (b, c, d)
+            // (rows climb with latitude, columns advance with azimuth).
+            indices.insert(indices.end(), {a, c, b, b, c, d});
         }
     }
 
@@ -2180,9 +2355,10 @@ void PlanetChunkRenderer::updateAtmosphereShell(const glm::dvec3 &eyePlanetLocal
 
     // Rotate the hemisphere's pole onto the eye direction and scale it to
     // the limb glow's visual radius: a quarter of the configured air column
-    // above the surface, clamped to 2-8% of the radius so the band hugs the
-    // horizon the way atmospheric density does instead of inflating with a
-    // deep showcase atmosphere. Translate to the planet's world center.
+    // above the surface, clamped to 1.5-3.5% of the radius so the band hugs
+    // the surface the way atmospheric density does - a fat glow ring reads
+    // as a glass marble coating, while the real limb photographs as a thin
+    // bright line. Translate to the planet's world center.
     // The shell's local +X lands on the SUNWARD tangent: the built-in
     // azimuthal day gradient (see ensureAtmosphereShell) then glows on the
     // sun side of the ring and fades on the night side. When the sun is
@@ -2203,8 +2379,8 @@ void PlanetChunkRenderer::updateAtmosphereShell(const glm::dvec3 &eyePlanetLocal
     tangent = glm::normalize(tangent);
     const glm::dvec3 third = glm::cross(tangent, eyeDirection);
     const glm::dmat3 rotation(tangent, eyeDirection, third);
-    const double glowHeight = glm::clamp(0.25 * std::max(1.0, params_.atmosphereHeightMeters),
-        0.02 * params_.radiusMeters, 0.08 * params_.radiusMeters);
+    const double glowHeight = glm::clamp(0.09 * std::max(1.0, params_.atmosphereHeightMeters),
+        0.025 * params_.radiusMeters, 0.05 * params_.radiusMeters);
     const double shellRadius = params_.radiusMeters + glowHeight;
     atmosphereShellTransform_ = glm::translate(glm::mat4(1.0f),
             glm::vec3(static_cast<float>(params_.centerMeters[0]), static_cast<float>(params_.centerMeters[1]),
@@ -2478,6 +2654,42 @@ void PlanetChunkRenderer::ensureSunDisc()
     renderer::MeshMaterial &material = sunDiscMaterials_.emplace_back();
     material.unlit = true;
     material.depthWrite = false; // backdrop layer; clouds and terrain overwrite it
+    // Radial halo texture: the alpha channel carries the core-to-rim falloff
+    // (the profile the vertex colors used to bake), the RGB stays white for
+    // the per-frame baseColor tint. The draw rides the transparent route
+    // (opacity just under 1): every pixel then blends at opacity x texel
+    // alpha, so the disc FADES into the sky dome behind it instead of
+    // painting a dark rim ring where the vertex colors used to reach zero.
+    constexpr std::uint32_t kHaloSize = 128;
+    std::vector<std::uint8_t> haloPixels(static_cast<std::size_t>(kHaloSize) * kHaloSize * 4u, 255u);
+    for (std::uint32_t y = 0; y < kHaloSize; ++y)
+    {
+        for (std::uint32_t x = 0; x < kHaloSize; ++x)
+        {
+            const double dx = (static_cast<double>(x) + 0.5) / kHaloSize * 2.0 - 1.0;
+            const double dy = (static_cast<double>(y) + 0.5) / kHaloSize * 2.0 - 1.0;
+            const double r = std::min(1.0, std::sqrt(dx * dx + dy * dy));
+            // The old ring profile: full brightness through the inner ~55%
+            // (the core stays the sun's own disc), then a smooth 1.7-power
+            // fall to zero at the rim.
+            const double falloff = std::pow(1.0 - r, 1.7);
+            const std::size_t index = (static_cast<std::size_t>(y) * kHaloSize + x) * 4u + 3u;
+            haloPixels[index] = static_cast<std::uint8_t>(std::clamp(falloff, 0.0, 1.0) * 255.0);
+        }
+    }
+    renderer::TextureDescription haloDescription;
+    haloDescription.width = kHaloSize;
+    haloDescription.height = kHaloSize;
+    haloDescription.pixels = haloPixels.data();
+    haloDescription.filter = renderer::TextureFilter::Linear;
+    haloDescription.address = renderer::TextureAddress::ClampEdge;
+    renderer::RenderError haloError = renderer::RenderError::None;
+    sunHaloTexture_ = renderer_->createTexture(renderer_->self, rendererHandle_, &haloDescription, &haloError);
+    if (sunHaloTexture_ != renderer::invalidTexture)
+    {
+        material.baseColorTexture = sunHaloTexture_;
+        material.opacity = 0.999f;
+    }
 }
 
 void PlanetChunkRenderer::updateSunDisc(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &up,
@@ -2732,6 +2944,250 @@ void PlanetChunkRenderer::updateAurora(const glm::dvec3 &eyePlanetLocal)
     }
 }
 
+void PlanetChunkRenderer::ensureCirrusLayer(const glm::dvec3 &sunDirection)
+{
+    if (!params_.cirrusEnabled || params_.cirrusStrength <= 0.0 || params_.cirrusCoverageAmount <= 0.0
+        || renderer_ == nullptr || rendererHandle_ == renderer::invalidRenderer
+        || cirrusLayer_ != renderer::invalidMesh)
+    {
+        return;
+    }
+
+    // Lat-long grid on the cirrus shell (datum radius + the deck's altitude).
+    // The streak field band-limits at the grid's own spacing (the same
+    // convention the cumulus shell's coverage sampling uses), so the veil
+    // the mesh resolves keeps its wisps at the resolution the grid can
+    // represent instead of aliasing them into speckle. The BAND count rules
+    // the streaks' cross-streak scale: 160 latitude rows put a row every
+    // ~1.2 km on the 60 km showcase (under a tenth of the streak width, so
+    // the filaments curve smoothly at capture resolutions - a coarser grid
+    // photographed the veil as blocks a dozen pixels wide). The quads stay
+    // cheap - the deck is a translucent veil, not a bank outline, so it
+    // needs none of the cumulus shell's contour-walk machinery.
+    constexpr std::uint32_t kSegments = 320;
+    constexpr std::uint32_t kBands = 160;
+    // Cirrus belt: the deck rides the mid-latitude westerlies and the
+    // subtropical jets, so the mesh spans the extrapolar latitudes; the
+    // poles stay clear (cirrus photographs there are rare, and the aurora
+    // rings own the polar limb anyway).
+    constexpr double kBeltLowRadians = -1.08;  // ~-62 deg
+    constexpr double kBeltHighRadians = 1.08; // ~+62 deg
+    // A quad renders only where one of its four corners carries this much
+    // baked alpha (streak intensity times the day-side gate); quads below
+    // the gate composite to nothing and are skipped whole.
+    // The floor sits well above zero: the veil is a TRANSLUCENT draw whose
+    // every covered supersample pays a texel fetch and a framebuffer blend,
+    // so the faint penumbral wisps around the streak cores cost frame time
+    // without ever reading as cloud - the strong streaks alone carry the
+    // deck.
+    constexpr double kQuadGateFloor = 0.06;
+    // The intensity texture's own resolution is DECOUPLED from the mesh grid
+    // (512 x 512): the veil's alpha interpolates through the texture per
+    // sample, so the streak definition comes from the texture's texels - a
+    // texture coupled to the mesh's rows quantized the wisps into
+    // two-texel blocks at capture resolutions. The mesh's own rows carry
+    // only the geometry (a smooth sheet), the texture carries the deck.
+    constexpr std::uint32_t kAlphaWidth = 512;
+    constexpr std::uint32_t kAlphaHeight = 512;
+
+    const double shellRadius = params_.radiusMeters + params_.cirrusAltitudeMeters;
+    const double vertexSpacing = glm::two_pi<double>() * shellRadius / static_cast<double>(kSegments);
+    const double bandLimit = 2.0 * vertexSpacing;
+
+    // The deck's intensity field, shared by the alpha texture and the quad
+    // gate: streak weight x day-side gate. The gate keeps the veil over the
+    // sunlit planet and lets it fall to nothing through the terminator into
+    // the night - a night-side cirrus wisp would only alpha-darken the dark
+    // limb behind it (the aurora's night gate works the same inequality in
+    // reverse). The gate is baked against the run's fixed sun direction.
+    const glm::dvec3 sun = glm::length(sunDirection) > 1.0e-9 ? glm::normalize(sunDirection) : glm::dvec3(0.0);
+    const auto intensityAt = [&](double latitude, double azimuth) -> double
+    {
+        const double cosLatitude = std::cos(latitude);
+        const planet::Vec3 direction{std::cos(azimuth) * cosLatitude, std::sin(latitude),
+            std::sin(azimuth) * cosLatitude};
+        const double streak = planet::cirrusStreakWeight(params_, direction, bandLimit);
+        const double dayGate = glm::length(sun) > 1.0e-9
+            ? planet::smoothstep(-0.08, 0.20, static_cast<double>(planet::dot(direction,
+                planet::Vec3{sun.x, sun.y, sun.z})))
+            : 1.0;
+        return streak * dayGate;
+    };
+
+    // Two evaluations of the one intensity field, each at the resolution of
+    // its own consumer: the mesh's corner grid gates the quads at the mesh's
+    // own band/segment coordinates, and the alpha texture fills at its own
+    // finer rows/columns (a row per 512th of the belt, a column per 512th
+    // of the azimuth) so the sampled streaks interpolate smoothly instead
+    // of quantizing to the mesh's coarser rows.
+    std::vector<float> cornerIntensities(static_cast<std::size_t>(kSegments + 1u) * (kBands + 1u));
+    for (std::uint32_t band = 0; band <= kBands; ++band)
+    {
+        const double latitude = kBeltLowRadians
+            + (kBeltHighRadians - kBeltLowRadians) * (static_cast<double>(band) / static_cast<double>(kBands));
+        for (std::uint32_t segment = 0; segment <= kSegments; ++segment)
+        {
+            const double azimuth
+                = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(kSegments);
+            cornerIntensities[static_cast<std::size_t>(band) * (kSegments + 1u) + segment]
+                = static_cast<float>(intensityAt(latitude, azimuth));
+        }
+    }
+    std::vector<std::uint8_t> alphaPixels(
+        static_cast<std::size_t>(kAlphaWidth) * kAlphaHeight * 4u, 255u);
+    for (std::uint32_t row = 0; row < kAlphaHeight; ++row)
+    {
+        const double latitude = kBeltLowRadians
+            + (kBeltHighRadians - kBeltLowRadians)
+                * (static_cast<double>(row) / static_cast<double>(kAlphaHeight - 1u));
+        for (std::uint32_t column = 0; column < kAlphaWidth; ++column)
+        {
+            const double azimuth
+                = glm::two_pi<double>() * static_cast<double>(column) / static_cast<double>(kAlphaWidth);
+            const double intensity = intensityAt(latitude, azimuth);
+            const std::size_t index
+                = (static_cast<std::size_t>(row) * kAlphaWidth + column) * 4u;
+            alphaPixels[index + 3] = static_cast<std::uint8_t>(std::clamp(intensity, 0.0, 1.0) * 255.0);
+        }
+        // The last texture column mirrors the first: the mesh's seam vertex
+        // (u = 1, azimuth 0) must not read a different intensity than u = 0
+        // (the field is periodic in azimuth, so the wrap is exact).
+        alphaPixels[(static_cast<std::size_t>(row) * kAlphaWidth + kAlphaWidth - 1u) * 4u + 3u]
+            = alphaPixels[static_cast<std::size_t>(row) * kAlphaWidth * 4u + 3u];
+    }
+
+    std::vector<planet::PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    vertices.reserve(static_cast<std::size_t>(kSegments + 1u) * (kBands + 1u));
+    indices.reserve(static_cast<std::size_t>(kSegments) * kBands * 6u);
+    for (std::uint32_t band = 0; band <= kBands; ++band)
+    {
+        const double latitude = kBeltLowRadians
+            + (kBeltHighRadians - kBeltLowRadians) * (static_cast<double>(band) / static_cast<double>(kBands));
+        const double cosLatitude = std::cos(latitude);
+        const double sinLatitude = std::sin(latitude);
+        for (std::uint32_t segment = 0; segment <= kSegments; ++segment)
+        {
+            const double azimuth
+                = glm::two_pi<double>() * static_cast<double>(segment) / static_cast<double>(kSegments);
+            const planet::Vec3 direction{std::cos(azimuth) * cosLatitude, sinLatitude,
+                std::sin(azimuth) * cosLatitude};
+            planet::PlanetVertex vertex{}; // value-init: untouched uv pair reads as finite zeros
+            vertex.position[0] = static_cast<float>(direction.x * shellRadius);
+            vertex.position[1] = static_cast<float>(direction.y * shellRadius);
+            vertex.position[2] = static_cast<float>(direction.z * shellRadius);
+            vertex.normal[0]   = static_cast<float>(direction.x);
+            vertex.normal[1]   = static_cast<float>(direction.y);
+            vertex.normal[2]   = static_cast<float>(direction.z);
+            // Chroma only - the intensity field rides the alpha texture, so
+            // the blend carries the veil's brightness (the composite
+            // multiplies the same way: chroma x strength x opacity x
+            // intensity). Ice-crystal decks read slightly cool white.
+            vertex.color[0] = 1.0f;
+            vertex.color[1] = 0.99f;
+            vertex.color[2] = 0.97f;
+            // UV spans the belt linearly: the texture's rows own the deck's
+            // cross-streak resolution, the mesh's rows only place the sheet.
+            vertex.uv[0]    = static_cast<float>(static_cast<double>(segment) / static_cast<double>(kSegments));
+            vertex.uv[1]    = static_cast<float>(
+                (latitude - kBeltLowRadians) / (kBeltHighRadians - kBeltLowRadians));
+            vertices.push_back(vertex);
+        }
+    }
+    for (std::uint32_t band = 0; band < kBands; ++band)
+    {
+        for (std::uint32_t segment = 0; segment < kSegments; ++segment)
+        {
+            const auto cornerIntensity = [&](std::uint32_t row, std::uint32_t column)
+            {
+                const std::size_t index = static_cast<std::size_t>(row) * (kSegments + 1u) + column;
+                return cornerIntensities[index];
+            };
+            const float maxIntensity = std::max(std::max(cornerIntensity(band, segment),
+                                                 cornerIntensity(band, segment + 1u)),
+                std::max(cornerIntensity(band + 1u, segment), cornerIntensity(band + 1u, segment + 1u)));
+            if (maxIntensity <= kQuadGateFloor)
+            {
+                continue; // clear sky: nothing to composite
+            }
+            const std::uint32_t a = band * (kSegments + 1u) + segment;
+            const std::uint32_t b = a + 1u;
+            const std::uint32_t c = a + (kSegments + 1u);
+            const std::uint32_t d = c + 1u;
+            // Outward winding for the +1 convention: (a, c, b) / (b, c, d)
+            // (rows climb with latitude, columns advance with azimuth).
+            indices.insert(indices.end(), {a, c, b, b, c, d});
+        }
+    }
+    if (indices.empty())
+    {
+        return; // the configured coverage keeps the whole belt clear
+    }
+
+    cirrusLayer_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
+    if (cirrusLayer_ == renderer::invalidMesh)
+    {
+        return;
+    }
+    // The veil's intensity field (streak weight x day gate) rides the alpha
+    // channel; the transparent route multiplies the material's opacity by
+    // the texel alpha, so the night side composites to nothing instead of
+    // alpha-darkening the limb behind it.
+    renderer::TextureDescription alphaDescription;
+    alphaDescription.width = kAlphaWidth;
+    alphaDescription.height = kAlphaHeight;
+    alphaDescription.pixels = alphaPixels.data();
+    alphaDescription.filter = renderer::TextureFilter::Linear;
+    alphaDescription.address = renderer::TextureAddress::ClampEdge;
+    renderer::RenderError alphaError = renderer::RenderError::None;
+    cirrusTexture_ = renderer_->createTexture(renderer_->self, rendererHandle_, &alphaDescription, &alphaError);
+    // Planet-local shell vertices: the placement mirrors the cloud shell
+    // (planet-local geometry shifted by the planet's center offset); the
+    // mesh is static after this (the day gate is baked against the run's
+    // fixed sun direction).
+    cirrusLayerTransform_ = glm::translate(glm::mat4(1.0f),
+        glm::vec3(static_cast<float>(params_.centerMeters[0]), static_cast<float>(params_.centerMeters[1]),
+            static_cast<float>(params_.centerMeters[2])));
+    renderer::MeshMaterial &material = cirrusLayerMaterials_.emplace_back();
+    // Unlit translucent veil: the vertex colors carry the deck's cool-white
+    // chroma, the intensity field rides the alpha texture, and the material
+    // opacity caps the composite's strongest filament. Opacity below 1
+    // routes the draw into the renderer's transparent pass: alpha-blended
+    // over the opaque scene (terrain, water, cumulus banks) with depth
+    // writes off, depth-tested so the planet hides the far side of the
+    // shell and the cumulus banks occlude the veil behind them.
+    material.unlit = true;
+    material.opacity = 0.70f;
+    material.baseColorTexture = cirrusTexture_;
+    material.baseColor[0] = static_cast<float>(params_.cirrusStrength);
+    material.baseColor[1] = static_cast<float>(params_.cirrusStrength);
+    material.baseColor[2] = static_cast<float>(params_.cirrusStrength);
+    // Outward shell seen from outside at every view that draws it (globe and
+    // orbit keep the eye above the veil): the declared winding culls the
+    // far hemisphere per triangle. The lat-long grid's rows climb with
+    // latitude and its columns advance with azimuth, so the outward-wound
+    // triangle order is (a, c, b) / (b, c, d) - the reverse of the sky
+    // deck's rows, which run pole-to-pole the other way.
+    material.frontFaceWinding = macroShellFrontFaceWinding;
+    cirrusLayerActive_ = true;
+}
+
+void PlanetChunkRenderer::updateCirrusLayer(const glm::dvec3 &eyePlanetLocal)
+{
+    cirrusLayerActive_ = cirrusLayer_ != renderer::invalidMesh && !cirrusLayerMaterials_.empty();
+    if (!cirrusLayerActive_)
+    {
+        return;
+    }
+    // Space-view backdrop (see the header note): inside the air the sky deck
+    // owns the whole sky, and the veil's own shell would smear through it.
+    const double eyeAltitude = glm::length(eyePlanetLocal) - params_.radiusMeters;
+    if (planet::atmosphereWeight(params_, eyeAltitude) > 0.0)
+    {
+        cirrusLayerActive_ = false;
+    }
+}
+
 void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &sunDirection)
 {
     if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0 || renderer_ == nullptr
@@ -2740,56 +3196,9 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
         return;
     }
 
-    // The deck is built on the unit ball in the sky dome's INITIAL frame
-    // (its +Y on the eye's local up, so band latitude equals elevation
-    // angle); the dome's per-frame update rotates it with the sky and scales
-    // it inside the dome's radius. A quad guard above the horizon keeps the
-    // contour off the rim, where a deck edge would paint a hard line across
-    // the haze band; the guard band itself FADES the deck into the sky
-    // gradient (see buildCoverageShellMesh), so the lower boundary reads as
-    // thinning cloud instead of a straight cut. The coverage field is
-    // sampled along the frame-rotated directions (from the planet center,
-    // which for a standing eye differs from the eye-local sky direction by
-    // well under the field's feature size).
-    // Grid resolution: fine enough that the deck's contoured edges stay
-    // curved at eye level - the deck spans the whole upper hemisphere, and a
-    // standing camera resolves roughly half a degree of azimuth per pixel
-    // pair at 1920x1080; the 0.56-degree cells (with the contour walk's 6x6
-    // subdivision of near-boundary quads) keep bank outlines smooth past
-    // that scale. Coarser grids terrace the smoothed coverage into grid-row
-    // plateaus, and the floor cutout follows the terraces: banks read as
-    // stacked horizontal planks. The grid is ISOTROPIC in angle - segments
-    // per degree of azimuth equal bands per degree of latitude
-    // (640/360 ~ 160/90): an anisotropic grid smears the banks along the
-    // azimuth rows through the coverage smoothing.
-    constexpr std::uint32_t kSegments = 640;
-    constexpr std::uint32_t kBands = 160;
-    // The deck's coverage floor sits BELOW the visual cloud edge on purpose:
-    // quads between the floor and the floor + haze width carry the thinning
-    // fringe (their color fades from the sky gradient into the cloud tone),
-    // so the deck dissolves into the sky instead of cutting off at a polygon
-    // boundary. The opaque cutout then happens where quads are already
-    // nearly sky-colored and its silhouette cannot read. With the widened
-    // threshold band (see coverageSoftnessScale) the sampled field ramps
-    // smoothly across this band, so the fringe's low end stays connected to
-    // the bank bodies instead of shedding isolated flecks.
-    constexpr double kCoverageFloor = 0.22;
-    // The guard spans the low sky band where the deck's grid cells project
-    // at extreme grazing angles (a 0.7-degree cell is a couple of pixels
-    // tall but tens of pixels wide at 10 degrees of elevation), so contour
-    // detail there reads as horizontal smears. The deck thins into the sky
-    // gradient over the band instead - the same place the atmosphere's own
-    // haze swallows distant detail, so the read stays natural.
-    constexpr double kHorizonGuardRadians = 0.13962634015954636;  // 8 deg above the horizon
-    constexpr double kGuardFadeRadians = 0.24434609527920614;     // 14 deg of thinning cloud above it
-
-    if (cloudField_ == nullptr)
-    {
-        cloudField_ = std::make_unique<planet::CloudField>(params_);
-    }
-
-    // Initial dome frame: +Y onto the spawn up (same construction as the
-    // dome's per-frame rotation).
+    // The dome's INITIAL frame first: the deck mesh, its UVs and its bake
+    // all live in this frame (see ensureDeckTexture), so the frame basis
+    // must exist before the bake runs.
     const glm::dvec3 upNormalized = glm::length(eyePlanetLocal) > 1.0e-9
         ? glm::normalize(eyePlanetLocal)
         : glm::dvec3(0.0, 1.0, 0.0);
@@ -2800,64 +3209,96 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     }
     tangent = glm::normalize(tangent);
     const glm::dvec3 third = glm::cross(tangent, upNormalized);
+    const glm::dmat3 domeToPlanet(tangent, upNormalized, third);
 
-    const double frameRadius = std::max(1.0, params_.radiusMeters);
-    const double vertexSpacing = glm::two_pi<double>() * frameRadius / static_cast<double>(kSegments);
-    // The sun direction for the baked bank shading: the deck's frame maps
-    // the world sun into dome-local coordinates (the same frame the coverage
-    // sampling uses below, so shading and coverage follow one geometry).
-    const glm::dvec3 sunLocal = glm::length(sunDirection) > 1.0e-9
-        ? glm::inverse(glm::dmat3(tangent, upNormalized, third)) * glm::normalize(sunDirection)
-        : glm::dvec3(0.0);
-    const planet::Vec3 deckSun{sunLocal.x, sunLocal.y, sunLocal.z};
+    ensureDeckTexture(sunDirection, domeToPlanet);
+    if (deckTexture_ == renderer::invalidTexture || deckTexturePixels_.empty())
+    {
+        return;
+    }
 
-    CoverageShellSpec spec;
-    spec.segments = kSegments;
-    spec.bands = kBands;
-    spec.latitudeLowRadians = 0.0;
-    spec.latitudeHighRadians = glm::pi<double>() * 0.5;
-    spec.shellRadiusMeters = 1.0; // scaled per frame with the dome
-    // Contour discipline for the deck: the field band-limits at twice the
-    // vertex spacing (octaves the grid cannot represent fade out) and four
-    // arc-isotropic smoothing rounds round the inclusion boundary, so the
-    // deck's outline stays curved at the grid scale. The coverage threshold
-    // band widens six-fold (see CoverageShellSpec::coverageSoftnessScale):
-    // at the deck's viewing distance one grid cell spans a dozen pixels, and
-    // the configured band maps to a spatial transition only a couple of
-    // samples wide - without the widening the sampled field is near-binary
-    // speckle and the contoured cutout terraces into stair steps and
-    // sawtooth fringe rows no smoothing can repair.
-    spec.lowPassCutoffMeters = 2.0 * vertexSpacing;
-    spec.coverageSoftnessScale = 6.0;
-    spec.coverageFloor = kCoverageFloor;
-    spec.smoothingPasses = 4;
-    // No per-quad floor jitter on the deck (unlike the macro shell): the
-    // jittered threshold is per-QUAD, so two quads sharing a grid edge each
-    // interpolate their own crossing position on that edge and the polygons
-    // part by the threshold difference - hairline sky notches along every
-    // bank boundary, glaring at ground-view quad sizes. The sub-quad contour
-    // walk already curves the outlines (bilinear isolines at 4x4
-    // sub-resolution), which is the stair-breaking the jitter was for.
-    spec.floorJitter = 0.0;
-    spec.floorJitterSeed = 0xC10D5C11ull;
-    // The deck's cells span a dozen pixels at eye level, so merged interior
-    // rectangles would read as blocky grid-aligned slabs (see
-    // CoverageShellSpec::mergeInterior); the deck keeps per-quad
-    // tessellation.
-    spec.mergeInterior = false;
-    spec.minQuadLatitudeRadians = kHorizonGuardRadians;
-    spec.guardFadeRadians = kGuardFadeRadians;
-    spec.guardFloorLift = 0.12; // banks thin into sparse fragments through the guard band
-    spec.hazeEdgeBlend = true;
-    spec.hazeEdgeWidth = 0.55;
-    spec.frame = glm::dmat3(tangent, upNormalized, third);
-    spec.sunDirection = glm::length(sunLocal) > 1.0e-9 ? &deckSun : nullptr;
+    // The deck is built on the unit ball in the sky dome's INITIAL frame
+    // (its +Y on the eye's local up, so band latitude equals elevation
+    // angle); the dome's per-frame update rotates it with the sky and
+    // scales it inside the dome's radius. The UVs are the mesh's own
+    // (segment, band) grid - the same grid the bake's texels follow - so
+    // the per-pixel alpha, wisp fringes and cyclone arms of the bake land
+    // on the sky at their own scale over well-conditioned UVs. A quad
+    // guard above the horizon keeps the mesh off the rim band, where the
+    // atmosphere's own haze swallows the detail anyway.
+    //
+    // Grid resolution: 512x128 over the hemisphere keeps a cell at ~0.70
+    // degrees - under the half-degree a 1920-wide frame resolves at eye
+    // level, so the geometry never limits the deck; the structure comes
+    // from the texture per pixel, and the grid only places the sheet.
+    constexpr std::uint32_t kSegments = 512;
+    constexpr std::uint32_t kBands = 128;
+    constexpr double kHorizonGuardRadians = 0.03490658503988659; // 2 deg above the horizon
+    constexpr double kCornerGate = 0.03;
 
     std::vector<planet::PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
-    if (!buildCoverageShellMesh(*cloudField_, params_, spec, vertices, indices))
+    vertices.reserve(static_cast<std::size_t>(kSegments + 1u) * (kBands + 1u));
+    for (std::uint32_t band = 0; band <= kBands; ++band)
     {
-        return;
+        const double latitude = kHorizonGuardRadians
+            + (glm::pi<double>() * 0.5 - kHorizonGuardRadians)
+                * (static_cast<double>(band) / static_cast<double>(kBands));
+        const double cosLatitude = std::cos(latitude);
+        const double sinLatitude = std::sin(latitude);
+        for (std::uint32_t segment = 0; segment <= kSegments; ++segment)
+        {
+            const double azimuth = glm::two_pi<double>() * static_cast<double>(segment)
+                / static_cast<double>(kSegments);
+            const glm::dvec3 domeDirection(std::cos(azimuth) * cosLatitude, sinLatitude,
+                std::sin(azimuth) * cosLatitude);
+            planet::PlanetVertex vertex{};
+            vertex.position[0] = static_cast<float>(domeDirection.x);
+            vertex.position[1] = static_cast<float>(domeDirection.y);
+            vertex.position[2] = static_cast<float>(domeDirection.z);
+            vertex.normal[0] = static_cast<float>(domeDirection.x);
+            vertex.normal[1] = static_cast<float>(domeDirection.y);
+            vertex.normal[2] = static_cast<float>(domeDirection.z);
+            // Neutral chroma: the bake's RGB carries the ground-sky lit
+            // response, the dome's per-frame tint rides the material
+            // baseColor, and the deck composites per texel over the dome
+            // behind it (the space shell's own route).
+            vertex.color[0] = 1.0f;
+            vertex.color[1] = 1.0f;
+            vertex.color[2] = 1.0f;
+            // Grid-aligned UVs (see ensureDeckTexture): texel columns
+            // follow the azimuth stations, rows the latitude span.
+            vertex.uv[0] = static_cast<float>(static_cast<double>(segment) / static_cast<double>(kSegments));
+            vertex.uv[1] = static_cast<float>(static_cast<double>(band) / static_cast<double>(kBands));
+            vertices.push_back(vertex);
+        }
+    }
+    for (std::uint32_t band = 0; band < kBands; ++band)
+    {
+        for (std::uint32_t segment = 0; segment < kSegments; ++segment)
+        {
+            const auto cornerAlpha = [&](std::uint32_t row, std::uint32_t column)
+            {
+                const double u = static_cast<double>(column) / static_cast<double>(kSegments);
+                const double v = static_cast<double>(row) / static_cast<double>(kBands);
+                return cloudBakeAlpha(deckTexturePixels_, deckTextureWidth_, deckTextureHeight_, u, v);
+            };
+            if (std::max(std::max(cornerAlpha(band, segment), cornerAlpha(band, segment + 1u)),
+                    std::max(cornerAlpha(band + 1u, segment), cornerAlpha(band + 1u, segment + 1u)))
+                < kCornerGate)
+            {
+                continue; // clear sky over this cell: nothing to composite
+            }
+            const std::uint32_t a = band * (kSegments + 1u) + segment;
+            const std::uint32_t b = a + 1u;
+            const std::uint32_t c = a + (kSegments + 1u);
+            const std::uint32_t d = c + 1u;
+            indices.insert(indices.end(), {a, c, b, b, c, d});
+        }
+    }
+    if (indices.empty())
+    {
+        return; // the configured coverage keeps the whole sky clear
     }
 
     skyCloudLayer_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
@@ -2867,7 +3308,18 @@ void PlanetChunkRenderer::ensureSkyCloudLayer(const glm::dvec3 &eyePlanetLocal, 
     }
     skyCloudMaterials_.emplace_back();
     renderer::MeshMaterial &material = skyCloudMaterials_.front();
-    material.unlit = true; // the dome's per-frame tint (sun elevation, haze weight) shades it
+    // Unlit translucent deck (the space shell's route, ground-lit): the
+    // bake's RGB carries the ground-sky lit response, its alpha the
+    // per-texel coverage, and the dome's per-frame tint (sun elevation,
+    // haze weight) shades the deck identically to the sky it floats in.
+    // Opacity just under 1 routes the draw into the renderer's transparent
+    // pass - alpha-blended per texel over the dome gradient behind it,
+    // depth-tested against the terrain (banks hide behind ridgelines) with
+    // depth writes off.
+    material.unlit = true;
+    material.depthWrite = false;
+    material.opacity = 0.94f;
+    material.baseColorTexture = deckTexture_;
     skyCloudActive_ = true;
 }
 
@@ -2930,6 +3382,24 @@ void PlanetChunkRenderer::destroyAurora()
     auroraActive_ = false;
 }
 
+void PlanetChunkRenderer::destroyCirrusLayer()
+{
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && cirrusLayer_ != renderer::invalidMesh)
+    {
+        renderer_->destroyMesh(renderer_->self, rendererHandle_, cirrusLayer_);
+    }
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && cirrusTexture_ != renderer::invalidTexture && renderer_->destroyTexture != nullptr)
+    {
+        renderer_->destroyTexture(renderer_->self, rendererHandle_, cirrusTexture_);
+    }
+    cirrusLayer_ = renderer::invalidMesh;
+    cirrusTexture_ = renderer::invalidTexture;
+    cirrusLayerMaterials_.clear();
+    cirrusLayerActive_ = false;
+}
+
 void PlanetChunkRenderer::destroy()
 {
     for (auto &entry : uploadedMeshes_)
@@ -2947,6 +3417,15 @@ void PlanetChunkRenderer::destroy()
     destroySunDisc();
     destroyMoon();
     destroyAurora();
+    destroyCirrusLayer();
+    destroyCloudTexture();
+    destroyWaterDetailTextures();
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && deckTexture_ != renderer::invalidTexture && renderer_->destroyTexture != nullptr)
+    {
+        renderer_->destroyTexture(renderer_->self, rendererHandle_, deckTexture_);
+    }
+    deckTexture_ = renderer::invalidTexture;
     cloudField_.reset();
     drawCommands_.clear();
     planet_ = nullptr;
@@ -2975,6 +3454,12 @@ void PlanetChunkRenderer::destroySunDisc()
         renderer_->destroyMesh(renderer_->self, rendererHandle_, sunDisc_);
     }
     sunDisc_ = renderer::invalidMesh;
+    if (renderer_ != nullptr && rendererHandle_ != renderer::invalidRenderer
+        && sunHaloTexture_ != renderer::invalidTexture && renderer_->destroyTexture != nullptr)
+    {
+        renderer_->destroyTexture(renderer_->self, rendererHandle_, sunHaloTexture_);
+    }
+    sunHaloTexture_ = renderer::invalidTexture;
     sunDiscMaterials_.clear();
     sunDiscActive_ = false;
 }
@@ -3025,7 +3510,9 @@ void PlanetChunkRenderer::ensureSkyDome()
             const std::uint32_t b = a + 1u;
             const std::uint32_t c = a + (kSegments + 1u);
             const std::uint32_t d = c + 1u;
-            indices.insert(indices.end(), {a, b, c, b, d, c});
+            // Outward winding for the +1 convention: (a, c, b) / (b, c, d)
+            // (rows climb with latitude, columns advance with azimuth).
+            indices.insert(indices.end(), {a, c, b, b, c, d});
         }
     }
 
@@ -3042,6 +3529,11 @@ void PlanetChunkRenderer::ensureSkyDome()
     }
     skyDomeMaterials_.emplace_back();
     skyDomeMaterials_.front().unlit = true;
+    // Backdrop contract: the dome never writes depth (the terrain the eye
+    // stands on pushed BEFORE it wins the shared pixels by depth test, and
+    // the later sun disc - which sits at the same backdrop radius - must
+    // not be depth-rejected against the dome's own surface).
+    skyDomeMaterials_.front().depthWrite = false;
 }
 
 bool PlanetChunkRenderer::updateSkyDome(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &up,

@@ -71,16 +71,21 @@ SpeciesCard treeSpeciesFor(Biome biome, std::uint64_t hash)
         case Biome::TemperateRainforest:
             return {0, 0.82f, 11.0, 19.0};
         case Biome::TemperateForest:
-            return mix < 0.75 ? SpeciesCard{0, 0.80f, 9.0, 16.0} : SpeciesCard{1, 1.00f, 8.0, 13.0};
+            // Three-card deal: a stand where two silhouettes out of three
+            // differ reads as a wood, one repeated silhouette reads as a
+            // stamp row (the coast capture's sprinkle-grid tell).
+            return mix < 0.45 ? SpeciesCard{0, 0.80f, 7.0, 17.0}
+                : (mix < 0.80 ? SpeciesCard{1, 1.00f, 6.0, 15.0} : SpeciesCard{3, 0.78f, 5.0, 12.0});
         case Biome::SeasonalForest:
-            return mix < 0.45 ? SpeciesCard{1, 1.00f, 8.0, 14.0}
-                : (mix < 0.80 ? SpeciesCard{0, 0.80f, 8.0, 14.0} : SpeciesCard{3, 0.78f, 6.0, 12.0});
+            return mix < 0.40 ? SpeciesCard{1, 1.00f, 6.0, 16.0}
+                : (mix < 0.75 ? SpeciesCard{0, 0.80f, 7.0, 16.0} : SpeciesCard{3, 0.78f, 5.0, 13.0});
         case Biome::Taiga:
             return {2, 0.52f, 10.0, 17.0};
         case Biome::Savanna:
-            return mix < 0.70 ? SpeciesCard{1, 1.05f, 6.0, 10.0} : SpeciesCard{3, 0.78f, 4.0, 7.0};
+            return mix < 0.55 ? SpeciesCard{1, 1.05f, 5.0, 12.0}
+                : (mix < 0.85 ? SpeciesCard{3, 0.78f, 4.0, 8.0} : SpeciesCard{0, 0.80f, 6.0, 11.0});
         case Biome::Grassland:
-            return mix < 0.5 ? SpeciesCard{1, 1.00f, 5.0, 9.0} : SpeciesCard{0, 0.80f, 5.0, 9.0};
+            return mix < 0.5 ? SpeciesCard{1, 1.00f, 4.0, 10.0} : SpeciesCard{0, 0.80f, 4.0, 10.0};
         case Biome::Shrubland:
             return {3, 0.78f, 4.0, 8.0};
         default:
@@ -125,7 +130,12 @@ SpeciesCard grassSpeciesFor(Biome biome, std::uint64_t hash)
     switch (biome)
     {
         case Biome::Grassland:
-            return {0, 1.00f, 0.35, 0.75};
+            // A mixed meadow, not a monoculture: the hash lane deals two
+            // secondary cards into the dominant tile so neighbors differ in
+            // silhouette as well as tint (a single-card biome planted the
+            // whole sward with one repeated sprite).
+            return mix < 0.55 ? SpeciesCard{0, 1.00f, 0.35, 0.75}
+                : (mix < 0.85 ? SpeciesCard{2, 0.95f, 0.30, 0.68} : SpeciesCard{3, 1.10f, 0.28, 0.62});
         case Biome::Savanna:
             return mix < 0.65 ? SpeciesCard{1, 1.00f, 0.30, 0.65} : SpeciesCard{0, 1.00f, 0.30, 0.60};
         case Biome::Shrubland:
@@ -135,11 +145,11 @@ SpeciesCard grassSpeciesFor(Biome biome, std::uint64_t hash)
             return mix < 0.7 ? SpeciesCard{0, 1.00f, 0.32, 0.70} : SpeciesCard{2, 0.90f, 0.25, 0.55};
         case Biome::TemperateRainforest:
         case Biome::TropicalRainforest:
-            return {0, 1.00f, 0.40, 0.85};
+            return mix < 0.7 ? SpeciesCard{0, 1.00f, 0.40, 0.85} : SpeciesCard{2, 0.90f, 0.35, 0.75};
         case Biome::Taiga:
             return mix < 0.6 ? SpeciesCard{3, 1.10f, 0.25, 0.55} : SpeciesCard{0, 1.00f, 0.28, 0.60};
         case Biome::Tundra:
-            return {3, 1.10f, 0.18, 0.40};
+            return mix < 0.75 ? SpeciesCard{3, 1.10f, 0.18, 0.40} : SpeciesCard{1, 1.00f, 0.20, 0.42};
         default:
             return {3, 1.10f, 0.22, 0.50};
     }
@@ -181,7 +191,7 @@ inline constexpr double kPi = 3.14159265358979323846;
 
 // Species tint multipliers applied to the ground's biome color (the terrain
 // albedo at the planting site) to read as foliage instead of painted ground.
-inline constexpr float kTreeTint[3]  = {0.72f, 1.02f, 0.68f};
+inline constexpr float kTreeTint[3]  = {0.78f, 0.96f, 0.66f};
 inline constexpr float kBushTint[3]  = {0.80f, 1.04f, 0.74f};
 
 // Lattice cell sizes (meters). Chosen so each element's screen-area budget
@@ -310,7 +320,7 @@ inline std::array<float, 3> grassSwardTint(const ClimateSample &sample, double v
     {
         mixed[channel] = clamp01(static_cast<float>(
             std::lerp(static_cast<double>(blade[channel]), ground[channel] / groundLuminance,
-                0.12 + 0.50 * dryness)));
+                0.30 + 0.55 * dryness)));
     }
     // Same hue-preserving normalization as grassTint (see the note there):
     // rescale by the tallest channel instead of flattening per channel.
@@ -633,6 +643,7 @@ PlanetScatterSystem::PlanetScatterSystem(engine::planet::PlanetCapability &plane
     : capability_(planetCapability)
     , planet_(planet)
     , params_(params)
+    , shadowField_(params)
 {
 }
 
@@ -890,14 +901,32 @@ void PlanetScatterSystem::buildSpriteTextures()
         return;
     }
 
-    // Tree sprite: a tapering trunk plus four overlapping leaf clusters with
-    // ragged, holed edges. RGB is baked (bark trunk, mid-green canopy);
-    // per-instance vertex colors tint it per biome. Alpha is the cutout.
+    // Tree sprite: a tapering trunk plus five overlapping leaf clusters
+    // with ragged, holed edges. The canopy's RGB bakes the shading a card
+    // cannot light per-voxel: each cluster carries its own sun-side
+    // brightness (upper clusters bright, the shaded understory clusters
+    // dark), overlap regions multiply into deep shadow pockets between the
+    // clumps, and every cluster's own top-to-bottom rim gradient rounds the
+    // lobes. Per-instance vertex colors tint it per biome; alpha is the
+    // cutout.
     {
         const std::uint32_t size = 256;
         std::vector<std::uint8_t> pixels(size * size * 4u, 0u);
         const double trunkHalfWidth = 0.045;
-        const double trunkTopY = 0.62;
+        const double trunkTopY = 0.66;
+        struct Cluster
+        {
+            double cx, cy, rx, ry;
+            double brightness; // cluster's own light (top-lit lobes run bright)
+            double shade;     // cluster's base value (understory darkens)
+        };
+        const Cluster clusters[] = {
+            {0.50, 0.80, 0.30, 0.20, 1.00, 0.86},
+            {0.31, 0.63, 0.21, 0.16, 0.74, 0.60},
+            {0.69, 0.65, 0.22, 0.16, 0.82, 0.66},
+            {0.50, 0.50, 0.27, 0.14, 0.62, 0.50},
+            {0.42, 0.71, 0.15, 0.12, 0.55, 0.45},
+        };
         for (std::uint32_t y = 0; y < size; ++y)
         {
             const double v = 1.0 - static_cast<double>(y) / static_cast<double>(size - 1); // 0 bottom, 1 top
@@ -905,22 +934,26 @@ void PlanetScatterSystem::buildSpriteTextures()
             {
                 const double u = static_cast<double>(x) / static_cast<double>(size - 1);
                 double canopy = 0.0;
-                const struct
-                {
-                    double cx, cy, rx, ry;
-                } clusters[] = {
-                    {0.50, 0.78, 0.30, 0.22},
-                    {0.33, 0.62, 0.22, 0.17},
-                    {0.68, 0.64, 0.23, 0.17},
-                    {0.50, 0.47, 0.27, 0.15},
-                };
-                for (const auto &cluster : clusters)
+                double coverage = 0.0; // accumulated cluster weight (overlap = pockets)
+                double litWeight = 0.0;
+                for (const Cluster &cluster : clusters)
                 {
                     const double dx = (u - cluster.cx) / cluster.rx;
                     const double dy = (v - cluster.cy) / cluster.ry;
                     const double wobble = (spriteNoise(params_.seed, u * 5.0, v * 5.0, 5.0, 0x1A2B3Cull) - 0.5) * 0.55;
                     const double d = dx * dx + dy * dy - 1.0 + wobble;
-                    canopy = std::max(canopy, smoothStepLocal(0.22, -0.14, d));
+                    const double inside = smoothStepLocal(0.22, -0.14, d);
+                    if (inside > 0.0)
+                    {
+                        // The cluster's own top-bright rim gradient: the lobe's
+                        // sunlit cap shines, its underside falls into the shade.
+                        const double localHeight = 0.5 + 0.5 * dy;
+                        const double clusterShade = cluster.shade
+                            + (cluster.brightness - cluster.shade) * smoothStepLocal(-0.4, 0.85, localHeight);
+                        litWeight += inside * clusterShade;
+                        coverage += inside;
+                    }
+                    canopy = std::max(canopy, inside);
                 }
                 // Interior leaf holes: high-frequency alpha nibbles keep the
                 // canopy from reading as a solid card.
@@ -931,15 +964,26 @@ void PlanetScatterSystem::buildSpriteTextures()
                 const double trunk = smoothStepLocal(trunkHalfWidth * taper + 0.012, trunkHalfWidth * taper - 0.006,
                     std::fabs(u - 0.5)) * (v < trunkTopY ? 1.0 : smoothStepLocal(trunkTopY + 0.06, trunkTopY, v));
                 const double alpha = std::clamp(canopy + trunk, 0.0, 1.0);
-                const double leafShade = 0.72
-                    + 0.28 * spriteNoise(params_.seed, u * 9.0, v * 9.0, 9.0, 0x3C4D5Eull)
-                    - 0.18 * (1.0 - v);
-                const std::uint8_t leafR = static_cast<std::uint8_t>(std::clamp(0.16 * leafShade * 2.2, 0.0, 1.0) * 255.0);
-                const std::uint8_t leafG = static_cast<std::uint8_t>(std::clamp(0.42 * leafShade * 2.0, 0.0, 1.0) * 255.0);
-                const std::uint8_t leafB = static_cast<std::uint8_t>(std::clamp(0.14 * leafShade * 2.4, 0.0, 1.0) * 255.0);
-                const std::uint8_t barkR = static_cast<std::uint8_t>(0.34 * 255.0);
-                const std::uint8_t barkG = static_cast<std::uint8_t>(0.26 * 255.0);
-                const std::uint8_t barkB = static_cast<std::uint8_t>(0.19 * 255.0);
+                // Canopy shading: the overlap-weighted cluster light (deep
+                // pockets where lobes stack), the whole crown's vertical
+                // self-shade, and a leaf-vein noise. The pocket darkening uses
+                // the average (not the max) cluster shade, so two stacked
+                // lobes multiply down past either one alone.
+                const double overlapCount = std::max(1.0, coverage);
+                const double clusterLight = coverage > 0.0 ? litWeight / overlapCount : 0.6;
+                const double pocket = 1.0 - 0.32 * smoothStepLocal(0.55, 1.45, coverage);
+                const double leafShade = clusterLight * pocket
+                    * (0.90 + 0.10 * spriteNoise(params_.seed, u * 11.0, v * 11.0, 11.0, 0x3C4D5Eull))
+                    * (0.72 + 0.28 * smoothStepLocal(0.15, 0.95, v));
+                const std::uint8_t leafR = static_cast<std::uint8_t>(std::clamp(0.17 * leafShade * 2.4, 0.0, 1.0) * 255.0);
+                const std::uint8_t leafG = static_cast<std::uint8_t>(std::clamp(0.44 * leafShade * 2.2, 0.0, 1.0) * 255.0);
+                const std::uint8_t leafB = static_cast<std::uint8_t>(std::clamp(0.15 * leafShade * 2.6, 0.0, 1.0) * 255.0);
+                // Bark: darker at the root, with a vertical bark-stripe noise.
+                const double barkShade = 0.78 + 0.22 * (1.0 - v)
+                    + 0.10 * (spriteNoise(params_.seed, u * 40.0, v * 22.0, 40.0, 0xBA2Bull) - 0.5);
+                const std::uint8_t barkR = static_cast<std::uint8_t>(std::clamp(0.34 * barkShade, 0.0, 1.0) * 255.0);
+                const std::uint8_t barkG = static_cast<std::uint8_t>(std::clamp(0.26 * barkShade * 0.9, 0.0, 1.0) * 255.0);
+                const std::uint8_t barkB = static_cast<std::uint8_t>(std::clamp(0.19 * barkShade * 0.8, 0.0, 1.0) * 255.0);
                 const double trunkMix = trunk / std::max(1.0e-6, alpha);
                 const std::uint8_t r = static_cast<std::uint8_t>(std::lerp(static_cast<double>(leafR), static_cast<double>(barkR), trunkMix));
                 const std::uint8_t g = static_cast<std::uint8_t>(std::lerp(static_cast<double>(leafG), static_cast<double>(barkG), trunkMix));
@@ -1018,11 +1062,19 @@ void PlanetScatterSystem::buildSpriteTextures()
                         : 1.0;
                     blade = std::max(blade, edge * fray);
                 }
-                const double bladeShade = 0.74 + 0.26 * v
+                // Root darkening: blade bases sit in their own and each
+                // other's shadow, so the tuft's bottom third reads as
+                // ground-shaded - the contact blend that keeps tufts planted
+                // in the soil instead of floating on it.
+                const double bladeShade = 0.52 + 0.48 * v
                     + 0.14 * (spriteNoise(params_.seed, u * 7.0, v * 7.0, 7.0, 0x708192ull) - 0.5);
-                const std::uint8_t r = static_cast<std::uint8_t>(std::clamp(0.34 * bladeShade * 1.6, 0.0, 1.0) * 255.0);
-                const std::uint8_t g = static_cast<std::uint8_t>(std::clamp(0.44 * bladeShade * 1.5, 0.0, 1.0) * 255.0);
-                const std::uint8_t b = static_cast<std::uint8_t>(std::clamp(0.20 * bladeShade * 1.8, 0.0, 1.0) * 255.0);
+                // Olive-leaning blade tone: the sward's ground carries the
+                // module's dry-patch senescence, so a lime sprite clashes as
+                // pasted-on; the blade chroma follows the grassland palette's
+                // own red/green ratio instead.
+                const std::uint8_t r = static_cast<std::uint8_t>(std::clamp(0.36 * bladeShade * 1.7, 0.0, 1.0) * 255.0);
+                const std::uint8_t g = static_cast<std::uint8_t>(std::clamp(0.42 * bladeShade * 1.5, 0.0, 1.0) * 255.0);
+                const std::uint8_t b = static_cast<std::uint8_t>(std::clamp(0.20 * bladeShade * 1.7, 0.0, 1.0) * 255.0);
                 putPixel(pixels, size, x, y, r, g, b, static_cast<std::uint8_t>(blade * 255.0));
             }
         }
@@ -1238,7 +1290,8 @@ void PlanetScatterSystem::rebuild(const glm::dvec3 &eyePlanetLocal)
 // (canopy skirt at the crown, blade tips stabbing the ground).
 void pushBillboard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_t> &indices,
     const glm::dvec3 &baseCenter, const glm::dvec3 &up, glm::dvec3 toEye, double halfWidth, double height,
-    const std::array<float, 3> &color, const glm::dvec3 &anchor, const SpeciesUvRect &uvRect)
+    const std::array<float, 3> &color, const glm::dvec3 &anchor, const SpeciesUvRect &uvRect,
+    bool mirrorU = false, float rootDarken = 0.0f)
 {
     glm::dvec3 right = glm::cross(up, toEye);
     if (glm::length(right) < 1.0e-6)
@@ -1249,13 +1302,22 @@ void pushBillboard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_
     glm::dvec3 facing = glm::normalize(glm::cross(toEye, right)); // card's vertical, ⊥ sight line
     QuadPush quad;
     quad.normal = up;
+    // Root shading: the card's two base corners darken toward the ground -
+    // the occlusion a plant's own base sits in (no light reaches the bottom
+    // of a tuft under its own blades). The top corners keep the full tint.
+    // Horizontal mirror: half the instances flip the sprite's U axis, so a
+    // stand of one species photographs two silhouettes instead of one.
+    const float baseShade = 1.0f - rootDarken;
     for (std::uint32_t corner = 0; corner < 4; ++corner)
     {
-        quad.color[0] = color[0];
-        quad.color[1] = color[1];
-        quad.color[2] = color[2];
+        const float shade = corner < 2u ? baseShade : 1.0f;
+        quad.color[0] = color[0] * shade;
+        quad.color[1] = color[1] * shade;
+        quad.color[2] = color[2] * shade;
     }
-    const float uv[4][2] = {{uvRect.u0, uvRect.v1}, {uvRect.u1, uvRect.v1}, {uvRect.u1, uvRect.v0}, {uvRect.u0, uvRect.v0}};
+    const float uL = mirrorU ? uvRect.u1 : uvRect.u0;
+    const float uR = mirrorU ? uvRect.u0 : uvRect.u1;
+    const float uv[4][2] = {{uL, uvRect.v1}, {uR, uvRect.v1}, {uR, uvRect.v0}, {uL, uvRect.v0}};
     for (std::uint32_t corner = 0; corner < 4; ++corner)
     {
         quad.uv[corner][0] = uv[corner][0];
@@ -1469,11 +1531,21 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 const SpeciesCard species = treeSpeciesFor(sample.biome, hash);
                 const double height = species.minHeightMeters
                     + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
-                const double halfWidth = 0.5 * height * species.aspect * (0.85 + 0.30 * hashUnit(hash, 5));
+                const double halfWidth = 0.5 * height * species.aspect * (0.62 + 0.72 * hashUnit(hash, 5));
                 const glm::dvec3 up = direction;
-                const glm::dvec3 baseCenter = point - up * (0.06 * height);
+                // Trunk foot sunk a tenth of the height: the drawn terrain at
+                // any LOD sits at or under the density surface on convex
+                // ground, and a sprite anchored exactly at the surface can
+                // float above the coarse mesh's ridge - the detached-trunk
+                // look distant views show. A deeper burial reads as the
+                // trunk's root flare disappearing into soil.
+                const glm::dvec3 baseCenter = point - up * (0.10 * height);
+                // The per-instance tint range spans half the multiplier's
+                // dynamic range: at billboard distances the eye averages a
+                // narrow band into one tone, so the stand's variation must
+                // survive the minification.
                 std::array<float, 3> color
-                    = speciesTint(sample, kTreeTint, 0.85 + 0.3 * hashUnit(hash, 6));
+                    = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(hash, 6));
                 if (species.tile == 2)
                 {
                     // Conifers carry their own spruce tone: cooler and deeper
@@ -1494,13 +1566,21 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 // beyond the mid ring.
                 const double groundFade = smoothStepLocal(160.0, 620.0, cellDistance);
                 const float groundMix = static_cast<float>(0.55 * groundFade);
+                // Cloud shade: the same field the terrain's vertex albedo
+                // carries (see the mesher's macro sample). A bank's shadow
+                // darkens the ground AND everything standing on it - without
+                // the multiply, foliage glows like a sticker against its own
+                // shaded ground.
+                const float cloudShade = static_cast<float>(clamp01(
+                    1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                        params_.derivedVoxelMeters)));
                 for (std::uint32_t channel = 0; channel < 3; ++channel)
                 {
                     color[channel] = std::lerp(color[channel],
-                        clamp01(static_cast<float>(sample.color[channel]) * 0.9f), groundMix);
+                        clamp01(static_cast<float>(sample.color[channel]) * 0.9f), groundMix) * cloudShade;
                 }
                 pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
-                    height, color, anchorEye_, speciesUv(species.tile));
+                    height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 10) < 0.5, 0.35f);
                 appendShadow(point, up, halfWidth * 1.15, height * 0.82);
                 ++treeCount;
                 // The companion lane follows the configured tree density the
@@ -1527,11 +1607,11 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                             + hashUnit(companionHash, 4)
                                 * (companionSpecies.maxHeightMeters - companionSpecies.minHeightMeters);
                         const double companionHalfWidth = 0.5 * companionHeight * companionSpecies.aspect
-                            * (0.85 + 0.30 * hashUnit(companionHash, 5));
+                            * (0.72 + 0.56 * hashUnit(companionHash, 5));
                         const glm::dvec3 companionPoint = companionDirection * companionRadius;
-                        const glm::dvec3 companionBase = companionPoint - up * (0.06 * companionHeight);
+                        const glm::dvec3 companionBase = companionPoint - up * (0.10 * companionHeight);
                         std::array<float, 3> companionColor
-                            = speciesTint(sample, kTreeTint, 0.85 + 0.3 * hashUnit(companionHash, 6));
+                            = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(companionHash, 6));
                         if (companionSpecies.tile == 2)
                         {
                             companionColor[0] *= 0.86f;
@@ -1543,11 +1623,12 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                         for (std::uint32_t channel = 0; channel < 3; ++channel)
                         {
                             companionColor[channel] = std::lerp(companionColor[channel],
-                                clamp01(static_cast<float>(sample.color[channel]) * 0.9f), companionGroundMix);
+                                clamp01(static_cast<float>(sample.color[channel]) * 0.9f), companionGroundMix)
+                                * cloudShade;
                         }
                         pushBillboard(vertices, indices, companionBase, up,
                             anchorEye_ - companionBase, companionHalfWidth, companionHeight, companionColor,
-                            anchorEye_, speciesUv(companionSpecies.tile));
+                            anchorEye_, speciesUv(companionSpecies.tile), hashUnit(companionHash, 10) < 0.5, 0.35f);
                         appendShadow(companionPoint, up, companionHalfWidth * 1.15, companionHeight * 0.82);
                         ++treeCount;
                     }
@@ -1627,13 +1708,18 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 // inside the mid ring where the species tint still reads.
                 const double groundFade = smoothStepLocal(200.0, 620.0, cellDistance);
                 const float groundMix = static_cast<float>(0.40 * groundFade);
+                // Cloud shade (see the tree walk): sprites darken with the
+                // ground under the same bank.
+                const float bushCloudShade = static_cast<float>(clamp01(
+                    1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                        params_.derivedVoxelMeters)));
                 for (std::uint32_t channel = 0; channel < 3; ++channel)
                 {
                     color[channel] = std::lerp(color[channel],
-                        clamp01(static_cast<float>(sample.color[channel]) * 0.9f), groundMix);
+                        clamp01(static_cast<float>(sample.color[channel]) * 0.9f), groundMix) * bushCloudShade;
                 }
                 pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
-                    height, color, anchorEye_, speciesUv(species.tile));
+                    height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 7) < 0.5, 0.40f);
                 appendShadow(direction * radius, up, halfWidth * 0.95, height * 0.9);
                 ++bushCount;
             });
@@ -1660,7 +1746,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         // while the old one-scale 0.62 m ring across the full radius doubled
         // the frame for no visual gain beyond nine meters.
         constexpr std::uint32_t kMaxGrassNear = 1500;
-        constexpr std::uint32_t kMaxGrassMid = 360;
+        constexpr std::uint32_t kMaxGrassMid = 950;
         const double nearDiscMeters = std::min(grassRadius, 7.0);
         walkLattice(eyePlanetLocal, east, north, 1.8, nearDiscMeters, kGrassCellMeters,
             [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
@@ -1735,9 +1821,26 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 right1 = glm::normalize(rotated);
                 const std::array<float, 3> color = grassSwardTint(sample,
                     0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
+                // Cloud shade (see the tree walk): the sward darkens with the
+                // ground it stands on.
+                const float grassCloudShade = static_cast<float>(clamp01(
+                    1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                        params_.derivedVoxelMeters)));
+                const std::array<float, 3> shadedColor{color[0] * grassCloudShade,
+                    color[1] * grassCloudShade, color[2] * grassCloudShade};
                 const SpeciesUvRect grassUv = speciesUv(species.tile);
-                pushBillboard(vertices, indices, center, up, right1, halfWidth, height, color, anchorEye_, grassUv);
-                pushBillboard(vertices, indices, center, up, right2, halfWidth, height, color, anchorEye_, grassUv);
+                pushBillboard(vertices, indices, center, up, right1, halfWidth, height, shadedColor,
+                    anchorEye_, grassUv, hashUnit(hash, 9) < 0.5, 0.45f);
+                pushBillboard(vertices, indices, center, up, right2, halfWidth, height, shadedColor,
+                    anchorEye_, grassUv, hashUnit(hash, 10) < 0.5, 0.45f);
+                // Contact shadow: the tuft's own footprint darkens the soil
+                // right under the blades. Without it the cutout sprite's hard
+                // bottom edge sits on undarkened ground and the tuft reads as
+                // a painted sticker floating on the soil - the decal the
+                // trees wear, scaled to the tuft (a sward clump's shadow is
+                // barely wider than the clump and a fraction of its height,
+                // since the blades are mostly transparent to the sun).
+                appendShadow(direction * (radius - 0.30 * height), up, halfWidth * 1.35, height * 0.28);
                 ++grassCount;
             });
         // Mid annulus (near disc edge .. full radius): coarser lattice,
@@ -1799,7 +1902,16 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                         * (0.78 + 0.44 * moisture);
                     const double halfWidth = 0.5 * height * species.aspect * (0.95 + 0.5 * hashUnit(hash, 5));
                     const glm::dvec3 up = direction;
-                    const glm::dvec3 center = direction * radius - up * (0.08 * height);
+                    // Mid-annulus tufts sink well into the ground: at this
+                    // distance the rendered terrain can sit under the exact
+                    // density surface by a voxel or more (a coarse LOD mesh
+                    // cuts a convex ridge's top off), and a sprite anchored
+                    // at the exact surface then FLOATS above the drawn
+                    // ground - the sky-background specks distant views show.
+                    // A quarter-height burial keeps every tuft's foot inside
+                    // the drawn surface at any LOD while the blades still
+                    // emerge from the soil.
+                    const glm::dvec3 center = direction * radius - up * (0.30 * height);
                     glm::dvec3 right1 = glm::cross(up, east);
                     if (glm::length(right1) < 1.0e-6)
                     {
@@ -1811,8 +1923,14 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     right1 = glm::normalize(rotated);
                     const std::array<float, 3> color = grassSwardTint(sample,
                         0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
-                    pushBillboard(vertices, indices, center, up, right1, halfWidth, height, color, anchorEye_,
-                        speciesUv(species.tile));
+                    // Cloud shade (see the near disc).
+                    const float midCloudShade = static_cast<float>(clamp01(
+                        1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                            params_.derivedVoxelMeters)));
+                    const std::array<float, 3> midShaded{color[0] * midCloudShade,
+                        color[1] * midCloudShade, color[2] * midCloudShade};
+                    pushBillboard(vertices, indices, center, up, right1, halfWidth, height, midShaded,
+                        anchorEye_, speciesUv(species.tile), hashUnit(hash, 9) < 0.5, 0.45f);
                     ++grassCount;
                 });
         }
@@ -2209,8 +2327,19 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
         const std::uint64_t stripHash = cellHash(params_.seed, kSaltSurf, static_cast<std::int64_t>(azimuthIndex), 1, 0);
         // Breaker band: 4-9 m seaward of the waterline, wider where the hash
         // says the swell is stronger; swash band: hugging the waterline.
-        pushStrip(-3.0 - 6.0 * hashUnit(stripHash, 1), 5.0 + 9.0 * hashUnit(stripHash, 2), 2.2 + 1.6 * hashUnit(stripHash, 3), 0.3);
-        pushStrip(0.8, 4.0 + 7.0 * hashUnit(stripHash, 4), 1.6 + 1.2 * hashUnit(stripHash, 5), 0.2);
+        // Both bands GATE by hash (a breaker only where this swell train is
+        // actively pitching, a swash only where the last run-up reached):
+        // bands at every azimuth march around the shore as continuous
+        // concentric stripes - the contour-map tell - while gated bands
+        // leave irregular gaps the way real surf patches do.
+        if (hashUnit(stripHash, 6) < 0.58)
+        {
+            pushStrip(-3.0 - 6.0 * hashUnit(stripHash, 1), 5.0 + 9.0 * hashUnit(stripHash, 2), 2.2 + 1.6 * hashUnit(stripHash, 3), 0.3);
+        }
+        if (hashUnit(stripHash, 7) < 0.45)
+        {
+            pushStrip(0.8 + 1.2 * hashUnit(stripHash, 8), 4.0 + 7.0 * hashUnit(stripHash, 4), 1.6 + 1.2 * hashUnit(stripHash, 5), 0.2);
+        }
     }
 
     surfMesh_.anchorPlanetLocal = anchorEye_;
@@ -2313,7 +2442,7 @@ void PlanetScatterSystem::scatterMist(const glm::dvec3 &eyePlanetLocal, const gl
     mistMesh_.anchorPlanetLocal = anchorEye_;
     // Fainter than the old vertical cards: the pools cover far more frame
     // area lying flat, and fog photographs as a light veil, not a slab.
-    uploadMesh(mistMesh_, vertices, indices, false, true, true, static_cast<float>(0.12 * params_.valleyMistStrength));
+    uploadMesh(mistMesh_, vertices, indices, false, true, true, static_cast<float>(0.08 * params_.valleyMistStrength));
     mistMesh_.material.baseColorTexture = mistTexture_;
     // The banks pick up the sky: bluish white at high sun, warm gold toward
     // sunrise/sunset (radiation fog at dawn catches the low sun's color).
@@ -2340,7 +2469,13 @@ void PlanetScatterSystem::scatterBirdFlocks(const glm::dvec3 &eyePlanetLocal, co
         const std::uint64_t hash = cellHash(params_.seed, kSaltFlock, static_cast<std::int64_t>(flockIndex), 0, 0);
         BirdFlock flock;
         const double azimuth = hashUnit(hash, 0) * 2.0 * kPi;
-        const double distance = 130.0 + 300.0 * hashUnit(hash, 1);
+        // Flight band: flocks stay close enough that a bird's wing span
+        // still resolves a few pixels on screen at capture resolutions -
+        // a flock beyond a couple hundred meters reads as a row of
+        // unresolvable dark specks against the haze, which photographs as
+        // debris rather than birds (the band tops out at 260 m; the path
+        // keeps its own minimum eye distance below).
+        const double distance = 80.0 + 180.0 * hashUnit(hash, 1);
         const glm::dvec3 walk = east * std::cos(azimuth) + north * std::sin(azimuth);
         const glm::dvec3 centerDirection = glm::normalize(eyePlanetLocal + walk * distance);
         double groundRadius = 0.0;

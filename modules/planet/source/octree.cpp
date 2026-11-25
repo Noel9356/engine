@@ -225,6 +225,25 @@ PlanetOctree::NodeRecord *PlanetOctree::findRecord(ChunkKey key)
     return nodes_.find(key);
 }
 
+bool PlanetOctree::frustumHidden(const Vec3 &nodeCenter, double boundRadius) const
+{
+    if (culling_ == nullptr || culling_->planeCount == 0)
+    {
+        return false;
+    }
+    const std::uint32_t planeCount = std::min<std::uint32_t>(culling_->planeCount, 8u);
+    for (std::uint32_t plane = 0; plane < planeCount; ++plane)
+    {
+        const double *p = culling_->planes[plane];
+        const double signedDistance = p[0] * nodeCenter.x + p[1] * nodeCenter.y + p[2] * nodeCenter.z + p[3];
+        if (signedDistance < -boundRadius)
+        {
+            return true; // the whole bounding sphere sits outside this plane
+        }
+    }
+    return false;
+}
+
 const PlanetOctree::NodeRecord *PlanetOctree::findRecord(ChunkKey key) const
 {
     return nodes_.find(key);
@@ -351,6 +370,16 @@ ChunkState PlanetOctree::classifyNode(const ChunkCoord &coord, const Vec3 &eyeLo
 
     // 2. Horizon culling (skippable; the demo toggles it from config).
     if (params_.horizonCulling && horizonHidden(nodeCenter, nodeSize, eyeLocal))
+    {
+        return ChunkState::Hidden;
+    }
+
+    // 2b. View-frustum culling (optional): a node whose bounding sphere is
+    //     fully outside any culling plane cannot touch any sight line the
+    //     camera takes, so selecting - let alone building - it would only
+    //     spend the queue on pixels no frame ever rasterizes. The test is
+    //     the negative-vertex sphere score against the caller's planes.
+    if (frustumHidden(nodeCenter, boundRadius))
     {
         return ChunkState::Hidden;
     }
@@ -663,10 +692,12 @@ void PlanetOctree::computeConformMask(const ChunkCoord &coord, const VisibleLeaf
         [&visibleLeaves](const ChunkCoord &probe) { return visibleLeaves.contains(probe); });
 }
 
-void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &outVisible)
+void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &outVisible,
+    const PlanetCullingVolume *culling)
 {
     ++updateIndex_;
     outVisible.clear();
+    culling_ = culling;
 
     std::vector<ChunkCoord> &stack = descentStack_;
     stack.clear();
@@ -829,6 +860,7 @@ void PlanetOctree::selectVisible(const Vec3 &eyeLocal, std::vector<ChunkCoord> &
         nodes_.eraseIf([staleThreshold](ChunkKey, const NodeRecord &record)
             { return record.lastSelectedUpdate < staleThreshold; });
     }
+    culling_ = nullptr; // borrowed pointer: drop it with the pass
 }
 
 } // namespace planet

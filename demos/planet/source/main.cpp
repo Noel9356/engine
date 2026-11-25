@@ -75,6 +75,55 @@ namespace window = engine::window;
 namespace renderer = engine::renderer;
 namespace planet = engine::planet;
 
+// Builds the camera's view-frustum culling volume (planet-local planes; see
+// planet::PlanetCullingVolume) from the frame's view-projection with the
+// same Gribb-Hartmann extraction the draw path's frustum culling uses, so
+// the streaming selection and the rasterizer agree on what a frame can see.
+// The volume feeds the module's streaming selection: generation covers ONLY
+// the chunks a frame can rasterize (nothing behind the camera, nothing off
+// screen) and follows the camera lazily as it pans. PLANET_NO_CULL=1
+// disables the volume (whole-horizon streaming) as an operator escape hatch.
+planet::PlanetCullingVolume buildCullingVolume(const camera::ViewState &viewState,
+    const glm::dvec3 &planetCenterWorld)
+{
+    planet::PlanetCullingVolume volume;
+    // Gribb-Hartmann rows of the column-major clip matrix; planes point INTO
+    // the visible half-space. The camera's own combined matrix is the source
+    // (the same numbers the renderer's per-draw culling scores against),
+    // normalized so the sphere-vs-plane test reads plain meters.
+    const glm::mat4 viewProjection = glm::make_mat4(viewState.viewProjection);
+    const auto row = [&viewProjection](std::uint32_t r)
+    {
+        return glm::dvec4(viewProjection[0][r], viewProjection[1][r], viewProjection[2][r], viewProjection[3][r]);
+    };
+    const glm::dvec4 rowX = row(0);
+    const glm::dvec4 rowY = row(1);
+    const glm::dvec4 rowZ = row(2);
+    const glm::dvec4 rowW = row(3);
+    // All six planes; the near plane is safe for the module's sphere test -
+    // the chunks the eye sits in or immediately behind still cross it.
+    const glm::dvec4 raw[6] = {rowW + rowX, rowW - rowX, rowW + rowY, rowW - rowY, rowW + rowZ, rowW - rowZ};
+    volume.planeCount = 0;
+    for (std::uint32_t plane = 0; plane < 6u; ++plane)
+    {
+        const double normalLength = glm::length(glm::dvec3(raw[plane]));
+        if (normalLength <= 1.0e-12)
+        {
+            continue;
+        }
+        const glm::dvec4 worldPlane = raw[plane] / normalLength;
+        volume.planes[volume.planeCount][0] = worldPlane.x;
+        volume.planes[volume.planeCount][1] = worldPlane.y;
+        volume.planes[volume.planeCount][2] = worldPlane.z;
+        // Planet-local offset: p_local = p_world - center turns the world
+        // plane's d into d_world + n*center.
+        volume.planes[volume.planeCount][3] = worldPlane.w
+            + glm::dot(glm::dvec3(worldPlane), planetCenterWorld);
+        ++volume.planeCount;
+    }
+    return volume;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -954,9 +1003,20 @@ int main(int argc, char **argv)
         // renderer picks one per chunk (deterministically from the chunk
         // address), so neighboring chunks photograph different ground and
         // rock scans and no scan repeats across the whole visible disk (see
-        // setTerrainTextures). All scans come from Poly Haven under CC0
-        // (see assets/textures/README.md).
+        // setTerrainTextures). The rock/soil scans come from Poly Haven under
+        // CC0 (see assets/textures/README.md); the grass detail pair is
+        // composed procedurally by scripts/compose_terrain_detail.py in the
+        // same directory tree (blade streaks over soil mottle, with the
+        // matching relief map) so near-ground reads as a sward instead of
+        // smooth vertex color.
         std::vector<demo::planet_demo::TerrainTextureVariant> groundVariants;
+        // The grass-detail scan is deliberately NOT in the ground set: its
+        // blades read as long directional brushstrokes once tiled across a
+        // sward, and at grazing angles the eye parses the compression as
+        // smeared paint. The sward's own look comes from the vertex albedo's
+        // hue (the biome palette's green, already varied by the module's
+        // three-scale mottle) multiplied by isotropic soil/rock detail
+        // scans - detail without a preferred direction.
         groundVariants.push_back(loadVariant("ground_grey_diff_1k.jpg", nullptr));
         groundVariants.push_back(loadVariant("aerial_ground_rock_diff_1k.jpg", nullptr));
         groundVariants.push_back(loadVariant("dry_ground_rocks_diff_1k.jpg", nullptr));
@@ -986,13 +1046,17 @@ int main(int argc, char **argv)
     // first, clouds depth-tested against it, backdrop shells last).
     chunkRenderer.ensureAtmosphereShell();
     chunkRenderer.ensureSkyDome();
+    chunkRenderer.ensureWaterDetailTextures();
     chunkRenderer.ensureSkyCloudLayer(eye - planetCenter,
         environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
-    chunkRenderer.ensureCloudLayer();
+    chunkRenderer.ensureCloudLayer(
+        environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
     chunkRenderer.ensureStarDome();
     chunkRenderer.ensureSunDisc();
     chunkRenderer.ensureMoon();
     chunkRenderer.ensureAurora(
+        environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
+    chunkRenderer.ensureCirrusLayer(
         environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
     chunkRenderer.setCloudLayerVisible(macroView);
     chunkRenderer.setSkyCloudLayerVisible(!macroView);
@@ -1167,8 +1231,22 @@ int main(int argc, char **argv)
         // The streamer follows the REAL eye (f64), not the camera-relative
         // view state: the view state carries the shifted pose whenever
         // camera-relative composition is active.
+        // The stream only ever generates the chunks this frame's camera can
+        // see: the view frustum rides along with the eye as a culling volume
+        // (see buildCullingVolume), so nothing behind the camera or off
+        // screen enters the build queue, and panning streams newly revealed
+        // ground lazily instead of prebuilding it.
         const double eyeWorld[3] = {eye.x, eye.y, eye.z};
-        planetCapability->updatePlanet(planetCapability->self, planetHandle, eyeWorld);
+        const planet::PlanetCullingVolume cullingVolume
+            = buildCullingVolume(viewState, planetCenter);
+        if (std::getenv("PLANET_NO_CULL") == nullptr && planetCapability->updatePlanetCulled != nullptr)
+        {
+            planetCapability->updatePlanetCulled(planetCapability->self, planetHandle, eyeWorld, &cullingVolume);
+        }
+        else
+        {
+            planetCapability->updatePlanet(planetCapability->self, planetHandle, eyeWorld);
+        }
         if (warmupRemaining > 0 || settleWindowOpen)
         {
             // Warmup frames exist to give the build pool wall-clock time.
@@ -1283,6 +1361,7 @@ int main(int argc, char **argv)
         chunkRenderer.updateAtmosphereShell(eyePlanetLocal,
             glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z), environment.sun.enabled);
         chunkRenderer.updateAurora(eyePlanetLocal);
+        chunkRenderer.updateCirrusLayer(eyePlanetLocal);
         chunkRenderer.updateStarDome(eyePlanetLocal, farZ);
         chunkRenderer.updateSunDisc(eyePlanetLocal, localUp,
             glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z), environment.sun.color,

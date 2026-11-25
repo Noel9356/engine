@@ -73,9 +73,13 @@ public:
     const PlanetGenerationParams &params() const;
     const PlanetStatistics       &statistics() const;
 
-    // Advances the LOD selection for this frame's eye (planet-local meters),
-    // collects finished builds and issues new ones.
-    void update(const Vec3 &eyeLocal);
+    // Advances the LOD selection for this frame's eye (planet-local meters).
+    // culling (optional, may be null) narrows the selection to the chunks the
+    // camera's frustum can touch (see PlanetCullingVolume): the streamer then
+    // generates only visible chunks - nothing behind the camera, nothing off
+    // screen - and reselects whenever the volume changes (a panning camera
+    // streams its newly revealed ground lazily, never all upfront).
+    void update(const Vec3 &eyeLocal, const PlanetCullingVolume *culling = nullptr);
 
     // Copies borrowed views of every visible, ready chunk (terrain first,
     // then that chunk's water patch), followed by the streaming-fallback
@@ -249,11 +253,14 @@ private:
     std::uint32_t                                starvedUpdates_ = 0;
 
     // Last eye the visible set was selected for. Selection is a pure
-    // function of (eye, params, field), so an unchanged eye pins the visible
-    // list and the update path skips the descent, balancing and mask pass
-    // entirely (streaming, stamping and eviction still run).
+    // function of (eye, culling volume, params, field), so an unchanged eye
+    // AND volume pin the visible list and the update path skips the descent,
+    // balancing and mask pass entirely (streaming, stamping and eviction
+    // still run).
     bool           hasSelectionEye_ = false;
     Vec3           selectionEye_{};
+    bool           hasSelectionCulling_ = false;
+    PlanetCullingVolume selectionCulling_{};
 
     std::uint64_t updateCount_ = 0;
     PlanetStatistics statistics_;

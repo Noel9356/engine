@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace engine
 {
@@ -710,6 +711,57 @@ double DensityField::cloudShadow(const Vec3 &unitDirection, double lowPassCutoff
     const double shadowSoftness = 1.0 + 2.0 * params_.cloudShadowSoftness;
     return params_.cloudShadowStrength
         * clouds_.coverage(normalized(samplePoint), lowPassCutoffMeters, shadowSoftness, false);
+}
+
+double DensityField::terrainSelfShadow(const Vec3 &surfacePoint) const
+{
+    if (params_.terrainSelfShadowStrength <= 0.0)
+    {
+        return 0.0;
+    }
+    // Night gate: no direct sun for the relief to block. The renderer's own
+    // lighting already carries the day cycle; the shadow must only ever
+    // darken points the sun actually reaches.
+    const Vec3 sun{params_.cloudShadowSunDirection[0], params_.cloudShadowSunDirection[1],
+        params_.cloudShadowSunDirection[2]};
+    const double radius = std::max(1.0e-9, length(surfacePoint));
+    const Vec3   up     = surfacePoint * (1.0 / radius);
+    const double sunUp  = dot(sun, up);
+    if (sunUp <= 0.03)
+    {
+        return 0.0;
+    }
+
+    // Fixed march: sixteen taps spaced over the configured reach, with the
+    // density band-limited at a fixed fraction of it. The resolution is
+    // deliberately NOT the consumer's own LOD cutoff - a coarser chunk must
+    // march the same reach at the same band as the fine chunk sharing its
+    // boundary, or the shared vertices disagree and the shade seams. The
+    // fraction keeps relief finer than the reach's sixth (boulders, grass
+    // scale) out of the march entirely: that scale of shading is the
+    // renderer's slope lighting's own job, and letting it into the shadow
+    // would only alias speckle into the per-vertex bake.
+    constexpr std::uint32_t kMarchSteps = 16;
+    constexpr double kStartOffsetMeters = 1.1; // clear the surface's own shell
+    constexpr double kSolidThresholdMeters = 0.4; // grazing air stays lit
+    const double reach = std::max(8.0, params_.terrainSelfShadowReachMeters);
+    const double step = reach / static_cast<double>(kMarchSteps);
+    const double marchCutoff = std::max(1.0, reach / 6.0);
+
+    // Deepest solid sample along the ray: a wall the ray grazes barely
+    // clears the threshold and shades gently, a wall it buries into shades
+    // fully - the smoothstep between them is the penumbra a finite sun and
+    // a sloped occluder would actually leave.
+    double deepest = -std::numeric_limits<double>::infinity();
+    for (std::uint32_t tap = 0; tap < kMarchSteps; ++tap)
+    {
+        const Vec3 sample = surfacePoint
+            + sun * (kStartOffsetMeters + step * static_cast<double>(tap));
+        const double density = densityAt(sample, marchCutoff);
+        deepest = std::max(deepest, density);
+    }
+    const double factor = smoothstep(kSolidThresholdMeters, 1.6, deepest);
+    return params_.terrainSelfShadowStrength * factor;
 }
 
 } // namespace planet

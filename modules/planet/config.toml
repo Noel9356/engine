@@ -273,16 +273,16 @@ water_depth_tint_meters = 70.0
 # Shallow shelf: the surface blends toward the beach-sand tone transmitted
 # by the water's own hue over this depth band, so flats read sandy turquoise
 # (the bottom seen through the sheet). 0 disables.
-water_shore_mix_meters  = 3.0
+water_shore_mix_meters  = 12.0
 # brightness lift of the sand seen through the shallow shelf (sunlit flats
 # under a thin sheet read brighter than the raw beach palette row).
 water_shore_sand_brightness = 1.35
 water_enabled           = true
-water_color_shallow     = [0.070, 0.255, 0.275]
+water_color_shallow     = [0.095, 0.258, 0.272]
 water_color_deep        = [0.012, 0.060, 0.130]
 # gloss of the ocean surface at close range: low values give the sea a
 # crisp sun-glint path that the per-vertex wave normals break into glitter.
-water_roughness         = 0.22
+water_roughness         = 0.15
 # the high-altitude blend target for the same hint: orbital eyes look down
 # on flat far-water facets whose per-facet mirror would sparkle, so the
 # material widens the lobe toward this value with eye altitude. 0.36 matches
@@ -294,8 +294,8 @@ water_roughness_orbital = 0.36
 # noise-modulated so it breaks into wave crests instead of a painted stripe.
 # Strength 0 disables; width is the depth band under the surface that reads
 # as surf (real breaker zones sit in the first few meters of depth).
-water_foam_width_meters = 2.5
-water_foam_strength    = 0.60
+water_foam_width_meters = 14.0
+water_foam_strength    = 0.72
 # falloff exponent of the breaker band across its depth range: 2 keeps a broad
 # wash of surf over the whole shallow shelf, 4 squeezes it into a tight rim at
 # the waterline (real surf hugs the shore).
@@ -316,7 +316,7 @@ water_color_ice         = [0.78, 0.85, 0.94]
 # radial direction, giving the sea sun-glint texture at close range. The
 # amplitude is a radian-scale tilt and fades out under the LOD band limit
 # like every other noise term, so coarse chunks keep a smooth sea.
-water_wave_amplitude          = 0.22
+water_wave_amplitude          = 0.28
 water_wave_wavelength_meters  = 8.0
 # amplitude of the half-wavelength chop riding the swell, as a fraction of the
 # swell tilt (the chop breaks the sun glint into sparkle). 0 = single-scale
@@ -359,6 +359,13 @@ cloud_weather_strength       = 0.45
 # banks into fewer, broader weather systems.
 cloud_weather_wavelength_multiple = 4.0
 cloud_latitude_band_strength = 0.16
+# cloud_wisp_strength is the wisp octave pair's amplitude share on the
+# texture path (see coverageTexel): the fine torn fringes under every mesh
+# grid's resolution. cloud_cyclone_strength scales the seed-derived storm
+# vortices' shear. Both keys tune the baked cloud texture only; mesh
+# consumers band-limit them out.
+cloud_wisp_strength          = 0.18
+cloud_cyclone_strength       = 0.45
 # cloud_band_frequency is the latitudinal band frequency (radians of phase
 # per radian of latitude): ~3.4 places a wet equatorial belt, dry subtropics
 # and wet mid-latitudes the way Earth's circulation cells do. 0 gives a
@@ -370,16 +377,39 @@ cloud_color                  = [0.985, 0.975, 0.955]
 # through each point (see cloud_shadow_sun_direction), so the shadows fall
 # away from their banks and agree with the cloud layer from orbit and from
 # the ground. 0 disables.
-cloud_shadow_strength        = 0.55
+cloud_shadow_strength        = 0.12
 # penumbra softening of the cast shadows: the shadow field widens the coverage
 # edge band by this fraction, so shadows read as soft-edged darkening under
 # their banks instead of a hard copy of the cloud outlines. 0 keeps the shadow
 # exactly as sharp as the banks above it.
-cloud_shadow_softness        = 0.50
-# The sunlight direction that casts the cloud shadows - pair it with the
+cloud_shadow_softness        = 0.72
+# Terrain self-shading: the mesher darkens each terrain vertex by the relief
+# the sun ray out of it meets (a fixed-resolution march of the density field
+# up-sun, see docs/configuration.md), so escarpments and ravine walls cast
+# shade into their lee. The shade rides the vertex albedo beside the cloud
+# shadow and shares its sun direction; 0 disables.
+terrain_self_shadow_strength = 0.78
+# How far up-sun the march resolves occluders (an escarpment's shadow reach).
+# The march's own density band rides at a sixth of it, and the whole march is
+# LOD-independent so chunks at different depths agree on shared vertices.
+terrain_self_shadow_reach_meters = 260.0
+# The sunlight direction that casts the cloud shadows (and the terrain
+# self-shading above) - pair it with the
 # [pbr] sun_direction lighting the scene (the demo's configuration ships
 # them together). Night-side points get no shadow (no direct sun to block).
 cloud_shadow_sun_direction   = [0.50, 0.45, 0.74]
+
+# high cirrus deck: a thin ice-crystal veil above the cloud shell (see
+# atmosphere.hpp cirrusStreakWeight). The streaks stretch along the latitude
+# circles the way the upper-level wind blows them, broken into filaments and
+# thresholded by cirrus_coverage_amount's quantile. Consumers mesh the deck as
+# a translucent shell (the demo's globe and orbit views); cirrus_strength is
+# its brightness (0 reads as a clear sky), cirrus_altitude_meters keeps it
+# above the cumulus shell.
+cirrus_enabled            = true
+cirrus_strength           = 1.0
+cirrus_altitude_meters    = 3400.0
+cirrus_coverage_amount    = 0.30
 
 # stars: a seed-derived star field for the space backdrop (see
 # atmosphere.hpp starFieldColor). Consumers sample the pure direction-space
@@ -397,7 +427,7 @@ stars_brightness  = 1.0
 # prominent bright stars (a coin at 0.006, a soft blob past 0.012 - the
 # validate() clamp).
 star_disc_radius_min_radians = 0.0011
-star_disc_radius_max_radians = 0.0040
+star_disc_radius_max_radians = 0.0024
 
 # galaxy: the star field concentrates along a seed-derived great circle -
 # the galactic plane. Cells near the plane light up several times more often
@@ -429,7 +459,7 @@ moon_albedo                    = 1.0
 # space views read a green arc along the dark limb while day-side and
 # twilight ground views stay clean. aurora_strength 0 disables the glow.
 aurora_enabled  = true
-aurora_strength = 0.55
+aurora_strength = 0.35
 
 # surface scatter: the ground-level real-world elements the terrain's color
 # field cannot express - vegetation, surface rocks, bird flocks, breaking-wave
@@ -450,7 +480,7 @@ vegetation_tree_density          = 1.0
 vegetation_bush_density          = 1.0
 vegetation_grass_density         = 1.0
 vegetation_tree_radius_meters    = 1400.0
-vegetation_grass_radius_meters   = 18.0
+vegetation_grass_radius_meters   = 46.0
 surface_rock_density             = 1.0
 surface_rock_radius_meters       = 260.0
 # contact shadows: soft dark quads laid on the ground under every scattered
@@ -463,11 +493,14 @@ whitecap_strength                = 0.65
 whitecap_wind_speed_mps          = 9.0
 surf_foam_enabled                = true
 surf_foam_strength               = 0.70
-birds_enabled                    = true
+# birds: distant flocks render as a few-pixel sprite specks - at capture
+# resolutions the eye parses those specks as floating artifacts, so the
+# default keeps the skies empty (a run that wants them sets the key true).
+birds_enabled                    = false
 bird_flock_count                 = 2.0
 bird_flock_size                  = 9.0
 valley_mist_enabled              = true
-valley_mist_strength             = 0.50
+valley_mist_strength             = 0.30
 scatter_rebuild_distance_meters  = 18.0
 
 # surface walking (kinematic controller; see walker.hpp): planet-centric
@@ -507,8 +540,8 @@ atmosphere_height_meters   = 20000.0
 # caps the haze weight at infinite distance, keeping the farthest terrain
 # faintly readable as terrain instead of fading fully into sky. Set the
 # asymptote to 0 to see the terrain without any aerial perspective.
-aerial_perspective_scale_meters  = 3600.0
-aerial_perspective_asymptote     = 0.72
+aerial_perspective_scale_meters  = 5400.0
+aerial_perspective_asymptote     = 0.52
 # sun_direct_tint_strength: how strongly the DIRECT sun light (terrain,
 # water, specular glints, the sun disc) adopts the atmosphere's
 # transmittance tint - the warm-to-red shift the sun's own light gains as
@@ -517,8 +550,8 @@ aerial_perspective_asymptote     = 0.72
 # consumer's configured sun color unchanged at every elevation. The
 # scattered light (sky gradient, haze) keeps its own sunset tint either way.
 sun_direct_tint_strength         = 1.0
-atmosphere_zenith_color    = [0.040, 0.130, 0.460]
-atmosphere_horizon_color   = [0.260, 0.420, 0.780]
+atmosphere_zenith_color    = [0.060, 0.170, 0.580]
+atmosphere_horizon_color   = [0.470, 0.620, 0.860]
 
 # climate
 equator_temperature        = 1.0
@@ -610,7 +643,7 @@ rock_strata_contrast       = 0.75
 # cubemap-style blend of the axis planes - see docs/configuration.md). These
 # keys set how many meters one texture tile spans per group: the consumer's
 # textures meet the generator's tiling here.
-terrain_texture_tile_meters_ground = 8.0
+terrain_texture_tile_meters_ground = 6.0
 terrain_texture_tile_meters_rock   = 14.0
 water_texture_tile_meters          = 8.0
 # Anti-repetition of the tiled terrain frames (see docs/configuration.md):
@@ -621,8 +654,8 @@ water_texture_tile_meters          = 8.0
 # orientation. The warp amplitude is in texture tiles (it scales with the
 # tile sizes); 0 disables the warp, texture_chunk_rotation = false keeps
 # every chunk's frame unrotated.
-texture_uv_warp_strength          = 0.35
-texture_uv_warp_wavelength_meters = 64.0
+texture_uv_warp_strength          = 0.45
+texture_uv_warp_wavelength_meters = 48.0
 texture_chunk_rotation            = true
 
 # biome color BLENDING (see docs/configuration.md): biome colors interpolate
