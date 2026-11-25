@@ -376,11 +376,11 @@ bool VulkanSwapchain::createObjects(VkRenderPass renderPass, std::uint32_t viewp
     result = vkBeginCommandBuffer(command, &beginInfo);
     if (result == VK_SUCCESS)
     {
-        std::vector<VkImageMemoryBarrier> depthBarriers;
-        depthBarriers.reserve(slotCount);
+        std::vector<VkImageMemoryBarrier> attachmentBarriers;
+        attachmentBarriers.reserve(slotCount * 2);
         for (std::uint32_t slot = 0; slot < slotCount; ++slot)
         {
-            depthBarriers.push_back(VkImageMemoryBarrier{
+            attachmentBarriers.push_back(VkImageMemoryBarrier{
                 .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .pNext               = nullptr,
                 .srcAccessMask       = 0,
@@ -392,17 +392,32 @@ bool VulkanSwapchain::createObjects(VkRenderPass renderPass, std::uint32_t viewp
                 .image               = depthImages_[slot],
                 .subresourceRange    = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
             });
+            if (slot < msaaColorImages_.size() && msaaColorImages_[slot] != VK_NULL_HANDLE)
+            {
+                attachmentBarriers.push_back(VkImageMemoryBarrier{
+                    .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext               = nullptr,
+                    .srcAccessMask       = 0,
+                    .dstAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+                    .newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image               = msaaColorImages_[slot],
+                    .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                });
+            }
         }
         vkCmdPipelineBarrier(command,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             0,
             0,
             nullptr,
             0,
             nullptr,
-            static_cast<std::uint32_t>(depthBarriers.size()),
-            depthBarriers.data());
+            static_cast<std::uint32_t>(attachmentBarriers.size()),
+            attachmentBarriers.data());
         result = vkEndCommandBuffer(command);
     }
     if (result != VK_SUCCESS)

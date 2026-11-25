@@ -76,6 +76,7 @@ struct FrameTimingSample
     double updateMilliseconds = 0.0;
     double uploadMilliseconds = 0.0;
     double drawMilliseconds = 0.0;
+    double gpuMilliseconds = 0.0;
 };
 
 class FrameTimingRecorder final
@@ -85,6 +86,7 @@ public:
     void markUpdateDone();
     void markUploadDone();
     void markDrawDone();
+    void recordGpuMilliseconds(double milliseconds);
 
     [[nodiscard]] const std::vector<FrameTimingSample> &samples() const noexcept
     {

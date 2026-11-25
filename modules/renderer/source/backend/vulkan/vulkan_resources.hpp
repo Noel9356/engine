@@ -95,6 +95,11 @@ public:
     bool updateProbeStorage(
         std::uint32_t frameIndex, const void *packedRecords, VkDeviceSize recordBytes, std::uint64_t revision);
 
+    bool probeStorageCurrent(std::uint32_t frameIndex, std::uint64_t revision) const
+    {
+        return frameIndex < probeStorageVersions_.size() && probeStorageVersions_[frameIndex] == revision;
+    }
+
     VkDescriptorSet frameUniformSet(std::uint32_t frameIndex) const
     {
         return frameUniformSets_[frameIndex];

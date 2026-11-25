@@ -292,7 +292,8 @@ private:
     enum class BoundPipeline : std::uint8_t
     {
         Mesh,
-        Fur
+        Fur,
+        Overlay
     };
     bool            hasLastPushConstants_ = false;
     PushConstants   lastPushConstants_{};

@@ -300,7 +300,7 @@ int main(int argc, char **argv)
     }
 
     engine::ApplicationHostOptions hostOptions
-        = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "camera", "pbr", "planet"});
+        = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "camera", "pbr", "planet", "radiance_cache"});
     {
         // The [planet] section of the demo's engine.toml and its profiles
         // overlays the planet module's configuration (see the forwarding
@@ -1652,13 +1652,17 @@ int main(int argc, char **argv)
         renderCapability.beginFrame(renderCapability.self, rendererHandle, &frameParameters);
         renderCapability.drawMeshes(renderCapability.self, rendererHandle, drawCommands.data(),
             static_cast<std::uint32_t>(drawCommands.size()));
+        renderer::FrameStatistics frameStats{};
+        renderCapability.frameStatistics(renderCapability.self, rendererHandle, &frameStats);
+        if (frameStats.gpuTimingAvailable)
+        {
+            frameTiming.recordGpuMilliseconds(frameStats.gpuFrameMilliseconds);
+        }
         renderCapability.endFrame(renderCapability.self, rendererHandle);
         frameTiming.markDrawDone();
         ++framesRendered;
         if (framesRendered % 100 == 0)
         {
-            renderer::FrameStatistics frameStats{};
-            renderCapability.frameStatistics(renderCapability.self, rendererHandle, &frameStats);
             std::cout << "demo_planet: raster stats - submitted " << frameStats.trianglesSubmitted
                       << ", rasterized " << frameStats.trianglesRasterized << "\n";
         }

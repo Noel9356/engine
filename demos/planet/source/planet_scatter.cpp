@@ -1224,7 +1224,14 @@ void walkLattice(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &east, const
     double innerMeters, double outerMeters, double cellMeters, Fn &&fn)
 {
     const std::int64_t span = static_cast<std::int64_t>(std::ceil(outerMeters / cellMeters)) + 1;
-    std::unordered_set<std::uint64_t> visited;
+    struct CellKeyHash
+    {
+        std::size_t operator()(const std::array<std::int64_t, 3> &key) const noexcept
+        {
+            return static_cast<std::size_t>(PlanetScatterSystem::cellHash(0, 0, key[0], key[1], key[2]));
+        }
+    };
+    std::unordered_set<std::array<std::int64_t, 3>, CellKeyHash> visited;
     visited.reserve(static_cast<std::size_t>((2 * span + 1) * (2 * span + 1)));
     for (std::int64_t gy = -span; gy <= span; ++gy)
     {
@@ -1245,7 +1252,7 @@ void walkLattice(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &east, const
             {
                 continue;
             }
-            const std::uint64_t key = PlanetScatterSystem::cellHash(0, 0, cx, cy, cz);
+            const std::array<std::int64_t, 3> key{cx, cy, cz};
             if (!visited.insert(key).second)
             {
                 continue; // two tangent candidates snapped to one cell
@@ -1294,6 +1301,7 @@ void PlanetScatterSystem::rebuild(const glm::dvec3 &eyePlanetLocal, const glm::d
     // which is the eye's own radial up: the flocks place into the camera's
     // forward fan, and the up-direction would collapse that fan to nothing.
     scatterBirdFlocks(eyePlanetLocal, viewForward, east, north);
+    animateBirds(0.0);
 }
 
 
@@ -1669,20 +1677,6 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     // (the grove gate above already carries the clumping).
                     presence = std::max(presence, 0.78 * params_.vegetationTreeDensity);
                 }
-                const double presenceRoll = hashUnit(hash, 3);
-                if (cellDistance <= kTreeNearRingMeters)
-                {
-                    // Near-ring candidate: viability already cleared every
-                    // gate but the draw; the ranking pass below plants the
-                    // best few whatever their roll.
-                    nearTreeCandidates.push_back(NearCandidate{presenceRoll, presence,
-                        forwardShareOf(cellCenter), {cx, cy, cz}});
-                    return;
-                }
-                if (presenceRoll > clamp01(presence))
-                {
-                    return;
-                }
                 // Slope gate: cliff faces carry no soil, so nothing grows on
                 // them. The climate sample always carries a flat-ground slope
                 // (it reads the flats at the cliff's feet), so without this
@@ -1698,6 +1692,20 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     {
                         return;
                     }
+                }
+                const double presenceRoll = hashUnit(hash, 3);
+                if (cellDistance <= kTreeNearRingMeters)
+                {
+                    // Near-ring candidate: viability already cleared every
+                    // gate but the draw; the ranking pass below plants the
+                    // best few whatever their roll.
+                    nearTreeCandidates.push_back(NearCandidate{presenceRoll, presence,
+                        forwardShareOf(cellCenter), {cx, cy, cz}});
+                    return;
+                }
+                if (presenceRoll > clamp01(presence))
+                {
+                    return;
                 }
                 const SpeciesCard species = treeSpeciesFor(sample.biome, hash);
                 const double height = species.minHeightMeters
@@ -1781,7 +1789,8 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                         const double companionHalfWidth = 0.5 * companionHeight * companionSpecies.aspect
                             * (0.72 + 0.56 * hashUnit(companionHash, 5));
                         const glm::dvec3 companionPoint = companionDirection * companionRadius;
-                        const glm::dvec3 companionBase = companionPoint - up * (0.10 * companionHeight);
+                        const glm::dvec3 companionUp = companionDirection;
+                        const glm::dvec3 companionBase = companionPoint - companionUp * (0.10 * companionHeight);
                         std::array<float, 3> companionColor
                             = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(companionHash, 6));
                         if (companionSpecies.tile == 2)
@@ -1799,10 +1808,10 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                                 * cloudShade;
                         }
                         cardHaze(companionColor, cellDistance);
-                        pushBillboard(vertices, indices, companionBase, up,
+                        pushBillboard(vertices, indices, companionBase, companionUp,
                             anchorEye_ - companionBase, companionHalfWidth, companionHeight, companionColor,
                             anchorEye_, speciesUv(companionSpecies.tile), hashUnit(companionHash, 10) < 0.5, 0.35f);
-                        appendShadow(companionPoint, up, companionHalfWidth * 1.15, companionHeight * 0.82);
+                        appendShadow(companionPoint, companionUp, companionHalfWidth * 1.15, companionHeight * 0.82);
                         ++treeCount;
                     }
                 }
@@ -1840,6 +1849,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
             {
                 continue;
             }
+            const glm::dvec3 point = direction * radius;
             ClimateSample sample;
             const double directionArray[3] = {direction.x, direction.y, direction.z};
             if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
@@ -1864,7 +1874,6 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
             const double halfWidth = 0.5 * height * species.aspect * (0.62 + 0.72 * hashUnit(hash, 5));
             const glm::dvec3 up = direction;
-            const glm::dvec3 point = direction * radius;
             const glm::dvec3 baseCenter = point - up * (0.10 * height);
             std::array<float, 3> color
                 = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(hash, 6));
@@ -1944,6 +1953,15 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 {
                     return;
                 }
+                // Slope gate: see the tree walk - cliff faces carry no soil.
+                {
+                    engine::planet::ReliefSample relief{};
+                    if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
+                        && relief.cliffFactor >= params_.cliffSteepnessLow)
+                    {
+                        return;
+                    }
+                }
                 const double presence = base * (0.5 + 0.5 * sample.moisture01) * params_.vegetationBushDensity;
                 const double presenceRoll = hashUnit(hash, 3);
                 if (cellDistance <= kBushNearRingMeters)
@@ -1955,15 +1973,6 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 if (presenceRoll > clamp01(presence))
                 {
                     return;
-                }
-                // Slope gate: see the tree walk - cliff faces carry no soil.
-                {
-                    engine::planet::ReliefSample relief{};
-                    if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
-                        && relief.cliffFactor >= params_.cliffSteepnessLow)
-                    {
-                        return;
-                    }
                 }
                 const SpeciesCard species = bushSpeciesFor(sample.biome, hash);
                 const double height = species.minHeightMeters
@@ -2022,6 +2031,11 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
             }
             const double base = bushBaseDensity(sample.biome);
             if (base <= 0.0)
+            {
+                continue;
+            }
+            const double presence = base * (0.5 + 0.5 * sample.moisture01) * params_.vegetationBushDensity;
+            if (hashUnit(hash, 3) > clamp01(presence))
             {
                 continue;
             }
@@ -2636,7 +2650,7 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
                 return;
             }
             const glm::dvec3 up = shoreDirection;
-            const glm::dvec3 center = shoreDirection * (seaRadius + radialOffset);
+            const glm::dvec3 center = shoreDirection * (seaRadius + radialOffset + lift);
             QuadPush quad;
             quad.normal = up;
             const float bright = 0.92f;
@@ -2655,7 +2669,6 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
             quad.corners[3] = center - shoreTangent * halfAlong + walk * halfAcross;
             pushQuad(vertices, indices, quad, anchorEye_);
             ++stripCount;
-            (void)lift;
         };
         const std::uint64_t stripHash = cellHash(params_.seed, kSaltSurf, static_cast<std::int64_t>(azimuthIndex), 1, 0);
         // Breaker band: 4-9 m seaward of the waterline, wider where the hash
@@ -2871,11 +2884,15 @@ void PlanetScatterSystem::scatterBirdFlocks(const glm::dvec3 &eyePlanetLocal, co
 
 void PlanetScatterSystem::animateBirds(double deltaSeconds)
 {
-    (void)deltaSeconds; // the flight state advanced via the flap phase below; kept for cadence symmetry
     if (flocks_.empty() || birdMesh_.mesh == engine::renderer::invalidMesh
         || renderCapability_ == nullptr || renderCapability_->updateMeshVertices == nullptr)
     {
         return;
+    }
+    for (BirdFlock &flock : flocks_)
+    {
+        flock.angularPhase += flock.angularSpeed * deltaSeconds;
+        flock.flapPhase += flock.flapHertz * 2.0 * kPi * deltaSeconds;
     }
     std::vector<PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;

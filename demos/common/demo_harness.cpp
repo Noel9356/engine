@@ -135,6 +135,11 @@ void FrameTimingRecorder::markUploadDone()
     lastMark_ = now;
 }
 
+void FrameTimingRecorder::recordGpuMilliseconds(double milliseconds)
+{
+    current_.gpuMilliseconds = milliseconds;
+}
+
 void FrameTimingRecorder::markDrawDone()
 {
     const auto now = Clock::now();
@@ -170,14 +175,23 @@ std::string FrameTimingRecorder::summary() const
         return "frame timing: no frames recorded\n";
     }
     std::vector<double> totals;
+    std::vector<double> gpuTotals;
     totals.reserve(samples_.size());
+    gpuTotals.reserve(samples_.size());
     double sum = 0.0;
+    double gpuSum = 0.0;
     for (const FrameTimingSample &sample : samples_)
     {
         totals.push_back(sample.totalMilliseconds);
         sum += sample.totalMilliseconds;
+        if (sample.gpuMilliseconds > 0.0)
+        {
+            gpuTotals.push_back(sample.gpuMilliseconds);
+            gpuSum += sample.gpuMilliseconds;
+        }
     }
     std::sort(totals.begin(), totals.end());
+    std::sort(gpuTotals.begin(), gpuTotals.end());
 
     // The slowest frame's phase split shows which stage owns the tail.
     const auto slowest = std::max_element(samples_.begin(), samples_.end(),
@@ -192,6 +206,15 @@ std::string FrameTimingRecorder::summary() const
         nearestRankPercentile(totals, 50.0), nearestRankPercentile(totals, 90.0), nearestRankPercentile(totals, 99.0),
         nearestRankPercentile(totals, 99.9), totals.back());
     report << line;
+    if (!gpuTotals.empty())
+    {
+        std::snprintf(line, sizeof(line),
+            "gpu timing: %zu frames, mean %.3f ms | p50 %.3f | p90 %.3f | p99 %.3f | p99.9 %.3f | max %.3f ms\n",
+            gpuTotals.size(), gpuSum / static_cast<double>(gpuTotals.size()),
+            nearestRankPercentile(gpuTotals, 50.0), nearestRankPercentile(gpuTotals, 90.0),
+            nearestRankPercentile(gpuTotals, 99.0), nearestRankPercentile(gpuTotals, 99.9), gpuTotals.back());
+        report << line;
+    }
     std::snprintf(line, sizeof(line), "frame timing: slowest frame - update %.3f, upload %.3f, draw %.3f ms\n",
         slowest->updateMilliseconds, slowest->uploadMilliseconds, slowest->drawMilliseconds);
     report << line;
@@ -205,12 +228,12 @@ bool FrameTimingRecorder::writeCsv(const std::string &path) const
     {
         return false;
     }
-    file << "frame,total_ms,update_ms,upload_ms,draw_ms\n";
+    file << "frame,total_ms,update_ms,upload_ms,draw_ms,gpu_ms\n";
     for (std::size_t index = 0; index < samples_.size(); ++index)
     {
         const FrameTimingSample &sample = samples_[index];
         file << index << ',' << sample.totalMilliseconds << ',' << sample.updateMilliseconds << ','
-             << sample.uploadMilliseconds << ',' << sample.drawMilliseconds << '\n';
+             << sample.uploadMilliseconds << ',' << sample.drawMilliseconds << ',' << sample.gpuMilliseconds << '\n';
     }
     return static_cast<bool>(file);
 }

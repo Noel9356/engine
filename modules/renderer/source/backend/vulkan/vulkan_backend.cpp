@@ -82,6 +82,85 @@ bool sameEnvironment(const pbr::PbrEnvironment &left, const pbr::PbrEnvironment 
         && left.toneMapping == right.toneMapping;
 }
 
+bool sameProbeGrid(const GiProbeGrid &grid, const ProbeGridUniformData &packed,
+    const std::vector<float> &packedRecords)
+{
+    if (!grid.valid())
+    {
+        return packed.level1Meta[3] == 0.0f && packedRecords.empty();
+    }
+    const radiance_cache::GiProbeHeader &header = grid.header;
+    if (packed.centerSpacing[0] != header.gridCenter[0] || packed.centerSpacing[1] != header.gridCenter[1]
+        || packed.centerSpacing[2] != header.gridCenter[2] || packed.centerSpacing[3] != header.level0Spacing
+        || packed.level0Meta[0] != static_cast<float>(header.level0Dimensions[0])
+        || packed.level0Meta[1] != static_cast<float>(header.level0Dimensions[1])
+        || packed.level0Meta[2] != static_cast<float>(header.level0Dimensions[2])
+        || packed.level0Meta[3] != header.level1Spacing || packed.level1Meta[3] != 1.0f
+        || packed.countMeta[0] != static_cast<float>(grid.probeCount)
+        || packed.countMeta[1] != static_cast<float>(header.directionResolution)
+        || packed.countMeta[2] != static_cast<float>(header.level0ProbeOffset)
+        || packed.countMeta[3] != static_cast<float>(header.level1ProbeOffset)
+        || packedRecords.size() != static_cast<std::size_t>(grid.probeCount) * giProbeRecordVec4s)
+    {
+        return false;
+    }
+    for (std::uint32_t index = 0; index < grid.probeCount; ++index)
+    {
+        const radiance_cache::GiProbe &probe = grid.probes[index];
+        const float                   *record = packedRecords.data() + static_cast<std::size_t>(index) * giProbeRecordVec4s;
+        if (record[0] != probe.position[0] || record[1] != probe.position[1] || record[2] != probe.position[2]
+            || record[3] != probe.validity)
+        {
+            return false;
+        }
+        for (std::uint32_t coefficient = 0; coefficient < 27; ++coefficient)
+        {
+            if (record[4 + coefficient] != probe.sh2[coefficient / 3][coefficient % 3])
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool sameDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count,
+    const std::array<DirectLightUniformData, direct_lighting::maxDirectLights> &packed, std::uint32_t packedCount)
+{
+    if (count != packedCount)
+    {
+        return false;
+    }
+    for (std::uint32_t index = 0; index < count; ++index)
+    {
+        const direct_lighting::DirectLightDescription &source = lights[index].description;
+        const DirectLightUniformData                  &target = packed[index];
+        if (source.position[0] != target.positionType[0] || source.position[1] != target.positionType[1]
+            || source.position[2] != target.positionType[2]
+            || static_cast<float>(source.type) != target.positionType[3]
+            || source.direction[0] != target.directionRange[0] || source.direction[1] != target.directionRange[1]
+            || source.direction[2] != target.directionRange[2] || source.range != target.directionRange[3]
+            || source.color[0] != target.colorIntensity[0] || source.color[1] != target.colorIntensity[1]
+            || source.color[2] != target.colorIntensity[2] || source.intensity != target.colorIntensity[3])
+        {
+            return false;
+        }
+        if (source.type == direct_lighting::DirectLightType::Spot)
+        {
+            if (std::cos(source.innerConeRadians) != target.spotParameters[0]
+                || std::cos(source.outerConeRadians) != target.spotParameters[1])
+            {
+                return false;
+            }
+        }
+        else if (target.spotParameters[0] != 1.0f || target.spotParameters[1] != -1.0f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Builds the std140 frame uniform: view-projection (with the Vulkan fixup),
 // camera position, sun/ambient/exposure/tone-mapper, the packed light
 // array with its active count, and the radiance_cache probe-grid header.
@@ -617,6 +696,14 @@ void VulkanBackend::setDirectLights(const direct_lighting::DirectLight *lights, 
     {
         return;
     }
+    if (sameDirectLights(lights, count, packedDirectLights_, directLightCount_))
+    {
+        return;
+    }
+    for (std::uint32_t index = count; index < directLightCount_; ++index)
+    {
+        packedDirectLights_[index] = DirectLightUniformData{};
+    }
     for (std::uint32_t index = 0; index < count; ++index)
     {
         const direct_lighting::DirectLightDescription &source = lights[index].description;
@@ -657,6 +744,11 @@ void VulkanBackend::setDirectLights(const direct_lighting::DirectLight *lights, 
 // buffers are refreshed lazily at their next beginFrame.
 void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
 {
+    if (!probeGridDirty_ && sameProbeGrid(grid, packedProbeGrid_, packedProbeRecords_))
+    {
+        return;
+    }
+    ++probeGridRevision_;
     packedProbeGrid_       = ProbeGridUniformData{};
     packedProbeRecords_.clear();
     if (grid.valid())
@@ -691,7 +783,6 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
             packedProbeRecords_.push_back(0.0f); // pad to 8 vec4
         }
     }
-    ++probeGridRevision_;
     probeGridDirty_    = true;
     frameUniformDirty_ = true; // the header rides the frame uniform
 }
@@ -773,7 +864,7 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
         std::fprintf(stderr, "renderer module: could not flush frame uniform memory\n");
         return;
     }
-    if (probeGridDirty_)
+    if (probeGridDirty_ || !resources_->probeStorageCurrent(frames_->currentFrame(), probeGridRevision_))
     {
         // The recording slot is refreshed eagerly; the other slots catch up
         // on their next beginFrame (their stored revision is older).
@@ -890,6 +981,9 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     flushPendingMeshUpdates();
 
     hasLastPushConstants_       = false;
+    lastBoundPipeline_          = BoundPipeline::Mesh;
+    lastMeshDepthWrite_         = true;
+    lastMeshTwoSided_           = false;
     lastBoundMesh_              = invalidMesh;
     lastBoundMaterialSet_       = VK_NULL_HANDLE;
     lastBoundInstanceOffset_    = 0;
@@ -2146,7 +2240,8 @@ void VulkanBackend::drawOverlay(const OverlayDrawData &data)
     OverlayBuffer &buffers = overlayBuffers_[frameIndex];
     std::memcpy(buffers.vertexMapping, data.vertices, static_cast<std::size_t>(vertexBytes));
     std::memcpy(buffers.indexMapping, data.indices, static_cast<std::size_t>(indexBytes));
-    if (!device_->flushAllocation(buffers.vertexAllocation) || !device_->flushAllocation(buffers.indexAllocation))
+    if (!device_->flushAllocation(buffers.vertexAllocation, 0, vertexBytes)
+        || !device_->flushAllocation(buffers.indexAllocation, 0, indexBytes))
         return;
 
     VkCommandBuffer     command = frames_->commandBuffer();
@@ -2157,6 +2252,7 @@ void VulkanBackend::drawOverlay(const OverlayDrawData &data)
         return;
 
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->overlayPipeline());
+    lastBoundPipeline_ = BoundPipeline::Overlay;
     const float scale[2]     = {2.0f / data.displaySize[0], 2.0f / data.displaySize[1]};
     const float translate[2] = {-1.0f - data.displayPosition[0] * scale[0], -1.0f - data.displayPosition[1] * scale[1]};
     const float pushConstants[4] = {scale[0], scale[1], translate[0], translate[1]};
@@ -2182,6 +2278,7 @@ void VulkanBackend::drawOverlay(const OverlayDrawData &data)
         if (draw.resetRenderState)
         {
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->overlayPipeline());
+            lastBoundPipeline_ = BoundPipeline::Overlay;
             vkCmdPushConstants(command,
                 pipeline_->overlayPipelineLayout(),
                 VK_SHADER_STAGE_VERTEX_BIT,
@@ -2256,31 +2353,10 @@ void VulkanBackend::endFrame()
     }
     VkCommandBuffer command = frames_->commandBuffer();
 
-    if (pipeline_->dynamicRenderingEnabled())
+    const bool dynamicRendering = pipeline_->dynamicRenderingEnabled();
+    if (dynamicRendering)
     {
         vkCmdEndRendering(command);
-        const VkImageMemoryBarrier toPresent{
-            .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .pNext               = nullptr,
-            .srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            .dstAccessMask       = 0,
-            .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image               = swapchain_->images()[currentImageIndex_],
-            .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-        };
-        vkCmdPipelineBarrier(command,
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            0,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            1,
-            &toPresent);
     }
     else
     {
@@ -2304,7 +2380,8 @@ void VulkanBackend::endFrame()
                 .pNext               = nullptr,
                 .srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                 .dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT,
-                .oldLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                .oldLayout           = dynamicRendering ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                        : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -2367,6 +2444,31 @@ void VulkanBackend::endFrame()
             std::fprintf(stderr, "renderer module: screenshot export failed\n");
             exportRequested_ = false;
         }
+    }
+    else if (dynamicRendering)
+    {
+        const VkImageMemoryBarrier toPresent{
+            .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext               = nullptr,
+            .srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask       = 0,
+            .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = swapchain_->images()[currentImageIndex_],
+            .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        };
+        vkCmdPipelineBarrier(command,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            1,
+            &toPresent);
     }
 
     frames_->endGpuTiming();
