@@ -143,6 +143,7 @@ void setRangeClusterStrength(PlanetGenerationParams &params, double value) { par
 void setRangeClusterWavelength(PlanetGenerationParams &params, double value) { params.rangeClusterWavelengthMeters = value; }
 void setMountainErosionWeight(PlanetGenerationParams &params, double value) { params.mountainErosionWeight = value; }
 void setMountainErosionFaceBlendWidth(PlanetGenerationParams &params, double value) { params.mountainErosionFaceBlendWidth = value; }
+void setMountainErosionUnitMeters(PlanetGenerationParams &params, double value) { params.mountainErosionUnitMeters = value; }
 void setMountainErosionTerrainFrequency(PlanetGenerationParams &params, double value) { params.mountainErosionTerrainFrequency = value; }
 void setMountainErosionTerrainAmplitude(PlanetGenerationParams &params, double value) { params.mountainErosionTerrainAmplitude = value; }
 void setMountainErosionTerrainOctaves(PlanetGenerationParams &params, double value) { setUnsignedParam(params.mountainErosionTerrainOctaves, value); }
@@ -279,6 +280,8 @@ void setAerialPerspectiveScaleMeters(PlanetGenerationParams &params, double valu
 }
 void setAerialPerspectiveAsymptote(PlanetGenerationParams &params, double value) { params.aerialPerspectiveAsymptote = value; }
 void setSunDirectTintStrength(PlanetGenerationParams &params, double value) { params.sunDirectTintStrength = value; }
+void setSkySunHaloStrength(PlanetGenerationParams &params, double value) { params.skySunHaloStrength = value; }
+void setSkyWarmHorizonStrength(PlanetGenerationParams &params, double value) { params.skyWarmHorizonStrength = value; }
 void setDebugChunkBorders(PlanetGenerationParams &params, double value) { params.debugChunkBorders = value != 0.0; }
 void setDebugChunkBorderWidth(PlanetGenerationParams &params, double value) { params.debugChunkBorderWidthMeters = value; }
 void setCliffSteepnessLow(PlanetGenerationParams &params, double value) { params.cliffSteepnessLow = value; }
@@ -302,6 +305,11 @@ void setCloudWeatherStrength(PlanetGenerationParams &params, double value) { par
 void setCloudWeatherWavelengthMultiple(PlanetGenerationParams &params, double value) { params.cloudWeatherWavelengthMultiple = value; }
 void setCloudLatitudeBandStrength(PlanetGenerationParams &params, double value) { params.cloudLatitudeBandStrength = value; }
 void setCloudWispStrength(PlanetGenerationParams &params, double value) { params.cloudWispStrength = value; }
+void setCloudConvectiveStrength(PlanetGenerationParams &params, double value) { params.cloudConvectiveStrength = value; }
+void setCloudConvectiveWavelength(PlanetGenerationParams &params, double value) { params.cloudConvectiveWavelengthMeters = value; }
+void setCloudConvectiveFineWavelength(PlanetGenerationParams &params, double value) { params.cloudConvectiveFineWavelengthMeters = value; }
+void setCloudWispWavelengthA(PlanetGenerationParams &params, double value) { params.cloudWispWavelengthAMeters = value; }
+void setCloudWispWavelengthB(PlanetGenerationParams &params, double value) { params.cloudWispWavelengthBMeters = value; }
 void setCloudCycloneStrength(PlanetGenerationParams &params, double value) { params.cloudCycloneStrength = value; }
 void setCloudBandFrequency(PlanetGenerationParams &params, double value) { params.cloudBandFrequency = value; }
 void setCloudShadowStrength(PlanetGenerationParams &params, double value) { params.cloudShadowStrength = value; }
@@ -415,6 +423,7 @@ constexpr SettingRow kSettingRows[] = {
     {"range_cluster_wavelength_meters", SettingKind::Floating, setRangeClusterWavelength},
     {"mountain_erosion_weight",           SettingKind::Floating, setMountainErosionWeight},
     {"mountain_erosion_face_blend_width", SettingKind::Floating, setMountainErosionFaceBlendWidth},
+    {"mountain_erosion_unit_meters",      SettingKind::Floating, setMountainErosionUnitMeters},
     {"mountain_erosion_terrain_frequency", SettingKind::Floating, setMountainErosionTerrainFrequency},
     {"mountain_erosion_terrain_amplitude", SettingKind::Floating, setMountainErosionTerrainAmplitude},
     {"mountain_erosion_terrain_octaves",  SettingKind::Integer,  setMountainErosionTerrainOctaves},
@@ -543,6 +552,11 @@ constexpr SettingRow kSettingRows[] = {
     {"cloud_weather_wavelength_multiple", SettingKind::Floating, setCloudWeatherWavelengthMultiple},
     {"cloud_latitude_band_strength",  SettingKind::Floating, setCloudLatitudeBandStrength},
     {"cloud_wisp_strength",         SettingKind::Floating, setCloudWispStrength},
+    {"cloud_convective_strength",    SettingKind::Floating, setCloudConvectiveStrength},
+    {"cloud_convective_wavelength_meters",     SettingKind::Floating, setCloudConvectiveWavelength},
+    {"cloud_convective_fine_wavelength_meters", SettingKind::Floating, setCloudConvectiveFineWavelength},
+    {"cloud_wisp_wavelength_a_meters",          SettingKind::Floating, setCloudWispWavelengthA},
+    {"cloud_wisp_wavelength_b_meters",          SettingKind::Floating, setCloudWispWavelengthB},
     {"cloud_cyclone_strength",      SettingKind::Floating, setCloudCycloneStrength},
     {"cloud_band_frequency",          SettingKind::Floating, setCloudBandFrequency},
     {"cloud_shadow_strength",         SettingKind::Floating, setCloudShadowStrength},
@@ -610,6 +624,8 @@ constexpr SettingRow kSettingRows[] = {
     {"aerial_perspective_scale_meters",  SettingKind::Floating, setAerialPerspectiveScaleMeters},
     {"aerial_perspective_asymptote",  SettingKind::Floating, setAerialPerspectiveAsymptote},
     {"sun_direct_tint_strength",      SettingKind::Floating, setSunDirectTintStrength},
+    {"sky_sun_halo_strength",          SettingKind::Floating, setSkySunHaloStrength},
+    {"sky_warm_horizon_strength",     SettingKind::Floating, setSkyWarmHorizonStrength},
     {"debug_chunk_borders",           SettingKind::Boolean,  setDebugChunkBorders},
     {"debug_chunk_border_width_meters", SettingKind::Floating, setDebugChunkBorderWidth},
 };

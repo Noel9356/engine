@@ -19,6 +19,7 @@
 
 #include "planet_demo_support.hpp"
 
+#include <engine/planet/atmosphere.hpp>
 #include <engine/planet/capabilities.hpp>
 #include <engine/planet/climate.hpp>
 #include <engine/planet/fbm.hpp>
@@ -82,12 +83,19 @@ SpeciesCard treeSpeciesFor(Biome biome, std::uint64_t hash)
         case Biome::Taiga:
             return {2, 0.52f, 10.0, 17.0};
         case Biome::Savanna:
-            return mix < 0.55 ? SpeciesCard{1, 1.05f, 5.0, 12.0}
-                : (mix < 0.85 ? SpeciesCard{3, 0.78f, 4.0, 8.0} : SpeciesCard{0, 0.80f, 6.0, 11.0});
+            // Open-country stature: flat-topped acacias read as trees (not
+            // shrubs) at the surface view's kilometer distances only when
+            // the crown band carries real height - a 5 m savanna tree
+            // subtends 3 pixels at 800 m and drops out of the midground.
+            return mix < 0.55 ? SpeciesCard{1, 1.05f, 8.0, 16.0}
+                : (mix < 0.85 ? SpeciesCard{3, 0.78f, 5.0, 11.0} : SpeciesCard{0, 0.80f, 8.0, 14.0});
         case Biome::Grassland:
-            return mix < 0.5 ? SpeciesCard{1, 1.00f, 4.0, 10.0} : SpeciesCard{0, 0.80f, 4.0, 10.0};
+            // Landmark trees with real presence: a lone oak reads on the
+            // skyline from a walking eye and anchors the midground's depth
+            // scale for the aerial views - a 4 m sapling does neither.
+            return mix < 0.5 ? SpeciesCard{1, 1.05f, 6.0, 15.0} : SpeciesCard{0, 0.85f, 7.0, 16.0};
         case Biome::Shrubland:
-            return {3, 0.78f, 4.0, 8.0};
+            return {3, 0.78f, 6.0, 13.0};
         default:
             return {3, 0.78f, 4.0, 7.0};
     }
@@ -134,7 +142,7 @@ SpeciesCard grassSpeciesFor(Biome biome, std::uint64_t hash)
             // secondary cards into the dominant tile so neighbors differ in
             // silhouette as well as tint (a single-card biome planted the
             // whole sward with one repeated sprite).
-            return mix < 0.55 ? SpeciesCard{0, 1.00f, 0.35, 0.75}
+            return mix < 0.55 ? SpeciesCard{0, 1.00f, 0.34, 0.82}
                 : (mix < 0.85 ? SpeciesCard{2, 0.95f, 0.30, 0.68} : SpeciesCard{3, 1.10f, 0.28, 0.62});
         case Biome::Savanna:
             return mix < 0.65 ? SpeciesCard{1, 1.00f, 0.30, 0.65} : SpeciesCard{0, 1.00f, 0.30, 0.60};
@@ -200,7 +208,7 @@ inline constexpr float kBushTint[3]  = {0.80f, 1.04f, 0.74f};
 // the tightest radius (see the configuration docs). Grass carries the finest
 // lattice of all groups - real grass reads as a sward only when tufts sit
 // closer than a blade's length apart; coarser cells plant visible rows.
-inline constexpr double kTreeCellMeters  = 46.0;
+inline constexpr double kTreeCellMeters  = 38.0;
 inline constexpr double kBushCellMeters  = 24.0;
 inline constexpr double kGrassCellMeters = 0.62;
 inline constexpr double kGrassMidCellMeters = 1.4;
@@ -217,7 +225,7 @@ inline constexpr double kSeaSpriteLiftMeters    = 0.45; // foam quads ride above
 // Contact shadows read only inside the near/mid ring - beyond it a tree's
 // shadow subtends a couple of pixels at ground-level eyes and a grazing
 // sliver at elevated ones, while its translucent fill still costs the frame.
-inline constexpr double kShadowMaxDistanceMeters = 600.0;
+inline constexpr double kShadowMaxDistanceMeters = 900.0;
 
 // Sea-state churn cadence: the foam pool's staggered quarters re-roll on this
 // wall-clock interval (real breaking foam turns over in a couple of seconds).
@@ -561,11 +569,16 @@ double treeBaseDensity(Biome biome)
         case Biome::Taiga:
             return 0.88; // the boreal forest is a dense conifer stand, not open parkland
         case Biome::Savanna:
-            return 0.16;
+            return 0.30;
         case Biome::Grassland:
-            return 0.05;
+            // Open country carries its landmark trees - the lone oak and
+            // small copse real grassland photographs every hundred meters
+            // or so; a sparser scatter leaves the midground a bare plain
+            // between the near grass and the horizon (the walk view's
+            // emptiness read came from exactly that band).
+            return 0.28;
         case Biome::Shrubland:
-            return 0.04;
+            return 0.16;
         default:
             return 0.0;
     }
@@ -576,18 +589,25 @@ double bushBaseDensity(Biome biome)
     switch (biome)
     {
         case Biome::Shrubland:
-            return 0.45;
+            // The shrub is the biome's own dominant plant - a scatter this
+            // thin left the mid ring an empty plain between the near grass
+            // and the horizon.
+            return 0.75;
         case Biome::Savanna:
-            return 0.20;
+            return 0.45;
         case Biome::Grassland:
-            return 0.12;
+            // Grassland's own shrub presence: open meadows carry a hazel or
+            // bramble patch every few dozen meters - a floor that keeps
+            // shrub patches across the whole near field without turning
+            // the meadow into scrub.
+            return 0.55;
         case Biome::TemperateForest:
         case Biome::SeasonalForest:
         case Biome::TemperateRainforest:
         case Biome::TropicalRainforest:
-            return 0.14;
+            return 0.26;
         case Biome::Taiga:
-            return 0.10;
+            return 0.20;
         case Biome::Tundra:
             return 0.05;
         default:
@@ -625,14 +645,14 @@ double rockBaseDensity(Biome biome)
     {
         case Biome::Rock:
         case Biome::Snow:
-            return 0.50;
+            return 0.60;
         case Biome::Desert:
         case Biome::Tundra:
-            return 0.35;
+            return 0.45;
         case Biome::Beach:
-            return 0.14;
+            return 0.22;
         default:
-            return 0.15;
+            return 0.30;
     }
 }
 
@@ -1235,7 +1255,7 @@ void walkLattice(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &east, const
     }
 }
 
-void PlanetScatterSystem::rebuild(const glm::dvec3 &eyePlanetLocal)
+void PlanetScatterSystem::rebuild(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward)
 {
     anchorEye_ = eyePlanetLocal;
     lastSunDirection_ = glm::length(lastSunDirection_) > 1.0e-9 ? lastSunDirection_ : glm::dvec3(0.0, 1.0, 0.0);
@@ -1252,21 +1272,28 @@ void PlanetScatterSystem::rebuild(const glm::dvec3 &eyePlanetLocal)
 
     shadowScratch_.clear();
     shadowIndexScratch_.clear();
-    scatterVegetation(eyePlanetLocal, eyeDirection, east, north);
+    scatterVegetation(eyePlanetLocal, eyeDirection, east, north, viewForward);
     scatterRocks(eyePlanetLocal, eyeDirection, east, north);
     // The contact shadows collected under the vegetation and rocks upload as
     // one unlit translucent mesh (the transparent tail depth-tests them
     // against the terrain they lie on). A night run collects nothing and the
     // slot deactivates itself in uploadMesh.
     shadowMesh_.anchorPlanetLocal = anchorEye_;
+    // The contact shadows carry the frame's shadow story (see the sun
+    // shadow map note in the demo config): their opacity runs high enough
+    // to read as shade rather than a gray stain - the sun's disc sits in
+    // the frame and its shadow needs to hold against the lit ground.
     uploadMesh(shadowMesh_, shadowScratch_, shadowIndexScratch_, false, true, true,
-        static_cast<float>(std::clamp(0.62 * params_.surfaceShadowStrength, 0.0, 1.0)), true);
+        static_cast<float>(std::clamp(0.78 * params_.surfaceShadowStrength, 0.0, 1.0)), true);
     shadowMesh_.material.baseColorTexture = shadowTexture_;
     scatterWhitecaps(eyePlanetLocal, eyeDirection, east, north, false);
     scatterSurf(eyePlanetLocal, eyeDirection, east, north);
     const double sunUp = glm::dot(glm::normalize(lastSunDirection_), eyeDirection);
     scatterMist(eyePlanetLocal, eyeDirection, east, north, sunUp);
-    scatterBirdFlocks(eyePlanetLocal, eyeDirection, east, north);
+    // viewForward (the camera's sight axis this rebuild) - NOT eyeDirection,
+    // which is the eye's own radial up: the flocks place into the camera's
+    // forward fan, and the up-direction would collapse that fan to nothing.
+    scatterBirdFlocks(eyePlanetLocal, viewForward, east, north);
 }
 
 
@@ -1301,7 +1328,44 @@ void pushBillboard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_
     right = glm::normalize(right);
     glm::dvec3 facing = glm::normalize(glm::cross(toEye, right)); // card's vertical, ⊥ sight line
     QuadPush quad;
-    quad.normal = up;
+    // Per-card lighting structure: the shading normal tilts a hash-chosen
+    // fraction of up to ~17 degrees off the local up. The tilt is a pure
+    // function of the card's planet-local base position (stable across
+    // rebuilds - the eye moving re-orients the card's plane, never its
+    // lighting), so the sun's NdotL spreads across a stand: sun-facing
+    // cards catch roughly twice the away-facing ones' light and the stand
+    // reads as individual plants at their own sun angles instead of one
+    // flat decal sheet - the billboard tell every card sharing the ground's
+    // exact up normal photographs (identical NdotL, no shade-side structure
+    // anywhere in the frame).
+    std::uint64_t jitterHash = 0x9E3779B97F4A7C15ull;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const std::int64_t lattice = static_cast<std::int64_t>(baseCenter[axis] * 4096.0);
+        jitterHash = (jitterHash ^ (static_cast<std::uint64_t>(lattice) * 0xC2B2AE3D27D4EB4Full))
+            * 0x165667B19E3779F9ull;
+    }
+    jitterHash ^= jitterHash >> 33;
+    const auto jitterUnit = [&jitterHash](std::uint64_t lane)
+    {
+        std::uint64_t h = jitterHash ^ (lane * 0x27D4EB2F165667C5ull);
+        h ^= h >> 33;
+        h *= 0xFF51AFD7ED558CCDull;
+        h ^= h >> 33;
+        return static_cast<double>(h >> 11) / 9007199254740992.0;
+    };
+    {
+        glm::dvec3 planeA = glm::dvec3(1.0, 0.0, 0.0) - up * up.x;
+        if (glm::length(planeA) < 1.0e-6)
+        {
+            planeA = glm::dvec3(0.0, 0.0, 1.0) - up * up.z;
+        }
+        planeA = glm::normalize(planeA);
+        const glm::dvec3 planeB = glm::normalize(glm::cross(up, planeA));
+        const double theta = jitterUnit(0) * 2.0 * kPi;
+        const double tilt = 0.30 * jitterUnit(1);
+        quad.normal = glm::normalize(up + (planeA * std::cos(theta) + planeB * std::sin(theta)) * tilt);
+    }
     // Root shading: the card's two base corners darken toward the ground -
     // the occlusion a plant's own base sits in (no light reaches the bottom
     // of a tuft under its own blades). The top corners keep the full tint.
@@ -1366,11 +1430,15 @@ void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm:
         return; // sun at zenith: the element covers its own shadow footprint
     }
     // Shadow length ~ height / tan(elevation), clamped to the reach even a
-    // sunset shadow keeps readable through the soft falloff. The quad spans
-    // from half a footprint BEHIND the trunk to the stretched toe, so the
-    // shaded patch always touches the element that casts it.
+    // sunset shadow keeps readable through the soft falloff. The clamp sits
+    // just past the low-sun band's own cotangent (cot 17 deg = 3.3), so a
+    // golden-hour shadow stretches to its true length instead of bunched
+    // under the element - the sun's direction is the cue the frame reads
+    // first, and a stunted shadow points nowhere. The quad spans from half
+    // a footprint BEHIND the trunk to the stretched toe, so the shaded
+    // patch always touches the element that casts it.
     const double stretchMeters = std::clamp(heightMeters * horizontal / std::max(0.12, sunUp),
-        0.0, 2.5 * heightMeters);
+        0.0, 3.4 * heightMeters);
     const double baseExtent = std::max(sizeMeters * 0.45, 0.5);
     const glm::dvec3 shadowDir = -(sunHorizontal / horizontal);
     const glm::dvec3 center = groundPoint + shadowDir * (0.5 * stretchMeters)
@@ -1405,7 +1473,7 @@ void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm:
 }
 
 void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
-    const glm::dvec3 &east, const glm::dvec3 &north)
+    const glm::dvec3 &east, const glm::dvec3 &north, const glm::dvec3 &viewForward)
 {
     (void)eyeDirection;
     if (!params_.vegetationEnabled)
@@ -1427,6 +1495,65 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         = engine::planet::makeFbmSeeds(engine::planet::hashCombine64(params_.seed, 0x7EE51D2ull), 3);
     const engine::planet::FbmParams clumpParams{3, 2.0, 0.5};
 
+    // Near-ring minimum population: the presence gates key on per-cell hash
+    // rolls, and a small ring of cells can (with perfectly uniform rolls)
+    // still reject every candidate - the walk site's own neighborhood drew
+    // such a region, leaving the whole near field bare while the far ring
+    // kept its scatter (an empty meadow with a distant treeline). The fix
+    // ranks the near ring's viable candidates and plants the best few
+    // regardless of the threshold - real open country always holds some
+    // landmark tree or shrub patch within a few dozen meters of any point.
+    // The ranking prefers cells inside the camera's forward hemisphere (the
+    // camera-fixed minimum must land ON SCREEN: the walk spawn faces uphill,
+    // so an unranked guarantee plants its landmarks behind the ridge the
+    // walker stares at, and the frame photographs the same bare slope). Both
+    // the candidate set and the ranking are pure functions of the world
+    // cells and the sight axis, so rebuilds stay deterministic.
+    constexpr double kTreeNearRingMeters = 260.0;
+    constexpr std::size_t kTreeNearRingMinimum = 8;
+    constexpr double kBushNearRingMeters = 150.0;
+    constexpr std::size_t kBushNearRingMinimum = 12;
+    const bool viewKnown = glm::dot(viewForward, viewForward) > 0.25; // unit or zero
+
+    // Pass 1 (trees): collect the near ring's viable candidates with their
+    // presence rolls. Viability here means every gate EXCEPT the presence
+    // draw itself cleared (land, biome, slope, and - for trees - a softened
+    // clump gate; the near guarantee is about presence, not about planting
+    // into a clearing the grove field wants empty, so the clump gate only
+    // floors the RANKED candidates' presence, never vetoes the ring outright).
+    struct NearCandidate
+    {
+        double roll = 1.0;
+        double presence = 0.0;
+        double forwardShare = 0.0; // dot(cell direction, camera forward)
+        std::int64_t cell[3]{};
+    };
+    const auto forwardShareOf = [&eyePlanetLocal, &viewKnown, &viewForward](const glm::dvec3 &cellCenter)
+    {
+        if (!viewKnown)
+        {
+            return 0.0;
+        }
+        const glm::dvec3 delta = cellCenter - eyePlanetLocal;
+        const double length = glm::length(delta);
+        return length > 1.0e-6 ? glm::dot(delta / length, viewForward) : 0.0;
+    };
+    // The ranking order shared by both near-ring passes: cells inside the
+    // camera's forward band lead (the guaranteed minimum must land on
+    // screen), and presence roll orders each band.
+    constexpr double kForwardBand = 0.35; // cells within ~69 deg of the sight axis
+    const auto forwardFirst = [kForwardBand](const NearCandidate &a, const NearCandidate &b)
+    {
+        const bool aFront = a.forwardShare > kForwardBand;
+        const bool bFront = b.forwardShare > kForwardBand;
+        if (aFront != bFront)
+        {
+            return aFront;
+        }
+        return a.roll < b.roll;
+    };
+    std::vector<NearCandidate> nearTreeCandidates;
+
     std::uint32_t treeCount = 0;
     if (params_.vegetationTreeDensity > 0.0)
     {
@@ -1435,6 +1562,40 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         vertices.reserve(1024);
         indices.reserve(1536);
         constexpr std::uint32_t kMaxTrees = 1200;
+        // Distance haze folded into the card albedo: the terrain fades
+        // toward the horizon band per chunk, and without the same fade the
+        // distant treeline photographs as a saturated green wall pasting
+        // against its own hazed ground - the aerial-perspective depth ramp
+        // must reach the vegetation or the whole midground flattens. The
+        // weight is the module's own exponential profile evaluated at the
+        // card's distance from the rebuild eye (the eye roams well inside
+        // the rebuild radius, so the weight's error stays invisible), and
+        // the target color is the sky's horizon band scaled to the band a
+        // lit card scatters back - a lit distant canopy returns roughly
+        // half the incident light, so the fold lands the distant trees
+        // near where the exact per-chunk fog puts the terrain beside them.
+        const glm::vec3 hazeColor = [&]()
+        {
+            const engine::planet::Vec3 horizon = engine::planet::skyGradientColor(params_, 0.04);
+            return glm::vec3(
+                static_cast<float>(horizon.x * 0.55), static_cast<float>(horizon.y * 0.55),
+                static_cast<float>(horizon.z * 0.55));
+        }();
+        const double hazeScale
+            = std::max(1.0, params_.aerialPerspectiveScaleMeters);
+        const double hazeAsymptote = std::clamp(params_.aerialPerspectiveAsymptote, 0.0, 1.0);
+        const auto cardHaze = [&](std::array<float, 3> &color, double cardDistance)
+        {
+            const double weight = hazeAsymptote * (1.0 - std::exp(-cardDistance / hazeScale));
+            if (weight <= 0.0)
+            {
+                return;
+            }
+            for (std::uint32_t channel = 0; channel < 3; ++channel)
+            {
+                color[channel] = std::lerp(color[channel], hazeColor[channel], static_cast<float>(weight));
+            }
+        };
         // Dense forest biomes double up: a passing cell plants a companion
         // tree at its own hashed offset (the lattice cell stays the walk's
         // cost unit, so the forest floor thickens without doubling the
@@ -1456,7 +1617,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     return;
                 }
                 const std::uint64_t hash = cellHash(params_.seed, kSaltTree, cx, cy, cz);
-                if (hashUnit(hash, 0) > 0.60)
+                if (hashUnit(hash, 0) > 0.70)
                 {
                     return; // cheap pre-gate: most cells hold no tree attempt
                 }
@@ -1508,7 +1669,17 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     // (the grove gate above already carries the clumping).
                     presence = std::max(presence, 0.78 * params_.vegetationTreeDensity);
                 }
-                if (hashUnit(hash, 3) > clamp01(presence))
+                const double presenceRoll = hashUnit(hash, 3);
+                if (cellDistance <= kTreeNearRingMeters)
+                {
+                    // Near-ring candidate: viability already cleared every
+                    // gate but the draw; the ranking pass below plants the
+                    // best few whatever their roll.
+                    nearTreeCandidates.push_back(NearCandidate{presenceRoll, presence,
+                        forwardShareOf(cellCenter), {cx, cy, cz}});
+                    return;
+                }
+                if (presenceRoll > clamp01(presence))
                 {
                     return;
                 }
@@ -1579,6 +1750,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     color[channel] = std::lerp(color[channel],
                         clamp01(static_cast<float>(sample.color[channel]) * 0.9f), groundMix) * cloudShade;
                 }
+                cardHaze(color, cellDistance);
                 pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
                     height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 10) < 0.5, 0.35f);
                 appendShadow(point, up, halfWidth * 1.15, height * 0.82);
@@ -1626,6 +1798,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                                 clamp01(static_cast<float>(sample.color[channel]) * 0.9f), companionGroundMix)
                                 * cloudShade;
                         }
+                        cardHaze(companionColor, cellDistance);
                         pushBillboard(vertices, indices, companionBase, up,
                             anchorEye_ - companionBase, companionHalfWidth, companionHeight, companionColor,
                             anchorEye_, speciesUv(companionSpecies.tile), hashUnit(companionHash, 10) < 0.5, 0.35f);
@@ -1634,6 +1807,89 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     }
                 }
             });
+
+        // Pass 2 (trees): the near-ring guarantee. The walk above deferred
+        // every near-ring candidate; the ranking plants the strongest few
+        // (presence margin - how badly the candidate wanted to grow) with
+        // the camera's forward hemisphere leading the order, so the
+        // guaranteed minimum lands on screen. Cells the far walk already
+        // accepted never appear here (they live outside the ring by
+        // construction), and a ranked cell re-runs the same geometry path a
+        // regular accept runs, with the identical hash lanes.
+        std::sort(nearTreeCandidates.begin(), nearTreeCandidates.end(), forwardFirst);
+        std::size_t nearTreesPlanted = 0;
+        for (const NearCandidate &candidate : nearTreeCandidates)
+        {
+            if (nearTreesPlanted >= kTreeNearRingMinimum || treeCount >= kMaxTrees)
+            {
+                break;
+            }
+            // A candidate whose roll already passed its presence threshold
+            // would have been planted by a correct draw region; count it and
+            // continue so the guaranteed minimum stays a true minimum.
+            const std::uint64_t hash = cellHash(params_.seed, kSaltTree,
+                candidate.cell[0], candidate.cell[1], candidate.cell[2]);
+            const glm::dvec3 cellCenter((static_cast<double>(candidate.cell[0]) + 0.5) * kTreeCellMeters,
+                (static_cast<double>(candidate.cell[1]) + 0.5) * kTreeCellMeters,
+                (static_cast<double>(candidate.cell[2]) + 0.5) * kTreeCellMeters);
+            const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kTreeCellMeters * 0.7
+                + north * (hashUnit(hash, 2) - 0.5) * kTreeCellMeters * 0.7;
+            const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
+            double radius = 0.0;
+            if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kTreeMinElevationMeters)
+            {
+                continue;
+            }
+            ClimateSample sample;
+            const double directionArray[3] = {direction.x, direction.y, direction.z};
+            if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
+            {
+                continue;
+            }
+            const double base = treeBaseDensity(sample.biome);
+            if (base <= 0.0)
+            {
+                continue;
+            }
+            {
+                engine::planet::ReliefSample relief{};
+                if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
+                    && relief.cliffFactor >= params_.cliffSteepnessLow)
+                {
+                    continue;
+                }
+            }
+            const SpeciesCard species = treeSpeciesFor(sample.biome, hash);
+            const double height = species.minHeightMeters
+                + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
+            const double halfWidth = 0.5 * height * species.aspect * (0.62 + 0.72 * hashUnit(hash, 5));
+            const glm::dvec3 up = direction;
+            const glm::dvec3 point = direction * radius;
+            const glm::dvec3 baseCenter = point - up * (0.10 * height);
+            std::array<float, 3> color
+                = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(hash, 6));
+            if (species.tile == 2)
+            {
+                color[0] *= 0.86f;
+                color[1] *= 1.00f;
+                color[2] *= 0.90f;
+            }
+            // The near field stands at full species color (the ground-fade
+            // only starts past 160 m; a near-ring landmark sits closer).
+            const float cloudShade = static_cast<float>(clamp01(
+                1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                    params_.derivedVoxelMeters)));
+            for (std::uint32_t channel = 0; channel < 3; ++channel)
+            {
+                color[channel] *= cloudShade;
+            }
+            pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
+                height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 10) < 0.5, 0.35f);
+            appendShadow(point, up, halfWidth * 1.15, height * 0.82);
+            ++treeCount;
+            ++nearTreesPlanted;
+        }
+
         treeMesh_.anchorPlanetLocal = anchorEye_;
         uploadMesh(treeMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
         treeMesh_.material.baseColorTexture = treeTexture_;
@@ -1643,6 +1899,12 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         treeMesh_.active = false;
     }
 
+    // The bush walk's own near-ring collection (see the tree walk's
+    // near-ring minimum population comment): the ranking pass below plants
+    // the best few whatever their presence roll, so the meadow's near field
+    // keeps its shrub patches.
+    std::vector<NearCandidate> nearBushCandidates;
+
     std::uint32_t bushCount = 0;
     if (params_.vegetationBushDensity > 0.0)
     {
@@ -1650,7 +1912,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         std::vector<std::uint32_t> indices;
         vertices.reserve(512);
         indices.reserve(768);
-        constexpr std::uint32_t kMaxBushes = 220;
+        constexpr std::uint32_t kMaxBushes = 360;
         walkLattice(eyePlanetLocal, east, north, 4.0, bushRadius, kBushCellMeters,
             [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
             {
@@ -1683,7 +1945,14 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                     return;
                 }
                 const double presence = base * (0.5 + 0.5 * sample.moisture01) * params_.vegetationBushDensity;
-                if (hashUnit(hash, 3) > clamp01(presence))
+                const double presenceRoll = hashUnit(hash, 3);
+                if (cellDistance <= kBushNearRingMeters)
+                {
+                    nearBushCandidates.push_back(NearCandidate{presenceRoll, presence,
+                        forwardShareOf(cellCenter), {cx, cy, cz}});
+                    return;
+                }
+                if (presenceRoll > clamp01(presence))
                 {
                     return;
                 }
@@ -1723,6 +1992,69 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 appendShadow(direction * radius, up, halfWidth * 0.95, height * 0.9);
                 ++bushCount;
             });
+        // Pass 2 (bushes): the near-ring guarantee (see the trees' pass 2).
+        std::sort(nearBushCandidates.begin(), nearBushCandidates.end(), forwardFirst);
+        std::size_t nearBushesPlanted = 0;
+        for (const NearCandidate &candidate : nearBushCandidates)
+        {
+            if (nearBushesPlanted >= kBushNearRingMinimum || bushCount >= kMaxBushes)
+            {
+                break;
+            }
+            const std::uint64_t hash = cellHash(params_.seed, kSaltBush,
+                candidate.cell[0], candidate.cell[1], candidate.cell[2]);
+            const glm::dvec3 cellCenter((static_cast<double>(candidate.cell[0]) + 0.5) * kBushCellMeters,
+                (static_cast<double>(candidate.cell[1]) + 0.5) * kBushCellMeters,
+                (static_cast<double>(candidate.cell[2]) + 0.5) * kBushCellMeters);
+            const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kBushCellMeters * 0.75
+                + north * (hashUnit(hash, 2) - 0.5) * kBushCellMeters * 0.75;
+            const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
+            double radius = 0.0;
+            if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kMinLandElevationMeters)
+            {
+                continue;
+            }
+            ClimateSample sample;
+            const double directionArray[3] = {direction.x, direction.y, direction.z};
+            if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
+            {
+                continue;
+            }
+            const double base = bushBaseDensity(sample.biome);
+            if (base <= 0.0)
+            {
+                continue;
+            }
+            {
+                engine::planet::ReliefSample relief{};
+                if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
+                    && relief.cliffFactor >= params_.cliffSteepnessLow)
+                {
+                    continue;
+                }
+            }
+            const SpeciesCard species = bushSpeciesFor(sample.biome, hash);
+            const double height = species.minHeightMeters
+                + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
+            const double halfWidth = 0.5 * height * species.aspect * (1.05 + 0.35 * hashUnit(hash, 5));
+            const glm::dvec3 up = direction;
+            const glm::dvec3 baseCenter = direction * radius - up * (0.25 * height);
+            std::array<float, 3> color
+                = speciesTint(sample, kBushTint, 0.88 + 0.26 * hashUnit(hash, 6));
+            const float bushCloudShade = static_cast<float>(clamp01(
+                1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                    params_.derivedVoxelMeters)));
+            for (std::uint32_t channel = 0; channel < 3; ++channel)
+            {
+                color[channel] *= bushCloudShade;
+            }
+            pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
+                height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 7) < 0.5, 0.40f);
+            appendShadow(direction * radius, up, halfWidth * 0.95, height * 0.9);
+            ++bushCount;
+            ++nearBushesPlanted;
+        }
+
         bushMesh_.anchorPlanetLocal = anchorEye_;
         uploadMesh(bushMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
         bushMesh_.material.baseColorTexture = bushTexture_;
@@ -1745,9 +2077,9 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         // past arm's reach). The split keeps the fill cost of the near disc
         // while the old one-scale 0.62 m ring across the full radius doubled
         // the frame for no visual gain beyond nine meters.
-        constexpr std::uint32_t kMaxGrassNear = 1500;
-        constexpr std::uint32_t kMaxGrassMid = 950;
-        const double nearDiscMeters = std::min(grassRadius, 7.0);
+        constexpr std::uint32_t kMaxGrassNear = 3000;
+        constexpr std::uint32_t kMaxGrassMid = 2600;
+        const double nearDiscMeters = std::min(grassRadius, 14.0);
         walkLattice(eyePlanetLocal, east, north, 1.8, nearDiscMeters, kGrassCellMeters,
             [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
             {
@@ -1805,7 +2137,7 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 const double moisture = clamp01(static_cast<float>(sample.moisture01));
                 const double height = (species.minHeightMeters
                     + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters))
-                    * (0.78 + 0.44 * moisture) * 1.30;
+                    * (0.78 + 0.44 * moisture) * 1.55;
                 const double halfWidth = 0.5 * height * species.aspect * (0.95 + 0.5 * hashUnit(hash, 5));
                 const glm::dvec3 up = direction;
                 const glm::dvec3 center = direction * radius - up * (0.08 * height);
@@ -1834,13 +2166,14 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 pushBillboard(vertices, indices, center, up, right2, halfWidth, height, shadedColor,
                     anchorEye_, grassUv, hashUnit(hash, 10) < 0.5, 0.45f);
                 // Contact shadow: the tuft's own footprint darkens the soil
-                // right under the blades. Without it the cutout sprite's hard
-                // bottom edge sits on undarkened ground and the tuft reads as
-                // a painted sticker floating on the soil - the decal the
-                // trees wear, scaled to the tuft (a sward clump's shadow is
-                // barely wider than the clump and a fraction of its height,
-                // since the blades are mostly transparent to the sun).
-                appendShadow(direction * (radius - 0.30 * height), up, halfWidth * 1.35, height * 0.28);
+                // right under the blades and stretches to the sun's own
+                // cotangent - the one directional cue a tuft owns. Without it
+                // the cutout sprite's hard bottom edge sits on undarkened
+                // ground and the tuft reads as a painted sticker floating on
+                // the soil - the decal the trees wear, scaled to the tuft (a
+                // sward clump's shadow is barely wider than the clump itself
+                // and roughly half its height stretched down-sun).
+                appendShadow(direction * (radius - 0.30 * height), up, halfWidth * 1.35, height * 0.50);
                 ++grassCount;
             });
         // Mid annulus (near disc edge .. full radius): coarser lattice,
@@ -1966,9 +2299,9 @@ void PlanetScatterSystem::scatterRocks(const glm::dvec3 &eyePlanetLocal, const g
     vertices.reserve(2048);
     indices.reserve(2048);
     std::uint32_t rockCount = 0;
-    constexpr std::uint32_t kMaxRocks = 48;
+    constexpr std::uint32_t kMaxRocks = 160;
 
-    walkLattice(eyePlanetLocal, east, north, 3.0, rockRadius, kRockCellMeters,
+    walkLattice(eyePlanetLocal, east, north, 2.0, rockRadius, kRockCellMeters,
         [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double)
         {
             if (rockCount >= kMaxRocks)
@@ -1976,7 +2309,7 @@ void PlanetScatterSystem::scatterRocks(const glm::dvec3 &eyePlanetLocal, const g
                 return;
             }
             const std::uint64_t hash = cellHash(params_.seed, kSaltRock, cx, cy, cz);
-            if (hashUnit(hash, 0) > 0.30)
+            if (hashUnit(hash, 0) > 0.50)
             {
                 return;
             }
@@ -2002,7 +2335,7 @@ void PlanetScatterSystem::scatterRocks(const glm::dvec3 &eyePlanetLocal, const g
             // Low-poly displaced octahedron: eight faces with flat facets,
             // radially displaced so no two rocks share a silhouette, sunk a
             // third into the ground.
-            const double rockSize = 0.3 + hashUnit(hash, 4) * 1.4;
+            const double rockSize = 0.5 + hashUnit(hash, 4) * 2.6;
             const double sink = rockSize * 0.34;
             const glm::dvec3 center = direction * (radius - sink);
             glm::dvec3 up = direction;
@@ -2455,7 +2788,6 @@ void PlanetScatterSystem::scatterMist(const glm::dvec3 &eyePlanetLocal, const gl
 void PlanetScatterSystem::scatterBirdFlocks(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
     const glm::dvec3 &east, const glm::dvec3 &north)
 {
-    (void)eyeDirection;
     const std::uint32_t flockCount = static_cast<std::uint32_t>(std::max(0.0, std::min(16.0, std::round(params_.birdFlockCount))));
     flocks_.clear();
     if (flockCount == 0 || !params_.birdsEnabled)
@@ -2463,12 +2795,38 @@ void PlanetScatterSystem::scatterBirdFlocks(const glm::dvec3 &eyePlanetLocal, co
         birdMesh_.active = false;
         return;
     }
+    // Forward-hemisphere placement: the flocks fly into the camera's FORWARD
+    // fan (eyeDirection, projected onto the local tangent plane) instead of
+    // any azimuth - a stand of two flocks placed blind lands behind the
+    // camera half the time and the frame photographs an empty sky, while a
+    // flock crossing the visible sky is the one motion cue a still capture
+    // can carry (wing poses frozen mid-flap, a live world reading).
+    glm::dvec3 forwardTangent = east;
+    if (glm::length(eyeDirection) > 1.0e-9)
+    {
+        const glm::dvec3 up = glm::length(eyePlanetLocal) > 1.0e-9
+            ? glm::normalize(eyePlanetLocal)
+            : glm::dvec3(0.0, 1.0, 0.0);
+        const glm::dvec3 projected = eyeDirection - up * glm::dot(eyeDirection, up);
+        if (glm::length(projected) > 1.0e-6)
+        {
+            forwardTangent = glm::normalize(projected);
+        }
+    }
+    const glm::dvec3 sideTangent = glm::normalize(
+        glm::length(glm::cross(forwardTangent, north)) > 1.0e-9 ? glm::cross(forwardTangent, north) : east);
     const double seaRadius = params_.derivedSeaRadiusMeters;
     for (std::uint32_t flockIndex = 0; flockIndex < flockCount; ++flockIndex)
     {
         const std::uint64_t hash = cellHash(params_.seed, kSaltFlock, static_cast<std::int64_t>(flockIndex), 0, 0);
         BirdFlock flock;
-        const double azimuth = hashUnit(hash, 0) * 2.0 * kPi;
+        // Flight fan: +-26 degrees around the forward tangent - inside the
+        // widest capture camera's horizontal field of view, so the flock
+        // and its path circle stay where the frame can see them (a fan wider
+        // than the lens places whole flocks off-screen for their entire
+        // flight). The path circle keeps its own rim inside the cone.
+        const double azimuth = (hashUnit(hash, 0) - 0.5) * 0.90;
+        const glm::dvec3 walk = glm::normalize(forwardTangent * std::cos(azimuth) + sideTangent * std::sin(azimuth));
         // Flight band: flocks stay close enough that a bird's wing span
         // still resolves a few pixels on screen at capture resolutions -
         // a flock beyond a couple hundred meters reads as a row of
@@ -2476,7 +2834,6 @@ void PlanetScatterSystem::scatterBirdFlocks(const glm::dvec3 &eyePlanetLocal, co
         // debris rather than birds (the band tops out at 260 m; the path
         // keeps its own minimum eye distance below).
         const double distance = 80.0 + 180.0 * hashUnit(hash, 1);
-        const glm::dvec3 walk = east * std::cos(azimuth) + north * std::sin(azimuth);
         const glm::dvec3 centerDirection = glm::normalize(eyePlanetLocal + walk * distance);
         double groundRadius = 0.0;
         if (!sampleSurfaceRadius(centerDirection, groundRadius))
@@ -2484,18 +2841,19 @@ void PlanetScatterSystem::scatterBirdFlocks(const glm::dvec3 &eyePlanetLocal, co
             continue;
         }
         groundRadius = std::max(groundRadius, seaRadius);
-        flock.centerPlanetLocal = centerDirection * (groundRadius + 24.0 + 42.0 * hashUnit(hash, 2));
+        flock.centerPlanetLocal = centerDirection * (groundRadius + 28.0 + 52.0 * hashUnit(hash, 2));
         // The path circle must keep its far rim away from the eye too: a
         // flock that swings through the camera's own neighborhood reads as a
-        // dark flash instead of distant birds.
-        flock.pathRadiusMeters = 55.0 + 110.0 * hashUnit(hash, 3);
+        // dark flash instead of distant birds. The radius also stays small
+        // enough that the circle's rim stays inside the view cone.
+        flock.pathRadiusMeters = 35.0 + 70.0 * hashUnit(hash, 3);
         flock.pathRadiusMeters = std::min(flock.pathRadiusMeters,
             std::max(20.0, distance - kFlockMinEyeDistanceMeters));
         flock.angularPhase = hashUnit(hash, 4) * 2.0 * kPi;
         flock.angularSpeed = 0.10 + 0.09 * hashUnit(hash, 5);
         flock.flapHertz = 2.4 + 1.6 * hashUnit(hash, 6);
         flock.flapPhase = hashUnit(hash, 7) * 2.0 * kPi;
-        flock.birdScale = 0.7 + 0.35 * hashUnit(hash, 8);
+        flock.birdScale = 0.85 + 0.55 * hashUnit(hash, 8);
         flock.birdCount = static_cast<std::uint32_t>(std::max(1.0, std::round(params_.birdFlockSize)));
         flocks_.push_back(flock);
     }
@@ -2610,13 +2968,16 @@ void PlanetScatterSystem::appendBirdGeometry(std::vector<PlanetVertex> &vertices
     (void)seaRadius;
 }
 
-void PlanetScatterSystem::update(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &sunDirection, bool sunEnabled,
-    double deltaSeconds)
+void PlanetScatterSystem::update(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForwardPlanetLocal,
+    const glm::dvec3 &sunDirection, bool sunEnabled, double deltaSeconds)
 {
     if (!initialized_)
     {
         return;
     }
+    viewForward_ = glm::length(viewForwardPlanetLocal) > 1.0e-9
+        ? glm::normalize(viewForwardPlanetLocal)
+        : glm::dvec3(0.0);
     const double eyeRadius = glm::length(eyePlanetLocal);
     const double eyeAltitude = eyeRadius - params_.radiusMeters;
     groundLevel_ = eyeAltitude < params_.atmosphereHeightMeters * 0.75;
@@ -2640,7 +3001,7 @@ void PlanetScatterSystem::update(const glm::dvec3 &eyePlanetLocal, const glm::dv
     const double moved = glm::length(eyePlanetLocal - anchorEye_);
     if (!hasAnchor_ || moved >= params_.scatterRebuildDistanceMeters)
     {
-        rebuild(eyePlanetLocal);
+        rebuild(eyePlanetLocal, viewForward_);
     }
     else
     {

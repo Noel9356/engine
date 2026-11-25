@@ -174,6 +174,162 @@ std::size_t runBiomeCensus(planet::PlanetCapability &planetCapability, planet::P
     return present;
 }
 
+glm::dvec3 pickMacroViewDirection(planet::PlanetCapability &planetCapability, planet::PlanetHandle planet,
+    const glm::dvec3 &sunDirection, double sunWeight, double sideWeight, double lift, double eyeRadii)
+{
+    // Space-view composition (globe and orbit): the camera keeps the
+    // sun-anchored bearing (the off-sun angle that models relief and crosses
+    // the terminator through the disc, the equator lift that keeps the polar
+    // cap in frame) but the bearing's LONGITUDE is chosen by census: a fixed
+    // longitude points at whatever hemisphere that slot carries, and a seed
+    // whose water sits there photographs the planet as an ocean world with
+    // no readable geography. Each candidate's visible cap (the cone the eye
+    // actually sees from eyeRadii radii out) is sampled over a fixed spiral
+    // and scored on the mix real planet photography reads - a landmass
+    // balance around two-fifths land, biome variety, and a touch of polar
+    // ice. Pure function of the climate field: no extra state, no streaming.
+    const glm::dvec3 sun = glm::normalize(sunDirection);
+    const glm::dvec3 up(0.0, 1.0, 0.0);
+    const double capCos = std::clamp(1.0 / std::max(1.05, eyeRadii), 0.2, 0.95);
+
+    // Cap-local sample spiral: unit directions within the cap cone around
+    // +Z, rotated into each candidate's equatorial basis. 96 points hold the
+    // census error under a few percent while the whole scan stays a few
+    // thousand field evaluations.
+    std::vector<planet::Vec3> capSamples;
+    {
+        const std::vector<planet::Vec3> spiral = goldenSpiralDirections(384);
+        for (const planet::Vec3 &direction : spiral)
+        {
+            if (direction.z >= capCos)
+            {
+                capSamples.push_back(direction);
+            }
+        }
+    }
+
+    double         bestScore = -1.0;
+    glm::dvec3     bestDirection{};
+    std::size_t    bestLand = 0;
+    std::size_t    bestBiomes = 0;
+    constexpr double kTwoPi = 6.283185307179586476925286766559;
+    for (int step = 0; step < 24; ++step)
+    {
+        const double   longitude = kTwoPi * static_cast<double>(step) / 24.0;
+        const planet::Vec3 sunLocal{sun.x, sun.y, sun.z};
+        const planet::Vec3 sunRotated = rotateDirection(sunLocal,
+            planet::Vec3{up.x, up.y, up.z}, -longitude);
+        const glm::dvec3 sunRot = glm::normalize(glm::dvec3(sunRotated.x, sunRotated.y, sunRotated.z));
+        glm::dvec3     side = glm::cross(sunRot, up);
+        if (glm::length(side) < 1.0e-6)
+        {
+            side = glm::cross(sunRot, glm::dvec3(1.0, 0.0, 0.0));
+        }
+        side = glm::normalize(side);
+        const glm::dvec3 direction = glm::normalize(sunRot * sunWeight + side * sideWeight + up * lift);
+
+        // Equatorial basis of the candidate; the cap spiral's +Z rides it.
+        glm::dvec3     east = glm::cross(up, direction);
+        if (glm::length(east) < 1.0e-6)
+        {
+            east = glm::cross(glm::dvec3(0.0, 0.0, 1.0), direction);
+        }
+        east = glm::normalize(east);
+        const glm::dvec3 north = glm::normalize(glm::cross(direction, east));
+
+        std::size_t water = 0;
+        std::size_t ice = 0;
+        std::vector<bool> biomeSeen(static_cast<std::size_t>(planet::Biome::Count), false);
+        std::size_t biomes = 0;
+        for (const planet::Vec3 &sample : capSamples)
+        {
+            const glm::dvec3 world = east * static_cast<double>(sample.x)
+                + north * static_cast<double>(sample.y)
+                + direction * static_cast<double>(sample.z);
+            const double dirArray[3] = {world.x, world.y, world.z};
+            double radius = 0.0;
+            if (!planetCapability.sampleSurfaceRadius(planetCapability.self, planet, dirArray, &radius))
+            {
+                continue;
+            }
+            engine::planet::ClimateSample climate{};
+            if (!planetCapability.sampleClimate(planetCapability.self, planet, dirArray, radius, &climate))
+            {
+                continue;
+            }
+            const planet::Biome biome = climate.biome;
+            if (isWaterBiome(biome))
+            {
+                water += 1;
+            }
+            if (biome == planet::Biome::Snow || biome == planet::Biome::Tundra)
+            {
+                ice += 1;
+            }
+            const std::size_t id = static_cast<std::size_t>(biome);
+            if (id < biomeSeen.size() && !biomeSeen[id])
+            {
+                biomeSeen[id] = true;
+                biomes += 1;
+            }
+        }
+        // Ocean sun glint: the specular mirror point of a spherical sea
+        // (the surface normal that bisects the eye and the sun) lands near
+        // normalize(candidate + sun). Real Earth photography almost always
+        // carries the sun's mirror on open water - the bright elongated
+        // glint patch is one of the strongest realism cues an orbital
+        // photograph holds, and a mirror that lands on a continent shows
+        // none at all. The mirror sample rides the same climate census.
+        const glm::dvec3 mirrorDirection = glm::normalize(direction + sunRot);
+        const double mirrorArray[3] = {mirrorDirection.x, mirrorDirection.y, mirrorDirection.z};
+        double mirrorRadius = 0.0;
+        bool   mirrorIsWater = false;
+        if (planetCapability.sampleSurfaceRadius(planetCapability.self, planet, mirrorArray, &mirrorRadius))
+        {
+            engine::planet::ClimateSample mirrorClimate{};
+            if (planetCapability.sampleClimate(planetCapability.self, planet, mirrorArray, mirrorRadius,
+                    &mirrorClimate))
+            {
+                mirrorIsWater = isWaterBiome(mirrorClimate.biome);
+            }
+        }
+
+        const std::size_t sampled = capSamples.size();
+        if (sampled == 0)
+        {
+            continue;
+        }
+        const double landFraction = 1.0 - static_cast<double>(water) / static_cast<double>(sampled);
+        const double iceFraction = static_cast<double>(ice) / static_cast<double>(sampled);
+        // Land balance: peak at 0.42 land, falling to zero at 0.12/0.72 - an
+        // ocean hemisphere and an unbroken supercontinent both read as
+        // featureless discs.
+        const double landScore = std::clamp(1.0 - std::abs(landFraction - 0.42) / 0.30, 0.0, 1.0);
+        const double varietyScore = std::clamp(static_cast<double>(biomes) / 8.0, 0.0, 1.0);
+        const double iceScore = std::clamp(iceFraction / 0.06, 0.0, 1.0);
+        const double glintScore = mirrorIsWater ? 1.0 : 0.0;
+        const double score = 0.45 * landScore + 0.25 * varietyScore + 0.10 * iceScore + 0.20 * glintScore;
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestDirection = direction;
+            bestLand = sampled - water;
+            bestBiomes = biomes;
+        }
+    }
+    if (bestScore < 0.0)
+    {
+        // No candidate scored (the capability refused every sample): fall
+        // back to the historical fixed bearing.
+        bestDirection = glm::normalize(sun * sunWeight
+            + glm::normalize(glm::cross(sun, up)) * sideWeight + up * lift);
+    }
+    std::printf("demo_planet: macro view bearing - land %.0f%% of cap, %zu climate zones (score %.2f)\n",
+        100.0 * static_cast<double>(bestLand) / static_cast<double>(capSamples.size()),
+        bestBiomes, bestScore);
+    return bestDirection;
+}
+
 bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHandle planet,
     const std::function<bool(double elevation, engine::planet::Biome biome, double temperature01,
         const planet::PlanetGenerationParams &params)>& predicate, ProbePolicy policy, double eyeHeight,
@@ -313,7 +469,8 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
     double      runnerTemperature = 0.0;
     int         runnerBiome = 0;
     bool        haveRunner = false;
-    static constexpr double kRunnerSeparationDot = 0.995; // ~7.6 km apart on the 60 km globe
+    static constexpr double kRunnerSeparationDot = 0.995; // ~0.1 rad apart - the arc distance
+    // scales with the planet radius (~7.6 km on a 60 km globe, ~640 km on Earth's)
     // Diagnostics: the strongest candidate that FAILED the sight gate (its
     // probe quality and the gate that rejected it), printed when the pick
     // fails so tuning sees what rejected the best spots.
@@ -669,6 +826,7 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         // the diagonal between the two keeps the shoreline running across the
         // frame with both beach and sea in shot. Store the diagonal as the
         // view's look tangent.
+        const bool sunValid = (sunDirection.x != 0.0 || sunDirection.y != 0.0 || sunDirection.z != 0.0);
         planet::Vec3 waterwardTangent{};
         bool hasWaterward = false;
         if (policy == ProbePolicy::Coastline)
@@ -741,20 +899,49 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 }
                 waterwardTangent = alongShore;
                 hasWaterward     = planet::length(alongShore) > 1.0e-9;
+                // Glint bias: rotate the along-shore tangent a quarter of
+                // the way toward the sun's horizon azimuth. The sun's
+                // specular wedge on the water centers on the sun's azimuth
+                // (the slopes of the wave field mirror the sun to an eye
+                // looking roughly sunward over the surface), and a pure
+                // along-shore look leaves that wedge at or beyond the
+                // frame's edge - the sea reads as a flat sheet. The rotation
+                // keeps the shoreline crossing the frame while the glint
+                // wedge enters over the open water.
+                if (hasWaterward && sunValid)
+                {
+                    planet::Vec3 sunTangent = sunDirection
+                        - direction * planet::dot(sunDirection, direction);
+                    const double sunTangentLength = planet::length(sunTangent);
+                    if (sunTangentLength > 1.0e-6)
+                    {
+                        sunTangent = sunTangent * (1.0 / sunTangentLength);
+                        const planet::Vec3 glintward = planet::normalized(
+                            alongShore + sunTangent * 0.9);
+                        if (planet::length(glintward) > 1.0e-9)
+                        {
+                            waterwardTangent = glintward;
+                        }
+                    }
+                }
             }
         }
 
         // Sun-preference yaw choice: among the five sight yaws, ground views
-        // look with the sun BEHIND the camera - the slope faces ahead catch
-        // the light instead of turning away from it, which keeps the frame
-        // readable at the demo's ambient level. Raking side light (the old
-        // criterion) was rejected after render review: at this sun elevation
-        // every face turned away from the sun went near black and half the
-        // frame read as shadow murk. Coast views keep their waterward tangent
-        // (the water must enter the frame); the sun falls where it falls.
-        double bestYawAlignment = -1.0;
+        // look CROSS-LIT - the sun ~70 degrees off the view axis, at or just
+        // outside the frame's edge. The old criterion (sun fully behind the
+        // camera) front-lit the whole frame: every slope faced the camera
+        // together, NdotL read nearly constant across the view, and the
+        // render flattened into mush with no readable light direction. Cross
+        // light turns the near slopes toward the camera and the far ones away
+        // (the directional shading the eye reads first), and the sun's
+        // azimuth still sits close enough to the frame edge that the sky's
+        // glare wedge and the warm horizon read on the sun's side. Coast
+        // views keep their waterward tangent (the water must enter the
+        // frame); the sun falls where the glint rotation below puts it.
+        double bestYawError = 1.0e30;
+        double bestYawAlignment = 0.0;
         std::size_t bestYaw = 2;
-        const bool sunValid = (sunDirection.x != 0.0 || sunDirection.y != 0.0 || sunDirection.z != 0.0);
         if (policy != ProbePolicy::Coastline && sunValid)
         {
             planet::Vec3 sunTangential = sunDirection - direction * planet::dot(sunDirection, direction);
@@ -762,20 +949,20 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             if (sunTangentialLength > 1.0e-6)
             {
                 sunTangential = sunTangential * (1.0 / sunTangentialLength);
-                // The dot sign is the sun's side: positive = the look direction
-                // points TOWARD the sun (the frame faces shadowed slopes),
-                // negative = the sun is behind the camera (lit slopes face
-                // the camera). Ground views therefore minimize the dot.
-                double bestScore = -2.0;
+                // Target alignment: cos(72 deg) = 0.30 keeps the sun
+                // cross-lit at (or a hair beyond) the frame's edge while the
+                // slopes that face it read strongly lit against the ones
+                // that face away.
+                constexpr double kSunCrossLightAlignment = 0.30;
                 for (std::size_t yaw = 0; yaw < 5; ++yaw)
                 {
                     const double alignment = planet::dot(yawedTangents[yaw], sunTangential);
-                    const double score = -alignment;
-                    if (bestScore < -1.5 || score > bestScore)
+                    const double error = std::abs(alignment - kSunCrossLightAlignment);
+                    if (error < bestYawError)
                     {
-                        bestScore = score;
+                        bestYawError = error;
                         bestYawAlignment = alignment;
-                        bestYaw          = yaw;
+                        bestYaw = yaw;
                     }
                 }
             }
@@ -1062,6 +1249,43 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             // Even the best yaw nearly points at the sun (shadow silhouettes).
             score *= 0.85;
         }
+        // Low-sun band preference: the sun is one fixed world direction, so
+        // a spot's OWN sun elevation is whatever latitude it landed on - a
+        // midday sun flattens relief into mush (NdotL near-constant across
+        // every slope), hides the sun disc above the frame, and switches
+        // the sky's warm horizon band off. Candidates standing in the
+        // sun's low-elevation band (13 to 30 degrees up: the late-afternoon
+        // latitudes) double their score, and deep-midday spots (the sun
+        // over ~45 degrees up) halve it - the search lands the showcase in
+        // the golden band whenever the biome windows have any presence
+        // there, and still places a view (unflattered, day side) when they
+        // do not. Macro views never score here: the globe's terminator is
+        // the whole point from orbit.
+        {
+            const double sunUp = sunValid
+                ? planet::dot(planet::Vec3{sunDirection.x, sunDirection.y, sunDirection.z}, direction)
+                : 1.0;
+            if (sunUp >= 0.16 && sunUp <= 0.40)
+            {
+                score *= 2.0;
+            }
+            else if (sunUp > 0.70)
+            {
+                score *= 0.5;
+            }
+            else if (sunUp > 0.40)
+            {
+                // Above the golden band but under midday: mild penalty, so
+                // any qualifying candidate INSIDE the band wins first.
+                score *= 0.8;
+            }
+            else if (sunUp < 0.05)
+            {
+                // Day side only: the terminator's own band and the night
+                // side read as dusk and dark, not as landscape.
+                score *= 0.4;
+            }
+        }
         if (score > bestScore)
         {
             // Demote the previous best to the runner-up slot (it is the
@@ -1127,7 +1351,11 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                   << (useRunner ? runnerScore : bestScore) << ") - elevation "
                   << (useRunner ? runnerElevation : bestElevation)
                   << " m, temperature " << (useRunner ? runnerTemperature : bestTemperature) << ", biome "
-                  << (useRunner ? runnerBiome : bestBiome) << "\n";
+                  << (useRunner ? runnerBiome : bestBiome)
+                  << ", sun elevation " << (std::asin(std::clamp(planet::dot(
+                        (useRunner ? runner : best).direction,
+                        planet::Vec3{sunDirection.x, sunDirection.y, sunDirection.z}), -1.0, 1.0)) * 57.29577951308232)
+                  << " deg\n";
         if (useRunner && choiceIndex > 1)
         {
             std::cout << "demo_planet: viewpoint choice index " << choiceIndex

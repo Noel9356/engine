@@ -8,6 +8,10 @@ aerial_ground_rock_diff_1k.jpg
     Source asset "aerial ground rock" (https://polyhaven.com/a/aerial_ground_rock), 1k diffuse map, processed with the pipeline above. Third ground-group variant: a dry soil-and-rock mosaic whose warmer, browner tone alternates with ground grey's neutral soil between chunks.
 dry_ground_rocks_diff_1k.jpg
     Source asset "dry ground rocks" (https://polyhaven.com/a/dry_ground_rocks), 1k diffuse map, processed with the pipeline above. Fourth ground-group variant: gravelly dry earth with embedded stones for the arid end of the ground variation.
+dirt_nor_gl_1k.jpg
+    Source asset "dirt" (https://polyhaven.com/a/dirt), 1k OpenGL-convention normal map, unmodified apart from the pipeline's resize stage (the 1k asset is already 1024x1024). Ground-group relief map paired with ground grey's albedo: fine soil-crumb and clod structure, isotropic in every direction, so the near-ground sward shades with per-sample relief under the sun instead of the smooth vertex gradient (the relief gate keeps its sampling to the eye's feet; see the chunk renderer's ground emit).
+forrest_ground_nor_gl_1k.jpg
+    Source asset "forrest ground 01" (https://polyhaven.com/a/forrest_ground_01), 1k OpenGL-convention normal map, unmodified apart from the pipeline's resize stage. Ground-group relief map paired with aerial ground rock's albedo: leaf-litter and twig micro-relief, isotropic, for the organic floor end of the ground variation.
 cliff_side_diff_1k.jpg and cliff_side_nor_gl_1k.jpg
     Source asset "cliff side" (https://polyhaven.com/a/cliff_side), shipped with the original demo and retained as the first rock-group variant: the 2k diffuse map resized to 1024x1024 (LANCZOS), desaturated to 45% saturation, linearized and mean-normalized, plus its 2k OpenGL-convention normal map resized to 1024x1024 (LANCZOS).
 rocky_terrain_02_diff_1k.jpg and rocky_terrain_02_nor_gl_1k.jpg

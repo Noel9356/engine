@@ -44,6 +44,17 @@ double atmosphereWeight(const PlanetGenerationParams &params, double eyeAltitude
 // with atmosphereWeight() at the consumer.
 Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot);
 
+// Sun-aware twin: sunDot is the view direction's dot product with the sun
+// direction (forward scattering keys the sun-side sky structure) and sunUp
+// is the sun's own dot product with the local up (the low-sun band switches
+// the warm horizon on). The plain overload is the sunDot = 0 case: every
+// directional term carries a positive sun-proximity factor, so a caller
+// without a view-relative sun direction gets the historical ramp exactly.
+// The whitening toward the sun (the Mie glare wedge, the horizon band
+// brightening on the sun's side) rides skySunHaloStrength; the gold horizon
+// toward the sun through the low-sun band rides skyWarmHorizonStrength.
+Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot, double sunDot, double sunUp);
+
 // Sky tint keyed to the sun's elevation above the local horizon (sunDotUp,
 // the sun direction's dot product with the local up): neutral through the
 // day, warm gold through the low-sun band, deep blue at night. Linear RGB
@@ -167,8 +178,10 @@ Vec3 moonDirection(const PlanetGenerationParams &params, double seconds);
 // consumer's bake - the model owns only the oval's shape.
 constexpr double auroraOvalLatitudeLowRadians  = 1.127; // ~64.6 deg off the equator
 constexpr double auroraOvalLatitudeHighRadians = 1.222; // ~70.0 deg off the equator
-constexpr double auroraBaseAltitudeMeters      = 2000.0;  // curtain foot above the datum
-constexpr double auroraTopAltitudeMeters       = 8000.0; // curtain top above the datum
+constexpr double auroraBaseAltitudeMeters      = 95000.0;  // curtain foot above the datum (real
+                                                          // curtains stand 95-250 km up, above the
+                                                          // air shell's blue limb)
+constexpr double auroraTopAltitudeMeters       = 250000.0; // curtain top above the datum
 
 // Cloud coverage field: a band-limited noise field sampled on a spherical
 // shell at cloudAltitudeMeters above the datum, thresholded into [0, 1]
@@ -216,8 +229,29 @@ public:
     // out at their grid spacing, so the two reads stay consistent at the
     // scale each resolves). Pure and thread safe like every sampler here.
     // The default wispDetail 1 keeps the octaves at the configured strength;
-    // 0 collapses coverageTexel onto coverage's raw field exactly.
-    double coverageTexel(const Vec3 &unitDirection, double wispDetail = 1.0) const;
+    // 0 collapses coverageTexel onto coverage's raw field exactly. The
+    // optional lowPassCutoffMeters band-limits the metric texture octaves
+    // (wisp pair, convective pair) to the caller's own texel footprint: a
+    // bake whose texels sample the shell coarser than the octaves' feature
+    // size fades them out instead of aliasing them into salt-and-pepper
+    // flecks; 0 (the default) keeps them raw for consumers with fine
+    // footprints (the ground deck).
+    double coverageTexel(const Vec3 &unitDirection, double wispDetail = 1.0,
+        double lowPassCutoffMeters = 0.0) const;
+
+    // The ground-deck twin of coverageTexel: the same texture-resolution
+    // detail (wisps, convective octaves) but WITHOUT the cyclone vortex
+    // shear. A ground-level eye photographs the cloud shell through true
+    // perspective: the horizon band it actually sees spans a few dozen
+    // kilometers of shell, and a storm's Rankine shear displaces banks
+    // across several of those kilometers - the displacement combs the
+    // horizon band into converging fan arcs that read as a mapping
+    // artifact from the ground even at the strengths the orbital view
+    // wants. Space consumers keep coverageTexel (the comma heads belong
+    // to that scale); the sky-deck bake the ground views draw uses this
+    // twin, so the two reads each show the sky their own scale of eye
+    // actually photographs. Pure and thread safe like every sampler here.
+    double coverageTexelGround(const Vec3 &unitDirection) const;
 
 private:
     const PlanetGenerationParams &params_;
@@ -227,6 +261,8 @@ private:
     FbmStreamSeeds seedsSwirl_{};
     FbmStreamSeeds seedsWisp_[2]{};
     std::int64_t seedBillow_ = 0;
+    std::int64_t seedConvective_ = 0;
+    std::int64_t seedConvectiveFine_ = 0;
     Vec3 flowAxis_{};
     Vec3 flowSide_{};
     Vec3 spinAxis_{};
@@ -245,9 +281,12 @@ private:
     // field value (wind stretch, swirl, cyclone shear, base/billow/detail/
     // wisp octaves) and thresholds it into [0, 1]. texelDetail gates the
     // sub-grid octaves and the vortex shear - coverage() passes false and
-    // stays bit-identical to its historical output.
+    // stays bit-identical to its historical output; includeCycloneShear
+    // (the ground twin's gate) drops only the vortex shear while the
+    // texture detail stays.
     double sampleCoverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale,
-        bool includeBillow, bool texelDetail, double wispDetail) const;
+        bool includeBillow, bool texelDetail, double wispDetail,
+        bool includeCycloneShear = true) const;
 };
 
 } // namespace planet

@@ -1153,7 +1153,11 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // bank's shadow and a ridge's shadow never disagree about where the
         // light stands.
         const double cloudShade = 1.0 - macro.cloudShadow;
-        const double selfShade = 1.0 - field.terrainSelfShadow(point);
+        // The self-shadow marches a FIXED metric relief scale, so it fades
+        // with this vertex's own spacing (see DensityField::terrainSelfShadow):
+        // a coarse LOD vertex cannot hold a hill-scale shade without turning
+        // into uncorrelated speckle.
+        const double selfShade = 1.0 - field.terrainSelfShadow(point, step);
         // Wave wash: the beach inside the run-up band above the sea surface
         // stays periodically soaked - real shorelines photograph a darker,
         // slightly cooler sand strip between the waterline and the dry
@@ -1334,10 +1338,17 @@ ChunkMesh buildChunkMesh(const PlanetGenerationParams &params, const DensityFiel
         // tint gradient, or per-vertex saturation paints diamond-shaped
         // shallows around every island. The band therefore widens with the
         // chunk's own sample spacing (the same LOD rule every noise term
-        // follows) - with an abyssal ocean profile the widening only spreads
-        // the genuine shelf around landmasses; open water stays deep.
+        // follows) - but the widening is CAPPED at four deep-water bands:
+        // beyond that the floor is genuine open ocean, and a tint band
+        // widened to the coarse chunk's cutoff scale (hundreds of km at a
+        // globe view's voxels) never saturates, painting the whole ocean
+        // the shallow shelf's turquoise - the teal-disc bug an Earth-scale
+        // radius's coarse voxels exposed. The cap keeps the shelf band
+        // visible at mid LOD while open water reads deep navy at every
+        // sampling scale.
         const double tintDepthBlue = std::max(1.0, params.waterDepthTintMeters);
-        const double tintDepth = std::max(tintDepthBlue, ownCutoff * 0.3);
+        const double tintWideningCap = std::max(tintDepthBlue, 4.0 * params.deepWaterMeters);
+        const double tintDepth = std::clamp(ownCutoff * 0.3, tintDepthBlue, tintWideningCap);
         const double tintDepths[3] = {0.28 * tintDepth, 0.6 * tintDepth, tintDepth};
         const double shoreWeight = 1.0 - smoothstep(2.0 * params.waterShoreMixMeters, 4.0 * params.waterShoreMixMeters,
             ownCutoff);

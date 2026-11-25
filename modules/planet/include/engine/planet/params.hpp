@@ -37,11 +37,16 @@ struct PlanetGenerationParams
 {
     // ---- identity and scale --------------------------------------------------
     std::uint64_t seed           = 1;      // root of every noise stream
-    double        radiusMeters   = 60000.0; // mean planet radius (datum). The showcase
-    // default is a 60 km planet: with Earth-scale relief AMPLITUDES this keeps the
-    // relief fraction near real planets (~1%), so globe views read as a planet rather
-    // than a spiked marble. Large-scale relief wavelengths scale with the radius; the
-    // close-range layers (hills and finer) stay metric - see config.toml.
+    double        radiusMeters   = 6371000.0; // mean planet radius (datum). The showcase
+    // default is Earth's volumetric mean radius (6371 km, NASA/GSFC Earth fact
+    // sheet): with the metric relief layers below (hills, gullies, strata at
+    // real absolute heights) the relief fraction lands at real-Earth scale
+    // (~0.05% of the radius, where Everest sits at 0.14%), so globe views
+    // read as a real planet - a smooth disc whose mountains photograph as
+    // shading, not a spiked marble - and a standing eye meets its horizon at
+    // the ~4.7 km a real 1.7 m eye sees. Large-scale relief wavelengths
+    // (continents through ranges) scale with the radius; the close-range
+    // layers (hills and finer) stay metric - see config.toml.
     double        centerMeters[3] = {0.0, 0.0, 0.0};
     double        seaLevelOffsetMeters = 0.0; // + raises the oceans above the datum
     double        axis[3]        = {0.0, 1.0, 0.0}; // spin axis (latitude pole), normalized in validate()
@@ -52,7 +57,7 @@ struct PlanetGenerationParams
 
     // ---- octree / level of detail ---------------------------------------------
     std::uint32_t leafGridN          = 16;   // marching-cubes cells per leaf chunk axis
-    double        targetVoxelMeters  = 2.5;  // desired finest voxel size (drives max depth)
+    double        targetVoxelMeters  = 2.0;  // desired finest voxel size (drives max depth)
     // Eye movement (meters) below which update() keeps the previous visible
     // selection instead of re-running the descent. The LOD decision for a
     // point cannot flip until the eye moves a good part of the distance to
@@ -71,8 +76,8 @@ struct PlanetGenerationParams
     // bytes per record; ground views touch tens of thousands).
     std::uint32_t nodeRecordLifetimeUpdates = 96;
     std::uint32_t nodeRecordPruneIntervalUpdates = 16;
-    std::uint32_t maxDepthLimit      = 15;   // hard cap for the octree depth (kept within the
-                                             // 4-bit depth field of the chunk key, see types.hpp)
+    std::uint32_t maxDepthLimit      = 19;   // hard cap for the octree depth (kept within the
+                                             // chunk key's 5-bit depth field, see types.hpp)
     // Per-depth angular (screen-space) refinement: a chunk refines while its
     // VOXEL subtends more than lodAngularVoxelRadians at the eye. Detail then
     // follows apparent size instead of raw eye distance: the whole visible
@@ -96,7 +101,7 @@ struct PlanetGenerationParams
     // evaluates its lattice with its own (stronger) cutoff and the conforming
     // boundary machinery hands exactly those values to the fine side, so the
     // shared plane stays consistent with the coarse neighbor's mesh.
-    double        lodBandLimitFactor = 2.0;
+    double        lodBandLimitFactor = 2.2;
     bool          horizonCulling     = true; // skip nodes behind the planet horizon
     // Streaming coverage for visible chunks whose mesh has not finished
     // building: such a chunk draws its nearest finished ANCESTOR whose LOD
@@ -130,21 +135,25 @@ struct PlanetGenerationParams
     std::uint32_t maxLivePlanets = 16;
 
     // ---- relief shaping (meters unless noted) ---------------------------------
-    double continentAmplitudeMeters = 560.0;  // ± height of the continent base field
-    double continentWavelengthMeters = 34000.0; // feature scale of the continent field
+    double continentAmplitudeMeters = 700.0;  // ± height of the continent base field (real land
+                                               // averages ~840 m above sea level)
+    double continentWavelengthMeters = 3610000.0; // feature scale of the continent field
+                                               // (real continents span 3,000-8,000 km)
     FbmParams continentsFbm{4, 2.0, 0.5};    // octaves etc. of the continent field. Fewer
     // octaves = fewer medium patches: the landmass cores stay contiguous and
     // coastline complexity comes from the warp and the hills near the shore.
 
     // domainWarpAmplitude is an ANGULAR displacement: at radius R it shears
     // features by roughly amplitude * R meters, so it must SHRINK as planets
-    // grow (0.5 shreds a 60 km planet into archipelago filaments; 0.18 bends
-    // coastlines by ~10 km there while keeping landmasses contiguous).
+    // grow (0.5 shreds small planets into archipelago filaments; 0.18 at
+    // Earth's radius bends coastlines by ~1,150 km - the scale real shoreline
+    // convolution reaches - while keeping landmasses contiguous).
     double domainWarpAmplitude = 0.18;  // continent-coast warping strength (field units)
-    double domainWarpWavelengthMeters = 14000.0;
+    double domainWarpWavelengthMeters = 1487000.0;
 
-    double mountainAmplitudeMeters  = 1100.0; // ridge height at mask = 1
-    double mountainWavelengthMeters = 9000.0;
+    double mountainAmplitudeMeters  = 3000.0; // ridge height at mask = 1 (real range crests run
+                                              // 2-4.5 km; the 2.4 km snow line caps them)
+    double mountainWavelengthMeters = 956000.0;
     double mountainMaskLow          = 0.08;  // continent field where mountains begin
     double mountainMaskHigh         = 0.45;  // continent field where mountains reach full height
     double mountainSharpness        = 1.25;   // exponent applied to the ridged crest field;
@@ -171,7 +180,7 @@ struct PlanetGenerationParams
     // concentrate the ridges on the big massifs.
     double mountainCrestMassCoupling    = 0.35;  // [0,1]
     double rangeClusterStrength         = 0.55;  // [0,1] mountain clustering into ranges
-    double rangeClusterWavelengthMeters = 20000.0;
+    double rangeClusterWavelengthMeters = 2124000.0;
     // Continent-field window where the range-cluster gate opens / saturates
     // (continent-field units): uplift clusters where the cluster field sits
     // inside this band.
@@ -194,9 +203,15 @@ struct PlanetGenerationParams
     // across this band so stripes continue around the sphere.
     double mountainErosionFaceBlendWidth = 0.02;
     // Base terrain the filter erodes. One unit of the filter's 2D domain
-    // spans mountainWavelengthMeters of arc at the cubemap face centers, so
-    // the massif scale is the wavelength divided by the frequency and the
-    // amplitude is in the filter's [0, 1] height band.
+    // spans mountainErosionUnitMeters of arc at the cubemap face centers, so
+    // the massif scale is that unit divided by the frequency and the
+    // amplitude is in the filter's [0, 1] height band. The unit is METRIC
+    // and independent of the belt-scale mountainWavelengthMeters: the filter
+    // owns the ridge/valley/gully detail a walker sees (real ridge spacing
+    // runs 1-10 km), while the wavelength places whole belts (~1,000 km, the
+    // spacing real orogenic systems keep). 0 derives the unit from
+    // mountainWavelengthMeters (small-planet convenience).
+    double        mountainErosionUnitMeters      = 9000.0;
     double        mountainErosionTerrainFrequency  = 1.0;
     double        mountainErosionTerrainAmplitude  = 0.25;
     std::uint32_t mountainErosionTerrainOctaves    = 3;
@@ -209,7 +224,7 @@ struct PlanetGenerationParams
     double mountainErosionHeightOffsetLow  = -0.35; // constant part of the offset
     double mountainErosionHeightOffsetBlend = 0.0;  // [0,1] blend toward -fadeTarget
     // Gully stack: scale sets the coarsest stripe wavelength (in units of
-    // mountainWavelengthMeters times cellScale), strength the erosion
+    // mountainErosionUnitMeters times cellScale), strength the erosion
     // amplitude, gullyWeight the stripes' share of each octave against the
     // fade target (lower values keep peaks pointy), detail how strictly
     // finer octaves are restricted to steeper ground, cellScale the stripe
@@ -261,8 +276,8 @@ struct PlanetGenerationParams
     // basins and valley systems. This is the layer that gives landmasses
     // structure at globe scale (where anything finer than a rendered voxel is
     // invisible) and gives mid-altitude views large, readable landforms.
-    double regionalAmplitudeMeters  = 80.0;
-    double regionalWavelengthMeters = 6500.0;
+    double regionalAmplitudeMeters  = 140.0;
+    double regionalWavelengthMeters = 690000.0;
     FbmParams regionalFbm{3, 2.0, 0.5};
 
     double hillAmplitudeMeters     = 110.0;  // medium-frequency rolling terrain
@@ -379,11 +394,11 @@ struct PlanetGenerationParams
 
     // ---- climate ---------------------------------------------------------------
     double equatorTemperature = 1.0;   // temperature01 at the equator, sea level
-    double poleTemperature    = 0.02;  // temperature01 at the poles, sea level
+    double poleTemperature    = 0.12;  // temperature01 at the poles, sea level
     double temperaturePerturbation = 0.09; // amplitude of the temperature noise field
-    double temperatureWavelengthMeters = 20000.0;
+    double temperatureWavelengthMeters = 2124000.0;
     double temperatureLapseMeters = 1100.0; // meters of altitude per 1.0 temperature01
-    double moistureWavelengthMeters = 14000.0;
+    double moistureWavelengthMeters = 1487000.0;
     double moisturePerturbation = 0.24;
     double moistureWarpAmplitude = 0.22;    // bends the moisture field so biome patches
                                             // follow organic, elongated shapes instead of
@@ -565,7 +580,10 @@ struct PlanetGenerationParams
     // pipeline brightens midtones, so the pre-tone-map values sit deeper and
     // more saturated than the sky they finally display.
     bool  atmosphereEnabled       = true;
-    double atmosphereHeightMeters = 20000.0; // sky fades to space over this altitude
+    double atmosphereHeightMeters = 100000.0; // sky fades to space over this altitude (Earth's
+                                               // visible air shell: the Kármán line at 100 km is
+                                               // 1.6% of the radius - the thin blue limb real
+                                               // orbital photographs show)
     float atmosphereZenithColor[3]  = {0.060f, 0.170f, 0.580f};
     float atmosphereHorizonColor[3] = {0.470f, 0.620f, 0.860f};
     // Aerial perspective (see atmosphere.hpp): the haze weight along a sight
@@ -575,11 +593,13 @@ struct PlanetGenerationParams
     // the whole distance range hazing over at once. The asymptote caps the
     // haze weight even at infinite distance, keeping the farthest terrain
     // faintly readable as terrain instead of fading fully into sky.
-    double aerialPerspectiveScaleMeters   = 3600.0; // sight-line distance at which the haze has covered
+    double aerialPerspectiveScaleMeters   = 15000.0; // sight-line distance at which the haze has covered
                                                     // ~63% of its asymptote (the exponential's scale
-                                                    // length, in meters - short enough that a ground
-                                                    // view's midground starts dissolving and the far
-                                                    // ridge melts into the horizon band)
+                                                    // length, in meters - real clear-air haze runs at
+                                                    // this scale: Koschmieder visibilities of 20-80 km
+                                                    // imply extinction scale lengths of ~5-20 km, so a
+                                                    // 15 km scale keeps the midground clear while the
+                                                    // far ridge dissolves gradually into the horizon)
     double aerialPerspectiveAsymptote     = 0.72; // haze weight the profile approaches at infinite distance
     // How strongly the DIRECT sun light (terrain/water/specular lighting, the
     // sun disc) adopts the atmosphere's transmittance tint (see
@@ -588,18 +608,28 @@ struct PlanetGenerationParams
     // Scattered light (the sky gradient, the haze) keeps its own tint either
     // way, so 0 restores the look of a scene lit by one fixed sun color.
     double sunDirectTintStrength = 1.0;
+    // Sun-side sky structure (see the sun-aware skyGradientColor twin): the
+    // whitening strength of the forward-scatter glare wedge around the sun
+    // (and the horizon band brightening on the sun's side of the dome), and
+    // the warm-horizon strength through the low-sun band (the gold the sun
+    // side of the horizon carries while the anti-sun side stays cool).
+    // Zero restores the sun-independent zenith-to-horizon ramp exactly.
+    double skySunHaloStrength     = 0.32;
+    double skyWarmHorizonStrength = 0.50;
 
     // ---- water -----------------------------------------------------------------
     bool  waterEnabled        = true;
     float waterColorShallow[3] = {0.070f, 0.255f, 0.275f};
-    float waterColorDeep[3]    = {0.012f, 0.060f, 0.130f};
+    float waterColorDeep[3]    = {0.022f, 0.095f, 0.210f};
     float waterRoughness      = 0.22f; // consumer hint (exposed via chunk material); low values give the
                                        // close-range sea a crisp sun-glint path (the per-vertex wave
                                        // normals break it into glitter)
-    float waterRoughnessOrbital = 0.36f; // the hint's high-altitude blend target: orbital eyes see flat
+    float waterRoughnessOrbital = 0.46f; // the hint's high-altitude blend target: orbital eyes see flat
                                          // far-water facets, so the lobe widens from the close-range
                                          // value toward this - kept well under 1 so the sun glint
-                                         // survives as the broad patch orbital photographs show
+                                         // survives as the broad patch orbital photographs show, and
+                                         // broad enough that the coarse facet grid never reads through
+                                         // the lobe
     // Depth tint per channel: water absorbs red fastest, green next, blue
     // last, so the surface tint runs shallow turquoise -> green-teal mid shelf
     // -> navy deep instead of one gray-blue mix. The configured
@@ -655,10 +685,12 @@ struct PlanetGenerationParams
     // sub-spacing speckle.
     bool  cloudsEnabled       = true;
     double cloudCoverageAmount    = 0.42;   // approximate sky fraction under cloud (0 = clear)
-    double cloudWavelengthMeters  = 13000.0; // feature scale of the cloud field (scale with the radius):
-                                             // Earth-like weather systems span ~3-6 features around
-                                             // the globe, so keep the wavelength at ~0.2 of the radius
-    double cloudAltitudeMeters    = 1200.0; // height of the cloud shell above the datum
+    double cloudWavelengthMeters  = 1380000.0; // feature scale of the cloud field (scale with the
+                                             // radius): real mid-latitude weather systems run
+                                             // 1,000-2,500 km across, and 0.2 of Earth's radius
+                                             // lands inside that band
+    double cloudAltitudeMeters    = 2000.0; // height of the cloud shell above the datum (real
+                                             // cumulus bases: ~300-2,400 m over land)
     double cloudDetailStrength    = 0.35;   // amplitude of the fine breakup octave relative to the base field
     // Amplitude of the inverted-cellular billow octave relative to the base
     // field: one-at-lobe-centers cellular distance packs the rounded
@@ -686,11 +718,26 @@ struct PlanetGenerationParams
     double cloudLatitudeBandStrength = 0.16;
     // Texture-consumer detail (see CloudField::coverageTexel): the wisp
     // octave pair's amplitude share (the torn fringes and ragged holes only
-    // a texture's texel lattice resolves) and the cyclone vortex family's
-    // strength multiplier (the spiral shear that wraps the banks near each
-    // seed-derived storm into comma heads and arms).
+    // a texture's texel lattice resolves), the cellular convective
+    // octave's strength (the cauliflower clumping a ground-level eye
+    // actually parses - see cloud_convective_strength) and the cyclone
+    // vortex family's strength multiplier (the spiral shear that wraps
+    // the banks near each seed-derived storm into comma heads and arms).
     double cloudWispStrength      = 0.40;
+    double cloudConvectiveStrength = 0.50;
     double cloudCycloneStrength   = 0.70;
+    // METRIC wavelengths of the texture-detail octaves above (independent of
+    // the radius-scaled cloudWavelengthMeters): real cumulus and their
+    // mesoscale organization are absolute sizes - a typical cumulus spans
+    // 1-10 km and open-cell convection packs them into 5-30 km fields - so
+    // the ground view keeps its cumulus scale at any planet radius while the
+    // banks and weather systems above them ride the big wavelength. The wisp
+    // pair carries the ragged fringes at cumulus-edge scale. 0 derives each
+    // from cloudWavelengthMeters (small-planet convenience).
+    double cloudConvectiveWavelengthMeters     = 8000.0; // coarse convective clumping (open cells)
+    double cloudConvectiveFineWavelengthMeters = 2000.0; // individual cumulus clump scale
+    double cloudWispWavelengthAMeters          = 540.0;   // torn fringe octave A
+    double cloudWispWavelengthBMeters          = 325.0;   // torn fringe octave B
     // Frequency of those bands over latitude (radians of phase per radian of
     // latitude): ~3.4 places a wet equatorial belt, dry subtropics and wet
     // mid-latitudes the way Earth's circulation cells do.
@@ -749,7 +796,8 @@ struct PlanetGenerationParams
     // views; consumers that ignore it lose the wisps and nothing else.
     bool   cirrusEnabled       = true;
     double cirrusStrength      = 1.0;   // brightness of the deck (0 reads as a clear sky)
-    double cirrusAltitudeMeters = 3400.0; // deck height above the datum (above the cumulus shell)
+    double cirrusAltitudeMeters = 11000.0; // deck height above the datum (above the cumulus shell;
+                                             // real cirrus decks ride 6-13 km, near the tropopause)
     double cirrusCoverageAmount = 0.30;  // approximate sky fraction under streak (0 = clear)
 
     // ---- stars (space backdrop; see atmosphere.hpp) ------------------------------

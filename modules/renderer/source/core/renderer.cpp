@@ -332,6 +332,7 @@ private:
             headlessOptions.lodEnabled                       = settings_.lodEnabled;
             headlessOptions.tileParallelEnabled              = settings_.headlessTileParallel;
             headlessOptions.batchedTileRasterizationEnabled  = settings_.headlessBatchedTileRasterization;
+            headlessOptions.wideRunsEnabled                 = settings_.headlessWideRuns;
             headlessOptions.taskScheduler
                 = context_ != nullptr ? &context_->taskScheduler() : nullptr;
             headlessOptions.msaaSamples                       = settings_.msaaSamples;
@@ -382,7 +383,10 @@ private:
             return invalidRenderer;
         }
         const RendererHandle id = nextRendererId_++;
-        RendererRecord       record{.id = id, .backend = backend, .surface = surface};
+        RendererRecord record{};
+        record.id      = id;
+        record.backend = backend;
+        record.surface = surface;
         record.backendInstance = std::move(backendInstance);
         // Attach the shared profiler so backends record their explicit wait
         // points (frame-slot wait, acquire/present, upload fences) into the

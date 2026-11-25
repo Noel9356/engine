@@ -68,13 +68,13 @@ bool PlanetGenerationParams::validate(std::string &error)
     {
         leafGridN -= 1u;
     }
-    // Finest-voxel floor: the chunk key packs a 4-bit depth and 20-bit
+    // Finest-voxel floor: the chunk key packs a 5-bit depth and 19-bit
     // lattice coordinates per axis (see types.hpp), so the octree depth is
-    // capped at 15 and the finest grid holds 2^15 chunks per root axis
+    // capped at 19 and the finest grid holds 2^19 chunks per root axis
     // (2^depth * leafGridN lattice steps). With leafGridN <= 64 that bounds
-    // voxels at rootSize / 2^21 (rootSize / 2^19 at the leafGridN = 16
+    // voxels at rootSize / 2^25 (rootSize / 2^23 at the leafGridN = 16
     // default); deeper refinement than the cap allows is silently clamped.
-    targetVoxelMeters = clampRange(targetVoxelMeters, radiusMeters / 131072.0, radiusMeters / 4.0);
+    targetVoxelMeters = clampRange(targetVoxelMeters, radiusMeters / 4194304.0, radiusMeters / 4.0);
     selectionUpdateDistanceMeters = clampRange(selectionUpdateDistanceMeters, 0.0, radiusMeters * 0.1);
     maxDepthLimit = static_cast<std::uint32_t>(clampRange(static_cast<double>(maxDepthLimit), 1.0, static_cast<double>(maxSupportedOctreeDepth)));
     lodAngularVoxelRadians = clampRange(lodAngularVoxelRadians, 0.0005, 0.5);
@@ -123,6 +123,12 @@ bool PlanetGenerationParams::validate(std::string &error)
 
     mountainErosionWeight         = clampRange(mountainErosionWeight, 0.0, 1.0);
     mountainErosionFaceBlendWidth = clampRange(mountainErosionFaceBlendWidth, 1.0e-4, 0.25);
+    // The filter's length unit (metric ridge/valley scale, see params.hpp):
+    // bounded by the belt-scale mountain wavelength it must stay coherent
+    // with (a unit larger than the belts would stretch gullies across whole
+    // ranges); 0 keeps the small-planet derivation from the wavelength.
+    mountainErosionUnitMeters = clampRange(mountainErosionUnitMeters, 0.0,
+        std::max(1.0, mountainWavelengthMeters));
     mountainErosionTerrainFrequency = clampRange(mountainErosionTerrainFrequency, 0.25, 64.0);
     mountainErosionTerrainAmplitude = clampRange(mountainErosionTerrainAmplitude, 0.0, 1.0);
     mountainErosionTerrainOctaves   = static_cast<std::uint32_t>(
@@ -328,6 +334,18 @@ bool PlanetGenerationParams::validate(std::string &error)
     cloudWeatherWavelengthMultiple = clampRange(cloudWeatherWavelengthMultiple, 1.0, 16.0);
     cloudLatitudeBandStrength = clampRange(cloudLatitudeBandStrength, 0.0, 0.5);
     cloudBandFrequency     = clampRange(cloudBandFrequency, 0.0, 24.0);
+    // Metric texture-detail wavelengths (see params.hpp): independent of the
+    // radius-scaled bank wavelength, so their bounds stay metric - a floor
+    // of ~100 m keeps the octaves resolvable by any bake lattice, and the
+    // radius cap keeps them from outrunning the banks they texture.
+    cloudConvectiveWavelengthMeters     = clampRange(cloudConvectiveWavelengthMeters, 0.0, radiusMeters);
+    cloudConvectiveFineWavelengthMeters = clampRange(cloudConvectiveFineWavelengthMeters,
+        cloudConvectiveWavelengthMeters > 0.0 ? std::min(100.0, cloudConvectiveWavelengthMeters) : 0.0,
+        cloudConvectiveWavelengthMeters > 0.0 ? cloudConvectiveWavelengthMeters : radiusMeters);
+    cloudWispWavelengthAMeters          = clampRange(cloudWispWavelengthAMeters, 0.0, radiusMeters);
+    cloudWispWavelengthBMeters          = clampRange(cloudWispWavelengthBMeters,
+        cloudWispWavelengthAMeters > 0.0 ? std::min(10.0, cloudWispWavelengthAMeters) : 0.0,
+        cloudWispWavelengthAMeters > 0.0 ? cloudWispWavelengthAMeters : radiusMeters);
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
         cloudColor[channel] = std::clamp(cloudColor[channel], 0.0f, 1.0f);

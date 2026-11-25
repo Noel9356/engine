@@ -76,7 +76,13 @@ public:
     // sunDirection the scene's sun direction (unit length, world-oriented);
     // sunEnabled gates the day-only elements (birds roost at night); the
     // deltaSeconds window advances the sea-state churn and the flock flight.
-    void update(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &sunDirection, bool sunEnabled, double deltaSeconds);
+    // viewForwardPlanetLocal is the camera's sight axis (eye-to-target, unit
+    // length; a zero vector means "unknown"): the near-ring population
+    // guarantee ranks the cells it plants by falling inside the camera's
+    // forward hemisphere first, so the guaranteed landmark vegetation lands
+    // on screen instead of behind the walker.
+    void update(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForwardPlanetLocal,
+        const glm::dvec3 &sunDirection, bool sunEnabled, double deltaSeconds);
 
     // Draw commands referencing this system's meshes (materials point into
     // this system's pools; valid until the next update). Opaque commands
@@ -132,10 +138,11 @@ private:
         std::uint32_t spriteSize);
 
     // Rebuilds (re-scatters) every stationary element group for a new eye
-    // anchor, and refreshes the transient sea-state groups.
-    void rebuild(const glm::dvec3 &eyePlanetLocal);
+    // anchor, and refreshes the transient sea-state groups. viewForward is
+    // the camera's sight axis in planet-local space (see update).
+    void rebuild(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward);
     void scatterVegetation(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
-        const glm::dvec3 &east, const glm::dvec3 &north);
+        const glm::dvec3 &east, const glm::dvec3 &north, const glm::dvec3 &viewForward);
     void scatterRocks(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
         const glm::dvec3 &east, const glm::dvec3 &north);
 
@@ -259,6 +266,7 @@ private:
     glm::dvec3 anchorEye_{0.0};      // the rebuild anchor (planet-local)
     double anchorEyeRadius_ = 0.0;   // its radial distance from the planet center
     bool hasAnchor_ = false;         // any rebuild happened yet
+    glm::dvec3 viewForward_{0.0};    // camera sight axis (planet-local; zero = unknown)
     glm::dvec3 lastSunDirection_{0.0, 1.0, 0.0}; // the scene sun at the last update
     double refreshAccumulator_ = 0.0;
     std::uint32_t refreshCounter_ = 0;

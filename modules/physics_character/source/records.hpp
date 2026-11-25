@@ -54,7 +54,7 @@ struct HumanoidPart
     double massFraction;
 };
 
-const HumanoidPart kHumanoidParts[] = {
+constexpr HumanoidPart kHumanoidParts[] = {
     // pelvis
     {-1, "pelvis", engine::physics_rigid::ShapeKind::Box, {0.14, 0.09, 0.10}, 0.0, 0.0, 0.0,
         {0.0, 0.0, 0.0}, false, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, false, 0.0, 0.0, 0.0, 0.0, 0.14},

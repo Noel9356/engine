@@ -1,3 +1,18 @@
+# The demo's own [planet] configuration forwarding (source/main.cpp) parses
+# the demo's engine.toml and its profiles with the same TOML library the
+# kernel reads configuration through; the dependency coordinator deduplicates
+# this declaration with the kernel's identical pin.
+engine_fetch_dependency(
+    tomlplusplus
+    OWNER demo_planet
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG v3.4.0
+    HEADER_ONLY
+    INCLUDE_SUBDIRS
+    include
+    include/toml++
+)
+
 engine_add_application(
     demo_planet
     SOURCES
@@ -21,6 +36,8 @@ engine_add_application(
     planet
     LIBRARIES
     engine_dep_glm
+    # [planet] configuration forwarding parses the demo's TOML directly.
+    engine_dep_tomlplusplus
     # The determinism self-test constructs a bare Planet to exercise
     # conforming-mask builds (the capability hashChunk has no mask argument),
     # which needs the module core's symbols at link time. The core is an

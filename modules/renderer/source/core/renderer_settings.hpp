@@ -144,6 +144,7 @@ struct RendererSettings
     std::size_t  headlessTransformCacheBudgetBytes     = 256u * 1024u * 1024u;
     bool         headlessTileParallel                  = false;
     bool         headlessBatchedTileRasterization      = true;
+    bool         headlessWideRuns                      = true;
     std::uint32_t headlessParallelTriangleThreshold    = 4096;
     std::size_t  headlessPixelsPerLockGroup            = 16;
     std::uint32_t headlessBandSplitTriangleThreshold   = 4096;

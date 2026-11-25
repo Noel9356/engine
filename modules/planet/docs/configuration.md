@@ -2,14 +2,14 @@
 
 All keys live in the `[planet]` section of the module's `config.toml` (copied into the runtime layout at `config/modules/planet/config.toml`). Every key is optional; missing keys keep the defaults mirrored in `PlanetGenerationParams`. `validate()` clamps every value into a safe range (lengths are capped relative to `radius_meters`, angles normalized, NaN replaced by defaults), so hostile config cannot produce degenerate geometry. Per-planet overrides arrive through the capability's `PlanetDescription` (`seed`, `radius_meters`, `sea_level_offset_meters`, `center_meters`).
 
-The shipped defaults describe the showcase planet: radius 60 km, Earth-like relief fractions (~1% of the radius), large-scale relief layers scaled to the radius, close-range layers metric. Globe views read as a planet, ground views read as a landscape.
+The shipped defaults describe the showcase planet: Earth's volumetric mean radius (6,371 km), real-Earth relief fractions (the mountain term's 3 km crests are ~0.05% of the radius, where Everest sits at 0.14%), large-scale relief layers scaled to the radius, close-range layers metric. Globe views read as a real planet (a smooth disc whose mountains photograph as shading), ground views read as a landscape, and a standing eye meets its horizon at the ~4.7 km a real 1.7 m eye sees.
 
 ## Identity and scale
 
 | Key | Default | Effect |
 | --- | --- | --- |
 | `seed` | `1337` | Root of every noise stream (SplitMix64 schedule). Changing it reshapes the entire planet. |
-| `radius_meters` | `60000.0` | Mean planet radius (the datum sphere). Range [1, 1e9]. Scale the large-scale wavelengths with it (see usage notes). |
+| `radius_meters` | `6371000.0` | Mean planet radius (the datum sphere; the default is Earth's volumetric mean radius). Range [1, 1e9]. Scale the large-scale wavelengths with it (see usage notes). |
 | `sea_level_offset_meters` | `0.0` | Raises (+) or lowers (-) the ocean surface relative to the datum. Clamped into the terrain's relief band: the sea sphere must stay inside the shell the octree prunes against, so offsets beyond the relief amplitudes are pulled back in. |
 | `axis` | `[0, 1, 0]` | Spin axis; latitude for climate is measured against it. Normalized in `validate()`. |
 
@@ -18,13 +18,13 @@ The shipped defaults describe the showcase planet: radius 60 km, Earth-like reli
 | Key | Default | Effect |
 | --- | --- | --- |
 | `leaf_grid_n` | `16` | Marching-cubes cells per leaf chunk axis (grid is `(n+1)^3` samples plus a 1-voxel apron). Must be EVEN so chunk faces sit on coarse planes. Range [4, 64]. |
-| `target_voxel_meters` | `2.5` | Desired finest voxel size; drives the derived octree depth (`derivedMaxDepth`). The lower clamp is `radius / 131072` (depth-capped by the chunk key's 15-level limit). |
-| `max_depth_limit` | `15` | Hard cap for the octree depth. The chunk key stores the depth in 4 bits, so 15 is also the structural maximum. |
+| `target_voxel_meters` | `2.0` | Desired finest voxel size; drives the derived octree depth (`derivedMaxDepth`). The lower clamp is `radius / 4194304` (depth-capped by the chunk key's 19-level limit). |
+| `max_depth_limit` | `19` | Hard cap for the octree depth. The chunk key stores the depth in 5 bits and its lattice coordinates in 19 bits, so 19 is also the structural maximum. |
 | `selection_update_distance_meters` | `0` | Eye movement below which `updatePlanet` keeps the previous visible selection (the streaming passes still run). `0` derives the finest voxel: a smaller step cannot change any LOD decision, so a walking camera re-selects every few dozen frames instead of every frame. | 
 | `node_record_lifetime_updates` | `96` | Selections an octree node record (its solid/air probe verdict) survives before the prune pass drops it. Longer lifetimes keep revisited views free of the first-visit field probes; the resident cost is a few dozen bytes per record. |
 | `node_record_prune_interval_updates` | `16` | Cadence of the record prune pass (clamped to the lifetime so visible records never age out between scans). |
 | `lod_angular_voxel_radians` | `0.02` | Screen-space LOD: refine a node while its voxel subtends more than this many radians at the eye. Detail follows apparent size, independent of planet radius, viewport and zoom. Smaller = finer views everywhere, visible chunk count grows quadratically. |
-| `lod_band_limit_factor` | `2.0` | Per-depth low-pass: density content below `voxel * factor` fades out before coarse chunks sample it. Marching cubes needs ~4 samples per wavelength; 2.0 renders content at full strength from 4 voxels up and fades it to zero at 2 voxels. Without it, sub-voxel octaves alias into random spikes on every coarse LOD surface (the "spiky globe"). Raise it to trade close-range roughness for cheaper, smoother chunks. |
+| `lod_band_limit_factor` | `3.0` | Per-depth low-pass: density content below `voxel * factor` fades out before coarse chunks sample it. Marching cubes needs ~4 samples per wavelength; 3.0 renders content at full strength from 6 voxels up and fades it to zero at 3 voxels. Without it, sub-voxel octaves alias into random spikes on every coarse LOD surface (the "spiky globe"), and marginal 3-4-voxel belts alias into shimmering shard facets - the factor keeps both out of the mesh entirely. Raise it to trade close-range roughness for cheaper, smoother chunks. |
 | `horizon_culling` | `true` | Skip nodes fully occluded behind the planet: everything below the guaranteed-solid inner shell ball, plus - for an eye above the water - everything behind the sea sphere (the opaque water sheet occludes the underwater half of the shell at the waterline instead of at the deep floor). |
 | `lod_missing_fallback` | `true` | Streaming coverage for visible chunks whose mesh has not finished building: such a chunk draws its nearest finished ancestor whose chunk width fits the hole's distance (the stand-in's width stays within twice that distance, so its on-screen extent stays bounded) instead of contributing no geometry, and the streamer additionally requests the chunk's coarsest pure ancestor (the coarsest one passing the screen-space rule and the width bound under which no finished visible chunk lies, so its mesh covers the hole without overlapping finished geometry). While holes still lack stand-ins, the scaffold builds go ahead of the fine ones (an umbrella chunk covers every hole in its region; a fine chunk covers one), and once coverage is complete the apparent-screen-size order resumes. The planet therefore appears coarse-first - the widest gaps stream the widest chunks - and sharpens in place as the fine meshes land, so a fresh view never waits on the build queue before showing terrain. |
 | `lod_scaffold_builds_per_update` | `8` | Scaffold request budget per `updatePlanet` call (see `lod_missing_fallback`): at most this many pure-ancestor builds are requested per update; while uncovered holes remain they are issued ahead of the fine requests so the coverage umbrella forms first, and afterwards they compete on apparent screen size in the same order as the fine chunks. `0` disables scaffold builds; the draw-side fallback then uses only ancestors that exist anyway. |
@@ -34,21 +34,21 @@ The shipped defaults describe the showcase planet: radius 60 km, Earth-like reli
 | `max_new_builds_per_update` | `48` | Build requests issued per `updatePlanet` call. Requests are ordered by apparent size (chunk width over distance, the same quantity the LOD rule is built on), so the widest-on-screen unresolved chunks build first. |
 | `max_live_planets` | `16` | How many planets one module instance may keep alive at once (each owns a worker pool). `createPlanet` reports `CapacityReached` beyond the cap. |
 | `chunk_eviction_updates` | `240` | Updates a hidden mesh stays cached before eviction. The stamp-refresh and eviction scan follows this value whenever it is shorter than the default eight-update cadence, so thresholds below eight never age a visible chunk out between scans. |
-| `chunk_cache_capacity` | `16384` | Hard cap on cached chunk meshes (oldest evicted first). Must exceed the whole visible set on the deepest ground views (~12500 chunks at radius 60000 with the eroded mountain defaults) or ready meshes evict and rebuild in a churn loop. |
+| `chunk_cache_capacity` | `16384` | Hard cap on cached chunk meshes (oldest evicted first). Must exceed the whole visible set on the deepest ground views (the screen-space LOD rule bounds the visible set, which stays radius-independent in angular terms) or ready meshes evict and rebuild in a churn loop. |
 
 ## Relief shaping (meters unless noted)
 
-Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 km radius so coarse globe chunks can resolve them; close-range layers (hills and finer) stay metric.
+Large-scale layers (continents ... regional) carry wavelengths scaled to the Earth-scale radius (real continents span 3,000-8,000 km, orographic belts keep ~1,000 km spacing, regional plateaus/basins ride 300-1,000 km); close-range layers (hills and finer) stay metric.
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `continent_amplitude_meters` | `560.0` | Height of the continent base field. |
-| `continent_wavelength_meters` | `34000.0` | Feature scale of the continent field. |
+| `continent_amplitude_meters` | `700.0` | Height of the continent base field (real land averages ~840 m above sea level). |
+| `continent_wavelength_meters` | `3610000.0` | Feature scale of the continent field (real continents span 3,000-8,000 km). |
 | `continent_octaves` | `4` | fBm octaves of the continent field. Fewer octaves = fewer medium patches: landmass cores stay contiguous; coastline complexity comes from the warp plus near-shore hills. |
-| `domain_warp_amplitude` | `0.18` | ANGULAR coastline bending (bends features by roughly amplitude * R meters): 0.18 shears coastlines ~10 km on the 60 km planet without shredding landmasses into filaments (0.5 gives archipelagos). |
-| `domain_warp_wavelength_meters` | `14000.0` | Scale of the warp field. |
-| `mountain_amplitude_meters` | `1100.0` | Ridge height where the mountain mask saturates. |
-| `mountain_wavelength_meters` | `9000.0` | Crest scale of the ridged field. |
+| `domain_warp_amplitude` | `0.18` | ANGULAR coastline bending (bends features by roughly amplitude * R meters): 0.18 shears coastlines ~1,150 km at Earth's radius - the scale real shoreline convolution reaches - without shredding landmasses into filaments (0.5 gives archipelagos). |
+| `domain_warp_wavelength_meters` | `1487000.0` | Scale of the warp field. |
+| `mountain_amplitude_meters` | `3000.0` | Ridge height where the mountain mask saturates (real range crests run 2-4.5 km; the 2.4 km snow line caps them). |
+| `mountain_wavelength_meters` | `956000.0` | Belt-placement scale of the ridged field (~1,000 km, the spacing real orogenic systems keep). |
 | `mountain_mask_low` / `mountain_mask_high` | `0.08` / `0.45` | Continent-field values where mountains start / reach full height. |
 | `mountain_sharpness` | `1.25` | Exponent applied to the ridged field. |
 | `mountain_octaves` | `5` | fBm octaves of the ridged field. |
@@ -57,17 +57,18 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `mountain_mass_fraction` | `0.50` | Amplitude share of the broad smooth mass field (the rest goes to the ridged crest field; a pure ridge sum reads as uniform needle carpets). |
 | `range_cluster_strength` | `0.55` | How strongly uplift groups into distinct ranges with foothill gaps. |
 | `range_cluster_gate_low` / `range_cluster_gate_high` | `-0.35` / `0.45` | Cluster-field window where the uplift gate opens / saturates (continent-field units). |
-| `range_cluster_wavelength_meters` | `20000.0` | Scale of the range-cluster field. |
+| `range_cluster_wavelength_meters` | `2124000.0` | Scale of the range-cluster field (real orogenic belts run ~2,000 km). |
 | `mountain_erosion_weight` | `1.0` | Blend of the analytic erosion filter's mountain profile against the classic mass-and-crest profile above (`0` = classic, `1` = fully eroded mountains; the belts keep the same continent mask and range clustering at every weight). |
 | `mountain_erosion_face_blend_width` | `0.02` | Width of the cubemap face-blend window (fraction of the dominant axis): near face seams the two overlapping faces blend across this band so gully stripes continue around the sphere. |
-| `mountain_erosion_terrain_frequency` | `1.0` | Frequency of the filter's base terrain: massifs sit at `mountain_wavelength_meters / frequency` (one filter unit spans one wavelength of arc at the cubemap face centers). |
+| `mountain_erosion_unit_meters` | `9000.0` | Arc length ONE filter unit spans - the METRIC ridge/valley/gully scale of the eroded belts (real ridge spacing runs 1-10 km), independent of the belt-placement `mountain_wavelength_meters`. `0` derives the unit from the mountain wavelength (small-planet convenience). |
+| `mountain_erosion_terrain_frequency` | `1.0` | Frequency of the filter's base terrain: massifs sit at `mountain_erosion_unit_meters / frequency` (one filter unit spans that many meters of arc at the cubemap face centers). |
 | `mountain_erosion_terrain_amplitude` | `0.25` | Amplitude of the filter's base terrain in its `[0, 1]` height band - the massif relief share of the eroded profile. |
 | `mountain_erosion_terrain_octaves` | `3` | Octaves of the filter's base terrain. |
 | `mountain_erosion_terrain_gain` | `0.10` | Gain of the filter's base terrain octaves. |
 | `mountain_erosion_terrain_lacunarity` | `2.0` | Lacunarity of the filter's base terrain octaves. |
 | `mountain_erosion_height_offset_low` | `-0.35` | Constant height offset compensating the gully stack's ridge-up bias, scaled by the accumulated erosion magnitude (partially compensating keeps the eroded belt's mean height on the input terrain's average). |
 | `mountain_erosion_height_offset_blend` | `0.0` | Blend of the offset toward the negated fade target (`0` = constant offset, `1` = fully altitude-keyed). |
-| `mountain_erosion_scale` | `0.28` | Coarsest gully stripe wavelength in units of `mountain_wavelength_meters` times `mountain_erosion_cell_scale` (default stripes span ~1.8 km on the 60 km showcase planet). |
+| `mountain_erosion_scale` | `0.28` | Coarsest gully stripe wavelength in units of `mountain_erosion_unit_meters` times `mountain_erosion_cell_scale` (default stripes span ~1.8 km). |
 | `mountain_erosion_strength` | `0.30` | Erosion amplitude of the gully stack. |
 | `mountain_erosion_gully_weight` | `0.55` | The stripes' share of each octave against the fade target; lower values keep peaks pointy, higher values carve deeper gullies. |
 | `mountain_erosion_detail` | `1.2` | How strictly finer gully octaves are restricted to steeper ground (lower = fine gullies across gentler slopes, higher = only on the steepest ground). |
@@ -87,8 +88,8 @@ Large-scale layers (continents ... regional) carry wavelengths scaled to the 60 
 | `mountain_erosion_assumed_slope` | `0.70` | Fixed slope magnitude the gully directions use, blended over the terrain's own slope so gullies stay aligned through rounded peaks and valley floors. |
 | `mountain_erosion_assumed_slope_blend` | `1.0` | Blend toward the assumed slope (`1` = fully assumed; the filter's own derivatives are approximations). |
 | `mountain_erosion_profile_low` / `mountain_erosion_profile_high` | `0.30` / `0.52` | The filter's height band remapped linearly onto the mountain profile `[0, 1]`, so valley floors sit at the belt base and crests reach the full `mountain_amplitude_meters`. Widen for gentler relief, narrow for wilder. |
-| `regional_amplitude_meters` | `80.0` | Broad plateaus/basins/valley systems between the continent and hill bands - the landform-structure layer at globe scale. |
-| `regional_wavelength_meters` | `6500.0` | Scale of the regional field. |
+| `regional_amplitude_meters` | `140.0` | Broad plateaus/basins/valley systems between the continent and hill bands - the landform-structure layer at globe scale. |
+| `regional_wavelength_meters` | `690000.0` | Scale of the regional field (real plateaus/basins ride 300-1,000 km). |
 | `regional_octaves` | `3` | fBm octaves of the regional field. |
 | `hill_amplitude_meters` | `110.0` | Medium-frequency rolling terrain (metric; radius-independent). |
 | `hill_wavelength_meters` | `1000.0` | Hill scale. |
@@ -148,9 +149,9 @@ A very-low-frequency field classifies every landmass region into layered sedimen
 | `water_depth_tint_meters` | `70.0` | Depth over which the water surface tint saturates in the BLUE channel; red and green saturate at fixed fractions of it (0.28x and 0.6x - the physical absorption ordering, red first), so the ramp runs shallow turquoise -> green-teal mid shelf -> navy deep. |
 | `water_enabled` | `true` | Generate water surface patches (marching cubes on the sea sphere). |
 | `water_color_shallow` | `[0.070, 0.255, 0.275]` | Linear RGB at zero depth (the turquoise of sunlit shallow water over sand). |
-| `water_color_deep` | `[0.012, 0.060, 0.130]` | Linear RGB at full tint depth. |
+| `water_color_deep` | `[0.022, 0.095, 0.210]` | Linear RGB at full tint depth - the saturated royal blue orbital photography reads on the lit open ocean. |
 | `water_roughness` | `0.22` | Gloss hint handed to the renderer's water material at close range. Low values give the sea a crisp sun-glint path that the wave normals break into glitter. |
-| `water_roughness_orbital` | `0.36` | High-altitude blend target for the same hint: the material widens the water lobe toward this value as the eye climbs out of the atmosphere, trading close-range glitter for the broad, smoothly attenuating sun patch orbital views of the ocean show (the value matches the sea-state slope spread Cox-Munk statistics give a real ocean). |
+| `water_roughness_orbital` | `0.46` | High-altitude blend target for the same hint: the material widens the water lobe toward this value as the eye climbs out of the atmosphere, trading close-range glitter for the broad, smoothly attenuating sun patch orbital views of the ocean show. The value sits past the Cox-Munk sea-state slope spread so the coarse far-water facet grid never photographs through the lobe as a faceted plate pattern. |
 | `sea_ice_temperature` | `0.10` | Sea-level temperature below which the water surface freezes. The field is the same climate field that drives the land's freeze line, so polar oceans ice over where the land turns tundra, with an organic, noise-shaped edge. `0` disables sea ice. |
 | `sea_ice_transition` | `0.05` | Temperature range around `sea_ice_temperature` over which the ice color blends in. |
 | `water_color_ice` | `[0.78, 0.85, 0.94]` | Linear RGB of the frozen water surface; slightly blue against the warm-white cloud tops so polar caps read as ice, not weather. |
@@ -170,9 +171,9 @@ A very-low-frequency field classifies every landmass region into layered sedimen
 | `equator_temperature` | `1.0` | temperature01 at the equator, sea level. |
 | `pole_temperature` | `0.02` | temperature01 at the poles, sea level. |
 | `temperature_perturbation` | `0.09` | Amplitude of the wandering temperature noise. |
-| `temperature_wavelength_meters` | `20000.0` | Scale of the temperature noise. |
+| `temperature_wavelength_meters` | `2124000.0` | Scale of the temperature noise (scales with the radius like the other climate fields). |
 | `temperature_lapse_meters` | `1100.0` | Meters of altitude per 1.0 temperature01. |
-| `moisture_wavelength_meters` | `14000.0` | Scale of the humidity noise. |
+| `moisture_wavelength_meters` | `1487000.0` | Scale of the humidity noise (scales with the radius like the other climate fields). |
 | `moisture_perturbation` | `0.24` | Amplitude of the humidity noise. |
 | `moisture_warp_amplitude` | `0.22` | Domain-warp of the humidity field: bends biome patches into elongated, organic shapes (unwarped, patches read as round camouflage blobs). |
 | `coastal_moisture_boost` | `0.18` | Onshore humidity: low land near the sea stays green (without it the shoreline belt paints a beige desert fringe around every landmass). |
@@ -243,12 +244,14 @@ The module exposes a pure sky model (`atmosphere.hpp`): a zenith-to-horizon grad
 | Key | Default | Effect |
 | --- | --- | --- |
 | `atmosphere_enabled` | `true` | Master switch; `false` leaves the sky entirely to the consumer. |
-| `atmosphere_height_meters` | `20000.0` | Eye altitude over which the sky fades to black (space). The sky is at full strength below 15% of this height. |
+| `atmosphere_height_meters` | `100000.0` | Eye altitude over which the sky fades to black (space); Earth's visible air shell (the Kármán line sits at 100 km, 1.6% of the radius - the thin blue limb orbital photographs show). The sky is at full strength below 15% of this height. |
 | `atmosphere_zenith_color` | `[0.060, 0.170, 0.580]` | Linear RGB at the zenith. The defaults are chosen for the renderer's shared tone mapping (which brightens midtones), so the pre-tone-map values sit deeper and more saturated than the sky they finally display. |
 | `atmosphere_horizon_color` | `[0.470, 0.620, 0.860]` | Linear RGB at the horizon; below it the haze darkens gently so ground-level gaps read as atmosphere, not void. |
-| `aerial_perspective_scale_meters` | `5400.0` | Scale length of the aerial-perspective haze's exponential, in meters (the distance at which the haze has covered ~63% of its asymptote). Larger values keep the midground clear and let the far ridge dissolve gradually; smaller values haze the whole distance range over at once. |
-| `aerial_perspective_asymptote` | `0.52` | Haze weight the profile approaches at infinite distance. Keeps the farthest terrain faintly readable as terrain instead of fading fully into sky; `0` disables the aerial perspective entirely. |
+| `aerial_perspective_scale_meters` | `8000.0` | Scale length of the aerial-perspective haze's exponential, in meters (the distance at which the haze has covered ~63% of its asymptote). Real clear-air haze runs at this scale (Koschmieder visibilities of 20-80 km imply ~5-20 km extinction scale lengths): larger values keep the midground clear and let the far ridge dissolve gradually; smaller values haze the whole distance range over at once. |
+| `aerial_perspective_asymptote` | `0.65` | Haze weight the profile approaches at infinite distance. Keeps the farthest terrain faintly readable as terrain instead of fading fully into sky; `0` disables the aerial perspective entirely. |
 | `sun_direct_tint_strength` | `1.0` | How strongly the DIRECT sun light (terrain/water/specular lighting, the sun disc) adopts the atmosphere's transmittance tint - the white -> warm -> deep red shift the sun's own light gains as its path through the air lengthens toward the horizon (Rayleigh-style curve, see `sunDirectTint` in `atmosphere.hpp`). `1` gives the full physical curve, `0` keeps the consumer's configured sun color unchanged at every elevation. The scattered light (sky gradient, haze) keeps its own sunset tint either way, so `0` restores the look of a scene lit by one fixed sun color. |
+| `sky_sun_halo_strength` | `0.32` | Whitening strength of the forward-scatter structure in the sun-aware sky gradient (see the `skyGradientColor` twin in `atmosphere.hpp`): the Mie glare wedge around the sun plus the horizon band's brightening on the sun's side of the dome, while the anti-sun sky keeps the deep saturated blue. `0` restores the sun-independent zenith-to-horizon ramp exactly. |
+| `sky_warm_horizon_strength` | `0.50` | Strength of the gold the sun side of the horizon carries through the late-afternoon band (the hue swing toward amber on the sun's azimuth, grading into the cool anti-sun haze around the dome). Rides the sun elevation like the halo term; `0` keeps the plain horizon color at every azimuth. |
 
 ## Clouds
 
@@ -261,9 +264,9 @@ Terrain vertices also carry SELF-SHADING (`terrainSelfShadow` in `density.hpp`):
 | Key | Default | Effect |
 | --- | --- | --- |
 | `clouds_enabled` | `true` | Master switch of the coverage field; `false` reports clear sky everywhere. |
-| `cloud_coverage` | `0.42` | Approximate fraction of the sky under cloud. `0` disables. |
-| `cloud_wavelength_meters` | `13000.0` | Feature scale of the bank field - raise it with `radius_meters` like the other large-scale layers. Around 0.2 of the radius gives Earth-like weather systems that span 3-6 features around the globe. |
-| `cloud_altitude_meters` | `1200.0` | Height of the cloud shell above the datum. |
+| `cloud_coverage` | `0.40` | Approximate fraction of the sky under cloud. `0` disables. The latitude bands and weather organization stack their coverage on top of the base threshold, so the visible fraction reads higher than this value; keeping the base under half leaves the clear lanes that carry the land/ocean contrast. |
+| `cloud_wavelength_meters` | `1380000.0` | Feature scale of the bank field - raise it with `radius_meters` like the other large-scale layers (real mid-latitude weather systems run 1,000-2,500 km across; 0.2 of Earth's radius lands inside that band). |
+| `cloud_altitude_meters` | `2000.0` | Height of the cloud shell above the datum (real cumulus bases: ~300-2,400 m over land). |
 | `cloud_detail_strength` | `0.35` | Amplitude of the fine breakup octave relative to the base field; higher values shred the bank edges into ragged cumulus. |
 | `cloud_billow_strength` | `0.32` | Amplitude of the inverted-cellular billow octave relative to the base field: one-at-lobe-centers cellular distance packs the rounded cumulus lobes into the bank bodies (the Perlin-Worley pairing volumetric-cloud pipelines use - smooth fBm alone reads as soft cotton). `0` keeps purely smooth banks. The RENDERED banks sample the octave; cloud shadows read the base field without it - a penumbra-widened shadow cannot resolve lobe-scale detail, and the shadow field runs per streaming chunk, where the octave's 27-cell walk would tax every build. |
 | `cloud_edge_softness` | `0.22` | Half-width of the coverage threshold band: narrow values scatter crisp clumps, wide values grow soft decks with veiled edges whose thinning fringes a consumer can paint (the demo's cloud layers fade their contour geometry through the fringe instead of cutting off at a polygon boundary). |
@@ -271,7 +274,12 @@ Terrain vertices also carry SELF-SHADING (`terrainSelfShadow` in `density.hpp`):
 | `cloud_weather_wavelength_multiple` | `4.0` | Wavelength of the regional weather field as a multiple of the cloud field's own wavelength: larger values organize the banks into fewer, broader weather systems. |
 | `cloud_latitude_band_strength` | `0.16` | Amplitude of the latitudinal coverage bands (a wet equatorial belt, dry subtropics, stormy mid-latitudes), keyed to the spin axis. `0` gives a latitude-blind field. |
 | `cloud_wisp_strength` | `0.18` | Amplitude share of the wisp octave pair the texture-consumer path resolves (see `CloudField::coverageTexel` in `engine/planet/atmosphere.hpp`): the torn fringes and ragged holes whose feature size sits under every mesh grid's vertex spacing, so only a baked cloud texture shows them. Mesh shells band-limit the pair out at their own grid spacing, so the two reads stay consistent at the scale each resolves. `0` leaves the texture at the plain field's structure.
+| `cloud_convective_strength` | `0.50` | Amplitude of the cellular convective octave pair the texture-consumer path resolves: the rounded clumping a ground-level eye parses as cumulus structure (the sky above ~25 degrees of elevation samples only a few kilometers of the cloud shell, so the clumps ride exactly the scale that patch photographs at; from orbit the pair reads as the cotton-wool grain of real decks). Mesh shells and cloud shadows band-limit the pair out. `0` leaves the baked texture at the bank field's own shapes.
 | `cloud_cyclone_strength` | `0.45` | Strength multiplier of the seed-derived cyclone vortices that swirl the coverage field's nearby banks into spiral comma heads and trailing arms (the storm systems satellite imagery resolves over the mid-latitudes). Evaluated on the texture path; mesh consumers band-limit the shear out. `0` leaves the deck unstirred, `2` doubles every storm's wrap. |
+| `cloud_convective_wavelength_meters` | `8000.0` | METRIC wavelength of the coarse convective octave (independent of the radius-scaled `cloud_wavelength_meters`): the open-cell clumping scale - real cumulus fields pack their clumps into ~8 km mesoscale cells. `0` derives it from the bank wavelength (small-planet convenience). |
+| `cloud_convective_fine_wavelength_meters` | `2000.0` | METRIC wavelength of the fine convective octave: the individual cumulus clump scale (a typical cumulus spans ~2 km). `0` derives it from the bank wavelength. |
+| `cloud_wisp_wavelength_a_meters` | `540.0` | METRIC wavelength of the coarse torn-fringe octave (independent of the radius-scaled bank wavelength). `0` derives it from the bank wavelength (small-planet convenience). |
+| `cloud_wisp_wavelength_b_meters` | `325.0` | METRIC wavelength of the fine torn-fringe octave. `0` derives it from the bank wavelength. |
 | `cloud_band_frequency` | `3.4` | Frequency of those bands over latitude (radians of phase per radian of latitude): ~3.4 places a wet equatorial belt, dry subtropics and wet mid-latitudes the way Earth's circulation cells do. |
 | `cloud_color` | `[0.985, 0.975, 0.955]` | Linear RGB of the cloud tops; warm white, so the layer reads against the bluer sea ice at globe scale. |
 | `cloud_shadow_strength` | `0.12` | How strongly the terrain and water albedo darkens under the coverage field (sampled along the sun ray through each point). `0` disables cloud shadows. |
@@ -362,7 +370,7 @@ The ground-level real-world elements the terrain's color field cannot express: v
 
 ## Usage notes
 
-- **Scaling a planet.** Raise `radius_meters` and scale the wavelengths you want to keep proportional (continents, mountains, regional, climate fields, snow line); close-range amplitudes stay metric (a 650 m mountain is a 650 m mountain on any planet). The domain warp amplitude is ANGULAR - its metric effect grows with R (0.18 bends ~10 km coastlines at 60 km radius). The derived octree depth grows automatically until voxels reach `target_voxel_meters` (or the depth cap); `validate()`'s lower voxel clamp is `radius / 131072`.
+- **Scaling a planet.** Raise `radius_meters` and scale the wavelengths you want to keep proportional (continents, mountains, regional, climate fields, snow line); close-range amplitudes stay metric (a 650 m mountain is a 650 m mountain on any planet), and the erosion filter's ridge/valley unit (`mountain_erosion_unit_meters`) plus the cloud texture octaves (`cloud_convective_*_wavelength_meters`, `cloud_wisp_wavelength_*_meters`) are metric by default, so gully, cumulus and fringe scale stay real at any radius. The domain warp amplitude is ANGULAR - its metric effect grows with R (0.18 bends ~1,150 km coastlines at Earth's radius). The derived octree depth grows automatically until voxels reach `target_voxel_meters` (or the depth cap); `validate()`'s lower voxel clamp is `radius / 4194304`.
 - **Performance knobs.** Visible chunk count scales roughly with `1 / target_voxel_meters^2` near the camera and with `lod_angular_voxel_radians` overall. `leaf_grid_n` trades chunk granularity against per-chunk cost. `max_concurrent_builds` / `max_new_builds_per_update` pace streaming (builds run on the module's dedicated worker pool, one thread per permitted concurrent build); caves cost two extra noise fields per sample. Terrain layers whose mask is zero for a sample (mountains over the ocean, detail fields under water) are skipped, and noise terms whose band-limit fade is zero at the chunk's cutoff are never evaluated at all, so coastal and ocean geometry is cheaper than mountainous terrain at the same depth. Cloud shadows cost one coverage evaluation per surface vertex (about two percent of a chunk build).
 - **Chunk boundaries and seams.** Same-depth chunks weld bit-identically (one global lattice); across depth changes the octree keeps a 2:1 balance and the fine side CONFORMS its boundary-plane samples to the coarse lattice's interpolant on segments whose far cell is a rendered coarse leaf, then EXTENDS its surface one cell layer past those faces - the fine and coarse surfaces interpenetrate along the whole transition, so no viewing ray can slip between them. Conform masks are recomputed whenever the visible set changes; chunks whose stored mesh was built under a different mask rebuild automatically (the stale mesh keeps rendering until the rebuild lands, and each chunk view carries a content hash so consumers refresh their uploaded copies when the rebuild arrives).
 - **Surface normals.** Vertex normals average the gradient of the (up to) four cells adjacent to the edge, in canonical min-corner form - a pure function of the edge's global position, so shared boundary vertices stay bit-identical across chunks, and steep creases shade smoothly across their faces.

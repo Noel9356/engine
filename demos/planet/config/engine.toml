@@ -16,48 +16,132 @@ queue_source_fairness   = false
 worker_count            = 0
 
 [pbr]
-# Fixed sun for terrain shading; warm afternoon light at ~40 degrees
+# Fixed sun for terrain shading; late-afternoon light at ~20 degrees
 # elevation. A high noon sun flattens relief (everything lights the same);
-# the lower elevation models hills and cliffs with real cast shading while
-# still keeping land mid-tone. The sun dominates the ambient by ~50:1 so the
-# terminator reads from space and backlit slopes go properly dark - with a
-# fat ambient the night side of the globe photographs as dusk and terrain
-# flattens into clay. The headless renderer exports LINEAR framebuffer
-# values, so exposure is tuned for linear output: albedo x (ambient + sun x
-# NdotL) should land mid-tones (~0.2-0.4) for land, ~0.9+ only for snow.
+# this elevation models hills and cliffs with long cast shading while
+# keeping land mid-tone, and puts a readable sun direction into every
+# ground view (shadow length is the cue the eye reads first). The sun
+# dominates the ambient by ~50:1 so the terminator reads from space and
+# backlit slopes go properly dark - with a fat ambient the night side of
+# the globe photographs as dusk and terrain flattens into clay. The
+# headless renderer exports LINEAR framebuffer values, so exposure is
+# tuned for linear output: albedo x (ambient + sun x NdotL) should land
+# mid-tones (~0.2-0.4) for land, ~0.9+ only for snow.
 # NOTE: the [planet] cloud_shadow_sun_direction below must carry the SAME
 # direction - the planet module's cloud shadows are cast by this sun.
 ambient_intensity = 0.10
 sun_color         = [1.0, 0.96, 0.88]
-sun_direction     = [0.50, 0.45, 0.74]
+sun_direction     = [0.55, 0.34, 0.76]
 sun_enabled       = true
-sun_intensity     = 3.2
+sun_intensity     = 3.8
 
 [planet]
-# The demo's planet: seed and radius can be overridden per run with --seed /
-# --radius (capability-level overrides; these are the only planet keys the
-# demo forwards). Build-queue sizing and all generation knobs live in the
-# module's own config (modules/planet/config.toml), which the kernel copies
-# to runtime/config/modules/planet/. Deep screen-space LOD ground views pair
-# with the demo's --warmup N (render-free build frames).
+# The demo's planet: this section overlays the planet module's own
+# configuration (the harness forwards it as staged kernel overrides before
+# the command line's --set list, so an explicit --set planet.<key>=<value>
+# still wins). Seed and radius can also be overridden per run with --seed /
+# --radius (capability-level overrides). Deep screen-space LOD ground views
+# pair with the demo's --warmup N (render-free build frames).
 seed                   = 1337
-radius_meters          = 60000.0
+radius_meters          = 6371000.0
+# Earth's volumetric mean radius (6,371 km): the module's metric close-range
+# layers then land at real-Earth relief fractions, the walking eye's horizon
+# sits at the ~4.7 km a real 1.7 m eye sees, and the module's own defaults
+# already carry the radius-scaled large-scale wavelengths - no per-key
+# overrides are needed for planet scale (the section below only retunes
+# atmosphere optics and sky character).
+# Bird flocks (the module's birds_enabled / bird_flock_count / bird_flock_
+# size): the module's own default config keeps the sky clear, so the
+# showcase opts in. Flocks fly inside the camera's forward fan (see
+# scatterBirdFlocks), so the visible sky carries winged life through the
+# capture - a mid-air flock frozen mid-flap is the one motion cue a still
+# frame can hold. The count scales the mid-air billboards linearly; each
+# flock is one small mesh rewrite per rendered frame.
+birds_enabled           = true
+bird_flock_count        = 4.0
+bird_flock_size         = 11.0
 # Cloud shadows are cast by the [pbr] sun above; keep the two directions
 # identical or the shadows disagree with the banks that should cast them.
-cloud_shadow_sun_direction = [0.50, 0.45, 0.74]
+cloud_shadow_sun_direction = [0.55, 0.34, 0.76]
 # Sky-shell cloud tuning: the clouds draw PER-PIXEL through the baked cloud
 # texture (the shell and deck meshes only place the sheet), so the edge band
 # stays moderate - each texel carries its own thinning fringe while the
 # billow lobes run at the module's full strength (the cauliflower clumping
 # the per-pixel read resolves). A very narrow band smears the whole deck;
 # a very wide one erases the bank boundaries.
-cloud_edge_softness   = 0.24
-cloud_billow_strength = 0.50
-cloud_detail_strength = 0.38
+cloud_edge_softness   = 0.17
+cloud_billow_strength = 0.72
+cloud_detail_strength = 0.26
+# Weather organization (the module's cloud_weather_strength /
+# cloud_latitude_band_strength): the showcase planet's banks organize into
+# large cloudy and clear systems with the circulation-cell banding readable
+# from orbit - the wet equatorial belt, the dry subtropics and the stormy
+# mid-latitude tracks Earth photography shows. The strength stays moderate:
+# the sky keeps long clear lanes between the banks, so the blue gradient,
+# the sun's glare wedge and the warm horizon all read around the scattered
+# cloud (a near-continuous deck turns the golden hour into overcast).
+cloud_weather_strength        = 0.40
+cloud_latitude_band_strength  = 0.30
+# The seeded storm family: the spiral shear that wraps nearby banks into
+# comma heads and arms. The strength runs high for the SPACE shell the
+# macro views photograph: real Earth imagery reads mid-latitude cyclones
+# 1,000-2,500 km across with wrapped comma heads (the shear needs to bend
+# the banks through a full arm wrap to read as weather at that scale),
+# while the ground deck's own twin skips the shear entirely
+# (coverageTexelGround - the Rankine fans only ever smear a ground view),
+# so the orbital drama costs the walking sky nothing.
+cloud_cyclone_strength        = 2.6
+# Convective clumping (the module's cloud_convective_strength): the sky
+# above ~25 deg of elevation samples only the few kilometers of cloud shell
+# around the eye's zenith, so the bank-scale field alone reads there as a
+# featureless sheet - the cellular octave carries the cumulus-scale
+# clumping that patch photographs at.
+cloud_convective_strength     = 1.9
+# Sun-side sky structure overrides (the module's sky_sun_halo_strength /
+# sky_warm_horizon_strength): the halo stays at the module's moderate
+# default (the DISC carries the brightness core - a saturated sky glare
+# wedge washes the disc into its background), while the warm horizon runs
+# past the module default: at the showcase's low sun the gold band under
+# the sun is the frame's key color cue, and a timid warmth photographs as
+# the same pale band the whitening already paints.
+sky_sun_halo_strength     = 0.32
+sky_warm_horizon_strength = 0.90
+# Aerial perspective (the module's aerial_perspective_scale_meters /
+# aerial_perspective_asymptote): the midground band between the near
+# sward and the horizon carries the depth cue the flat-lit terrain
+# cannot - distant ground fades toward the sky's own horizon band so the
+# hills stack in depth planes instead of pasting against the sky. The
+# showcase runs the photographic end of the real clear-air band: a
+# landscape camera's typical visibility runs 8-15 km, whose extinction
+# scale length lands near 4 km, so a standing eye's ~4.7 km horizon
+# carries a half-and-better haze mix while the near sward and the first
+# tree rows stay fully saturated - real landscape photography reads
+# exactly that trade (distant treelines washed toward the sky color,
+# foreground color punchy). The asymptote keeps a quarter of the far
+# terrain so the horizon band still reads as terrain dissolving, never
+# as fog swallowing the frame.
+aerial_perspective_scale_meters = 3800.0
+aerial_perspective_asymptote     = 0.75
+# Grass sward radius (the module's vegetation_grass_radius_meters): the
+# midground's bare band between the near disc and the first trees read as
+# empty plain, so the sward's single-card ring carries out to 90 m where
+# the mid ring's 1.4 m lattice keeps the fill cost flat.
+vegetation_grass_radius_meters   = 90.0
 
 [renderer]
 backend     = "headless"
 clear_color = [0.012, 0.014, 0.028, 1.0]
+# Presentation bloom rides its OWN defaults softened for general scenes
+# (threshold 0.8 in linear: only near-white pixels glow). This showcase
+# carries a visible sun disc whose core saturates to white: the raised
+# threshold keeps everything but true saturations out of the bright pass
+# (snow faces, cloud tops and the ocean glint sit under it), while the
+# stronger gain gives the saturated core the camera's bloom response - the
+# blown-out glare halo a real lens throws around a low sun - without
+# letting mid-tone highlights smear.
+bloom          = true
+bloom_strength = 1.15
+bloom_threshold = 0.85
 lod_enabled = false
 # Terrain must render TWO-SIDED: the planet's marching-cubes meshes carry
 # legitimate inward-facing surfaces (overhang undersides, cave walls), and
@@ -72,6 +156,16 @@ back_face_culling = false
 # layered by SUBMISSION ORDER ahead of the depth-tested scene. Sorting by
 # mesh handle would scramble that order. Submission order it is.
 draw_sort_mode = "off"
+# Sun shadow mapping stays OFF for this scene (the renderer's sun_shadows):
+# the measured A/B across the round-3 and round-4 compositions agrees - the
+# pass moves under 0.1% of the pixels. The casters that would matter are
+# the scatter's billboard stands, and a card that faces the EYE stands
+# EDGE-ON to the sun, so its rasterized shadow footprint is a thin line
+# (the rolling terrain never self-occludes at the map's texel scale
+# either). The scene's readable shadows are the scatter's sun-aligned
+# contact-shadow quads (surface_shadow_strength) and the planet module's
+# cloud shadows - those carry the sun's direction through the frame.
+sun_shadows = false
 
 [trust]
 trustModules = ["renderer"]

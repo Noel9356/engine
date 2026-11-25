@@ -53,6 +53,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <toml.hpp>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -62,6 +64,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -75,6 +78,141 @@ namespace window = engine::window;
 namespace renderer = engine::renderer;
 namespace planet = engine::planet;
 
+// ---- [planet] configuration forwarding ---------------------------------------
+//
+// The demo's engine.toml (and every profile layered over it) carries a
+// [planet] section that overlays the planet module's own configuration the
+// same way [pbr] and [renderer] overlay the kernel's: the harness stages it
+// as kernel configuration overrides ("planet.<key>=<value>"), which the
+// kernel merges over the module's defaults when the planet module reads its
+// configuration. Without this staging the section would be silent dead text
+// - the kernel never maps application-table sections to module configs on
+// its own, and the module itself only reads its own config.toml plus the
+// staged overrides. The base file is read first, then each profile in the
+// order the kernel would apply them (later wins), and every produced override
+// is inserted BEFORE the command line's own --set list so an explicit --set
+// planet.<key>=<value> keeps winning over both file and profiles.
+
+// The configuration file path the kernel itself would resolve: an explicit
+// --config wins; otherwise config/engine.toml next to the cwd (if present)
+// over the one beside the executable.
+std::filesystem::path resolveDemoConfigurationFile(const engine::ApplicationCommandLineOptions &commandLine)
+{
+    if (!commandLine.configurationFile.empty())
+    {
+        return commandLine.configurationFile;
+    }
+    const std::filesystem::path workingDirectoryPath
+        = std::filesystem::current_path() / "config" / "engine.toml";
+    if (std::filesystem::exists(workingDirectoryPath))
+    {
+        return workingDirectoryPath;
+    }
+    return engine::executableDirectory() / "config" / "engine.toml";
+}
+
+// Serializes one [planet] table entry as an override assignment; sub-tables
+// recurse with dotted key paths (the section carries scalars and arrays, but
+// a nested table costs nothing to support). Streaming dispatches on the
+// concrete node types (toml++ streams values and arrays as TOML literals,
+// but not the generic node base).
+void stagePlanetTableEntries(const toml::table &table, const std::string &prefix,
+    std::vector<std::string> &overrides)
+{
+    for (auto &&[key, value] : table)
+    {
+        const std::string keyString(key.str());
+        const std::string path = prefix.empty() ? keyString : prefix + "." + keyString;
+        if (const auto *nested = value.as_table())
+        {
+            stagePlanetTableEntries(*nested, path, overrides);
+            continue;
+        }
+        std::ostringstream serialized;
+        if (const auto *array = value.as_array())
+        {
+            serialized << *array;
+        }
+        else if (const auto *scalar = value.as<std::string>())
+        {
+            // Plain strings serialize WITH quotes through the generic stream;
+            // the override grammar parses the value as TOML, so the quoted
+            // form is exactly what the kernel's parser expects.
+            serialized << *scalar;
+        }
+        else if (const auto *boolean = value.as_boolean())
+        {
+            serialized << (*boolean ? "true" : "false");
+        }
+        else if (const auto *integer = value.as_integer())
+        {
+            serialized << integer->get();
+        }
+        else if (const auto *floating = value.as_floating_point())
+        {
+            // Full precision, and an explicit ".0" landing on whole numbers:
+            // the TOML grammar types whole floats ("2") as an integer,
+            // which the module's float keys would then reject.
+            serialized.precision(17);
+            serialized << floating->get();
+        }
+        else
+        {
+            continue; // unknown node kinds never reach a [planet] table in practice
+        }
+        overrides.push_back(path + "=" + serialized.str());
+    }
+}
+
+// Collects the [planet] section of one TOML document into the override list
+// (a missing section is not an error; a malformed file is reported and
+// skipped, since the kernel's own load would surface the same defect loudly).
+void stagePlanetFileOverrides(const std::filesystem::path &file, std::vector<std::string> &overrides)
+{
+    if (file.empty())
+    {
+        return;
+    }
+    try
+    {
+        const toml::table document = toml::parse_file(file.string());
+        if (const toml::node *planetNode = document.get("planet"))
+        {
+            if (const toml::table *planetSection = planetNode->as_table())
+            {
+                stagePlanetTableEntries(*planetSection, "planet", overrides);
+            }
+        }
+    }
+    catch (const toml::parse_error &error)
+    {
+        std::cerr << "demo_planet: skipping [planet] forwarding for '" << file.string().c_str()
+                  << "': " << error.description() << '\n';
+    }
+}
+
+// The full forwarding pass: base engine.toml, then every profile file in
+// kernel order (the multi-profile list when present, otherwise the single
+// profile path), so the effective [planet] table matches the one the rest of
+// the configuration stack builds.
+std::vector<std::string> planetConfigurationOverrides(const engine::ApplicationCommandLineOptions &commandLine)
+{
+    std::vector<std::string> overrides;
+    stagePlanetFileOverrides(resolveDemoConfigurationFile(commandLine), overrides);
+    if (!commandLine.configurationProfileFiles.empty())
+    {
+        for (const std::filesystem::path &profile : commandLine.configurationProfileFiles)
+        {
+            stagePlanetFileOverrides(profile, overrides);
+        }
+    }
+    else if (!commandLine.configurationProfileFile.empty())
+    {
+        stagePlanetFileOverrides(commandLine.configurationProfileFile, overrides);
+    }
+    return overrides;
+}
+
 // Builds the camera's view-frustum culling volume (planet-local planes; see
 // planet::PlanetCullingVolume) from the frame's view-projection with the
 // same Gribb-Hartmann extraction the draw path's frustum culling uses, so
@@ -83,8 +221,16 @@ namespace planet = engine::planet;
 // the chunks a frame can rasterize (nothing behind the camera, nothing off
 // screen) and follows the camera lazily as it pans. PLANET_NO_CULL=1
 // disables the volume (whole-horizon streaming) as an operator escape hatch.
+// renderShift is the SAME f64 origin shift the camera pose composes against
+// (see cameraRelativeShift): the view-projection carries the SHIFTED pose
+// whenever camera-relative composition is active, so the extracted planes
+// live in the shifted frame - a point there is p_world - shift, which turns
+// every plane's offset into d_shifted - n*shift in world terms. Composing
+// that back (and then into planet-local) keeps the volume exact at any
+// planet radius; with a zero shift the historical absolute frame is
+// reproduced exactly.
 planet::PlanetCullingVolume buildCullingVolume(const camera::ViewState &viewState,
-    const glm::dvec3 &planetCenterWorld)
+    const glm::dvec3 &planetCenterWorld, const glm::dvec3 &renderShift)
 {
     planet::PlanetCullingVolume volume;
     // Gribb-Hartmann rows of the column-major clip matrix; planes point INTO
@@ -111,14 +257,16 @@ planet::PlanetCullingVolume buildCullingVolume(const camera::ViewState &viewStat
         {
             continue;
         }
-        const glm::dvec4 worldPlane = raw[plane] / normalLength;
-        volume.planes[volume.planeCount][0] = worldPlane.x;
-        volume.planes[volume.planeCount][1] = worldPlane.y;
-        volume.planes[volume.planeCount][2] = worldPlane.z;
-        // Planet-local offset: p_local = p_world - center turns the world
-        // plane's d into d_world + n*center.
-        volume.planes[volume.planeCount][3] = worldPlane.w
-            + glm::dot(glm::dvec3(worldPlane), planetCenterWorld);
+        const glm::dvec4 shiftedPlane = raw[plane] / normalLength;
+        volume.planes[volume.planeCount][0] = shiftedPlane.x;
+        volume.planes[volume.planeCount][1] = shiftedPlane.y;
+        volume.planes[volume.planeCount][2] = shiftedPlane.z;
+        // Planet-local offset: the plane's frame is SHIFTED (a point there is
+        // p_world - renderShift), so its offset composes through the shift
+        // and then the planet center - p_local = p_world - center turns the
+        // shifted frame's d into d_shifted + n*(center - shift).
+        volume.planes[volume.planeCount][3] = shiftedPlane.w
+            + glm::dot(glm::dvec3(shiftedPlane), planetCenterWorld - renderShift);
         ++volume.planeCount;
     }
     return volume;
@@ -153,6 +301,16 @@ int main(int argc, char **argv)
 
     engine::ApplicationHostOptions hostOptions
         = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "camera", "pbr", "planet"});
+    {
+        // The [planet] section of the demo's engine.toml and its profiles
+        // overlays the planet module's configuration (see the forwarding
+        // block's comment at the top of this file); the staged assignments
+        // sit in front of the command line's own --set list so an explicit
+        // --set still wins.
+        std::vector<std::string> forwarded = planetConfigurationOverrides(commandLine);
+        hostOptions.configurationOverrides.insert(hostOptions.configurationOverrides.begin(), forwarded.begin(),
+            forwarded.end());
+    }
     if (options.caves)
     {
         // The demo stages the toggle as a configuration override so the
@@ -166,6 +324,42 @@ int main(int argc, char **argv)
         // Same staging as --caves: the overlay is baked into the chunk's
         // vertex colors at build time, so it rides the configured template.
         hostOptions.configurationOverrides.push_back("planet.debug_chunk_borders=true");
+    }
+    if (options.viewName == "globe" || options.viewName == "orbit")
+    {
+        // Space views run LOD bands finer than the module's default angular
+        // cutoff: at a planet-scale radius that default leaves the whole
+        // disc meshed at voxels hundreds of kilometers wide, and the
+        // marching-cubes facets of a grid that coarse photograph through
+        // the relief shading and around the ocean glint (the aliasing every
+        // close view refines away by simply running finer voxels). The
+        // cutoff keys the leaf voxel's ON-SCREEN subtense, so the globe (the
+        // disc smallest in frame) runs the finest cutoff while the closer
+        // orbit view stops one band coarser - the facet's pixel size stays
+        // comparable between the two views and the orbit's ~2x pixel
+        // coverage does not double its already-dominant draw cost. The
+        // ground views keep the default cutoff - their near field already
+        // runs the finest depth, and a globally tighter cutoff would
+        // multiply their mid-range chunk counts for no visible gain.
+        hostOptions.configurationOverrides.push_back(options.viewName == "globe"
+                ? "planet.lod_angular_voxel_radians=0.006"
+                : "planet.lod_angular_voxel_radians=0.012");
+        // ... and dim the star backdrop for the same views: a sunlit Earth
+        // photographed at the exposure that keeps the disc mid-tone shows no
+        // stars (short-exposure Apollo/ISS imagery), and the Milky Way band
+        // that can land in frame blooms into a blown-out white wall across
+        // half the space field. The faint sprinkle a long exposure would
+        // show survives at a quarter brightness without feeding the bloom.
+        hostOptions.configurationOverrides.push_back("planet.stars_brightness=0.22");
+        // Space views also drop the scene's ambient floor: a real night
+        // side is black, and the hemisphere of ambient a ground view needs
+        // to keep its shadowed relief readable photographs the disc's night
+        // side as permanent dusk - the terminator mushes into a gradient
+        // half the disc wide. The macro views carry their own lighting
+        // story through the sun term and the limb shell, so the near-black
+        // night side (and the crisp terminator it draws) costs the ground
+        // views nothing.
+        hostOptions.configurationOverrides.push_back("pbr.ambient_intensity=0.04");
     }
     engine::ApplicationHost host;
     std::string             startupReport;
@@ -362,22 +556,26 @@ int main(int argc, char **argv)
 
     if (options.viewName == "globe")
     {
-        // The eye sits ~72 degrees OFF the sun: the terminator crosses the
-        // disc, relief reads through cast shadows, and the atmosphere limb
-        // glows on one side - a view straight down the sun direction lights
-        // every slope equally and the planet photographs flat. The eye stays
-        // lifted above the equator so the north polar cap and its sea ice
-        // stay in frame.
+        // The eye sits ~51 degrees OFF the sun: the terminator crosses the
+        // anti-sun limb cleanly, relief reads through cast shading, and the
+        // sun-side disc photographs bright - the Blue Marble lighting. The
+        // off-axis floor matters as much as the ceiling: inside ~45 degrees
+        // the sun itself rides the frame's diagonal corner, and its glare
+        // halo plus the bloom response washes the whole off-sun side of the
+        // frame into a blown-out cream wall that reads as an overexposed
+        // backdrop instead of black space (real Earth imagery is made with
+        // the sun at the photographer's back; glare in frame is a lens
+        // artifact, not the scene). The eye stays lifted above the equator
+        // so the north polar cap and its sea ice stay in frame, and the
+        // bearing's longitude comes from the visible cap's climate census
+        // so the disc carries the seed's landmasses and biome variety
+        // instead of whatever hemisphere the sun-relative slot happens to
+        // hold.
         const glm::dvec3 sun = environment.sun.enabled
             ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
             : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
-        glm::dvec3       side = glm::cross(sun, glm::dvec3(0.0, 1.0, 0.0));
-        if (glm::length(side) < 1.0e-6)
-        {
-            side = glm::cross(sun, glm::dvec3(1.0, 0.0, 0.0));
-        }
-        side            = glm::normalize(side);
-        const glm::dvec3 direction = glm::normalize(sun * 0.30 + side * 0.72 + glm::dvec3(0.0, 0.35, 0.0));
+        const glm::dvec3 direction = pickMacroViewDirection(*planetCapability, planetHandle, sun,
+            0.55, 0.60, 0.35, 3.1);
         eye                        = planetCenter + direction * planetRadius * 3.1;
         target                     = planetCenter;
     }
@@ -386,18 +584,16 @@ int main(int argc, char **argv)
         // Mid-altitude view: the planet fills most of the frame while the
         // limb and its atmosphere ring stay visible - the scale between the
         // globe and the surface where range structure (or its absence) shows
-        // most clearly. The eye sits ~63 degrees off the sun so the ranges
-        // model through shading and the terminator touches the limb.
+        // most clearly. The eye sits ~53 degrees off the sun so the ranges
+        // model through shading while most of the disc stays lit and the sun
+        // itself stays clear of the frame's corner (see the globe branch's
+        // glare note), and the bearing's longitude rides the same climate
+        // census as the globe.
         const glm::dvec3 sun = environment.sun.enabled
             ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
             : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
-        glm::dvec3       side = glm::cross(sun, glm::dvec3(0.0, 1.0, 0.0));
-        if (glm::length(side) < 1.0e-6)
-        {
-            side = glm::cross(sun, glm::dvec3(1.0, 0.0, 0.0));
-        }
-        side            = glm::normalize(side);
-        const glm::dvec3 direction = glm::normalize(sun * 0.45 + side * 0.80 + glm::dvec3(0.0, 0.30, 0.0));
+        const glm::dvec3 direction = pickMacroViewDirection(*planetCapability, planetHandle, sun,
+            0.55, 0.55, 0.30, 2.2);
         eye                        = planetCenter + direction * planetRadius * 2.2;
         target                     = planetCenter;
     }
@@ -425,7 +621,18 @@ int main(int argc, char **argv)
             return 1;
         }
         walkController = std::make_unique<PlanetWalkController>(params, planetCenter);
-        walkController->spawn(viewpoint.direction);
+        // Spawn facing the SUN (its horizon tangent at the spawn point): a
+        // standing eye keeps the sun disc, its glare wedge and the warm
+        // sun-side horizon in frame through the whole capture - the one
+        // composition cue every ground view was missing (the sun sat behind
+        // the camera, so the frame showed flat front-lit country and no
+        // light source at all).
+        const planet::Vec3 walkFacing = environment.sun.enabled
+            ? planet::Vec3{sunDirection.x - viewpoint.direction.x * planet::dot(sunDirection, viewpoint.direction),
+                sunDirection.y - viewpoint.direction.y * planet::dot(sunDirection, viewpoint.direction),
+                sunDirection.z - viewpoint.direction.z * planet::dot(sunDirection, viewpoint.direction)}
+            : planet::Vec3{0.0, 0.0, 0.0};
+        walkController->spawn(viewpoint.direction, walkFacing);
         walkController->setAutoWalk(options.orbit);
         eye    = walkController->eye();
         target = walkController->target();
@@ -632,8 +839,11 @@ int main(int argc, char **argv)
             // biome (shrubland is excluded - its pale khaki albedo photographs
             // as washed-out empty country), above the coastal-flatten band
             // (its planed-off terrain photographs as an empty sheet) and
-            // below the snow blend.
-            found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(60.0, 200.0), ProbePolicy::Inland, 140.0,
+            // below the snow blend. The floor stays at 10 m - not 60 - so the
+            // picker keeps every green candidate inside the sun's own golden
+            // band in play (a floor high enough to exclude the band's spots
+            // lands the view under a flatter, higher sun).
+            found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(10.0, 200.0), ProbePolicy::Inland, 140.0,
                 sunDirection, viewpoint);
         }
         if (!found)
@@ -811,14 +1021,22 @@ int main(int argc, char **argv)
 
     const camera::CameraHandle cameraHandle = [&]()
     {
+        // Camera-relative composition (see planet_demo_support.hpp): the
+        // static views' pose composes against the SAME f64 render origin the
+        // per-frame walk/orbit poses and every model matrix use, so the
+        // f32 pipeline only ever sees eye-relative coordinates at planet
+        // scale (an absolute f32 pose at a 6,371 km eye quantizes half a
+        // meter at a time). Below the threshold the shift is zero and the
+        // historical absolute pose is reproduced exactly.
+        const glm::dvec3 poseShift = cameraRelativeShift(eye - planetCenter);
         camera::CameraParameters cameraParameters{};
-        cameraParameters.position[0] = static_cast<float>(eye.x);
-        cameraParameters.position[1] = static_cast<float>(eye.y);
-        cameraParameters.position[2] = static_cast<float>(eye.z);
+        cameraParameters.position[0] = static_cast<float>(eye.x - poseShift.x);
+        cameraParameters.position[1] = static_cast<float>(eye.y - poseShift.y);
+        cameraParameters.position[2] = static_cast<float>(eye.z - poseShift.z);
         cameraParameters.hasPosition  = true;
-        cameraParameters.target[0]    = static_cast<float>(target.x);
-        cameraParameters.target[1]    = static_cast<float>(target.y);
-        cameraParameters.target[2]    = static_cast<float>(target.z);
+        cameraParameters.target[0]    = static_cast<float>(target.x - poseShift.x);
+        cameraParameters.target[1]    = static_cast<float>(target.y - poseShift.y);
+        cameraParameters.target[2]    = static_cast<float>(target.z - poseShift.z);
         cameraParameters.hasTarget    = true;
         cameraParameters.up[0]        = static_cast<float>(initialCameraUp.x);
         cameraParameters.up[1]        = static_cast<float>(initialCameraUp.y);
@@ -1016,16 +1234,23 @@ int main(int argc, char **argv)
         // smeared paint. The sward's own look comes from the vertex albedo's
         // hue (the biome palette's green, already varied by the module's
         // three-scale mottle) multiplied by isotropic soil/rock detail
-        // scans - detail without a preferred direction.
-        groundVariants.push_back(loadVariant("ground_grey_diff_1k.jpg", nullptr));
-        groundVariants.push_back(loadVariant("aerial_ground_rock_diff_1k.jpg", nullptr));
-        groundVariants.push_back(loadVariant("dry_ground_rocks_diff_1k.jpg", nullptr));
+        // scans - detail without a preferred direction. Each ground variant
+        // additionally carries a scanned RELIEF map (the rock group's own
+        // tangent-frame path): rolling swards shade as smooth vertex
+        // gradients - real ground photographs carry soil-crumb and leaf-
+        // litter relief at every scale, and the per-sample normal breaks the
+        // flat clay look a vertex gradient alone photographs. The relief
+        // scans stay isotropic for the same directional reason as the
+        // albedo scans above.
+        groundVariants.push_back(loadVariant("ground_grey_diff_1k.jpg", "dirt_nor_gl_1k.jpg"));
+        groundVariants.push_back(loadVariant("aerial_ground_rock_diff_1k.jpg", "forrest_ground_nor_gl_1k.jpg"));
+        groundVariants.push_back(loadVariant("dry_ground_rocks_diff_1k.jpg", "rocky_terrain_02_nor_gl_1k.jpg"));
         std::vector<demo::planet_demo::TerrainTextureVariant> rockVariants;
         rockVariants.push_back(loadVariant("cliff_side_diff_1k.jpg", "cliff_side_nor_gl_1k.jpg"));
         rockVariants.push_back(loadVariant("rocky_terrain_02_diff_1k.jpg", "rocky_terrain_02_nor_gl_1k.jpg"));
         rockVariants.push_back(loadVariant("rock_face_diff_1k.jpg", "rock_face_nor_gl_1k.jpg"));
         chunkRenderer.setTerrainTextures(groundVariants, rockVariants,
-            groundTextureGateMeters, rockTextureGateMeters);
+            groundTextureGateMeters, rockTextureGateMeters, groundTextureGateMeters * 0.30);
     }
     // The world-anchored cloud shell bakes the pbr environment's lighting
     // into its vertex colors and draws unlit (see BackdropLighting); the
@@ -1045,7 +1270,9 @@ int main(int argc, char **argv)
     // tints them. Draw order lives in rebuildDrawCommands (opaque scene
     // first, clouds depth-tested against it, backdrop shells last).
     chunkRenderer.ensureAtmosphereShell();
-    chunkRenderer.ensureSkyDome();
+    chunkRenderer.ensureSkyDome(
+        environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0),
+        environment.sun.enabled, glm::normalize(eye - planetCenter));
     chunkRenderer.ensureWaterDetailTextures();
     chunkRenderer.ensureSkyCloudLayer(eye - planetCenter,
         environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
@@ -1238,7 +1465,7 @@ int main(int argc, char **argv)
         // ground lazily instead of prebuilding it.
         const double eyeWorld[3] = {eye.x, eye.y, eye.z};
         const planet::PlanetCullingVolume cullingVolume
-            = buildCullingVolume(viewState, planetCenter);
+            = buildCullingVolume(viewState, planetCenter, cameraRelativeShift(eye - planetCenter));
         if (std::getenv("PLANET_NO_CULL") == nullptr && planetCapability->updatePlanetCulled != nullptr)
         {
             planetCapability->updatePlanetCulled(planetCapability->self, planetHandle, eyeWorld, &cullingVolume);
@@ -1274,6 +1501,7 @@ int main(int argc, char **argv)
             // have refreshed anyway.
             chunkRenderer.updateVisibleChunks();
             scatterSystem.update(eye - planetCenter,
+                glm::length(target - eye) > 1.0e-9 ? glm::normalize(target - eye) : glm::dvec3(0.0),
                 environment.sun.enabled
                     ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z)
                     : glm::dvec3(0.0),
@@ -1371,6 +1599,7 @@ int main(int argc, char **argv)
             glm::dvec3(moonDirectionThisFrame.x, moonDirectionThisFrame.y, moonDirectionThisFrame.z),
             environment.sun.enabled, farZ);
         scatterSystem.update(eyePlanetLocal,
+            glm::length(target - eye) > 1.0e-9 ? glm::normalize(target - eye) : glm::dvec3(0.0),
             environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0),
             environment.sun.enabled, deltaSeconds);
         renderer::FrameParameters frameParameters{};

@@ -27,8 +27,12 @@ public:
 
     // Places the walker on the terrain top at `direction` (planet-local unit
     // vector from the planet center) and resets the view to look along the
-    // horizon tangent.
-    void spawn(const engine::planet::Vec3 &unitDirection);
+    // horizon tangent. `facing` (planet-local, any length; the zero vector
+    // keeps the default world +x tangent) orients the initial view - the
+    // capture walker spawns facing the sun so the sun disc and the sky's
+    // glare wedge read in the first-person frame.
+    void spawn(const engine::planet::Vec3 &unitDirection,
+        const engine::planet::Vec3 &facing = engine::planet::Vec3{0.0, 0.0, 0.0});
 
     // Advances the walk one frame from a camera input sample (mouse look +
     // WASD + Space jump + Shift sprint). `enabled == false` freezes input

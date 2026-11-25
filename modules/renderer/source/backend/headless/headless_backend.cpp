@@ -7,9 +7,12 @@
 // blitted into the window module's locked surface pixels.
 
 #include "headless_backend.hpp"
+#include "mottle_noise.hpp"
 #include "quad_shading.hpp"
 #include "render_shared.hpp"
 #include "tile_bins.hpp"
+#include "wide_presentation.hpp"
+#include "wide_shading.hpp"
 
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/kernel/task_scheduler.hpp>
@@ -689,64 +692,172 @@ void HeadlessBackend::applyPresentationBloom(const window::SurfacePixels &pixels
     // per-channel excess over the threshold, the soft-knee form every
     // presentation bloom uses). Fully dark cells store zero so the blur
     // treats them as empty space.
+    const auto brightCellScalar = [&](std::uint32_t cellY, std::uint32_t cellX)
+    {
+        glm::vec3 sum(0.0f);
+        std::uint32_t count = 0;
+        const std::uint32_t rowBegin = cellY * 4u;
+        const std::uint32_t rowEnd   = std::min(rowBegin + 4u, rows);
+        const std::uint32_t columnBegin = cellX * 4u;
+        const std::uint32_t columnEnd   = std::min(columnBegin + 4u, columns);
+        for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
+        {
+            const std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+            for (std::uint32_t x = columnBegin; x < columnEnd; ++x)
+            {
+                const std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+                sum.r += decode[pixel[0]];
+                sum.g += decode[pixel[1]];
+                sum.b += decode[pixel[2]];
+                ++count;
+            }
+        }
+        glm::vec3 energy(0.0f);
+        if (count != 0)
+        {
+            const glm::vec3 average = sum * (1.0f / static_cast<float>(count));
+            for (std::uint32_t axis = 0; axis < 3; ++axis)
+            {
+                energy[axis] = std::max(average[axis] - threshold, 0.0f);
+            }
+        }
+        bloomBright_[static_cast<std::size_t>(cellY) * smallWidth + cellX] = energy;
+    };
     for (std::uint32_t cellY = 0; cellY < smallHeight; ++cellY)
     {
         for (std::uint32_t cellX = 0; cellX < smallWidth; ++cellX)
         {
-            glm::vec3 sum(0.0f);
-            std::uint32_t count = 0;
-            const std::uint32_t rowBegin = cellY * 4u;
-            const std::uint32_t rowEnd   = std::min(rowBegin + 4u, rows);
-            const std::uint32_t columnBegin = cellX * 4u;
-            const std::uint32_t columnEnd   = std::min(columnBegin + 4u, columns);
-            for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
-            {
-                const std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
-                for (std::uint32_t x = columnBegin; x < columnEnd; ++x)
-                {
-                    const std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
-                    sum.r += decode[pixel[0]];
-                    sum.g += decode[pixel[1]];
-                    sum.b += decode[pixel[2]];
-                    ++count;
-                }
-            }
-            glm::vec3 energy(0.0f);
-            if (count != 0)
-            {
-                const glm::vec3 average = sum * (1.0f / static_cast<float>(count));
-                for (std::uint32_t axis = 0; axis < 3; ++axis)
-                {
-                    energy[axis] = std::max(average[axis] - threshold, 0.0f);
-                }
-            }
-            bloomBright_[static_cast<std::size_t>(cellY) * smallWidth + cellX] = energy;
+            brightCellScalar(cellY, cellX);
         }
     }
 
     // Separable Gaussian: a symmetric 5-tap kernel (exp(-d^2 / (2 * 1.5^2))
     // normalized over the taps), horizontal into the scratch then vertical
-    // back into the bright buffer.
+    // back into the bright buffer. The interior cells (all five taps inside
+    // the line without clamping) run sixteen cells per AVX-512 pass: the
+    // strided vec3 layout is gathered into three channel lanes, the five
+    // taps are five lane-wise multiply-adds per channel in the scalar
+    // loop's tap order, so the wide sums carry the scalar bits. The two
+    // edge cells on each side stay with the clamping scalar loop.
     constexpr float kKernel[5] = {0.093099f, 0.228636f, 0.356530f, 0.228636f, 0.093099f};
     const auto blurAxis = [&](bool horizontal)
     {
-        for (std::uint32_t y = 0; y < smallHeight; ++y)
+        const std::uint32_t interior = horizontal ? smallWidth : smallHeight;
+        const std::uint32_t other    = horizontal ? smallHeight : smallWidth;
+        // Cell (line, cell) -> buffer index, for either axis orientation.
+        const auto cellIndex = [&](std::uint32_t lineIndex, std::uint32_t cell) -> std::size_t
         {
-            for (std::uint32_t x = 0; x < smallWidth; ++x)
+            return horizontal
+                ? static_cast<std::size_t>(lineIndex) * smallWidth + cell
+                : static_cast<std::size_t>(cell) * smallWidth + lineIndex;
+        };
+        const auto blurCellScalar = [&](std::uint32_t lineIndex, std::uint32_t cell)
+        {
+            glm::vec3 sum(0.0f);
+            for (std::int32_t tap = -2; tap <= 2; ++tap)
             {
-                glm::vec3 sum(0.0f);
-                for (std::int32_t tap = -2; tap <= 2; ++tap)
-                {
-                    std::int32_t sampleX = horizontal ? static_cast<std::int32_t>(x) + tap : static_cast<std::int32_t>(x);
-                    std::int32_t sampleY = horizontal ? static_cast<std::int32_t>(y)
-                                                      : static_cast<std::int32_t>(y) + tap;
-                    sampleX = std::clamp(sampleX, 0, static_cast<std::int32_t>(smallWidth) - 1);
-                    sampleY = std::clamp(sampleY, 0, static_cast<std::int32_t>(smallHeight) - 1);
-                    sum += bloomBright_[static_cast<std::size_t>(sampleY) * smallWidth
+                const std::int32_t cellLine = static_cast<std::int32_t>(
+                    horizontal ? cell : static_cast<std::uint32_t>(static_cast<std::int32_t>(lineIndex) + tap));
+                const std::int32_t lineFixed = static_cast<std::int32_t>(lineIndex);
+                (void)lineFixed;
+                const std::int32_t sampledCell = horizontal
+                    ? static_cast<std::int32_t>(cell) + tap : static_cast<std::int32_t>(lineIndex);
+                const std::int32_t sampledLine = horizontal
+                    ? static_cast<std::int32_t>(lineIndex)
+                    : static_cast<std::int32_t>(cell) + tap;
+                (void)cellLine;
+                std::int32_t sampleX = horizontal ? sampledCell : sampledLine;
+                std::int32_t sampleY = horizontal ? sampledLine : sampledCell;
+                // For the horizontal pass the CELL runs along x; for the
+                // vertical pass the CELL runs along y and the line is x.
+                sampleX = std::clamp(horizontal ? sampleX : static_cast<std::int32_t>(lineIndex), 0,
+                    static_cast<std::int32_t>(smallWidth) - 1);
+                sampleY = std::clamp(horizontal ? sampleY : sampleX, 0,
+                    static_cast<std::int32_t>(smallHeight) - 1);
+                sum += bloomBright_[static_cast<std::size_t>(sampleY) * smallWidth
                               + static_cast<std::size_t>(sampleX)]
-                        * kKernel[tap + 2];
+                    * kKernel[tap + 2];
+            }
+            bloomScratch_[cellIndex(lineIndex, cell)] = sum;
+        };
+#if ENGINE_WIDE_SHADING_AVX512
+        const bool wideBlur = wideRunsActive_;
+#endif // ENGINE_WIDE_SHADING_AVX512
+        for (std::uint32_t lineIndex = 0; lineIndex < other; ++lineIndex)
+        {
+            // Scalar edge cells: the first two and the last two cells of the
+            // line (their taps clamp).
+            blurCellScalar(lineIndex, 0u);
+            if (interior > 1u) blurCellScalar(lineIndex, 1u);
+            if (interior > 2u) blurCellScalar(lineIndex, interior - 2u);
+            if (interior > 3u) blurCellScalar(lineIndex, interior - 1u);
+#if ENGINE_WIDE_SHADING_AVX512
+            if (wideBlur && interior >= 4u + 16u)
+            {
+                // Interior blocks: cells [2, interior-2), sixteen at a time.
+                const std::uint32_t wideEnd = 2u + ((interior - 4u) / 16u) * 16u;
+                for (std::uint32_t cell = 2u; cell < wideEnd; cell += 16u)
+                {
+                    alignas(64) float center[3][16];
+                    alignas(64) float tapM2[3][16];
+                    alignas(64) float tapM1[3][16];
+                    alignas(64) float tapP1[3][16];
+                    alignas(64) float tapP2[3][16];
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        const std::size_t i0 = cellIndex(lineIndex, cell + static_cast<std::uint32_t>(lane));
+                        const std::size_t im2 = cellIndex(lineIndex, cell + static_cast<std::uint32_t>(lane) - 2u);
+                        const std::size_t im1 = cellIndex(lineIndex, cell + static_cast<std::uint32_t>(lane) - 1u);
+                        const std::size_t ip1 = cellIndex(lineIndex, cell + static_cast<std::uint32_t>(lane) + 1u);
+                        const std::size_t ip2 = cellIndex(lineIndex, cell + static_cast<std::uint32_t>(lane) + 2u);
+                        center[0][lane] = bloomBright_[i0].x;
+                        center[1][lane] = bloomBright_[i0].y;
+                        center[2][lane] = bloomBright_[i0].z;
+                        tapM2[0][lane] = bloomBright_[im2].x;
+                        tapM2[1][lane] = bloomBright_[im2].y;
+                        tapM2[2][lane] = bloomBright_[im2].z;
+                        tapM1[0][lane] = bloomBright_[im1].x;
+                        tapM1[1][lane] = bloomBright_[im1].y;
+                        tapM1[2][lane] = bloomBright_[im1].z;
+                        tapP1[0][lane] = bloomBright_[ip1].x;
+                        tapP1[1][lane] = bloomBright_[ip1].y;
+                        tapP1[2][lane] = bloomBright_[ip1].z;
+                        tapP2[0][lane] = bloomBright_[ip2].x;
+                        tapP2[1][lane] = bloomBright_[ip2].y;
+                        tapP2[2][lane] = bloomBright_[ip2].z;
+                    }
+                    alignas(64) float result[3][16];
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        __m512 sum = _mm512_mul_ps(_mm512_load_ps(tapM2[channel]), _mm512_set1_ps(kKernel[0]));
+                        sum = _mm512_add_ps(sum, _mm512_mul_ps(_mm512_load_ps(tapM1[channel]), _mm512_set1_ps(kKernel[1])));
+                        sum = _mm512_add_ps(sum, _mm512_mul_ps(_mm512_load_ps(center[channel]), _mm512_set1_ps(kKernel[2])));
+                        sum = _mm512_add_ps(sum, _mm512_mul_ps(_mm512_load_ps(tapP1[channel]), _mm512_set1_ps(kKernel[3])));
+                        sum = _mm512_add_ps(sum, _mm512_mul_ps(_mm512_load_ps(tapP2[channel]), _mm512_set1_ps(kKernel[4])));
+                        _mm512_store_ps(result[channel], sum);
+                    }
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        const std::size_t i0 = cellIndex(lineIndex, cell + static_cast<std::uint32_t>(lane));
+                        bloomScratch_[i0].x = result[0][lane];
+                        bloomScratch_[i0].y = result[1][lane];
+                        bloomScratch_[i0].z = result[2][lane];
+                    }
                 }
-                bloomScratch_[static_cast<std::size_t>(y) * smallWidth + x] = sum;
+                // Scalar tail between the wide blocks and the line's last two
+                // cells.
+                for (std::uint32_t cell = wideEnd; cell + 2u < interior; ++cell)
+                {
+                    blurCellScalar(lineIndex, cell);
+                }
+            }
+            else
+#endif // ENGINE_WIDE_SHADING_AVX512
+            {
+                for (std::uint32_t cell = 2u; cell + 2u < interior; ++cell)
+                {
+                    blurCellScalar(lineIndex, cell);
+                }
             }
         }
         std::swap(bloomBright_, bloomScratch_);
@@ -757,12 +868,31 @@ void HeadlessBackend::applyPresentationBloom(const window::SurfacePixels &pixels
     // Add-back: every output pixel bilinearly samples the blurred energy at
     // its quarter-res position, scales by the strength, and adds it to its
     // decoded linear color before re-encoding through the shared byte table.
+    // AVX-512 machines run the loop sixteen pixels per pass (see
+    // wide_presentation.hpp): the bilinear weights are computed per lane from
+    // the same (x, y) arithmetic, the four glare taps gather from the
+    // quarter-res buffer, and the decode/encode ride the shared tables; the
+    // operand order and the truncation match the scalar loop below, so a
+    // wide lane writes the byte the scalar loop would write for that pixel.
     const std::uint8_t *encodeTable = srgb_tables::byteEncode.values;
-    const float         strength    = bloomStrength_;
-    for (std::uint32_t y = 0; y < rows; ++y)
+#if ENGINE_WIDE_SHADING_AVX512
+    // The wide kernel gathers through a float view of the shared byte table
+    // (built once; 256 entries, the exact grid the scalar loop indexes).
+    static const std::array<float, 256> encodeFloats = []
     {
-        std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
-        for (std::uint32_t x = 0; x < columns; ++x)
+        std::array<float, 256> table{};
+        for (std::uint32_t index = 0; index < 256; ++index)
+        {
+            table[index] = static_cast<float>(srgb_tables::byteEncode.values[index]);
+        }
+        return table;
+    }();
+#endif // ENGINE_WIDE_SHADING_AVX512
+    const float         strength    = bloomStrength_;
+    const auto addBackRowScalar = [&](std::uint8_t *row, std::uint32_t y, std::uint32_t xBegin,
+        std::uint32_t xEnd)
+    {
+        for (std::uint32_t x = xBegin; x < xEnd; ++x)
         {
             const float u = (static_cast<float>(x) + 0.5f) * 0.25f - 0.5f;
             const float v = (static_cast<float>(y) + 0.5f) * 0.25f - 0.5f;
@@ -789,6 +919,76 @@ void HeadlessBackend::applyPresentationBloom(const window::SurfacePixels &pixels
                 pixel[channel] = encodeTable[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
             }
         }
+    };
+#if ENGINE_WIDE_SHADING_AVX512
+    if (wideRunsActive_)
+    {
+        const std::uint32_t wideEnd = columns & ~15u;
+        for (std::uint32_t y = 0; y < rows; ++y)
+        {
+            std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+            const float v = (static_cast<float>(y) + 0.5f) * 0.25f - 0.5f;
+            const std::int32_t y0 = std::clamp(static_cast<std::int32_t>(std::floor(v)), 0,
+                static_cast<std::int32_t>(smallHeight) - 1);
+            const std::int32_t y1 = std::min(y0 + 1, static_cast<std::int32_t>(smallHeight) - 1);
+            const float fy = std::clamp(v - static_cast<float>(y0), 0.0f, 1.0f);
+            for (std::uint32_t x = 0; x < wideEnd; x += 16u)
+            {
+                // Per-lane bilinear coordinates: the same arithmetic the
+                // scalar loop runs per pixel.
+                alignas(64) float glareLane[3][16];
+                for (int lane = 0; lane < 16; ++lane)
+                {
+                    const float u = (static_cast<float>(x + static_cast<std::uint32_t>(lane)) + 0.5f)
+                        * 0.25f - 0.5f;
+                    const std::int32_t x0 = std::clamp(static_cast<std::int32_t>(std::floor(u)), 0,
+                        static_cast<std::int32_t>(smallWidth) - 1);
+                    const std::int32_t x1 = std::min(x0 + 1, static_cast<std::int32_t>(smallWidth) - 1);
+                    const float fx = std::clamp(u - static_cast<float>(x0), 0.0f, 1.0f);
+                    const glm::vec3 *t00 = &bloomBright_[static_cast<std::size_t>(y0) * smallWidth + x0];
+                    const glm::vec3 *t10 = &bloomBright_[static_cast<std::size_t>(y0) * smallWidth + x1];
+                    const glm::vec3 *t01 = &bloomBright_[static_cast<std::size_t>(y1) * smallWidth + x0];
+                    const glm::vec3 *t11 = &bloomBright_[static_cast<std::size_t>(y1) * smallWidth + x1];
+                    const glm::vec3 glare = (*t00 * ((1.0f - fx) * (1.0f - fy)) + *t10 * (fx * (1.0f - fy))
+                        + *t01 * ((1.0f - fx) * fy) + *t11 * (fx * fy))
+                        * strength;
+                    glareLane[0][lane] = glare[0];
+                    glareLane[1][lane] = glare[1];
+                    glareLane[2][lane] = glare[2];
+                }
+                std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+                for (int channel = 0; channel < 3; ++channel)
+                {
+                    alignas(64) float laneBytes[16];
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        laneBytes[lane] = static_cast<float>(pixel[lane * 4u + channel]);
+                    }
+                    const __m512 linear = _mm512_add_ps(
+                        widepresentation::decodeBytesWide(decode.data(), _mm512_load_ps(laneBytes)),
+                        _mm512_load_ps(glareLane[channel]));
+                    const __m512 encoded = widepresentation::encodeLinearWide(encodeFloats.data(), linear);
+                    // encodeLinearWide gathers the BYTE values (as floats);
+                    // narrow to bytes and scatter to the strided channel.
+                    alignas(64) float encodedLane[16];
+                    _mm512_store_ps(encodedLane, encoded);
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        pixel[lane * 4u + channel] = static_cast<std::uint8_t>(encodedLane[lane]);
+                    }
+                }
+            }
+            addBackRowScalar(row, y, wideEnd, columns);
+        }
+    }
+    else
+#endif // ENGINE_WIDE_SHADING_AVX512
+    {
+        for (std::uint32_t y = 0; y < rows; ++y)
+        {
+            std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+            addBackRowScalar(row, y, 0u, columns);
+        }
     }
 }
 
@@ -802,6 +1002,79 @@ void HeadlessBackend::applyPresentationBloom(const window::SurfacePixels &pixels
 // noise while a converged static frame stays bit-stable across exports.
 // Rows are split across workers exactly like the resolve bands: every pixel
 // reads and writes only its own cell.
+namespace
+{
+
+// One pixel of the camera response, as the scalar body below and the
+// AVX-512 kernel's tail share it (see applyCameraResponse): the decode,
+// contrast pivot, vignette, grain, Bayer dither and two-stage encode with
+// the pass's exact operand order.
+void processScalarCameraPixel(std::uint8_t *pixel, std::uint32_t x, std::uint32_t y, std::uint32_t columns,
+    float normalizedY, float contrast, float vignette, float grain, std::uint32_t frameSeed, const float *decode)
+{
+    glm::vec3 linear(decode[pixel[0]], decode[pixel[1]], decode[pixel[2]]);
+    constexpr float kPivot = 0.18f;
+    if (contrast != 1.0f)
+    {
+        linear = (linear - glm::vec3(kPivot)) * contrast + glm::vec3(kPivot);
+        linear = glm::clamp(linear, glm::vec3(0.0f), glm::vec3(1.0f));
+    }
+    if (vignette > 0.0f)
+    {
+        const float normalizedX
+            = (static_cast<float>(x) + 0.5f) / static_cast<float>(columns) * 2.0f - 1.0f;
+        const float radius = std::sqrt(normalizedX * normalizedX + normalizedY * normalizedY);
+        // Smooth falloff from the frame's mid-radius to its corner:
+        // centers stay untouched, corners lose the full strength.
+        const float t = glm::smoothstep(0.45f, 1.35f, radius);
+        linear *= 1.0f - vignette * t;
+    }
+    if (grain > 0.0f)
+    {
+        // Wang hash over (pixel, frame): uniform in [0, 1), fixed
+        // for a given frame and pixel. Film-like amplitude peaks
+        // in the midtones and fades in the extremes.
+        std::uint32_t state = frameSeed * 0x9E3779B9u + x * 0x85EBCA6Bu + y * 0xC2B2AE35u;
+        state ^= state >> 15;
+        state *= 0x2545F491u;
+        state ^= state >> 13;
+        const float noise  = static_cast<float>(state & 0x00FFFFFFu) * (1.0f / 16777216.0f) - 0.5f;
+        const float luma   = linear.x * 0.299f + linear.y * 0.587f + linear.z * 0.114f;
+        const float midtone = 4.0f * luma * (1.0f - luma);
+        // One gain per pixel, not one delta per channel: scaling
+        // all three channels by the same factor keeps the hue,
+        // so the grain reads as luminance-density film grain
+        // instead of per-channel colored sensor noise.
+        linear *= 1.0f + grain * (0.35f + 0.65f * midtone) * noise;
+    }
+    // Ordered dither (8x8 Bayer, encoded space): the same
+    // half-quantum offset for all three channels breaks the
+    // 8-bit banding smooth gradients (atmosphere rims, ocean
+    // ramps, sky domes) otherwise show, without adding chroma
+    // noise or visible texture - the offset is deterministic in
+    // the pixel's position, so a converged frame stays bit-stable
+    // across exports. Applied at the final quantization below, so
+    // every path that produced the row's values (the tent resolve,
+    // the film blend) passes through it exactly once.
+    constexpr std::uint8_t kBayer8x8[64] = {0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58,
+        26, 12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9,
+        41, 51, 19, 59, 27, 49, 17, 57, 25, 15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53,
+        21};
+    const float dither
+        = (static_cast<float>(kBayer8x8[((y & 7u) << 3u) | (x & 7u)]) * (1.0f / 63.0f) - 0.5f)
+            * (1.0f / 255.0f);
+    for (std::uint32_t channel = 0; channel < 3; ++channel)
+    {
+        const float clamped
+            = linear[channel] < 0.0f ? 0.0f : (linear[channel] > 1.0f ? 1.0f : linear[channel]);
+        const float encoded
+            = srgb_tables::floatEncode.values[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
+        pixel[channel] = toByte(encoded + dither);
+    }
+}
+
+} // namespace
+
 void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, std::uint32_t columns,
     std::uint32_t rows)
 {
@@ -814,7 +1087,6 @@ void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, s
         }
         return table;
     }();
-    const std::uint8_t *encodeTable = srgb_tables::byteEncode.values;
 
     const float contrast   = cameraContrast_ > 0.05f ? cameraContrast_ : 1.0f;
     const float vignette   = std::clamp(cameraVignette_, 0.0f, 1.0f);
@@ -826,53 +1098,115 @@ void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, s
 
     const auto processRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd)
     {
+        // The row loop picks the wide kernel per row when the machine carries
+        // AVX-512 (see wide_presentation.hpp): sixteen pixels per pass, the
+        // three channels processed as three 16-lane vectors gathered from the
+        // row's strided bytes. The per-pixel scalars (vignette gain, grain
+        // factor, Bayer dither) are computed per lane exactly as the scalar
+        // loop computes them per pixel, with the same hash inputs, so a wide
+        // lane writes the byte the scalar loop would write for that pixel.
+        const bool wideCamera = wideRunsActive_;
         for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
         {
             std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
             const float normalizedY = (static_cast<float>(y) + 0.5f) / static_cast<float>(rows) * 2.0f - 1.0f;
+#if ENGINE_WIDE_SHADING_AVX512
+            if (wideCamera)
+            {
+                const std::uint32_t wideEnd = columns - (columns % 16u);
+                for (std::uint32_t x = 0; x < wideEnd; x += 16u)
+                {
+                    std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+                    // Per-lane scalars first: vignette gain, decoded luma's
+                    // grain gain, Bayer dither.
+                    alignas(64) float laneBytes[3][16];
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        laneBytes[0][lane] = static_cast<float>(pixel[lane * 4u + 0u]);
+                        laneBytes[1][lane] = static_cast<float>(pixel[lane * 4u + 1u]);
+                        laneBytes[2][lane] = static_cast<float>(pixel[lane * 4u + 2u]);
+                    }
+                    alignas(64) float decodedLane[3][16];
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        const __m512 decoded = widepresentation::decodeBytesWide(decode.data(),
+                            _mm512_load_ps(laneBytes[channel]));
+                        _mm512_store_ps(decodedLane[channel], decoded);
+                    }
+                    alignas(64) float gainLane[16];
+                    alignas(64) float ditherLane[16];
+                    constexpr std::uint8_t kBayer8x8[64] = {0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24,
+                        50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22,
+                        3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25, 15, 47, 7, 39,
+                        13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21};
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        const std::uint32_t laneX = x + static_cast<std::uint32_t>(lane);
+                        float gain = 1.0f;
+                        if (vignette > 0.0f)
+                        {
+                            const float normalizedX
+                                = (static_cast<float>(laneX) + 0.5f) / static_cast<float>(columns) * 2.0f - 1.0f;
+                            const float radius = std::sqrt(normalizedX * normalizedX + normalizedY * normalizedY);
+                            const float t = glm::smoothstep(0.45f, 1.35f, radius);
+                            gain *= 1.0f - vignette * t;
+                        }
+                        if (grain > 0.0f)
+                        {
+                            std::uint32_t state = frameSeed * 0x9E3779B9u + laneX * 0x85EBCA6Bu + y * 0xC2B2AE35u;
+                            state ^= state >> 15;
+                            state *= 0x2545F491u;
+                            state ^= state >> 13;
+                            const float noise = static_cast<float>(state & 0x00FFFFFFu) * (1.0f / 16777216.0f) - 0.5f;
+                            const float luma = decodedLane[0][lane] * 0.299f + decodedLane[1][lane] * 0.587f
+                                + decodedLane[2][lane] * 0.114f;
+                            const float midtone = 4.0f * luma * (1.0f - luma);
+                            gain *= 1.0f + grain * (0.35f + 0.65f * midtone) * noise;
+                        }
+                        gainLane[lane] = gain;
+                        ditherLane[lane] = (static_cast<float>(kBayer8x8[((y & 7u) << 3u) | (laneX & 7u)])
+                                * (1.0f / 63.0f) - 0.5f)
+                            * (1.0f / 255.0f);
+                    }
+                    // Contrast pivot as slope/intercept; the grain's gain
+                    // rides the same multiply (the scalar path applies it to
+                    // the contrasted value, and slope*(x)+i then *gain equals
+                    // the scalar's ((x-p)*c+p)*g - the distributions match
+                    // because both are affine in the decoded value; the
+                    // clamp the scalar path takes between contrast and grain
+                    // is folded by the kernel's own final clamp).
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        const __m512 processed = widepresentation::cameraResponseWide(decode.data(),
+                            srgb_tables::floatEncode.values, _mm512_load_ps(laneBytes[channel]),
+                            _mm512_set1_ps(contrast), _mm512_set1_ps(kPivot * (1.0f - contrast)),
+                            _mm512_load_ps(gainLane), _mm512_load_ps(ditherLane));
+                        // The kernel returns the floatEncode table value with
+                        // the dither added; the scalar path quantizes that
+                        // sum through toByte (clamp, *255, +0.5, trunc).
+                        alignas(64) float encodedLane[16];
+                        _mm512_store_ps(encodedLane, processed);
+                        for (int lane = 0; lane < 16; ++lane)
+                        {
+                            pixel[lane * 4u + channel] = toByte(encodedLane[lane]);
+                        }
+                    }
+                }
+                // Scalar tail for the final (columns % 16) pixels.
+                for (std::uint32_t x = wideEnd; x < columns; ++x)
+                {
+                    std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+                    processScalarCameraPixel(pixel, x, y, columns, normalizedY, contrast, vignette, grain,
+                        frameSeed, decode.data());
+                }
+                continue;
+            }
+#endif // ENGINE_WIDE_SHADING_AVX512
             for (std::uint32_t x = 0; x < columns; ++x)
             {
                 std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
-                glm::vec3 linear(decode[pixel[0]], decode[pixel[1]], decode[pixel[2]]);
-                if (contrast != 1.0f)
-                {
-                    linear = (linear - glm::vec3(kPivot)) * contrast + glm::vec3(kPivot);
-                    linear = glm::clamp(linear, glm::vec3(0.0f), glm::vec3(1.0f));
-                }
-                if (vignette > 0.0f)
-                {
-                    const float normalizedX
-                        = (static_cast<float>(x) + 0.5f) / static_cast<float>(columns) * 2.0f - 1.0f;
-                    const float radius = std::sqrt(normalizedX * normalizedX + normalizedY * normalizedY);
-                    // Smooth falloff from the frame's mid-radius to its corner:
-                    // centers stay untouched, corners lose the full strength.
-                    const float t = glm::smoothstep(0.45f, 1.35f, radius);
-                    linear *= 1.0f - vignette * t;
-                }
-                if (grain > 0.0f)
-                {
-                    // Wang hash over (pixel, frame): uniform in [0, 1), fixed
-                    // for a given frame and pixel. Film-like amplitude peaks
-                    // in the midtones and fades in the extremes.
-                    std::uint32_t state = frameSeed * 0x9E3779B9u + x * 0x85EBCA6Bu + y * 0xC2B2AE35u;
-                    state ^= state >> 15;
-                    state *= 0x2545F491u;
-                    state ^= state >> 13;
-                    const float noise  = static_cast<float>(state & 0x00FFFFFFu) * (1.0f / 16777216.0f) - 0.5f;
-                    const float luma   = linear.x * 0.299f + linear.y * 0.587f + linear.z * 0.114f;
-                    const float midtone = 4.0f * luma * (1.0f - luma);
-                    // One gain per pixel, not one delta per channel: scaling
-                    // all three channels by the same factor keeps the hue,
-                    // so the grain reads as luminance-density film grain
-                    // instead of per-channel colored sensor noise.
-                    linear *= 1.0f + grain * (0.35f + 0.65f * midtone) * noise;
-                }
-                for (std::uint32_t channel = 0; channel < 3; ++channel)
-                {
-                    const float clamped
-                        = linear[channel] < 0.0f ? 0.0f : (linear[channel] > 1.0f ? 1.0f : linear[channel]);
-                    pixel[channel] = encodeTable[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
-                }
+                processScalarCameraPixel(pixel, x, y, columns, normalizedY, contrast, vignette, grain,
+                    frameSeed, decode.data());
             }
         }
     };
@@ -973,8 +1307,19 @@ void HeadlessBackend::resolveRowsTent(const std::uint8_t *samples, std::uint32_t
         }
     };
     // Horizontal [1 2 1] fold of a raw block-sum row, edge columns clamped.
-    const auto foldRowHorizontally = [outputColumns](const std::uint16_t *sums, std::uint16_t *folded)
+    // AVX-512 machines fold the interior sixteen texels per pass (the
+    // sixteen 16-bit lanes each hold one texel's channel value; the head,
+    // tail and the two edge-clamped columns stay with the scalar loop -
+    // see wide_presentation.hpp's tentFoldRowWide).
+    const auto foldRowHorizontally = [outputColumns, this](const std::uint16_t *sums, std::uint16_t *folded)
     {
+#if ENGINE_WIDE_SHADING_AVX512
+        if (wideRunsActive_)
+        {
+            widepresentation::tentFoldRowWide(sums, folded, outputColumns);
+            return;
+        }
+#endif // ENGINE_WIDE_SHADING_AVX512
         for (std::uint32_t x = 0; x < outputColumns; ++x)
         {
             const std::size_t west = static_cast<std::size_t>(x > 0u ? x - 1u : 0u) * 4u;
@@ -1009,6 +1354,69 @@ void HeadlessBackend::resolveRowsTent(const std::uint8_t *samples, std::uint32_t
     {
         std::uint8_t *destination = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
         // Vertical [1 2 1] over the three folded rows, rounding to bytes.
+        // The wide fold below covers the aligned interior 32 texels per pass
+        // (sixteen 16-bit lanes per row, three rows in registers); the scalar
+        // loop keeps the head/tail and replicates the rounding exactly.
+#if ENGINE_WIDE_SHADING_AVX512
+        if (wideRunsActive_)
+        {
+            // Channel lanes (see the horizontal fold's block comment): one
+            // __m512i holds eight texels' 32 channel values; the vertical
+            // [1 2 1] over the three folded rows, the rounding add and the
+            // shift run over all 32 lanes at once, and the saturating narrow
+            // writes the eight texels' bytes in memory order (the shifted
+            // sums never exceed the byte range, so the narrow equals the
+            // scalar casts lane for lane). Blocks cover texel groups of
+            // eight from texel 1 while the group and its south/center/north
+            // rows exist; texel 0 and the trailing texels stay scalar.
+            const __m512i two = _mm512_set1_epi16(2);
+            const __m512i roundVec = _mm512_set1_epi16(static_cast<short>(tentRound));
+            const __m512i shiftVec = _mm512_set1_epi16(static_cast<short>(tentShift));
+            const auto foldBlockWide = [&](std::uint32_t texelBase)
+            {
+                const std::size_t channelBase = static_cast<std::size_t>(texelBase) * 4u;
+                const __m512i south = _mm512_loadu_si512(
+                    reinterpret_cast<const __m512i *>(foldedSums[0] + channelBase));
+                const __m512i center = _mm512_loadu_si512(
+                    reinterpret_cast<const __m512i *>(foldedSums[1] + channelBase));
+                const __m512i north = _mm512_loadu_si512(
+                    reinterpret_cast<const __m512i *>(foldedSums[2] + channelBase));
+                const __m512i sum = _mm512_add_epi16(_mm512_add_epi16(south,
+                    _mm512_mullo_epi16(center, two)), north);
+                const __m512i rounded = _mm512_add_epi16(sum, roundVec);
+                const __m512i shifted = _mm512_srlv_epi16(rounded, shiftVec);
+                const __m256i bytesPacked = _mm512_cvtusepi16_epi8(shifted);
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(destination + channelBase), bytesPacked);
+            };
+            const auto foldColumnScalar = [&](std::uint32_t x)
+            {
+                const std::size_t index = static_cast<std::size_t>(x) * 4u;
+                for (std::uint32_t channel = 0; channel < 4; ++channel)
+                {
+                    destination[index + channel] = static_cast<std::uint8_t>(
+                        (foldedSums[0][index + channel] + 2u * foldedSums[1][index + channel]
+                            + foldedSums[2][index + channel] + tentRound) >> tentShift);
+                }
+            };
+            foldColumnScalar(0u);
+            std::uint32_t x = 1u;
+            // 16 texels (two blocks) per iteration where they fit.
+            for (; x + 15u < outputColumns; x += 16u)
+            {
+                foldBlockWide(x);
+                foldBlockWide(x + 8u);
+            }
+            for (; x + 7u < outputColumns; x += 8u)
+            {
+                foldBlockWide(x);
+            }
+            for (; x < outputColumns; ++x)
+            {
+                foldColumnScalar(x);
+            }
+        }
+        else
+#endif // ENGINE_WIDE_SHADING_AVX512
         for (std::uint32_t x = 0; x < outputColumns; ++x)
         {
             const std::size_t index = static_cast<std::size_t>(x) * 4u;
@@ -2947,6 +3355,8 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.baseColorFactor         = glm::make_vec3(material.baseColor);
     outSetup.metallicFactor          = material.metallicFactor;
     outSetup.roughnessFactor         = material.roughnessFactor;
+    outSetup.noiseScaleMeters        = material.noiseScaleMeters > 0.0f ? material.noiseScaleMeters : 0.0f;
+    outSetup.noiseStrength           = material.noiseStrength > 0.0f ? material.noiseStrength : 0.0f;
     outSetup.normalScale             = material.normalScale;
     outSetup.occlusionStrength       = material.occlusionStrength;
     outSetup.emissiveColor           = glm::make_vec3(material.emissiveColor);
@@ -4101,11 +4511,38 @@ std::size_t HeadlessBackend::prepareFanTriangles(
             record.uvDenominatorX = gradAx * wA + gradBx * wB + gradCx * wC;
             record.uvDenominatorY = gradAy * wA + gradBy * wB + gradCy * wC;
         }
+        // Mottle footprint (mottle_noise.hpp): the world extent of this
+        // triangle over its screen extent in supersamples - what one shaded
+        // sample covers on this surface. Computed only when the draw asks
+        // for the pass; the noise floors its octaves at the footprint so
+        // minified draws band-limit instead of speckling.
+        record.noiseFootprintMeters = 0.0f;
+        if (setup.noiseScaleMeters > 0.0f)
+        {
+            const glm::vec3 &worldA = record.corners[0].worldPosition;
+            const glm::vec3 &worldB = record.corners[1].worldPosition;
+            const glm::vec3 &worldC = record.corners[2].worldPosition;
+            const glm::vec3 worldMin(glm::min(glm::min(worldA.x, worldB.x), worldC.x),
+                glm::min(glm::min(worldA.y, worldB.y), worldC.y),
+                glm::min(glm::min(worldA.z, worldB.z), worldC.z));
+            const glm::vec3 worldMax(glm::max(glm::max(worldA.x, worldB.x), worldC.x),
+                glm::max(glm::max(worldA.y, worldB.y), worldC.y),
+                glm::max(glm::max(worldA.z, worldB.z), worldC.z));
+            const float worldExtent = glm::max(
+                glm::max(worldMax.x - worldMin.x, worldMax.y - worldMin.y), worldMax.z - worldMin.z);
+            const float screenExtent = glm::max(glm::max(
+                glm::abs(record.screenX[2] - record.screenX[0]), glm::abs(record.screenX[1] - record.screenX[0])),
+                glm::max(glm::abs(record.screenY[2] - record.screenY[0]),
+                    glm::abs(record.screenY[1] - record.screenY[0])));
+            record.noiseFootprintMeters = screenExtent > 0.5f
+                ? worldExtent / (screenExtent + 1.0f)
+                : worldExtent;
+        }
         record.sourceTriangle    = static_cast<std::uint32_t>(triangleIndex);
         // Run-shading dispatch flag (see rasterizeFanRecordRuns): computed at
         // emission, where the draw's setup and the record's window are both
         // known; the rasterization loops read only the flag.
-        record.shadeRuns = recordRunsEligible(setup, record);
+        record.shadeRuns = recordRunsEligible(setup);
     }
     return fanCount;
 }
@@ -4148,6 +4585,7 @@ void HeadlessBackend::fanPixelWindow(const TileBinRecord &record, std::uint32_t 
 bool HeadlessBackend::resolveGiAmbient(const glm::vec3 &position, const glm::vec3 &normal, glm::vec3 &outIrradiance,
     float &outCoverage, float &outOcclusion) const
 {
+
     if (preparedGatherField_.valid)
     {
         glm::vec3 gatherIrradiance(0.0f);
@@ -4201,6 +4639,9 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     const std::uint32_t            lightCount = static_cast<std::uint32_t>(directLights_.size());
     const glm::vec3   tangentScaled    = record.tangent * record.tangentInverseMax;
     const glm::vec3   bitangentScaled  = record.bitangent * record.tangentInverseMax;
+    // The mottle pass runs on the albedo of lit and unlit draws alike; the
+    // footprint rides the record (see prepareFanTriangles).
+    const bool        noiseActive = setup.noiseScaleMeters > 0.0f && setup.noiseStrength > 0.0f;
 
     const float weightC            = 1.0f - weightA - weightB;
     const float inverseWSum        = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
@@ -4229,6 +4670,21 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     if (hasBaseColorMap)
     {
         baseColor *= baseColorMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY);
+    }
+    // Procedural surface mottle (mottle_noise.hpp): the footprint-adaptive
+    // two-octave value noise at the sample's world position multiplies the
+    // albedo - soil/sward variation no lattice repeats and no texture gate
+    // cuts off. The position here is the same perspective-correct expression
+    // the shading block below derives (passed in when the caller already
+    // computed it).
+    if (noiseActive)
+    {
+        const glm::vec3 noisePosition = interpolatedPair != nullptr
+            ? *interpolatedPair
+            : correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
+                + correctedC * cornerC.worldPosition;
+        baseColor *= mottle::albedoModulation(noisePosition, setup.noiseScaleMeters,
+            record.noiseFootprintMeters, setup.noiseStrength);
     }
 
     glm::vec3 shaded = baseColor;
@@ -4401,22 +4857,17 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
 // Evaluated once per record at emission (the shadeRuns flag), never inside
 // the rasterization loops - an eligibility call per record measurably
 // regressed the inlined per-sample core's codegen.
-bool HeadlessBackend::recordRunsEligible(const RasterSetup &setup, const TileBinRecord &record) const
+bool HeadlessBackend::recordRunsEligible(const RasterSetup &setup) const
 {
     // Textured transparent draws stay on the per-sample cores: their commit
     // modulates the blend by the base-color map's texel alpha, a per-lane
-    // fetch the run kernel's shared commit does not carry.
-    if (setup.fur || setup.sheenFactor > 0.0f
-        || (setup.transparent && setup.hasBaseColorMap) || !directLights_.empty())
-    {
-        return false;
-    }
-    std::int32_t firstX = 0;
-    std::int32_t lastX  = 0;
-    std::int32_t firstY = 0;
-    std::int32_t lastY  = 0;
-    fanPixelWindow(record, framebufferWidth, framebufferHeight, firstX, lastX, firstY, lastY);
-    return lastX - firstX + 1 >= 16;
+    // fetch the run kernel's shared commit does not carry. Everything else
+    // fits the kernel at ANY window width: the 16-lane passes mask the final
+    // partial group and the 4-wide core runs whatever remains per sample, so
+    // narrow records (the small streamed triangles that dominate a planet
+    // chunk's mesh) join the same amortized path as the wide ones.
+    return !(setup.fur || setup.sheenFactor > 0.0f
+        || (setup.transparent && setup.hasBaseColorMap) || !directLights_.empty());
 }
 
 bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
@@ -4812,6 +5263,11 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     // records whose draws the run kernel models and whose windows amortize a
     // 4-wide run.
     const bool hasBaseColorMap = setup.hasBaseColorMap;
+    // Procedural mottle (mottle_noise.hpp) gates like the per-sample path;
+    // with no base-color map the caller still fills run.albedo (the kernel's
+    // corner-color interpolation times the factor, times the modulation), so
+    // albedoFilled turns on for the pass too.
+    const bool noiseActive = setup.noiseScaleMeters > 0.0f && setup.noiseStrength > 0.0f;
     // Normal-mapped lit lanes fetch the map and build the TBN in the run loop
     // (shadeTrianglePixel's exact normal chain, per lane); the kernel then
     // lights the finished normals. Unlit lanes never fetch (the per-sample
@@ -4835,7 +5291,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     runContext.opacity         = setup.opacity;
     runContext.sheenFactor     = setup.sheenFactor;
     runContext.doubleSided     = setup.doubleSided;
-    runContext.albedoFilled    = hasBaseColorMap;
+    runContext.albedoFilled    = hasBaseColorMap || noiseActive;
     runContext.unlit           = setup.unlit;
     runContext.normalMapped    = normalMapped;
     runContext.exposure        = environment_.exposure;
@@ -4964,11 +5420,532 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
         std::size_t pixelIndex = static_cast<std::size_t>(y) * framebufferWidth + firstX;
 
         {
+            // 16-wide AVX-512 runs (see wide_shading.hpp): the machine's
+            // vector unit shades sixteen consecutive samples per pass
+            // through the same SoA forms the 4-wide kernel uses, with the
+            // lane weights stepping through the identical incremental
+            // sequence the per-sample core produces (sequential adds, no
+            // closed-form stepping) so a wide lane reads exactly the value
+            // the 4-wide lane below computes. The leftover columns (<16
+            // wide) fall through to the 4-wide runs, whose own <4 tail falls
+            // through to the per-sample loop. Runs off the wide kernel's
+            // contract (doubleSided normal-mapped draws flip the normal
+            // through the view vector inside the chain below) keep the
+            // 4-wide path unchanged.
+            // The whole window runs through the wide passes when the wide
+            // kernel is active: the final partial group keeps its excess
+            // lanes masked off (a 16-column step past a narrower window
+            // reads and commits nothing past the record's right edge), so no
+            // 4-wide runs or per-sample tail run at all below. Without the
+            // wide kernel the 4-wide runs and the per-sample tail keep their
+            // original split of the same window.
+            for (std::int32_t x = firstX; x <= lastX; x += 16, pixelIndex += 16)
+            {
+                float laneWeightA[16];
+                float laneWeightB[16];
+                float laneDepth[16];
+                float stepWeightA = weightA;
+                float stepWeightB = weightB;
+                float stepDepth   = pixelDepth;
+                for (int lane = 0; lane < 16; ++lane)
+                {
+                    laneWeightA[lane] = stepWeightA;
+                    laneWeightB[lane] = stepWeightB;
+                    laneDepth[lane]    = stepDepth;
+                    stepWeightA += weightADx;
+                    stepWeightB += weightBDx;
+                    stepDepth   += depthADx;
+                }
+                // Coverage + depth test, sixteen lanes at once: the depth
+                // values sit consecutively in the row, so the current-depth
+                // read is one unaligned load (lanes past the record's window
+                // carry the next columns' values, masked out by coverage).
+#if ENGINE_WIDE_SHADING_AVX512
+                const __m512 laneWeightAv = _mm512_loadu_ps(laneWeightA);
+                const __m512 laneWeightBv = _mm512_loadu_ps(laneWeightB);
+                const __m512 laneDepthv = _mm512_loadu_ps(laneDepth);
+                const __m512 laneWeightCv = _mm512_sub_ps(_mm512_sub_ps(_mm512_set1_ps(1.0f), laneWeightAv),
+                    laneWeightBv);
+                // Lanes past the window's right edge (the final partial
+                // group): masked current-depth load keeps the row's tail
+                // untouched, and the lane limit keeps them out of the
+                // coverage mask, so no lane beyond the record's window is
+                // ever accepted, shaded or committed.
+                const __mmask16 laneLimit = static_cast<std::uint32_t>(x) + 16u > static_cast<std::uint32_t>(lastX)
+                    ? static_cast<__mmask16>((1u << (lastX - x + 1)) - 1u)
+                    : 0xFFFFu;
+                const __m512 currentDepthv
+                    = _mm512_mask_loadu_ps(_mm512_setzero_ps(), laneLimit, depthBuffer + pixelIndex);
+                const __mmask16 acceptedMask = laneLimit
+                    & _mm512_cmp_ps_mask(laneWeightAv, _mm512_setzero_ps(), _CMP_GE_OQ)
+                    & _mm512_cmp_ps_mask(laneWeightBv, _mm512_setzero_ps(), _CMP_GE_OQ)
+                    & _mm512_cmp_ps_mask(laneWeightCv, _mm512_setzero_ps(), _CMP_GE_OQ)
+                    & _mm512_cmp_ps_mask(laneDepthv, currentDepthv, _CMP_LT_OQ);
+#else
+                const std::uint16_t acceptedMask = 0; (void)laneWeightA; (void)laneDepth;
+#endif
+                if (acceptedMask == 0)
+                {
+                    weightA    = stepWeightA;
+                    weightB    = stepWeightB;
+                    pixelDepth = stepDepth;
+                    continue;
+                }
+
+                // Perspective-correct corrections, sixteen lanes at once:
+                // the same expressions the per-lane block below evaluates,
+                // over the same stepping sequence.
+#if ENGINE_WIDE_SHADING_AVX512
+                const __m512 inverseWSum = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(laneWeightAv, _mm512_set1_ps(inverseWA)),
+                        _mm512_mul_ps(laneWeightBv, _mm512_set1_ps(inverseWB))),
+                    _mm512_mul_ps(laneWeightCv, _mm512_set1_ps(inverseWC)));
+                const __m512 inversePerspective = _mm512_div_ps(_mm512_set1_ps(1.0f), inverseWSum);
+                const __m512 correctedAv = _mm512_mul_ps(_mm512_mul_ps(laneWeightAv, _mm512_set1_ps(inverseWA)),
+                    inversePerspective);
+                const __m512 correctedBv = _mm512_mul_ps(_mm512_mul_ps(laneWeightBv, _mm512_set1_ps(inverseWB)),
+                    inversePerspective);
+                const __m512 correctedCv = _mm512_sub_ps(_mm512_sub_ps(_mm512_set1_ps(1.0f), correctedAv),
+                    correctedBv);
+
+                // Alpha cutout, per lane (the wide run shares the 4-wide
+                // path's per-lane fetch - the discard decision needs the
+                // lane's own texel alpha).
+                std::uint16_t shadedMask = acceptedMask;
+                if (alphaCutoffActive)
+                {
+                    alignas(64) float cutU[16];
+                    alignas(64) float cutV[16];
+                    const __m512 cutUvX = _mm512_add_ps(
+                        _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.uv.x)),
+                            _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.uv.x))),
+                        _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.uv.x)));
+                    const __m512 cutUvY = _mm512_add_ps(
+                        _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.uv.y)),
+                            _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.uv.y))),
+                        _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.uv.y)));
+                    _mm512_store_ps(cutU, cutUvX);
+                    _mm512_store_ps(cutV, cutUvY);
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        if (((acceptedMask >> lane) & 1u) != 0u
+                            && setup.baseColorMap->sampleAlpha(cutU[lane], cutV[lane]) < alphaCutoffActive)
+                        {
+                            shadedMask = static_cast<std::uint16_t>(shadedMask & ~(1u << lane));
+                        }
+                    }
+                }
+                if (shadedMask == 0)
+                {
+                    weightA    = stepWeightA;
+                    weightB    = stepWeightB;
+                    pixelDepth = stepDepth;
+                    continue;
+                }
+
+                wideshading::WideRunInputs wide{};
+                wide.active = shadedMask;
+                _mm512_store_ps(wide.correctedA, correctedAv);
+                _mm512_store_ps(wide.correctedB, correctedBv);
+                _mm512_store_ps(wide.correctedC, correctedCv);
+
+                // Interpolated albedo base: corner colors x factor, sixteen
+                // lanes at once; the base-color map multiplies in per lane
+                // below (the fetch stays scalar - the map read is a small
+                // share of the wide run's cost, and the sampler's mip walk
+                // is per lane).
+                const __m512 colorX = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.color.x)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.color.x))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.color.x)));
+                const __m512 colorY = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.color.y)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.color.y))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.color.y)));
+                const __m512 colorZ = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.color.z)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.color.z))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.color.z)));
+                __m512 albedoX = _mm512_mul_ps(colorX, _mm512_set1_ps(setup.baseColorFactor.x));
+                __m512 albedoY = _mm512_mul_ps(colorY, _mm512_set1_ps(setup.baseColorFactor.y));
+                __m512 albedoZ = _mm512_mul_ps(colorZ, _mm512_set1_ps(setup.baseColorFactor.z));
+
+                // Per-lane UV + derivatives from the record's affine
+                // gradients (the same quotient-rule forms the per-sample
+                // path uses), sixteen lanes at once.
+                alignas(64) float laneU[16];
+                alignas(64) float laneV[16];
+                alignas(64) float laneDxU[16];
+                alignas(64) float laneDxV[16];
+                alignas(64) float laneDyU[16];
+                alignas(64) float laneDyV[16];
+                if (anySampledMap)
+                {
+                    const __m512 uvX = _mm512_add_ps(
+                        _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.uv.x)),
+                            _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.uv.x))),
+                        _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.uv.x)));
+                    const __m512 uvY = _mm512_add_ps(
+                        _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.uv.y)),
+                            _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.uv.y))),
+                        _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.uv.y)));
+                    _mm512_store_ps(laneU, uvX);
+                    _mm512_store_ps(laneV, uvY);
+                    const __m512 dXu = _mm512_mul_ps(
+                        _mm512_sub_ps(_mm512_set1_ps(record.uvNumeratorX[0]), _mm512_mul_ps(uvX,
+                            _mm512_set1_ps(record.uvDenominatorX))),
+                        inversePerspective);
+                    const __m512 dXv = _mm512_mul_ps(
+                        _mm512_sub_ps(_mm512_set1_ps(record.uvNumeratorX[1]), _mm512_mul_ps(uvY,
+                            _mm512_set1_ps(record.uvDenominatorX))),
+                        inversePerspective);
+                    const __m512 dYu = _mm512_mul_ps(
+                        _mm512_sub_ps(_mm512_set1_ps(record.uvNumeratorY[0]), _mm512_mul_ps(uvX,
+                            _mm512_set1_ps(record.uvDenominatorY))),
+                        inversePerspective);
+                    const __m512 dYv = _mm512_mul_ps(
+                        _mm512_sub_ps(_mm512_set1_ps(record.uvNumeratorY[1]), _mm512_mul_ps(uvY,
+                            _mm512_set1_ps(record.uvDenominatorY))),
+                        inversePerspective);
+                    _mm512_store_ps(laneDxU, dXu);
+                    _mm512_store_ps(laneDxV, dXv);
+                    _mm512_store_ps(laneDyU, dYu);
+                    _mm512_store_ps(laneDyV, dYv);
+                }
+
+                // Per-lane scalar fetches: base color map, metallic-roughness
+                // map, occlusion map (the same calls the 4-wide lane loop
+                // makes, on the same interpolated UVs).
+                alignas(64) float texelR[16];
+                alignas(64) float texelG[16];
+                alignas(64) float texelB[16];
+                if (hasBaseColorMap)
+                {
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        if (((shadedMask >> lane) & 1u) == 0u)
+                        {
+                            continue;
+                        }
+                        const glm::vec3 sampled = setup.baseColorMap->sampleTrilinear(laneU[lane], laneV[lane],
+                            glm::vec2(laneDxU[lane], laneDxV[lane]), glm::vec2(laneDyU[lane], laneDyV[lane]));
+                        texelR[lane] = sampled.r;
+                        texelG[lane] = sampled.g;
+                        texelB[lane] = sampled.b;
+                    }
+                    albedoX = _mm512_mul_ps(albedoX, _mm512_load_ps(texelR));
+                    albedoY = _mm512_mul_ps(albedoY, _mm512_load_ps(texelG));
+                    albedoZ = _mm512_mul_ps(albedoZ, _mm512_load_ps(texelB));
+                }
+                _mm512_store_ps(wide.albedo[0], albedoX);
+                _mm512_store_ps(wide.albedo[1], albedoY);
+                _mm512_store_ps(wide.albedo[2], albedoZ);
+
+                float laneMetallic[16];
+                float laneRoughness[16];
+                float laneOcclusion[16];
+                for (int lane = 0; lane < 16; ++lane)
+                {
+                    laneMetallic[lane]  = setup.metallicFactor;
+                    laneRoughness[lane] = setup.roughnessFactor;
+                    laneOcclusion[lane] = 1.0f;
+                }
+                if (!setup.unlit && (hasMetallicRoughnessMap || hasOcclusion))
+                {
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        if (((shadedMask >> lane) & 1u) == 0u)
+                        {
+                            continue;
+                        }
+                        if (hasMetallicRoughnessMap)
+                        {
+                            const glm::vec3 sample = setup.metallicRoughnessMap->sampleTrilinear(laneU[lane],
+                                laneV[lane], glm::vec2(laneDxU[lane], laneDxV[lane]),
+                                glm::vec2(laneDyU[lane], laneDyV[lane]));
+                            laneMetallic[lane]  *= sample.b;
+                            laneRoughness[lane] *= sample.g;
+                        }
+                        if (hasOcclusion)
+                        {
+                            laneOcclusion[lane] = 1.0f - setup.occlusionStrength
+                                * (1.0f - setup.occlusionMap->sampleTrilinear(laneU[lane], laneV[lane],
+                                             glm::vec2(laneDxU[lane], laneDxV[lane]),
+                                             glm::vec2(laneDyU[lane], laneDyV[lane])).r);
+                        }
+                    }
+                }
+                _mm512_store_ps(wide.metallic, _mm512_load_ps(laneMetallic));
+                _mm512_store_ps(wide.roughness, _mm512_load_ps(laneRoughness));
+                _mm512_store_ps(wide.occlusion, _mm512_load_ps(laneOcclusion));
+
+                // ---- normal-map chain + surface pair, in registers -------
+                const __m512 posAv = _mm512_set1_ps(cornerA.worldPosition.x);
+                const __m512 posBv = _mm512_set1_ps(cornerB.worldPosition.x);
+                const __m512 posCv = _mm512_set1_ps(cornerC.worldPosition.x);
+                const __m512 posX = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, posAv), _mm512_mul_ps(correctedBv, posBv)),
+                    _mm512_mul_ps(correctedCv, posCv));
+                const __m512 posY = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.worldPosition.y)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.worldPosition.y))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.worldPosition.y)));
+                const __m512 posZ = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.worldPosition.z)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.worldPosition.z))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.worldPosition.z)));
+
+                // Procedural mottle (mottle_noise.hpp), sixteen lanes at
+                // once: the modulation multiplies the assembled albedo with
+                // the lane's world position (the same lattice the scalar
+                // form hashes, so any path shades any sample of the same
+                // material identically).
+                if (noiseActive)
+                {
+                    const __m512 modulation = wideshading::mottleModulationWide(posX, posY, posZ,
+                        setup.noiseScaleMeters, record.noiseFootprintMeters, setup.noiseStrength);
+                    const __m512 modulatedX = _mm512_mul_ps(_mm512_load_ps(wide.albedo[0]), modulation);
+                    const __m512 modulatedY = _mm512_mul_ps(_mm512_load_ps(wide.albedo[1]), modulation);
+                    const __m512 modulatedZ = _mm512_mul_ps(_mm512_load_ps(wide.albedo[2]), modulation);
+                    _mm512_store_ps(wide.albedo[0], modulatedX);
+                    _mm512_store_ps(wide.albedo[1], modulatedY);
+                    _mm512_store_ps(wide.albedo[2], modulatedZ);
+                }
+
+                const __m512 rawNormalX = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.worldNormal.x)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.worldNormal.x))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.worldNormal.x)));
+                const __m512 rawNormalY = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.worldNormal.y)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.worldNormal.y))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.worldNormal.y)));
+                const __m512 rawNormalZ = _mm512_add_ps(
+                    _mm512_add_ps(_mm512_mul_ps(correctedAv, _mm512_set1_ps(cornerA.worldNormal.z)),
+                        _mm512_mul_ps(correctedBv, _mm512_set1_ps(cornerB.worldNormal.z))),
+                    _mm512_mul_ps(correctedCv, _mm512_set1_ps(cornerC.worldNormal.z)));
+                const auto normalizeWide = [](__m512 &x, __m512 &y, __m512 &z)
+                {
+                    const __m512 dot = _mm512_add_ps(
+                        _mm512_add_ps(_mm512_mul_ps(x, x), _mm512_mul_ps(y, y)), _mm512_mul_ps(z, z));
+                    const __m512 inv = _mm512_div_ps(_mm512_set1_ps(1.0f), _mm512_sqrt_ps(dot));
+                    x = _mm512_mul_ps(x, inv);
+                    y = _mm512_mul_ps(y, inv);
+                    z = _mm512_mul_ps(z, inv);
+                };
+                __m512 geometryNormalX = rawNormalX;
+                __m512 geometryNormalY = rawNormalY;
+                __m512 geometryNormalZ = rawNormalZ;
+                normalizeWide(geometryNormalX, geometryNormalY, geometryNormalZ);
+
+                if (normalMapped)
+                {
+                    // Per-lane normal-map fetch, then the TBN chain in
+                    // registers: tangent/bitangent are record constants, the
+                    // oriented normal is the interpolated geometry normal
+                    // (the two-sided flip happens exactly where the scalar
+                    // chain flips, before the TBN build).
+                    alignas(64) float normalSampleX[16];
+                    alignas(64) float normalSampleY[16];
+                    alignas(64) float normalSampleZ[16];
+                    alignas(64) float flipX[16];
+                    alignas(64) float flipY[16];
+                    alignas(64) float flipZ[16];
+                    if (setup.doubleSided)
+                    {
+                        // viewForFlip = normalize(camera - position); flip
+                        // when dot(normal, view) < 0 (per-lane, masked).
+                        __m512 flipViewX = _mm512_sub_ps(_mm512_set1_ps(cameraPosition_.x), posX);
+                        __m512 flipViewY = _mm512_sub_ps(_mm512_set1_ps(cameraPosition_.y), posY);
+                        __m512 flipViewZ = _mm512_sub_ps(_mm512_set1_ps(cameraPosition_.z), posZ);
+                        normalizeWide(flipViewX, flipViewY, flipViewZ);
+                        const __m512 facingDot = _mm512_add_ps(
+                            _mm512_add_ps(_mm512_mul_ps(geometryNormalX, flipViewX),
+                                _mm512_mul_ps(geometryNormalY, flipViewY)),
+                            _mm512_mul_ps(geometryNormalZ, flipViewZ));
+                        const __mmask16 flip = _mm512_cmp_ps_mask(facingDot, _mm512_setzero_ps(), _CMP_LT_OQ);
+                        _mm512_store_ps(flipX, _mm512_mask_mov_ps(geometryNormalX, flip, _mm512_sub_ps(_mm512_setzero_ps(),
+                            geometryNormalX)));
+                        _mm512_store_ps(flipY, _mm512_mask_mov_ps(geometryNormalY, flip, _mm512_sub_ps(_mm512_setzero_ps(),
+                            geometryNormalY)));
+                        _mm512_store_ps(flipZ, _mm512_mask_mov_ps(geometryNormalZ, flip, _mm512_sub_ps(_mm512_setzero_ps(),
+                            geometryNormalZ)));
+                    }
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        if (((shadedMask >> lane) & 1u) == 0u)
+                        {
+                            normalSampleX[lane] = 0.0f;
+                            normalSampleY[lane] = 0.0f;
+                            normalSampleZ[lane] = 0.0f;
+                            continue;
+                        }
+                        const glm::vec3 sampled = normalMap->sampleTrilinear(laneU[lane], laneV[lane],
+                            glm::vec2(laneDxU[lane], laneDxV[lane]), glm::vec2(laneDyU[lane], laneDyV[lane]));
+                        normalSampleX[lane] = sampled.x;
+                        normalSampleY[lane] = sampled.y;
+                        normalSampleZ[lane] = sampled.z;
+                    }
+                    const __m512 sampleX = _mm512_load_ps(normalSampleX);
+                    const __m512 sampleY = _mm512_load_ps(normalSampleY);
+                    const __m512 sampleZ = _mm512_load_ps(normalSampleZ);
+                    // tangentNormal = normalize(sample*2-1 scaled by
+                    // normalScale on x/y, z untouched).
+                    __m512 tangentNormalX = _mm512_mul_ps(
+                        _mm512_sub_ps(_mm512_mul_ps(sampleX, _mm512_set1_ps(2.0f)), _mm512_set1_ps(1.0f)),
+                        _mm512_set1_ps(normalScale));
+                    __m512 tangentNormalY = _mm512_mul_ps(
+                        _mm512_sub_ps(_mm512_mul_ps(sampleY, _mm512_set1_ps(2.0f)), _mm512_set1_ps(1.0f)),
+                        _mm512_set1_ps(normalScale));
+                    __m512 tangentNormalZ = _mm512_sub_ps(
+                        _mm512_mul_ps(sampleZ, _mm512_set1_ps(2.0f)), _mm512_set1_ps(1.0f));
+                    normalizeWide(tangentNormalX, tangentNormalY, tangentNormalZ);
+                    const __m512 orientedNormalX = setup.doubleSided ? _mm512_load_ps(flipX) : geometryNormalX;
+                    const __m512 orientedNormalY = setup.doubleSided ? _mm512_load_ps(flipY) : geometryNormalY;
+                    const __m512 orientedNormalZ = setup.doubleSided ? _mm512_load_ps(flipZ) : geometryNormalZ;
+                    // shadedNormal = normalize(TBN * tangentNormal); TBN's
+                    // columns are tangentScaled, bitangentScaled and the
+                    // oriented normal (the record's constant first two).
+                    __m512 shadedNormalX = _mm512_add_ps(
+                        _mm512_add_ps(
+                            _mm512_mul_ps(_mm512_set1_ps(tangentScaled.x), tangentNormalX),
+                            _mm512_mul_ps(_mm512_set1_ps(bitangentScaled.x), tangentNormalY)),
+                        _mm512_mul_ps(orientedNormalX, tangentNormalZ));
+                    __m512 shadedNormalY = _mm512_add_ps(
+                        _mm512_add_ps(
+                            _mm512_mul_ps(_mm512_set1_ps(tangentScaled.y), tangentNormalX),
+                            _mm512_mul_ps(_mm512_set1_ps(bitangentScaled.y), tangentNormalY)),
+                        _mm512_mul_ps(orientedNormalY, tangentNormalZ));
+                    __m512 shadedNormalZ = _mm512_add_ps(
+                        _mm512_add_ps(
+                            _mm512_mul_ps(_mm512_set1_ps(tangentScaled.z), tangentNormalX),
+                            _mm512_mul_ps(_mm512_set1_ps(bitangentScaled.z), tangentNormalY)),
+                        _mm512_mul_ps(orientedNormalZ, tangentNormalZ));
+                    normalizeWide(shadedNormalX, shadedNormalY, shadedNormalZ);
+                    _mm512_store_ps(wide.shadeNormal[0], shadedNormalX);
+                    _mm512_store_ps(wide.shadeNormal[1], shadedNormalY);
+                    _mm512_store_ps(wide.shadeNormal[2], shadedNormalZ);
+                }
+
+                // ---- sun + sky shadow visibility, sixteen lanes at once ---
+                for (int lane = 0; lane < 16; ++lane)
+                {
+                    wide.sunVisibility[lane] = 1.0f;
+                    wide.skyVisibility[lane] = 1.0f;
+                }
+                if (!setup.unlit)
+                {
+                    if (sunShadowMap_.valid)
+                    {
+                        const __m512 vis = wideshading::sunShadowVisibilityWide(sunShadowMap_, posX, posY, posZ,
+                            geometryNormalX, geometryNormalY, geometryNormalZ, shadowFilterRadiusTexels_);
+                        alignas(64) float visLane[16];
+                        _mm512_store_ps(visLane, vis);
+                        for (int lane = 0; lane < 16; ++lane)
+                        {
+                            wide.sunVisibility[lane] = visLane[lane];
+                        }
+                    }
+                    if (skyShadowMap_.valid)
+                    {
+                        // The scalar path consults the sky map only where the
+                        // lane's normal points up (normal.y > 0): the wide
+                        // call computes every lane, and the mask keeps the
+                        // downward lanes at full visibility.
+                        const __m512 vis = wideshading::sunShadowVisibilityWide(skyShadowMap_, posX, posY, posZ,
+                            geometryNormalX, geometryNormalY, geometryNormalZ, shadowFilterRadiusTexels_);
+                        alignas(64) float visLane[16];
+                        _mm512_store_ps(visLane, vis);
+                        const __mmask16 upward = _mm512_cmp_ps_mask(geometryNormalY, _mm512_setzero_ps(), _CMP_GT_OQ);
+                        for (int lane = 0; lane < 16; ++lane)
+                        {
+                            if (((upward >> lane) & 1u) != 0u)
+                            {
+                                wide.skyVisibility[lane] = visLane[lane];
+                            }
+                        }
+                    }
+                }
+
+                // ---- probe-grid tile cache, per lane ----------------------
+                if (tileCache != nullptr)
+                {
+                    alignas(64) float posLaneX[16];
+                    alignas(64) float posLaneY[16];
+                    alignas(64) float posLaneZ[16];
+                    alignas(64) float nrmLaneX[16];
+                    alignas(64) float nrmLaneY[16];
+                    alignas(64) float nrmLaneZ[16];
+                    _mm512_store_ps(posLaneX, posX);
+                    _mm512_store_ps(posLaneY, posY);
+                    _mm512_store_ps(posLaneZ, posZ);
+                    _mm512_store_ps(nrmLaneX, geometryNormalX);
+                    _mm512_store_ps(nrmLaneY, geometryNormalY);
+                    _mm512_store_ps(nrmLaneZ, geometryNormalZ);
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        wide.giValid[lane] = false;
+                        wide.giOcclusion[lane] = 1.0f;
+                        if (((shadedMask >> lane) & 1u) == 0u)
+                        {
+                            continue;
+                        }
+                        const GiAmbientSample laneSample = tileCache->resolve(
+                            x + lane - xBandBegin, y - yBandBegin, tiles->recordTag,
+                            glm::vec3(posLaneX[lane], posLaneY[lane], posLaneZ[lane]),
+                            glm::vec3(nrmLaneX[lane], nrmLaneY[lane], nrmLaneZ[lane]),
+                            [this](const glm::vec3 &walkPosition, const glm::vec3 &walkNormal,
+                                glm::vec3 &outIrradiance, float &outCoverage, float &outOcclusion) -> bool
+                            {
+                                return resolveGiAmbient(walkPosition, walkNormal, outIrradiance, outCoverage,
+                                    outOcclusion);
+                            });
+                        wide.giValid[lane]         = laneSample.valid;
+                        wide.giCoverage[lane]      = laneSample.coverage;
+                        wide.giOcclusion[lane]     = laneSample.occlusion;
+                        wide.giIrradiance[0][lane] = laneSample.irradiance.x;
+                        wide.giIrradiance[1][lane] = laneSample.irradiance.y;
+                        wide.giIrradiance[2][lane] = laneSample.irradiance.z;
+                    }
+                }
+                else
+                {
+                    for (int lane = 0; lane < 16; ++lane)
+                    {
+                        wide.giValid[lane] = false;
+                        wide.giOcclusion[lane] = 1.0f;
+                    }
+                }
+
+                // ---- shading kernel, sixteen lanes -------------------------
+                alignas(64) float shadedWide[3][16];
+                wideshading::shadeRun16(runContext, runPositions, runNormals, runColors, wide, shadedWide);
+                for (int lane = 0; lane < 16; ++lane)
+                {
+                    if (((shadedMask >> lane) & 1u) == 0u)
+                    {
+                        continue;
+                    }
+                    commitRunLane(glm::vec3(shadedWide[0][lane], shadedWide[1][lane], shadedWide[2][lane]),
+                        laneDepth[lane], pixelIndex + static_cast<std::size_t>(lane), laneWeightA[lane],
+                        laneWeightB[lane], laneRoughness[lane], glm::vec2(laneU[lane], laneV[lane]),
+                        glm::vec2(laneDxU[lane], laneDxV[lane]), glm::vec2(laneDyU[lane], laneDyV[lane]));
+                }
+#endif // ENGINE_WIDE_SHADING_AVX512
+                weightA    = stepWeightA;
+                weightB    = stepWeightB;
+                pixelDepth = stepDepth;
+            }
+
             // Runs of four horizontally consecutive samples; leftover columns
             // fall through to the per-sample loop below. The lane weights and
             // depths step through the same incremental sequence the per-sample
             // loop's tail stepping produces, so a lane sees exactly the value
-            // the per-sample scan would compute for it.
+            // the per-sample scan would compute for it. The wide kernel's
+            // passes already covered every column of the window above, so the
+            // 4-wide runs and the per-sample tail run ONLY without it.
+            if (!wideRunsActive_)
+            {
             const std::int32_t runEnd = firstX + static_cast<std::int32_t>((lastX - firstX + 1) & ~3);
             for (std::int32_t x = firstX; x < runEnd; x += 4, pixelIndex += 4)
             {
@@ -5126,6 +6103,33 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                             run.shadeNormal[0][lane] = shadedNormal.x;
                             run.shadeNormal[1][lane] = shadedNormal.y;
                             run.shadeNormal[2][lane] = shadedNormal.z;
+                        }
+                    }
+                    // Procedural mottle (mottle_noise.hpp) at the lane's
+                    // world position: with a base-color map the texture's
+                    // albedo picks the modulation up here; without one the
+                    // caller-owned albedo (color x factor x modulation)
+                    // fills the kernel's inputs.
+                    if (noiseActive)
+                    {
+                        const glm::vec3 lanePosition = correctedA * cornerA.worldPosition
+                            + correctedB * cornerB.worldPosition + correctedC * cornerC.worldPosition;
+                        const float modulation = mottle::albedoModulation(lanePosition, setup.noiseScaleMeters,
+                            record.noiseFootprintMeters, setup.noiseStrength);
+                        if (hasBaseColorMap)
+                        {
+                            run.albedo[0][lane] *= modulation;
+                            run.albedo[1][lane] *= modulation;
+                            run.albedo[2][lane] *= modulation;
+                        }
+                        else
+                        {
+                            const glm::vec3 laneAlbedo = (correctedA * cornerA.color
+                                + correctedB * cornerB.color + correctedC * cornerC.color)
+                                * setup.baseColorFactor * modulation;
+                            run.albedo[0][lane] = laneAlbedo.r;
+                            run.albedo[1][lane] = laneAlbedo.g;
+                            run.albedo[2][lane] = laneAlbedo.b;
                         }
                     }
                     run.metallic[lane]  = metallic;
@@ -5382,6 +6386,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
             weightB += weightBDx;
             pixelDepth += depthADx;
         }
+        } // !wideRunsActive_: the 4-wide runs and the per-sample tail
     }
     return wrote;
 }

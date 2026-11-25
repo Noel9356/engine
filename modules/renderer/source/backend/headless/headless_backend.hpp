@@ -21,6 +21,7 @@
 #include "render_backend.hpp"
 #include "render_shared.hpp"
 #include "sun_shadows.hpp"
+#include "wide_shading.hpp"
 
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/kernel/task_scheduler.hpp>
@@ -234,6 +235,14 @@ struct HeadlessBackendOptions
     // draw, which is what makes many-small-draw scenes (streamed chunk
     // meshes) scale across the machine.
     bool           batchedTileRasterizationEnabled = true;
+    // 16-wide AVX-512 shading runs (renderer.headless_wide_runs, default
+    // on): shade sixteen horizontally consecutive samples of a run-eligible
+    // record per pass through the wide kernel (see wide_shading.hpp) when
+    // the running CPU carries the AVX-512 foundation. The kernel mirrors
+    // the 4-wide pass operation for operation, so the wide path returns
+    // bit-identical colors; records the wide path does not model keep the
+    // existing 4-wide runs.
+    bool           wideRunsEnabled = true;
     TaskScheduler *taskScheduler             = nullptr; // borrowed; parallelism disabled when null/not running
     std::uint32_t  parallelTriangleThreshold = 4096;    // triangles per draw before splitting across workers
     std::size_t    pixelsPerLockGroup        = 16;      // pixels per depth lock during parallel rasterization
@@ -350,6 +359,7 @@ public:
           lodEnabled_(options.lodEnabled),
           tileParallelEnabled_(options.tileParallelEnabled),
           batchedTileRasterizationEnabled_(options.batchedTileRasterizationEnabled),
+          wideRunsActive_(options.wideRunsEnabled && wideshading::avx512Available()),
           taskScheduler_(options.taskScheduler),
           window_(windowCapability),
           bandSplitTriangleThreshold_(options.bandSplitTriangleThreshold),
@@ -358,21 +368,21 @@ public:
           parallelTransformVertexThreshold_(options.parallelTransformVertexThreshold),
           lodStrides_(options.lodStrides),
           lodThresholds_(options.lodThresholds),
-          maxBatchTileRecords_(options.maxBatchTileRecords),
           bloomEnabled_(options.bloomEnabled),
           bloomStrength_(options.bloomStrength),
           bloomThreshold_(options.bloomThreshold),
           sunShadowsEnabled_(options.sunShadowsEnabled),
+          skyShadowsEnabled_(options.skyShadowsEnabled),
           shadowMapResolution_(options.shadowMapResolution),
           shadowFilterRadiusTexels_(options.shadowFilterRadiusTexels),
-          skyShadowsEnabled_(options.skyShadowsEnabled),
           cameraContrast_(options.cameraContrast),
           cameraVignette_(options.cameraVignette),
           cameraGrain_(options.cameraGrain),
           filmAA_(options.filmAntialiasingEnabled),
           filmAAStrength_(std::clamp(options.filmAntialiasingStrength, 0.0f, 2.0f)),
           resolveTent_(options.resolveTentEnabled),
-          gatherOcclusionStrength_(options.gatherOcclusionStrength)
+          gatherOcclusionStrength_(options.gatherOcclusionStrength),
+          maxBatchTileRecords_(options.maxBatchTileRecords)
     {
         // Supersampling grid from the requested sample count (see
         // HeadlessBackendOptions::msaaSamples); sampleScaleX_/Y_ stay 1 when
@@ -616,6 +626,12 @@ private:
         float         uvNumeratorY[2];
         float         uvDenominatorX;
         float         uvDenominatorY;
+        // Mottle footprint (mottle_noise.hpp): the world meters one
+        // supersample covers over this record - the record's world extent
+        // over its screen extent, computed at emission. The noise floors
+        // its octave wavelengths at it so minified draws band-limit the
+        // mottle instead of aliasing it into speckle. 0 disables the pass.
+        float         noiseFootprintMeters = 0.0f;
         std::uint32_t sourceTriangle;
         std::uint32_t setupIndex;
         // Run-shading dispatch flag (see rasterizeFanRecordRuns), computed at
@@ -688,6 +704,11 @@ private:
         glm::vec3              baseColorFactor         = glm::vec3(1.0f);
         float                  metallicFactor          = 0.0f;
         float                  roughnessFactor         = 1.0f;
+        // Procedural surface mottle (MeshMaterial::noiseScaleMeters / -
+        // Strength, mottle_noise.hpp): the per-draw half of the pass. The
+        // per-record half (the sample footprint) rides TileBinRecord.
+        float                  noiseScaleMeters        = 0.0f;
+        float                  noiseStrength           = 0.0f;
         float                  normalScale             = 1.0f;
         float                  occlusionStrength       = 1.0f;
         glm::vec3              emissiveColor           = glm::vec3(0.0f);
@@ -761,11 +782,13 @@ private:
         std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
         TileShadingCache *tiles = nullptr);
 
-    // Run-shading dispatch predicate (see rasterizeFanRecordRuns): the draw's
-    // shading path fits the 4-wide run kernel and the record's window is wide
-    // enough to amortize a run. Evaluated once per record at emission (the
-    // shadeRuns flag), never inside the rasterization loops.
-    bool recordRunsEligible(const RasterSetup &setup, const TileBinRecord &record) const;
+    // Run-shading eligibility (the rasterizeFanRecordRuns contract): the
+    // kernel models any window width (the wide passes mask the final
+    // partial group; the 4-wide core's leftover columns run per sample),
+    // so eligibility is purely about the DRAW: no fur, no cloth sheen, no
+    // direct lights, and no textured transparency (the lane loop's
+    // texel-alpha modulation has no wide twin). Evaluated at emission.
+    bool recordRunsEligible(const RasterSetup &setup) const;
 
     // The 4-wide run variant of rasterizeFanRecord (see quad_shading.hpp):
     // identical window, coverage, depth and commit semantics - run-eligible
@@ -925,6 +948,10 @@ private:
     // readers).
     bool                 tileParallelEnabled_       = false;
     bool                 batchedTileRasterizationEnabled_ = true;
+    // The wide kernel's effective gate: the configured flag AND the running
+    // CPU's AVX-512 foundation (wideshading::avx512Available). Set once in the
+    // constructor; the rasterizer consults it per record.
+    bool                 wideRunsActive_            = false;
 
     TaskScheduler *taskScheduler_ = nullptr;
 

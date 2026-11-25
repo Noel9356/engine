@@ -147,25 +147,27 @@ inline std::uint64_t hashCombine64(std::uint64_t a, std::uint64_t b)
 
 // Identifies one octree node: depth in the tree (0 = root cube) plus the
 // node's integer coordinates on that depth's lattice. The key packs the
-// depth into 4 bits and each coordinate into 20 bits (64 bits total); the
-// depth cap keeps both fields collision-free - a deeper tree would wrap its
-// depth modulo 16 and alias nodes of different levels onto one key.
+// depth into 5 bits and each coordinate into 19 bits (62 of the 64 bits;
+// the two spare bits stay zero); the depth cap keeps every field
+// collision-free - a depth-19 lattice's coordinates reach 2^19 exactly, and
+// a deeper tree would wrap its depth modulo 32 and alias nodes of different
+// levels onto one key.
 using ChunkKey = std::uint64_t;
 
-inline constexpr std::uint32_t maxSupportedOctreeDepth = 15;
+inline constexpr std::uint32_t maxSupportedOctreeDepth = 19;
 
 inline ChunkKey makeChunkKey(std::uint32_t depth, std::uint32_t x, std::uint32_t y, std::uint32_t z)
 {
-    return (static_cast<std::uint64_t>(depth & 0xFu) << 60) | (static_cast<std::uint64_t>(x & 0xFFFFFu) << 40)
-         | (static_cast<std::uint64_t>(y & 0xFFFFFu) << 20) | static_cast<std::uint64_t>(z & 0xFFFFFu);
+    return (static_cast<std::uint64_t>(depth & 0x1Fu) << 59) | (static_cast<std::uint64_t>(x & 0x7FFFFu) << 40)
+         | (static_cast<std::uint64_t>(y & 0x7FFFFu) << 21) | static_cast<std::uint64_t>(z & 0x7FFFFu);
 }
 
 inline void unpackChunkKey(ChunkKey key, std::uint32_t &depth, std::uint32_t &x, std::uint32_t &y, std::uint32_t &z)
 {
-    depth = static_cast<std::uint32_t>((key >> 60) & 0xFu);
-    x     = static_cast<std::uint32_t>((key >> 40) & 0xFFFFFu);
-    y     = static_cast<std::uint32_t>((key >> 20) & 0xFFFFFu);
-    z     = static_cast<std::uint32_t>(key & 0xFFFFFu);
+    depth = static_cast<std::uint32_t>((key >> 59) & 0x1Fu);
+    x     = static_cast<std::uint32_t>((key >> 40) & 0x7FFFFu);
+    y     = static_cast<std::uint32_t>((key >> 21) & 0x7FFFFu);
+    z     = static_cast<std::uint32_t>(key & 0x7FFFFu);
 }
 
 // ---- biomes -----------------------------------------------------------------

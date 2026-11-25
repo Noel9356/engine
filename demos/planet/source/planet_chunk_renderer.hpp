@@ -75,9 +75,12 @@ public:
     // inside the gate divides its material base color by the SELECTED
     // variant's mean, so the texture multiply preserves the vertex albedo
     // on average and only adds detail, and the gate boundary cannot read.
+    // groundReliefMaxDistanceMeters gates the ground variants' NORMAL maps
+    // separately and tighter than the albedo gate (see setTerrainTextures'
+    // implementation note); a zero/negative value keeps the relief off.
     void setTerrainTextures(const std::vector<TerrainTextureVariant> &groundVariants,
         const std::vector<TerrainTextureVariant> &rockVariants, double groundTextureMaxDistanceMeters,
-        double rockTextureMaxDistanceMeters);
+        double rockTextureMaxDistanceMeters, double groundReliefMaxDistanceMeters);
 
     // Installs the environment lighting the world-anchored cloud shell bakes
     // into its vertex colors (see BackdropLighting). Called before
@@ -112,8 +115,17 @@ public:
     // so its rim always sits beyond the farthest terrain the eye can see but
     // inside the far plane. Drawn first, unlit (vertex colors only), so it
     // never shades or occludes - it only fills the pixels the terrain does
-    // not reach: the sky itself, plus any chunk still streaming in.
-    void ensureSkyDome();
+    // not reach: the sky itself, plus any chunk still streaming in. The bake
+    // is sun-aware (see the sun-aware skyGradientColor twin): the canonical
+    // sun sits on the dome's +X meridian at the sun's own local elevation,
+    // and the per-frame rotation turns that meridian toward the real sun so
+    // the glare wedge and the warm horizon land on the sun's azimuth.
+    void ensureSkyDome(const glm::dvec3 &sunDirection, bool sunEnabled, const glm::dvec3 &up);
+    // Rebakes the dome's vertex colors for a sun whose local elevation has
+    // drifted from the baked one (a long interactive session walking toward
+    // a pole); the threshold is small enough that capture runs never trigger
+    // it twice.
+    void rebakeSkyDomeColors(double sunUp);
     // Places and tints the dome for this frame's eye. eyePlanetLocal is the
     // eye in planet-local space, up the local gravity gradient, sunDirection
     // the pbr sun's direction. Reports the horizon-haze color for the frame
@@ -152,8 +164,11 @@ public:
     void ensureWaterDetailTextures();
 
     // The sky deck's own bake (see deckTexture_): the coverage field with
-    // ground-sky lighting for overhead cameras.
-    void ensureDeckTexture(const glm::dvec3 &sunDirection, const glm::dmat3 &domeToPlanet);
+    // ground-sky lighting for overhead cameras, sampled where the eye's rays
+    // pierce the cloud shell (the chord geometry the deck's source comment
+    // describes).
+    void ensureDeckTexture(const glm::dvec3 &sunDirection, const glm::dmat3 &domeToPlanet,
+        const glm::dvec3 &eyePlanetLocal);
 
     // Atmosphere limb (space views): a hemisphere around the planet at the
     // top of the atmosphere, drawn unlit with depth writes off ahead of
@@ -352,14 +367,18 @@ private:
     std::vector<TerrainTextureVariant> groundTextureVariants_;
     std::vector<TerrainTextureVariant> rockTextureVariants_;
     double groundTextureMaxDistanceMetersSquared_ = 0.0;
+    double groundReliefMaxDistanceMetersSquared_ = 0.0;
     double rockTextureMaxDistanceMetersSquared_ = 0.0;
 
     // Sky dome: unit-radius gradient sphere (positions on the unit ball,
-    // colors from the atmosphere model's up-gradient) shared by every frame;
-    // the per-frame transform places, orients and scales it.
+    // colors from the atmosphere model's sun-aware gradient) shared by every
+    // frame; the per-frame transform places, orients and scales it. The
+    // baked sun's local elevation rides along so a drifting sun rebakes the
+    // colors instead of wearing the wrong elevation's glare wedge.
     engine::renderer::MeshHandle skyDome_ = engine::renderer::invalidMesh;
     glm::mat4 skyDomeTransform_{1.0f};
     bool skyDomeActive_ = false;
+    double skyDomeBakedSunUp_ = 2.0; // sentinel: nothing baked yet
     std::deque<engine::renderer::MeshMaterial> skyDomeMaterials_;
 
     // Cloud layer: world-anchored shell drawn from the module's cloud

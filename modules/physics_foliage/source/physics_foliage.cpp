@@ -169,7 +169,7 @@ private:
         }
         outVelocity[0] = ambientWindVelocity_[0];
         outVelocity[1] = 0.0;
-        outVelocity[2] = ambientWindVelocity_[2];
+        outVelocity[2] = ambientWindVelocity_[1];
         return true;
     }
 

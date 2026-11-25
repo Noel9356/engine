@@ -42,11 +42,6 @@ if(CMAKE_CXX_COMPILER_ID
         PRIVATE GLM_FORCE_DEFAULT
                 GLM_FORCE_INTRINSICS_V
     )
-endif()
-if(CMAKE_CXX_COMPILER_ID
-   MATCHES
-   "GNU|Clang|AppleClang"
-)
     target_compile_options(
         engine_module_reflection_field
         PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-math-errno;-funroll-loops>

@@ -237,7 +237,14 @@ MountainErosionField::MountainErosionField(const PlanetGenerationParams &params,
     , seed_(seed)
     , fieldId_(nextErosionFieldId.fetch_add(1, std::memory_order_relaxed))
     , latticeStrideFloorMeters_(std::max(1.0, params.radiusMeters / 600000.0))
-    , metersPerUnit_(std::max(1.0, params.mountainWavelengthMeters))
+    // The filter's length unit is METRIC by default (see mountainErosionUnit
+    // - meters in params.hpp): the gully/valley scale is an absolute real-
+    // world size, independent of the belt-placement wavelength the mountain
+    // term rides. A unit of 0 derives it from the wavelength (the small-
+    // planet convenience path where the two scales coincide).
+    , metersPerUnit_(params.mountainErosionUnitMeters > 0.0
+            ? params.mountainErosionUnitMeters
+            : std::max(1.0, params.mountainWavelengthMeters))
 {
 }
 

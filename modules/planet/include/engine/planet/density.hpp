@@ -106,13 +106,20 @@ public:
     // thing slope shading alone cannot express). The march samples the
     // density field along the configured sun ray over
     // terrainSelfShadowReachMeters of travel, band-limited at a fixed
-    // fraction of that reach so the answer is LOD-independent: every chunk
-    // depth evaluating the same point agrees, and shared boundary vertices
-    // never disagree across chunk depths. Night points (the sun at or below
-    // the local horizon) return 0 - no direct sun for the relief to block.
-    // Returns 0 when terrain self-shading is disabled. Pure function of
-    // (point, parameters); thread safe like every sampler of the field.
-    double terrainSelfShadow(const Vec3 &surfacePoint) const;
+    // fraction of that reach so the march itself is LOD-independent: every
+    // chunk depth evaluating the same point agrees, and shared boundary
+    // vertices never disagree across chunk depths. Night points (the sun at
+    // or below the local horizon) return 0 - no direct sun for the relief to
+    // block. The CONSUMER's vertex spacing fades the whole term like the
+    // albedo jitter: the march resolves relief at a fixed metric scale
+    // (fractions of the reach), and a vertex lattice coarser than that
+    // scale samples the shade field uncorrelatedly - per-vertex speckle
+    // instead of readable lee shading (a globe-view chunk's vertices sit
+    // hundreds of kilometers apart; real orbital photography shows relief
+    // shading only at the horizon, never as speckle). Returns 0 when terrain
+    // self-shading is disabled. Pure function of (point, parameters);
+    // thread safe like every sampler of the field.
+    double terrainSelfShadow(const Vec3 &surfacePoint, double vertexSpacingMeters) const;
 
     // Full single-point climate classification (macro fields evaluated
     // exactly for this point, then classified). The single-point path for

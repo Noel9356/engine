@@ -42,17 +42,22 @@ PlanetWalkController::PlanetWalkController(const planet::PlanetGenerationParams 
 {
 }
 
-void PlanetWalkController::spawn(const planet::Vec3 &unitDirection)
+void PlanetWalkController::spawn(const planet::Vec3 &unitDirection, const planet::Vec3 &facing)
 {
     walker_.placeOnSurface(unitDirection);
 
-    // Look along the horizon tangent at the spawn point (world +x projected
-    // onto the tangent plane; falls back to +z where +x is radial).
+    // Look along the horizon tangent at the spawn point: the caller's facing
+    // hint when one was given (projected onto the tangent plane), else the
+    // world +x tangent (falls back to +z where +x is radial).
     const glm::dvec3 up = toGlm(walker_.state().up);
-    glm::dvec3       tangent = glm::dvec3(1.0, 0.0, 0.0) - up * glm::dot(glm::dvec3(1.0, 0.0, 0.0), up);
+    glm::dvec3       tangent = glm::dvec3(facing.x, facing.y, facing.z) - up * glm::dot(glm::dvec3(facing.x, facing.y, facing.z), up);
     if (glm::length(tangent) < 0.5)
     {
-        tangent = glm::dvec3(0.0, 0.0, 1.0) - up * glm::dot(glm::dvec3(0.0, 0.0, 1.0), up);
+        tangent = glm::dvec3(1.0, 0.0, 0.0) - up * glm::dot(glm::dvec3(1.0, 0.0, 0.0), up);
+        if (glm::length(tangent) < 0.5)
+        {
+            tangent = glm::dvec3(0.0, 0.0, 1.0) - up * glm::dot(glm::dvec3(0.0, 0.0, 1.0), up);
+        }
     }
     viewForward_ = glm::normalize(tangent);
     autoWalkYaw_ = 0.0;

@@ -37,18 +37,16 @@ constexpr FbmParams kCloudDetailFbm{2, 2.0, 0.5};
 constexpr FbmParams kCloudWeatherFbm{2, 2.0, 0.5};
 constexpr FbmParams kCloudSwirlFbm{2, 2.0, 0.5};
 
-// Wisp octaves for texture consumers (see coverageTexel): the wavelengths
-// ride at a 24th and a 40th of the bank scale, under every practical mesh
-// grid's vertex spacing but ABOVE the bake's own texel footprint - a
-// 2048-wide equirect over the 60 km showcase puts ~187 m per texel at the
-// equator, so both octaves resolve (a sub-texel octave would alias into
-// uncorrelated salt-and-pepper instead of ragged fringes). The pair's
-// amplitude halves for the finer octave, carrying the hierarchy real
-// cloud decks photograph (large torn sheets, finer ragged fringes on
-// their edges).
+// Wisp octaves for texture consumers (see coverageTexel): METRIC wavelengths
+// (cloudWispWavelength*Meters in params.hpp; a value of 0 derives it from a
+// 24th/40th of the bank scale - the small-planet convenience). Real ragged
+// fringes ride at cumulus-edge scale (hundreds of meters), independent of
+// the planet's radius; the pair's amplitude halves for the finer octave,
+// carrying the hierarchy real cloud decks photograph (large torn sheets,
+// finer ragged fringes on their edges).
 constexpr FbmParams kCloudWispFbm{2, 2.0, 0.5};
-constexpr double kCloudWispWavelengthFractionA = 1.0 / 24.0;
-constexpr double kCloudWispWavelengthFractionB = 1.0 / 40.0;
+constexpr double kCloudWispWavelengthFallbackFractionA = 1.0 / 24.0;
+constexpr double kCloudWispWavelengthFallbackFractionB = 1.0 / 40.0;
 
 // Amplitude of the bank-elongation (1.0 = features stretch to about twice
 // their width along the flow) and of the swirl bend, in units of the cloud
@@ -57,9 +55,30 @@ constexpr double kCloudWispWavelengthFractionB = 1.0 / 40.0;
 // shells' own grids at six-plus samples per lobe wavelength (the contour
 // walk needs that headroom to keep lobe outlines off the grid stairs) - with
 // the amplitude below as its share of the field.
-constexpr double kCloudStretchFactor = 0.50;
+// 0.32: orbital photography of trade-wind banks reads as elongated but
+// individually resolved cells - a stronger stretch (0.5+) smeared the
+// banks into the motion-blur streaks the earlier tuning showed.
+constexpr double kCloudStretchFactor = 0.32;
 constexpr double kCloudSwirlAmplitude = 0.20;
 constexpr double kCloudBillowWavelengthFraction = 0.70;
+
+// Convective octave (texture consumers only, see coverageTexel): an
+// inverted-cellular (Worley) pair at METRIC wavelengths
+// (cloudConvective*WavelengthMeters in params.hpp; a value of 0 derives it
+// from an 11th/44th of the bank scale - the small-planet convenience). A
+// ground-level eye sees the cloud shell through true perspective: the sky
+// above ~25 deg of elevation samples only a few kilometers of the shell
+// around the eye's zenith, so the bank-scale field there magnifies into one
+// or two huge smooth masses. The cellular pair rides exactly the scale that
+// patch photographs at - real cumulus clumps span ~2 km, packed by open-cell
+// convection into ~8 km fields - so the overhead sky reads as rounded
+// cumulus clumps with ragged edges instead of a featureless sheet, while the
+// band-limited consumers (mesh shells, cloud shadows) never evaluate it and
+// stay bit-identical.
+constexpr double kCloudConvectiveWavelengthFallbackFraction = 1.0 / 9.0;
+constexpr double kCloudConvectiveFineWavelengthFallbackFraction = 1.0 / 44.0;
+constexpr std::uint64_t kCloudConvectiveSeedTag = 0xC10D8ULL;
+constexpr std::uint64_t kCloudConvectiveFineSeedTag = 0xC10D9ULL;
 
 // Fixed shape of the cirrus deck: three smooth octaves carry the streak
 // field at half the cumulus wavelength, a two-octave filament stream tears
@@ -162,6 +181,8 @@ CloudField::CloudField(const PlanetGenerationParams &params)
     seedsWisp_[1] = makeFbmSeeds(static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudWispSeedTagB)),
         kCloudWispFbm.octaves);
     seedBillow_  = static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudBillowSeedTag));
+    seedConvective_ = static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudConvectiveSeedTag));
+    seedConvectiveFine_ = static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(baseSeed), kCloudConvectiveFineSeedTag));
 
     // Deterministic wind frame: a unit flow direction derived from the cloud
     // seed. The base field is sampled in a frame whose axis is compressed
@@ -215,13 +236,18 @@ double CloudField::coverage(const Vec3 &unitDirection, double lowPassCutoffMeter
     return sampleCoverage(unitDirection, lowPassCutoffMeters, softnessScale, includeBillow, false, 0.0);
 }
 
-double CloudField::coverageTexel(const Vec3 &unitDirection, double wispDetail) const
+double CloudField::coverageTexel(const Vec3 &unitDirection, double wispDetail, double lowPassCutoffMeters) const
 {
-    return sampleCoverage(unitDirection, 0.0, 1.0, true, true, wispDetail);
+    return sampleCoverage(unitDirection, lowPassCutoffMeters, 1.0, true, true, wispDetail);
+}
+
+double CloudField::coverageTexelGround(const Vec3 &unitDirection) const
+{
+    return sampleCoverage(unitDirection, 0.0, 1.0, true, true, 1.0, false);
 }
 
 double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale,
-    bool includeBillow, bool texelDetail, double wispDetail) const
+    bool includeBillow, bool texelDetail, double wispDetail, bool includeCycloneShear) const
 {
     if (!params_.cloudsEnabled || params_.cloudCoverageAmount <= 0.0)
     {
@@ -269,7 +295,7 @@ double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutof
     // influence tightens the wrap toward the eyewall without dragging the
     // far-field banks around. The displacement stays a pure function of the
     // position, so the texture bake remains deterministic.
-    if (texelDetail)
+    if (texelDetail && includeCycloneShear)
     {
         for (const Cyclone &storm : cyclones_)
         {
@@ -333,17 +359,83 @@ double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutof
     // real decks photograph at close range - the structure a contoured mesh
     // cannot hold at any practical resolution. The amplitude follows the
     // configured detail strength so cloud_detail_strength keeps tuning the
-    // whole breakup family together.
+    // whole breakup family together. Both octaves band-limit under the
+    // caller's cutoff like every other noise term: a bake whose texel
+    // footprint sits ABOVE the metric wavelengths (the space shell's equirect
+    // at planet scale) fades them out instead of aliasing them into
+    // uncorrelated salt-and-pepper flecks; the ground deck's fine footprint
+    // keeps them at full strength.
     if (texelDetail && wispDetail > 0.0)
     {
         const double wispStrength = wispDetail * params_.cloudWispStrength
             * std::max(params_.cloudDetailStrength, 0.12);
-        field += wispStrength
-            * fbm(seedsWisp_[0], shellPosition, params_.cloudWavelengthMeters * kCloudWispWavelengthFractionA,
-                kCloudWispFbm, 0.0);
-        field += 0.5 * wispStrength
-            * fbm(seedsWisp_[1], shellPosition, params_.cloudWavelengthMeters * kCloudWispWavelengthFractionB,
-                kCloudWispFbm, 0.0);
+        const double wispWavelengthA = std::max(1.0,
+            params_.cloudWispWavelengthAMeters > 0.0
+                ? params_.cloudWispWavelengthAMeters
+                : params_.cloudWavelengthMeters * kCloudWispWavelengthFallbackFractionA);
+        const double wispWavelengthB = std::max(1.0,
+            params_.cloudWispWavelengthBMeters > 0.0
+                ? params_.cloudWispWavelengthBMeters
+                : params_.cloudWavelengthMeters * kCloudWispWavelengthFallbackFractionB);
+        const double wispFadeA = lowPassFade(lowPassCutoffMeters, wispWavelengthA);
+        const double wispFadeB = lowPassFade(lowPassCutoffMeters, wispWavelengthB);
+        if (wispFadeA > 0.0)
+        {
+            field += wispStrength * wispFadeA
+                * fbm(seedsWisp_[0], shellPosition, wispWavelengthA, kCloudWispFbm, lowPassCutoffMeters);
+        }
+        if (wispFadeB > 0.0)
+        {
+            field += 0.5 * wispStrength * wispFadeB
+                * fbm(seedsWisp_[1], shellPosition, wispWavelengthB, kCloudWispFbm, lowPassCutoffMeters);
+        }
+    }
+
+    // Convective octaves (texture consumers only): an inverted-cellular pair
+    // one and two size classes under the banks (see the constants' block
+    // comment). The coarse cell packs the rounded clumps a ground-level eye
+    // parses as cumulus structure and orbital photography reads as the
+    // cotton-wool grain of real decks; the fine cell halves in amplitude and
+    // shatters the clump edges into the ragged fringes real cloud masses
+    // photograph. The amplitude follows the dedicated cloud_convective_strength
+    // key (the clumps are a shape family of their own, not a breakup detail
+    // of the banks - the wisp pair owns that), and the fine cell follows the
+    // same key at half share. Both ride the field BEFORE the threshold, so a
+    // stronger key grows real clumping instead of softening the crossing.
+    // Like the wisp pair they band-limit under the caller's cutoff: a bake
+    // whose texel footprint sits above the metric cumulus scale fades the
+    // clumps out (sub-texel octaves alias into salt-and-pepper) while the
+    // ground deck's fine footprint keeps them at full strength.
+    if (texelDetail)
+    {
+        const double convectiveWavelength = std::max(1.0,
+            params_.cloudConvectiveWavelengthMeters > 0.0
+                ? params_.cloudConvectiveWavelengthMeters
+                : params_.cloudWavelengthMeters * kCloudConvectiveWavelengthFallbackFraction);
+        const double convectiveFineWavelength = std::max(1.0,
+            params_.cloudConvectiveFineWavelengthMeters > 0.0
+                ? params_.cloudConvectiveFineWavelengthMeters
+                : params_.cloudWavelengthMeters * kCloudConvectiveFineWavelengthFallbackFraction);
+        const double convectiveStrength = params_.cloudConvectiveStrength * wispDetail
+            * lowPassFade(lowPassCutoffMeters, convectiveWavelength);
+        const double convectiveFineStrength = 0.5 * params_.cloudConvectiveStrength * wispDetail
+            * lowPassFade(lowPassCutoffMeters, convectiveFineWavelength);
+        if (convectiveStrength > 0.0)
+        {
+            field += convectiveStrength
+                * (1.0 - 2.0 * noise::worley3(seedConvective_,
+                    shellPosition.x / convectiveWavelength,
+                    shellPosition.y / convectiveWavelength,
+                    shellPosition.z / convectiveWavelength));
+        }
+        if (convectiveFineStrength > 0.0)
+        {
+            field += convectiveFineStrength
+                * (1.0 - 2.0 * noise::worley3(seedConvectiveFine_,
+                    shellPosition.x / convectiveFineWavelength,
+                    shellPosition.y / convectiveFineWavelength,
+                    shellPosition.z / convectiveFineWavelength));
+        }
     }
 
     // Threshold into coverage: the crossing band centers on the quantile the
@@ -415,6 +507,16 @@ AerialPerspective aerialPerspective(const PlanetGenerationParams &params, const 
 
 Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot)
 {
+    // Neutral-direction twin of the sun-aware overload below (sunDot = 0):
+    // every directional term carries a positive sun-proximity factor, so a
+    // zero sunDot leaves the plain zenith-to-horizon ramp bit-identical -
+    // consumers without a view-relative sun direction keep the historical
+    // sky exactly.
+    return skyGradientColor(params, upDot, 0.0, 1.0);
+}
+
+Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot, double sunDot, double sunUp)
+{
     // Pale band along the horizon, deepening toward the zenith: real skies
     // keep their horizon haze over roughly the first quarter of the climb,
     // which the smoothstep edges encode (the band saturates by ~20 degrees
@@ -434,6 +536,36 @@ Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot)
         static_cast<double>(params.atmosphereZenithColor[2])};
     Vec3 color{};
     double *out[3] = {&color.x, &color.y, &color.z};
+
+    // Sun-direction terms (the azimuth structure the plain ramp lacks):
+    // forward Mie scattering builds the whitened glare wedge around the sun
+    // and brightens the horizon band on the sun's side, while the anti-sun
+    // sky keeps the deep saturated blue (the sky's own saturation grows away
+    // from the sun the way an observer reads it). Every term multiplies a
+    // positive sun-proximity factor, so sunDot = 0 returns the legacy ramp
+    // exactly. The low-sun warm horizon rides the sun elevation: through
+    // the low-sun band the horizon toward the sun runs gold while the far
+    // side keeps its cool haze.
+    const double sunProximity = clamp01(sunDot);
+    const double horizonBand = 1.0 - climb;
+    // Whitening lobes: a broad half-lambert lobe (the quarter-dome sector
+    // around the sun) plus a tight pow lobe (the glare's core near the sun
+    // itself). The broad lobe doubles at the horizon band - the sun-side
+    // horizon haze whitens long before the sun itself enters the frame.
+    const double broadLobe = sunProximity * sunProximity * (1.0 + 1.2 * horizonBand);
+    const double tightLobe = sunProximity * sunProximity * sunProximity * sunProximity * sunProximity * sunProximity
+        * sunProximity * sunProximity * sunProximity * sunProximity * sunProximity * sunProximity;
+    const double halo = clamp01(
+        params.skySunHaloStrength * (0.24 * broadLobe + 0.76 * tightLobe));
+    // Warm horizon weight: active below the mid-sun band, strongest in the
+    // horizon band, on the sun's side of the dome. The band's upper edge
+    // sits near 42 degrees of sun elevation - through the whole late-
+    // afternoon arc the horizon keeps some warmth, and only a high sun
+    // reads a neutral sky.
+    const double lowSunBand = 1.0 - smoothstep(0.38, 0.68, sunUp);
+    const double warmWeight = params.skyWarmHorizonStrength * lowSunBand * horizonBand
+        * (0.35 + 0.65 * sunProximity);
+
     for (std::size_t channel = 0; channel < 3; ++channel)
     {
         double value = channels[channel] + (zeniths[channel] - channels[channel]) * climb;
@@ -441,7 +573,20 @@ Vec3 skyGradientColor(const PlanetGenerationParams &params, double upDot)
         {
             value *= 1.0 - 0.3 * std::min(1.0, -upDot);
         }
-        *out[channel] = std::clamp(value, 0.0, 1.0);
+        // Whitening pushes toward the glare color (warm-white), with the
+        // blue channel pulled hardest (desaturation toward the sun).
+        const double glare[3] = {1.0, 0.97, 0.92};
+        value = value + (glare[channel] - value) * halo;
+        // Gold side of the horizon band: a MIX toward the amber the
+        // scattered light carries at low sun (red and green held high while
+        // blue eases deep down - the hue swing the tone curve's shoulder
+        // would flatten if the warmth arrived as small additive deltas on
+        // the already-pale horizon). The weight peaks only at the sun's own
+        // azimuth and melts with elevation and azimuthal distance, so the
+        // warm band grades into the cool anti-sun haze around the dome.
+        const double warmTarget[3] = {1.0, 0.62, 0.25};
+        value = value + (warmTarget[channel] - value) * clamp01(warmWeight);
+        *out[channel] = clamp01(value);
     }
     return color;
 }

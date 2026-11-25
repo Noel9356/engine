@@ -713,7 +713,7 @@ double DensityField::cloudShadow(const Vec3 &unitDirection, double lowPassCutoff
         * clouds_.coverage(normalized(samplePoint), lowPassCutoffMeters, shadowSoftness, false);
 }
 
-double DensityField::terrainSelfShadow(const Vec3 &surfacePoint) const
+double DensityField::terrainSelfShadow(const Vec3 &surfacePoint, double vertexSpacingMeters) const
 {
     if (params_.terrainSelfShadowStrength <= 0.0)
     {
@@ -747,6 +747,19 @@ double DensityField::terrainSelfShadow(const Vec3 &surfacePoint) const
     const double reach = std::max(8.0, params_.terrainSelfShadowReachMeters);
     const double step = reach / static_cast<double>(kMarchSteps);
     const double marchCutoff = std::max(1.0, reach / 6.0);
+    // Consumer fade (see density.hpp): the shade this march produces varies
+    // across the ground at the march's own relief scale, so a vertex lattice
+    // coarser than that scale samples it uncorrelatedly - per-vertex
+    // speckle. Full strength while the consumer's spacing resolves at least
+    // half the march's scale, fading to zero by twice it: ground views keep
+    // their lee shading, mid-LOD and globe chunks (spacing in kilometers to
+    // hundreds of kilometers at planet scale) drop the term exactly where
+    // real orbital photography would show nothing.
+    const double consumerFade = 1.0 - smoothstep(0.5 * reach, 2.0 * reach, vertexSpacingMeters);
+    if (consumerFade <= 0.0)
+    {
+        return 0.0;
+    }
 
     // Deepest solid sample along the ray: a wall the ray grazes barely
     // clears the threshold and shades gently, a wall it buries into shades
@@ -761,7 +774,7 @@ double DensityField::terrainSelfShadow(const Vec3 &surfacePoint) const
         deepest = std::max(deepest, density);
     }
     const double factor = smoothstep(kSolidThresholdMeters, 1.6, deepest);
-    return params_.terrainSelfShadowStrength * factor;
+    return params_.terrainSelfShadowStrength * consumerFade * factor;
 }
 
 } // namespace planet

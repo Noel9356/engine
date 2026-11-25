@@ -267,6 +267,12 @@ void overlayConfiguredSettings(ParticipantContext &context, RendererSettings &se
                                         .value_or(util::logicalProcessorCount() >= 4u);
     settings.headlessBatchedTileRasterization
         = context.configurationBooleanInSection("renderer", "headless_batched_tile_rasterization").value_or(true);
+    // 16-wide AVX-512 shading runs (wide_shading.hpp): on when the key is
+    // absent, and the backend itself gates on the running CPU's AVX-512
+    // foundation, so the flag is safe to leave on everywhere a binary with
+    // the kernel ships.
+    settings.headlessWideRuns
+        = context.configurationBooleanInSection("renderer", "headless_wide_runs").value_or(true);
     settings.headlessParallelTriangleThreshold = static_cast<std::uint32_t>(readClampedInteger(
         context, "headless_parallel_triangle_threshold", settings.headlessParallelTriangleThreshold, 1, 1048576));
     settings.headlessPixelsPerLockGroup        = static_cast<std::size_t>(readClampedInteger(

@@ -98,6 +98,15 @@ bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOpt
 std::vector<engine::planet::Vec3> goldenSpiralDirections(std::uint32_t count);
 engine::planet::Vec3 rotateDirection(const engine::planet::Vec3 &direction, const engine::planet::Vec3 &axis,
     double angleRadians);
+// Space-view bearing (globe and orbit): the sun-anchored camera direction
+// with its longitude chosen by the visible cap's climate census (a landmass
+// balance, biome variety and a touch of polar ice - see the implementation).
+// sunWeight/sideWeight/lift fix the bearing's geometry relative to the sun and
+// the spin axis; eyeRadii is the camera's distance in planet radii (it sizes
+// the visible cap the census samples).
+glm::dvec3 pickMacroViewDirection(engine::planet::PlanetCapability &planetCapability,
+    engine::planet::PlanetHandle planet, const glm::dvec3 &sunDirection,
+    double sunWeight, double sideWeight, double lift, double eyeRadii);
 void clampCameraPitch(const glm::dvec3 &eye, const glm::dvec3 &localUp, glm::dvec3 &target,
     double minPitchRadians, double maxPitchRadians);
 bool pickViewpoint(engine::planet::PlanetCapability &planetCapability, engine::planet::PlanetHandle planet,
