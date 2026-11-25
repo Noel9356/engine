@@ -84,7 +84,7 @@ bool sameEnvironment(const pbr::PbrEnvironment &left, const pbr::PbrEnvironment 
 
 // Builds the std140 frame uniform: view-projection (with the Vulkan fixup),
 // camera position, sun/ambient/exposure/tone-mapper, the packed light
-// array with its active count, and the lumen_gi probe-grid header.
+// array with its active count, and the radiance_cache probe-grid header.
 FrameUniformData makeFrameUniform(const CameraMatrices &camera, const pbr::PbrEnvironment &environment,
     const DirectLightUniformData *packedLights, std::uint32_t lightCount, const ProbeGridUniformData &probeGrid)
 {
@@ -650,7 +650,7 @@ void VulkanBackend::setDirectLights(const direct_lighting::DirectLight *lights, 
     frameUniformDirty_ = true;
 }
 
-// Packs the borrowed lumen_gi snapshot into the std140 frame-uniform header
+// Packs the borrowed radiance_cache snapshot into the std140 frame-uniform header
 // and the std430 probe-record scratch (8 vec4 per probe: position.xyz +
 // validity, then the 27 SH2 floats plus one pad - the exact layout the
 // ProbeData block in shaders/mesh.frag walks). The per-slot probe storage
@@ -661,7 +661,7 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
     packedProbeRecords_.clear();
     if (grid.valid())
     {
-        const lumen_gi::GiProbeHeader &header = grid.header;
+        const radiance_cache::GiProbeHeader &header = grid.header;
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
             packedProbeGrid_.centerSpacing[axis] = header.gridCenter[axis];
@@ -679,7 +679,7 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
         packedProbeRecords_.reserve(static_cast<std::size_t>(grid.probeCount) * giProbeRecordVec4s);
         for (std::uint32_t index = 0; index < grid.probeCount; ++index)
         {
-            const lumen_gi::GiProbe &probe = grid.probes[index];
+            const radiance_cache::GiProbe &probe = grid.probes[index];
             packedProbeRecords_.push_back(probe.position[0]);
             packedProbeRecords_.push_back(probe.position[1]);
             packedProbeRecords_.push_back(probe.position[2]);
@@ -700,6 +700,16 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
 // docs/backends.md ("Behavior parity") for the scope note. The hook stays
 // complete on this side so renderer.cpp's version polling is backend-agnostic.
 void VulkanBackend::setReflectionField(const ReflectionField &field)
+{
+    (void) field;
+}
+
+// The gather field composite runs in the software rasterizer too (the same
+// "Behavior parity" scope note); this side keeps the interface complete so
+// the renderer's version polling stays uniform, and consumesGatherField()
+// stays false so the module never pays the per-evaluate gather pass for a
+// Vulkan renderer.
+void VulkanBackend::setGatherField(const GatherField &field)
 {
     (void) field;
 }

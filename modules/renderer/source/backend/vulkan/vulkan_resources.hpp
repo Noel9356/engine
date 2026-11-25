@@ -40,7 +40,7 @@ struct DirectLightUniformData
 };
 static_assert(sizeof(DirectLightUniformData) == 64, "a direct light occupies four std140 vec4 values");
 
-// std140 header of the lumen_gi probe grid, consumed by the fragment stage's
+// std140 header of the radiance_cache probe grid, consumed by the fragment stage's
 // indirect-lighting hook (the probe SH2 records themselves live in the set-0
 // binding-1 storage buffer, not here). Keep in sync with the uProbeGrid
 // comment block in shaders/mesh.frag.
@@ -197,7 +197,7 @@ private:
     std::vector<std::uint64_t>   frameUniformVersions_;
     std::vector<VkDescriptorSet> frameUniformSets_;
 
-    // Probe storage for the lumen_gi indirect-lighting hook: one host-visible
+    // Probe storage for the radiance_cache indirect-lighting hook: one host-visible
     // std430 buffer per frame in flight, always bound on set 0 binding 1
     // (a zeroed dummy when no grid is active keeps the pipeline valid).
     static constexpr VkDeviceSize probeStorageBytes_ = maxGiProbes * giProbeRecordVec4s * sizeof(float) * 4;

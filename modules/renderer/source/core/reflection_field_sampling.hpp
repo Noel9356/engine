@@ -1,11 +1,11 @@
-// lumen_reflection screen-space field sampling shared by the module core and
+// reflection_field screen-space field sampling shared by the module core and
 // the headless pixel path: the borrowed snapshot types copied from the
-// lumen_reflection capability and the bilinear, roughness-band-gated sample
+// reflection_field capability and the bilinear, roughness-band-gated sample
 // that turns the field into per-pixel indirect specular radiance.
 
 #pragma once
 
-#include <engine/lumen_reflection/capabilities.hpp>
+#include <engine/reflection_field/capabilities.hpp>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -19,7 +19,7 @@ namespace engine
 namespace renderer
 {
 
-// Snapshot of the lumen_reflection screen-space field borrowed by the
+// Snapshot of the reflection_field screen-space field borrowed by the
 // renderer: the indirect specular radiance buffer produced for one camera.
 // Backends copy the data synchronously inside setReflectionField(), so the
 // borrowed view only needs to stay valid for that call. A null/empty field
@@ -27,10 +27,10 @@ namespace renderer
 // bit-identical.
 struct ReflectionField
 {
-    lumen_reflection::ReflectionFieldHeader header{};
+    reflection_field::ReflectionFieldHeader header{};
     // Borrowed; width*height*reflectionFieldTexelFloats linear HDR texels
     // (radiance RGB interleaved with the texel roughness, per the
-    // lumen_reflection ABI).
+    // reflection_field ABI).
     const float *radiance = nullptr;
 
     bool valid() const
@@ -81,7 +81,7 @@ inline PreparedReflectionField prepareReflectionField(const ReflectionField &fie
 // maxRoughness band receives no specular environment response at all (its
 // surface never traced one, exactly like the module's own band rule), and
 // the four surrounding texels are refused when their surface roughness
-// leaves the pixel's band (lumen_reflection::reflectionFieldRoughnessBand)
+// leaves the pixel's band (reflection_field::reflectionFieldRoughnessBand)
 // or carries the neutral value (no traced response: background, unlit,
 // above the traced roughness band), so the bilinear weights renormalize
 // over the surviving texels and a fully-refused neighborhood reads black -
@@ -132,14 +132,14 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
     {
         const float *texel
             = field.radiance
-              + (static_cast<std::size_t>(y) * field.width + x) * lumen_reflection::reflectionFieldTexelFloats;
+              + (static_cast<std::size_t>(y) * field.width + x) * reflection_field::reflectionFieldTexelFloats;
         // The trailing roughness is the sample gate: the module reports the
         // neutral value for every texel it never traced a response into, and
         // blending those in would smear background radiance across the
         // neighborhood (or resurrect a stale frame's field when the module
         // skipped an evaluate).
         texelRoughness = texel[3];
-        traced = texel[3] < lumen_reflection::reflectionFieldNeutralRoughness;
+        traced = texel[3] < reflection_field::reflectionFieldNeutralRoughness;
         return glm::vec3(texel[0], texel[1], texel[2]);
     };
     bool traced00 = false, traced10 = false, traced01 = false, traced11 = false;
@@ -151,7 +151,7 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
     // for a different lobe than the pixel's belongs to another material
     // (the module traced every texel in its own band, so the difference can
     // only come from a silhouette neighbor).
-    const float band      = lumen_reflection::reflectionFieldRoughnessBand;
+    const float band      = reflection_field::reflectionFieldRoughnessBand;
     traced00 = traced00 && std::fabs(roughness00 - pixelRoughness) <= band;
     traced10 = traced10 && std::fabs(roughness10 - pixelRoughness) <= band;
     traced01 = traced01 && std::fabs(roughness01 - pixelRoughness) <= band;

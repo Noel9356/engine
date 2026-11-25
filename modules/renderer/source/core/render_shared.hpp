@@ -1,8 +1,9 @@
 // Shared math/data helpers used by both backends and the module core. The
 // shading model is split into focused headers and re-exported here:
 // direct_light_shading.hpp (prepared lights + per-point resolution),
-// gi_probe_sampling.hpp and reflection_field_sampling.hpp (the lumen_gi /
-// lumen_reflection snapshot types and their samplers), pbr_shading.hpp (the
+// gi_probe_sampling.hpp, gather_field_sampling.hpp and
+// reflection_field_sampling.hpp (the radiance_cache / radiance_cache.gather /
+// reflection_field snapshot types and their samplers), pbr_shading.hpp (the
 // CPU twin of shaders/mesh.frag) and fur_shading.hpp (the twin of
 // shaders/fur.frag). This header carries what is genuinely common: the
 // backend-neutral enums, the default PBR environment, frustum rejection, and
@@ -12,6 +13,7 @@
 
 #include "direct_light_shading.hpp"
 #include "fur_shading.hpp"
+#include "gather_field_sampling.hpp"
 #include "gi_probe_sampling.hpp"
 #include "pbr_shading.hpp"
 #include "reflection_field_sampling.hpp"
@@ -19,8 +21,8 @@
 #include "shading_inline.hpp"
 
 #include <engine/direct_lighting/capabilities.hpp>
-#include <engine/lumen_gi/capabilities.hpp>
-#include <engine/lumen_reflection/capabilities.hpp>
+#include <engine/radiance_cache/capabilities.hpp>
+#include <engine/reflection_field/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/util/png.hpp>

@@ -60,7 +60,7 @@ layout(std140, set = 0, binding = 0) uniform FrameData
     vec4 uToneMapping;    // x = exposure, y = tone mapper id
     vec4 uDirectLightMeta; // x = active direct-light count
     LightData uDirectLights[MAX_LIGHTS];
-    // lumen_gi probe-grid header (the indirect-lighting hook; the SH2 probe
+    // radiance_cache probe-grid header (the indirect-lighting hook; the SH2 probe
     // records ride the set-0 binding-1 storage buffer below):
     vec4 uProbeGridA; // xyz = grid center, w = level0 spacing
     vec4 uProbeGridB; // xyz = level0 dimensions, w = level1 spacing
@@ -68,9 +68,9 @@ layout(std140, set = 0, binding = 0) uniform FrameData
     vec4 uProbeGridD; // x = probe count, y = direction resolution, z = level0 offset, w = level1 offset
 } frameData;
 
-// lumen_gi probe records, 8 vec4 per probe: (position.xyz, validity) then
+// radiance_cache probe records, 8 vec4 per probe: (position.xyz, validity) then
 // the 27 SH2 radiance floats (GiProbe [basis][channel] order) plus one pad.
-// Written by the renderer module from the lumen_gi copyProbes snapshot.
+// Written by the renderer module from the radiance_cache copyProbes snapshot.
 layout(std430, set = 0, binding = 1) readonly buffer ProbeData
 {
     vec4 probeRecords[];
@@ -222,7 +222,7 @@ vec3 toneMap(vec3 color, float mapperId)
     return clamp((acesInput * (2.51 * acesInput + 0.03)) / (acesInput * (2.43 * acesInput + 0.59) + 0.14), 0.0, 1.0);
 }
 
-// ---- lumen_gi probe-grid indirect lighting ----------------------------------
+// ---- radiance_cache probe-grid indirect lighting ----------------------------------
 // Mirrors the CPU path in source/core/gi_probe_sampling.hpp exactly (same lattice
 // walk, same SH2 convolution, same validity weighting), like every other
 // formula this shader shares with the software rasterizer.
@@ -392,7 +392,7 @@ void main()
 
     // Hemispheric ambient: sky color for up-facing normals, ground bounce
     // for down-facing ones, blended by the world-space normal's y, scaled
-    // by the occlusion map. When the lumen_gi probe grid holds valid data
+    // by the occlusion map. When the radiance_cache probe grid holds valid data
     // at this point, its validity-weighted SH2 irradiance replaces the
     // hemispheric term (blended back by coverage so partially populated
     // grids degrade gracefully instead of going black).

@@ -3,14 +3,22 @@ config_keys           = [
     "renderer.auto_config",
     "renderer.back_face_culling",
     "renderer.backend",
+    "renderer.contrast",
+    "renderer.bloom",
+    "renderer.bloom_strength",
+    "renderer.bloom_threshold",
     "renderer.clear_color",
     "renderer.device",
     "renderer.draw_sort_min_commands",
     "renderer.draw_sort_mode",
+    "renderer.film_aa",
     "renderer.frustum_culling",
     "renderer.fur_enabled",
     "renderer.fur_max_layers",
+    "renderer.gather_indirect_lighting",
+    "renderer.gather_occlusion_strength",
     "renderer.gi_indirect_lighting",
+    "renderer.grain",
     "renderer.gpu_timestamps_enabled",
     "renderer.headless_band_split_min_screen_fraction",
     "renderer.headless_band_split_triangles",
@@ -38,14 +46,19 @@ config_keys           = [
     "renderer.pipeline_cache_mb",
     "renderer.present_mode",
     "renderer.reflection_indirect_specular",
+    "renderer.shadow_filter_radius",
+    "renderer.shadow_map_resolution",
+    "renderer.sky_shadows",
     "renderer.srgb_output",
+    "renderer.sun_shadows",
     "renderer.texture_mipmaps",
     "renderer.validation",
+    "renderer.vignette",
     "renderer.vsync",
 ]
 name                  = "renderer"
-optional_capabilities = ["window.vulkan", "pbr", "direct_lighting", "lumen_gi",
-    "lumen_reflection"]
+optional_capabilities = ["window.vulkan", "pbr", "direct_lighting", "radiance_cache",
+    "radiance_cache.gather", "reflection_field"]
 provides              = ["renderer", "renderer.vulkan", "renderer.headless"]
 requires              = ["window"]
 version               = "0.1.0"

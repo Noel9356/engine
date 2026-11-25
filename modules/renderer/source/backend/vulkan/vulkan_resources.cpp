@@ -99,7 +99,7 @@ bool VulkanResources::create(const VulkanDeviceContext &device, std::uint32_t fr
         }
     }
 
-    // Probe storage (set 0 binding 1): sized for the full lumen_gi probe
+    // Probe storage (set 0 binding 1): sized for the full radiance_cache probe
     // bound and zero-filled so the inactive hook reads nothing.
     probeStorageBuffers_.resize(framesInFlight, VK_NULL_HANDLE);
     probeStorageAllocations_.resize(framesInFlight, nullptr);

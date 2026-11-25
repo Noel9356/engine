@@ -19,7 +19,7 @@ namespace pbr
 // ABI version of PbrCapability; bump when any struct in this header changes.
 // History: 5 -> 6 grew ConvertedModelMaterial's embedded renderer::MeshMaterial
 // by the transmission pair (opacity, indexOfRefraction) the renderer's
-// transparent pass and the lumen_gi / lumen_reflection surfaces evaluate with;
+// transparent pass and the radiance_cache / reflection_field surfaces evaluate with;
 // convertModelMaterial now maps the source material's opacity and index of
 // refraction into the converted material instead of only preserving them as
 // standalone scalars.

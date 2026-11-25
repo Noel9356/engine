@@ -73,6 +73,54 @@ struct RendererSettings
     // Lighting integration hooks.
     bool giIndirectLighting        = true;
     bool reflectionIndirectSpecular = true;
+    // The radiance_cache screen-space gather field (the final gather's
+    // per-pixel indirect irradiance, sampled ahead of the probe-walk
+    // ambient).
+    bool gatherIndirectLighting    = true;
+
+    // Presentation post pass (headless backend): a soft bloom over the
+    // tone-mapped output - bright-pass threshold, quarter-resolution
+    // separable blur, weighted add-back.
+    bool  bloomEnabled    = true;
+    float bloomStrength   = 0.35f;
+    float bloomThreshold  = 0.8f;
+
+    // Sun shadow mapping (headless backend): the frame's opaque lit draws
+    // rasterize into an orthographic sun-aligned depth map the next frame's
+    // sun term shades through (percentage-closer filter). shadowFilterRadius
+    // is the filter width in map texels; the rebuild is skipped while the
+    // caster set and the sun are unchanged.
+    bool          sunShadowsEnabled        = true;
+    std::uint32_t shadowMapResolution      = 1024;
+    float         shadowFilterRadiusTexels = 1.5f;
+    // Zenith sky-visibility shadows (the ambient term's grounding map).
+    bool          skyShadowsEnabled        = true;
+
+    // Camera response presentation pass (headless backend): the photographic
+    // layer over the finished output - a contrast curve pivoting at mid-gray,
+    // a radial lens falloff, and deterministic sensor grain.
+    float cameraContrast = 1.0f;
+    float cameraVignette = 0.18f;
+    float cameraGrain    = 0.01f;
+
+    // Film antialiasing presentation pass (headless backend): a
+    // luminance-directed edge blend over the finished rows, smoothing the
+    // staircase the rasterizer leaves on screen-space diagonal silhouettes.
+    // The strength scales the cross-edge stage that softens the one-texel
+    // hard step a straight silhouette keeps between supersample columns
+    // (0 keeps the along-edge blend only).
+    bool  filmAntialiasingEnabled  = false;
+    float filmAntialiasingStrength = 1.0f;
+
+    // Supersample resolve filter (headless backend): the sample-block average
+    // runs through the bilinear tent kernel over the 3x3 block neighborhood
+    // instead of the plain box average, spreading every silhouette over a
+    // two-texel ramp the way a sensor's optical low-pass filter does.
+    bool resolveTentEnabled = true;
+
+    // Multiplier on the gather field's contact-occlusion channel (headless
+    // backend composites the field; 1 keeps the module's reported occlusion).
+    float gatherOcclusionStrength = 1.0f;
 
     // Draw scheduling.
     bool                drawSortEnabled         = true;

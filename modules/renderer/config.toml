@@ -8,14 +8,49 @@ anisotropy_level                        = 1.0
 auto_config                             = false
 back_face_culling                       = true
 backend                                 = "auto"
+# Presentation bloom (the headless backend bright-passes the tone-mapped
+# surface, blurs the bright energy at quarter resolution, and adds it back;
+# see bloom_strength / bloom_threshold). false keeps the resolve output
+# one-to-one.
+bloom                                   = true
+# Weight of the blurred bright energy added back over the resolved frame.
+bloom_strength                          = 0.35
+# Encoded-space luminance where the bright pass starts (the soft-knee excess
+# over this value feeds the blur).
+bloom_threshold                         = 0.8
 clear_color                             = [0.0, 0.0, 0.0, 1.0]
+# Camera response (headless presentation pass over the tone-mapped output):
+# contrast pivots at mid-gray, vignette is the radial lens falloff strength,
+# grain is the deterministic sensor-noise amplitude. 1.0 / 0.0 / 0.0 keeps
+# the tone-mapped output one-to-one.
+contrast                                = 1.0
 device                                  = "auto"
 draw_sort_min_commands                  = 2
 draw_sort_mode                          = "mesh_material"
+# Film antialiasing: the luminance-directed edge blend over the finished
+# rows smooths the staircase the rasterizer leaves on screen-space diagonal
+# silhouettes (film_aa), and film_aa_strength scales that pass's cross-edge
+# stage - the blend toward the mean of the two neighbors across a hard
+# silhouette that softens the one-texel step a straight edge keeps when it
+# lands between supersample columns (0 keeps the along-edge blend only; the
+# default targets half a texel at strong contrast).
+film_aa_strength                        = 1.0
 frustum_culling                         = true
 fur_enabled                             = true
 fur_max_layers                          = 16
+# Consume the optional radiance_cache.gather capability's screen-space field
+# and shade the ambient with its per-pixel indirect irradiance (contact-scale
+# occlusion and caustic irradiance the coarse probe lattice cannot resolve;
+# see the radiance_cache module's overview). false keeps the probe-grid walk.
+gather_indirect_lighting                = true
+# Multiplier on the gather field's contact-occlusion channel: scales the
+# DARKENING the ambient term carries at surface meet lines (1 keeps the
+# module's reported occlusion, above 1 deepens the contact bands).
+gather_occlusion_strength               = 1.0
 gi_indirect_lighting                    = true
+# Deterministic sensor-grain amplitude of the camera response pass
+# (see contrast).
+grain                                   = 0.01
 gpu_timestamps_enabled                  = false
 headless_band_split_min_screen_fraction = 0.125
 headless_band_split_triangles           = 4096
@@ -27,6 +62,15 @@ headless_batched_tile_rasterization     = true
 headless_parallel_transform_vertices    = 8192
 headless_parallel_triangle_threshold    = 4096
 headless_pixels_per_lock_group          = 16
+# Supersample resolve filter: the sample-block average runs through the
+# bilinear tent kernel [1 2 1; 2 4 2; 1 2 1] / 16 over the 3x3 block
+# neighborhood instead of the plain box average - a box resolve reproduces
+# the sample grid's own hard steps (a straight silhouette landing between
+# sample columns keeps a one-texel jump; shallow diagonals quantize into
+# two-texel terraces), the tent spreads every silhouette over a two-texel
+# ramp the way a sensor's optical low-pass filter does. false restores the
+# plain box average.
+headless_resolve_tent                   = true
 headless_tile_pixels                    = 64
 # The per-draw tile path (headless_tile_parallel) has no entry here on
 # purpose: its default adapts to the machine (on from four logical
@@ -52,13 +96,28 @@ msaa_samples                            = 4
 memory_budget_update_interval_frames    = 120
 pipeline_cache_mb                       = 64
 present_mode                            = "auto"
-# Consume the optional lumen_reflection capability's screen-space field and
+# Consume the optional reflection_field capability's screen-space field and
 # add its indirect specular radiance to the shaded pixels (see the module's
 # overview); false, or the module being absent, keeps the pre-hook specular.
 reflection_indirect_specular            = true
+# Percentage-closer filter width in map texels.
+shadow_filter_radius                    = 1.5
+shadow_map_resolution                   = 1024
+# Zenith sky-visibility shadows (headless backend): the frame's opaque lit
+# draws rasterize into an orthographic straight-down depth map the next
+# frame's hemispheric ambient shades through (what blocks the open sky above
+# a point darkens its sky fill). Static scenes skip the rebuild.
+sky_shadows                             = true
 # sRGB output target (Vulkan surface pick + shader specialization); the
 # headless target always writes UNORM with its fixed encode.
 srgb_output                             = false
+# Directional sun shadow mapping (headless backend): the frame's opaque lit
+# draws rasterize into an orthographic sun-aligned depth map the next
+# frame's sun term shades through a percentage-closer filter. The rebuild
+# is skipped while the caster set, the sun, and the camera are unchanged.
+sun_shadows                             = true
 texture_mipmaps                         = true
 validation                              = false
+# Radial lens-falloff strength of the camera response pass (see contrast).
+vignette                                = 0.18
 vsync                                   = false

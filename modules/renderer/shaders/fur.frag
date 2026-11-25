@@ -29,7 +29,7 @@ layout(constant_id = 6) const int SRGB_OUTPUT = 0;
 // Perf notes: this shader is deliberately cheap because fur cost is
 // fill-rate-bound (the shell stack blends every layer over every covered
 // pixel): one texture fetch, no normal map, no occlusion/emissive maps, and
-// NO lumen_gi probe-grid fetch (the probe walk costs 8 probes x 27 floats
+// NO radiance_cache probe-grid fetch (the probe walk costs 8 probes x 27 floats
 // per pixel and multiplies by the layer count; fur keeps the hemispheric
 // ambient term instead - documented in modules/fur/docs/overview.md).
 // layout(early_fragment_tests) is safe: no discard, no gl_FragDepth write;

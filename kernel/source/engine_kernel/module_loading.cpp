@@ -584,8 +584,13 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
         }
         if (!detail::sameStringSet(record.manifest.optionalCapabilities, module.descriptor.optionalCapabilities))
         {
+            std::string manifestList;
+            for (const std::string &item : record.manifest.optionalCapabilities) { manifestList += item + ","; }
+            std::string descriptorList;
+            for (const std::string &item : module.descriptor.optionalCapabilities) { descriptorList += item + ","; }
             report += "- module '" + module.descriptor.name
-                    + "' declares different optional capabilities in its manifest than in its module descriptor; "
+                    + "' declares different optional capabilities in its manifest [" + manifestList
+                    + "] than in its module descriptor [" + descriptorList + "]; "
                       "rebuild the module with this kernel.\n";
             successful = false;
             continue;

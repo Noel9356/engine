@@ -20,6 +20,7 @@
 #include "headless_types.hpp"
 #include "render_backend.hpp"
 #include "render_shared.hpp"
+#include "sun_shadows.hpp"
 
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/kernel/task_scheduler.hpp>
@@ -49,32 +50,152 @@ namespace engine
 namespace renderer
 {
 
-// Per-tile amortization of the probe-grid ambient walk over 2x2 pixel quads
-// (see GiAmbientSample): one entry per quad holds the last walk's inputs and
-// result, and a pixel whose surface passes the same-plane and same-normal
-// gates reuses it, so smooth surfaces pay one probe walk per quad. A pixel
-// that fails the gates (a different surface, a curvature edge, a moving
-// normal map) overwrites the entry with its own walk, so the fallback is the
-// exact per-pixel evaluation. One cache lives per rasterizing worker and is
-// reset when it moves to its next tile.
-struct GiQuadCache
+// Per-tile amortization of the probe-grid ambient walk (see GiAmbientSample)
+// over a two-tier grid of sample neighborhoods: 8x8-sample blocks first, 4x4
+// sample quads second (4x4 and 2x2 output pixels at the default 2x2
+// supersampling). One entry per block or quad holds the last walk's inputs
+// and result; a sample of the record (clipped triangle) that published the
+// entry reuses it outright (the record's surface is continuous, so its gates
+// pass by construction), a sample of another record reuses it when the
+// same-plane and same-normal gates pass, and both failing runs the exact
+// per-pixel walk and publishes it into the tier it missed. A flat expanse
+// therefore pays one probe walk per block, a curvature edge or silhouette
+// pays one per quad, and a pixel that fails both tiers runs the exact
+// evaluation. One cache lives per rasterizing worker and is reset when it
+// moves to its next tile.
+struct GiTileCache
 {
     struct Entry
     {
-        glm::vec3 position{0.0f};
-        glm::vec3 normal{0.0f, 1.0f, 0.0f};
-        glm::vec3 irradiance{0.0f};
-        float     coverage = 0.0f;
-        bool      valid    = false;
+        glm::vec3     position{0.0f};
+        glm::vec3     normal{0.0f, 1.0f, 0.0f};
+        glm::vec3     irradiance{0.0f};
+        float         coverage = 0.0f;
+        float         occlusion = 1.0f;
+        // Record (clipped triangle) that published this entry. A reader of
+        // the SAME record sits on the same continuous surface, so its gate
+        // outcome is decided by the tag alone: the tier check becomes a
+        // compare instead of the plane/normal arithmetic, while a
+        // cross-record reader keeps the full gates.
+        std::uint32_t recordTag = 0u;
+        bool          valid     = false;
     };
-    std::uint32_t      stride = 0; // quad columns of the owning tile
-    std::vector<Entry> entries;
 
-    void resetForTile(std::uint32_t quadColumns, std::uint32_t quadRows)
+    // Same-plane gate: the normal projection of the position delta between
+    // the cached walk's input and this pixel's stays below this many meters,
+    // so a reused sample differs from the exact walk only by the curvature
+    // the gate tolerates.
+    static constexpr float kPlaneTolerance = 0.05f;
+    // Same-normal gate: the dot between the cached walk's normal and this
+    // pixel's. The block tier shares the quad tier's tolerance; a 4x4-sample
+    // block spans two output pixels, whose normals agree to this dot wherever
+    // the surface is locally flat.
+    static constexpr float kNormalTolerance = 0.995f;
+
+    std::uint32_t      quadStride = 0;  // 4x4-sample quad columns of the owning tile
+    std::vector<Entry> quadEntries;
+    std::uint32_t      blockStride = 0; // 8x8-sample block columns of the owning tile
+    std::vector<Entry> blockEntries;
+
+    // `sampleColumns`/`sampleRows` are the owning tile's extents in
+    // framebuffer samples; the tier grids round up so partial blocks and
+    // quads at a tile's right/bottom border still index safely. At the
+    // default 2x2 supersampling the tiers are the documented 4x4-pixel
+    // blocks and 2x2-pixel quads; other sample scales keep the same sample
+    // extents (the record tags and gates, not the tier geometry, decide
+    // correctness).
+    void resetForTile(std::uint32_t sampleColumns, std::uint32_t sampleRows)
     {
-        stride = std::max(quadColumns, 1u);
-        entries.assign(static_cast<std::size_t>(stride) * std::max(quadRows, 1u), Entry{});
+        quadStride = std::max((sampleColumns + 3u) / 4u, 1u);
+        quadEntries.assign(
+            static_cast<std::size_t>(quadStride) * std::max((sampleRows + 3u) / 4u, 1u), Entry{});
+        blockStride = std::max((sampleColumns + 7u) / 8u, 1u);
+        blockEntries.assign(
+            static_cast<std::size_t>(blockStride) * std::max((sampleRows + 7u) / 8u, 1u), Entry{});
     }
+
+    // Resolves the ambient sample for one shaded sample at band-relative
+    // coordinates (x, y): the block tier answers when its tag or gates pass,
+    // the quad tier when the block's fail, and both failing runs `walk` at
+    // this sample's exact inputs and publishes the result into both tiers
+    // (the quad tier keeps serving the samples that only missed the block,
+    // and the block tier gets a fresh chance at flat content on the next
+    // sample). `walk` is (position, normal, outIrradiance, outCoverage) ->
+    // bool, the GiAmbientSample contract of giProbeGridIrradiance.
+    template <typename Walk>
+    GiAmbientSample resolve(
+        std::int32_t x, std::int32_t y, std::uint32_t recordTag, const glm::vec3 &position,
+        const glm::vec3 &normal, Walk &&walk)
+    {
+        GiAmbientSample sample;
+        if (!blockEntries.empty())
+        {
+            Entry &block = blockEntries[static_cast<std::size_t>(y >> 3) * blockStride
+                + static_cast<std::size_t>(x >> 3)];
+            if (block.valid && (block.recordTag == recordTag
+                    || (glm::dot(normal, block.normal) >= kNormalTolerance
+                        && std::fabs(glm::dot(normal, block.position - position)) <= kPlaneTolerance)))
+            {
+                sample.irradiance = block.irradiance;
+                sample.coverage   = block.coverage;
+                sample.occlusion  = block.occlusion;
+                sample.valid      = true;
+                return sample;
+            }
+        }
+        if (!quadEntries.empty())
+        {
+            Entry &quad = quadEntries[static_cast<std::size_t>(y >> 2) * quadStride
+                + static_cast<std::size_t>(x >> 2)];
+            const glm::vec3 positionDelta = quad.position - position;
+            if (quad.valid && (quad.recordTag == recordTag
+                    || (glm::dot(normal, quad.normal) >= kNormalTolerance
+                        && std::fabs(glm::dot(normal, positionDelta)) <= kPlaneTolerance)))
+            {
+                sample.irradiance = quad.irradiance;
+                sample.coverage   = quad.coverage;
+                sample.occlusion  = quad.occlusion;
+                sample.valid      = true;
+                return sample;
+            }
+            sample.valid = walk(position, normal, sample.irradiance, sample.coverage, sample.occlusion);
+            quad.position   = position;
+            quad.normal     = normal;
+            quad.irradiance = sample.irradiance;
+            quad.coverage   = sample.coverage;
+            quad.occlusion  = sample.occlusion;
+            quad.recordTag  = recordTag;
+            quad.valid      = true;
+        }
+        else
+        {
+            sample.valid = walk(position, normal, sample.irradiance, sample.coverage, sample.occlusion);
+        }
+        if (!blockEntries.empty())
+        {
+            Entry &block = blockEntries[static_cast<std::size_t>(y >> 3) * blockStride
+                + static_cast<std::size_t>(x >> 3)];
+            block.position   = position;
+            block.normal     = normal;
+            block.irradiance = sample.irradiance;
+            block.coverage   = sample.coverage;
+            block.occlusion  = sample.occlusion;
+            block.recordTag  = recordTag;
+            block.valid      = true;
+        }
+        return sample;
+    }
+};
+
+// The per-tile GI cache plus the owning record's tag, threaded through the
+// rasterizer cores as one pointer: the GI tile cache amortizes the
+// probe-grid ambient walk (the caller resolves it before shading), and the
+// tag identifies the record (clipped triangle) whose continuous surface the
+// cache's trust check keys on.
+struct TileShadingCache
+{
+    GiTileCache   *gi        = nullptr;
+    std::uint32_t  recordTag = 0u;
 };
 
 // Options forwarded from [renderer] configuration at renderer creation.
@@ -143,7 +264,67 @@ struct HeadlessBackendOptions
     // triangle, so this bounds the transient memory of the whole-draw-list
     // batching; chunks that would exceed it fall back to the per-draw paths
     // with identical output.
-    std::size_t maxBatchTileRecords = 512u * 1024u;
+    std::size_t    maxBatchTileRecords         = 512u * 1024u;
+
+    // Presentation bloom (renderer.bloom / bloom_strength / bloom_threshold):
+    // a soft glare over the tone-mapped output - bright-pass at the
+    // threshold, a quarter-resolution separable Gaussian, and the weighted
+    // add-back. Runs after the supersample resolve in endFrame, on the
+    // presentation band parallelism.
+    bool           bloomEnabled                = true;
+    float          bloomStrength               = 0.12f;
+    float          bloomThreshold              = 0.85f;
+
+    // Directional sun shadow mapping (renderer.sun_shadows /
+    // shadow_map_resolution / shadow_filter_radius): the frame's opaque lit
+    // draws rasterize into an orthographic sun-aligned depth map at endFrame
+    // and the next frame's sun term shades through a percentage-closer
+    // filter. Static scenes skip the rebuild (a hash over the caster set).
+    bool           sunShadowsEnabled           = true;
+    std::uint32_t  shadowMapResolution         = 1024;
+    float          shadowFilterRadiusTexels    = 1.5f;
+
+    // Zenith sky-visibility shadows (renderer.sky_shadows): the same
+    // orthographic depth-map machinery aimed straight down, shading the
+    // hemispheric ambient / GI diffuse term by what blocks the sky above a
+    // point. Contact-scale grounding for panel- and sky-lit scenes where
+    // the sun term is off and the probe lattice is too coarse for the tight
+    // bands under props.
+    bool           skyShadowsEnabled           = true;
+
+    // Camera response (renderer.contrast / vignette / grain): the
+    // presentation pass a photograph adds after the tone map - a pivot-point
+    // contrast curve, a radial lens falloff, and deterministic sensor grain,
+    // applied in linear space over the locked surface rows after the bloom.
+    float          cameraContrast              = 1.0f;
+    float          cameraVignette              = 0.18f;
+    float          cameraGrain                 = 0.01f;
+
+    // Film antialiasing (renderer.film_aa / renderer.film_aa_strength): a
+    // luminance-directed edge blend over the finished rows, smoothing the
+    // staircase the rasterizer leaves on screen-space diagonal silhouettes.
+    // The strength scales the second, cross-edge stage that softens the
+    // one-texel hard step a straight silhouette keeps when it lands between
+    // supersample columns (0 restores the along-edge-only blend). Off by
+    // default; the cost is one extra read-mostly pass over the surface.
+    bool           filmAntialiasingEnabled     = false;
+    float          filmAntialiasingStrength    = 1.0f;
+
+    // Supersample resolve filter (renderer.headless_resolve_tent): the
+    // sample-block average runs through the bilinear tent kernel
+    // [1 2 1; 2 4 2; 1 2 1] / 16 over the 3x3 block neighborhood instead of
+    // the plain box average. A box resolve reproduces the sample grid's own
+    // hard steps (a straight silhouette landing between sample columns keeps
+    // a one-texel jump, and shallow diagonals quantize into two-texel
+    // terraces); the tent spreads each silhouette over a two-texel ramp the
+    // way a sensor's optical low-pass filter does. On by default; the cost
+    // is a second separable pass over the sample sums in the resolve.
+    bool           resolveTentEnabled          = true;
+
+    // Multiplier on the gather field's contact-occlusion channel
+    // (renderer.gather_occlusion_strength): 1 keeps the module's reported
+    // occlusion, above 1 deepens the contact bands the ambient term carries.
+    float          gatherOcclusionStrength     = 1.0f;
 
     // Angular-size LOD cutoffs (renderer.lod_thresholds) and the triangle
     // strides of the decimated chains (renderer.lod_strides); level 0 is
@@ -177,7 +358,21 @@ public:
           parallelTransformVertexThreshold_(options.parallelTransformVertexThreshold),
           lodStrides_(options.lodStrides),
           lodThresholds_(options.lodThresholds),
-          maxBatchTileRecords_(options.maxBatchTileRecords)
+          maxBatchTileRecords_(options.maxBatchTileRecords),
+          bloomEnabled_(options.bloomEnabled),
+          bloomStrength_(options.bloomStrength),
+          bloomThreshold_(options.bloomThreshold),
+          sunShadowsEnabled_(options.sunShadowsEnabled),
+          shadowMapResolution_(options.shadowMapResolution),
+          shadowFilterRadiusTexels_(options.shadowFilterRadiusTexels),
+          skyShadowsEnabled_(options.skyShadowsEnabled),
+          cameraContrast_(options.cameraContrast),
+          cameraVignette_(options.cameraVignette),
+          cameraGrain_(options.cameraGrain),
+          filmAA_(options.filmAntialiasingEnabled),
+          filmAAStrength_(std::clamp(options.filmAntialiasingStrength, 0.0f, 2.0f)),
+          resolveTent_(options.resolveTentEnabled),
+          gatherOcclusionStrength_(options.gatherOcclusionStrength)
     {
         // Supersampling grid from the requested sample count (see
         // HeadlessBackendOptions::msaaSamples); sampleScaleX_/Y_ stay 1 when
@@ -239,7 +434,7 @@ public:
 
     void setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count) override;
 
-    // Copies the borrowed lumen_gi probe-grid snapshot; the rasterizer's
+    // Copies the borrowed radiance_cache probe-grid snapshot; the rasterizer's
     // pbrShade calls then sample it per pixel (validity-weighted trilinear
     // SH2 irradiance). An empty snapshot keeps the legacy hemispheric
     // ambient. The prepared view (level descriptors + bounds constants) is
@@ -258,7 +453,7 @@ public:
         preparedProbeGrid_ = prepareGiProbeGrid(probeGrid_);
     }
 
-    // Copies the borrowed lumen_reflection field; the rasterizer's pixel
+    // Copies the borrowed reflection_field field; the rasterizer's pixel
     // path then adds the indirect specular radiance (bilinear field sample
     // through the field's own camera) to every shaded opaque pixel after the
     // PBR pass and before tone mapping. An empty snapshot keeps the legacy
@@ -276,13 +471,48 @@ public:
             const std::size_t texelCount
                 = static_cast<std::size_t>(field.header.width) * field.header.height;
             reflectionRadiance_.assign(
-                field.radiance, field.radiance + texelCount * lumen_reflection::reflectionFieldTexelFloats);
+                field.radiance, field.radiance + texelCount * reflection_field::reflectionFieldTexelFloats);
             reflectionField_.header = field.header;
             reflectionField_.radiance = reflectionRadiance_.data();
         }
         // Prepared once per snapshot: the field's view-projection, so the
         // per-pixel bilinear sample stops rebuilding the matrix.
         preparedReflectionField_ = prepareReflectionField(reflectionField_);
+    }
+
+    // Copies the borrowed radiance_cache gather field; the pixel path's GI
+    // ambient then resolves the gather sample first (validity-gated bilinear
+    // through the field's own camera) and falls back to the probe-walk
+    // ambient wherever the field refuses the point. An empty snapshot keeps
+    // the probe-walk ambient bit-identical.
+    void setGatherField(const GatherField &field) override
+    {
+        gatherField_      = GatherField{};
+        gatherIrradiance_.clear();
+        if (field.valid())
+        {
+            // The borrowed field is interleaved texels (irradiance RGB +
+            // validity; see radianceGatherTexelFloats), so the copy keeps
+            // the whole stride and the sampler indexes it the same way.
+            const std::size_t texelCount
+                = static_cast<std::size_t>(field.header.width) * field.header.height;
+            gatherIrradiance_.assign(
+                field.irradiance, field.irradiance + texelCount * radiance_cache::radianceGatherTexelFloats);
+            gatherField_.header    = field.header;
+            gatherField_.irradiance = gatherIrradiance_.data();
+        }
+        // Prepared once per snapshot: the field's view-projection, so the
+        // per-pixel bilinear sample stops rebuilding the matrix.
+        preparedGatherField_      = prepareGatherField(gatherField_);
+        preparedGatherField_.occlusionStrength = gatherOcclusionStrength_;
+    }
+
+    // The software rasterizer composites the gather field (see
+    // setGatherField), so the module core pushes its viewport to the
+    // radiance_cache.gather capability for this backend.
+    bool consumesGatherField() const override
+    {
+        return true;
     }
 
     void setEnvironment(const pbr::PbrEnvironment &environment) override
@@ -293,6 +523,8 @@ public:
                         * (environment.sun.enabled ? 1.0f : 0.0f);
         ambientSky_     = glm::make_vec3(environment.ambient.skyColor) * environment.ambient.intensity;
         ambientGround_  = glm::make_vec3(environment.ambient.groundColor) * environment.ambient.intensity;
+        sunShadowSunActive_ = sunShadowsEnabled_ && environment.sun.enabled
+            && (sunRadiance_.x > 0.0f || sunRadiance_.y > 0.0f || sunRadiance_.z > 0.0f);
     }
 
     void beginFrame(const FrameParameters &frame) override;
@@ -470,15 +702,6 @@ private:
         // uCloth.z): textured opaque draws cull pixels whose sampled
         // base-color alpha lands below the cutoff; 0 keeps every texel.
         float                  alphaCutoff             = 0.0f;
-        // Procedural surface mottle (MeshMaterial::noiseScaleMeters /
-        // noiseStrength, headless shading path): a footprint-adaptive
-        // two-octave value noise perturbing the shaded albedo at the
-        // sample's world position. The setup also carries the frame's
-        // angular pixel size so the noise's wavelength can ride the pixel
-        // footprint (mottle finer than a pixel would alias into speckle).
-        float                  noiseScaleMeters        = 0.0f;
-        float                  noiseStrength           = 0.0f;
-        float                  pixelAngleRadians       = 0.0f;
         bool                   hasBaseColorMap         = false;
         bool                   hasNormalMap            = false;
         bool                   hasMetallicRoughnessMap = false;
@@ -533,10 +756,10 @@ private:
     // increments, depth-test, shade, write. Tile owners pass their tile;
     // writes only touch the window, so concurrent calls with disjoint
     // windows never share a pixel. giQuads, when non-null, amortizes the
-    // probe-grid ambient walk over 2x2 pixel quads (see GiQuadCache).
+    // probe-grid ambient walk over its two-tier sample cache (see GiTileCache).
     ENGINE_RASTERIZER_INLINE bool rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
         std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-        GiQuadCache *giQuads = nullptr);
+        TileShadingCache *tiles = nullptr);
 
     // Run-shading dispatch predicate (see rasterizeFanRecordRuns): the draw's
     // shading path fits the 4-wide run kernel and the record's window is wide
@@ -551,7 +774,7 @@ private:
     // of the shared core preserves the per-sample loop's codegen.
     bool rasterizeFanRecordRuns(const RasterSetup &setup, const TileBinRecord &record,
         std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-        GiQuadCache *giQuads = nullptr);
+        TileShadingCache *tiles = nullptr);
 
     // Integer pixel window (inclusive) a fan record can write, clamped to
     // the framebuffer. Shared verbatim by the rasteriser core and the tile
@@ -566,7 +789,77 @@ private:
     // per-pixel probe-grid walk with a caller-evaluated quad sample.
     ENGINE_RASTERIZER_INLINE glm::vec3 shadeTrianglePixel(const RasterSetup &setup, const TileBinRecord &record,
         float weightA, float weightB, float inverseWA, float inverseWB, float inverseWC,
-        bool *outFieldTraced = nullptr, const GiAmbientSample *giSample = nullptr) const;
+        bool *outFieldTraced = nullptr, const GiAmbientSample *giSample = nullptr,
+        const glm::vec3 *interpolatedPair = nullptr, const glm::vec3 *geometryNormalPair = nullptr) const;
+
+    // The GI ambient walk the tile cache and the per-pixel path amortize:
+    // the gather field's irradiance first (the radiance_cache final gather,
+    // contact-scale occlusion and caustics included), the coarse probe-grid
+    // walk wherever the field refuses the position (off its frustum, invalid
+    // footprint). The GiAmbientSample contract of giProbeGridIrradiance, so
+    // the same cache tiers serve both sources.
+    bool resolveGiAmbient(const glm::vec3 &position, const glm::vec3 &normal, glm::vec3 &outIrradiance,
+        float &outCoverage, float &outOcclusion) const;
+
+    // Presentation bloom over the locked surface's encoded output rows
+    // (see endFrame): bright-pass, quarter-res separable Gaussian, weighted
+    // add-back. Defined in the endFrame translation unit.
+    void applyPresentationBloom(const window::SurfacePixels &pixels, std::uint32_t columns, std::uint32_t rows);
+
+    // Sun visibility of one shaded point through the built shadow map
+    // (sunshadows::sunShadowVisibility's backend-side wrapper: inactive maps
+    // and an inactive sun read as fully lit). Const; reads the shared map.
+    ENGINE_SHADING_INLINE float sunShadowVisibility(const glm::vec3 &worldPosition, const glm::vec3 &normal) const
+    {
+        if (!sunShadowMap_.valid)
+        {
+            return 1.0f;
+        }
+        return sunshadows::sunShadowVisibility(sunShadowMap_, worldPosition, normal, shadowFilterRadiusTexels_);
+    }
+
+    // Zenith sky visibility of one shaded point through the sky-visibility
+    // map (the ambient term's grounding factor; inactive maps read as fully
+    // open sky).
+    ENGINE_SHADING_INLINE float skyShadowVisibility(const glm::vec3 &worldPosition, const glm::vec3 &normal) const
+    {
+        if (!skyShadowMap_.valid)
+        {
+            return 1.0f;
+        }
+        return sunshadows::sunShadowVisibility(skyShadowMap_, worldPosition, normal, shadowFilterRadiusTexels_);
+    }
+
+    // Camera response presentation pass (see endFrame): the pivot-point
+    // contrast curve, radial vignette, and deterministic sensor grain over
+    // the locked surface's encoded rows, in linear space. Defined in the
+    // endFrame translation unit.
+    void applyCameraResponse(const window::SurfacePixels &pixels, std::uint32_t columns, std::uint32_t rows);
+    void applyFilmAntialias(const window::SurfacePixels &pixels, std::uint32_t columns, std::uint32_t rows);
+
+    // Tent supersample resolve (renderer.headless_resolve_tent, see
+    // HeadlessBackendOptions::resolveTentEnabled): the sample-block sums run
+    // through the separable [1 2 1; 2 4 2; 1 2 1] / 16 kernel across the 3x3
+    // block neighborhood, edge blocks clamped. `scratch` is the calling
+    // band's private slice (six rows of outputColumns uint16 entries: three
+    // raw block-sum rows plus their three horizontally folded rows), so
+    // concurrently running bands never share state. Defined in the endFrame
+    // translation unit.
+    void resolveRowsTent(const std::uint8_t *samples, std::uint32_t framebufferWidth,
+        window::SurfacePixels &pixels, std::uint32_t outputColumns, std::uint32_t outputRows,
+        std::uint32_t rowBegin, std::uint32_t rowEnd, std::uint16_t *scratch) const;
+
+    // Records one draw as a shadow caster (sun_shadows.hpp's exclusion rule:
+    // unlit and transparent draws do not block the sun) and rebuilds the maps
+    // at endFrame when the caster set or the light directions changed.
+    // Defined in the endFrame translation unit.
+    void recordSunShadowCaster(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material);
+    void updateSunShadowMap();
+    std::uint64_t sunShadowCastersHash() const;
+    std::uint64_t sunShadowStateHash() const;
+    std::uint64_t skyShadowStateHash() const;
+    std::vector<sunshadows::SunShadowGeometry> sunShadowGeometries() const;
+    void sunShadowReceiverBox(glm::vec3 &receiverMin, glm::vec3 &receiverMax, bool &haveBox) const;
 
     // Phase 1 (calling thread): geometry pipeline over every triangle, then
     // two-pass binning into screen tiles (per-tile lists keep ascending
@@ -663,14 +956,14 @@ private:
     glm::vec3                        ambientGround_{0.0f};
     std::vector<PreparedDirectLight> directLights_;
 
-    // lumen_gi probe-grid hook: owned probe copy plus the prepared view
+    // radiance_cache probe-grid hook: owned probe copy plus the prepared view
     // passed to pbrShade. Kept valid between frames; setProbeGrid replaces
     // both wholesale.
     GiProbeGrid                     probeGrid_{};
     PreparedGiProbeGrid             preparedProbeGrid_{};
-    std::vector<lumen_gi::GiProbe> probeGridProbes_;  
+    std::vector<radiance_cache::GiProbe> probeGridProbes_;  
 
-    // lumen_reflection field hook: owned radiance copy plus the borrowed view
+    // reflection_field field hook: owned radiance copy plus the borrowed view
     // the pixel path samples. Kept valid between frames; setReflectionField
     // replaces it wholesale.
     std::vector<float>                 reflectionRadiance_;
@@ -678,6 +971,15 @@ private:
     // Prepared view of reflectionField_ (the field's own view-projection
     // built once per snapshot); rebuilt by setReflectionField.
     PreparedReflectionField            preparedReflectionField_{};
+
+    // radiance_cache gather-field hook: owned irradiance copy plus the
+    // prepared view the pixel path's GI ambient resolves first. Kept valid
+    // between frames; setGatherField replaces it wholesale.
+    std::vector<float>                 gatherIrradiance_;
+    GatherField                        gatherField_{};
+    // Prepared view of gatherField_ (the field's own view-projection built
+    // once per snapshot); rebuilt by setGatherField.
+    PreparedGatherField                preparedGatherField_{};
 
     std::uint32_t viewportWidth  = 0;
     std::uint32_t viewportHeight = 0;
@@ -702,6 +1004,58 @@ private:
     // counts. Member (not local) so a frame with many parallel draws does
     // not hit the allocator 60+ times (allocation spikes land in the P99).
     std::vector<StripResult> rasterResultScratch_;
+
+    // Presentation bloom scratch (see applyPresentationBloom): the
+    // quarter-res bright energy and its blur scratch, kept across frames so
+    // steady-state endFrames allocate nothing.
+    std::vector<glm::vec3> bloomBright_;
+    std::vector<glm::vec3> bloomScratch_;
+    bool                   bloomEnabled_    = true;
+    float                  bloomStrength_   = 0.12f;
+    float                  bloomThreshold_  = 0.85f;
+
+    // Sun shadow mapping (sun_shadows.hpp): the casters recorded by this
+    // frame's draws (cleared in beginFrame, hashed and rebuilt in endFrame),
+    // the map the current frame shades through (built by the PREVIOUS
+    // endFrame - the caster set only exists once every draw is seen), and
+    // the hash the map was built for (the static-scene rebuild skip).
+    std::vector<sunshadows::SunShadowCaster> sunShadowCasters_;
+    sunshadows::SunShadowMap                 sunShadowMap_;
+    sunshadows::SunShadowMap                 skyShadowMap_;
+    std::uint64_t                            sunShadowBuiltHash_ = 0;
+    std::uint64_t                            skyShadowBuiltHash_ = 0;
+    bool                                     sunShadowSunActive_ = false;
+    bool                                     sunShadowsEnabled_ = true;
+    bool                                     skyShadowsEnabled_ = true;
+    std::uint32_t                            shadowMapResolution_ = 1024;
+    float                                    shadowFilterRadiusTexels_ = 1.5f;
+
+    // Film antialiasing scratch (applyFilmAntialias): a snapshot of the
+    // finished rows every pass reads from, so band-parallel workers never
+    // sample a row a neighbor already rewrote (the result stays
+    // deterministic regardless of scheduling).
+    std::vector<std::uint8_t> filmAASource_;
+
+    // Camera response pass (applyCameraResponse): contrast pivot curve,
+    // radial vignette, deterministic sensor grain.
+    float cameraContrast_          = 1.0f;
+    float cameraVignette_          = 0.18f;
+    float cameraGrain_             = 0.01f;
+    bool  filmAA_                  = false;
+    // Film AA cross-edge stage strength (film_aa_strength; see
+    // applyFilmAntialias) and the tent supersample resolve gate
+    // (headless_resolve_tent; see resolveRowsTent).
+    float filmAAStrength_          = 1.0f;
+    bool  resolveTent_             = true;
+
+    // Tent resolve scratch (resolveRowsTent): per-band slices of 16-bit
+    // sample-block sums (three raw rows plus three folded rows per band),
+    // grown once per size in endFrame before the bands dispatch.
+    mutable std::vector<std::uint16_t> tentRowSums_;
+
+    // Gather field contact-occlusion multiplier (setGatherField bakes it
+    // into the prepared field).
+    float gatherOcclusionStrength_ = 1.0f;
 
     // Tile-parallel scratch, reused across draws/frames (no steady-state
     // allocation; capacity persists and the largest tile-parallel draw sets

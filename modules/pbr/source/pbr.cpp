@@ -283,7 +283,7 @@ bool convertModelMaterialValues(
             1.0));
     result.material.unlit     = source.unlit || source.illuminationModel == 0u;
     // The transmission pair rides the converted material itself (renderer
-    // transparent pass + lumen_gi / lumen_reflection surfaces) and stays on
+    // transparent pass + radiance_cache / reflection_field surfaces) and stays on
     // the preserved scalars for consumers that read them from there.
     result.opacity                    = std::clamp(source.opacity, 0.0f, 1.0f);
     result.material.opacity           = result.opacity;

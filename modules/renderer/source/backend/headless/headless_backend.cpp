@@ -372,6 +372,11 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
     }
 
     std::fill(pixelLocks.begin(), pixelLocks.end(), 0);
+
+    // Shadow casters accumulate per frame (see sun_shadows.hpp): the list
+    // starts empty so the endFrame build hashes exactly what this frame
+    // drew, and the capacity survives for allocation-free steady states.
+    sunShadowCasters_.clear();
 }
 
 // Presents: copies the CPU raster into the window surface's locked pixel
@@ -428,8 +433,25 @@ void HeadlessBackend::endFrame()
         case 8u: sampleShift = 3u; sampleCountIsPowerOfTwo = true; break;
         default: sampleCountIsPowerOfTwo = false; break;
         }
-        const auto resolveRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd)
+        const auto resolveRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd, std::uint32_t bandIndex)
         {
+            // Tent resolve (renderer.headless_resolve_tent, the default):
+            // the sample-block sums run through the separable bilinear tent
+            // [1 2 1; 2 4 2; 1 2 1] / 16 across the 3x3 block neighborhood.
+            // A box resolve reproduces the sample grid's own hard steps (a
+            // straight silhouette landing between sample columns keeps a
+            // one-texel jump, and shallow diagonals quantize into two-texel
+            // terraces the film blend cannot fully smooth); the tent spreads
+            // every silhouette over a two-texel ramp the way a sensor's
+            // optical low-pass filter does, before the film blend sees it.
+            // Each band works on its own scratch slice (bands run
+            // concurrently).
+            if (resolveTent_)
+            {
+                resolveRowsTent(color.data(), framebufferWidth, pixels, outputColumns, outputRows, rowBegin,
+                    rowEnd, tentRowSums_.data() + static_cast<std::size_t>(bandIndex) * outputColumns * 4u * 6u);
+                return;
+            }
             // 2x2 supersampling (the default): a widened-add fast path computes
             // the same rounding average the generic loop below computes - the
             // per-sample bytes widen to 16-bit lanes exactly, the sums stay
@@ -549,6 +571,20 @@ void HeadlessBackend::endFrame()
                 }
             }
         };
+        // The tent resolve's per-band scratch is sized once here (the band
+        // workers below index their own slice): three rows of raw block sums
+        // plus their three horizontally folded rows, per band.
+        std::size_t tentBandStride = 0;
+        if (resolveTent_)
+        {
+            tentBandStride = static_cast<std::size_t>(outputColumns) * 4u * 6u;
+            const std::size_t tentTotal = tentBandStride * (parallelWorkerCount() + 1u);
+            if (tentRowSums_.size() < tentTotal)
+            {
+                tentRowSums_.assign(tentTotal, 0);
+            }
+        }
+        (void)tentBandStride; // the resolve lambda slices by band index itself
         const bool resolveInParallel = taskScheduler_ != nullptr && taskScheduler_->isRunning()
             && parallelWorkerCount() >= 2u && outputRows >= 2u;
         if (resolveInParallel)
@@ -565,22 +601,912 @@ void HeadlessBackend::endFrame()
                 {
                     break;
                 }
-                if (!taskScheduler_->schedule(resolveGroup, [this, &resolveRows, begin, end]()
-                        { resolveRows(begin, end); }))
+                if (!taskScheduler_->schedule(resolveGroup, [this, &resolveRows, begin, end, band]()
+                        { resolveRows(begin, end, band); }))
                 {
-                    resolveRows(begin, end);
+                    resolveRows(begin, end, band);
                 }
             }
-            resolveRows(0u, std::min(bandWidth, outputRows));
+            resolveRows(0u, std::min(bandWidth, outputRows), 0u);
             resolveGroup.wait(*taskScheduler_);
         }
         else
         {
-            resolveRows(0u, outputRows);
+            resolveRows(0u, outputRows, 0u);
         }
     }
+    // Presentation bloom (renderer.bloom): the resolve above produced the
+    // tone-mapped, sRGB-encoded output rows of the locked surface; the bloom
+    // bright-passes them (decoded back to linear through the shared encode
+    // grid's inverse), blurs the bright energy at quarter resolution, and
+    // adds the weighted glare back before the surface unlocks. The whole
+    // pass reads and writes the same locked rows, so it serializes cleanly
+    // after the resolve bands.
+    if (bloomEnabled_ && bloomStrength_ > 0.0f && columns > 8u && rows > 8u)
+    {
+        applyPresentationBloom(pixels, columns, rows);
+    }
+    // Film antialiasing (renderer.film_aa): the luminance-directed edge
+    // blend over the finished, bloomed rows - the rasterizer's screen-space
+    // diagonal staircase smoothed before the camera response layers the
+    // contrast curve, the lens falloff, and the grain on top.
+    if (filmAA_ && columns > 4u && rows > 4u)
+    {
+        applyFilmAntialias(pixels, columns, rows);
+    }
+    // Camera response (renderer.contrast / vignette / grain): the
+    // photographic layer over the finished, bloomed output - the contrast
+    // pivot curve, the radial lens falloff, and deterministic sensor grain,
+    // decoded to linear and re-encoded through the shared byte table. Runs
+    // after the bloom so the glare carries the same lens response.
+    if ((cameraContrast_ != 1.0f || cameraVignette_ > 0.0f || cameraGrain_ > 0.0f) && columns > 1u && rows > 1u)
+    {
+        applyCameraResponse(pixels, columns, rows);
+    }
+    // Sun shadow map rebuild (renderer.sun_shadows): the casters recorded by
+    // this frame's draws rasterize into the map the NEXT frame shades
+    // through; a hash over the caster set and the sun skips the rebuild
+    // while the scene is static.
+    updateSunShadowMap();
     window_->unlockSurfacePixels(window_->self, surface_);
     ++statistics_.framesRendered;
+}
+
+// The presentation bloom pass (see the endFrame call site): bright-pass +
+// quarter-res separable Gaussian + weighted add-back over the locked
+// surface's encoded rows. The decode side of the sRGB grid is a 256-entry
+// inverse table built like srgb_tables' forward tables; the encode side
+// reuses byteEncode so the output quantization matches every other commit
+// path. The pass keeps its scratch across frames (steady-state frames
+// allocate nothing).
+void HeadlessBackend::applyPresentationBloom(const window::SurfacePixels &pixels, std::uint32_t columns,
+    std::uint32_t rows)
+{
+    const std::uint32_t smallWidth  = std::max(columns / 4u, 1u);
+    const std::uint32_t smallHeight = std::max(rows / 4u, 1u);
+    const std::size_t   smallCount  = static_cast<std::size_t>(smallWidth) * smallHeight;
+    if (bloomBright_.size() != smallCount)
+    {
+        bloomBright_.assign(smallCount, glm::vec3(0.0f));
+        bloomScratch_.assign(smallCount, glm::vec3(0.0f));
+    }
+    // Inverse of the fast encode table: fastSrgbEncode quantizes through the
+    // 256-step grid, so the decode of a committed byte is that grid point's
+    // linear value (one shared table, built on first use).
+    static const std::array<float, 256> decode = []
+    {
+        std::array<float, 256> table{};
+        for (std::uint32_t index = 0; index < 256; ++index)
+        {
+            table[index] = std::pow(static_cast<float>(index) / 255.0f, 2.2f);
+        }
+        return table;
+    }();
+    const float threshold = std::clamp(bloomThreshold_, 0.0f, 1.0f);
+
+    // Bright pass: each quarter-res cell averages its 4x4 block of output
+    // pixels in linear space and keeps the energy above the threshold (the
+    // per-channel excess over the threshold, the soft-knee form every
+    // presentation bloom uses). Fully dark cells store zero so the blur
+    // treats them as empty space.
+    for (std::uint32_t cellY = 0; cellY < smallHeight; ++cellY)
+    {
+        for (std::uint32_t cellX = 0; cellX < smallWidth; ++cellX)
+        {
+            glm::vec3 sum(0.0f);
+            std::uint32_t count = 0;
+            const std::uint32_t rowBegin = cellY * 4u;
+            const std::uint32_t rowEnd   = std::min(rowBegin + 4u, rows);
+            const std::uint32_t columnBegin = cellX * 4u;
+            const std::uint32_t columnEnd   = std::min(columnBegin + 4u, columns);
+            for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
+            {
+                const std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+                for (std::uint32_t x = columnBegin; x < columnEnd; ++x)
+                {
+                    const std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+                    sum.r += decode[pixel[0]];
+                    sum.g += decode[pixel[1]];
+                    sum.b += decode[pixel[2]];
+                    ++count;
+                }
+            }
+            glm::vec3 energy(0.0f);
+            if (count != 0)
+            {
+                const glm::vec3 average = sum * (1.0f / static_cast<float>(count));
+                for (std::uint32_t axis = 0; axis < 3; ++axis)
+                {
+                    energy[axis] = std::max(average[axis] - threshold, 0.0f);
+                }
+            }
+            bloomBright_[static_cast<std::size_t>(cellY) * smallWidth + cellX] = energy;
+        }
+    }
+
+    // Separable Gaussian: a symmetric 5-tap kernel (exp(-d^2 / (2 * 1.5^2))
+    // normalized over the taps), horizontal into the scratch then vertical
+    // back into the bright buffer.
+    constexpr float kKernel[5] = {0.093099f, 0.228636f, 0.356530f, 0.228636f, 0.093099f};
+    const auto blurAxis = [&](bool horizontal)
+    {
+        for (std::uint32_t y = 0; y < smallHeight; ++y)
+        {
+            for (std::uint32_t x = 0; x < smallWidth; ++x)
+            {
+                glm::vec3 sum(0.0f);
+                for (std::int32_t tap = -2; tap <= 2; ++tap)
+                {
+                    std::int32_t sampleX = horizontal ? static_cast<std::int32_t>(x) + tap : static_cast<std::int32_t>(x);
+                    std::int32_t sampleY = horizontal ? static_cast<std::int32_t>(y)
+                                                      : static_cast<std::int32_t>(y) + tap;
+                    sampleX = std::clamp(sampleX, 0, static_cast<std::int32_t>(smallWidth) - 1);
+                    sampleY = std::clamp(sampleY, 0, static_cast<std::int32_t>(smallHeight) - 1);
+                    sum += bloomBright_[static_cast<std::size_t>(sampleY) * smallWidth
+                              + static_cast<std::size_t>(sampleX)]
+                        * kKernel[tap + 2];
+                }
+                bloomScratch_[static_cast<std::size_t>(y) * smallWidth + x] = sum;
+            }
+        }
+        std::swap(bloomBright_, bloomScratch_);
+    };
+    blurAxis(true);
+    blurAxis(false);
+
+    // Add-back: every output pixel bilinearly samples the blurred energy at
+    // its quarter-res position, scales by the strength, and adds it to its
+    // decoded linear color before re-encoding through the shared byte table.
+    const std::uint8_t *encodeTable = srgb_tables::byteEncode.values;
+    const float         strength    = bloomStrength_;
+    for (std::uint32_t y = 0; y < rows; ++y)
+    {
+        std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+        for (std::uint32_t x = 0; x < columns; ++x)
+        {
+            const float u = (static_cast<float>(x) + 0.5f) * 0.25f - 0.5f;
+            const float v = (static_cast<float>(y) + 0.5f) * 0.25f - 0.5f;
+            const std::int32_t x0 = std::clamp(static_cast<std::int32_t>(std::floor(u)), 0,
+                static_cast<std::int32_t>(smallWidth) - 1);
+            const std::int32_t y0 = std::clamp(static_cast<std::int32_t>(std::floor(v)), 0,
+                static_cast<std::int32_t>(smallHeight) - 1);
+            const std::int32_t x1 = std::min(x0 + 1, static_cast<std::int32_t>(smallWidth) - 1);
+            const std::int32_t y1 = std::min(y0 + 1, static_cast<std::int32_t>(smallHeight) - 1);
+            const float fx = std::clamp(u - static_cast<float>(x0), 0.0f, 1.0f);
+            const float fy = std::clamp(v - static_cast<float>(y0), 0.0f, 1.0f);
+            const glm::vec3 *t00 = &bloomBright_[static_cast<std::size_t>(y0) * smallWidth + x0];
+            const glm::vec3 *t10 = &bloomBright_[static_cast<std::size_t>(y0) * smallWidth + x1];
+            const glm::vec3 *t01 = &bloomBright_[static_cast<std::size_t>(y1) * smallWidth + x0];
+            const glm::vec3 *t11 = &bloomBright_[static_cast<std::size_t>(y1) * smallWidth + x1];
+            const glm::vec3 glare = (*t00 * ((1.0f - fx) * (1.0f - fy)) + *t10 * (fx * (1.0f - fy))
+                + *t01 * ((1.0f - fx) * fy) + *t11 * (fx * fy))
+                * strength;
+            std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+            for (std::uint32_t channel = 0; channel < 3; ++channel)
+            {
+                const float linear = decode[pixel[channel]] + glare[channel];
+                const float clamped = linear < 0.0f ? 0.0f : (linear > 1.0f ? 1.0f : linear);
+                pixel[channel] = encodeTable[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
+            }
+        }
+    }
+}
+
+// The camera response pass (see the endFrame call site): the photographic
+// layer over the finished output. Every pixel decodes to linear through the
+// shared sRGB grid's inverse (the same table the bloom builds; a local twin
+// keeps each presentation pass self-contained), applies the pivot-point
+// contrast curve, the radial lens falloff, and one deterministic grain
+// sample, then re-encodes through the shared byte table. The grain hash
+// mixes the frame counter, so an animated view shows uncorrelated sensor
+// noise while a converged static frame stays bit-stable across exports.
+// Rows are split across workers exactly like the resolve bands: every pixel
+// reads and writes only its own cell.
+void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, std::uint32_t columns,
+    std::uint32_t rows)
+{
+    static const std::array<float, 256> decode = []
+    {
+        std::array<float, 256> table{};
+        for (std::uint32_t index = 0; index < 256; ++index)
+        {
+            table[index] = std::pow(static_cast<float>(index) / 255.0f, 2.2f);
+        }
+        return table;
+    }();
+    const std::uint8_t *encodeTable = srgb_tables::byteEncode.values;
+
+    const float contrast   = cameraContrast_ > 0.05f ? cameraContrast_ : 1.0f;
+    const float vignette   = std::clamp(cameraVignette_, 0.0f, 1.0f);
+    const float grain      = std::clamp(cameraGrain_, 0.0f, 0.2f);
+    // Contrast pivot: the sRGB mid-gray linear value (0.18), the exposure
+    // midpoint every tone curve pivots around.
+    constexpr float kPivot = 0.18f;
+    const std::uint32_t frameSeed = static_cast<std::uint32_t>(statistics_.framesRendered);
+
+    const auto processRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd)
+    {
+        for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
+        {
+            std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+            const float normalizedY = (static_cast<float>(y) + 0.5f) / static_cast<float>(rows) * 2.0f - 1.0f;
+            for (std::uint32_t x = 0; x < columns; ++x)
+            {
+                std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+                glm::vec3 linear(decode[pixel[0]], decode[pixel[1]], decode[pixel[2]]);
+                if (contrast != 1.0f)
+                {
+                    linear = (linear - glm::vec3(kPivot)) * contrast + glm::vec3(kPivot);
+                    linear = glm::clamp(linear, glm::vec3(0.0f), glm::vec3(1.0f));
+                }
+                if (vignette > 0.0f)
+                {
+                    const float normalizedX
+                        = (static_cast<float>(x) + 0.5f) / static_cast<float>(columns) * 2.0f - 1.0f;
+                    const float radius = std::sqrt(normalizedX * normalizedX + normalizedY * normalizedY);
+                    // Smooth falloff from the frame's mid-radius to its corner:
+                    // centers stay untouched, corners lose the full strength.
+                    const float t = glm::smoothstep(0.45f, 1.35f, radius);
+                    linear *= 1.0f - vignette * t;
+                }
+                if (grain > 0.0f)
+                {
+                    // Wang hash over (pixel, frame): uniform in [0, 1), fixed
+                    // for a given frame and pixel. Film-like amplitude peaks
+                    // in the midtones and fades in the extremes.
+                    std::uint32_t state = frameSeed * 0x9E3779B9u + x * 0x85EBCA6Bu + y * 0xC2B2AE35u;
+                    state ^= state >> 15;
+                    state *= 0x2545F491u;
+                    state ^= state >> 13;
+                    const float noise  = static_cast<float>(state & 0x00FFFFFFu) * (1.0f / 16777216.0f) - 0.5f;
+                    const float luma   = linear.x * 0.299f + linear.y * 0.587f + linear.z * 0.114f;
+                    const float midtone = 4.0f * luma * (1.0f - luma);
+                    // One gain per pixel, not one delta per channel: scaling
+                    // all three channels by the same factor keeps the hue,
+                    // so the grain reads as luminance-density film grain
+                    // instead of per-channel colored sensor noise.
+                    linear *= 1.0f + grain * (0.35f + 0.65f * midtone) * noise;
+                }
+                for (std::uint32_t channel = 0; channel < 3; ++channel)
+                {
+                    const float clamped
+                        = linear[channel] < 0.0f ? 0.0f : (linear[channel] > 1.0f ? 1.0f : linear[channel]);
+                    pixel[channel] = encodeTable[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
+                }
+            }
+        }
+    };
+
+    const bool inParallel = taskScheduler_ != nullptr && taskScheduler_->isRunning() && parallelWorkerCount() >= 2u
+        && rows >= 2u;
+    if (inParallel)
+    {
+        const std::uint32_t workers    = parallelWorkerCount();
+        const std::uint32_t bandCount  = workers;
+        const std::uint32_t bandWidth  = (rows + bandCount - 1u) / bandCount;
+        TaskGroup group;
+        for (std::uint32_t band = 1; band < bandCount; ++band)
+        {
+            const std::uint32_t begin = band * bandWidth;
+            const std::uint32_t end   = std::min(begin + bandWidth, rows);
+            if (begin >= end)
+            {
+                break;
+            }
+            if (!taskScheduler_->schedule(group, [this, &processRows, begin, end]()
+                    { processRows(begin, end); }))
+            {
+                processRows(begin, end);
+            }
+        }
+        processRows(0u, std::min(bandWidth, rows));
+        group.wait(*taskScheduler_);
+    }
+    else
+    {
+        processRows(0u, rows);
+    }
+}
+
+// The film antialiasing pass (see the endFrame call site): a
+// luminance-directed edge blend over the finished, bloomed rows, in the
+// encoded (non-linear) space the blend math expects. A snapshot of the rows
+// feeds every sample, so band-parallel workers always read the pre-pass
+// image and the output stays deterministic regardless of which worker
+// touched which row first. Per pixel: five luminance taps bracket the local
+// contrast, four corner taps orient the blend axis, and the kernel mixes the
+// center with samples offset along the edge normal - an FXAA-class
+// formulation whose range check falls back to the higher-quality pair of
+// thirds-samples wherever the full blend would overshoot the local bracket,
+// so silhouettes keep their shape while the diagonals lose the staircase.
+// Flat neighborhoods take the early-out and are never touched (the grain the
+// camera response adds afterwards keeps its per-pixel detail).
+// Tent supersample resolve (see HeadlessBackendOptions::resolveTentEnabled
+// and the endFrame call site): the separable [1 2 1; 2 4 2; 1 2 1] / 16
+// kernel over the 3x3 neighborhood of sample-block sums, edge blocks
+// clamped. The kernel runs on 16-bit block sums (a block holds at most
+// sampleCount * 255 per channel, so the widest intermediate stays inside 16
+// bits for every supported grid): each output row's three block rows are
+// computed once, folded horizontally, and combined vertically. `scratch` is
+// the calling band's private slice (see the header); each band keeps a
+// sliding three-row window so a row's sums and folds are computed exactly
+// once, and concurrent bands never share state, so the pass stays
+// deterministic under scheduling.
+void HeadlessBackend::resolveRowsTent(const std::uint8_t *samples, std::uint32_t framebufferWidth,
+    window::SurfacePixels &pixels, std::uint32_t outputColumns, std::uint32_t outputRows,
+    std::uint32_t rowBegin, std::uint32_t rowEnd, std::uint16_t *scratch) const
+{
+    const std::size_t rowStride = static_cast<std::size_t>(outputColumns) * 4u;
+    // Scratch layout: three rows of raw block sums followed by their three
+    // horizontally folded rows (the calling band's private slice).
+    std::uint16_t *rawSums[3]    = {scratch, scratch + rowStride, scratch + rowStride * 2u};
+    std::uint16_t *foldedSums[3] = {scratch + rowStride * 3u, scratch + rowStride * 4u,
+        scratch + rowStride * 5u};
+    // Block sums of one output row's sampleScaleX_ x sampleScaleY_ sample
+    // block (the same sum the box resolve rounds down to bytes).
+    const auto computeRowSums = [this, samples, framebufferWidth, outputColumns](
+        std::uint32_t outY, std::uint16_t *dest)
+    {
+        const std::uint8_t *rowBase
+            = samples + static_cast<std::size_t>(outY) * sampleScaleY_ * framebufferWidth * 4u;
+        for (std::uint32_t x = 0; x < outputColumns; ++x)
+        {
+            const std::uint8_t *blockBase = rowBase + static_cast<std::size_t>(x) * sampleScaleX_ * 4u;
+            std::uint32_t accumulated[4] = {0, 0, 0, 0};
+            for (std::uint32_t sampleY = 0; sampleY < sampleScaleY_; ++sampleY)
+            {
+                const std::uint8_t *sample
+                    = blockBase + static_cast<std::size_t>(sampleY) * framebufferWidth * 4u;
+                for (std::uint32_t sampleX = 0; sampleX < sampleScaleX_; ++sampleX)
+                {
+                    accumulated[0] += sample[0];
+                    accumulated[1] += sample[1];
+                    accumulated[2] += sample[2];
+                    accumulated[3] += sample[3];
+                    sample += 4;
+                }
+            }
+            dest[x * 4u + 0] = static_cast<std::uint16_t>(accumulated[0]);
+            dest[x * 4u + 1] = static_cast<std::uint16_t>(accumulated[1]);
+            dest[x * 4u + 2] = static_cast<std::uint16_t>(accumulated[2]);
+            dest[x * 4u + 3] = static_cast<std::uint16_t>(accumulated[3]);
+        }
+    };
+    // Horizontal [1 2 1] fold of a raw block-sum row, edge columns clamped.
+    const auto foldRowHorizontally = [outputColumns](const std::uint16_t *sums, std::uint16_t *folded)
+    {
+        for (std::uint32_t x = 0; x < outputColumns; ++x)
+        {
+            const std::size_t west = static_cast<std::size_t>(x > 0u ? x - 1u : 0u) * 4u;
+            const std::size_t here = static_cast<std::size_t>(x) * 4u;
+            const std::size_t east = static_cast<std::size_t>(x + 1u < outputColumns ? x + 1u : x) * 4u;
+            for (std::uint32_t channel = 0; channel < 4; ++channel)
+            {
+                folded[here + channel] = static_cast<std::uint16_t>(sums[west + channel]
+                    + 2u * sums[here + channel] + sums[east + channel]);
+            }
+        }
+    };
+    // Sliding window over output rows: the clamped south (y-1), center (y),
+    // and north (y+1) block rows, each raw-summed and folded once.
+    // The kernel's 16 weight units divide the 3x3 sum of BLOCK sums, and a
+    // block sum carries sampleCount samples - the total shift is 4 + the
+    // block's log2 sample count (mirroring the box resolve's sampleShift).
+    const std::uint32_t sampleCount = sampleScaleX_ * sampleScaleY_;
+    const std::uint32_t tentShift  = 4u + (sampleCount == 2u ? 1u
+        : sampleCount == 4u ? 2u : sampleCount == 8u ? 3u : 0u);
+    const std::uint32_t tentRound  = 1u << (tentShift - 1u);
+    std::uint32_t southIndex   = rowBegin > 0u ? rowBegin - 1u : 0u;
+    std::uint32_t centerIndex  = rowBegin;
+    std::uint32_t northIndex   = rowBegin + 1u < outputRows ? rowBegin + 1u : rowBegin;
+    computeRowSums(southIndex, rawSums[0]);
+    foldRowHorizontally(rawSums[0], foldedSums[0]);
+    computeRowSums(centerIndex, rawSums[1]);
+    foldRowHorizontally(rawSums[1], foldedSums[1]);
+    computeRowSums(northIndex, rawSums[2]);
+    foldRowHorizontally(rawSums[2], foldedSums[2]);
+    for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
+    {
+        std::uint8_t *destination = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+        // Vertical [1 2 1] over the three folded rows, rounding to bytes.
+        for (std::uint32_t x = 0; x < outputColumns; ++x)
+        {
+            const std::size_t index = static_cast<std::size_t>(x) * 4u;
+            destination[index + 0] = static_cast<std::uint8_t>(
+                (foldedSums[0][index + 0] + 2u * foldedSums[1][index + 0] + foldedSums[2][index + 0]
+                    + tentRound) >> tentShift);
+            destination[index + 1] = static_cast<std::uint8_t>(
+                (foldedSums[0][index + 1] + 2u * foldedSums[1][index + 1] + foldedSums[2][index + 1]
+                    + tentRound) >> tentShift);
+            destination[index + 2] = static_cast<std::uint8_t>(
+                (foldedSums[0][index + 2] + 2u * foldedSums[1][index + 2] + foldedSums[2][index + 2]
+                    + tentRound) >> tentShift);
+            destination[index + 3] = static_cast<std::uint8_t>(
+                (foldedSums[0][index + 3] + 2u * foldedSums[1][index + 3] + foldedSums[2][index + 3]
+                    + tentRound) >> tentShift);
+        }
+        if (y + 1u < rowEnd)
+        {
+            // Slide the row window one output row down (the north edge
+            // clamps at the bottom): recycle the south row's buffers.
+            const std::uint32_t nextNorth = y + 2u < outputRows ? y + 2u : outputRows - 1u;
+            std::uint16_t *const oldestRaw    = rawSums[0];
+            std::uint16_t *const oldestFolded = foldedSums[0];
+            rawSums[0]    = rawSums[1];
+            rawSums[1]    = rawSums[2];
+            rawSums[2]    = oldestRaw;
+            foldedSums[0] = foldedSums[1];
+            foldedSums[1] = foldedSums[2];
+            foldedSums[2] = oldestFolded;
+            computeRowSums(nextNorth, rawSums[2]);
+            foldRowHorizontally(rawSums[2], foldedSums[2]);
+        }
+    }
+}
+
+void HeadlessBackend::applyFilmAntialias(const window::SurfacePixels &pixels, std::uint32_t columns,
+    std::uint32_t rows)
+{
+    const std::size_t byteCount = static_cast<std::size_t>(rows) * pixels.strideBytes;
+    if (filmAASource_.size() != byteCount)
+    {
+        filmAASource_.resize(byteCount);
+    }
+    std::memcpy(filmAASource_.data(), pixels.rgba, byteCount);
+    const std::uint8_t *source = filmAASource_.data();
+
+    // Bilinear sample of the snapshot at sub-pixel coordinates: the edge
+    // blend offsets are fractional texel steps, and a nearest-texel fetch
+    // would collapse them back onto the center pixel.
+    const auto samplePixel = [source, &pixels, columns, rows](float x, float y, glm::vec3 &outColor, float &outLuma)
+    {
+        const float clampedX = glm::clamp(x, 0.0f, static_cast<float>(columns) - 1.0f);
+        const float clampedY = glm::clamp(y, 0.0f, static_cast<float>(rows) - 1.0f);
+        const std::int32_t x0 = static_cast<std::int32_t>(clampedX);
+        const std::int32_t y0 = static_cast<std::int32_t>(clampedY);
+        const std::int32_t x1 = std::min(x0 + 1, static_cast<std::int32_t>(columns) - 1);
+        const std::int32_t y1 = std::min(y0 + 1, static_cast<std::int32_t>(rows) - 1);
+        const float fractionX = clampedX - static_cast<float>(x0);
+        const float fractionY = clampedY - static_cast<float>(y0);
+        const auto texel = [source, &pixels](std::int32_t x, std::int32_t y)
+        {
+            const std::uint8_t *t = source + static_cast<std::size_t>(y) * pixels.strideBytes
+                + static_cast<std::size_t>(x) * 4u;
+            return glm::vec3(static_cast<float>(t[0]), static_cast<float>(t[1]), static_cast<float>(t[2]));
+        };
+        const glm::vec3 top    = glm::mix(texel(x0, y0), texel(x1, y0), fractionX);
+        const glm::vec3 bottom = glm::mix(texel(x0, y1), texel(x1, y1), fractionX);
+        outColor = glm::mix(top, bottom, fractionY) * (1.0f / 255.0f);
+        // Perceptual luma of the encoded channels: the edge math compares
+        // what the eye sees, not linear radiance.
+        outLuma = outColor.x * 0.299f + outColor.y * 0.587f + outColor.z * 0.114f;
+    };
+
+    const auto processRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd)
+    {
+        for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
+        {
+            std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
+            const float centerY = static_cast<float>(y);
+            for (std::uint32_t x = 0; x < columns; ++x)
+            {
+                std::uint8_t *pixel = row + static_cast<std::size_t>(x) * 4u;
+                const float centerX = static_cast<float>(x);
+                glm::vec3 color;
+                float luma;
+                glm::vec3 northColor, southColor, westColor, eastColor;
+                float northLuma, southLuma, westLuma, eastLuma;
+                samplePixel(centerX, centerY, color, luma);
+                samplePixel(centerX, centerY - 1.0f, northColor, northLuma);
+                samplePixel(centerX, centerY + 1.0f, southColor, southLuma);
+                samplePixel(centerX - 1.0f, centerY, westColor, westLuma);
+                samplePixel(centerX + 1.0f, centerY, eastColor, eastLuma);
+                const float minimum = std::min({luma, northLuma, southLuma, westLuma, eastLuma});
+                const float maximum = std::max({luma, northLuma, southLuma, westLuma, eastLuma});
+                // Flat neighborhood (the common case): keep the pixel.
+                if (maximum - minimum < 0.043f)
+                {
+                    continue;
+                }
+                float northWestLuma, northEastLuma, southWestLuma, southEastLuma;
+                glm::vec3 cornerColor;
+                samplePixel(centerX - 1.0f, centerY - 1.0f, cornerColor, northWestLuma);
+                samplePixel(centerX + 1.0f, centerY - 1.0f, cornerColor, northEastLuma);
+                samplePixel(centerX - 1.0f, centerY + 1.0f, cornerColor, southWestLuma);
+                samplePixel(centerX + 1.0f, centerY + 1.0f, cornerColor, southEastLuma);
+                // Edge normal direction from the corner luma differences
+                // (the classic console-quality formulation), in texel units.
+                // The clamp is 4, not the console's 8: this renderer's GI
+                // gradients are smooth and wide, and a half-pair reaching 4
+                // texels away read as defocus instead of antialiasing - 4
+                // caps the full blend at a two-texel span, still enough to
+                // hide the rasterizer's one-texel staircase.
+                glm::vec2 direction(-(northWestLuma + northEastLuma - southWestLuma - southEastLuma),
+                    northWestLuma + southWestLuma - northEastLuma - southEastLuma);
+                const float directionReduce = std::max(
+                    (northWestLuma + northEastLuma + southWestLuma + southEastLuma) * (0.125f * 0.25f), 1.0f / 128.0f);
+                const float inverseDirectionMinimum
+                    = 1.0f / (std::min(std::abs(direction.x), std::abs(direction.y)) + directionReduce);
+                direction = glm::clamp(direction * inverseDirectionMinimum, glm::vec2(-4.0f), glm::vec2(4.0f));
+                const auto blend = [&samplePixel, centerX, centerY, &direction](float offset)
+                {
+                    glm::vec3 sampledColor;
+                    float sampledLuma;
+                    samplePixel(centerX + direction.x * offset, centerY + direction.y * offset, sampledColor,
+                        sampledLuma);
+                    return sampledColor;
+                };
+                const glm::vec3 thirdsPair = (blend(1.0f / 3.0f - 0.5f) + blend(2.0f / 3.0f - 0.5f)) * 0.5f;
+                const glm::vec3 halfPair   = thirdsPair * 0.5f + (blend(-0.5f) + blend(0.5f)) * 0.25f;
+                const float halfPairLuma
+                    = halfPair.x * 0.299f + halfPair.y * 0.587f + halfPair.z * 0.114f;
+                // The full blend must stay inside the local contrast bracket;
+                // outside it the thirds pair is the safe answer.
+                const glm::vec3 chosen = (halfPairLuma < minimum || halfPairLuma > maximum) ? thirdsPair : halfPair;
+                // Cross-edge softening (film_aa_strength): the along-edge
+                // blend above runs parallel to a straight silhouette and
+                // cannot touch the one-texel hard step a straight edge keeps
+                // when it lands between supersample columns - the tent
+                // resolve spreads that step, and this stage catches whatever
+                // hard boundary remains. The pixel blends toward the mean of
+                // its two neighbors ACROSS the edge, but only when it sits ON
+                // the boundary: one across neighbor matches the pixel (its
+                // own side's plateau) while the other lies on the far side.
+                // A thin bright feature (an emissive strip, a specular slit)
+                // has both across neighbors far from the pixel and is left
+                // alone; a smooth GI gradient's deltas sit mid-bracket on
+                // both sides and never qualify either. The weight ramps from
+                // the flat-skip threshold to half a texel at strong contrast.
+                glm::vec3 finalColor = chosen;
+                const float contrast = maximum - minimum;
+                const float crossWeight
+                    = filmAAStrength_ * glm::clamp((contrast - 0.043f) * 4.0f, 0.0f, 0.5f);
+                if (crossWeight > 0.0f)
+                {
+                    // Across the edge = along the luma gradient: east/west
+                    // when the edge runs vertically, north/south otherwise.
+                    const bool edgeRunsVertically
+                        = std::abs(eastLuma - westLuma) >= std::abs(southLuma - northLuma);
+                    const float nearDelta = edgeRunsVertically ? std::abs(luma - westLuma)
+                                                               : std::abs(luma - northLuma);
+                    const float farDelta  = edgeRunsVertically ? std::abs(luma - eastLuma)
+                                                               : std::abs(luma - southLuma);
+                    const bool boundaryPixel
+                        = (nearDelta <= contrast * 0.25f && farDelta >= contrast * 0.6f)
+                        || (farDelta <= contrast * 0.25f && nearDelta >= contrast * 0.6f);
+                    if (boundaryPixel)
+                    {
+                        const glm::vec3 acrossMean = edgeRunsVertically ? (westColor + eastColor) * 0.5f
+                                                                        : (northColor + southColor) * 0.5f;
+                        finalColor = glm::mix(chosen, acrossMean, crossWeight);
+                    }
+                }
+                // Direct quantization: the blend already lives in the encoded
+                // display space the samples came from - routing it through
+                // the shared encode table would apply the transfer curve a
+                // second time and lift every blended edge toward white.
+                for (std::uint32_t channel = 0; channel < 3; ++channel)
+                {
+                    const float clamped
+                        = finalColor[channel] < 0.0f ? 0.0f
+                          : (finalColor[channel] > 1.0f ? 1.0f : finalColor[channel]);
+                    pixel[channel] = static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+                }
+            }
+        }
+    };
+
+    const bool inParallel = taskScheduler_ != nullptr && taskScheduler_->isRunning() && parallelWorkerCount() >= 2u
+        && rows >= 2u;
+    if (inParallel)
+    {
+        const std::uint32_t workers    = parallelWorkerCount();
+        const std::uint32_t bandCount  = workers;
+        const std::uint32_t bandWidth  = (rows + bandCount - 1u) / bandCount;
+        TaskGroup group;
+        for (std::uint32_t band = 1; band < bandCount; ++band)
+        {
+            const std::uint32_t begin = band * bandWidth;
+            const std::uint32_t end   = std::min(begin + bandWidth, rows);
+            if (begin >= end)
+            {
+                break;
+            }
+            if (!taskScheduler_->schedule(group, [this, &processRows, begin, end]()
+                    { processRows(begin, end); }))
+            {
+                processRows(begin, end);
+            }
+        }
+        processRows(0u, std::min(bandWidth, rows));
+        group.wait(*taskScheduler_);
+    }
+    else
+    {
+        processRows(0u, rows);
+    }
+}
+
+// Records one submitted draw as a sun-shadow caster. The exclusion rule
+// mirrors the lighting modules' shadow-ray semantics: unlit draws are the
+// decorative geometry the environment already accounts for (sky domes, emissive
+// panels), and transparent draws transmit their share instead of blocking -
+// a hard shadow from either would darken what the lighting already handles.
+// Recording happens before the frustum cull inside prepareRasterization: a
+// mesh outside the view frustum still casts a visible shadow into it.
+void HeadlessBackend::recordSunShadowCaster(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material)
+{
+    if ((!sunShadowSunActive_ && !skyShadowsEnabled_) || mesh == 0 || modelMatrix == nullptr)
+    {
+        return;
+    }
+    if (material.unlit || material.opacity < 0.999f)
+    {
+        return;
+    }
+    sunshadows::SunShadowCaster caster;
+    caster.mesh = mesh;
+    std::memcpy(caster.transform, modelMatrix, sizeof(caster.transform));
+    sunShadowCasters_.push_back(caster);
+}
+
+// FNV-1a over the shared caster state (casters, camera, resolution): the
+// body both shadow-map hashes reuse, so the sun map additionally mixes in
+// the sun direction and the sky map stays direction-fixed.
+std::uint64_t HeadlessBackend::sunShadowCastersHash() const
+{
+    const auto mix = [](std::uint64_t hash, const float *values, std::size_t count)
+    {
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, values + index, sizeof(bits));
+            hash ^= bits;
+            hash *= 0x00000100000001B3ull;
+        }
+        return hash;
+    };
+    std::uint64_t hash = 0xCBF29CE484222325ull;
+    hash ^= shadowMapResolution_;
+    hash *= 0x00000100000001B3ull;
+    hash ^= sunShadowCasters_.size();
+    hash *= 0x00000100000001B3ull;
+    for (const sunshadows::SunShadowCaster &caster : sunShadowCasters_)
+    {
+        hash ^= caster.mesh;
+        hash *= 0x00000100000001B3ull;
+        hash = mix(hash, caster.transform, 16);
+    }
+    const float camera[3] = {cameraPosition_.x, cameraPosition_.y, cameraPosition_.z};
+    hash                  = mix(hash, camera, 3);
+    const float viewProjection[16] = {viewProjection_[0][0], viewProjection_[1][0], viewProjection_[2][0],
+        viewProjection_[3][0], viewProjection_[0][1], viewProjection_[1][1], viewProjection_[2][1],
+        viewProjection_[3][1], viewProjection_[0][2], viewProjection_[1][2], viewProjection_[2][2],
+        viewProjection_[3][2], viewProjection_[0][3], viewProjection_[1][3], viewProjection_[2][3],
+        viewProjection_[3][3]};
+    hash = mix(hash, viewProjection, 16);
+    return hash;
+}
+
+// The sun map's hash: the shared caster state plus the sun's on/off state
+// and direction. Two frames with the same hash produce the same map, so the
+// rebuild is skipped (the static-scene amortization).
+std::uint64_t HeadlessBackend::sunShadowStateHash() const
+{
+    std::uint64_t hash = sunShadowCastersHash();
+    hash ^= sunShadowSunActive_ ? 1u : 0u;
+    hash *= 0x00000100000001B3ull;
+    const float sun[3] = {lightDirection_.x, lightDirection_.y, lightDirection_.z};
+    for (std::size_t index = 0; index < 3; ++index)
+    {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, sun + index, sizeof(bits));
+        hash ^= bits;
+        hash *= 0x00000100000001B3ull;
+    }
+    return hash;
+}
+
+// The sky-visibility map's hash: the shared caster state alone (the map's
+// direction is the fixed world up).
+std::uint64_t HeadlessBackend::skyShadowStateHash() const
+{
+    return sunShadowCastersHash() ^ 0x5BF8CA9A17C1ull;
+}
+
+// Resolves the casters into build-ready geometry (the mesh lookups and the
+// exact world bounds boxes; see sun_shadows.hpp).
+std::vector<sunshadows::SunShadowGeometry> HeadlessBackend::sunShadowGeometries() const
+{
+    std::vector<sunshadows::SunShadowGeometry> geometries;
+    geometries.reserve(sunShadowCasters_.size());
+    for (const sunshadows::SunShadowCaster &caster : sunShadowCasters_)
+    {
+        const auto found = meshes.find(caster.mesh);
+        if (found == meshes.end())
+        {
+            continue;
+        }
+        const HeadlessMesh &mesh = found->second;
+        sunshadows::SunShadowGeometry geometry;
+        geometry.positions            = mesh.positions.data();
+        geometry.positionCount        = mesh.positions.size() / 3;
+        geometry.indices              = mesh.indices.data();
+        geometry.indexCount           = mesh.indices.size();
+        geometry.transformColumnMajor = caster.transform;
+        const glm::mat4 model         = glm::make_mat4(caster.transform);
+        // The mesh's local bounds box (center +/- radius, the bounding
+        // sphere's conservative box) transformed by the model matrix: exact
+        // under any rotation/scale, so the orthographic fit measures the
+        // caster's true footprint.
+        const glm::vec3 localMin = mesh.boundsCenter - glm::vec3(mesh.boundsRadius);
+        const glm::vec3 localMax = mesh.boundsCenter + glm::vec3(mesh.boundsRadius);
+        geometry.worldBoundsMin = glm::vec3(std::numeric_limits<float>::max());
+        geometry.worldBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
+        for (std::int32_t dz = 0; dz < 2; ++dz)
+        {
+            for (std::int32_t dy = 0; dy < 2; ++dy)
+            {
+                for (std::int32_t dx = 0; dx < 2; ++dx)
+                {
+                    const glm::vec3 localCorner(dx ? localMax.x : localMin.x,
+                        dy ? localMax.y : localMin.y,
+                        dz ? localMax.z : localMin.z);
+                    const glm::vec3 worldCorner(model * glm::vec4(localCorner, 1.0f));
+                    geometry.worldBoundsMin = glm::min(geometry.worldBoundsMin, worldCorner);
+                    geometry.worldBoundsMax = glm::max(geometry.worldBoundsMax, worldCorner);
+                }
+            }
+        }
+        if (mesh.boundsValid && std::isfinite(geometry.worldBoundsMin.x) && std::isfinite(geometry.worldBoundsMax.x))
+        {
+            geometries.push_back(geometry);
+        }
+    }
+    return geometries;
+}
+
+// The receiver box the orthographic u/v fits follow: the view frustum's
+// world bounds, from the frame's view-projection (the same matrix every
+// draw clipped through). A singular inverse falls back to the casters' own
+// fit.
+void HeadlessBackend::sunShadowReceiverBox(glm::vec3 &receiverMin, glm::vec3 &receiverMax, bool &haveBox) const
+{
+    receiverMin = glm::vec3(0.0f);
+    receiverMax = glm::vec3(0.0f);
+    haveBox     = false;
+    if (!cameraInitialized_)
+    {
+        return;
+    }
+    const glm::mat4 inverseViewProjection = glm::inverse(viewProjection_);
+    if (!std::isfinite(inverseViewProjection[0][0]))
+    {
+        return;
+    }
+    glm::vec3 corners[8];
+    std::size_t corner = 0;
+    for (std::int32_t dz = -1; dz <= 1; dz += 2)
+    {
+        for (std::int32_t dy = -1; dy <= 1; dy += 2)
+        {
+            for (std::int32_t dx = -1; dx <= 1; dx += 2)
+            {
+                const glm::vec4 world = inverseViewProjection * glm::vec4(
+                    static_cast<float>(dx), static_cast<float>(dy), static_cast<float>(dz), 1.0f);
+                if (world.w > 1.0e-6f)
+                {
+                    corners[corner++] = glm::vec3(world) / world.w;
+                }
+            }
+        }
+    }
+    if (corner != 8)
+    {
+        return;
+    }
+    receiverMin = corners[0];
+    receiverMax = corners[0];
+    for (std::size_t index = 1; index < corner; ++index)
+    {
+        receiverMin = glm::min(receiverMin, corners[index]);
+        receiverMax = glm::max(receiverMax, corners[index]);
+    }
+    haveBox = std::isfinite(receiverMin.x) && std::isfinite(receiverMax.x);
+}
+
+// Builds the shadow maps from the frame's recorded casters (see
+// sun_shadows.hpp). Called at endFrame: the maps this build produces are the
+// ones the NEXT frame shades through, and matching hashes skip each build
+// independently - a static scene pays each rasterization exactly once.
+void HeadlessBackend::updateSunShadowMap()
+{
+    if (sunShadowCasters_.empty() || (!sunShadowSunActive_ && !skyShadowsEnabled_))
+    {
+        sunShadowMap_.valid = false;
+        sunShadowBuiltHash_ = 0;
+        skyShadowMap_.valid = false;
+        skyShadowBuiltHash_ = 0;
+        return;
+    }
+    glm::vec3 receiverMin(0.0f);
+    glm::vec3 receiverMax(0.0f);
+    bool      haveReceiverBox = false;
+    sunShadowReceiverBox(receiverMin, receiverMax, haveReceiverBox);
+
+    if (sunShadowSunActive_)
+    {
+        const std::uint64_t hash = sunShadowStateHash();
+        if (!sunShadowMap_.valid || hash != sunShadowBuiltHash_)
+        {
+            sunshadows::buildSunShadowMap(sunShadowMap_,
+                sunShadowGeometries(),
+                shadowMapResolution_,
+                lightDirection_,
+                haveReceiverBox ? &receiverMin : nullptr,
+                haveReceiverBox ? &receiverMax : nullptr);
+            sunShadowBuiltHash_ = hash;
+        }
+    }
+    else
+    {
+        sunShadowMap_.valid = false;
+        sunShadowBuiltHash_ = 0;
+    }
+
+    if (skyShadowsEnabled_)
+    {
+        const std::uint64_t hash = skyShadowStateHash();
+        if (!skyShadowMap_.valid || hash != skyShadowBuiltHash_)
+        {
+            // Zenith direction: the sky's radiance arrives from straight
+            // above, so the map measures what stands between each point and
+            // the open sky.
+            sunshadows::buildSunShadowMap(skyShadowMap_,
+                sunShadowGeometries(),
+                shadowMapResolution_,
+                glm::vec3(0.0f, 1.0f, 0.0f),
+                haveReceiverBox ? &receiverMin : nullptr,
+                haveReceiverBox ? &receiverMax : nullptr);
+            skyShadowBuiltHash_ = hash;
+        }
+    }
+    else
+    {
+        skyShadowMap_.valid = false;
+        skyShadowBuiltHash_ = 0;
+    }
+
+    // Debug export (ENGINE_SHADOW_DEBUG=path): the built depth maps as PNGs,
+    // grayscale (1 = empty/far). Diagnostic aid for shadow-map bring-up.
+    if (const char *shadowDebug = std::getenv("ENGINE_SHADOW_DEBUG"); shadowDebug != nullptr)
+    {
+        const auto exportMap = [&](const sunshadows::SunShadowMap &map, const char *suffix)
+        {
+            if (!map.valid)
+            {
+                return;
+            }
+            std::string path(shadowDebug);
+            path += suffix;
+            std::vector<std::uint8_t> pixels(static_cast<std::size_t>(map.resolution) * map.resolution * 4);
+            for (std::size_t index = 0; index < pixels.size(); index += 4)
+            {
+                const std::uint8_t gray = static_cast<std::uint8_t>(
+                    std::clamp(map.depth[index / 4], 0.0f, 1.0f) * 255.0f + 0.5f);
+                pixels[index] = gray;
+                pixels[index + 1] = gray;
+                pixels[index + 2] = gray;
+                pixels[index + 3] = 255;
+            }
+            util::writePngRgba(path.c_str(), map.resolution, map.resolution, pixels.data(),
+                static_cast<std::size_t>(map.resolution) * 4, false, false);
+            std::fprintf(stderr, "shadow map %s: %ux%u texel=%.4f\n", suffix, map.resolution, map.resolution,
+                map.texelWorldSize);
+        };
+        exportMap(sunShadowMap_, ".sun.png");
+        exportMap(skyShadowMap_, ".sky.png");
+    }
 }
 
 // Copies the interleaved vertices into planar arrays, computes the bounding
@@ -818,19 +1744,12 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
         // fragments sample the level whose footprint matches their screen
         // texel instead of a shimmering base-level fetch (see
         // HeadlessTexture::sampleTrilinear). Non-square and non-pow2 sources
-        // still chain cleanly - each level halves its own extents. Repeat-
-        // addressed textures wrap their horizontal taps: the seam column
-        // averages with column 0 the way the base-level sampler wraps, so a
-        // continuous field baked around a sphere keeps its continuity at every
-        // mip level instead of showing a hard discontinuity column wherever
-        // the chain clamps (the vertical seam line a deep-mip deck draw
-        // otherwise paints across the sky).
+        // still chain cleanly - each level halves its own extents.
         {
             std::vector<HeadlessTexture::MipLevel> chain;
             std::uint32_t levelWidth  = description.width;
             std::uint32_t levelHeight = description.height;
             const float   *source     = texture.pixelsRGB.data();
-            const bool    wrapX      = texture.address == TextureAddress::Repeat;
             while (levelWidth > 1u || levelHeight > 1u)
             {
                 const std::uint32_t nextWidth  = std::max(1u, levelWidth / 2u);
@@ -844,13 +1763,10 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                     for (std::uint32_t x = 0; x < nextWidth; ++x)
                     {
                         // 2x2 box; odd extents clamp their far tap to the
-                        // last texel so edge texels keep full weight, except
-                        // the horizontal pair of a wrapping texture, whose
-                        // far tap wraps to column 0.
+                        // last texel so edge texels keep full weight.
                         const std::uint32_t x0 = x * 2u;
                         const std::uint32_t y0 = y * 2u;
-                        const std::uint32_t x1 = wrapX ? (x0 + 1u) % levelWidth
-                                                        : std::min(x0 + 1u, levelWidth - 1u);
+                        const std::uint32_t x1 = std::min(x0 + 1u, levelWidth - 1u);
                         const std::uint32_t y1 = std::min(y0 + 1u, levelHeight - 1u);
                         for (std::uint32_t channel = 0; channel < 3u; ++channel)
                         {
@@ -959,6 +1875,11 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
 
     const std::size_t triCount = activeIndices->size() / 3;
     statistics_.trianglesSubmitted += triCount;
+
+    // Shadow caster recording (sun_shadows.hpp): before the frustum cull
+    // inside prepareRasterization - a mesh outside the view still casts a
+    // visible shadow into it.
+    recordSunShadowCaster(mesh, modelMatrix, material);
 
     RasterSetup setup;
     if (!prepareRasterization(meshData, modelMatrix, material, activeIndices->data(), activeIndices->size(), setup,
@@ -1314,6 +2235,7 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
             statistics_.trianglesSubmitted += triCount;
             RasterSetup setup;
             const MeshMaterial &material = item.material != nullptr ? *item.material : defaultMaterial;
+            recordSunShadowCaster(item.mesh, item.modelMatrix, material);
             if (!prepareRasterization(meshData, item.modelMatrix, material, activeIndices->data(),
                     activeIndices->size(), setup, haveBounds ? &bounds : nullptr))
             {
@@ -1375,7 +2297,7 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
                             static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
                         : rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
                             static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                            static_cast<std::int32_t>(framebufferHeight) - 1))
+                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr))
                 {
                     ++statistics_.trianglesRasterized;
                 }
@@ -1403,7 +2325,7 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
                             static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
                         : rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
                             static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                            static_cast<std::int32_t>(framebufferHeight) - 1))
+                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr))
                 {
                     ++statistics_.trianglesRasterized;
                 }
@@ -2031,15 +2953,6 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.sheenFactor             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
     outSetup.doubleSided             = material.doubleSided;
     outSetup.alphaCutoff             = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
-    // Procedural mottle: the material's own scale/strength plus the frame's
-    // angular pixel size (an ~62-degree vertical field over the framebuffer
-    // height lands within a few percent of the true projection derivative -
-    // the mottle's footprint rule only needs the right order, not exact
-    // perspective). 0 strength keeps the pass off entirely.
-    outSetup.noiseScaleMeters        = material.noiseScaleMeters;
-    outSetup.noiseStrength           = material.noiseStrength;
-    outSetup.pixelAngleRadians       = framebufferHeight > 0u
-        ? 1.15f / static_cast<float>(framebufferHeight) : 0.0f;
 
     outSetup.hasBaseColorMap         = outSetup.baseColorMap != &neutralWhite_;
     outSetup.hasNormalMap            = outSetup.normalMap != &flatNormal_;
@@ -2611,26 +3524,6 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 continue;
                             }
                         }
-                        // Transparent texel discard (the commit's own
-                        // threshold, opacity * texel alpha): a texel that
-                        // cannot move the pixel needs no shading, no BRDF and
-                        // no RGB fetch - the skip mirrors the alpha-cutout
-                        // discard above. Per-texel-alpha sheets (cloud shells,
-                        // veils) spend most of their footprint at alpha ~0
-                        // where the blend already no-ops; this keeps the
-                        // per-sample cores from shading them first.
-                        if (setup.transparent && hasBaseColorMap)
-                        {
-                            const float transparentTexelAlpha
-                                = setup.opacity * baseColorMap->sampleAlpha(interpolatedUv.x, interpolatedUv.y);
-                            if (transparentTexelAlpha <= 0.0039f)
-                            {
-                                weightA += weightADx;
-                                weightB += weightBDx;
-                                pixelDepth += depthADx;
-                                continue;
-                            }
-                        }
                         glm::vec3       baseColor         = interpolatedColor * baseColorFactor;
                         if (hasBaseColorMap)
                         {
@@ -2689,7 +3582,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 // half-Lambert diffuse + Kajiya-Kay specular
                                 // against the strand tangent (= the shell
                                 // normal), hemispheric ambient, direct lights.
-                                // No normal map, no occlusion map, no lumen_gi
+                                // No normal map, no occlusion map, no radiance_cache
                                 // probe walk - same perf contract as fur.frag.
                                 const float strandShade = glm::mix(0.60f, 1.05f, setup.furLayerRatio);
                                 shaded = furShade(geometryNormal,
@@ -2752,19 +3645,6 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             }
                             metallic  = std::clamp(metallic, 0.0f, 1.0f);
                             roughness = std::clamp(roughness, minimumRoughness, 1.0f);
-                            // Procedural surface mottle (MeshMaterial::noiseScaleMeters,
-                            // quad_shading.hpp's surfaceMottle): same field the run
-                            // kernel samples, at the same footprint rule - the two
-                            // paths photograph one surface.
-                            if (setup.noiseStrength > 0.0f)
-                            {
-                                const glm::vec3 toSample = interpolatedPosition - cameraPosition_;
-                                const float mottleLambda = std::max(setup.noiseScaleMeters,
-                                    glm::length(toSample) * setup.pixelAngleRadians * 2.4f);
-                                baseColor *= 1.0f + setup.noiseStrength
-                                    * shadingrun::surfaceMottle(interpolatedPosition.x, interpolatedPosition.y,
-                                        interpolatedPosition.z, mottleLambda);
-                            }
                             const float occlusion
                                 = hasOcclusion
                                     ? 1.0f
@@ -2787,7 +3667,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
                                 setup.opacity,
                                 setup.sheenFactor);
-                            // Indirect specular (lumen_reflection field hook):
+                            // Indirect specular (reflection_field field hook):
                             // the field texel this pixel projects into carries
                             // the expected GGX-lobe response of its material,
                             // so the add is the whole composite (linear space,
@@ -3262,9 +4142,32 @@ void HeadlessBackend::fanPixelWindow(const TileBinRecord &record, std::uint32_t 
 // loop, these become registers hoisted out of the x-loop (the depth/colour
 // stores are restrict-qualified, so nothing inside the loop can clobber
 // them). Reading setup fields directly would re-load them per pixel.
+// The GI ambient walk the tile cache and the per-pixel path amortize (see
+// the header declaration): gather field first, probe-grid walk as the
+// fallback. Pure read of the prepared snapshots, safe to call concurrently.
+bool HeadlessBackend::resolveGiAmbient(const glm::vec3 &position, const glm::vec3 &normal, glm::vec3 &outIrradiance,
+    float &outCoverage, float &outOcclusion) const
+{
+    if (preparedGatherField_.valid)
+    {
+        glm::vec3 gatherIrradiance(0.0f);
+        float     gatherCoverage = 0.0f;
+        float     gatherOcclusion = 1.0f;
+        if (sampleGatherField(preparedGatherField_, position, gatherIrradiance, gatherCoverage, gatherOcclusion))
+        {
+            outIrradiance = gatherIrradiance;
+            outCoverage   = gatherCoverage;
+            outOcclusion  = gatherOcclusion;
+            return true;
+        }
+    }
+    outOcclusion = 1.0f;
+    return giProbeGridIrradiance(preparedProbeGrid_, position, normal, outIrradiance, outCoverage);
+}
+
 glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const TileBinRecord &record, float weightA,
     float weightB, float inverseWA, float inverseWB, float inverseWC, bool *outFieldTraced,
-    const GiAmbientSample *giSample) const
+    const GiAmbientSample *giSample, const glm::vec3 *interpolatedPair, const glm::vec3 *geometryNormalPair) const
 {
     const RasterVertex &cornerA = record.corners[0];
     const RasterVertex &cornerB = record.corners[1];
@@ -3291,7 +4194,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     const HeadlessTexture *emissiveMap        = setup.emissiveMap;
     const glm::vec3   cameraPosition          = cameraPosition_;
     const glm::vec3   lightDirection          = lightDirection_;
-    const glm::vec3   sunRadiance             = sunRadiance_;
+    glm::vec3         sunRadiance             = sunRadiance_;
     const glm::vec3   ambientSky              = ambientSky_;
     const glm::vec3   ambientGround           = ambientGround_;
     const PreparedDirectLight *const lights   = directLights_.data();
@@ -3331,11 +4234,18 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     glm::vec3 shaded = baseColor;
     if (!unlit)
     {
-        const glm::vec3 interpolatedPosition = correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
-                                             + correctedC * cornerC.worldPosition;
-        const glm::vec3 interpolatedNormal   = correctedA * cornerA.worldNormal + correctedB * cornerB.worldNormal
-                                             + correctedC * cornerC.worldNormal;
-        const glm::vec3 geometryNormal       = glm::normalize(interpolatedNormal);
+        // The interpolated surface pair, when the caller already computed it
+        // (the tile cache's prologue needs the same values for its gates), is
+        // passed in instead of being re-derived: the caller evaluates the
+        // exact expressions below, so the values are identical.
+        const glm::vec3 interpolatedPosition = interpolatedPair != nullptr
+            ? *interpolatedPair
+            : correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
+                + correctedC * cornerC.worldPosition;
+        const glm::vec3 geometryNormal = geometryNormalPair != nullptr
+            ? *geometryNormalPair
+            : glm::normalize(correctedA * cornerA.worldNormal + correctedB * cornerB.worldNormal
+                + correctedC * cornerC.worldNormal);
 
         // Without a normal map the surface normal IS the interpolated
         // geometry normal: skip the TBN construction and its per-pixel
@@ -3364,6 +4274,15 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             normal = glm::normalize(tbn * tangentNormal);
         }
 
+        // Sun shadow map (sun_shadows.hpp): the sun's diffuse and specular
+        // terms scale by the percentage-closer visibility of this point.
+        // The local sunRadiance copy the caller value-caches takes the
+        // factor, so pbrShade's math stays untouched.
+        if (sunShadowMap_.valid && sunRadiance.x + sunRadiance.y + sunRadiance.z > 0.0f)
+        {
+            sunRadiance *= sunShadowVisibility(interpolatedPosition, normal);
+        }
+
         float metallic  = metallicFactor;
         float roughness = roughnessFactor;
         if (hasMetallicRoughnessMap)
@@ -3374,46 +4293,61 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
         }
         metallic  = std::clamp(metallic, 0.0f, 1.0f);
         roughness = std::clamp(roughness, minimumRoughness, 1.0f);
-        // Procedural surface mottle (MeshMaterial::noiseScaleMeters,
-        // quad_shading.hpp's surfaceMottle): the per-record path's twin of
-        // the per-sample and run-kernel applications - one world-anchored
-        // field, one footprint rule, three call sites.
-        if (setup.noiseStrength > 0.0f)
-        {
-            const glm::vec3 toSample = interpolatedPosition - cameraPosition;
-            const float mottleLambda = std::max(setup.noiseScaleMeters,
-                glm::length(toSample) * setup.pixelAngleRadians * 2.4f);
-            baseColor *= 1.0f + setup.noiseStrength
-                * shadingrun::surfaceMottle(interpolatedPosition.x, interpolatedPosition.y,
-                    interpolatedPosition.z, mottleLambda);
-        }
-        const float occlusion
+        float occlusion
             = hasOcclusion
                   ? 1.0f
                         - occlusionStrength * (1.0f - occlusionMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY).r)
                   : 1.0f;
+        // Zenith sky visibility (sun_shadows.hpp): the HEMISPHERIC ambient
+        // is the sky's diffuse approximation, so what stands between this
+        // point and the open sky scales it (the GI ambient - light bounced
+        // from every direction - stays untouched; an emissive-lit interior
+        // keeps its bounce, an open field loses its sky fill under props).
+        glm::vec3 ambientSkySky    = ambientSky;
+        glm::vec3 ambientGroundSky = ambientGround;
+        if (skyShadowMap_.valid && normal.y > 0.0f)
+        {
+            const float skyVisible = skyShadowVisibility(interpolatedPosition, normal);
+            ambientSkySky *= skyVisible;
+            ambientGroundSky *= skyVisible;
+        }
+        // Gather field (radiance_cache.gather hook): the final gather's
+        // per-pixel irradiance replaces the probe-walk ambient wherever the
+        // field covers the position - the contact-scale structure (short-
+        // range occlusion, caustic irradiance) the coarse probe lattice
+        // cannot resolve. pbrShade consumes it as a GiAmbientSample; the
+        // probe-walk grid path stays the fallback for refused positions.
+        GiAmbientSample gatherSample;
+        const GiAmbientSample *effectiveGiSample = giSample;
+        if (effectiveGiSample == nullptr && preparedGatherField_.valid
+            && sampleGatherField(preparedGatherField_, interpolatedPosition, gatherSample.irradiance,
+                gatherSample.coverage, gatherSample.occlusion))
+        {
+            gatherSample.valid = true;
+            effectiveGiSample  = &gatherSample;
+        }
         shaded = pbrShade(normal,
             interpolatedPosition,
             cameraPosition,
             lightDirection,
             sunRadiance,
-            ambientSky,
-            ambientGround,
+            ambientSkySky,
+            ambientGroundSky,
             baseColor,
             metallic,
             roughness,
             occlusion,
             lights,
             lightCount,
-            giSample == nullptr && preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
+            effectiveGiSample == nullptr && preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
             setup.opacity,
             setup.sheenFactor,
-            giSample);
+            effectiveGiSample);
 
-        // Indirect specular (lumen_reflection field hook): the field texel
+        // Indirect specular (reflection_field field hook): the field texel
         // this pixel projects into carries the expected GGX-lobe response of
         // its material, so the add is the whole composite. Linear space, per
-        // the module's estimator contract; tone mapping happens below.
+        // the module's estimator contract; tone mapping happens below. The
         if (preparedReflectionField_.valid)
         {
             bool fieldTraced = false;
@@ -3455,9 +4389,10 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
 // least one pixel was written.
 // Run-shading dispatch predicate: the draw's shading path fits the 4-wide
 // run kernel (no normal map, no cloth sheen, no direct lights, and either an
-// unlit draw or no probe grid - a lit draw under a probe grid keeps the
-// per-sample path so the probe walk cannot silently drop to the hemispheric
-// ambient), and the record's framebuffer window is wide enough to amortize a
+// probe grid included - the lane loop resolves each lane's ambient sample
+// through the tile cache, so the walk amortizes exactly like the per-sample
+// path instead of dropping to the hemispheric ambient), and the record's
+// framebuffer window is wide enough to amortize a
 // run (narrow records keep the per-sample core; their lanes mostly reject
 // and the run bookkeeping would cost more than the SoA pass saves).
 // Alpha-cutout draws FIT the kernel: the lane loop fetches each lane's texel
@@ -3476,25 +4411,17 @@ bool HeadlessBackend::recordRunsEligible(const RasterSetup &setup, const TileBin
     {
         return false;
     }
-    if (!setup.unlit && preparedProbeGrid_.valid)
-    {
-        return false;
-    }
     std::int32_t firstX = 0;
     std::int32_t lastX  = 0;
     std::int32_t firstY = 0;
     std::int32_t lastY  = 0;
     fanPixelWindow(record, framebufferWidth, framebufferHeight, firstX, lastX, firstY, lastY);
-    // The width floor stays at 1: the measured A/B (globe 938 -> 696 ms on
-    // the 2-core sandbox) shows narrow records shade faster inside the 4-wide
-    // kernel than through the per-sample core, and the inactive lanes cost
-    // nothing next to the per-sample path's scalar shading.
-    return lastX - firstX + 1 >= 1;
+    return lastX - firstX + 1 >= 16;
 }
 
 bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBinRecord &record,
     std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-    GiQuadCache *giQuads)
+    TileShadingCache *tiles)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
@@ -3563,16 +4490,26 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
     bool fieldTraced = false;
-    // Quad amortization of the probe-grid ambient (see GiQuadCache): only
+    // Two-tier amortization of the probe-grid ambient (see GiTileCache): only
     // draws whose shading normal IS the interpolated geometry normal can
-    // share a quad sample (a normal map perturbs it per pixel, a two-sided
+    // share a cached sample (a normal map perturbs it per pixel, a two-sided
     // draw flips it on back-facing fragments; unlit and fur draws never
-    // consult the probe grid).
-    const bool giQuadEligible = giQuads != nullptr && preparedProbeGrid_.valid && !setup.unlit && !setup.fur
-        && !setup.hasNormalMap && !setup.doubleSided;
-    GiQuadCache::Entry *const quadEntries
-        = giQuadEligible && !giQuads->entries.empty() ? giQuads->entries.data() : nullptr;
-    const std::uint32_t quadStride = giQuads != nullptr ? giQuads->stride : 0u;
+    // consult the probe grid). The field cache applies to every lit draw:
+    // its gates (roughness agreement, position tolerance) refuse any sample
+    // the pixel's own material would answer differently.
+    const bool giCacheEligible = tiles != nullptr && tiles->gi != nullptr && preparedProbeGrid_.valid
+        && !setup.unlit && !setup.fur && !setup.hasNormalMap && !setup.doubleSided;
+    GiTileCache *const tileCache = giCacheEligible ? tiles->gi : nullptr;
+    // The interpolated surface pair is computed once per covered pixel and
+    // shared by the cache resolve and the shading kernel (which would
+    // otherwise re-derive the same perspective-correct values); the locals
+    // live outside the scan loops so a passing pixel writes them in place.
+    // Every lit draw under a probe grid needs the pair, cache-eligible or
+    // not (a normal-mapped or two-sided draw still shades with the geometry
+    // normal and world position).
+    const bool surfacePairNeeded = preparedProbeGrid_.valid && !setup.unlit && !setup.fur;
+    glm::vec3   pairPosition(0.0f);
+    glm::vec3   pairNormal(0.0f, 1.0f, 0.0f);
     for (std::int32_t y = firstY; y <= lastY; ++y)
     {
         const float sampleY  = static_cast<float>(y) + 0.5f;
@@ -3643,10 +4580,15 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                 // near-identical normal - are what the walk's own inputs vary
                 // smoothly over, so a passing neighbor returns the sample the
                 // per-pixel walk would have produced to within the gates'
-                // tolerance.
-                GiAmbientSample quadSample;
-                const GiAmbientSample *giSample = nullptr;
-                if (quadEntries != nullptr)
+                // tolerance. The interpolated surface pair computed here is
+                // the same pair the shading kernel needs (the exact
+                // perspective-correct expressions), so it is passed through
+                // instead of being re-derived per pixel.
+                GiAmbientSample         quadSample;
+                const GiAmbientSample  *giSample        = nullptr;
+                const glm::vec3        *positionHint    = nullptr;
+                const glm::vec3        *geometryHint    = nullptr;
+                if (surfacePairNeeded)
                 {
                     const float inverseWSum = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
                     const float inversePerspective = 1.0f / inverseWSum;
@@ -3656,41 +4598,32 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                     const RasterVertex &cornerA    = record.corners[0];
                     const RasterVertex &cornerB    = record.corners[1];
                     const RasterVertex &cornerC    = record.corners[2];
-                    const glm::vec3 pixelPosition  = correctedA * cornerA.worldPosition
-                                                    + correctedB * cornerB.worldPosition
-                                                    + correctedC * cornerC.worldPosition;
+                    pairPosition = correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
+                                 + correctedC * cornerC.worldPosition;
                     const glm::vec3 pixelNormalRaw = correctedA * cornerA.worldNormal
                                                     + correctedB * cornerB.worldNormal
                                                     + correctedC * cornerC.worldNormal;
                     const float     pixelNormalLength = glm::length(pixelNormalRaw);
-                    const glm::vec3 pixelNormal = pixelNormalLength > 1.0e-8f ? pixelNormalRaw / pixelNormalLength
-                                                                          : glm::vec3(0.0f, 1.0f, 0.0f);
-                    GiQuadCache::Entry &entry
-                        = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1) * quadStride
-                                      + static_cast<std::size_t>((x - xBandBegin) >> 1)];
-                    const glm::vec3 positionDelta = entry.position - pixelPosition;
-                    if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
-                        && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
+                    pairNormal = pixelNormalLength > 1.0e-8f ? pixelNormalRaw / pixelNormalLength
+                                                             : glm::vec3(0.0f, 1.0f, 0.0f);
+                    positionHint = &pairPosition;
+                    geometryHint = &pairNormal;
+                    if (tileCache != nullptr)
                     {
-                        quadSample.irradiance = entry.irradiance;
-                        quadSample.coverage   = entry.coverage;
-                        quadSample.valid      = true;
+                        quadSample = tileCache->resolve(
+                            x - xBandBegin, y - yBandBegin, tiles->recordTag, pairPosition, pairNormal,
+                            [this](const glm::vec3 &walkPosition, const glm::vec3 &walkNormal, glm::vec3 &outIrradiance,
+                                float &outCoverage, float &outOcclusion) -> bool
+                            {
+                                return resolveGiAmbient(walkPosition, walkNormal, outIrradiance, outCoverage,
+                                    outOcclusion);
+                            });
+                        giSample = &quadSample;
                     }
-                    else
-                    {
-                        quadSample.valid = giProbeGridIrradiance(
-                            preparedProbeGrid_, pixelPosition, pixelNormal, quadSample.irradiance, quadSample.coverage);
-                        entry.position   = pixelPosition;
-                        entry.normal     = pixelNormal;
-                        entry.irradiance = quadSample.irradiance;
-                        entry.coverage   = quadSample.coverage;
-                        entry.valid      = true;
-                    }
-                    giSample = &quadSample;
                 }
                 const glm::vec3 shaded
                     = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC,
-                        &fieldTraced, giSample);
+                        &fieldTraced, giSample, positionHint, geometryHint);
 
                 if (setup.transparent)
                 {
@@ -3769,7 +4702,7 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
 
 bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const TileBinRecord &record,
     std::int32_t xBandBegin, std::int32_t xBandEnd, std::int32_t yBandBegin, std::int32_t yBandEnd,
-    GiQuadCache *giQuads)
+    TileShadingCache *tiles)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
     {
@@ -3837,16 +4770,26 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
     bool fieldTraced = false;
-    // Quad amortization of the probe-grid ambient (see GiQuadCache): only
+    // Two-tier amortization of the probe-grid ambient (see GiTileCache): only
     // draws whose shading normal IS the interpolated geometry normal can
-    // share a quad sample (a normal map perturbs it per pixel, a two-sided
+    // share a cached sample (a normal map perturbs it per pixel, a two-sided
     // draw flips it on back-facing fragments; unlit and fur draws never
-    // consult the probe grid).
-    const bool giQuadEligible = giQuads != nullptr && preparedProbeGrid_.valid && !setup.unlit && !setup.fur
-        && !setup.hasNormalMap && !setup.doubleSided;
-    GiQuadCache::Entry *const quadEntries
-        = giQuadEligible && !giQuads->entries.empty() ? giQuads->entries.data() : nullptr;
-    const std::uint32_t quadStride = giQuads != nullptr ? giQuads->stride : 0u;
+    // consult the probe grid). The field cache applies to every lit draw:
+    // its gates (roughness agreement, position tolerance) refuse any sample
+    // the pixel's own material would answer differently.
+    const bool giCacheEligible = tiles != nullptr && tiles->gi != nullptr && preparedProbeGrid_.valid
+        && !setup.unlit && !setup.fur && !setup.hasNormalMap && !setup.doubleSided;
+    GiTileCache *const tileCache = giCacheEligible ? tiles->gi : nullptr;
+    // The interpolated surface pair is computed once per covered pixel and
+    // shared by the cache resolve and the shading kernel (which would
+    // otherwise re-derive the same perspective-correct values); the locals
+    // live outside the scan loops so a passing pixel writes them in place.
+    // Every lit draw under a probe grid needs the pair, cache-eligible or
+    // not (a normal-mapped or two-sided draw still shades with the geometry
+    // normal and world position).
+    const bool surfacePairNeeded = preparedProbeGrid_.valid && !setup.unlit && !setup.fur;
+    glm::vec3   pairPosition(0.0f);
+    glm::vec3   pairNormal(0.0f, 1.0f, 0.0f);
 
     // 4-wide shading runs (see quad_shading.hpp): the run kernel models the
     // whole !unlit shading path for draws without direct lights, cloth sheen,
@@ -3895,9 +4838,6 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     runContext.albedoFilled    = hasBaseColorMap;
     runContext.unlit           = setup.unlit;
     runContext.normalMapped    = normalMapped;
-    runContext.noiseScaleMeters  = setup.noiseScaleMeters;
-    runContext.noiseStrength     = setup.noiseStrength;
-    runContext.pixelAngleRadians = setup.pixelAngleRadians;
     runContext.exposure        = environment_.exposure;
     runContext.toneMapping     = environment_.toneMapping;
     // The reflection-field response and emissive add in LINEAR space (the
@@ -3974,7 +4914,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
             const glm::vec3 pixelPosition = correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
                 + correctedC * cornerC.worldPosition;
             const float roughnessClamped = std::clamp(runRoughness, minimumRoughness, 1.0f);
-            bool      traced = false;
+            bool traced = false;
             shadedOut += sampleReflectionField(preparedReflectionField_, pixelPosition, roughnessClamped, &traced);
             sampleFieldTraced = traced;
         }
@@ -4079,6 +5019,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     // run's probe-grid verdict otherwise (see the scratch
                     // hoist comment above).
                     run.giValid[lane] = false;
+                    run.giOcclusion[lane] = 1.0f;
                     const float weightC = 1.0f - laneWeightA[lane] - laneWeightB[lane];
                     const float inverseWSum = laneWeightA[lane] * inverseWA + laneWeightB[lane] * inverseWB
                                              + weightC * inverseWC;
@@ -4191,47 +5132,61 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     run.roughness[lane] = roughness;
                     run.occlusion[lane] = occlusion;
 
-                    // Probe-grid quad sample: the per-sample path's entry
-                    // logic, per lane.
-                    if (quadEntries != nullptr)
+                    // The lane's interpolated surface pair, shared by the
+                    // sun-shadow visibility below and the tile-cache walk
+                    // (the same perspective-correct math the shading kernel
+                    // runs).
+                    const bool laneNeedsSurfacePair
+                        = ((sunShadowMap_.valid || skyShadowMap_.valid) && !setup.unlit) || tileCache != nullptr;
+                    glm::vec3 pixelPosition(0.0f);
+                    glm::vec3 pixelNormal(0.0f, 1.0f, 0.0f);
+                    if (laneNeedsSurfacePair)
                     {
-                        const glm::vec3 pixelPosition = correctedA * cornerA.worldPosition
+                        pixelPosition = correctedA * cornerA.worldPosition
                             + correctedB * cornerB.worldPosition + correctedC * cornerC.worldPosition;
                         const glm::vec3 pixelNormalRaw = correctedA * cornerA.worldNormal
                             + correctedB * cornerB.worldNormal + correctedC * cornerC.worldNormal;
                         const float     pixelNormalLength = glm::length(pixelNormalRaw);
-                        const glm::vec3 pixelNormal = pixelNormalLength > 1.0e-8f
+                        pixelNormal = pixelNormalLength > 1.0e-8f
                             ? pixelNormalRaw / pixelNormalLength
                             : glm::vec3(0.0f, 1.0f, 0.0f);
-                        GiQuadCache::Entry &entry = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1)
-                            * quadStride + static_cast<std::size_t>((x + lane - xBandBegin) >> 1)];
-                        const glm::vec3 positionDelta = entry.position - pixelPosition;
-                        if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
-                            && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
+                    }
+
+                    // Sun shadow visibility (sun_shadows.hpp), per lane: the
+                    // run kernel multiplies the sun weight by it, exactly
+                    // where the per-sample path scales its sunRadiance copy.
+                    // The zenith sky visibility (the hemispheric ambient's
+                    // grounding factor) rides its own lane field.
+                    if (!setup.unlit)
+                    {
+                        if (sunShadowMap_.valid)
                         {
-                            run.giValid[lane]         = true;
-                            run.giCoverage[lane]       = entry.coverage;
-                            run.giIrradiance[0][lane] = entry.irradiance.x;
-                            run.giIrradiance[1][lane] = entry.irradiance.y;
-                            run.giIrradiance[2][lane] = entry.irradiance.z;
+                            run.sunVisibility[lane] = sunShadowVisibility(pixelPosition, pixelNormal);
                         }
-                        else
+                        if (skyShadowMap_.valid && pixelNormal.y > 0.0f)
                         {
-                            glm::vec3 irradiance(0.0f);
-                            float     coverage = 0.0f;
-                            const bool valid = giProbeGridIrradiance(
-                                preparedProbeGrid_, pixelPosition, pixelNormal, irradiance, coverage);
-                            entry.position   = pixelPosition;
-                            entry.normal     = pixelNormal;
-                            entry.irradiance = irradiance;
-                            entry.coverage   = coverage;
-                            entry.valid      = true;
-                            run.giValid[lane]         = valid;
-                            run.giCoverage[lane]      = coverage;
-                            run.giIrradiance[0][lane] = irradiance.x;
-                            run.giIrradiance[1][lane] = irradiance.y;
-                            run.giIrradiance[2][lane] = irradiance.z;
+                            run.skyVisibility[lane] = skyShadowVisibility(pixelPosition, pixelNormal);
                         }
+                    }
+
+                    // Probe-grid tile-cache sample: the per-sample path's
+                    // resolve, per lane.
+                    if (tileCache != nullptr)
+                    {
+                        const GiAmbientSample laneSample = tileCache->resolve(
+                            x + lane - xBandBegin, y - yBandBegin, tiles->recordTag, pixelPosition, pixelNormal,
+                            [this](const glm::vec3 &walkPosition, const glm::vec3 &walkNormal,
+                                glm::vec3 &outIrradiance, float &outCoverage, float &outOcclusion) -> bool
+                            {
+                                return resolveGiAmbient(walkPosition, walkNormal, outIrradiance, outCoverage,
+                                    outOcclusion);
+                            });
+                        run.giValid[lane]         = laneSample.valid;
+                        run.giCoverage[lane]      = laneSample.coverage;
+                        run.giOcclusion[lane]     = laneSample.occlusion;
+                        run.giIrradiance[0][lane] = laneSample.irradiance.x;
+                        run.giIrradiance[1][lane] = laneSample.irradiance.y;
+                        run.giIrradiance[2][lane] = laneSample.irradiance.z;
                     }
                 }
 
@@ -4319,50 +5274,43 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 // smoothly over, so a passing neighbor returns the sample the
                 // per-pixel walk would have produced to within the gates'
                 // tolerance.
-                GiAmbientSample quadSample;
-                const GiAmbientSample *giSample = nullptr;
-                if (quadEntries != nullptr)
+                GiAmbientSample         quadSample;
+                const GiAmbientSample  *giSample     = nullptr;
+                const glm::vec3        *positionHint = nullptr;
+                const glm::vec3        *geometryHint = nullptr;
+                if (surfacePairNeeded)
                 {
                     const float inverseWSum = weightA * inverseWA + weightB * inverseWB + weightC * inverseWC;
                     const float inversePerspective = 1.0f / inverseWSum;
                     const float correctedA         = weightA * inverseWA * inversePerspective;
                     const float correctedB         = weightB * inverseWB * inversePerspective;
                     const float correctedC         = 1.0f - correctedA - correctedB;
-                    const glm::vec3 pixelPosition  = correctedA * cornerA.worldPosition
-                                                    + correctedB * cornerB.worldPosition
-                                                    + correctedC * cornerC.worldPosition;
+                    pairPosition = correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
+                                 + correctedC * cornerC.worldPosition;
                     const glm::vec3 pixelNormalRaw = correctedA * cornerA.worldNormal
                                                     + correctedB * cornerB.worldNormal
                                                     + correctedC * cornerC.worldNormal;
                     const float     pixelNormalLength = glm::length(pixelNormalRaw);
-                    const glm::vec3 pixelNormal = pixelNormalLength > 1.0e-8f ? pixelNormalRaw / pixelNormalLength
-                                                                          : glm::vec3(0.0f, 1.0f, 0.0f);
-                    GiQuadCache::Entry &entry
-                        = quadEntries[static_cast<std::size_t>((y - yBandBegin) >> 1) * quadStride
-                                      + static_cast<std::size_t>((x - xBandBegin) >> 1)];
-                    const glm::vec3 positionDelta = entry.position - pixelPosition;
-                    if (entry.valid && glm::dot(pixelNormal, entry.normal) >= 0.995f
-                        && std::fabs(glm::dot(pixelNormal, positionDelta)) <= 0.05f)
+                    pairNormal = pixelNormalLength > 1.0e-8f ? pixelNormalRaw / pixelNormalLength
+                                                             : glm::vec3(0.0f, 1.0f, 0.0f);
+                    positionHint = &pairPosition;
+                    geometryHint = &pairNormal;
+                    if (tileCache != nullptr)
                     {
-                        quadSample.irradiance = entry.irradiance;
-                        quadSample.coverage   = entry.coverage;
-                        quadSample.valid      = true;
+                        quadSample = tileCache->resolve(
+                            x - xBandBegin, y - yBandBegin, tiles->recordTag, pairPosition, pairNormal,
+                            [this](const glm::vec3 &walkPosition, const glm::vec3 &walkNormal, glm::vec3 &outIrradiance,
+                                float &outCoverage, float &outOcclusion) -> bool
+                            {
+                                return resolveGiAmbient(walkPosition, walkNormal, outIrradiance, outCoverage,
+                                    outOcclusion);
+                            });
+                        giSample = &quadSample;
                     }
-                    else
-                    {
-                        quadSample.valid = giProbeGridIrradiance(
-                            preparedProbeGrid_, pixelPosition, pixelNormal, quadSample.irradiance, quadSample.coverage);
-                        entry.position   = pixelPosition;
-                        entry.normal     = pixelNormal;
-                        entry.irradiance = quadSample.irradiance;
-                        entry.coverage   = quadSample.coverage;
-                        entry.valid      = true;
-                    }
-                    giSample = &quadSample;
                 }
                 const glm::vec3 shaded
                     = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC,
-                        &fieldTraced, giSample);
+                        &fieldTraced, giSample, positionHint, geometryHint);
 
                 if (setup.transparent)
                 {
@@ -4580,30 +5528,34 @@ void HeadlessBackend::rasterizeTileRecords(
         const std::int32_t yBandBegin = static_cast<std::int32_t>(tileY * tileHeight_);
         const std::int32_t yBandEnd = static_cast<std::int32_t>(
             std::min<std::int64_t>(framebufferHeightInt, static_cast<std::int64_t>(yBandBegin) + tileHeight_) - 1);
-        // One probe-grid quad cache per worker thread, reset per owned tile:
-        // the amortization is only valid within a tile's pixels (see
-        // GiQuadCache), and concurrent tile owners must never share entries.
+        // One probe-grid tile cache per worker thread, reset per owned tile:
+        // the amortization is only valid within a tile's samples (see
+        // GiTileCache), and concurrent tile owners must never share entries.
         // The thread-local keeps its capacity across tiles and frames, so a
         // steady-state tile costs one allocation-free clear.
-        static thread_local GiQuadCache quadCache;
+        static thread_local GiTileCache tileCache;
         if (preparedProbeGrid_.valid)
         {
-            quadCache.resetForTile((tileWidth_ + 1u) / 2u, (tileHeight_ + 1u) / 2u);
+            tileCache.resetForTile(tileWidth_, tileHeight_);
         }
         // Run-shading dispatch (see rasterizeFanRecordRuns): wide records of
         // run-eligible draws shade in 4-wide SoA passes; every other record
         // (and every narrow window) keeps the shared per-sample core, whose
         // codegen this dispatch keeps pristine by keeping the run machinery
         // in its own outlined function.
-        GiQuadCache *const tileQuadCache = preparedProbeGrid_.valid ? &quadCache : nullptr;
+        TileShadingCache tileShading;
+        tileShading.gi = preparedProbeGrid_.valid ? &tileCache : nullptr;
         for (std::uint32_t entry = begin; entry < end; ++entry)
         {
             const TileBinRecord &record = tileRecords_[tileItems_[entry]];
+            // The record's chunk index identifies its (single, continuous)
+            // surface to the caches' tag checks.
+            tileShading.recordTag = tileItems_[entry];
             const bool rasterized = record.shadeRuns
                 ? rasterizeFanRecordRuns(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin,
-                    yBandEnd, tileQuadCache)
+                    yBandEnd, &tileShading)
                 : rasterizeFanRecord(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin, yBandEnd,
-                    tileQuadCache);
+                    &tileShading);
             if (rasterized)
             {
                 // Counted per (record, tile): a fan record spanning several

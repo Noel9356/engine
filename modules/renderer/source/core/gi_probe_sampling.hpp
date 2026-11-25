@@ -1,16 +1,16 @@
-// lumen_gi probe-grid sampling shared by both backends: the borrowed snapshot
-// types the renderer module copies from the lumen_gi capability, the prepared
+// radiance_cache probe-grid sampling shared by both backends: the borrowed snapshot
+// types the renderer module copies from the radiance_cache capability, the prepared
 // per-snapshot level descriptors, and the trilinear validity-weighted SH2
 // irradiance walk the headless pixel path runs (the GLSL twin lives in
 // shaders/mesh.frag). The SH2 convolution is the same as
-// lumen_gi::evaluateProbeIrradiance; kept textually in sync because both
+// radiance_cache::evaluateProbeIrradiance; kept textually in sync because both
 // sides must agree on the exported probe layout.
 
 #pragma once
 
 #include "shading_inline.hpp"
 
-#include <engine/lumen_gi/capabilities.hpp>
+#include <engine/radiance_cache/capabilities.hpp>
 
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
@@ -47,7 +47,7 @@ struct GiProbeLevel
     std::uint32_t offset  = 0; // first probe index inside GiProbeGrid::probes
 };
 
-// Snapshot of the lumen_gi world-space radiance cache borrowed by the
+// Snapshot of the radiance_cache world-space radiance cache borrowed by the
 // renderer: a GiProbeHeader plus the probe array behind it. Backends copy the
 // data synchronously inside setProbeGrid(), so the borrowed view only needs
 // to stay valid for that call. A null/empty snapshot means "no GI": the
@@ -55,8 +55,8 @@ struct GiProbeLevel
 // pre-hook behavior).
 struct GiProbeGrid
 {
-    lumen_gi::GiProbeHeader  header{};
-    const lumen_gi::GiProbe *probes     = nullptr; // borrowed; header.probeCount entries
+    radiance_cache::GiProbeHeader  header{};
+    const radiance_cache::GiProbe *probes     = nullptr; // borrowed; header.probeCount entries
     std::uint32_t            probeCount = 0;
 
     // Precomputed level descriptors, filled once per snapshot by
@@ -78,7 +78,7 @@ struct GiProbeGrid
 // snapshot carries a usable pair of levels.
 inline bool buildProbeLevels(GiProbeGrid &grid)
 {
-    const lumen_gi::GiProbeHeader &header = grid.header;
+    const radiance_cache::GiProbeHeader &header = grid.header;
     grid.levelsBuilt                      = false;
     if (!grid.valid() || header.level0Dimensions[0] < 2u || header.level1Dimensions[0] < 2u)
     {
@@ -124,7 +124,7 @@ struct PreparedGiProbeGrid
     float        halfCell0 = 0.0f;
     // Borrowed from the owning backend copy (valid for the frame; see
     // GiProbeGrid's borrowed-view contract).
-    const lumen_gi::GiProbe *probes     = nullptr;
+    const radiance_cache::GiProbe *probes     = nullptr;
     std::uint32_t            probeCount = 0;
     bool                     valid      = false;
 };
@@ -205,7 +205,7 @@ inline Sh2Basis sh2BasisFor(const glm::vec3 &normal)
 }
 
 // Cosine-lobed SH2 irradiance at one probe (the same convolution as
-// lumen_gi::evaluateProbeIrradiance; kept textually in sync because the GLSL
+// radiance_cache::evaluateProbeIrradiance; kept textually in sync because the GLSL
 // mirror in shaders/mesh.frag must match this CPU path like the rest of the
 // shading model). sh2 is 27 floats in the GiProbe [basis][channel] order; the
 // basis comes from sh2BasisFor so a shared normal evaluates its products once.
@@ -244,8 +244,8 @@ ENGINE_SHADING_INLINE glm::vec3 giEvaluateSh2Irradiance(const float sh2[27], con
 // along this footprint (the caller keeps its legacy ambient); outWeight is the
 // validity coverage of the footprint in 0..1, used to blend GI against the
 // hemispheric ambient. The tangent-plane term comes from the shared
-// lumen_gi::probeTangentPlaneFactor, the exported-grid convention the
-// provider's world cache and lumen_reflection's hit lighting also apply.
+// radiance_cache::probeTangentPlaneFactor, the exported-grid convention the
+// provider's world cache and reflection_field's hit lighting also apply.
 ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid, const glm::vec3 &position,
     const glm::vec3 &normal, glm::vec3 &outIrradiance, float &outWeight)
 {
@@ -271,7 +271,7 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
     // coefficients first would hold all 27 coefficient floats live and spill);
     // the loop keeps its early-outs (probe index range, zero-weight corners)
     // so invalid probes never touch the arithmetic at all. The tangent-plane
-    // term runs in its factored form (see lumen_gi::probeTangentPlaneFactor):
+    // term runs in its factored form (see radiance_cache::probeTangentPlaneFactor):
     // the pixel-level base alignment (measured against the cell's base corner,
     // anchor + base * spacing) plus the corner's unit offsets dotted with the
     // normal, so no corner position is rebuilt per probe.
@@ -292,7 +292,7 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
                 {
                     continue;
                 }
-                const lumen_gi::GiProbe &probe = grid.probes[probeIndex];
+                const radiance_cache::GiProbe &probe = grid.probes[probeIndex];
                 const float latticeWeight = (cornerX != 0 ? fraction.x : 1.0f - fraction.x)
                                           * (cornerY != 0 ? fraction.y : 1.0f - fraction.y)
                                           * (cornerZ != 0 ? fraction.z : 1.0f - fraction.z);
@@ -314,7 +314,7 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
                 {
                     alignment += normal.z;
                 }
-                weight *= lumen_gi::probeTangentPlaneAlignmentFactor(alignment);
+                weight *= radiance_cache::probeTangentPlaneAlignmentFactor(alignment);
                 if (weight <= 1.0e-8f)
                 {
                     continue;

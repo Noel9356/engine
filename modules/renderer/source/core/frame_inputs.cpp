@@ -87,12 +87,12 @@ void FrameInputs::pushDirectLights(RenderBackend &backend, const direct_lighting
     }
 }
 
-void FrameInputs::pushProbeGrid(RenderBackend &backend, const lumen_gi::LumenGiCapability *lumenGi, bool enabled)
+void FrameInputs::pushProbeGrid(RenderBackend &backend, const radiance_cache::RadianceCacheCapability *radianceCache, bool enabled)
 {
-    if (enabled && lumenGi != nullptr && lumenGi->copyProbes != nullptr)
+    if (enabled && radianceCache != nullptr && radianceCache->copyProbes != nullptr)
     {
         std::uint64_t version = 0;
-        lumenGi->copyProbes(lumenGi->self, nullptr, 0, &probeHeader, &version);
+        radianceCache->copyProbes(radianceCache->self, nullptr, 0, &probeHeader, &version);
         if (!probeGridInitialized || probeGridVersion != version)
         {
             // The probe storage the Vulkan backend sizes is bounded by
@@ -104,7 +104,7 @@ void FrameInputs::pushProbeGrid(RenderBackend &backend, const lumen_gi::LumenGiC
                 if (!gNotifiedProbeOverflow)
                 {
                     std::fprintf(stderr,
-                        "renderer module: lumen_gi probe grid holds %u probes; consuming the first %u (the Vulkan "
+                        "renderer module: radiance_cache probe grid holds %u probes; consuming the first %u (the Vulkan "
                         "probe storage bound)\n",
                         probeHeader.probeCount,
                         maxGiProbes);
@@ -123,7 +123,7 @@ void FrameInputs::pushProbeGrid(RenderBackend &backend, const lumen_gi::LumenGiC
                 return;
             }
             const std::uint32_t copied = probeHeader.probeCount != 0
-                ? lumenGi->copyProbes(lumenGi->self,
+                ? radianceCache->copyProbes(radianceCache->self,
                       probeScratch.data(),
                       static_cast<std::uint32_t>(probeScratch.size()),
                       &probeHeader,
@@ -147,19 +147,19 @@ void FrameInputs::pushProbeGrid(RenderBackend &backend, const lumen_gi::LumenGiC
 }
 
 void FrameInputs::pushReflectionField(
-    RenderBackend &backend, const lumen_reflection::LumenReflectionCapability *lumenReflection, bool enabled)
+    RenderBackend &backend, const reflection_field::ReflectionFieldCapability *reflectionField, bool enabled)
 {
-    if (enabled && lumenReflection != nullptr && lumenReflection->copyField != nullptr)
+    if (enabled && reflectionField != nullptr && reflectionField->copyField != nullptr)
     {
         std::uint64_t version = 0;
-        lumen_reflection::ReflectionFieldHeader header{};
-        lumenReflection->copyField(lumenReflection->self, nullptr, 0, &header, &version);
+        reflection_field::ReflectionFieldHeader header{};
+        reflectionField->copyField(reflectionField->self, nullptr, 0, &header, &version);
         if (!reflectionFieldInitialized || reflectionFieldVersion != version || reflectionHeader.width != header.width
             || reflectionHeader.height != header.height)
         {
             // copyField writes reflectionFieldTexelFloats floats per texel
             // (the radiance triplet interleaved with the texel roughness;
-            // see the lumen_reflection ABI header) - the scratch sizing and
+            // see the reflection_field ABI header) - the scratch sizing and
             // the copy capacity must both carry that stride.
             const std::size_t texelCount = static_cast<std::size_t>(header.width) * header.height;
             if (texelCount > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
@@ -167,7 +167,7 @@ void FrameInputs::pushReflectionField(
                 if (!gNotifiedFieldOversize)
                 {
                     std::fprintf(stderr,
-                        "renderer module: lumen_reflection field of %ux%u texels exceeds the addressable bound; "
+                        "renderer module: reflection_field field of %ux%u texels exceeds the addressable bound; "
                         "keeping the previous snapshot\n",
                         header.width,
                         header.height);
@@ -177,7 +177,7 @@ void FrameInputs::pushReflectionField(
             }
             try
             {
-                reflectionScratch.resize(texelCount * lumen_reflection::reflectionFieldTexelFloats);
+                reflectionScratch.resize(texelCount * reflection_field::reflectionFieldTexelFloats);
             }
             catch (const std::bad_alloc &)
             {
@@ -188,7 +188,7 @@ void FrameInputs::pushReflectionField(
             std::uint32_t copiedTexels = 0;
             if (texelCount != 0)
             {
-                copiedTexels = lumenReflection->copyField(lumenReflection->self,
+                copiedTexels = reflectionField->copyField(reflectionField->self,
                     reflectionScratch.data(),
                     static_cast<std::uint32_t>(texelCount),
                     &reflectionHeader,
@@ -223,6 +223,83 @@ void FrameInputs::pushReflectionField(
     {
         backend.setReflectionField(ReflectionField{});
         reflectionFieldInitialized = true;
+    }
+}
+
+void FrameInputs::pushGatherField(RenderBackend &backend, const radiance_cache::RadianceGatherCapability *gather, bool enabled)
+{
+    if (enabled && gather != nullptr && gather->copyIrradianceField != nullptr)
+    {
+        std::uint64_t version = 0;
+        radiance_cache::RadianceGatherHeader header{};
+        gather->copyIrradianceField(gather->self, nullptr, 0, &header, &version);
+        if (!gatherFieldInitialized || gatherFieldVersion != version || gatherHeader.width != header.width
+            || gatherHeader.height != header.height)
+        {
+            // copyIrradianceField writes radianceGatherTexelFloats floats per
+            // texel (the irradiance triplet interleaved with the validity; see
+            // the radiance_cache.gather ABI header) - the scratch sizing and
+            // the copy capacity must both carry that stride.
+            const std::size_t texelCount = static_cast<std::size_t>(header.width) * header.height;
+            if (texelCount > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+            {
+                if (!gNotifiedFieldOversize)
+                {
+                    std::fprintf(stderr,
+                        "renderer module: radiance_cache gather field of %ux%u texels exceeds the addressable bound; "
+                        "keeping the previous snapshot\n",
+                        header.width,
+                        header.height);
+                    gNotifiedFieldOversize = true;
+                }
+                return;
+            }
+            try
+            {
+                gatherScratch.resize(texelCount * radiance_cache::radianceGatherTexelFloats);
+            }
+            catch (const std::bad_alloc &)
+            {
+                // Keep the previous snapshot; the version stays stale so the
+                // next frame retries the copy.
+                return;
+            }
+            std::uint32_t copiedTexels = 0;
+            if (texelCount != 0)
+            {
+                copiedTexels = gather->copyIrradianceField(gather->self,
+                    gatherScratch.data(),
+                    static_cast<std::uint32_t>(texelCount),
+                    &gatherHeader,
+                    &version);
+            }
+            else
+            {
+                gatherHeader = header;
+            }
+            if (copiedTexels != texelCount || gatherHeader.width != header.width
+                || gatherHeader.height != header.height)
+            {
+                // The module resized the field between the version probe and
+                // this copy; this frame keeps the backend's previous snapshot
+                // (the copyIrradianceField counterpart of the reflection
+                // field's resize race), and the recorded state stays stale so
+                // the next frame retries at the new size.
+                return;
+            }
+            GatherField field;
+            field.header    = gatherHeader;
+            field.irradiance = gatherScratch.data();
+            backend.setGatherField(field);
+            gatherFieldVersion     = version;
+            gatherFieldInitialized = true;
+        }
+        return;
+    }
+    if (!gatherFieldInitialized)
+    {
+        backend.setGatherField(GatherField{});
+        gatherFieldInitialized = true;
     }
 }
 

@@ -1,0 +1,33 @@
+config_keys           = [
+    "reflection_field.debug.reference_samples",
+    "reflection_field.enabled",
+    "reflection_field.filter.bilateral",
+    "reflection_field.filter.bilateral_radius",
+    "reflection_field.filter.spatial_reuse_radius",
+    "reflection_field.filter.variance_threshold",
+    "reflection_field.quality",
+    "reflection_field.rays_per_pixel",
+    "reflection_field.roughness.max_trace",
+    "reflection_field.roughness.ray_band_max",
+    "reflection_field.scene.max_surfaces",
+    "reflection_field.scene.max_triangles_per_surface",
+    "reflection_field.screen_ray_distance_m",
+    "reflection_field.screen_scale",
+    "reflection_field.screen_trace.enabled",
+    "reflection_field.screen_trace.grazing_limit",
+    "reflection_field.screen_trace.max_steps",
+    "reflection_field.screen_trace.thickness_m",
+    "reflection_field.skip_unchanged_frames",
+    "reflection_field.temporal.neighborhood_clamp_sigma",
+    "reflection_field.temporal.strength",
+    "reflection_field.trace.bias_m",
+    "reflection_field.trace.lobe_alpha_floor",
+    "reflection_field.trace.transmission_lobe_alpha_floor",
+    "reflection_field.trace.max_distance_m",
+    "reflection_field.trace.max_transmission_segments",
+]
+name                  = "reflection_field"
+optional_capabilities = ["pbr", "direct_lighting", "radiance_cache"]
+provides              = ["reflection_field"]
+requires              = []
+version               = "0.1.0"

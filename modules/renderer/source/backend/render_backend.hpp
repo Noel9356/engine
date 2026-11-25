@@ -24,10 +24,13 @@ namespace engine
 namespace renderer
 {
 
-// Defined in gi_probe_sampling.hpp / reflection_field_sampling.hpp (the borrowed lumen_gi probe-grid snapshot
-// and lumen_reflection field snapshot passed to RenderBackend::setProbeGrid /
+// Defined in gi_probe_sampling.hpp / gather_field_sampling.hpp /
+// reflection_field_sampling.hpp (the borrowed radiance_cache probe-grid
+// snapshot, radiance_cache gather-field snapshot, and reflection_field field
+// snapshot passed to RenderBackend::setProbeGrid / setGatherField /
 // setReflectionField).
 struct GiProbeGrid;
+struct GatherField;
 struct ReflectionField;
 
 // Lifecycle contract: createMesh/createTexture are safe any time after
@@ -52,24 +55,40 @@ public:
     virtual void setCamera(const CameraMatrices &camera) = 0;
 
     // Environment/lights/probe grid are pushed by renderer.cpp when the pbr,
-    // direct_lighting and lumen_gi capabilities report new versions.
+    // direct_lighting and radiance_cache capabilities report new versions.
     virtual void setEnvironment(const pbr::PbrEnvironment &environment)                           = 0;
     virtual void setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count) = 0;
 
-    // The lumen_gi probe-grid snapshot for the indirect-lighting hook. The
+    // The radiance_cache probe-grid snapshot for the indirect-lighting hook. The
     // view is borrowed only for this call; backends copy what they need
     // (headless: the CPU sampling path in gi_probe_sampling.hpp; Vulkan: the
     // packed std430 probe storage buffer). An invalid/empty grid disables the
     // hook and keeps the legacy hemispheric ambient.
     virtual void setProbeGrid(const GiProbeGrid &grid) = 0;
 
-    // The lumen_reflection screen-space field snapshot for the indirect
+    // The reflection_field screen-space field snapshot for the indirect
     // specular hook. The view is borrowed only for this call. An invalid/
     // empty field disables the hook and keeps the pre-hook shading. The
     // composite currently runs in the software rasterizer; the Vulkan path
     // consumes the module through its exported field (copyField) - see
     // docs/backends.md.
     virtual void setReflectionField(const ReflectionField &field) = 0;
+
+    // The radiance_cache screen-space gather field snapshot for the final
+    // gather hook: the per-pixel indirect irradiance the CPU pixel path
+    // composites over (and in place of) its probe-walk ambient, carrying the
+    // contact-scale structure (short-range occlusion, caustic irradiance)
+    // the coarse probe lattice cannot resolve. The view is borrowed only for
+    // this call; backends that cannot consume it keep the probe-grid ambient
+    // (see consumesGatherField). An invalid/empty field disables the hook.
+    virtual void setGatherField(const GatherField &field) = 0;
+
+    // Whether this backend composites the gather field: the module core
+    // pushes the field's viewport to the radiance_cache.gather capability
+    // only for a consuming backend, so non-consuming backends never make the
+    // module pay the per-evaluate gather pass. Default false; the headless
+    // rasterizer overrides it.
+    virtual bool consumesGatherField() const { return false; }
 
     virtual void beginFrame(const FrameParameters &frame)                                          = 0;
     virtual void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) = 0;

@@ -206,8 +206,8 @@ target_link_libraries(
             engine_window_capabilities
             engine_pbr_capabilities
             engine_direct_lighting_capabilities
-            engine_lumen_gi_capabilities
-            engine_lumen_reflection_capabilities
+            engine_radiance_cache_capabilities
+            engine_reflection_field_capabilities
             engine_dep_stb
             meshoptimizer
 )

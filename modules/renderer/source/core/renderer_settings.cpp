@@ -201,6 +201,50 @@ void overlayConfiguredSettings(ParticipantContext &context, RendererSettings &se
         = context.configurationBooleanInSection("renderer", "gi_indirect_lighting").value_or(true);
     settings.reflectionIndirectSpecular
         = context.configurationBooleanInSection("renderer", "reflection_indirect_specular").value_or(true);
+    settings.gatherIndirectLighting
+        = context.configurationBooleanInSection("renderer", "gather_indirect_lighting").value_or(true);
+    settings.bloomEnabled
+        = context.configurationBooleanInSection("renderer", "bloom").value_or(true);
+    settings.bloomStrength
+        = context.configurationFloatingInSection("renderer", "bloom_strength").value_or(0.35);
+    settings.bloomThreshold
+        = context.configurationFloatingInSection("renderer", "bloom_threshold").value_or(0.8);
+    // Sun shadow mapping (headless backend): orthographic sun-aligned depth
+    // map over the frame's opaque lit draws; the percentage-closer filter
+    // width and map resolution are the quality/cost knobs, and a static
+    // caster set skips the per-frame rebuild entirely.
+    settings.sunShadowsEnabled
+        = context.configurationBooleanInSection("renderer", "sun_shadows").value_or(true);
+    settings.shadowMapResolution = static_cast<std::uint32_t>(readClampedInteger(
+        context, "shadow_map_resolution", settings.shadowMapResolution, 64, 8192));
+    settings.shadowFilterRadiusTexels = std::clamp(
+        context.configurationFloatingInSection("renderer", "shadow_filter_radius").value_or(1.5), 0.0, 16.0);
+    // Zenith sky-visibility shadows (headless backend): the ambient term
+    // grounded by what blocks the sky above each point.
+    settings.skyShadowsEnabled
+        = context.configurationBooleanInSection("renderer", "sky_shadows").value_or(true);
+    // Camera response presentation pass (headless backend).
+    settings.cameraContrast = std::clamp(
+        context.configurationFloatingInSection("renderer", "contrast").value_or(1.0), 0.05, 8.0);
+    settings.cameraVignette = std::clamp(
+        context.configurationFloatingInSection("renderer", "vignette").value_or(0.18), 0.0, 1.0);
+    settings.cameraGrain = std::clamp(
+        context.configurationFloatingInSection("renderer", "grain").value_or(0.01), 0.0, 0.2);
+    // Film antialiasing presentation pass (headless backend).
+    settings.filmAntialiasingEnabled
+        = context.configurationBooleanInSection("renderer", "film_aa").value_or(false);
+    // The cross-edge stage strength of that pass (0 keeps the along-edge
+    // blend only; above 1 keeps softening past the half-texel the default
+    // targets).
+    settings.filmAntialiasingStrength = std::clamp(
+        context.configurationFloatingInSection("renderer", "film_aa_strength").value_or(1.0), 0.0, 2.0);
+    // Supersample resolve filter: the bilinear tent kernel over the sample
+    // blocks instead of the plain box average (see resolveTentEnabled).
+    settings.resolveTentEnabled
+        = context.configurationBooleanInSection("renderer", "headless_resolve_tent").value_or(true);
+    // Gather field contact-occlusion multiplier.
+    settings.gatherOcclusionStrength = std::clamp(
+        context.configurationFloatingInSection("renderer", "gather_occlusion_strength").value_or(1.0), 0.0, 4.0);
     settings.furEnabled = context.configurationBooleanInSection("renderer", "fur_enabled").value_or(true);
     settings.furMaximumLayers
         = static_cast<std::uint32_t>(readClampedInteger(context, "fur_max_layers", settings.furMaximumLayers, 0, 64));

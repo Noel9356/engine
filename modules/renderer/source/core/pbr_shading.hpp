@@ -85,10 +85,15 @@ struct GiAmbientSample
 {
     glm::vec3 irradiance{0.0f};
     float     coverage = 0.0f;
+    // Contact occlusion of the sample (0..1, 1 = open): the gather field's
+    // near-contact darkening channel. The indirect term multiplies by it, so
+    // the tight dark bands where surfaces meet survive the field's
+    // resolution; samples without one (the probe-grid walk) stay 1.
+    float     occlusion = 1.0f;
     bool      valid    = false;
 };
 
-// Full CPU shading pass: hemispheric ambient (or the lumen_gi probe-grid
+// Full CPU shading pass: hemispheric ambient (or the radiance_cache probe-grid
 // indirect term blended over it by probe validity), one directional sun, then
 // the prepared direct lights (range-faded point/spot attenuation with
 // smoothstep cones). Roughness/metallic are clamped here exactly like the
@@ -122,10 +127,11 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     // quarter of valid coverage is enough to trust it (probe lattices
     // routinely lose the corners that fall inside nearby geometry); the
     // ambient remains the fallback only while almost no probe is valid.
-    const auto blendGiAmbient = [&](const glm::vec3 &giIrradiance, float giWeight)
+    const auto blendGiAmbient = [&](const glm::vec3 &giIrradiance, float giWeight, float giOcclusion)
     {
         const float     giTrust   = glm::smoothstep(0.0f, 0.25f, giWeight);
-        const glm::vec3 giAmbient = diffuseAlbedo * (giIrradiance * (1.0f / glm::pi<float>())) * ambientOcclusion;
+        const glm::vec3 giAmbient = diffuseAlbedo * (giIrradiance * (1.0f / glm::pi<float>())) * ambientOcclusion
+            * giOcclusion;
         ambient                   = glm::mix(hemispheric, giAmbient, giTrust);
     };
     // The hemispheric ambient and the probe-grid GI are diffuse integrals, so
@@ -136,7 +142,7 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     {
         if (giSample->valid)
         {
-            blendGiAmbient(giSample->irradiance, giSample->coverage);
+            blendGiAmbient(giSample->irradiance, giSample->coverage, giSample->occlusion);
         }
     }
     else if (giGrid != nullptr && giGrid->valid
@@ -146,7 +152,7 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
         float     giWeight         = 0.0f;
         if (giProbeGridIrradiance(*giGrid, worldPosition, normal, giIrradiance, giWeight))
         {
-            blendGiAmbient(giIrradiance, giWeight);
+            blendGiAmbient(giIrradiance, giWeight, 1.0f);
         }
     }
     glm::vec3 result = ambient;

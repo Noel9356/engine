@@ -21,8 +21,8 @@
 // Runs only cover draws the kernel fully models: no direct lights (the
 // per-light resolve loop stays scalar in pbrShade), no cloth sheen (the
 // Charlie lobe needs a per-lane pow), and no probe-grid walk outside the quad
-// cache (the caller's GiQuadCache already amortizes that walk over 2x2
-// quads). Normal-mapped draws route through the kernel with the caller
+// cache (the caller's GiTileCache already amortizes that walk over its
+// blocks and quads). Normal-mapped draws route through the kernel with the caller
 // supplying the finished per-lane shading normal: the TBN build needs a
 // per-sample texture fetch and its own normalize chain, so the caller runs
 // shadeTrianglePixel's exact normal block per lane (geometry normal,
@@ -45,6 +45,7 @@
 #include <glm/geometric.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 
 #if defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
@@ -85,15 +86,6 @@ struct RunContext
     bool      doubleSided = false;
     bool      albedoFilled = false; // caller multiplied the base color map in
     bool      unlit = false;        // skip the lighting block; result = albedo
-    // Procedural surface mottle (MeshMaterial::noiseScaleMeters /
-    // noiseStrength): a footprint-adaptive two-octave value noise perturbing
-    // the albedo at the sample's world position. The wavelength rides the
-    // pixel's ground footprint (pixelAngleRadians per frame), so the mottle
-    // photographs as soil/sward variation at every distance instead of
-    // stopping where a tiled scan's gate cuts. 0 strength disables.
-    float     noiseScaleMeters = 0.0f;
-    float     noiseStrength    = 0.0f;
-    float     pixelAngleRadians = 0.0f;
     // Normal-mapped draws supply the finished per-lane shading normal (see
     // RunInputs::shadeNormal): the caller ran the TBN chain per lane, so the
     // kernel consumes the normal as-is instead of interpolating and
@@ -120,95 +112,27 @@ struct RunInputs
     float metallic[4]{};
     float roughness[4]{};
     float occlusion[4]{};
-    // Probe-grid quad sample per lane (see GiQuadCache): the hemispheric
+    // Probe-grid tile-cache sample per lane (see GiTileCache): the hemispheric
     // ambient covers lanes without a valid sample.
     float giIrradiance[3][4]{};
     float giCoverage[4]{};
+    float giOcclusion[4]{};
     bool giValid[4]{};
     // Finished per-lane shading normal, read only when
     // RunContext::normalMapped (the caller's TBN chain output).
     float shadeNormal[3][4]{};
+    // Sun visibility per lane (the shadow map's percentage-closer factor;
+    // 1 = lit, 0 = fully blocked). The caller resolves it with the lane's
+    // interpolated position and normal exactly where the per-sample path
+    // resolves its own; runs without a shadow map leave the default 1s.
+    float sunVisibility[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Zenith sky visibility per lane (the hemispheric ambient's grounding
+    // factor; 1 = open sky). Scales ONLY the hemispheric term, exactly where
+    // the per-sample path scales its ambientSky/ambientGround copies.
+    float skyVisibility[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     // Run coverage: lanes the caller wants shaded.
     bool active[4]{};
 };
-
-// ---- procedural surface mottle ----------------------------------------------
-//
-// MeshMaterial::noiseScaleMeters / noiseStrength's shading twin (shared by
-// the run kernel and the per-sample paths in headless_backend.cpp). A
-// two-octave value noise on a hashed 3D lattice, evaluated at the sample's
-// WORLD position: every chunk, every distance, every frame samples the same
-// field, so the mottle is world-anchored - no tile, no seam, no gate. The
-// octave wavelengths ride the caller's footprint-adaptive lambda (never
-// below the material's base scale, never under what one pixel covers), so
-// the pattern band-limits itself instead of aliasing into per-pixel speckle.
-inline std::uint32_t mottleHash(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t tag)
-{
-    std::uint32_t mixed = x * 0x9E3779B9u ^ y * 0xC2B2AE3Du ^ z * 0x27D4EB2Fu ^ tag;
-    mixed ^= mixed >> 16;
-    mixed *= 0x7FEB352Du;
-    mixed ^= mixed >> 15;
-    mixed *= 0x846CA68Bu;
-    mixed ^= mixed >> 16;
-    return mixed;
-}
-
-inline float mottleNoise(float x, float y, float z, std::uint32_t tag)
-{
-    const float fx = std::floor(x);
-    const float fy = std::floor(y);
-    const float fz = std::floor(z);
-    const float tx = x - fx;
-    const float ty = y - fy;
-    const float tz = z - fz;
-    const float sx = tx * tx * tx * (tx * (tx * 6.0f - 15.0f) + 10.0f);
-    const float sy = ty * ty * ty * (ty * (ty * 6.0f - 15.0f) + 10.0f);
-    const float sz = tz * tz * tz * (tz * (tz * 6.0f - 15.0f) + 10.0f);
-    const std::int32_t ix = static_cast<std::int32_t>(fx);
-    const std::int32_t iy = static_cast<std::int32_t>(fy);
-    const std::int32_t iz = static_cast<std::int32_t>(fz);
-    const auto lattice = [tag](std::int32_t cx, std::int32_t cy, std::int32_t cz)
-    {
-        // Negative coordinates flow through the cast to the hash's wrap
-        // (two's-complement truncation), so the field continues below zero.
-        return static_cast<float>(mottleHash(static_cast<std::uint32_t>(cx),
-            static_cast<std::uint32_t>(cy), static_cast<std::uint32_t>(cz), tag)) * (1.0f / 4294967296.0f);
-    };
-    const float h000 = lattice(ix, iy, iz);
-    const float h100 = lattice(ix + 1, iy, iz);
-    const float h010 = lattice(ix, iy + 1, iz);
-    const float h110 = lattice(ix + 1, iy + 1, iz);
-    const float h001 = lattice(ix, iy, iz + 1);
-    const float h101 = lattice(ix + 1, iy, iz + 1);
-    const float h011 = lattice(ix, iy + 1, iz + 1);
-    const float h111 = lattice(ix + 1, iy + 1, iz + 1);
-    const float x00 = h000 + (h100 - h000) * sx;
-    const float x10 = h010 + (h110 - h010) * sx;
-    const float x01 = h001 + (h101 - h001) * sx;
-    const float x11 = h011 + (h111 - h011) * sx;
-    const float y0 = x00 + (x10 - x00) * sy;
-    const float y1 = x01 + (x11 - x01) * sy;
-    return y0 + (y1 - y0) * sz;
-}
-
-// Three octaves: the footprint wavelength and its 2.7x-finer partner carry
-// grain, while the third rides 4.3x COARSER - the soil-patch/tussock scale
-// that keeps high camera altitudes from reading as flat paint (a 1 m grain
-// is sub-pixel mush at 300 m; a 5-30 m patch is the mottle those views
-// photograph). Mixed to roughly [-1, 1]; the caller scales by the
-// material's noiseStrength.
-inline float surfaceMottle(float x, float y, float z, float lambda)
-{
-    const float lambda2 = lambda * 0.37f;
-    const float lambda3 = lambda * 4.3f;
-    const float n = 0.42f * (mottleNoise(x / lambda, y / lambda, z / lambda, 0x51A7E11Bu)
-            - 0.5f)
-        + 0.30f * (mottleNoise(x / lambda2 + 13.7f, y / lambda2 + 5.1f, z / lambda2 + 29.3f,
-            0x6E115EEDu) - 0.5f)
-        + 0.28f * (mottleNoise(x / lambda3 + 61.9f, y / lambda3 + 47.3f, z / lambda3 + 3.7f,
-            0x2F0A4C9Du) - 0.5f);
-    return n * 2.2f;
-}
 
 // The tone mappers' SoA twin (mirrors toneMapColor's per-channel math; the
 // exposure multiply is the caller's). Operates on the run's X/Y/Z registers.
@@ -326,37 +250,6 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
     interpolate(position[0].x, position[0].y, position[0].z, position[1].x, position[1].y, position[1].z,
         position[2].x, position[2].y, position[2].z, posX, posY, posZ);
 
-    // Procedural surface mottle: the noise rides each lane's WORLD position
-    // and the pixel's own footprint, so near lanes photograph grain, far
-    // lanes photograph broad tonal drift, and nothing ever aliases. The
-    // scalar per-lane loop sits outside the SIMD math (8 hash-lattice
-    // lookups per run) - a hair next to the lane's lighting work.
-    if (context.noiseStrength > 0.0f)
-    {
-        alignas(16) float laneX[4];
-        alignas(16) float laneY[4];
-        alignas(16) float laneZ[4];
-        _mm_store_ps(laneX, posX);
-        _mm_store_ps(laneY, posY);
-        _mm_store_ps(laneZ, posZ);
-        alignas(16) float laneGain[4];
-        for (int lane = 0; lane < 4; ++lane)
-        {
-            const float dx = laneX[lane] - context.cameraPosition.x;
-            const float dy = laneY[lane] - context.cameraPosition.y;
-            const float dz = laneZ[lane] - context.cameraPosition.z;
-            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-            const float lambda = std::max(context.noiseScaleMeters,
-                dist * context.pixelAngleRadians * 2.4f);
-            laneGain[lane] = 1.0f + context.noiseStrength
-                * surfaceMottle(laneX[lane], laneY[lane], laneZ[lane], lambda);
-        }
-        const __m128 gain = _mm_load_ps(laneGain);
-        albX = _mm_mul_ps(albX, gain);
-        albY = _mm_mul_ps(albY, gain);
-        albZ = _mm_mul_ps(albZ, gain);
-    }
-
     // Lane-wise helper: the 3-component dot of two SoA vectors (no horizontal
     // reduction - each lane is one sample's dot).
     const auto dot3 = [](__m128 x0, __m128 y0, __m128 z0, __m128 x1, __m128 y1, __m128 z1)
@@ -445,9 +338,16 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         _mm_add_ps(_mm_mul_ps(_mm_set1_ps(context.ambientGround.z), invSkyWeight),
             _mm_mul_ps(_mm_set1_ps(context.ambientSky.z), skyWeight)),
         diffuseZ);
+    // Zenith sky visibility (per lane): the hemispheric ambient is the sky's
+    // diffuse approximation, so what blocks the open sky scales it - the GI
+    // ambient blend below stays untouched, matching the per-sample path.
+    const __m128 skyVisible = _mm_loadu_ps(inputs.skyVisibility);
     ambientX = _mm_mul_ps(ambientX, occlusion);
+    ambientX = _mm_mul_ps(ambientX, skyVisible);
     ambientY = _mm_mul_ps(ambientY, occlusion);
+    ambientY = _mm_mul_ps(ambientY, skyVisible);
     ambientZ = _mm_mul_ps(ambientZ, occlusion);
+    ambientZ = _mm_mul_ps(ambientZ, skyVisible);
 
     // Probe-grid quad samples: giTrust = smoothstep(0, 0.25, coverage),
     // giAmbient = diffuseAlbedo * (irradiance / pi) * occlusion, ambient =
@@ -461,20 +361,28 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         const __m128 irradX = _mm_loadu_ps(inputs.giIrradiance[0]);
         const __m128 irradY = _mm_loadu_ps(inputs.giIrradiance[1]);
         const __m128 irradZ = _mm_loadu_ps(inputs.giIrradiance[2]);
-        const __m128 giX = _mm_mul_ps(_mm_mul_ps(diffuseX, _mm_mul_ps(irradX, invPi)), occlusion);
-        const __m128 giY = _mm_mul_ps(_mm_mul_ps(diffuseY, _mm_mul_ps(irradY, invPi)), occlusion);
-        const __m128 giZ = _mm_mul_ps(_mm_mul_ps(diffuseZ, _mm_mul_ps(irradZ, invPi)), occlusion);
+        // The gather field's contact occlusion rides the sample: the
+        // indirect term darkens by it so the tight bands at surface meet
+        // lines survive the field's resolution (scalar twin in pbrShade).
+        const __m128 giOcclusion = _mm_loadu_ps(inputs.giOcclusion);
+        const __m128 giX = _mm_mul_ps(_mm_mul_ps(_mm_mul_ps(diffuseX, _mm_mul_ps(irradX, invPi)), occlusion), giOcclusion);
+        const __m128 giY = _mm_mul_ps(_mm_mul_ps(_mm_mul_ps(diffuseY, _mm_mul_ps(irradY, invPi)), occlusion), giOcclusion);
+        const __m128 giZ = _mm_mul_ps(_mm_mul_ps(_mm_mul_ps(diffuseZ, _mm_mul_ps(irradZ, invPi)), occlusion), giOcclusion);
         // glm::mix(x, y, a) = x * (1 - a) + y * a; oneMinusTrust = 1 - a.
         const __m128 oneMinusTrust = _mm_sub_ps(_mm_set1_ps(1.0f), trust);
         const __m128 blendX = _mm_add_ps(_mm_mul_ps(ambientX, oneMinusTrust), _mm_mul_ps(giX, trust));
         const __m128 blendY = _mm_add_ps(_mm_mul_ps(ambientY, oneMinusTrust), _mm_mul_ps(giY, trust));
         const __m128 blendZ = _mm_add_ps(_mm_mul_ps(ambientZ, oneMinusTrust), _mm_mul_ps(giZ, trust));
-        // Valid-lane select (bitwise; lanes without a valid quad sample keep
-        // the hemispheric value).
+        // Valid-lane select (bitwise; lanes without a valid tile-cache sample
+        // keep the hemispheric value). The mask lanes must carry the
+        // all-ones / all-zeros BIT patterns: the float VALUE -1.0f encodes
+        // as 0xBF800000, and AND-ing that with the blend would splice the
+        // blend's exponent onto the hemispheric's mantissa instead of
+        // selecting, so the bits are produced with std::bit_cast.
         float validBits[4];
         for (int lane = 0; lane < 4; ++lane)
         {
-            validBits[lane] = inputs.giValid[lane] ? -1.0f : 0.0f;
+            validBits[lane] = std::bit_cast<float>(inputs.giValid[lane] ? 0xFFFFFFFFu : 0u);
         }
         const __m128 validMask = _mm_loadu_ps(validBits);
         ambientX = _mm_or_ps(_mm_and_ps(validMask, blendX), _mm_andnot_ps(validMask, ambientX));
@@ -549,17 +457,21 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         const __m128 specScale = _mm_mul_ps(_mm_mul_ps(dTerm, gTerm), invSpec);
 
         // result += (diffuse + specular) * sunRadiance * sunNDotL, masked to
-        // the lanes whose sunNDotL > 0 (the scalar path's if).
+        // the lanes whose sunNDotL > 0 (the scalar path's if). The sun
+        // shadow map's per-lane visibility multiplies the weight only - the
+        // BRDF terms keep the true sunNDotL, exactly where the scalar path
+        // scales its sunRadiance copy.
+        const __m128 sunWeight = _mm_mul_ps(sunNDotL, _mm_loadu_ps(inputs.sunVisibility));
         const __m128 zero = _mm_setzero_ps();
         const __m128 termX = _mm_mul_ps(_mm_mul_ps(_mm_add_ps(diffuseTermX, _mm_mul_ps(specScale, fX)),
                                              _mm_set1_ps(context.sunRadiance.x)),
-            sunNDotL);
+            sunWeight);
         const __m128 termY = _mm_mul_ps(_mm_mul_ps(_mm_add_ps(diffuseTermY, _mm_mul_ps(specScale, fY)),
                                              _mm_set1_ps(context.sunRadiance.y)),
-            sunNDotL);
+            sunWeight);
         const __m128 termZ = _mm_mul_ps(_mm_mul_ps(_mm_add_ps(diffuseTermZ, _mm_mul_ps(specScale, fZ)),
                                              _mm_set1_ps(context.sunRadiance.z)),
-            sunNDotL);
+            sunWeight);
         resultX = _mm_add_ps(resultX, _mm_or_ps(_mm_and_ps(sunMask, termX), _mm_andnot_ps(sunMask, zero)));
         resultY = _mm_add_ps(resultY, _mm_or_ps(_mm_and_ps(sunMask, termY), _mm_andnot_ps(sunMask, zero)));
         resultZ = _mm_add_ps(resultZ, _mm_or_ps(_mm_and_ps(sunMask, termZ), _mm_andnot_ps(sunMask, zero)));
@@ -603,20 +515,6 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         }
         glm::vec3 interpolatedPosition = inputs.correctedA[lane] * position[0] + inputs.correctedB[lane] * position[1]
             + inputs.correctedC[lane] * position[2];
-        // Procedural surface mottle: the scalar fallback's twin of the SIMD
-        // block above (same field, same footprint rule).
-        glm::vec3 shadedAlbedo = albedo;
-        if (context.noiseStrength > 0.0f)
-        {
-            const float dx = interpolatedPosition.x - context.cameraPosition.x;
-            const float dy = interpolatedPosition.y - context.cameraPosition.y;
-            const float dz = interpolatedPosition.z - context.cameraPosition.z;
-            const float lambda = std::max(context.noiseScaleMeters,
-                std::sqrt(dx * dx + dy * dy + dz * dz) * context.pixelAngleRadians * 2.4f);
-            const float gain = 1.0f + context.noiseStrength
-                * surfaceMottle(interpolatedPosition.x, interpolatedPosition.y, interpolatedPosition.z, lambda);
-            shadedAlbedo *= gain;
-        }
         // Normal-mapped lanes arrive with the caller's finished shading
         // normal (TBN chain output; the flip already applied) - consume it
         // instead of interpolating and flipping the corner normals.
@@ -643,16 +541,17 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         GiAmbientSample giSample;
         giSample.valid = inputs.giValid[lane];
         giSample.coverage = inputs.giCoverage[lane];
+        giSample.occlusion = inputs.giOcclusion[lane];
         giSample.irradiance = glm::vec3(
             inputs.giIrradiance[0][lane], inputs.giIrradiance[1][lane], inputs.giIrradiance[2][lane]);
         outShaded[lane] = toneMapColor(pbrShade(shadingNormal,
             interpolatedPosition,
             context.cameraPosition,
             context.lightDirection,
-            context.sunRadiance,
+            context.sunRadiance * inputs.sunVisibility[lane],
             context.ambientSky,
             context.ambientGround,
-            shadedAlbedo,
+            albedo,
             inputs.metallic[lane],
             inputs.roughness[lane],
             inputs.occlusion[lane],

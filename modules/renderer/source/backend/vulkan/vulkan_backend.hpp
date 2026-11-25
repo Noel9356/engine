@@ -90,10 +90,14 @@ public:
     void setEnvironment(const pbr::PbrEnvironment &environment) override;
     void setDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t count) override;
     void setProbeGrid(const GiProbeGrid &grid) override;
-    // The lumen_reflection field composite runs in the software rasterizer
+    // The reflection_field field composite runs in the software rasterizer
     // (see docs/backends.md); this side keeps the interface complete and the
     // snapshot counts zero so renderer.cpp's version polling stays uniform.
     void setReflectionField(const ReflectionField &field) override;
+    // The radiance_cache gather field composite also runs in the software
+    // rasterizer (same scope note); the Vulkan ambient keeps the probe-grid
+    // hook while the interface stays complete for the version polling.
+    void setGatherField(const GatherField &field) override;
 
     void beginFrame(const FrameParameters &frame) override;
     void drawMesh(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material) override;
@@ -276,7 +280,7 @@ private:
 
     bool frameActive_ = false; // true between a successful beginFrame and endFrame; draw calls check it
 
-    // Bind-state caches so repeated draws skip duplicate vkCmd* calls.
+    // Bind-state caches so repeated draws skip redundant vkCmd* calls.
     // lastBoundPipeline_ tracks which of the backend's graphics pipelines
     // is current (mesh vs fur): the fur path binds the alpha-blended fur
     // pipeline and every mesh draw binds the mesh pipeline back, pushing its
@@ -315,7 +319,7 @@ private:
     std::array<DirectLightUniformData, direct_lighting::maxDirectLights> packedDirectLights_{};
     std::uint32_t                                                        directLightCount_ = 0;
 
-    // lumen_gi probe-grid hook: the std140 header rides the frame uniform,
+    // radiance_cache probe-grid hook: the std140 header rides the frame uniform,
     // the SH2 records are packed std430 (8 vec4 per probe) into a scratch
     // buffer and streamed to the per-slot probe storage by setProbeGrid.
     ProbeGridUniformData packedProbeGrid_{};

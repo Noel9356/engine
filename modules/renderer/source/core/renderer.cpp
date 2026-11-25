@@ -3,7 +3,7 @@
 //
 // Responsibilities: hold the current [renderer] settings (read and re-read
 // by renderer_settings.cpp), acquire the window/pbr/direct_lighting/
-// lumen_gi/lumen_reflection capabilities, create renderers by resolving the
+// radiance_cache/reflection_field capabilities, create renderers by resolving the
 // configured backend (Vulkan or headless), and route capability calls into
 // the per-renderer frame input feeds (frame_inputs.cpp), the draw-list
 // scheduler (draw_scheduler.cpp) and the backend. The module entry table
@@ -14,8 +14,8 @@
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
 #include <engine/kernel/participant_manifest.hpp>
-#include <engine/lumen_gi/capabilities.hpp>
-#include <engine/lumen_reflection/capabilities.hpp>
+#include <engine/radiance_cache/capabilities.hpp>
+#include <engine/reflection_field/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
@@ -130,8 +130,9 @@ public:
 
         pbr_             = context.tryAcquireCapability<pbr::PbrCapability>();
         directLighting_  = context.tryAcquireCapability<direct_lighting::DirectLightingCapability>();
-        lumenGi_         = context.tryAcquireCapability<lumen_gi::LumenGiCapability>();
-        lumenReflection_ = context.tryAcquireCapability<lumen_reflection::LumenReflectionCapability>();
+        radianceCache_         = context.tryAcquireCapability<radiance_cache::RadianceCacheCapability>();
+        radianceGather_  = context.tryAcquireCapability<radiance_cache::RadianceGatherCapability>();
+        reflectionField_ = context.tryAcquireCapability<reflection_field::ReflectionFieldCapability>();
         context_         = &context;
         profiler_        = &context.profiler();
         readConfiguration();
@@ -156,8 +157,9 @@ public:
         window_         = nullptr;
         pbr_            = nullptr;
         directLighting_ = nullptr;
-        lumenGi_        = nullptr;
-        lumenReflection_ = nullptr;
+        radianceCache_        = nullptr;
+        radianceGather_ = nullptr;
+        reflectionField_ = nullptr;
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
         vulkanSurface_ = nullptr;
 #endif
@@ -215,7 +217,7 @@ private:
             .version              = "0.1.0",
             .providedCapabilities = {"renderer", "renderer.vulkan", "renderer.headless"},
             .requiredCapabilities = {"window"},
-            .optionalCapabilities = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi", "lumen_reflection"}};
+            .optionalCapabilities = {"window.vulkan", "pbr", "direct_lighting", "radiance_cache", "radiance_cache.gather", "reflection_field"}};
     }
 
     RendererRecord *recordFor(RendererHandle renderer)
@@ -343,6 +345,20 @@ private:
             headlessOptions.maxBatchTileRecords               = settings_.headlessMaxBatchTileRecords;
             headlessOptions.lodThresholds                     = settings_.lodThresholds;
             headlessOptions.lodStrides                        = settings_.lodStrides;
+            headlessOptions.bloomEnabled                      = settings_.bloomEnabled;
+            headlessOptions.bloomStrength                     = settings_.bloomStrength;
+            headlessOptions.bloomThreshold                    = settings_.bloomThreshold;
+            headlessOptions.sunShadowsEnabled                 = settings_.sunShadowsEnabled;
+            headlessOptions.shadowMapResolution               = settings_.shadowMapResolution;
+            headlessOptions.shadowFilterRadiusTexels          = settings_.shadowFilterRadiusTexels;
+            headlessOptions.skyShadowsEnabled                 = settings_.skyShadowsEnabled;
+            headlessOptions.cameraContrast                    = settings_.cameraContrast;
+            headlessOptions.cameraVignette                    = settings_.cameraVignette;
+            headlessOptions.cameraGrain                       = settings_.cameraGrain;
+            headlessOptions.filmAntialiasingEnabled           = settings_.filmAntialiasingEnabled;
+            headlessOptions.filmAntialiasingStrength          = settings_.filmAntialiasingStrength;
+            headlessOptions.resolveTentEnabled                = settings_.resolveTentEnabled;
+            headlessOptions.gatherOcclusionStrength           = settings_.gatherOcclusionStrength;
             return registerRenderer(Backend::Headless,
                 surface,
                 std::make_unique<HeadlessBackend>(surface, window_, headlessOptions),
@@ -407,6 +423,15 @@ private:
             return;
         }
         record->backendInstance->setViewport(width, height);
+        // The gather field follows the renderer's own output size, and only
+        // for a backend that composites it (the module's per-evaluate gather
+        // pass is activated by exactly this push, so a non-consuming backend
+        // never pays it).
+        if (radianceGather_ != nullptr && radianceGather_->setViewport != nullptr
+            && record->backendInstance->consumesGatherField())
+        {
+            radianceGather_->setViewport(radianceGather_->self, width, height);
+        }
     }
 
     void setCameraImpl(RendererHandle renderer, const CameraMatrices *camera)
@@ -420,7 +445,7 @@ private:
     }
 
     // Pushes the version-gated lighting inputs (pbr environment, direct
-    // lights, lumen_gi probe grid, lumen_reflection field), starts frame
+    // lights, radiance_cache probe grid, reflection_field field), starts frame
     // timing for the profiler, then hands off to the backend.
     // frame == nullptr selects the configured clear_color.
     void beginFrameImpl(RendererHandle renderer, const FrameParameters *frame)
@@ -440,8 +465,9 @@ private:
         RenderBackend &backend = *record->backendInstance;
         record->frameInputs.pushEnvironment(backend, pbr_);
         record->frameInputs.pushDirectLights(backend, directLighting_, record->directLightLimit);
-        record->frameInputs.pushProbeGrid(backend, lumenGi_, settings_.giIndirectLighting);
-        record->frameInputs.pushReflectionField(backend, lumenReflection_, settings_.reflectionIndirectSpecular);
+        record->frameInputs.pushProbeGrid(backend, radianceCache_, settings_.giIndirectLighting);
+        record->frameInputs.pushReflectionField(backend, reflectionField_, settings_.reflectionIndirectSpecular);
+        record->frameInputs.pushGatherField(backend, radianceGather_, settings_.gatherIndirectLighting);
 
         record->frameStart        = std::chrono::steady_clock::now();
         record->frameTimingActive = true;
@@ -1035,8 +1061,9 @@ private:
     // to the built-in default environment and empty light/probe/field sets).
     pbr::PbrCapability                        *pbr_             = nullptr;
     direct_lighting::DirectLightingCapability *directLighting_  = nullptr;
-    lumen_gi::LumenGiCapability               *lumenGi_         = nullptr;
-    lumen_reflection::LumenReflectionCapability *lumenReflection_ = nullptr;
+    radiance_cache::RadianceCacheCapability               *radianceCache_         = nullptr;
+    radiance_cache::RadianceGatherCapability              *radianceGather_  = nullptr;
+    reflection_field::ReflectionFieldCapability *reflectionField_ = nullptr;
 
 #if defined(ENGINE_RENDERER_BACKEND_VULKAN)
     window::VulkanSurfaceCapability *vulkanSurface_ = nullptr;
@@ -1071,7 +1098,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
     static const char *const providedCapabilities[] = {"renderer", "renderer.vulkan", "renderer.headless"};
     static const char *const requiredCapabilities[] = {"window"};
     static const char *const optionalCapabilities[]
-        = {"window.vulkan", "pbr", "direct_lighting", "lumen_gi", "lumen_reflection"};
+        = {"window.vulkan", "pbr", "direct_lighting", "radiance_cache", "radiance_cache.gather", "reflection_field"};
 
     static const engine::EngineModuleEntryTable entry = {
         .abiVersion              = engine::engineModuleAbiVersion,
@@ -1083,7 +1110,7 @@ extern "C" ENGINE_MODULE_EXPORT const engine::EngineModuleEntryTable *engineQuer
         .requiredCapabilities    = requiredCapabilities,
         .requiredCapabilityCount = 1,
         .optionalCapabilities    = optionalCapabilities,
-        .optionalCapabilityCount = 5,
+        .optionalCapabilityCount = 6,
         .declaredPermissions     = nullptr,
         .declaredPermissionCount = 0,
     };
