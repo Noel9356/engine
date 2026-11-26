@@ -21,6 +21,7 @@
 #include "render_backend.hpp"
 #include "render_shared.hpp"
 #include "sun_shadows.hpp"
+#include "tile_bins.hpp"
 #include "wide_shading.hpp"
 
 #include <engine/direct_lighting/capabilities.hpp>
@@ -723,6 +724,12 @@ private:
         // uCloth.z): textured opaque draws cull pixels whose sampled
         // base-color alpha lands below the cutoff; 0 keeps every texel.
         float                  alphaCutoff             = 0.0f;
+        // Per-pixel distance fog (MeshMaterial's fog triple): the per-sample
+        // weight below runs on the sample's own interpolated position, after
+        // every lighting and emissive term, in linear space.
+        glm::vec3              fogColor                = glm::vec3(0.0f);
+        float                  fogScaleMeters          = 1000.0f;
+        float                  fogAsymptote            = 0.0f;
         bool                   hasBaseColorMap         = false;
         bool                   hasNormalMap            = false;
         bool                   hasMetallicRoughnessMap = false;
@@ -878,6 +885,13 @@ private:
     // Defined in the endFrame translation unit.
     void recordSunShadowCaster(MeshHandle mesh, const float *modelMatrix, const MeshMaterial &material);
     void updateSunShadowMap();
+    // One map build over the frame's shared caster geometries: the raster
+    // splits across the task scheduler's workers when one is running (the
+    // atomic per-cell min-store keeps the map exactly the serial build's),
+    // the plain serial build covers every other host.
+    void buildShadowMapInParallel(sunshadows::SunShadowMap &map,
+        const std::vector<sunshadows::SunShadowGeometry> &geometries, const glm::vec3 &direction,
+        const glm::vec3 *receiverMin, const glm::vec3 *receiverMax);
     std::uint64_t sunShadowCastersHash() const;
     std::uint64_t sunShadowStateHash() const;
     std::uint64_t skyShadowStateHash() const;
@@ -1092,6 +1106,7 @@ private:
     std::vector<TileBinRecord> tileRecords_;
     std::vector<std::uint32_t> tileOffsets_;
     std::vector<std::uint32_t> tileItems_;
+    std::vector<tilebins::RecordTileRange> tileRangeScratch_;
     // Draws that could exceed the record cap fall back to the default
     // paths instead of growing the scratch without bound.
     static constexpr std::size_t maxTileRecords_ = 1u << 20;

@@ -2,7 +2,7 @@
 //
 // Declares the POD types and function-pointer tables consumers receive
 // through ParticipantContext::acquireCapability for the "radiance_cache" capability
-// (ABI 3): a registry of GI scene surfaces, a camera-driven frame evaluation that runs
+// (ABI 4): a registry of GI scene surfaces, a camera-driven frame evaluation that runs
 // a Lumen-style dynamic global illumination pipeline (card-based surface
 // cache, amortized direct/indirect lighting, world-space radiance probes,
 // screen-space final gather), a probe-grid snapshot copy API for renderers,
@@ -31,7 +31,11 @@ namespace radiance_cache
 // opacity below 1 (attenuated by the (1 - opacity) share, tinted by the
 // albedo, bent once by Snell's law with the index ratio), and shadow rays
 // soften by the same transmittance instead of being blocked.
-inline constexpr std::uint32_t radianceCacheCapabilityAbi = 4u;
+// 4 -> 5 added sampleCausticsIrradiance: the photon caustics pass's
+// deposited irradiance, readable per world position so coupled renderers
+// (the reflection field's refracted chains) light receiver hits with the
+// focused patterns a transmitter casts onto them.
+inline constexpr std::uint32_t radianceCacheCapabilityAbi = 5u;
 using GiSurfaceHandle                               = std::uint32_t;
 inline constexpr GiSurfaceHandle invalidGiSurface   = 0;
 
@@ -222,6 +226,19 @@ struct RadianceCacheCapability
     // Writes one debug view as a binary PPM file. The view reflects the most
     // recent evaluate() state; export failures (bad path) report ExportFailed.
     bool (*debugExport)(void *self, GiDebugView view, const char *filePath, GiError *error);
+
+    // Samples the photon caustics pass's deposited irradiance at a world-space
+    // position: the caustic receiver surfaces whose bounds contain the
+    // position are read with the same card-texel bilinear the gather's display
+    // composite applies, and the first receiver with caustic state at the
+    // position answers. Returns false when no receiver covers the position or
+    // none holds caustic state (outIrradiance stays untouched then). The read
+    // side of the registry, like copyProbes: it never waits on a running
+    // evaluate, and callers between evaluates (the reflection field's frame)
+    // see the last deposited state. A Lambertian caller turns the irradiance
+    // into outgoing radiance as albedo / pi * E.
+    bool (*sampleCausticsIrradiance)(
+        void *self, const float *position3, const float *normal3, float *outIrradiance3);
 };
 
 // The screen-space final gather exported as a second capability: the

@@ -1163,8 +1163,23 @@ int main(int argc, char **argv)
     // disabling).
     const double textureMinTilePixels = options.textureTilePixels != 0u
         ? static_cast<double>(options.textureTilePixels) : std::numeric_limits<double>::infinity();
-    const double viewportHeightMeters = static_cast<double>(
-        context.configurationIntegerInSection("window", "height").value_or(540));
+    // The live window size, not the configured one: a resized or maximized
+    // window changes the tile's projected pixel span, and a stale configured
+    // height keeps the gate calibrated for a viewport the frame no longer
+    // renders into. Falls back to the configured height only while the
+    // window cannot be queried (no handle yet, or a backend without sizes).
+    std::uint32_t viewportHeightPixels = 0u;
+    std::uint32_t viewportWidthPixels  = 0u;
+    if (windowCapability.getSize != nullptr && windowHandle != window::invalidWindow)
+    {
+        windowCapability.getSize(windowCapability.self, windowHandle, &viewportWidthPixels, &viewportHeightPixels);
+    }
+    if (viewportHeightPixels == 0u)
+    {
+        viewportHeightPixels = static_cast<std::uint32_t>(
+            context.configurationIntegerInSection("window", "height").value_or(540));
+    }
+    const double viewportHeightMeters = static_cast<double>(viewportHeightPixels);
     const double tanHalfFovY = std::tan(glm::radians(static_cast<double>(cameraFovYDegrees)) * 0.5);
     const double groundTextureGateMeters = params.terrainTextureTileMetersGround * viewportHeightMeters
         / (2.0 * tanHalfFovY * textureMinTilePixels);
@@ -1648,7 +1663,6 @@ int main(int argc, char **argv)
         chunkRenderer.rebuildDrawCommands(viewProjection, eyePlanetLocal, sunTint, cameraRelativeShift(eyePlanetLocal));
         const auto &drawCommands = chunkRenderer.drawCommands();
         frameTiming.markUploadDone();
-
         renderCapability.beginFrame(renderCapability.self, rendererHandle, &frameParameters);
         renderCapability.drawMeshes(renderCapability.self, rendererHandle, drawCommands.data(),
             static_cast<std::uint32_t>(drawCommands.size()));

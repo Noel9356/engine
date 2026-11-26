@@ -50,32 +50,33 @@ bool isBackground(float depth)
 
 // ---- GBuffer raster -------------------------------------------------------------
 
-struct ClipVertex
-{
-    glm::vec4 clip{0.0f};
-    glm::vec3 world{0.0f};
-    glm::vec3 bary{0.0f};
-};
-
-struct ScreenVertex
-{
-    glm::vec2 pixel{0.0f};
-    float     inverseW = 0.0f;
-    glm::vec3 world{0.0f};
-    glm::vec3 bary{0.0f};
-};
-
-struct ScreenTriangle
-{
-    ScreenVertex  vertex[3];
-    std::uint32_t surface  = 0;
-    std::uint32_t triangle = 0;
-};
+using ClipVertex = GatherClipVertex;
+using ScreenVertex = GatherScreenVertex;
+using ScreenTriangle = GatherScreenTriangle;
 
 // Clip distance (clip-space w). Clipping closer than this projects vertices to
 // enormous pixel coordinates and the edge functions lose all precision.
 constexpr float nearW = 0.05f;
 constexpr std::uint32_t bandRows = 16;
+
+// Exact FNV-1a over the transform's sixteen float bits: the per-surface
+// cache key for the gather raster caches (a transform the renderer would
+// see as a different matrix retires the surface's projections).
+std::uint64_t gatherTransformBitsOf(const glm::mat4 &transform)
+{
+    std::uint64_t hash = 1469598103934665603ull;
+    for (std::size_t column = 0; column < 4; ++column)
+    {
+        for (std::size_t row = 0; row < 4; ++row)
+        {
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &transform[column][row], sizeof(bits));
+            hash ^= bits;
+            hash *= 1099511628211ull;
+        }
+    }
+    return hash;
+}
 
 bool surfaceOutsideFrustum(const glm::mat4 &viewProjection, const GiSurface &surface)
 {
@@ -96,22 +97,56 @@ bool surfaceOutsideFrustum(const glm::mat4 &viewProjection, const GiSurface &sur
     return (outcodeAnd & 0x1fu) != 0u;
 }
 
-void setupSurfaceTriangles(const GiPipelineState &state, std::uint32_t surfaceIndex, std::uint32_t width,
+void setupSurfaceTriangles(GiPipelineState &state, std::uint32_t surfaceIndex, std::uint32_t width,
     std::uint32_t height, std::vector<ScreenTriangle> &out)
 {
-    const GiSurface &surface = state.surfaces[surfaceIndex];
-    if (surface.excluded || surfaceOutsideFrustum(state.viewProjection, surface))
+    GiSurface &surface = state.surfaces[surfaceIndex];
+    // Exact transform-bit compare plus the gather raster serial (view /
+    // registry / field-size changes bump it in rasterizeViewGBuffer and the
+    // registry mutators): an unchanged surface keeps its projections.
+    const std::uint64_t transformBits = gatherTransformBitsOf(surface.transform);
+    const bool          worldDirty    = surface.gatherTransformBits != transformBits;
+    const bool          viewDirty     = surface.gatherRasterSerial != state.gatherRasterSerial;
+    if (!worldDirty && !viewDirty)
+    {
+        return; // the projected triangles are still current
+    }
+    out.clear();
+    surface.gatherTransformBits = transformBits;
+    surface.gatherRasterSerial  = state.gatherRasterSerial;
+    // Transmissive surfaces stay out of the view GBuffer alongside the
+    // excluded ones: the field describes the displayed opaque surface's
+    // indirect light, and at a transmissive surface's pixels that is the
+    // receiver behind it (the water's pixel shows the pool floor the
+    // refraction path bends toward, so the floor's gather - caustics
+    // included - is what the field must carry there). The transmissive
+    // surface's own diffuse share rides its material opacity, and its
+    // specular arrives through the reflection field's refracted chains,
+    // not this field.
+    if (surface.excluded || surface.opacity < 1.0f || surfaceOutsideFrustum(state.viewProjection, surface))
     {
         return;
     }
     const GiSurfaceGeometry &geometry = surface.geometry;
-    // Transform every vertex once (not once per triangle corner).
-    std::vector<glm::vec3> world(geometry.positions.size());
-    std::vector<glm::vec4> clip(geometry.positions.size());
-    for (std::size_t vertex = 0; vertex < geometry.positions.size(); ++vertex)
+    // Transform every vertex once (not once per triangle corner); the world
+    // positions follow the surface's transform alone, the clip positions the
+    // transform and the view (the reflection field's split caches).
+    std::vector<glm::vec3> &world = surface.gatherWorldPositions;
+    std::vector<glm::vec4> &clip  = surface.gatherClipPositions;
+    world.resize(geometry.positions.size());
+    clip.resize(geometry.positions.size());
+    if (worldDirty)
     {
-        world[vertex] = glm::vec3(surface.transform * glm::vec4(geometry.positions[vertex], 1.0f));
-        clip[vertex]  = state.viewProjection * glm::vec4(world[vertex], 1.0f);
+        for (std::size_t vertex = 0; vertex < geometry.positions.size(); ++vertex)
+        {
+            world[vertex] = glm::vec3(surface.transform * glm::vec4(geometry.positions[vertex], 1.0f));
+        }
+    }
+    {
+        for (std::size_t vertex = 0; vertex < geometry.positions.size(); ++vertex)
+        {
+            clip[vertex] = state.viewProjection * glm::vec4(world[vertex], 1.0f);
+        }
     }
     const std::uint32_t triangleCount = static_cast<std::uint32_t>(geometry.indices.size() / 3);
     for (std::uint32_t triangle = 0; triangle < triangleCount; ++triangle)
@@ -284,24 +319,57 @@ void rasterizeViewGBuffer(GiPipelineState &state, TaskScheduler *scheduler)
     state.viewFlags.assign(pixelCount, 0u);
     state.viewSurfaceIndex.assign(pixelCount, noSurface);
 
-    // Phase 1: per-surface triangle setup (parallel over surfaces).
-    std::vector<std::vector<ScreenTriangle>> perSurface(state.surfaces.size());
+    // A field-size or view change retires every projected-triangle cache
+    // (the pixel coordinates depend on the resolution, the clip positions on
+    // the view); a registry change does the same through the mutators.
+    if (state.gatherRasterWidth != width || state.gatherRasterHeight != height)
+    {
+        state.gatherRasterWidth  = width;
+        state.gatherRasterHeight = height;
+        ++state.gatherRasterSerial;
+    }
+    if (!state.gatherRasterViewValid || !(state.gatherRasterViewProjection == state.viewProjection))
+    {
+        state.gatherRasterViewProjection = state.viewProjection;
+        state.gatherRasterViewValid      = true;
+        ++state.gatherRasterSerial;
+    }
+    if (state.gatherRasterTriangles.size() < state.surfaces.size())
+    {
+        state.gatherRasterTriangles.resize(state.surfaces.size());
+        ++state.gatherRasterSerial;
+    }
+    // Phase 1: per-surface triangle setup (parallel over surfaces, into the
+    // persistent per-surface lists).
     parallelRange(scheduler, state.surfaces.size(), 1,
         [&](std::size_t begin, std::size_t end)
         {
             for (std::size_t surface = begin; surface < end; ++surface)
             {
-                setupSurfaceTriangles(state, static_cast<std::uint32_t>(surface), width, height, perSurface[surface]);
+                setupSurfaceTriangles(state, static_cast<std::uint32_t>(surface), width, height,
+                    state.gatherRasterTriangles[surface]);
             }
         });
-    std::vector<ScreenTriangle> triangles;
-    for (const std::vector<ScreenTriangle> &list : perSurface)
+    state.gatherRasterConcat.clear();
+    for (const std::vector<ScreenTriangle> &list : state.gatherRasterTriangles)
     {
-        triangles.insert(triangles.end(), list.begin(), list.end());
+        state.gatherRasterConcat.insert(state.gatherRasterConcat.end(), list.begin(), list.end());
     }
+    const std::vector<ScreenTriangle> &triangles = state.gatherRasterConcat;
     // Phase 2: bin triangles into row bands (kept in submission order).
     const std::uint32_t bandCount = (height + bandRows - 1) / bandRows;
-    std::vector<std::vector<std::uint32_t>> bins(bandCount);
+    if (state.gatherRasterBins.size() != bandCount)
+    {
+        state.gatherRasterBins.assign(bandCount, std::vector<std::uint32_t>());
+    }
+    else
+    {
+        for (std::vector<std::uint32_t> &bin : state.gatherRasterBins)
+        {
+            bin.clear();
+        }
+    }
+    std::vector<std::vector<std::uint32_t>> &bins = state.gatherRasterBins;
     for (std::uint32_t index = 0; index < triangles.size(); ++index)
     {
         const ScreenTriangle &screen = triangles[index];

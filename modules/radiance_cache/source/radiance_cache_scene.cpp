@@ -1357,17 +1357,19 @@ void buildProbeDirectionTable(GiPipelineState &state)
 
 void buildProbeLevels(GiPipelineState &state)
 {
-    // Two camera-centered clip levels of 9^3 probes each (an odd dimension
-    // keeps a probe exactly on the camera axis). Level 0 covers the near field
-    // at the configured spacing; level 1 uses a coarser spacing
-    // (probes.level1_spacing_factor x) and so covers that many times the
-    // extent. The dimension is fixed by the renderer's probe buffer.
+    // Two camera-centered clip levels of dimension^3 probes each (the odd
+    // probes.clip_dimension keeps a probe exactly on the camera axis). Level 0
+    // covers the near field at the configured spacing; level 1 uses a coarser
+    // spacing (probes.level1_spacing_factor x) and so covers that many times
+    // the extent. The exported header carries the dimensions, so consumers
+    // walk whatever lattice the configuration built.
+    const std::uint32_t dimension = state.settings.probeClipDimension | 1u;
     auto buildLevel = [&](GiProbeLevel &level, float spacing)
     {
         level.spacing    = std::max(spacing, 0.25f);
-        level.dimensions = {probeGridDimension, probeGridDimension, probeGridDimension};
+        level.dimensions = {dimension, dimension, dimension};
         level.probes.assign(
-            static_cast<std::size_t>(probeGridDimension) * probeGridDimension * probeGridDimension, GiProbeLevel::Probe{});
+            static_cast<std::size_t>(dimension) * dimension * dimension, GiProbeLevel::Probe{});
         level.updateCursor = 0;
         level.originCell   = glm::ivec3(0);
         for (GiProbeLevel::Probe &probe : level.probes)

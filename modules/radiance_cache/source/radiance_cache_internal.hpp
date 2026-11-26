@@ -53,7 +53,9 @@ namespace radiance_cache
 
 inline constexpr float invalidCardDepth  = std::numeric_limits<float>::max();
 inline constexpr std::uint32_t noSurface = 0xffffffffu;
-// Fixed probe clip box edge (the renderer's fixed probe buffer holds 2 x 9^3).
+// Default probe clip box edge (probes.clip_dimension; odd so a probe sits
+// exactly on the camera axis). Consumers read the lattice extent from the
+// exported probe header, so a configured dimension flows to every walker.
 inline constexpr std::uint32_t probeGridDimension = 9;
 inline constexpr std::uint32_t maxCardLayers      = 4;
 // Octahedral map resolution bounds of the world probes (the documented
@@ -167,6 +169,10 @@ struct GiSettings
     // Rays past the budget treat the next opaque surface as blocking.
     std::uint32_t maxTransmissionSegments      = 3;
     float         probeSpacing               = 2.0f;
+    // Clip box edge per axis of both probe levels (probes.clip_dimension,
+    // odd): each level holds dimension^3 probes. Structural - a change
+    // rebuilds the levels; see rebuildPipelineAfterConfigChangeLocked.
+    std::uint32_t probeClipDimension       = probeGridDimension;
     std::uint32_t probeDirectionResolution   = 32;
     std::uint32_t probeUpdatesPerFrame       = 64;
     std::uint32_t probeRaysPerUpdate         = 256;
@@ -337,6 +343,28 @@ struct GiSurfaceGeometry
     glm::vec3                     boundsMax{0.0f};
 };
 
+struct GatherClipVertex
+{
+    glm::vec4 clip{0.0f};
+    glm::vec3 world{0.0f};
+    glm::vec3 bary{0.0f};
+};
+
+struct GatherScreenVertex
+{
+    glm::vec2 pixel{0.0f};
+    float     inverseW = 0.0f;
+    glm::vec3 world{0.0f};
+    glm::vec3 bary{0.0f};
+};
+
+struct GatherScreenTriangle
+{
+    GatherScreenVertex vertex[3];
+    std::uint32_t surface  = 0;
+    std::uint32_t triangle = 0;
+};
+
 struct GiSurface
 {
     GiSurfaceHandle   handle = invalidGiSurface;
@@ -383,6 +411,16 @@ struct GiSurface
     glm::vec3         worldMin{0.0f};
     glm::vec3         worldMax{0.0f};
     std::vector<GiCard> cards;            // local-space cards of this surface
+
+    // Gather-view raster caches (the reflection field's pattern): the
+    // surface's projected screen triangles are rebuilt only when the gather
+    // raster serial changes (view / registry / field size) or the surface's
+    // exact transform changes; the world positions follow the transform
+    // alone, the clip positions the transform and the view.
+    std::uint64_t              gatherRasterSerial = 0;
+    std::uint64_t              gatherTransformBits = 0;
+    std::vector<glm::vec3>     gatherWorldPositions;
+    std::vector<glm::vec4>     gatherClipPositions;
 };
 
 // Top-level acceleration structure over the surfaces' world bounds.
@@ -618,6 +656,18 @@ struct GiPipelineState
     bool        environmentValid = false;
     std::uint64_t environmentVersion = 0;
     std::uint64_t directLightsVersion = 0;
+
+    // Gather-view raster caches: `gatherRasterSerial` retires every
+    // per-surface projected-triangle cache when the view, the registry, or
+    // the field size changes (the reflection field's rasterSerial pattern).
+    std::uint64_t                          gatherRasterSerial = 1;
+    std::uint32_t                          gatherRasterWidth  = 0;
+    std::uint32_t                          gatherRasterHeight = 0;
+    glm::mat4                              gatherRasterViewProjection{1.0f};
+    bool                                   gatherRasterViewValid = false;
+    std::vector<std::vector<GatherScreenTriangle>> gatherRasterTriangles;
+    std::vector<GatherScreenTriangle>      gatherRasterConcat;
+    std::vector<std::vector<std::uint32_t>> gatherRasterBins;
 
     // World-space radiance cache: two camera-centered clip levels.
     GiProbeLevel level0;

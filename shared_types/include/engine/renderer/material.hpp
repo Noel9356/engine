@@ -109,6 +109,21 @@ struct MeshMaterial
     // order is append-only.
     float noiseScaleMeters = 0.0f;
     float noiseStrength    = 0.0f;
+
+    // Per-pixel distance fog (aerial perspective) for large scenes: every
+    // shaded sample blends toward fogColor by
+    // fogAsymptote * (1 - exp(-cameraDistance / fogScaleMeters)), evaluated
+    // at the sample's own interpolated world position after every lighting
+    // and emissive term and before the output transform. The weight follows
+    // the pixel, so the fog stays continuous across every mesh and chunk
+    // boundary by construction - a per-draw uniform weight reads as a
+    // rectangle grid on streamed terrain. fogAsymptote 0.0f (the default)
+    // disables the pass. The CPU rasterizer applies the fog on all of its
+    // shading paths; the Vulkan backend documents the pair as a parity note
+    // (see modules/renderer/docs/backends.md). Field order is append-only.
+    float fogColor[3]    = {0.0f, 0.0f, 0.0f};
+    float fogScaleMeters = 1000.0f;
+    float fogAsymptote   = 0.0f;
 };
 
 } // namespace engine::renderer

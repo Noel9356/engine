@@ -1,0 +1,104 @@
+# demo_lighting: the lighting pipeline showcase configuration.
+#
+# Headless by default (CI / screenshot runs): the window and renderer run on
+# their CPU backends and the demo exports PNG screenshots. For a windowed run
+# pass --set window.backend=glfw --set renderer.backend=vulkan (or edit here).
+
+[engine]
+active_plugins        = []
+max_fps               = 0
+max_frame_delta_seconds = 0.25
+max_worker_count      = 8
+priority_aging_ms     = 500
+queue_source_fairness = true
+worker_count          = 0
+
+[trust]
+# The renderer acquires the optional radiance_cache and reflection_field
+# capabilities on top of its own set, which the trust gate flags as
+# "broad"; first-party modules are trusted by name (same binding the
+# showcase configuration carries).
+trustModules = ["renderer"]
+
+[window]
+width  = 1280
+height = 720
+
+[pbr]
+# Golden-hour sun: warm light from ~10 degrees elevation, aligned with the
+# orbit camera's opening view direction, so the sun disc's glare wedge, the
+# long object shadows and the specular glints all read in one frame. The ambient stays modest - the
+# indirect terms own the shadowed half. Exposure sits below 1.0: the gather
+# field adds the bounce of a bright field, and the default would clip it.
+sun_enabled       = true
+sun_direction     = [-0.84, 0.17, -0.51]
+sun_color         = [1.0, 0.93, 0.82]
+sun_intensity     = 3.2
+ambient_intensity = 0.22
+ambient_mode      = "hemisphere"
+exposure          = 0.60
+tone_mapping      = "aces"
+
+[direct_lighting]
+maximum_registered_lights = 64
+
+[direct_lighting.budgets]
+# The per-draw light count: the showcase's pool lamp rides on top of the
+# configured orbiting ring, so the budget opens past it (the registry still
+# resolves the nearest set per draw).
+base = 16
+
+[radiance_cache]
+# The showcase registers one GI surface per instance plus four ground
+# quadrants, so the registry capacity opens up to the full scatter. The card
+# density runs at the prop scale (the module default targets architecture:
+# 24 texels/m on a two-meter prop spends a six-face card set ~1.5 MB large,
+# and thousands of props would spend gigabytes; 8 texels/m resolves the same
+# ambient field at a twelfth of the storage), and the depth layers drop to
+# one (the props are convex - a second texel layer behind the front face
+# never lights anything). The per-frame texel and probe budgets keep the
+# module's documented defaults: they are what keep the evaluate cost flat
+# while the surface set grows.
+[radiance_cache.scene]
+max_surfaces = 8192
+
+[radiance_cache.cards]
+texels_per_meter = 8.0
+depth_layers     = 1
+
+[radiance_cache.caustics]
+# The showcase's water and glass focus light onto the pool floor; the photon
+# budget runs well above the module default so the caustic net resolves
+# sharp, low-noise lines at pool scale (the pass shares the frame's ray
+# budgets and stays a flat per-frame cost however it is tuned).
+photons_per_frame = 24576
+
+[renderer]
+backend     = "headless"
+clear_color = [0.012, 0.014, 0.028, 1.0]
+# The whole lighting stack consumes its modules' outputs: the probe grid and
+# the gather field light the ambient term, the reflection field adds the
+# indirect specular, and the two headless shadow maps carry the sun and sky
+# occlusion.
+gather_indirect_lighting    = true
+gi_indirect_lighting        = true
+reflection_indirect_specular = true
+sun_shadows                 = true
+sky_shadows                 = true
+shadow_map_resolution       = 2048
+bloom                       = true
+bloom_strength              = 0.28
+bloom_threshold             = 0.8
+
+[reflection_field]
+# One reflection surface per instance plus the ground tiles, mirroring the
+# GI registry capacity above. The field runs at half the default field
+# scale (1/2 instead of 1/4 of the viewport): the pool showcase's refracted
+# floor view and its caustic net resolve at the finer texel size - the
+# showcase spends its budget where it shows, and the per-frame tracing
+# budget keeps the evaluate cost flat at whatever scale runs. The base
+# setting halves the module default (the quality preset doubles the base,
+# so the field runs at half the viewport instead of a quarter).
+screen_scale = 1
+[reflection_field.scene]
+max_surfaces = 8192

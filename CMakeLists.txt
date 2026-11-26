@@ -375,11 +375,10 @@ set(ENGINE_MODULE_SELECTION_ALIASES
     "ecs=world"
     "render=renderer"
     "entity_world=world"
-    "environment_lighting=render_effects"
-    "global_illumination=render_effects"
-    "shadow_maps=render_effects"
-    "specular_reflections=render_effects"
-    "volumetric_lighting=render_effects"
+    "environment_lighting=pbr"
+    "global_illumination=radiance_cache"
+    "shadow_maps=renderer"
+    "specular_reflections=reflection_field"
 )
 set(ENGINE_NORMALIZED_MODULES)
 foreach(
@@ -886,6 +885,7 @@ if(ENGINE_BUILD_DEMO)
             lumen_gi
             physics_sandbox
             planet
+            lighting
     )
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/demos/${engineDemoDirectory}/CMakeLists.txt")
             add_subdirectory("demos/${engineDemoDirectory}")

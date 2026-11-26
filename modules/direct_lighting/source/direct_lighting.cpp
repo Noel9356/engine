@@ -134,6 +134,24 @@ public:
         // maxDirectLights are clamped; negatives are ignored.
         configuredMaxLights_ = 0;
         configuredMaximumRegisteredLights_ = 256;
+        // [direct_lighting.budgets] per-device automatic budgets resolveProfile
+        // picks between when max_lights is 0. 0 disables the class (the
+        // uniform-buffer range still caps the result).
+        budgetBaseLights_               = 8;
+        budgetDiscreteGpuLights_       = 32;
+        budgetIntegratedGpuLights_     = 24;
+        budgetVirtualGpuLights_        = 16;
+        const auto budgetKey = [&](const char *key, std::uint32_t fallback)
+        {
+            const auto value = context.configurationIntegerInSection("direct_lighting.budgets", key);
+            return value.has_value() && *value >= 0 && *value <= maxDirectLights
+                ? static_cast<std::uint32_t>(*value)
+                : fallback;
+        };
+        budgetBaseLights_           = budgetKey("base_lights", budgetBaseLights_);
+        budgetDiscreteGpuLights_   = budgetKey("vulkan_discrete_gpu_lights", budgetDiscreteGpuLights_);
+        budgetIntegratedGpuLights_ = budgetKey("vulkan_integrated_gpu_lights", budgetIntegratedGpuLights_);
+        budgetVirtualGpuLights_    = budgetKey("vulkan_virtual_gpu_lights", budgetVirtualGpuLights_);
         if (const auto value = context.configurationIntegerInSection("direct_lighting", "maximum_registered_lights");
             value.has_value() && *value >= 1 && *value <= 65536)
         {
@@ -412,24 +430,25 @@ private:
         {
             return false;
         }
-        // Vulkan light budgets by device class; without compute shaders the
-        // budget is capped at 16. Non-Vulkan devices use the base 8.
-        std::uint32_t automatic = 8;
+        // Vulkan light budgets by device class (the [direct_lighting.budgets]
+        // keys); without compute shaders the budget is capped at 16.
+        // Non-Vulkan devices use the base budget.
+        std::uint32_t automatic = budgetBaseLights_;
         if (device->isVulkan)
         {
             switch (device->deviceClass)
             {
             case renderer::DeviceClass::DiscreteGpu:
-                automatic = 32;
+                automatic = budgetDiscreteGpuLights_;
                 break;
             case renderer::DeviceClass::IntegratedGpu:
-                automatic = 24;
+                automatic = budgetIntegratedGpuLights_;
                 break;
             case renderer::DeviceClass::VirtualGpu:
-                automatic = 16;
+                automatic = budgetVirtualGpuLights_;
                 break;
             default:
-                automatic = 8;
+                automatic = budgetBaseLights_;
                 break;
             }
             if (!device->computeShader)
@@ -468,6 +487,12 @@ private:
     std::atomic<std::uint64_t>               version_{1};
     std::uint32_t                            configuredMaxLights_ = 0;
     std::uint32_t                            configuredMaximumRegisteredLights_ = 256;
+    // Per-device-class automatic budgets of resolveProfile (the
+    // [direct_lighting.budgets] keys), all capped by maxDirectLights.
+    std::uint32_t                            budgetBaseLights_           = 8;
+    std::uint32_t                            budgetDiscreteGpuLights_   = 32;
+    std::uint32_t                            budgetIntegratedGpuLights_ = 24;
+    std::uint32_t                            budgetVirtualGpuLights_    = 16;
 };
 
 } // namespace

@@ -181,7 +181,7 @@ struct ReflectionSettings
     // (standard deviations of the current 3x3 neighborhood, widened to the
     // neighborhood's own min/max range so deterministic high-dynamic-range
     // structure survives the clamp).
-    float         temporalStrength       = 0.98f;
+    float         temporalStrength       = 0.99f;
     float         neighborhoodClampSigma = 1.0f;
 
     // Angular radius of the sun disc the reflection module's sky answer
@@ -466,6 +466,15 @@ struct RfPipelineState
     std::uint32_t convergenceFrames = 1;
     RfEnvironmentSnapshot environment;
     bool        environmentValid = false;
+
+    // The radiance_cache capability when the module could acquire it (null
+    // otherwise): the hit shading samples the photon caustics pass's deposited
+    // irradiance through it, so refracted chains land on a receiver with the
+    // focused pattern the transmitter casts (sunlit water onto its bed). The
+    // pointer is read-only on this side - the same read-side contract
+    // copyProbes already follows - and never dereferenced during the
+    // provider's own evaluate.
+    const radiance_cache::RadianceCacheCapability *radianceCacheCapability = nullptr;
     std::uint64_t environmentVersion = 0;
     std::uint64_t directLightsVersion = 0;
 

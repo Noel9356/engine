@@ -62,6 +62,15 @@ constexpr double kCloudStretchFactor = 0.32;
 constexpr double kCloudSwirlAmplitude = 0.20;
 constexpr double kCloudBillowWavelengthFraction = 0.70;
 
+// Cyclone shear displacement stays storm-local: past a few bank wavelengths
+// the arms stop wrapping the storm and start lacing the whole deck around
+// the globe (samples at the eyewall read banks from the far side of the
+// planet, and the deck photographs as meridian combs radiating from the
+// storm). The clamp caps the wrap at that bound whatever the configured
+// strength; the inward drift derives from the same product, so the cap
+// lands on it too.
+constexpr double kCloudShearMaxWavelengths = 6.0;
+
 // Convective octave (texture consumers only, see coverageTexel): an
 // inverted-cellular (Worley) pair at METRIC wavelengths
 // (cloudConvective*WavelengthMeters in params.hpp; a value of 0 derives it
@@ -320,10 +329,12 @@ double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutof
                     ? radial / storm.coreMeters
                     : storm.coreMeters / radial)
                 * (1.0 - smoothstep(3.0 * storm.coreMeters, 4.0 * storm.coreMeters, radial));
+            const double shearMeters = std::min(storm.strength * storm.coreMeters,
+                kCloudShearMaxWavelengths * params_.cloudWavelengthMeters);
             const Vec3 inward = offset * (1.0 / radial);
             shellPosition = shellPosition
-                + tangential * (storm.strength * storm.coreMeters * speed)
-                - inward * (0.35 * storm.strength * storm.coreMeters * speed);
+                + tangential * (shearMeters * speed)
+                - inward * (0.35 * shearMeters * speed);
         }
     }
 

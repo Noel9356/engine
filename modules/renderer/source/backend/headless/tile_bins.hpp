@@ -96,13 +96,26 @@ inline TileGrid makeGrid(std::uint32_t framebufferWidth, std::uint32_t framebuff
     return tileXBegin <= tileXEnd && tileYBegin <= tileYEnd && tileXEnd < grid.tilesX && tileYEnd < grid.tilesY;
 }
 
+// One record's tile span as computed by the counting pass; the scatter
+// pass replays it without calling `ranges` again.
+struct RecordTileRange
+{
+    std::uint32_t xBegin = 0;
+    std::uint32_t xEnd   = 0;
+    std::uint32_t yBegin = 0;
+    std::uint32_t yEnd   = 0;
+    bool          touches = false;
+};
+
 // Two-pass binning over a grid: `ranges(record, ...)` reports, per record,
 // the inclusive tile-column/row span the record covers (return false for
 // records that touch no tile - they are skipped). Records are visited in
 // ascending id order in both passes, so the resulting per-tile lists keep
 // ascending record order - the property that keeps per-pixel rasterisation
 // order deterministic (equal-depth writes resolve exactly as the
-// sequential scan resolves them).
+// sequential scan resolves them). The counting pass stores each record's
+// span in `scratch` (caller-owned, kept across frames); the scatter pass
+// replays the stored spans instead of recomputing them.
 //
 // On return: offsets has tileCount(grid)+1 entries (exclusive prefix sums),
 // and items holds every (record, tile) pairing as record ids; the ids for
@@ -110,7 +123,8 @@ inline TileGrid makeGrid(std::uint32_t framebufferWidth, std::uint32_t framebuff
 // count (items.size()).
 template <typename RangeFn>
 bool binRecordTileRanges(std::size_t recordCount, const RangeFn &ranges, const TileGrid &grid,
-    std::vector<std::uint32_t> &offsets, std::vector<std::uint32_t> &items)
+    std::vector<std::uint32_t> &offsets, std::vector<std::uint32_t> &items,
+    std::vector<RecordTileRange> &scratch)
 {
     const std::uint32_t tiles = tileCount(grid);
     // std::vector::max_size() is implementation-defined and querying it via
@@ -135,22 +149,28 @@ bool binRecordTileRanges(std::size_t recordCount, const RangeFn &ranges, const T
             return true;
         }
 
-        // Pass 1: per-tile coverage counts.
+        // Pass 1: per-tile coverage counts; each record's span is stored for
+        // the scatter pass below (which replays it without a second `ranges`
+        // call per record).
+        scratch.clear();
+        scratch.resize(recordCount);
         for (std::size_t record = 0; record < recordCount; ++record)
         {
-            std::uint32_t tileXBegin = 0, tileXEnd = 0, tileYBegin = 0, tileYEnd = 0;
-            if (!ranges(record, tileXBegin, tileXEnd, tileYBegin, tileYEnd))
+            RecordTileRange &span = scratch[record];
+            span.touches = ranges(record, span.xBegin, span.xEnd, span.yBegin, span.yEnd);
+            if (!span.touches)
                 continue;
-            if (tileXBegin > tileXEnd || tileYBegin > tileYEnd || tileXEnd >= grid.tilesX || tileYEnd >= grid.tilesY)
+            if (span.xBegin > span.xEnd || span.yBegin > span.yEnd || span.xEnd >= grid.tilesX
+                || span.yEnd >= grid.tilesY)
             {
                 offsets.clear();
                 items.clear();
                 return false;
             }
-            for (std::uint32_t tileY = tileYBegin;; ++tileY)
+            for (std::uint32_t tileY = span.yBegin;; ++tileY)
             {
                 const std::size_t rowBase = static_cast<std::size_t>(flattenTile(grid, 0u, tileY));
-                for (std::uint32_t tileX = tileXBegin;; ++tileX)
+                for (std::uint32_t tileX = span.xBegin;; ++tileX)
                 {
                     if (offsets[rowBase + tileX + 1u] == std::numeric_limits<std::uint32_t>::max())
                     {
@@ -159,10 +179,10 @@ bool binRecordTileRanges(std::size_t recordCount, const RangeFn &ranges, const T
                         return false;
                     }
                     ++offsets[rowBase + tileX + 1u];
-                    if (tileX == tileXEnd)
+                    if (tileX == span.xEnd)
                         break;
                 }
-                if (tileY == tileYEnd)
+                if (tileY == span.yEnd)
                     break;
             }
         }
@@ -187,25 +207,19 @@ bool binRecordTileRanges(std::size_t recordCount, const RangeFn &ranges, const T
         std::vector<std::uint32_t> cursors(offsets.begin(), offsets.end() - 1);
         for (std::size_t record = 0; record < recordCount; ++record)
         {
-            std::uint32_t tileXBegin = 0, tileXEnd = 0, tileYBegin = 0, tileYEnd = 0;
-            if (!ranges(record, tileXBegin, tileXEnd, tileYBegin, tileYEnd))
+            const RecordTileRange &span = scratch[record];
+            if (!span.touches)
                 continue;
-            if (tileXBegin > tileXEnd || tileYBegin > tileYEnd || tileXEnd >= grid.tilesX || tileYEnd >= grid.tilesY)
-            {
-                offsets.clear();
-                items.clear();
-                return false;
-            }
-            for (std::uint32_t tileY = tileYBegin;; ++tileY)
+            for (std::uint32_t tileY = span.yBegin;; ++tileY)
             {
                 const std::size_t rowBase = static_cast<std::size_t>(flattenTile(grid, 0u, tileY));
-                for (std::uint32_t tileX = tileXBegin;; ++tileX)
+                for (std::uint32_t tileX = span.xBegin;; ++tileX)
                 {
                     items[cursors[rowBase + tileX]++] = static_cast<std::uint32_t>(record);
-                    if (tileX == tileXEnd)
+                    if (tileX == span.xEnd)
                         break;
                 }
-                if (tileY == tileYEnd)
+                if (tileY == span.yEnd)
                     break;
             }
         }

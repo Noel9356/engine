@@ -54,7 +54,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -394,19 +393,30 @@ glm::vec3 coneFluxPerPhoton(const EmissionSource &source, std::uint32_t photons)
     return source.fluxPerPhoton * (solidAngle / static_cast<float>(photons));
 }
 
+// The share of vertex normals that must agree with the sheet's dominant
+// direction before a thin slab counts as non-focusing: a pane's two large
+// parallel faces own the overwhelming majority of its normals (the rim is
+// minor by the extent test), while a rippled sheet's normals wander
+// everywhere across its waves.
+constexpr float kSlabAlignedNormalShare = 0.98f;
+
 // Whether the geometry focuses the light it transmits. Two shapes pass a
 // beam through without converging it, so the gather's deterministic Snell
 // path already resolves their transmitted share exactly and photons aimed
 // at them add variance without focus: a single plane (all vertex normals
 // align up to sign - double-sided planes fold onto one direction), and a
-// thin slab (one local-space extent far below the other two: two large
-// parallel faces carry the transmission while the rim stays minor).
-// Curved surfaces - spheres - and boxes with comparable extents bend rays
-// non-uniformly at their faces and edges and keep the caustic transmitter
-// role. Both tests read local geometry (vertex normals, local bounds), so
-// they are transform-invariant.
+// thin slab with parallel faces (one local-space extent far below the other
+// two, its normals agreeing with the dominant direction up to the rim).
+// Everything else keeps the caustic transmitter role: curved surfaces -
+// spheres - and boxes with comparable extents bend rays non-uniformly at
+// their faces and edges, and a rippled water sheet is thin but its normals
+// vary across the waves, so it focuses exactly the way a pool floor's
+// caustic net expects. All tests read local geometry (vertex normals, local
+// bounds), so they are transform-invariant.
 bool nonFocusingGeometry(const GiSurfaceGeometry &geometry)
 {
+    glm::vec3 dominantDirection(0.0f);
+    bool hasDominant = false;
     if (!geometry.normals.empty())
     {
         glm::vec3 foldedSum(0.0f);
@@ -417,7 +427,8 @@ bool nonFocusingGeometry(const GiSurfaceGeometry &geometry)
         const float sumLength = glm::length(foldedSum);
         if (sumLength > 1.0e-9f)
         {
-            const glm::vec3 dominantDirection = foldedSum / sumLength;
+            dominantDirection = foldedSum / sumLength;
+            hasDominant = true;
             // A 2.5-degree normal agreement budget: sphere belts and box
             // corner normals deviate far beyond it, while a flat pane's
             // smoothing noise stays inside it.
@@ -438,13 +449,33 @@ bool nonFocusingGeometry(const GiSurfaceGeometry &geometry)
         }
     }
     // Thin-slab test on the local-space extent: the smallest axis far below
-    // the middle one marks a pane or water sheet whose two large parallel
-    // faces dominate the transmission.
+    // the middle one marks a pane or water sheet. The extent alone is not
+    // enough - a rippled sheet is exactly as thin - so the slab passes
+    // light through unfocused only when its faces are parallel: nearly all
+    // normals inside the planar agreement budget of the dominant direction.
     const glm::vec3 extent = geometry.boundsMax - geometry.boundsMin;
     std::array<float, 3> sortedExtent = {extent.x, extent.y, extent.z};
     std::sort(sortedExtent.begin(), sortedExtent.end());
     constexpr float kSlabThinness = 0.2f;
-    return sortedExtent[0] < kSlabThinness * sortedExtent[1];
+    if (sortedExtent[0] >= kSlabThinness * sortedExtent[1])
+    {
+        return false;
+    }
+    if (!hasDominant)
+    {
+        return true; // no normals to vary: a flat sheet
+    }
+    constexpr float kPlanarNormalAlignment = 0.999f;
+    std::size_t alignedNormals = 0;
+    for (const glm::vec3 &normal : geometry.normals)
+    {
+        if (glm::abs(glm::dot(normal, dominantDirection)) >= kPlanarNormalAlignment)
+        {
+            ++alignedNormals;
+        }
+    }
+    return static_cast<float>(alignedNormals) / static_cast<float>(geometry.normals.size())
+        >= kSlabAlignedNormalShare;
 }
 
 } // namespace
@@ -558,8 +589,13 @@ void runCausticsPass(GiPipelineState &state, TaskScheduler *scheduler)
         if (sunSource)
         {
             const std::uint32_t transmitter = static_cast<std::uint32_t>(state.frameIndex) % transmitters.size();
+            // The beam wants the direction the light TRAVELS (down-sun);
+            // the environment's sunDirection points toward the sun, so the
+            // beam plane sits on the light side only when it is negated (the
+            // un-negated beam started underground on the shadow side and its
+            // photons flew upward into the sky - backfaces only, no deposits).
             EmissionSource source = beamSourceFor(state.surfaces[transmitters[transmitter]],
-                state.environment.sunDirection);
+                -state.environment.sunDirection);
             source.fluxPerPhoton = sunRadiance;
             sources.push_back(source);
             sourcePhotons.push_back(perBeam);
@@ -571,8 +607,11 @@ void runCausticsPass(GiPipelineState &state, TaskScheduler *scheduler)
                 continue;
             }
             const std::uint32_t transmitter = static_cast<std::uint32_t>(state.frameIndex) % transmitters.size();
+            // light.direction is the ray direction the light travels along
+            // (see DirectLightDescription); the beam flies along it into the
+            // transmitter, the same as the sun beam above.
             EmissionSource source = beamSourceFor(state.surfaces[transmitters[transmitter]],
-                -light.direction);
+                light.direction);
             source.fluxPerPhoton = light.color * light.intensity;
             sources.push_back(source);
             sourcePhotons.push_back(perBeam);

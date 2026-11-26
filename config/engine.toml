@@ -25,10 +25,11 @@ lod_enabled = false
 
 [trust]
 trustPlugins = ["main_menu"]
-# The renderer acquires six capabilities now that it consumes the optional
-# lumen_gi probe grid and the lumen_reflection field (window + window.vulkan
-# + pbr + direct_lighting + lumen_gi + lumen_reflection), which the trust
-# gate flags as "broad"; first-party modules are trusted by name.
+# The renderer acquires seven capabilities now that it consumes the optional
+# radiance_cache probe grid and gather field plus the reflection field
+# (window + window.vulkan + pbr + direct_lighting + radiance_cache
+# + radiance_cache.gather + reflection_field), which the trust gate flags as
+# "broad"; first-party modules are trusted by name.
 trustModules = ["renderer"]
 
 [window]

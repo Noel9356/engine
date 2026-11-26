@@ -360,11 +360,39 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
     // probes below still dominate the score.
     const bool prefilterByBiome = neighborhoodBiome != nullptr
         && (policy == ProbePolicy::Pinned || policy == ProbePolicy::Coastline);
-    if (prefilterByBiome)
+    // The unpinned coast view is just as sparse as a biome pin: its
+    // 2-45 m shoreband predicate only ever matches a sliver of the globe
+    // (the beach ring itself), and no practical spiral lands inside it -
+    // the 2048-point spiral's own spacing (~1.6 km on the showcase globe)
+    // already exceeds the 220 m ring the near-shore fan gate reads, so the
+    // coarse search silently degraded to the generic fallback spot and
+    // photographed inland hills instead of a shoreline. The coast search
+    // instead keeps the spiral's near-shore WATER points and marches each
+    // to its waterline (see the pre-filter below); the coastline fan gates
+    // then still verify real land AND water in frame.
+    const bool prefilterByShore = policy == ProbePolicy::Coastline && neighborhoodBiome == nullptr;
+    // The shore march's own constants: the standing elevation the marched
+    // candidate climbs to (inside the coast predicate's 2-45 m window and
+    // above the flattened shoreline band's near-waterline floor), how far
+    // inland the climb may search, how far the compass probes search for
+    // land around a near-shore water point, how deep a water point may sit
+    // before marching from it stops being a shoreline search, and how many
+    // marched candidates the search wants before it stops escalating the
+    // spiral (a coastline's spiral footprint is thin; one pass finds a
+    // handful).
+    constexpr double kShoreStandMeters     = 3.0;
+    constexpr double kShoreClimbMeters     = 2000.0;
+    constexpr double kShoreProbeMeters     = 480.0;
+    constexpr double kShoreProbeMaxMeters  = 7680.0;
+    constexpr double kShoreMaxWaterDepthMeters = 400.0;
+    constexpr std::size_t kShoreCandidateFloor = 24;
+    if (prefilterByBiome || prefilterByShore)
     {
         std::uint32_t spiralCount = 2048;
         candidates.reserve(96);
-        for (int attempt = 0; attempt < 2 && candidates.empty(); ++attempt)
+        for (int attempt = 0; attempt < 2
+            && (prefilterByShore ? candidates.size() < kShoreCandidateFloor : candidates.empty());
+            ++attempt)
         {
             const std::vector<planet::Vec3> fine = goldenSpiralDirections(spiralCount);
             for (const planet::Vec3 &direction : fine)
@@ -377,6 +405,180 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 const double dirArray[3] = {direction.x, direction.y, direction.z};
                 if (!planetCapability.sampleSurfaceRadius(planetCapability.self, planet, dirArray, &radius))
                 {
+                    continue;
+                }
+                if (prefilterByShore)
+                {
+                    // The shoreline march: a point ON the beach is what the
+                    // coastline gates need (land under foot, open water
+                    // inside the near fan rings), and no practical spiral
+                    // lands there - the 2048-point spiral's own spacing
+                    // (~1.6 km on the showcase globe) already exceeds the
+                    // 220 m ring the near-shore gate reads. So the search
+                    // runs the other way around: keep the spiral's
+                    // near-shore WATER points and march each one to its
+                    // waterline along the first compass direction that
+                    // finds land, stepping a fixed distance inland. The
+                    // marched candidate then carries real water within the
+                    // probe reach by construction, and the fan gates below
+                    // still verify the full frame composition.
+                    const double waterElevation = radius - params.derivedSeaRadiusMeters;
+                    if (waterElevation < -kShoreMaxWaterDepthMeters || waterElevation > -1.0)
+                    {
+                        continue; // open ocean (too far to march) or already land
+                    }
+                    planet::Vec3 shoreTangent = planet::cross(spinAxis, direction);
+                    double       shoreTangentLength = planet::length(shoreTangent);
+                    if (shoreTangentLength < 1.0e-6)
+                    {
+                        shoreTangent       = planet::cross(direction, planet::Vec3{1.0, 0.0, 0.0});
+                        shoreTangentLength = planet::length(shoreTangent);
+                    }
+                    if (shoreTangentLength < 1.0e-6)
+                    {
+                        continue;
+                    }
+                    shoreTangent = shoreTangent * (1.0 / shoreTangentLength);
+                    const planet::Vec3 shoreBitangent = planet::normalized(planet::cross(direction, shoreTangent));
+                    // The land bearing search: the coastal flattening leaves
+                    // near-shore shelves nearly level (a few meters of fall
+                    // over a kilometer), so a fixed probe reach misses the
+                    // waterline on every gentle shore. Each compass bearing
+                    // expands its probe outward (kShoreProbeMeters, doubling)
+                    // until it stands on dry land or leaves the search
+                    // reach; the steepest landward bearing wins the march.
+                    std::size_t         landBearing        = 8;
+                    planet::Vec3        landProbe{};
+                    double              landProbeElevation = -1.0e30;
+                    for (std::size_t compass = 0; compass < 8; ++compass)
+                    {
+                        const double angle = static_cast<double>(compass) * (3.14159265358979323846 / 4.0);
+                        const planet::Vec3 probeAxis
+                            = shoreTangent * std::cos(angle) + shoreBitangent * std::sin(angle);
+                        for (double probeDistance = kShoreProbeMeters; probeDistance <= kShoreProbeMaxMeters;
+                             probeDistance *= 2.0)
+                        {
+                            const planet::Vec3 probe
+                                = rotateDirection(direction, probeAxis, probeDistance / params.radiusMeters);
+                            double probeRadius = 0.0;
+                            const double probeArray[3] = {probe.x, probe.y, probe.z};
+                            if (!planetCapability.sampleSurfaceRadius(
+                                    planetCapability.self, planet, probeArray, &probeRadius))
+                            {
+                                break;
+                            }
+                            const double probeElevation = probeRadius - params.derivedSeaRadiusMeters;
+                            if (probeElevation <= 0.0)
+                            {
+                                continue; // still water: push the probe outward
+                            }
+                            if (probeElevation > landProbeElevation)
+                            {
+                                landBearing        = compass;
+                                landProbe          = probe;
+                                landProbeElevation = probeElevation;
+                            }
+                            break; // dry land on this bearing: stop expanding
+                        }
+                    }
+                    bool marched = false;
+                    if (landBearing < 8)
+                    {
+                        // The winning bearing's tangent axis (the march
+                        // rotates around it, toward the land it found).
+                        const double landAngle = static_cast<double>(landBearing) * (3.14159265358979323846 / 4.0);
+                        const planet::Vec3 probeAxis
+                            = shoreTangent * std::cos(landAngle) + shoreBitangent * std::sin(landAngle);
+                        // Bisect the waterline between the water point and
+                        // the land probe (the span can run kilometers on a
+                        // gentle shelf; the halvings resolve it to ~30 m),
+                        // then climb inland from the crossing.
+                        planet::Vec3 waterSide = direction;
+                        planet::Vec3 landSide  = landProbe;
+                        for (std::size_t step = 0; step < 9; ++step)
+                        {
+                            const planet::Vec3 middle = planet::normalized(planet::Vec3{
+                                0.5 * (waterSide.x + landSide.x), 0.5 * (waterSide.y + landSide.y),
+                                0.5 * (waterSide.z + landSide.z)});
+                            double middleRadius = 0.0;
+                            const double middleArray[3] = {middle.x, middle.y, middle.z};
+                            if (!planetCapability.sampleSurfaceRadius(
+                                    planetCapability.self, planet, middleArray, &middleRadius))
+                            {
+                                break;
+                            }
+                            if (middleRadius > params.derivedSeaRadiusMeters)
+                            {
+                                landSide = middle;
+                            }
+                            else
+                            {
+                                waterSide = middle;
+                            }
+                        }
+                        // From the waterline, climb inland to the shore
+                        // march's target standing elevation: the coastal
+                        // flattening damps the shoreline band's detail to a
+                        // few percent, so a FIXED step lands within a meter
+                        // of the waterline and the predicate's own window
+                        // rejects it. The climb bisects between the
+                        // waterline and a probe kShoreClimbMeters inland;
+                        // a shore too flat to reach the target inside that
+                        // reach is left to the fan gates of some steeper
+                        // candidate (a beach below the window renders as a
+                        // sandbar, not a shore).
+                        planet::Vec3 inlandBase = rotateDirection(
+                            waterSide, probeAxis, kShoreClimbMeters / params.radiusMeters);
+                        double inlandBaseRadius = 0.0;
+                        const double inlandBaseArray[3] = {inlandBase.x, inlandBase.y, inlandBase.z};
+                        if (!planetCapability.sampleSurfaceRadius(
+                                planetCapability.self, planet, inlandBaseArray, &inlandBaseRadius)
+                            || inlandBaseRadius - params.derivedSeaRadiusMeters < kShoreStandMeters)
+                        {
+                            continue; // too flat to stand on inside the climb reach
+                        }
+                        planet::Vec3 lowSide  = waterSide;   // at the waterline: elevation ~0
+                        planet::Vec3 highSide = inlandBase;  // at/above the target elevation
+                        for (std::size_t step = 0; step < 6; ++step)
+                        {
+                            const planet::Vec3 middle = planet::normalized(planet::Vec3{
+                                0.5 * (lowSide.x + highSide.x), 0.5 * (lowSide.y + highSide.y),
+                                0.5 * (lowSide.z + highSide.z)});
+                            double middleRadius = 0.0;
+                            const double middleArray[3] = {middle.x, middle.y, middle.z};
+                            if (!planetCapability.sampleSurfaceRadius(
+                                    planetCapability.self, planet, middleArray, &middleRadius))
+                            {
+                                break;
+                            }
+                            if (middleRadius - params.derivedSeaRadiusMeters >= kShoreStandMeters)
+                            {
+                                highSide = middle;
+                            }
+                            else
+                            {
+                                lowSide = middle;
+                            }
+                        }
+                        const planet::Vec3 inland = highSide;
+                        // Two water points can march to the same beach: keep
+                        // the first, drop duplicates within a beach-length of
+                        // an existing candidate.
+                        bool duplicate = false;
+                        for (const planet::Vec3 &existing : candidates)
+                        {
+                            if (planet::dot(existing, inland) > 1.0 - 1.0e-10)
+                            {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                        if (!duplicate)
+                        {
+                            candidates.push_back(inland);
+                            marched = true;
+                        }
+                    }
                     continue;
                 }
                 engine::planet::ClimateSample climate{};
@@ -411,11 +613,23 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             // footprint: escalate once to an 8x denser spiral before calling
             // the biome absent (the failure log then distinguishes "rare"
             // from "absent").
-            if (candidates.empty() && attempt == 0)
+            const bool escalate = prefilterByShore
+                ? candidates.size() < kShoreCandidateFloor
+                : candidates.empty();
+            if (escalate && attempt == 0)
             {
-                std::cout << "demo_planet: biome '" << biomeName(*neighborhoodBiome)
-                          << "' produced no candidates on the " << spiralCount
-                          << "-point spiral; escalating to " << (spiralCount * 8) << " points\n";
+                if (prefilterByShore)
+                {
+                    std::cout << "demo_planet: the shoreline march produced " << candidates.size()
+                              << " candidates on the " << spiralCount
+                              << "-point spiral; escalating to " << (spiralCount * 8) << " points\n";
+                }
+                else
+                {
+                    std::cout << "demo_planet: biome '" << biomeName(*neighborhoodBiome)
+                              << "' produced no candidates on the " << spiralCount
+                              << "-point spiral; escalating to " << (spiralCount * 8) << " points\n";
+                }
                 spiralCount *= 8;
             }
         }
@@ -479,7 +693,7 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
     const char *bestFailReason    = "none";
     planet::Vec3 bestFailDirection{};
     planet::Vec3 bestFailFanTangents[5]{};
-    double      bestFailRises[30] = {};
+    double      bestFailRises[35] = {};
     bool        bestFailValid     = false;
     Viewpoint   best;
 
@@ -715,15 +929,19 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                     }
                     else
                     {
-                        // The coast view wants water in frame: sea probes are
-                        // fine, and land probes should be green behind the beach.
-                        // The temperature gate is low: shoreline air is cooled by
-                        // the lapse rate whenever the beach sits on high ground.
+                        // The coast view wants water in frame: sea probes
+                        // pass, and land probes pass when the shore country
+                        // is warm - the flattened shoreline band the march
+                        // lands in spans beach, savanna and desert shores
+                        // on this generator, and any of them photographs as
+                        // a coast (only snowfields and tundra wash the
+                        // frame out). The temperature gate is low: shoreline
+                        // air is cooled by the lapse rate whenever the beach
+                        // sits on high ground.
                         probeOk = hopElevation < 0.0
                             || (hopClimate.biome != engine::planet::Biome::Snow
                                 && hopClimate.biome != engine::planet::Biome::Tundra
-                                && hopClimate.temperature01 > 0.32
-                                && isGreenBiome(hopClimate.biome));
+                                && hopClimate.temperature01 > 0.32);
                     }
                 }
                 else if (policy == ProbePolicy::Mountain)
@@ -831,32 +1049,58 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         bool hasWaterward = false;
         if (policy == ProbePolicy::Coastline)
         {
+            // The waterward scan starts just past the coast view's look
+            // distance (320 m: the shoreline the near-shore view shows) and
+            // doubles outward on flat shelves - this generator's coastal
+            // flattening routinely leaves the waterline a kilometer or more
+            // from dry ground, and a fixed 320 m probe then mistook the
+            // gently falling shelf for open water. A probe that lands below
+            // the sea radius IS the water; among water bearings the nearest
+            // one wins, and only when no bearing finds water does the
+            // lowest-radius (steepest fall) bearing stand in.
             double lowestRadius  = 1.0e30;
             double highestRadius = -1.0e30;
+            double nearestWaterMeters = 1.0e30;
             planet::Vec3 seaward;
             planet::Vec3 landward;
             for (std::size_t compass = 0; compass < 8; ++compass)
             {
                 const double angle    = static_cast<double>(compass) * (3.14159265358979323846 / 4.0);
                 const planet::Vec3 probeAxis = tangent * std::cos(angle) + bitangent * std::sin(angle);
-                // The waterward scan searches just past the coast view's look
-                // distance (320 m): the shoreline the view will actually show.
-                const planet::Vec3 sightDirection = rotateDirection(direction, probeAxis, 320.0 / params.radiusMeters);
-                double sightRadius = 0.0;
-                const double sightArray[3] = {sightDirection.x, sightDirection.y, sightDirection.z};
-                if (!planetCapability.sampleSurfaceRadius(planetCapability.self, planet, sightArray, &sightRadius))
+                for (double probeDistance = 320.0; probeDistance <= 5120.0; probeDistance *= 2.0)
                 {
-                    continue;
-                }
-                if (sightRadius < lowestRadius)
-                {
-                    lowestRadius = sightRadius;
-                    seaward      = sightDirection;
-                }
-                if (sightRadius > highestRadius)
-                {
-                    highestRadius = sightRadius;
-                    landward      = sightDirection;
+                    const planet::Vec3 sightDirection
+                        = rotateDirection(direction, probeAxis, probeDistance / params.radiusMeters);
+                    double sightRadius = 0.0;
+                    const double sightArray[3] = {sightDirection.x, sightDirection.y, sightDirection.z};
+                    if (!planetCapability.sampleSurfaceRadius(planetCapability.self, planet, sightArray, &sightRadius))
+                    {
+                        break;
+                    }
+                    if (sightRadius < params.derivedSeaRadiusMeters)
+                    {
+                        // Open water on this bearing at this distance: the
+                        // nearest water bearing wins the scan.
+                        if (probeDistance < nearestWaterMeters)
+                        {
+                            nearestWaterMeters = probeDistance;
+                            seaward            = sightDirection;
+                        }
+                        break;
+                    }
+                    if (sightRadius < lowestRadius)
+                    {
+                        lowestRadius = sightRadius;
+                        if (nearestWaterMeters >= 1.0e30)
+                        {
+                            seaward = sightDirection; // steepest seaward fall so far
+                        }
+                    }
+                    if (sightRadius > highestRadius)
+                    {
+                        highestRadius = sightRadius;
+                        landward      = sightDirection;
+                    }
                 }
             }
             if (lowestRadius < 1.0e30)
@@ -888,14 +1132,25 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 planet::Vec3 alongShore = diagonalLength > 0.5 ? diagonal * (1.0 / diagonalLength)
                     : (seawardTLength > 1.0e-9 ? planet::normalized(planet::cross(radial, seawardTangent))
                                                 : planet::Vec3{});
-                // Landward bias: the along-shore diagonal aims the CENTER of
-                // the frame at the waterline, and on bent shores the land
-                // ends up past the frame edge (the render then reads as open
-                // ocean). Rotating a quarter radian toward the land keeps the
-                // water in frame while guaranteeing real coast in view.
-                if (landwardTLength > 1.0e-9 && planet::length(alongShore) > 1.0e-9)
+                // Aim bias: the along-shore diagonal aims the CENTER of the
+                // frame at the waterline. On bent shores the land then ends
+                // up past the frame edge (the render reads as open ocean),
+                // so a NEAR shoreline rotates a quarter radian toward the
+                // land - the water keeps its frame share while real coast
+                // stays in view. A FAR shoreline (the flat shelves again:
+                // water past the sight fan's near rings) rotates the other
+                // way, toward the water, so the waterline crosses the frame
+                // at all instead of sitting outside the view's edge.
+                if (planet::length(alongShore) > 1.0e-9)
                 {
-                    alongShore = planet::normalized(alongShore * std::cos(0.25) + landwardTangent * std::sin(0.25));
+                    const bool nearShore = nearestWaterMeters <= 640.0;
+                    const double biasRadians = nearShore ? 0.25 : -0.35;
+                    const planet::Vec3 &biasTangent = nearShore ? landwardTangent : seawardTangent;
+                    if (landwardTLength > 1.0e-9 || !nearShore)
+                    {
+                        alongShore = planet::normalized(
+                            alongShore * std::cos(biasRadians) + biasTangent * std::sin(biasRadians));
+                    }
                 }
                 waterwardTangent = alongShore;
                 hasWaterward     = planet::length(alongShore) > 1.0e-9;
@@ -988,8 +1243,14 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
         // camera stares into a near-vertical slope that fills the whole
         // frame. The wall caps rise with distance; cliff views get taller
         // caps because the terraced risers ARE the showcase.
-        const double sightRingDistances[6] = {60.0, 120.0, 220.0, 420.0, 720.0, 1440.0}; // meters
-        static constexpr std::size_t kSightRingCount = 6;
+        // Coastline fans carry one ring beyond the other views: the shore
+        // march may place the camera up to its climb reach from the
+        // waterline on the flattest shelves, and the water gates need a
+        // probe that reaches past it (a coast whose water never enters the
+        // fan fails "no water in sight fan" and the whole view falls back
+        // to an inland spot).
+        const double sightRingDistances[7] = {60.0, 120.0, 220.0, 420.0, 720.0, 1440.0, 2880.0}; // meters
+        const std::size_t kSightRingCount = policy == ProbePolicy::Coastline ? 7u : 6u;
         bool sightClear = true;
         bool cliffAhead = false;
         const char *failReason = "none"; // diagnostics: why sightClear went false
@@ -1051,7 +1312,7 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 // once the demo planet grew (the rings were then kilometers
                 // away while the caps stayed at tens of meters). Cliff views
                 // allow taller walls still (the risers are the showcase).
-                static constexpr double flatCapScale[6]   = {0.45, 0.6, 1.2, 2.0, 3.0, 4.0};
+                static constexpr double flatCapScale[7]   = {0.45, 0.6, 1.2, 2.0, 3.0, 4.0, 6.0};
                 // Cliff-view caps tolerate whole terrace steps in the near
                 // fan: the quantized risers ARE the showcase, and a step is
                 // ~200 m tall on the showcase planet. The UP side is
@@ -1060,7 +1321,7 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                 // deep descent (a valley basin, a below-datum sea) would aim
                 // the cliffs view across open water at a distant far shore,
                 // which is a coast view, not a cliff view.
-                static constexpr double cliffCapScale[6]  = {1.5, 2.2, 3.2, 5.0, 7.0, 10.0};
+                static constexpr double cliffCapScale[7]  = {1.5, 2.2, 3.2, 5.0, 7.0, 10.0, 14.0};
                 static constexpr double slopeTolerance    = 0.45; // meters of ground rise per meter of distance
                 const bool cliffView = policy == ProbePolicy::Mountain;
                 const double upCapScale = cliffView ? cliffCapScale[ring] : flatCapScale[ring];
@@ -1104,8 +1365,17 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
                             sawLandNear = true;
                         }
                     }
-                    else if (sightElevation < -2.0)
+                    else if (sightElevation < -0.25)
                     {
+                        // Water is water at any depth: the water sheet
+                        // renders wherever terrain dips below the sea
+                        // radius, and this generator's flattened shelves
+                        // slope so gently that their first kilometer of
+                        // open water sits within a couple of meters of the
+                        // datum - a wide deadband here classifies real sea
+                        // as "neither" and the coastline gates never see
+                        // it. The land side keeps its 2 m floor (the beach
+                        // band is land even at a meter up).
                         sawWater = true;
                         if (ring <= 2)
                         {
@@ -1129,13 +1399,19 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             sightClear = false;
             failReason = sawLand ? "no water in sight fan" : (sawWater ? "no land in sight fan" : "fan all level (no land, no water)");
         }
-        if (policy == ProbePolicy::Coastline && !waterPin && sightClear && !(sawLandNear && sawWaterNear))
+        // A shoreline beyond the near rings still reads as a coast from a
+        // 120 m eye on the flattened shelves this generator produces (the
+        // water enters the frame across the midground instead of the near
+        // field), so a far shoreline stays eligible and the score below
+        // ranks it behind any closer-water candidate. The islet trap is the
+        // opposite failure (no LAND near) and keeps its hard gate.
+        const bool farShoreline = policy == ProbePolicy::Coastline && !waterPin && sightClear && !sawWaterNear;
+        if (policy == ProbePolicy::Coastline && !waterPin && sightClear && !sawLandNear)
         {
-            // The shoreline is farther than 220 m on every fan yaw: from a
-            // 120 m eye the near field renders as open ocean even though a
-            // coast technically exists in the far fan (the islet trap).
+            // No land within 220 m on any fan yaw: the spot is open water
+            // or a skerry smaller than the near rings (the islet trap).
             sightClear = false;
-            failReason = "shoreline beyond 220 m";
+            failReason = "no land near (islet)";
         }
 
         // Score: probe greenness, zeroed when the view stares into a wall.
@@ -1203,7 +1479,7 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             bestFailReason    = failReason;
             bestFailDirection = direction;
             bestFailValid     = true;
-            for (std::size_t ring = 0; ring < 6; ++ring)
+            for (std::size_t ring = 0; ring < kSightRingCount; ++ring)
             {
                 for (std::size_t yaw = 0; yaw < 5; ++yaw)
                 {
@@ -1242,6 +1518,13 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
             // The shoreline (if any) is beyond 220 m: the frame is mostly
             // open water with the coast behind the camera. Keep the spot
             // eligible but let closer-shore candidates win.
+            score *= 0.85;
+        }
+        if (farShoreline)
+        {
+            // Water beyond the near rings (see farShoreline above): a
+            // midground shore loses to a near-shore candidate at equal
+            // quality but stays in the running on gentle-shelf seeds.
             score *= 0.85;
         }
         if (bestYawAlignment > 0.75)
@@ -1372,8 +1655,10 @@ bool pickViewpoint(planet::PlanetCapability &planetCapability, planet::PlanetHan
               << " m, reason '" << bestFailReason << "')\n";
     if (bestFailValid)
     {
-        std::cerr << "demo_planet: strongest rejected fan rises (rows = ring 60/120/220/420/720/1440 m, cols = yaw -0.8..+0.8):\n";
-        for (std::size_t ring = 0; ring < 6; ++ring)
+        const std::size_t printRingCount = policy == ProbePolicy::Coastline ? 7u : 6u;
+        std::cerr << "demo_planet: strongest rejected fan rises (rows = ring 60/120/220/420/720/1440"
+                     << (printRingCount > 6 ? "/2880" : "") << " m, cols = yaw -0.8..+0.8):\n";
+        for (std::size_t ring = 0; ring < printRingCount; ++ring)
         {
             std::cerr << "demo_planet:   ";
             for (std::size_t yaw = 0; yaw < 5; ++yaw)

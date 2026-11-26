@@ -32,7 +32,8 @@ Every key of the `[reflection_field]` configuration section, in TOML path form. 
 | --- | --- | --- | --- |
 | `reflection_field.screen_trace.enabled` | bool | `true` | Screen-trace tier toggle (Lumen's Screen Traces switch): `false` sends every dedicated ray straight to the scene trace, skipping the GBuffer march. |
 | `reflection_field.screen_trace.max_steps` | 4..256 | `48` | Marching step budget of one screen trace; longer on-screen extents trade resolution for distance coverage. |
-| `reflection_field.screen_trace.thickness_m` | 0.01..8 | `0.5` | Thin-occluder thickness: a ray accepts the texel it passes behind when it exceeds the stored camera distance by at most this many meters. |
+| `reflection_field.screen_trace.grazing_limit` | 0..1 | `0.25` | March geometry acceptance floor: screen traces stop marching a ray whose direction grazes the view axis below this cosine, where the GBuffer's parallax no longer represents the ray's actual path and a hit would be a false occlusion. |
+| `reflection_field.screen_trace.thickness_m` | 0.01..8 | `0.25` | Thin-occluder thickness: a ray accepts the texel it passes behind when it exceeds the stored camera distance by at most this many meters. |
 
 ## Roughness bands
 
@@ -48,8 +49,9 @@ Every key of the `[reflection_field]` configuration section, in TOML path form. 
 | `reflection_field.trace.max_distance_m` | 1..2000 | `50.0` | Scene-trace length for reflection rays (the same ceiling as radiance_cache's trace budget). |
 | `reflection_field.trace.bias_m` | 0.001..0.5 | `0.02` | Surface offset for reflection rays and their shadow rays; one bias behind every trace site, the same acne/leak knob as radiance_cache's `trace.bias_m`. |
 | `reflection_field.trace.lobe_alpha_floor` | 0..0.25 | `0.02` | Reflected-lobe antialiasing floor (a GGX alpha): every traced reflection lobe integrates at least this wide, so a near-mirror texel's near-deterministic direction cannot alias the high-contrast scene it reflects into single-texel outliers at field resolution. 0 keeps only the material's own roughness (sharpest, most grain); larger values pre-blur the lobe and trade sharpness for stability. |
-| `reflection_field.trace.transmission_lobe_alpha_floor` | 0..0.25 | `0.03` | Transmitted-lobe antialiasing floor: refraction magnifies the texel footprint, so refracted lobes integrate at least this wide. Lower toward `lobe_alpha_floor` for a sharper clear-glass image whose per-frame grain the temporal accumulation averages out; raise for immediate smoothness. |
+| `reflection_field.trace.transmission_lobe_alpha_floor` | 0..0.25 | `0.02` | Transmitted-lobe antialiasing floor: refraction magnifies the texel footprint, so refracted lobes integrate at least this wide. Lower toward `lobe_alpha_floor` for a sharper clear-glass image whose per-frame grain the temporal accumulation averages out; raise for immediate smoothness. |
 | `reflection_field.trace.max_transmission_segments` | 0..16 | `3` | How many interfaces a ray chain may cross through transparent or translucent surfaces (screen pass-throughs and refracted hops both count). A chain that exhausts the budget is absorbed; a glass pane costs two segments (entering and exiting the medium). |
+| `reflection_field.sky.sun_disc_angular_radius_deg` | 0.05..15 | `2.3` | Angular radius of the sun disc the module's sky answer carries: reflection rays that miss every surface resolve the analytic sky, and the sun's contribution integrates over this disc (a smaller disc is a sharper, more intense mirror sun; a larger one spreads the same energy). Roughly matches the visible sun's ~0.27 degrees half-angle at the tuned default for a pleasing mirror highlight. |
 
 ## Temporal filter
 
@@ -72,3 +74,16 @@ Every key of the `[reflection_field]` configuration section, in TOML path form. 
 | Key | Range | Default | Meaning |
 | --- | --- | --- | --- |
 | `reflection_field.debug.reference_samples` | 1..4096 | `16` | Brute-force rays per texel for the Reference debug view. All views render at field resolution (the module's working resolution - exactly what the renderer composites, so an A/B comparison against the reference involves no resampling). |
+
+## Fallback environment
+
+| Key | Range | Default | Meaning |
+| --- | --- | --- | --- |
+| `reflection_field.environment.sun_direction` | 3 finite floats | `[0.45, 0.62, 0.35]` | Direction TOWARD the sun of the built-in environment the module shades with when the optional pbr capability is absent (normalized internally; any direction is legal, including below the horizon). With pbr present the pbr environment wins and these keys are unused. |
+| `reflection_field.environment.sun_color` | 3 floats, >= 0 | `[1.0, 0.96, 0.88]` | Sun color of the fallback environment. |
+| `reflection_field.environment.sun_intensity` | 0-1e6 | `3.0` | Sun intensity of the fallback environment. |
+| `reflection_field.environment.sun_enabled` | bool | `true` | Whether the fallback environment carries a sun at all. |
+| `reflection_field.environment.ambient_sky` / `reflection_field.environment.ambient_ground` | 3 floats, >= 0 | `[0.55, 0.65, 0.80]` / `[0.35, 0.30, 0.25]` | Hemisphere colors the fallback skylight blends between (miss rays and the diffuse band's environment fallback). |
+| `reflection_field.environment.ambient_intensity` | 0-1e6 | `0.5` | Overall intensity of the fallback skylight. |
+
+The defaults match the renderer's built-in environment, so a headless consumer without pbr sees the same scene as the renderer's no-pbr fallback until it overrides these keys.

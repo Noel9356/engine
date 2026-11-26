@@ -45,6 +45,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace engine
@@ -160,10 +161,37 @@ public:
         context_ = nullptr;
         std::lock_guard<std::mutex> lock(moduleMutex_);
         state_.surfaces.clear();
+        surfaceIndexByHandle_.clear();
         state_.tlas.clear();
         state_.tlasSurfaces.clear();
         state_.hasView          = false;
         state_.environmentValid = false;
+        // The stopped module owns nothing: the frame GBuffer, the filtered
+        // field, and the temporal history are dropped too, so the snapshot
+        // published below reports an empty field instead of the last traced
+        // frame under a bumped version. A restart rebuilds every one of them
+        // from the first evaluate().
+        state_.fieldWidth  = 0;
+        state_.fieldHeight = 0;
+        state_.gbufferDepth.clear();
+        state_.gbufferPosition.clear();
+        state_.gbufferNormal.clear();
+        state_.gbufferAlbedo.clear();
+        state_.gbufferRoughness.clear();
+        state_.gbufferMetallic.clear();
+        state_.gbufferOpacity.clear();
+        state_.gbufferIor.clear();
+        state_.gbufferEmissive.clear();
+        state_.gbufferUnlit.clear();
+        state_.gbufferSurface.clear();
+        state_.fieldRaw.clear();
+        state_.fieldFiltered.clear();
+        state_.historyValid = false;
+        // The probe-grid copy follows the provider's own stop semantics: a
+        // stale grid would keep feeding reflections an environment the
+        // radiance_cache no longer stands behind.
+        state_.probeGrid              = RfProbeGrid{};
+        state_.sceneDirty             = true;
         publishSnapshotLocked();
     }
 
@@ -239,6 +267,18 @@ private:
             const auto value = context_->configurationBooleanInSection("reflection_field", key);
             return value.has_value() ? *value : fallback;
         };
+        auto environmentVector = [&](const char *key, glm::vec3 fallback, bool nonNegative)
+        {
+            const auto values = context_->configurationFloatingArrayInSection("reflection_field", key);
+            if (values.size() != 3 || !std::isfinite(values[0]) || !std::isfinite(values[1])
+                || !std::isfinite(values[2]) || (nonNegative && (values[0] < 0.0 || values[1] < 0.0
+                    || values[2] < 0.0)))
+            {
+                return fallback;
+            }
+            return glm::vec3(static_cast<float>(values[0]), static_cast<float>(values[1]),
+                static_cast<float>(values[2]));
+        };
         settings.enabled               = boolean("enabled", true);
         settings.skipUnchangedFrames   = boolean("skip_unchanged_frames", true);
         settings.quality              = static_cast<std::uint32_t>(integer("quality", 3, 0, 4));
@@ -275,6 +315,23 @@ private:
         settings_                      = settings;
         // The capacity key is the documented registry bound.
         state_.registryCapacity = settings_.maxSurfaces;
+        // Fallback environment (used when the optional pbr capability is
+        // absent or its copy fails): the same defaults the renderer's built-in
+        // environment carries, overridable so a headless consumer without pbr
+        // can still tune the sun and the hemispheric skylight the reflection
+        // rays see.
+        fallbackEnvironment_.sunDirection = environmentVector("environment.sun_direction",
+            glm::vec3(0.45f, 0.62f, 0.35f), false);
+        fallbackEnvironment_.sunColor     = environmentVector("environment.sun_color", glm::vec3(1.0f, 0.96f, 0.88f), true);
+        fallbackEnvironment_.sunIntensity =
+            static_cast<float>(floating("environment.sun_intensity", 3.0, 0.0, 1.0e6));
+        fallbackEnvironment_.sunEnabled   = boolean("environment.sun_enabled", true);
+        fallbackEnvironment_.ambientSky    = environmentVector("environment.ambient_sky",
+            glm::vec3(0.55f, 0.65f, 0.80f), true);
+        fallbackEnvironment_.ambientGround = environmentVector("environment.ambient_ground",
+            glm::vec3(0.35f, 0.30f, 0.25f), true);
+        fallbackEnvironment_.ambientIntensity =
+            static_cast<float>(floating("environment.ambient_intensity", 0.5, 0.0, 1.0e6));
     }
 
     void onConfigurationReloaded(const ConfigurationReloadedEvent &event)
@@ -305,16 +362,21 @@ private:
 
     // ---- surface registry -----------------------------------------------------
 
+    // Handle -> index into state_.surfaces, maintained at every registry
+    // mutation under moduleMutex_. Dynamic surfaces re-look up their entry
+    // every frame (updateSurfaceTransform), so the registry must answer in
+    // O(1) at registry capacities in the tens of thousands, not scan the
+    // vector. Destroy swaps the last surface into the hole (see
+    // destroySurfaceImpl), which keeps the fix-up O(1) at the cost of a
+    // registration order the consumers never observe - they hold handles.
     std::uint32_t findSurfaceLocked(ReflectionSurfaceHandle handle) const
     {
-        for (std::size_t index = 0; index < state_.surfaces.size(); ++index)
+        const auto found = surfaceIndexByHandle_.find(handle);
+        if (found == surfaceIndexByHandle_.end() || found->second >= state_.surfaces.size())
         {
-            if (state_.surfaces[index].handle == handle)
-            {
-                return static_cast<std::uint32_t>(index);
-            }
+            return 0xffffffffu;
         }
-        return 0xffffffffu;
+        return found->second;
     }
 
     void applySurfaceDescriptionLocked(RfSurface &surface, const ReflectionSurfaceDescription &description,
@@ -399,6 +461,7 @@ private:
         }
         // The handle is consumed only once the surface really exists.
         const ReflectionSurfaceHandle handle = state_.nextHandle++;
+        surfaceIndexByHandle_.emplace(handle, static_cast<std::uint32_t>(state_.surfaces.size()));
         state_.surfaces.push_back(std::move(surface));
         registryChangedLocked();
         setError(error, ReflectionError::None);
@@ -518,7 +581,16 @@ private:
         {
             return false;
         }
-        state_.surfaces.erase(state_.surfaces.begin() + index);
+        // Swap-and-pop: the last surface moves into the hole and its map
+        // entry follows, so removal stays O(1) like the lookup (a middle
+        // erase would shift every later index and force an O(n) map walk).
+        surfaceIndexByHandle_.erase(surface);
+        if (index + 1u < state_.surfaces.size())
+        {
+            state_.surfaces[index] = std::move(state_.surfaces.back());
+            surfaceIndexByHandle_[state_.surfaces[index].handle] = index;
+        }
+        state_.surfaces.pop_back();
         registryChangedLocked();
         return true;
     }
@@ -599,12 +671,26 @@ private:
         RfEnvironmentSnapshot snapshot;
         std::uint64_t         pbrVersion    = 0;
         std::uint64_t         lightsVersion = 0;
-        // Defaults first (the built-in environment every other engine
-        // component falls back to); the provider's values replace them when
-        // its copy succeeds (lighting::copyPbrEnvironment leaves the fields
-        // untouched otherwise).
+        // Fallback environment first (used when the optional pbr capability is
+        // absent or its copy fails): the same defaults the renderer's built-in
+        // environment carries, overridable through the
+        // [reflection_field.environment] keys so a headless consumer without
+        // pbr can still tune the sun and the hemispheric skylight.
         snapshot.hasSun           = true;
-        snapshot.sunEnabled       = true;
+        snapshot.sunEnabled       = fallbackEnvironment_.sunEnabled;
+        snapshot.sunDirection     = glm::normalize(fallbackEnvironment_.sunDirection);
+        if (!std::isfinite(snapshot.sunDirection.x) || !std::isfinite(snapshot.sunDirection.y)
+            || !std::isfinite(snapshot.sunDirection.z))
+        {
+            // A zero (or degenerate) configured direction: fall back to the
+            // built-in default instead of a NaN direction.
+            snapshot.sunDirection = glm::normalize(glm::vec3(0.45f, 0.62f, 0.35f));
+        }
+        snapshot.sunColor         = fallbackEnvironment_.sunColor;
+        snapshot.sunIntensity     = fallbackEnvironment_.sunIntensity;
+        snapshot.ambientSky       = fallbackEnvironment_.ambientSky;
+        snapshot.ambientGround    = fallbackEnvironment_.ambientGround;
+        snapshot.ambientIntensity = fallbackEnvironment_.ambientIntensity;
         pbrVersion = lighting::copyPbrEnvironment(pbrCapability_, snapshot);
         if (directLightingCapability_ != nullptr && directLightingCapability_->copyLights != nullptr)
         {
@@ -668,6 +754,11 @@ private:
         // change is a dirty signal exactly like an environment change, so the
         // static skip never freezes a field traced against unconverged GI.
         const bool probeGridChanged = rfRefreshProbeGrid(state_, radianceCacheCapability_);
+        // The same coupling's caustics read: hit shading samples the photon
+        // pass's deposited irradiance through the capability (see
+        // rfShadeHitPoint); the pointer is refreshed every frame so a late
+        // acquire (the provider module loading after this one) is picked up.
+        state_.radianceCacheCapability = radianceCacheCapability_;
         ++state_.frameIndex;
 
         // Static-frame skip: when the camera, the scene, and the environment
@@ -957,6 +1048,21 @@ private:
 
     ReflectionSettings                  settings_;
     RfPipelineState                     state_;
+    // Registry lookup side of state_.surfaces (see findSurfaceLocked).
+    std::unordered_map<ReflectionSurfaceHandle, std::uint32_t> surfaceIndexByHandle_;
+    // Built-in environment used when the pbr capability is absent or its copy
+    // fails; fed from the [reflection_field.environment] configuration keys.
+    struct FallbackEnvironment
+    {
+        glm::vec3 sunDirection{0.45f, 0.62f, 0.35f};
+        glm::vec3 sunColor{1.0f, 0.96f, 0.88f};
+        float     sunIntensity     = 3.0f;
+        bool      sunEnabled       = true;
+        glm::vec3 ambientSky{0.55f, 0.65f, 0.80f};
+        glm::vec3 ambientGround{0.35f, 0.30f, 0.25f};
+        float     ambientIntensity = 0.5f;
+    };
+    FallbackEnvironment fallbackEnvironment_;
     ReflectionFieldCapability           capability_{};
     double                              lastEvaluateMilliseconds_ = 0.0;
 };

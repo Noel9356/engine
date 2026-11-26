@@ -394,13 +394,30 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
     const glm::vec3 diffuse = albedo * (1.0f / kPi);
 
     const RfEnvironmentSnapshot &environment = state.environment;
+    // Photon caustics from the radiance_cache (when coupled): a hit on a
+    // caustic receiver sits behind a transmitter, and the photon estimate IS
+    // the sun's transported energy there - the interface Fresnel, the
+    // medium's absorption, and the focusing net included. The unoccluded sun
+    // term below is REPLACED by it for such hits (adding both would count
+    // the sun twice and wash the caustic net out into a flat bright floor);
+    // the direct point lights keep their own terms (their photon transport
+    // is a second-order share the cones only carry while a light hangs near
+    // the transmitter).
+    glm::vec3 causticIrradiance(0.0f);
+    bool      causticsAnswered = false;
+    if (state.radianceCacheCapability != nullptr && state.radianceCacheCapability->sampleCausticsIrradiance != nullptr)
+    {
+        causticsAnswered = state.radianceCacheCapability->sampleCausticsIrradiance(
+            state.radianceCacheCapability->self, &position.x, &normal.x, &causticIrradiance.x);
+    }
     // Sun, unoccluded exactly like the renderer's own direct term: the field
     // composites onto the renderer's shaded pixels, so reflection hit lighting
     // must match the presented image's occlusion model (occlusion carried only
     // by reflections reads as dark objects the scene does not contain). A
     // renderer with a shadow system is the place to reintroduce it.
     const glm::vec3 sunRadiance = environment.sunRadiance();
-    if (environment.hasSun && environment.sunEnabled && glm::dot(sunRadiance, sunRadiance) > 0.0f)
+    if (!causticsAnswered && environment.hasSun && environment.sunEnabled
+        && glm::dot(sunRadiance, sunRadiance) > 0.0f)
     {
         const float nDotL = glm::dot(normal, environment.sunDirection);
         if (nDotL > 0.0f)
@@ -439,6 +456,13 @@ glm::vec3 rfShadeHitPoint(const RfPipelineState &state, const glm::vec3 &positio
         const glm::vec3 ambient = glm::mix(environment.ambientGround, environment.ambientSky, normal.y * 0.5f + 0.5f)
             * environment.ambientIntensity;
         result += diffuse * ambient;
+    }
+    // The caustic receiver's transported sun (sampled at the top of the
+    // function) adds where the photon estimate answered; the sun block above
+    // skipped its direct term for exactly those hits.
+    if (causticsAnswered)
+    {
+        result += diffuse * causticIrradiance;
     }
 
     // Specular response of the hit's own material, answered by the world

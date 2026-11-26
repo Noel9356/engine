@@ -133,3 +133,16 @@ bilateral_radius           = 2
 # Brute-force reference rays per texel for the Reference debug view (views
 # render at the field resolution the renderer composites).
 reference_samples           = 16
+
+[reflection_field.environment]
+# Built-in environment the module shades with when the optional pbr capability
+# is absent or its copy fails (the same defaults the renderer's built-in
+# environment carries). With pbr present the pbr environment wins and this
+# section is unused.
+sun_direction               = [0.45, 0.62, 0.35]
+sun_color                   = [1.0, 0.96, 0.88]
+sun_intensity               = 3.0
+sun_enabled                 = true
+ambient_sky                 = [0.55, 0.65, 0.80]
+ambient_ground              = [0.35, 0.30, 0.25]
+ambient_intensity           = 0.5

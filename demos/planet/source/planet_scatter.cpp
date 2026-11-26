@@ -222,10 +222,17 @@ inline constexpr double kFlockMinEyeDistanceMeters   = 80.0; // flocks never bru
 inline constexpr double kFlockMinEyeDistanceMarginMeters = 8.0;
 inline constexpr double kMinWhitecapDepthMeters = 8.0;  // breaking crests live over open water
 inline constexpr double kSeaSpriteLiftMeters    = 0.45; // foam quads ride above the wave-roughened sheet
-// Contact shadows read only inside the near/mid ring - beyond it a tree's
-// shadow subtends a couple of pixels at ground-level eyes and a grazing
-// sliver at elevated ones, while its translucent fill still costs the frame.
-inline constexpr double kShadowMaxDistanceMeters = 900.0;
+// Contact shadows read only inside the tree ring - a shadow past the
+// ring's edge belongs to no drawn tree, and inside it the draped ribbon
+// stays legible (subpixel shadows simply fade into the ground texture).
+inline constexpr double kShadowMaxDistanceMeters = 1500.0;
+// The drape lift: each ribbon ring floats this far over the sampled surface
+// so the terrain's own depth wins the shared pixels without z-fighting.
+inline constexpr double kShadowLiftMeters = 0.12;
+// Ribbon resolution along the shadow direction: the base ring plus four
+// sampled rings drape a golden-hour length (up to ~3.4x the caster height)
+// over rolling ground without a visible kink.
+inline constexpr std::uint32_t kShadowRings = 5;
 
 // Sea-state churn cadence: the foam pool's staggered quarters re-roll on this
 // wall-clock interval (real breaking foam turns over in a couple of seconds).
@@ -509,7 +516,10 @@ struct QuadPush
 {
     glm::dvec3 corners[4];
     glm::dvec3 normal;
-    float color[3];
+    // Per-corner tint: bilinear corner order (bottom-left, bottom-right,
+    // top-right, top-left), so one quad can grade its own color across the
+    // card (the billboards' root shading darkens only the two base corners).
+    float color[4][3];
     float uv[4][2];
 };
 
@@ -531,9 +541,9 @@ void pushQuad(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_t> &i
         vertex.normal[0]   = static_cast<float>(quad.normal.x);
         vertex.normal[1]   = static_cast<float>(quad.normal.y);
         vertex.normal[2]   = static_cast<float>(quad.normal.z);
-        vertex.color[0]    = quad.color[0];
-        vertex.color[1]    = quad.color[1];
-        vertex.color[2]    = quad.color[2];
+        vertex.color[0]    = quad.color[corner][0];
+        vertex.color[1]    = quad.color[corner][1];
+        vertex.color[2]    = quad.color[corner][2];
         vertex.uv[0]       = quad.uv[corner][0];
         vertex.uv[1]       = quad.uv[corner][1];
         vertices.push_back(vertex);
@@ -1383,9 +1393,9 @@ void pushBillboard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_
     for (std::uint32_t corner = 0; corner < 4; ++corner)
     {
         const float shade = corner < 2u ? baseShade : 1.0f;
-        quad.color[0] = color[0] * shade;
-        quad.color[1] = color[1] * shade;
-        quad.color[2] = color[2] * shade;
+        quad.color[corner][0] = color[0] * shade;
+        quad.color[corner][1] = color[1] * shade;
+        quad.color[corner][2] = color[2] * shade;
     }
     const float uL = mirrorU ? uvRect.u1 : uvRect.u0;
     const float uR = mirrorU ? uvRect.u0 : uvRect.u1;
@@ -1402,13 +1412,16 @@ void pushBillboard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_
     pushQuad(vertices, indices, quad, anchor);
 }
 
-// One sun-aligned contact shadow: a soft dark quad laid tangent to the
+// One sun-aligned contact shadow: a soft dark ribbon draped over the
 // ground under a scattered element, shifted and stretched along the
 // away-from-sun direction by the site's sun elevation (a low sun drags the
-// shadow long and pale, a high sun bunches it under the element). The
-// darkness rides the quad's vertex color over a white-RGB alpha texture, so
-// stretched shadows simply drop toward grey. Lifted slightly off the ground
-// so the terrain's own depth wins without polygon-offset support.
+// shadow long and pale, a high sun bunches it under the element). Each ring
+// of the ribbon re-samples the planet surface along the shadow direction
+// and lifts off it, so the stretched toe rides over rolling terrain instead
+// of burying under the first rise (a tangent-plane quad only ever shows the
+// patch hugging the trunk, whatever the sun says). The darkness rides the
+// quad's vertex color over a white-RGB alpha texture, so stretched shadows
+// simply drop toward grey.
 void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm::dvec3 &up, double sizeMeters,
     double heightMeters)
 {
@@ -1418,7 +1431,7 @@ void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm:
     }
     if (glm::length(groundPoint - anchorEye_) > kShadowMaxDistanceMeters)
     {
-        return; // beyond the readable ring the fill cost buys nothing
+        return; // beyond the tree ring the fill cost buys nothing
     }
     const double sunLength = glm::length(lastSunDirection_);
     if (sunLength < 1.0e-9)
@@ -1442,16 +1455,13 @@ void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm:
     // just past the low-sun band's own cotangent (cot 17 deg = 3.3), so a
     // golden-hour shadow stretches to its true length instead of bunched
     // under the element - the sun's direction is the cue the frame reads
-    // first, and a stunted shadow points nowhere. The quad spans from half
-    // a footprint BEHIND the trunk to the stretched toe, so the shaded
-    // patch always touches the element that casts it.
+    // first, and a stunted shadow points nowhere. The ribbon spans from half
+    // a footprint BEHIND the trunk to the stretched toe, so the shaded patch
+    // always touches the element that casts it.
     const double stretchMeters = std::clamp(heightMeters * horizontal / std::max(0.12, sunUp),
         0.0, 3.4 * heightMeters);
     const double baseExtent = std::max(sizeMeters * 0.45, 0.5);
     const glm::dvec3 shadowDir = -(sunHorizontal / horizontal);
-    const glm::dvec3 center = groundPoint + shadowDir * (0.5 * stretchMeters)
-        + up * 0.12;
-    const double halfLength = 0.5 * stretchMeters + 0.5 * baseExtent;
     const double halfWidth = sizeMeters;
     glm::dvec3 across = glm::cross(up, shadowDir);
     if (glm::length(across) < 1.0e-6)
@@ -1459,25 +1469,67 @@ void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm:
         across = glm::dvec3(1.0, 0.0, 0.0);
     }
     across = glm::normalize(across);
-    // The source RGB is black either way (src-over darkening); the falloff
-    // lives in the material's opacity alone (the pipeline has no per-vertex
-    // alpha to carry a stretch-dependent paleness).
-    QuadPush quad;
-    quad.normal = up;
-    quad.color[0] = 0.0f;
-    quad.color[1] = 0.0f;
-    quad.color[2] = 0.0f;
-    const float uv[4][2] = {{0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f}};
-    for (std::uint32_t corner = 0; corner < 4; ++corner)
+    // Ring layout along the shadow direction: from half a footprint behind
+    // the trunk to the stretched toe. The heel ring keeps the ground point's
+    // own placement; the interior and toe rings sample the surface (the
+    // planet sits at the frame's origin, so a ring's radial direction is its
+    // own normalized position).
+    const double beginAlong = -0.5 * baseExtent;
+    const double endAlong   = stretchMeters + 0.5 * baseExtent;
+    glm::dvec3 ringPosition[kShadowRings];
+    glm::dvec3 ringNormal[kShadowRings];
+    double ringV[kShadowRings];
+    for (std::uint32_t ring = 0; ring < kShadowRings; ++ring)
     {
-        quad.uv[corner][0] = uv[corner][0];
-        quad.uv[corner][1] = uv[corner][1];
+        const double along = beginAlong
+            + (endAlong - beginAlong) * static_cast<double>(ring) / static_cast<double>(kShadowRings - 1u);
+        ringV[ring] = 1.0 - static_cast<double>(ring) / static_cast<double>(kShadowRings - 1u);
+        glm::dvec3 position = groundPoint + shadowDir * along;
+        double radius = glm::length(position);
+        if (ring == 0)
+        {
+            radius = glm::length(groundPoint);
+        }
+        else if (!sampleSurfaceRadius(position / radius, radius))
+        {
+            // The surface march failed (a horizon-grazing direction): keep
+            // the ring on the ground point's own sphere rather than folding
+            // the ribbon into the planet. On success the sampled radius has
+            // already replaced the tangent-plane guess, and the lift rides
+            // the ring's own radial direction (the local up).
+            radius = glm::length(groundPoint);
+        }
+        const glm::dvec3 direction = glm::length(position) > 1.0e-9 ? position / glm::length(position) : up;
+        ringPosition[ring] = direction * (radius + kShadowLiftMeters);
+        ringNormal[ring]   = direction;
     }
-    quad.corners[0] = center - across * halfWidth - shadowDir * halfLength;
-    quad.corners[1] = center + across * halfWidth - shadowDir * halfLength;
-    quad.corners[2] = center + across * halfWidth + shadowDir * halfLength;
-    quad.corners[3] = center - across * halfWidth + shadowDir * halfLength;
-    pushQuad(shadowScratch_, shadowIndexScratch_, quad, anchorEye_);
+    // The ribbon: one quad per ring pair, black RGB (src-over darkening; the
+    // falloff lives in the material's opacity alone), UV v spanning the whole
+    // ribbon so the soft falloff texture reads end to end.
+    for (std::uint32_t strip = 0; strip + 1u < kShadowRings; ++strip)
+    {
+        QuadPush quad;
+        quad.normal = ringNormal[strip];
+        for (std::uint32_t corner = 0; corner < 4; ++corner)
+        {
+            quad.color[corner][0] = 0.0f;
+            quad.color[corner][1] = 0.0f;
+            quad.color[corner][2] = 0.0f;
+        }
+        quad.uv[0][0] = 0.0f;
+        quad.uv[0][1] = static_cast<float>(ringV[strip]);
+        quad.uv[1][0] = 1.0f;
+        quad.uv[1][1] = static_cast<float>(ringV[strip]);
+        quad.uv[2][0] = 1.0f;
+        quad.uv[2][1] = static_cast<float>(ringV[strip + 1u]);
+        quad.uv[3][0] = 0.0f;
+        quad.uv[3][1] = static_cast<float>(ringV[strip + 1u]);
+        quad.corners[0] = ringPosition[strip] - across * halfWidth;
+        quad.corners[1] = ringPosition[strip] + across * halfWidth;
+        quad.corners[2] = ringPosition[strip + 1u] + across * halfWidth;
+        quad.corners[3] = ringPosition[strip + 1u] - across * halfWidth;
+        pushQuad(shadowScratch_, shadowIndexScratch_, quad, anchorEye_);
+    }
 }
 
 void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
@@ -2034,11 +2086,10 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
             {
                 continue;
             }
-            const double presence = base * (0.5 + 0.5 * sample.moisture01) * params_.vegetationBushDensity;
-            if (hashUnit(hash, 3) > clamp01(presence))
-            {
-                continue;
-            }
+            // The ranking plants the best few whatever their presence roll
+            // (the trees' pass 2 contract): the near-ring minimum is a
+            // guarantee, and re-rolling presence here can silently zero it
+            // on sparse-biome seeds.
             {
                 engine::planet::ReliefSample relief{};
                 if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
@@ -2381,9 +2432,12 @@ void PlanetScatterSystem::scatterRocks(const glm::dvec3 &eyePlanetLocal, const g
                 const glm::dvec3 faceNormal = glm::normalize(glm::cross(b - a, c - a));
                 QuadPush quad;
                 quad.normal = faceNormal;
-                quad.color[0] = color[0];
-                quad.color[1] = color[1];
-                quad.color[2] = color[2];
+                for (std::uint32_t corner = 0; corner < 4; ++corner)
+                {
+                    quad.color[corner][0] = color[0];
+                    quad.color[corner][1] = color[1];
+                    quad.color[corner][2] = color[2];
+                }
                 quad.corners[0] = a;
                 quad.corners[1] = b;
                 quad.corners[2] = c;
@@ -2527,9 +2581,12 @@ void PlanetScatterSystem::scatterWhitecaps(const glm::dvec3 &eyePlanetLocal, con
         QuadPush quad;
         quad.normal = up;
         const float bright = 0.9f;
-        quad.color[0] = bright;
-        quad.color[1] = bright;
-        quad.color[2] = bright;
+        for (std::uint32_t corner = 0; corner < 4; ++corner)
+        {
+            quad.color[corner][0] = bright;
+            quad.color[corner][1] = bright;
+            quad.color[corner][2] = bright;
+        }
         const float uv[4][2] = {{0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f}};
         for (std::uint32_t corner = 0; corner < 4; ++corner)
         {
@@ -2551,9 +2608,12 @@ void PlanetScatterSystem::scatterWhitecaps(const glm::dvec3 &eyePlanetLocal, con
     {
         QuadPush degenerate;
         degenerate.normal = eyeDirection;
-        degenerate.color[0] = 0.0f;
-        degenerate.color[1] = 0.0f;
-        degenerate.color[2] = 0.0f;
+        for (std::uint32_t corner = 0; corner < 4; ++corner)
+        {
+            degenerate.color[corner][0] = 0.0f;
+            degenerate.color[corner][1] = 0.0f;
+            degenerate.color[corner][2] = 0.0f;
+        }
         for (std::uint32_t corner = 0; corner < 4; ++corner)
         {
             degenerate.uv[corner][0] = 0.0f;
@@ -2654,9 +2714,12 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
             QuadPush quad;
             quad.normal = up;
             const float bright = 0.92f;
-            quad.color[0] = bright;
-            quad.color[1] = bright;
-            quad.color[2] = bright;
+            for (std::uint32_t corner = 0; corner < 4; ++corner)
+            {
+                quad.color[corner][0] = bright;
+                quad.color[corner][1] = bright;
+                quad.color[corner][2] = bright;
+            }
             const float uv[4][2] = {{0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f}};
             for (std::uint32_t corner = 0; corner < 4; ++corner)
             {
@@ -2768,9 +2831,12 @@ void PlanetScatterSystem::scatterMist(const glm::dvec3 &eyePlanetLocal, const gl
         const glm::dvec3 center = probe * (seaRadius + std::max(6.0, floorElevation) + bankHeight);
         QuadPush quad;
         quad.normal = up;
-        quad.color[0] = 1.0f;
-        quad.color[1] = 1.0f;
-        quad.color[2] = 1.0f;
+        for (std::uint32_t corner = 0; corner < 4; ++corner)
+        {
+            quad.color[corner][0] = 1.0f;
+            quad.color[corner][1] = 1.0f;
+            quad.color[corner][2] = 1.0f;
+        }
         const float uv[4][2] = {{0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f}};
         for (std::uint32_t corner = 0; corner < 4; ++corner)
         {
@@ -2944,9 +3010,12 @@ void PlanetScatterSystem::appendBirdGeometry(std::vector<PlanetVertex> &vertices
             // Body: a small quad in the flight plane.
             QuadPush body;
             body.normal = centerUp;
-            body.color[0] = 1.0f;
-            body.color[1] = 1.0f;
-            body.color[2] = 1.0f;
+            for (std::uint32_t corner = 0; corner < 4; ++corner)
+            {
+                body.color[corner][0] = 1.0f;
+                body.color[corner][1] = 1.0f;
+                body.color[corner][2] = 1.0f;
+            }
             for (std::uint32_t corner = 0; corner < 4; ++corner)
             {
                 body.uv[corner][0] = 0.0f;
@@ -2966,9 +3035,12 @@ void PlanetScatterSystem::appendBirdGeometry(std::vector<PlanetVertex> &vertices
                 const glm::dvec3 wingOut = left * (wingSign * wingSpan * std::cos(flap)) + centerUp * (wingSpan * std::sin(flap));
                 QuadPush wingQuad;
                 wingQuad.normal = centerUp;
-                wingQuad.color[0] = 1.0f;
-            wingQuad.color[1] = 1.0f;
-            wingQuad.color[2] = 1.0f;
+                for (std::uint32_t corner = 0; corner < 4; ++corner)
+                {
+                    wingQuad.color[corner][0] = 1.0f;
+                    wingQuad.color[corner][1] = 1.0f;
+                    wingQuad.color[corner][2] = 1.0f;
+                }
                 for (std::uint32_t corner = 0; corner < 4; ++corner)
                 {
                     wingQuad.uv[corner][0] = 0.0f;

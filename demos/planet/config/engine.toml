@@ -69,7 +69,7 @@ cloud_shadow_sun_direction = [0.55, 0.34, 0.76]
 # billow lobes run at the module's full strength (the cauliflower clumping
 # the per-pixel read resolves). A very narrow band smears the whole deck;
 # a very wide one erases the bank boundaries.
-cloud_edge_softness   = 0.17
+cloud_edge_softness   = 0.22
 cloud_billow_strength = 0.72
 cloud_detail_strength = 0.26
 # Weather organization (the module's cloud_weather_strength /
@@ -83,14 +83,16 @@ cloud_detail_strength = 0.26
 cloud_weather_strength        = 0.40
 cloud_latitude_band_strength  = 0.30
 # The seeded storm family: the spiral shear that wraps nearby banks into
-# comma heads and arms. The strength runs high for the SPACE shell the
-# macro views photograph: real Earth imagery reads mid-latitude cyclones
-# 1,000-2,500 km across with wrapped comma heads (the shear needs to bend
-# the banks through a full arm wrap to read as weather at that scale),
-# while the ground deck's own twin skips the shear entirely
-# (coverageTexelGround - the Rankine fans only ever smear a ground view),
-# so the orbital drama costs the walking sky nothing.
-cloud_cyclone_strength        = 2.6
+# comma heads and arms. The strength reads as wrapped but STORM-LOCAL
+# weather at the macro scale: the module clamps each storm's displacement
+# to a few bank wavelengths (module atmosphere.cpp), so the arms wrap the
+# eyewall without dragging banks around the globe - Earth imagery reads
+# mid-latitude cyclones 1,000-2,500 km across with comma heads, not
+# meridian combs lacing the whole deck - while the ground deck's own twin
+# skips the shear entirely (coverageTexelGround - the Rankine fans only
+# ever smear a ground view), so the orbital drama costs the walking sky
+# nothing.
+cloud_cyclone_strength        = 1.2
 # Convective clumping (the module's cloud_convective_strength): the sky
 # above ~25 deg of elevation samples only the few kilometers of cloud shell
 # around the eye's zenith, so the bank-scale field alone reads there as a

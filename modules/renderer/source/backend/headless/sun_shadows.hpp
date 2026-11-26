@@ -28,6 +28,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -104,7 +105,7 @@ struct SunShadowMap
 // still land in the range). receiverMin/receiverMax may be null, which fits
 // to the casters' own bounds instead. Empty caster lists or a degenerate sun
 // direction leave the map invalid.
-inline void buildSunShadowMap(SunShadowMap &map, const std::vector<SunShadowGeometry> &casters,
+inline bool sunShadowFitMap(SunShadowMap &map, const std::vector<SunShadowGeometry> &casters,
     std::uint32_t resolution, const glm::vec3 &sunDirection, const glm::vec3 *receiverMin = nullptr,
     const glm::vec3 *receiverMax = nullptr)
 {
@@ -112,7 +113,7 @@ inline void buildSunShadowMap(SunShadowMap &map, const std::vector<SunShadowGeom
     const bool degenerateSun = sunDirection.x == 0.0f && sunDirection.y == 0.0f && sunDirection.z == 0.0f;
     if (casters.empty() || resolution < 8u || degenerateSun)
     {
-        return;
+        return false;
     }
     const glm::vec3 sunWard = glm::normalize(sunDirection);
     // Depth runs along the light's travel direction (from the sun into the
@@ -157,7 +158,7 @@ inline void buildSunShadowMap(SunShadowMap &map, const std::vector<SunShadowGeom
     }
     if (!(maximum.x > minimum.x) || !(maximum.y > minimum.y) || !(maximum.z > minimum.z))
     {
-        return; // degenerate fit (single-point scene)
+        return false; // degenerate fit (single-point scene)
     }
 
     // Light-space extents: u/v from the receiver box when provided (padded
@@ -240,6 +241,20 @@ inline void buildSunShadowMap(SunShadowMap &map, const std::vector<SunShadowGeom
 
     map.depth.assign(static_cast<std::size_t>(resolution) * resolution, 1.0f);
 
+    return true;
+}
+
+// Rasterizes `casters[begin, end)` into a fitted map (the edge-walk
+// min-store keeps the surface nearest the light). AtomicStore selects the
+// per-cell write: the plain store for the serial build, an atomic
+// compare-exchange for concurrent workers over overlapping caster ranges -
+// the map is exactly the serial build's either way (the min is
+// order-independent).
+template <bool AtomicStore>
+inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShadowGeometry> &casters,
+    std::size_t begin, std::size_t end)
+{
+    const std::uint32_t resolution = map.resolution;
     const float invHalfWidth  = 1.0f / map.halfWidth;
     const float invHalfHeight = 1.0f / map.halfHeight;
     const float invDepth      = 1.0f / map.depthExtent;
@@ -250,13 +265,14 @@ inline void buildSunShadowMap(SunShadowMap &map, const std::vector<SunShadowGeom
     const auto project = [&](const glm::vec3 &position)
     {
         const glm::vec3 delta = position - map.origin;
-        return glm::vec3((glm::dot(delta, right) * invHalfWidth + 1.0f) * 0.5f,
-            (glm::dot(delta, up) * invHalfHeight + 1.0f) * 0.5f,
-            (glm::dot(delta, forward) - map.minDepth) * invDepth);
+        return glm::vec3((glm::dot(delta, map.right) * invHalfWidth + 1.0f) * 0.5f,
+            (glm::dot(delta, map.up) * invHalfHeight + 1.0f) * 0.5f,
+            (glm::dot(delta, map.forward) - map.minDepth) * invDepth);
     };
 
-    for (const SunShadowGeometry &caster : casters)
+    for (std::size_t casterIndex = begin; casterIndex < end; ++casterIndex)
     {
+        const SunShadowGeometry &caster = casters[casterIndex];
         if (caster.positions == nullptr || caster.indices == nullptr || caster.transformColumnMajor == nullptr)
         {
             continue;
@@ -351,12 +367,40 @@ inline void buildSunShadowMap(SunShadowMap &map, const std::vector<SunShadowGeom
                     float &cell = depthRow[static_cast<std::uint32_t>(column)];
                     if (depth < cell)
                     {
-                        cell = depth;
+                        if constexpr (AtomicStore)
+                        {
+                            std::atomic_ref<float> atomicCell(cell);
+                            float expected = atomicCell.load(std::memory_order_relaxed);
+                            while (depth < expected)
+                            {
+                                if (atomicCell.compare_exchange_weak(
+                                        expected, depth, std::memory_order_relaxed, std::memory_order_relaxed))
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            cell = depth;
+                        }
                     }
                 }
             }
         }
     }
+}
+
+// The whole serial build: fit the map, raster every caster once, publish.
+inline void buildSunShadowMap(SunShadowMap &map, const std::vector<SunShadowGeometry> &casters,
+    std::uint32_t resolution, const glm::vec3 &sunDirection, const glm::vec3 *receiverMin = nullptr,
+    const glm::vec3 *receiverMax = nullptr)
+{
+    if (!sunShadowFitMap(map, casters, resolution, sunDirection, receiverMin, receiverMax))
+    {
+        return;
+    }
+    sunShadowRasterCasters<false>(map, casters, 0, casters.size());
     map.valid = true;
 }
 

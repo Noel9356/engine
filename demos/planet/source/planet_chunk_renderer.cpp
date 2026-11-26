@@ -757,13 +757,24 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
     const float waterRoughness = static_cast<float>(
         params_.waterRoughness + (params_.waterRoughnessOrbital - params_.waterRoughness) * orbitBlend);
 
-    // Aerial perspective: the atmosphere model's haze for the eye's sight
-    // lines, composed as exact fog through the material - the renderer's
-    // shading is albedo * light, so scaling baseColor by (1 - w) and setting
-    // the emissive term to hazeColor * w yields terrainRadiance * (1 - w) +
-    // haze * w per pixel: dark backlit slopes LIFT toward the haze color and
-    // bright snow keeps poking through it, the way real air scatters.
-    const planet::Vec3 eyeLocal{eyePlanetLocal.x, eyePlanetLocal.y, eyePlanetLocal.z};
+    // Aerial perspective (per-pixel): the atmosphere model's haze composed
+    // through the renderer's distance-fog fields - every shaded sample runs
+    // mix(radiance, hazeColor, asymptote * (1 - e^(-distance / scale))) at
+    // its own interpolated position, so the haze follows each sight line
+    // continuously across every chunk boundary (a per-chunk uniform weight
+    // steps at each boundary and photographs as a rectangle grid on the
+    // streamed terrain). Dark backlit slopes LIFT toward the haze color and
+    // bright snow keeps poking through it, the way real air scatters. The
+    // color is the horizon band under the frame's sun tint, and the weight
+    // asymptote carries the eye's atmosphere share, so a space eye keeps the
+    // limb shell as its only depth cue exactly like the composed model did.
+    const double fogAirWeight = planet::atmosphereWeight(params_, eyeAltitudeMeters);
+    const float fogAsymptote = static_cast<float>(
+        std::clamp(params_.aerialPerspectiveAsymptote, 0.0, 1.0) * fogAirWeight);
+    const float fogScaleMeters = static_cast<float>(std::max(1.0, params_.aerialPerspectiveScaleMeters));
+    const planet::Vec3 hazeHorizon = planet::skyGradientColor(params_, 0.04);
+    const float fogColor[3] = {static_cast<float>(hazeHorizon.x * sunTint.x),
+        static_cast<float>(hazeHorizon.y * sunTint.y), static_cast<float>(hazeHorizon.z * sunTint.z)};
 
     const glm::dvec3 planetCenter(params_.centerMeters[0], params_.centerMeters[1], params_.centerMeters[2]);
 
@@ -841,18 +852,6 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         const glm::dvec3 worldCenter = handles.placementCenter - renderShift;
         frameChunkMatrices_.push_back(glm::mat4(glm::translate(glm::dmat4(1.0), worldCenter)));
 
-        // The aerial perspective keeps the REAL planet-local center - the
-        // physics does not shift with the render origin.
-        const planet::AerialPerspective haze
-            = planet::aerialPerspective(params_, eyeLocal, planet::Vec3{draw.entry->second.placementCenter.x - planetCenter.x,
-                                                                    draw.entry->second.placementCenter.y - planetCenter.y,
-                                                                    draw.entry->second.placementCenter.z - planetCenter.z},
-                sunTint);
-        const float keepTerrain = static_cast<float>(1.0 - haze.weight);
-        const float addHaze[3] = {static_cast<float>(haze.color.x * haze.weight),
-            static_cast<float>(haze.color.y * haze.weight),
-            static_cast<float>(haze.color.z * haze.weight)};
-
         if (handles.terrain != renderer::invalidMesh)
         {
             // This chunk's ground variant, hashed from the chunk address so
@@ -906,12 +905,14 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             // variant's mean compensation (see setTerrainTextures), so the
             // multiply preserves the vertex albedo on average; outside the
             // gate neither applies and the boundary cannot read.
-            material.baseColor[0] = keepTerrain * (groundTextured ? groundVariant.meanCompensation[0] : 1.0f);
-            material.baseColor[1] = keepTerrain * (groundTextured ? groundVariant.meanCompensation[1] : 1.0f);
-            material.baseColor[2] = keepTerrain * (groundTextured ? groundVariant.meanCompensation[2] : 1.0f);
-            material.emissiveColor[0] = addHaze[0];
-            material.emissiveColor[1] = addHaze[1];
-            material.emissiveColor[2] = addHaze[2];
+            material.baseColor[0] = groundTextured ? groundVariant.meanCompensation[0] : 1.0f;
+            material.baseColor[1] = groundTextured ? groundVariant.meanCompensation[1] : 1.0f;
+            material.baseColor[2] = groundTextured ? groundVariant.meanCompensation[2] : 1.0f;
+            material.fogColor[0] = fogColor[0];
+            material.fogColor[1] = fogColor[1];
+            material.fogColor[2] = fogColor[2];
+            material.fogScaleMeters = fogScaleMeters;
+            material.fogAsymptote = fogAsymptote;
             material.roughnessFactor = 0.95f;
             // The ground detail multiplies in only where one tile still
             // spans its pixel budget (see the gate setup in main.cpp);
@@ -976,12 +977,14 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
                 ? rockTextureVariants_[static_cast<std::size_t>(chunkSeed % rockTextureVariants_.size())]
                 : untextured;
             renderer::MeshMaterial material{};
-            material.baseColor[0] = keepTerrain * (rockTextured ? rockVariant.meanCompensation[0] : 1.0f);
-            material.baseColor[1] = keepTerrain * (rockTextured ? rockVariant.meanCompensation[1] : 1.0f);
-            material.baseColor[2] = keepTerrain * (rockTextured ? rockVariant.meanCompensation[2] : 1.0f);
-            material.emissiveColor[0] = addHaze[0];
-            material.emissiveColor[1] = addHaze[1];
-            material.emissiveColor[2] = addHaze[2];
+            material.baseColor[0] = rockTextured ? rockVariant.meanCompensation[0] : 1.0f;
+            material.baseColor[1] = rockTextured ? rockVariant.meanCompensation[1] : 1.0f;
+            material.baseColor[2] = rockTextured ? rockVariant.meanCompensation[2] : 1.0f;
+            material.fogColor[0] = fogColor[0];
+            material.fogColor[1] = fogColor[1];
+            material.fogColor[2] = fogColor[2];
+            material.fogScaleMeters = fogScaleMeters;
+            material.fogAsymptote = fogAsymptote;
             material.roughnessFactor = 0.85f;
             // Rock tiles span twice the ground tile's meters, so the rock
             // texture stays useful to twice the distance (same pixel
@@ -1013,12 +1016,11 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
         if (handles.water != renderer::invalidMesh)
         {
             renderer::MeshMaterial material{};
-            material.baseColor[0] = keepTerrain;
-            material.baseColor[1] = keepTerrain;
-            material.baseColor[2] = keepTerrain;
-            material.emissiveColor[0] = addHaze[0];
-            material.emissiveColor[1] = addHaze[1];
-            material.emissiveColor[2] = addHaze[2];
+            material.fogColor[0] = fogColor[0];
+            material.fogColor[1] = fogColor[1];
+            material.fogColor[2] = fogColor[2];
+            material.fogScaleMeters = fogScaleMeters;
+            material.fogAsymptote = fogAsymptote;
             material.roughnessFactor = waterRoughness;
             // Water is a DIELECTRIC mirror: the sun glint and the grazing
             // sky reflection carry most of its radiance from orbit (the
@@ -1257,6 +1259,12 @@ planet::Vec3 equirectDirection(std::uint32_t x, std::uint32_t y, std::uint32_t w
 planet::Vec3 warpCloudSampleDirection(const planet::PlanetGenerationParams &params, const planet::Vec3 &direction)
 {
     const std::int64_t warpSeed = static_cast<std::int64_t>(params.seed) + 0x2B7E151628AED2A6LL;
+    // The bend noise must read the shell in METERS, like the coverage
+    // field's own octaves: a unit direction fed to a 1/meters frequency
+    // spans a millionth of one noise cell (a constant output - the warp
+    // degenerates to an identity bend and the anti-comb never happens).
+    const planet::Vec3 shellPosition = direction
+        * (params.radiusMeters + params.cloudAltitudeMeters);
     double bendAccumX = 0.0;
     double bendAccumY = 0.0;
     planet::Vec3 tangentA{};
@@ -1272,9 +1280,9 @@ planet::Vec3 warpCloudSampleDirection(const planet::PlanetGenerationParams &para
         const double frequency = 1.0 / featureMeters;
         const std::int64_t octaveSeed = warpSeed + octave;
         const double bx = planet::noise::simplex3ImproveXY(octaveSeed,
-            direction.x * frequency, direction.y * frequency, direction.z * frequency);
+            shellPosition.x * frequency, shellPosition.y * frequency, shellPosition.z * frequency);
         const double by = planet::noise::simplex3ImproveXY(octaveSeed + 1,
-            direction.x * frequency, direction.y * frequency, direction.z * frequency);
+            shellPosition.x * frequency, shellPosition.y * frequency, shellPosition.z * frequency);
         if (octave == 0)
         {
             // Two tangents at the sample point carry the bend (any orthonormal
@@ -2532,8 +2540,15 @@ void PlanetChunkRenderer::ensureStarDome()
         std::size_t count = 0;
     };
     std::vector<planet::PlanetVertex> vertices;
-    std::vector<std::uint32_t> indices;
-    StarDiscContext context{&vertices, &indices, params_.starDiscRadiusMinRadians, params_.starDiscRadiusMaxRadians};
+    // Disc indices ride separately from the glow-quad indices: the dome is
+    // one opaque mesh with depth writes off, so within it painter's order -
+    // the index order - decides what shows where. The glow quads emit first
+    // and the discs second, so a star standing inside the galaxy band keeps
+    // its point instead of the band's wash painting over it (the band reads
+    // as the river BEHIND the star discs; see the glow block below).
+    std::vector<std::uint32_t> indices;       // glow-quad indices (drawn first)
+    std::vector<std::uint32_t> starDiscIndices;
+    StarDiscContext context{&vertices, &starDiscIndices, params_.starDiscRadiusMinRadians, params_.starDiscRadiusMaxRadians};
     constexpr std::uint32_t kDiscSegments = 10;
     const auto visitor = [](const planet::Vec3 &direction, const planet::Vec3 &color, double brightness, void *raw)
     {
@@ -2591,7 +2606,7 @@ void PlanetChunkRenderer::ensureStarDome()
         return true;
     };
     planet::forEachStar(params_, visitor, &context);
-    if (indices.empty())
+    if (starDiscIndices.empty())
     {
         return; // stars disabled by density/brightness: no dome
     }
@@ -2608,8 +2623,11 @@ void PlanetChunkRenderer::ensureStarDome()
     {
         constexpr std::uint32_t kGlowAzimuthSteps  = 256;
         constexpr std::uint32_t kGlowLatitudeSteps = 128;
-        // Linear RGB of the glow at full band weight: a faint warm wash.
-        // The values sit far under the presentation bloom's bright-pass
+        // Linear RGB of the glow at full band weight: a faint warm wash,
+        // scaled by the same stars_brightness multiplier the star discs
+        // carry so dimming the field for a view (the macro captures) keeps
+        // the discs and their unresolved river in one exposure story. The
+        // values sit far under the presentation bloom's bright-pass
         // threshold and under the tone curve's contrast band, so the band
         // reads as the Milky Way's diffuse river behind the star discs but
         // never blooms and never photographs its quad grid - a glow quad
@@ -2617,8 +2635,9 @@ void PlanetChunkRenderer::ensureStarDome()
         // tone curve and the bloom smears the whole band into a blown-out
         // wall across half the space field, while even mid tones expose the
         // 1.4-deg quad staircase at the band's soft edges.
-        constexpr double kGlowTone[3] = {0.12, 0.11, 0.09};
-        constexpr double kGlowFloor    = 0.16;
+        const double glowScale    = std::max(0.0, params_.starsBrightness);
+        const double glowTone[3] = {0.12 * glowScale, 0.11 * glowScale, 0.09 * glowScale};
+        constexpr double kGlowFloor = 0.16;
         // Corner weights first (shared by adjacent quads; the seam row/column
         // repeats the first to keep the grid watertight).
         std::vector<double> weightGrid(static_cast<std::size_t>(kGlowLatitudeSteps + 1u)
@@ -2681,15 +2700,18 @@ void PlanetChunkRenderer::ensureStarDome()
                     vertex.normal[0]   = static_cast<float>(direction.x);
                     vertex.normal[1]   = static_cast<float>(direction.y);
                     vertex.normal[2]   = static_cast<float>(direction.z);
-                    vertex.color[0]    = static_cast<float>(kGlowTone[0] * weight);
-                    vertex.color[1]    = static_cast<float>(kGlowTone[1] * weight);
-                    vertex.color[2]    = static_cast<float>(kGlowTone[2] * weight);
+                    vertex.color[0]    = static_cast<float>(glowTone[0] * weight);
+                    vertex.color[1]    = static_cast<float>(glowTone[1] * weight);
+                    vertex.color[2]    = static_cast<float>(glowTone[2] * weight);
                     vertices.push_back(vertex);
                 }
                 indices.insert(indices.end(), {first, first + 1u, first + 2u, first, first + 2u, first + 3u});
             }
         }
     }
+
+    // The discs paint over the band wash (see starDiscIndices above).
+    indices.insert(indices.end(), starDiscIndices.begin(), starDiscIndices.end());
 
     starDome_ = uploadShellMesh(*renderer_, rendererHandle_, vertices, indices);
     if (starDome_ == renderer::invalidMesh)

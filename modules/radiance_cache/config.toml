@@ -89,6 +89,12 @@ dynamic_relight_radius_m    = 2.0
 # regular regardless.
 relocation_margin           = 0.05
 level1_spacing_factor       = 4.0
+# Clip box edge per axis of both levels (odd; even values round up). Each
+# level holds dimension^3 probes: a larger box trades per-frame probe update
+# cost for coverage extent, a smaller one concentrates the same budget on the
+# near field. The exported header carries the dimensions, so renderers and
+# the reflection field walk whatever lattice this builds.
+clip_dimension              = 9
 
 [radiance_cache.gather]
 # Screen-space final gather (Lumen's opaque Final Gather): probes at

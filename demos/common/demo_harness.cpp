@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <numeric>
 #include <ratio>
 #include <sstream>
 
@@ -176,14 +177,23 @@ std::string FrameTimingRecorder::summary() const
     }
     std::vector<double> totals;
     std::vector<double> gpuTotals;
+    std::vector<double> updateTotals;
+    std::vector<double> uploadTotals;
+    std::vector<double> drawTotals;
     totals.reserve(samples_.size());
     gpuTotals.reserve(samples_.size());
+    updateTotals.reserve(samples_.size());
+    uploadTotals.reserve(samples_.size());
+    drawTotals.reserve(samples_.size());
     double sum = 0.0;
     double gpuSum = 0.0;
     for (const FrameTimingSample &sample : samples_)
     {
         totals.push_back(sample.totalMilliseconds);
         sum += sample.totalMilliseconds;
+        updateTotals.push_back(sample.updateMilliseconds);
+        uploadTotals.push_back(sample.uploadMilliseconds);
+        drawTotals.push_back(sample.drawMilliseconds);
         if (sample.gpuMilliseconds > 0.0)
         {
             gpuTotals.push_back(sample.gpuMilliseconds);
@@ -192,6 +202,9 @@ std::string FrameTimingRecorder::summary() const
     }
     std::sort(totals.begin(), totals.end());
     std::sort(gpuTotals.begin(), gpuTotals.end());
+    std::sort(updateTotals.begin(), updateTotals.end());
+    std::sort(uploadTotals.begin(), uploadTotals.end());
+    std::sort(drawTotals.begin(), drawTotals.end());
 
     // The slowest frame's phase split shows which stage owns the tail.
     const auto slowest = std::max_element(samples_.begin(), samples_.end(),
@@ -205,6 +218,29 @@ std::string FrameTimingRecorder::summary() const
     std::snprintf(line, sizeof(line), "frame timing: p50 %.3f | p90 %.3f | p99 %.3f | p99.9 %.3f | max %.3f ms\n",
         nearestRankPercentile(totals, 50.0), nearestRankPercentile(totals, 90.0), nearestRankPercentile(totals, 99.0),
         nearestRankPercentile(totals, 99.9), totals.back());
+    report << line;
+    // Per-phase lines: the update phase is the demo's own work, the upload
+    // phase the draw-list pose, and the draw phase the render backend's
+    // frame execution - the GPU-equivalent cost on the CPU rasterizer (the
+    // same number the gpu line below reports from real GPU timestamps
+    // whenever the backend can supply them).
+    std::snprintf(line, sizeof(line),
+        "update phase: mean %.3f | p50 %.3f | p90 %.3f | p99 %.3f | max %.3f ms\n",
+        std::accumulate(updateTotals.begin(), updateTotals.end(), 0.0) / static_cast<double>(updateTotals.size()),
+        nearestRankPercentile(updateTotals, 50.0), nearestRankPercentile(updateTotals, 90.0),
+        nearestRankPercentile(updateTotals, 99.0), updateTotals.back());
+    report << line;
+    std::snprintf(line, sizeof(line),
+        "upload phase: mean %.3f | p50 %.3f | p90 %.3f | p99 %.3f | max %.3f ms\n",
+        std::accumulate(uploadTotals.begin(), uploadTotals.end(), 0.0) / static_cast<double>(uploadTotals.size()),
+        nearestRankPercentile(uploadTotals, 50.0), nearestRankPercentile(uploadTotals, 90.0),
+        nearestRankPercentile(uploadTotals, 99.0), uploadTotals.back());
+    report << line;
+    std::snprintf(line, sizeof(line),
+        "draw phase (render backend, GPU-equivalent on the CPU rasterizer): mean %.3f | p50 %.3f | p90 %.3f | p99 %.3f | max %.3f ms\n",
+        std::accumulate(drawTotals.begin(), drawTotals.end(), 0.0) / static_cast<double>(drawTotals.size()),
+        nearestRankPercentile(drawTotals, 50.0), nearestRankPercentile(drawTotals, 90.0),
+        nearestRankPercentile(drawTotals, 99.0), drawTotals.back());
     report << line;
     if (!gpuTotals.empty())
     {

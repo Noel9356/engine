@@ -1,4 +1,8 @@
 config_keys = [
+    "direct_lighting.budgets.base_lights",
+    "direct_lighting.budgets.vulkan_discrete_gpu_lights",
+    "direct_lighting.budgets.vulkan_integrated_gpu_lights",
+    "direct_lighting.budgets.vulkan_virtual_gpu_lights",
     "direct_lighting.max_lights",
     "direct_lighting.maximum_registered_lights",
 ]

@@ -13,7 +13,6 @@
 // in Unreal Engine 5", SIGGRAPH 2022 Advances course; "Lumen Technical
 // Details", Epic Games documentation) scaled to a CPU implementation.
 
-#include <atomic>
 #include <cstdint>
 #include <engine/kernel/module_api.hpp>
 #include <engine/kernel/participant_interface.hpp>
@@ -40,6 +39,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace engine
@@ -148,11 +148,35 @@ public:
         context_ = nullptr;
         std::lock_guard<std::mutex> lock(moduleMutex_);
         state_.surfaces.clear();
+        surfaceIndexByHandle_.clear();
         state_.cardRefs.clear();
         state_.tlas.clear();
         state_.tlasSurfaces.clear();
         state_.hasView          = false;
         state_.environmentValid = false;
+        // The stopped module owns nothing: the probe levels, their direction
+        // tables, and the gather-field view buffers are dropped too, so the
+        // snapshots published below report an empty cache instead of the
+        // last lit frame under a bumped version. A restart rebuilds every
+        // one of them from the configuration.
+        state_.level0                       = GiProbeLevel{};
+        state_.level1                       = GiProbeLevel{};
+        state_.probeDirections.clear();
+        state_.probeDirectionWeights.clear();
+        state_.probeDirectionBasis.clear();
+        state_.screenProbeDirections.clear();
+        state_.screenProbeDirectionWeights.clear();
+        state_.screenProbeDirectionBasis.clear();
+        state_.viewWidth                = 0;
+        state_.viewHeight               = 0;
+        state_.gatherViewportWidth      = 0;
+        state_.gatherViewportHeight     = 0;
+        state_.screenProbeWidth         = 0;
+        state_.screenProbeHeight        = 0;
+        state_.gatherHasHistory         = false;
+        state_.sceneDirty               = true;
+        state_.causticTransmittersDirty = true;
+        state_.causticEmissiveCardsDirty = true;
         publishSnapshotLocked();
         publishGatherSnapshotLocked();
     }
@@ -209,6 +233,9 @@ private:
         { return static_cast<RadianceCacheModule *>(self)->resolveProfileImpl(device, outProfile); };
         capability_.debugExport = [](void *self, GiDebugView view, const char *filePath, GiError *error)
         { return static_cast<RadianceCacheModule *>(self)->debugExportImpl(view, filePath, error); };
+        capability_.sampleCausticsIrradiance
+            = [](void *self, const float *position, const float *normal, float *outIrradiance)
+        { return static_cast<RadianceCacheModule *>(self)->sampleCausticsIrradianceImpl(position, normal, outIrradiance); };
 
         gatherCapability_.self = this;
         gatherCapability_.setViewport = [](void *self, std::uint32_t viewportWidth, std::uint32_t viewportHeight)
@@ -292,12 +319,20 @@ private:
         settings.maxTransmissionSegments  = static_cast<std::uint32_t>(
             integer("trace.max_transmission_segments", 3, 0, 16));
         settings.probeSpacing             = static_cast<float>(floating("probes.spacing_m", 2.0, 0.25, 32.0));
+        // Odd values only (an odd dimension keeps a probe exactly on the
+        // camera axis); even values round up so a stray config cannot build
+        // an axis-symmetric lattice.
+        settings.probeClipDimension = static_cast<std::uint32_t>(
+                                 integer("probes.clip_dimension", probeGridDimension, 3, 33))
+                               | 1u;
         settings.probeDirectionResolution = static_cast<std::uint32_t>(
             integer("probes.direction_resolution", 32,
                 static_cast<std::int64_t>(minProbeDirectionResolution),
                 static_cast<std::int64_t>(maxProbeDirectionResolution)));
         settings.probeUpdatesPerFrame     = static_cast<std::uint32_t>(
-            integer("probes.updates_per_frame", 64, 1, 1458));
+            integer("probes.updates_per_frame", 64, 1,
+                static_cast<std::int64_t>(settings.probeClipDimension) * settings.probeClipDimension
+                    * settings.probeClipDimension * 2));
         settings.probeRaysPerUpdate       = static_cast<std::uint32_t>(
             integer("probes.rays_per_update", 256, 1, 4096));
         settings.probeHysteresis          = static_cast<float>(floating("probes.hysteresis", 0.2, 0.0, 0.99));
@@ -336,7 +371,7 @@ private:
         settings.referenceBounces         = static_cast<std::uint32_t>(integer("debug.reference_bounces", 4, 1, 16));
         settings.debugIncludeAmbient      = boolean("debug.include_ambient", false);
         settings.continuousGather         = boolean("debug.continuous_gather", false);
-        settings.exportGatherFrames       = static_cast<std::uint32_t>(integer("debug.export_gather_frames", 16, 1, 64));
+        settings.exportGatherFrames       = static_cast<std::uint32_t>(integer("debug.export_gather_frames", 24, 1, 64));
         settings.debugExportFieldPrefix =
             context_->configurationStringInSection("radiance_cache", "debug.export_field_prefix").value_or("");
         // Fallback environment (used when the optional pbr capability is
@@ -388,7 +423,7 @@ private:
         const std::uint32_t resolution = std::max(settings_.probeDirectionResolution, 4u);
         const bool probesChanged = state_.probeDirections.empty() || resolution != builtDirectionResolution_
             || settings_.probeSpacing != builtProbeSpacing_ || settings_.probeLevel1SpacingFactor != builtLevel1Factor_
-            || state_.level0.probes.empty();
+            || settings_.probeClipDimension != builtProbeDimension_ || state_.level0.probes.empty();
         if (probesChanged)
         {
             buildProbeDirectionTable(state_);
@@ -396,6 +431,7 @@ private:
             builtDirectionResolution_ = resolution;
             builtProbeSpacing_        = settings_.probeSpacing;
             builtLevel1Factor_        = settings_.probeLevel1SpacingFactor;
+            builtProbeDimension_      = settings_.probeClipDimension;
             if (state_.hasView)
             {
                 snapProbeLevels(state_, state_.cameraPosition);
@@ -425,16 +461,21 @@ private:
 
     // ---- surface registry -----------------------------------------------------
 
+    // Handle -> index into state_.surfaces, maintained at every registry
+    // mutation under moduleMutex_. Dynamic surfaces re-look up their entry
+    // every frame (updateSurfaceTransform), so the registry must answer in
+    // O(1) at registry capacities in the tens of thousands, not scan the
+    // vector. Destroy swaps the last surface into the hole (see
+    // destroySurfaceImpl), which keeps the fix-up O(1) at the cost of a
+    // registration order the consumers never observe - they hold handles.
     std::uint32_t findSurfaceLocked(GiSurfaceHandle handle) const
     {
-        for (std::size_t index = 0; index < state_.surfaces.size(); ++index)
+        const auto found = surfaceIndexByHandle_.find(handle);
+        if (found == surfaceIndexByHandle_.end() || found->second >= state_.surfaces.size())
         {
-            if (state_.surfaces[index].handle == handle)
-            {
-                return static_cast<std::uint32_t>(index);
-            }
+            return 0xffffffffu;
         }
-        return 0xffffffffu;
+        return found->second;
     }
 
     void applySurfaceDescriptionLocked(GiSurface &surface, const GiSurfaceDescription &description, GiError *error)
@@ -487,6 +528,8 @@ private:
         // emitters, changed emission).
         state_.causticTransmittersDirty = true;
         state_.causticEmissiveCardsDirty = true;
+        ++state_.gatherRasterSerial;
+        causticReceiverIndexDirty_ = true;
         state_.causticsDecayFrames = std::max<std::uint32_t>(state_.causticsDecayFrames, 256);
     }
 
@@ -542,6 +585,7 @@ private:
         }
         // The handle is consumed only once the surface really exists.
         const GiSurfaceHandle handle = state_.nextHandle++;
+        surfaceIndexByHandle_.emplace(handle, static_cast<std::uint32_t>(state_.surfaces.size()));
         state_.surfaces.push_back(std::move(surface));
         registryChangedLocked();
         // A new surface lights its neighborhood: the probes around it retrace
@@ -652,6 +696,7 @@ private:
         {
             return true; // unchanged: keep the frame clean for the static skip
         }
+        causticReceiverIndexDirty_ = true;
         // A singular transform is refused and the previous one kept; the
         // caller only sees the boolean.
         if (!updateSurfaceTransform(surface, transform))
@@ -677,7 +722,16 @@ private:
         // it retrace from scratch.
         const glm::vec3 oldMin = state_.surfaces[index].worldMin;
         const glm::vec3 oldMax = state_.surfaces[index].worldMax;
-        state_.surfaces.erase(state_.surfaces.begin() + index);
+        // Swap-and-pop: the last surface moves into the hole and its map
+        // entry follows, so removal stays O(1) like the lookup (a middle
+        // erase would shift every later index and force an O(n) map walk).
+        surfaceIndexByHandle_.erase(handle);
+        if (index + 1u < state_.surfaces.size())
+        {
+            state_.surfaces[index] = std::move(state_.surfaces.back());
+            surfaceIndexByHandle_[state_.surfaces[index].handle] = index;
+        }
+        state_.surfaces.pop_back();
         registryChangedLocked();
         markDynamicRelightLocked(oldMin, oldMax, oldMin, oldMax);
         return true;
@@ -1014,6 +1068,63 @@ private:
         gatherSnapshot_ = std::move(snapshot);
     }
 
+    // Rebuilds the caustics receiver index from the live registry (the
+    // module mutex held): receiver-flagged opaque surfaces in registry order,
+    // so the sampler's first-match answer is exactly the full scan's.
+    void rebuildCausticReceiverIndexLocked()
+    {
+        causticReceiverIndex_.clear();
+        for (std::size_t surface = 0; surface < state_.surfaces.size(); ++surface)
+        {
+            const GiSurface &receiver = state_.surfaces[surface];
+            if (!receiver.causticReceiver || receiver.opacity < 1.0f)
+            {
+                continue;
+            }
+            causticReceiverIndex_.push_back(CausticReceiverEntry{
+                static_cast<std::uint32_t>(surface), receiver.worldMin, receiver.worldMax});
+        }
+        causticReceiverIndexDirty_ = false;
+    }
+
+    bool sampleCausticsIrradianceImpl(const float *position, const float *normal, float *outIrradiance)
+    {
+        if (position == nullptr || normal == nullptr || outIrradiance == nullptr)
+        {
+            return false;
+        }
+        const glm::vec3 samplePosition = glm::make_vec3(position);
+        const glm::vec3 sampleNormal   = glm::make_vec3(normal);
+        // The registry's read side: serialize against mutators and evaluate
+        // like every other surface read (an uncontended lock between frames -
+        // the reflection field samples from its own evaluate, never during
+        // this module's).
+        std::lock_guard<std::mutex> lock(moduleMutex_);
+        if (causticReceiverIndexDirty_)
+        {
+            rebuildCausticReceiverIndexLocked();
+        }
+        for (const CausticReceiverEntry &entry : causticReceiverIndex_)
+        {
+            // Bounds first (cheap reject); the card-texel read then confirms
+            // the position actually lies on the receiver's surface.
+            if (glm::any(glm::lessThan(samplePosition, entry.worldMin))
+                || glm::any(glm::greaterThan(samplePosition, entry.worldMax)))
+            {
+                continue;
+            }
+            glm::vec3 irradiance(0.0f);
+            if (sampleSurfaceCausticsIrradiance(state_, entry.surface, samplePosition, sampleNormal, irradiance))
+            {
+                outIrradiance[0] = irradiance.x;
+                outIrradiance[1] = irradiance.y;
+                outIrradiance[2] = irradiance.z;
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::uint32_t copyProbesImpl(GiProbe *output, std::uint32_t capacity, GiProbeHeader *outHeader,
         std::uint64_t *outVersion) const
     {
@@ -1265,10 +1376,21 @@ private:
     mutable std::mutex moduleMutex_;
     GiSettings         settings_;
     GiPipelineState    state_;
+    // Registry lookup side of state_.surfaces (see findSurfaceLocked).
+    std::unordered_map<GiSurfaceHandle, std::uint32_t> surfaceIndexByHandle_;
     std::uint32_t      builtDirectionResolution_ = 0;
     float              builtProbeSpacing_        = 0.0f;
     float              builtLevel1Factor_        = 0.0f;
+    std::uint32_t      builtProbeDimension_      = 0;
     CardKey            builtCardKey_{0.0f, 0, 0, 0, 0};
+    struct CausticReceiverEntry
+    {
+        std::uint32_t surface;
+        glm::vec3     worldMin;
+        glm::vec3     worldMax;
+    };
+    std::vector<CausticReceiverEntry> causticReceiverIndex_;
+    bool                              causticReceiverIndexDirty_ = true;
     double             lastEvaluateMilliseconds_ = 0.0;
     std::atomic<std::uint64_t> probeVersion_{0};
     mutable std::mutex                     snapshotMutex_;

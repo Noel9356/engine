@@ -1,3 +1,13 @@
 [direct_lighting]
 max_lights                = 0
 maximum_registered_lights = 256
+
+[direct_lighting.budgets]
+# Per-device-class automatic light budgets resolveProfile picks between when
+# max_lights is 0 (an explicit non-zero max_lights wins over all of these;
+# the uniform-buffer range still caps the result). base_lights serves
+# non-Vulkan devices and unknown Vulkan classes.
+base_lights                     = 8
+vulkan_discrete_gpu_lights      = 32
+vulkan_integrated_gpu_lights    = 24
+vulkan_virtual_gpu_lights       = 16

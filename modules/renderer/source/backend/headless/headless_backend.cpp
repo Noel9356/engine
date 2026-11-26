@@ -756,26 +756,22 @@ void HeadlessBackend::applyPresentationBloom(const window::SurfacePixels &pixels
             glm::vec3 sum(0.0f);
             for (std::int32_t tap = -2; tap <= 2; ++tap)
             {
-                const std::int32_t cellLine = static_cast<std::int32_t>(
-                    horizontal ? cell : static_cast<std::uint32_t>(static_cast<std::int32_t>(lineIndex) + tap));
-                const std::int32_t lineFixed = static_cast<std::int32_t>(lineIndex);
-                (void)lineFixed;
-                const std::int32_t sampledCell = horizontal
-                    ? static_cast<std::int32_t>(cell) + tap : static_cast<std::int32_t>(lineIndex);
-                const std::int32_t sampledLine = horizontal
-                    ? static_cast<std::int32_t>(lineIndex)
-                    : static_cast<std::int32_t>(cell) + tap;
-                (void)cellLine;
-                std::int32_t sampleX = horizontal ? sampledCell : sampledLine;
-                std::int32_t sampleY = horizontal ? sampledLine : sampledCell;
-                // For the horizontal pass the CELL runs along x; for the
-                // vertical pass the CELL runs along y and the line is x.
-                sampleX = std::clamp(horizontal ? sampleX : static_cast<std::int32_t>(lineIndex), 0,
-                    static_cast<std::int32_t>(smallWidth) - 1);
-                sampleY = std::clamp(horizontal ? sampleY : sampleX, 0,
-                    static_cast<std::int32_t>(smallHeight) - 1);
-                sum += bloomBright_[static_cast<std::size_t>(sampleY) * smallWidth
-                              + static_cast<std::size_t>(sampleX)]
+                // For the horizontal pass the CELL runs along x and the
+                // line is y; for the vertical pass the CELL runs along y and
+                // the line is x. The tap always steps along the cell axis,
+                // and both coordinates clamp to the bright buffer's own
+                // extent (x to smallWidth, y to smallHeight) - a swapped or
+                // shared clamp reads the wrong cell and the blur smears
+                // unrelated energy across the frame.
+                const std::int32_t steppedCell = static_cast<std::int32_t>(cell) + tap;
+                const std::int32_t sampleX = horizontal ? steppedCell : static_cast<std::int32_t>(lineIndex);
+                const std::int32_t sampleY = horizontal ? static_cast<std::int32_t>(lineIndex) : steppedCell;
+                const std::int32_t clampedX
+                    = std::clamp(sampleX, 0, static_cast<std::int32_t>(smallWidth) - 1);
+                const std::int32_t clampedY
+                    = std::clamp(sampleY, 0, static_cast<std::int32_t>(smallHeight) - 1);
+                sum += bloomBright_[static_cast<std::size_t>(clampedY) * smallWidth
+                              + static_cast<std::size_t>(clampedX)]
                     * kKernel[tap + 2];
             }
             bloomScratch_[cellIndex(lineIndex, cell)] = sum;
@@ -1842,15 +1838,13 @@ void HeadlessBackend::updateSunShadowMap()
     bool      haveReceiverBox = false;
     sunShadowReceiverBox(receiverMin, receiverMax, haveReceiverBox);
 
+    const std::vector<sunshadows::SunShadowGeometry> geometries = sunShadowGeometries();
     if (sunShadowSunActive_)
     {
         const std::uint64_t hash = sunShadowStateHash();
         if (!sunShadowMap_.valid || hash != sunShadowBuiltHash_)
         {
-            sunshadows::buildSunShadowMap(sunShadowMap_,
-                sunShadowGeometries(),
-                shadowMapResolution_,
-                lightDirection_,
+            buildShadowMapInParallel(sunShadowMap_, geometries, lightDirection_,
                 haveReceiverBox ? &receiverMin : nullptr,
                 haveReceiverBox ? &receiverMax : nullptr);
             sunShadowBuiltHash_ = hash;
@@ -1870,10 +1864,7 @@ void HeadlessBackend::updateSunShadowMap()
             // Zenith direction: the sky's radiance arrives from straight
             // above, so the map measures what stands between each point and
             // the open sky.
-            sunshadows::buildSunShadowMap(skyShadowMap_,
-                sunShadowGeometries(),
-                shadowMapResolution_,
-                glm::vec3(0.0f, 1.0f, 0.0f),
+            buildShadowMapInParallel(skyShadowMap_, geometries, glm::vec3(0.0f, 1.0f, 0.0f),
                 haveReceiverBox ? &receiverMin : nullptr,
                 haveReceiverBox ? &receiverMax : nullptr);
             skyShadowBuiltHash_ = hash;
@@ -1915,6 +1906,45 @@ void HeadlessBackend::updateSunShadowMap()
         exportMap(sunShadowMap_, ".sun.png");
         exportMap(skyShadowMap_, ".sky.png");
     }
+}
+
+// One shadow map build over the frame's shared caster geometries (see the
+// header note): with a running scheduler the caster list splits into
+// per-worker ranges that rasterize concurrently - the per-cell min-store is
+// atomic, so the map is exactly the serial build's - and the plain serial
+// build covers every other host.
+void HeadlessBackend::buildShadowMapInParallel(sunshadows::SunShadowMap &map,
+    const std::vector<sunshadows::SunShadowGeometry> &geometries, const glm::vec3 &direction,
+    const glm::vec3 *receiverMin, const glm::vec3 *receiverMax)
+{
+    const std::uint32_t workers = parallelWorkerCount();
+    if (taskScheduler_ == nullptr || !taskScheduler_->isRunning() || workers < 2u || geometries.size() < 2u
+        || !sunshadows::sunShadowFitMap(map, geometries, shadowMapResolution_, direction, receiverMin, receiverMax))
+    {
+        sunshadows::buildSunShadowMap(map, geometries, shadowMapResolution_, direction, receiverMin, receiverMax);
+        return;
+    }
+    const std::size_t casters = geometries.size();
+    const std::size_t grain   = (casters + workers - 1u) / workers;
+    TaskGroup        group;
+    for (std::uint32_t worker = 1u; worker < workers; ++worker)
+    {
+        const std::size_t begin = std::min<std::size_t>(casters, worker * grain);
+        const std::size_t end   = std::min<std::size_t>(casters, begin + grain);
+        if (begin >= end)
+        {
+            break;
+        }
+        if (!taskScheduler_->schedule(group,
+                [&map, &geometries, begin, end]()
+                { sunshadows::sunShadowRasterCasters<true>(map, geometries, begin, end); }))
+        {
+            sunshadows::sunShadowRasterCasters<true>(map, geometries, begin, end);
+        }
+    }
+    sunshadows::sunShadowRasterCasters<true>(map, geometries, 0u, std::min<std::size_t>(casters, grain));
+    group.wait(*taskScheduler_);
+    map.valid = true;
 }
 
 // Copies the interleaved vertices into planar arrays, computes the bounding
@@ -3363,6 +3393,9 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.sheenFactor             = glm::clamp(material.sheenFactor, 0.0f, 1.0f);
     outSetup.doubleSided             = material.doubleSided;
     outSetup.alphaCutoff             = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
+    outSetup.fogColor                = glm::max(glm::make_vec3(material.fogColor), glm::vec3(0.0f));
+    outSetup.fogScaleMeters          = std::max(material.fogScaleMeters, 1.0f);
+    outSetup.fogAsymptote            = glm::clamp(material.fogAsymptote, 0.0f, 1.0f);
 
     outSetup.hasBaseColorMap         = outSetup.baseColorMap != &neutralWhite_;
     outSetup.hasNormalMap            = outSetup.normalMap != &flatNormal_;
@@ -3396,11 +3429,14 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
         // needs only vertex POSITIONS (a face normal cross product), so it
         // works for unlit backdrops too - shells and domes drawn by
         // position-only vertex colors - where the vote path (which reads
-        // smooth vertex normals) cannot apply.
+        // smooth vertex normals) cannot apply. The renderer's configured
+        // culling switch still gates it like every other culling path: a
+        // consumer that turns back-face culling off (two-sided terrain)
+        // means it, declared convention or not.
         if (material.frontFaceWinding > 0.0f || material.frontFaceWinding < 0.0f)
         {
             outSetup.frontSign          = material.frontFaceWinding;
-            outSetup.enableBackFaceCull = true; // winding convention declared; culling is safe
+            outSetup.enableBackFaceCull = backFaceCullingEnabled_; // winding convention declared; culling stays config-gated
         }
         else if (!outSetup.unlit && backFaceCullingEnabled_ && outSetup.useTransformCache && mesh.boundsValid
             && triangleCount >= 4)
@@ -3975,12 +4011,12 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             }
                         }
 
+                        const glm::vec3 interpolatedPosition = correctedA * clipped[cornerA].worldPosition
+                                                             + correctedB * clipped[cornerB].worldPosition
+                                                             + correctedC * clipped[cornerC].worldPosition;
                         glm::vec3 shaded = baseColor;
                         if (!unlit)
                         {
-                            const glm::vec3 interpolatedPosition = correctedA * clipped[cornerA].worldPosition
-                                                                 + correctedB * clipped[cornerB].worldPosition
-                                                                 + correctedC * clipped[cornerC].worldPosition;
                             const glm::vec3 interpolatedNormal   = correctedA * clipped[cornerA].worldNormal
                                                                  + correctedB * clipped[cornerB].worldNormal
                                                                  + correctedC * clipped[cornerC].worldNormal;
@@ -4101,6 +4137,20 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             {
                                 shaded += emissiveColor;
                             }
+                        }
+                        // Distance fog (MeshMaterial's fog triple; see
+                        // shadeTrianglePixel's twin block): per-pixel, linear
+                        // space, after every add. The position rides the
+                        // pixel loop's own interpolation, so unlit draws fog
+                        // like lit ones.
+                        if (setup.fogAsymptote > 0.0f)
+                        {
+                            const float fogWeight = setup.fogAsymptote
+                                * (1.0f
+                                      - std::exp(
+                                          -glm::length(interpolatedPosition - cameraPosition_)
+                                          / setup.fogScaleMeters));
+                            shaded = glm::mix(shaded, setup.fogColor, fogWeight);
                         }
                         // Output transform: tone map here; the commit paths
                         // encode to bytes (see encodeColorRgba; the CPU
@@ -4830,6 +4880,21 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             shaded += emissiveColor;
         }
     }
+    // Distance fog (MeshMaterial's fog triple): per-pixel, in linear space,
+    // after every lighting and emissive term - the sample's own position
+    // carries the weight, so the fog stays continuous across mesh and chunk
+    // boundaries whatever the scene's streaming granularity. Unlit draws
+    // fog too (a distant emissive card fades like the terrain behind it).
+    if (setup.fogAsymptote > 0.0f)
+    {
+        const glm::vec3 fogPosition = interpolatedPair != nullptr
+            ? *interpolatedPair
+            : correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
+                + correctedC * cornerC.worldPosition;
+        const float fogWeight = setup.fogAsymptote
+            * (1.0f - std::exp(-glm::length(fogPosition - cameraPosition) / setup.fogScaleMeters));
+        shaded = glm::mix(shaded, setup.fogColor, fogWeight);
+    }
     // Tone map only: the commit paths fold the sRGB encode and the byte
     // quantization into one table (encodeColorRgba); the shell-fur path
     // blends in encoded space and applies fastSrgbEncode itself.
@@ -5299,7 +5364,10 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     // The reflection-field response and emissive add in LINEAR space (the
     // per-sample path applies them before the output transform), so the run
     // defers the transform to the caller whenever those paths are live.
-    runContext.toneMapInside = !(setup.hasEmissive || (preparedReflectionField_.valid && !setup.unlit));
+    // Distance fog defers it too: the fog blends in linear space after every
+    // add, at the caller's epilogue where the lane's position is at hand.
+    runContext.toneMapInside = !(setup.hasEmissive || setup.fogAsymptote > 0.0f
+        || (preparedReflectionField_.valid && !setup.unlit));
 
     // The commit both paths share: transparent draws blend over the
     // framebuffer, opaque draws write depth and the packed color. The depth
@@ -5386,6 +5454,25 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 shadedOut += setup.emissiveColor;
             }
         }
+        // Distance fog (MeshMaterial's fog triple; shadeTrianglePixel's
+        // twin block): per-lane, in linear space, after every add. The
+        // lane's perspective-correct position carries the weight, so the
+        // fog stays continuous across mesh and chunk boundaries whatever
+        // the scene's streaming granularity.
+        if (setup.fogAsymptote > 0.0f)
+        {
+            const float weightC = 1.0f - laneWeightA_ - laneWeightB_;
+            const float inverseWSum = laneWeightA_ * inverseWA + laneWeightB_ * inverseWB + weightC * inverseWC;
+            const float inversePerspective = 1.0f / inverseWSum;
+            const float correctedA = laneWeightA_ * inverseWA * inversePerspective;
+            const float correctedB = laneWeightB_ * inverseWB * inversePerspective;
+            const float correctedC = 1.0f - correctedA - correctedB;
+            const glm::vec3 lanePosition = correctedA * cornerA.worldPosition + correctedB * cornerB.worldPosition
+                + correctedC * cornerC.worldPosition;
+            const float fogWeight = setup.fogAsymptote
+                * (1.0f - std::exp(-glm::length(lanePosition - cameraPosition_) / setup.fogScaleMeters));
+            shadedOut = glm::mix(shadedOut, setup.fogColor, fogWeight);
+        }
         // The run kernel already applied the output transform (exposure +
         // tone map) unless it deferred it behind the linear-space adds above.
         if (!runContext.toneMapInside)
@@ -5439,8 +5526,21 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
             // 4-wide runs or per-sample tail run at all below. Without the
             // wide kernel the 4-wide runs and the per-sample tail keep their
             // original split of the same window.
+            // The gate is wideRunsActive_ (the configured flag AND the
+            // running CPU's AVX-512 foundation, see wide_shading.hpp), and
+            // it MUST be consulted before the first vector instruction:
+            // entering the loop while the kernel is off would both execute
+            // AVX-512 opcodes on a CPU without them and consume this row's
+            // pixelIndex/edge weights through the stepping tail, leaving the
+            // 4-wide and per-sample passes below scanning columns past the
+            // window. Breaking before any stepping keeps every fallback
+            // state exactly at the row start.
             for (std::int32_t x = firstX; x <= lastX; x += 16, pixelIndex += 16)
             {
+                if (!wideRunsActive_)
+                {
+                    break;
+                }
                 float laneWeightA[16];
                 float laneWeightB[16];
                 float laneDepth[16];
@@ -6475,7 +6575,7 @@ bool HeadlessBackend::binTileRecords()
             return tilebins::tileRangeForPixelRect(
                 grid, firstX, lastX, firstY, lastY, tileXBegin, tileXEnd, tileYBegin, tileYEnd);
         },
-        grid, tileOffsets_, tileItems_);
+        grid, tileOffsets_, tileItems_, tileRangeScratch_);
     if (!binned)
     {
         tileOffsets_.clear();
@@ -6554,7 +6654,7 @@ void HeadlessBackend::rasterizeTileRecords(
         {
             const TileBinRecord &record = tileRecords_[tileItems_[entry]];
             // The record's chunk index identifies its (single, continuous)
-            // surface to the caches' tag checks.
+            // surface to the caches' tag tests.
             tileShading.recordTag = tileItems_[entry];
             const bool rasterized = record.shadeRuns
                 ? rasterizeFanRecordRuns(setups[record.setupIndex], record, xBandBegin, xBandEnd, yBandBegin,
