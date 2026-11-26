@@ -1191,6 +1191,22 @@ void PlanetScatterSystem::uploadMesh(ScatterMesh &slot, std::vector<PlanetVertex
     description.vertexAttributes = attributes.data();
     description.vertexAttributeCount = static_cast<std::uint32_t>(attributes.size());
 
+    // The in-place refresh only covers a mesh whose vertex AND index counts
+    // still match the creation stream (the renderer rejects anything else);
+    // a rebuild whose population changed recreates the mesh. A mismatched
+    // refresh would silently keep the previous geometry while the anchor
+    // moves on - the whole stale mesh would slide with the eye.
+    const bool streamMatches = slot.mesh != renderer::invalidMesh
+        && slot.uploadedVertexCount == static_cast<std::uint32_t>(vertices.size())
+        && slot.uploadedIndexCount == static_cast<std::uint32_t>(indices.size());
+    if (slot.mesh != renderer::invalidMesh && !streamMatches
+        && renderCapability_->destroyMesh != nullptr)
+    {
+        renderCapability_->destroyMesh(renderCapability_->self, rendererHandle_, slot.mesh);
+        slot.mesh = renderer::invalidMesh;
+        slot.uploadedVertexCount = 0;
+        slot.uploadedIndexCount = 0;
+    }
     if (slot.mesh == renderer::invalidMesh)
     {
         renderer::RenderError error = renderer::RenderError::None;
@@ -1200,12 +1216,15 @@ void PlanetScatterSystem::uploadMesh(ScatterMesh &slot, std::vector<PlanetVertex
             slot.active = false;
             return;
         }
+        slot.uploadedVertexCount = static_cast<std::uint32_t>(vertices.size());
+        slot.uploadedIndexCount = static_cast<std::uint32_t>(indices.size());
         slot.vertexUpdated = false;
     }
     else
     {
-        // Same vertex count, same stride: refresh in place (the whitecap
-        // churn and bird paths; the backend recomputes bounds itself).
+        // Same vertex count, same index count: refresh in place (the
+        // whitecap churn and bird paths; the backend recomputes bounds
+        // itself).
         renderCapability_->updateMeshVertices(renderCapability_->self, rendererHandle_, slot.mesh, vertices.data(),
             static_cast<std::uint32_t>(vertices.size()), nullptr);
     }
@@ -1272,48 +1291,141 @@ void walkLattice(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &east, const
     }
 }
 
-void PlanetScatterSystem::rebuild(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward)
+// ---- cached placement plumbing -----------------------------------------------
+//
+// The stationary families place from world-keyed lattice cells, so every
+// fully-evaluated card (site, size, tint, baked shadow ribbon) is cached by
+// cell and re-emitted at any anchor as arithmetic. The emit applies the
+// distance-driven terms against the anchor the mesh is baked for, so a
+// re-anchored family shows exactly what a fresh walk at that anchor would
+// show for its cached cells - the cache only removes the repeated field
+// probes, never the placement itself.
+
+// pushBillboard lives with the geometry helpers below; the emit path needs it
+// first, so the declaration rides ahead of the definition.
+void pushBillboard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_t> &indices,
+    const glm::dvec3 &baseCenter, const glm::dvec3 &up, glm::dvec3 toEye, double halfWidth, double height,
+    const std::array<float, 3> &color, const glm::dvec3 &anchor, const SpeciesUvRect &uvRect,
+    bool mirrorU, float rootDarken);
+
+std::size_t PlanetScatterSystem::CellKeyHash::operator()(const CellKey &key) const noexcept
 {
-    anchorEye_ = eyePlanetLocal;
-    lastSunDirection_ = glm::length(lastSunDirection_) > 1.0e-9 ? lastSunDirection_ : glm::dvec3(0.0, 1.0, 0.0);
-    anchorEyeRadius_ = glm::length(eyePlanetLocal);
-    hasAnchor_ = true;
-    const glm::dvec3 eyeDirection = eyePlanetLocal / std::max(1.0, anchorEyeRadius_);
+    return static_cast<std::size_t>(PlanetScatterSystem::cellHash(0, 0, key.value[0], key.value[1], key.value[2])
+        ^ (static_cast<std::uint64_t>(key.value[3]) * 0x9E3779B97F4A7C15ull));
+}
+
+void PlanetScatterSystem::tangentFrameAt(const glm::dvec3 &eyePlanetLocal, glm::dvec3 &outEyeDirection,
+    glm::dvec3 &outEast, glm::dvec3 &outNorth) const
+{
+    const double eyeRadius = std::max(1.0, glm::length(eyePlanetLocal));
+    outEyeDirection = eyePlanetLocal / eyeRadius;
     glm::dvec3 axis(0.0, 0.0, 1.0);
-    if (std::abs(glm::dot(axis, eyeDirection)) > 0.9)
+    if (std::abs(glm::dot(axis, outEyeDirection)) > 0.9)
     {
         axis = glm::dvec3(0.0, 1.0, 0.0);
     }
-    const glm::dvec3 east = glm::normalize(glm::cross(axis, eyeDirection));
-    const glm::dvec3 north = glm::cross(eyeDirection, east);
+    outEast  = glm::normalize(glm::cross(axis, outEyeDirection));
+    outNorth = glm::cross(outEyeDirection, outEast);
+}
 
+void PlanetScatterSystem::emitFoliageCard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_t> &indices,
+    const PlacedCard &card, const glm::dvec3 &anchor, const FoliageEmitStyle &style) const
+{
+    const double cardDistance = glm::length(card.base - anchor);
+    std::array<float, 3> color = card.speciesColor;
+    if (style.groundFadeWeight > 0.0)
+    {
+        const double groundFade = smoothStepLocal(
+            style.groundFadeStartMeters, style.groundFadeEndMeters, cardDistance);
+        const float groundMix = static_cast<float>(style.groundFadeWeight * groundFade);
+        for (std::uint32_t channel = 0; channel < 3; ++channel)
+        {
+            color[channel] = std::lerp(color[channel], card.groundColor[channel], groundMix);
+        }
+    }
+    if (style.aerialHaze)
+    {
+        const double weight = style.hazeAsymptote * (1.0 - std::exp(-cardDistance / style.hazeScaleMeters));
+        if (weight > 0.0)
+        {
+            for (std::uint32_t channel = 0; channel < 3; ++channel)
+            {
+                color[channel]
+                    = std::lerp(color[channel], style.hazeColor[channel], static_cast<float>(weight));
+            }
+        }
+    }
+    const glm::dvec3 toEye = card.fixedRight ? card.right : (anchor - card.base);
+    pushBillboard(vertices, indices, card.base, card.up, toEye, card.halfWidth, card.height, color, anchor,
+        speciesUv(card.uvTile), card.mirrorU, card.rootDarken);
+}
+
+void PlanetScatterSystem::rebuildShadowMesh(const glm::dvec3 &eyePlanetLocal)
+{
     shadowScratch_.clear();
     shadowIndexScratch_.clear();
-    scatterVegetation(eyePlanetLocal, eyeDirection, east, north, viewForward);
-    scatterRocks(eyePlanetLocal, eyeDirection, east, north);
-    // The contact shadows collected under the vegetation and rocks upload as
-    // one unlit translucent mesh (the transparent tail depth-tests them
-    // against the terrain they lie on). A night run collects nothing and the
-    // slot deactivates itself in uploadMesh.
-    shadowMesh_.anchorPlanetLocal = anchorEye_;
-    // The contact shadows carry the frame's shadow story (see the sun
-    // shadow map note in the demo config): their opacity runs high enough
-    // to read as shade rather than a gray stain - the sun's disc sits in
-    // the frame and its shadow needs to hold against the lit ground.
+    const auto replayRibbon = [this, &eyePlanetLocal](const ShadowRibbon &ribbon)
+    {
+        if (ribbon.strips == 0)
+        {
+            return;
+        }
+        // The ribbon was baked against a specific sun; a changed sun drops it
+        // (the demo's sun is configuration-static, so this never fires in a
+        // run - it exists so a stale ribbon can never replay as a wrong one).
+        const glm::dvec3 ribbonSun = glm::length(ribbon.sun) > 1.0e-9 ? glm::normalize(ribbon.sun) : ribbon.sun;
+        if (glm::length(ribbonSun - lastSunDirection_) > 1.0e-6)
+        {
+            return;
+        }
+        // Beyond the tree ring the fill cost buys nothing (the same gate the
+        // bake used to apply against the anchor).
+        if (glm::length(ribbon.corners[0][0] - eyePlanetLocal) > kShadowMaxDistanceMeters)
+        {
+            return;
+        }
+        for (std::uint32_t strip = 0; strip < ribbon.strips; ++strip)
+        {
+            QuadPush quad;
+            quad.normal = ribbon.normals[strip];
+            for (std::uint32_t corner = 0; corner < 4; ++corner)
+            {
+                quad.color[corner][0] = 0.0f;
+                quad.color[corner][1] = 0.0f;
+                quad.color[corner][2] = 0.0f;
+                quad.uv[corner][0] = ribbon.uv[strip][corner][0];
+                quad.uv[corner][1] = ribbon.uv[strip][corner][1];
+            }
+            for (std::uint32_t corner = 0; corner < 4; ++corner)
+            {
+                quad.corners[corner] = ribbon.corners[strip][corner];
+            }
+            pushQuad(shadowScratch_, shadowIndexScratch_, quad, eyePlanetLocal);
+        }
+    };
+    for (const PlacementCache &cache : familyCache_)
+    {
+        for (const auto &entry : cache)
+        {
+            for (const PlacedCard &card : entry.second)
+            {
+                replayRibbon(card.shadowRibbon);
+            }
+        }
+    }
+    for (const ShadowRibbon &ribbon : rockShadowRibbons_)
+    {
+        replayRibbon(ribbon);
+    }
+    shadowMesh_.anchorPlanetLocal = eyePlanetLocal;
+    // The contact shadows carry the frame's shadow story (see the sun shadow
+    // map note in the demo config): their opacity runs high enough to read as
+    // shade rather than a gray stain - the sun's disc sits in the frame and
+    // its shadow needs to hold against the lit ground.
     uploadMesh(shadowMesh_, shadowScratch_, shadowIndexScratch_, false, true, true,
         static_cast<float>(std::clamp(0.78 * params_.surfaceShadowStrength, 0.0, 1.0)), true);
     shadowMesh_.material.baseColorTexture = shadowTexture_;
-    scatterWhitecaps(eyePlanetLocal, eyeDirection, east, north, false);
-    scatterSurf(eyePlanetLocal, eyeDirection, east, north);
-    const double sunUp = glm::dot(glm::normalize(lastSunDirection_), eyeDirection);
-    scatterMist(eyePlanetLocal, eyeDirection, east, north, sunUp);
-    // viewForward (the camera's sight axis this rebuild) - NOT eyeDirection,
-    // which is the eye's own radial up: the flocks place into the camera's
-    // forward fan, and the up-direction would collapse that fan to nothing.
-    scatterBirdFlocks(eyePlanetLocal, viewForward, east, north);
-    animateBirds(0.0);
 }
-
 
 // ---- geometry helpers shared by the scatter groups ---------------------------
 
@@ -1421,17 +1533,16 @@ void pushBillboard(std::vector<PlanetVertex> &vertices, std::vector<std::uint32_
 // of burying under the first rise (a tangent-plane quad only ever shows the
 // patch hugging the trunk, whatever the sun says). The darkness rides the
 // quad's vertex color over a white-RGB alpha texture, so stretched shadows
-// simply drop toward grey.
-void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm::dvec3 &up, double sizeMeters,
-    double heightMeters)
+// simply drop toward grey. The ribbon is BAKED once per placement (the
+// ground march is the expensive part); the shadow-mesh replay in
+// rebuildShadowMesh is pure arithmetic.
+void PlanetScatterSystem::bakeShadowRibbon(const glm::dvec3 &groundPoint, const glm::dvec3 &up, double sizeMeters,
+    double heightMeters, ShadowRibbon &outRibbon) const
 {
+    outRibbon.strips = 0;
     if (params_.surfaceShadowStrength <= 0.0 || !initialized_ || sizeMeters <= 0.0 || heightMeters <= 0.0)
     {
         return;
-    }
-    if (glm::length(groundPoint - anchorEye_) > kShadowMaxDistanceMeters)
-    {
-        return; // beyond the tree ring the fill cost buys nothing
     }
     const double sunLength = glm::length(lastSunDirection_);
     if (sunLength < 1.0e-9)
@@ -1508,45 +1619,40 @@ void PlanetScatterSystem::appendShadow(const glm::dvec3 &groundPoint, const glm:
     // ribbon so the soft falloff texture reads end to end.
     for (std::uint32_t strip = 0; strip + 1u < kShadowRings; ++strip)
     {
-        QuadPush quad;
-        quad.normal = ringNormal[strip];
-        for (std::uint32_t corner = 0; corner < 4; ++corner)
-        {
-            quad.color[corner][0] = 0.0f;
-            quad.color[corner][1] = 0.0f;
-            quad.color[corner][2] = 0.0f;
-        }
-        quad.uv[0][0] = 0.0f;
-        quad.uv[0][1] = static_cast<float>(ringV[strip]);
-        quad.uv[1][0] = 1.0f;
-        quad.uv[1][1] = static_cast<float>(ringV[strip]);
-        quad.uv[2][0] = 1.0f;
-        quad.uv[2][1] = static_cast<float>(ringV[strip + 1u]);
-        quad.uv[3][0] = 0.0f;
-        quad.uv[3][1] = static_cast<float>(ringV[strip + 1u]);
-        quad.corners[0] = ringPosition[strip] - across * halfWidth;
-        quad.corners[1] = ringPosition[strip] + across * halfWidth;
-        quad.corners[2] = ringPosition[strip + 1u] + across * halfWidth;
-        quad.corners[3] = ringPosition[strip + 1u] - across * halfWidth;
-        pushQuad(shadowScratch_, shadowIndexScratch_, quad, anchorEye_);
+        outRibbon.normals[strip] = ringNormal[strip];
+        outRibbon.uv[strip][0][0] = 0.0f;
+        outRibbon.uv[strip][0][1] = static_cast<float>(ringV[strip]);
+        outRibbon.uv[strip][1][0] = 1.0f;
+        outRibbon.uv[strip][1][1] = static_cast<float>(ringV[strip]);
+        outRibbon.uv[strip][2][0] = 1.0f;
+        outRibbon.uv[strip][2][1] = static_cast<float>(ringV[strip + 1u]);
+        outRibbon.uv[strip][3][0] = 0.0f;
+        outRibbon.uv[strip][3][1] = static_cast<float>(ringV[strip + 1u]);
+        outRibbon.corners[strip][0] = ringPosition[strip] - across * halfWidth;
+        outRibbon.corners[strip][1] = ringPosition[strip] + across * halfWidth;
+        outRibbon.corners[strip][2] = ringPosition[strip + 1u] + across * halfWidth;
+        outRibbon.corners[strip][3] = ringPosition[strip + 1u] - across * halfWidth;
     }
+    outRibbon.sun = sunDir;
+    outRibbon.strips = kShadowRings - 1u;
 }
 
-void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
-    const glm::dvec3 &east, const glm::dvec3 &north, const glm::dvec3 &viewForward)
+void PlanetScatterSystem::rebuildTrees(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward)
 {
-    (void)eyeDirection;
-    if (!params_.vegetationEnabled)
+    familyAnchor_[static_cast<std::size_t>(Family::Trees)] = eyePlanetLocal;
+    familyAnchored_[static_cast<std::size_t>(Family::Trees)] = true;
+    if (params_.vegetationTreeDensity <= 0.0)
     {
         treeMesh_.active = false;
-        bushMesh_.active = false;
-        grassMesh_.active = false;
+        familyCache_[static_cast<std::size_t>(Family::Trees)].clear();
         return;
     }
     const double seaRadius = params_.derivedSeaRadiusMeters;
     const double grassRadius = std::max(2.0, params_.vegetationGrassRadiusMeters);
     const double treeRadius = std::max(grassRadius + 10.0, params_.vegetationTreeRadiusMeters);
-    const double bushRadius = std::max(8.0, std::min(460.0, treeRadius * 0.33));
+    glm::dvec3 eyeDirection, east, north;
+    tangentFrameAt(eyePlanetLocal, eyeDirection, east, north);
+    (void)eyeDirection;
 
     // The grove clump field: one fBm stream shared by every tree candidate,
     // keyed off the planet seed (forests read as groves with clearings,
@@ -1568,25 +1674,17 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
     // so an unranked guarantee plants its landmarks behind the ridge the
     // walker stares at, and the frame photographs the same bare slope). Both
     // the candidate set and the ranking are pure functions of the world
-    // cells and the sight axis, so rebuilds stay deterministic.
+    // cells and the sight axis, so rebuilds stay deterministic; cells the
+    // cache already planted count toward the minimum.
     constexpr double kTreeNearRingMeters = 260.0;
     constexpr std::size_t kTreeNearRingMinimum = 8;
-    constexpr double kBushNearRingMeters = 150.0;
-    constexpr std::size_t kBushNearRingMinimum = 12;
     const bool viewKnown = glm::dot(viewForward, viewForward) > 0.25; // unit or zero
-
-    // Pass 1 (trees): collect the near ring's viable candidates with their
-    // presence rolls. Viability here means every gate EXCEPT the presence
-    // draw itself cleared (land, biome, slope, and - for trees - a softened
-    // clump gate; the near guarantee is about presence, not about planting
-    // into a clearing the grove field wants empty, so the clump gate only
-    // floors the RANKED candidates' presence, never vetoes the ring outright).
-    struct NearCandidate
+    struct NearDeferral
     {
         double roll = 1.0;
-        double presence = 0.0;
         double forwardShare = 0.0; // dot(cell direction, camera forward)
-        std::int64_t cell[3]{};
+        CellKey key{};
+        PlacedCard card{};
     };
     const auto forwardShareOf = [&eyePlanetLocal, &viewKnown, &viewForward](const glm::dvec3 &cellCenter)
     {
@@ -1598,11 +1696,11 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         const double length = glm::length(delta);
         return length > 1.0e-6 ? glm::dot(delta / length, viewForward) : 0.0;
     };
-    // The ranking order shared by both near-ring passes: cells inside the
+    // The ranking order shared by the near-ring passes: cells inside the
     // camera's forward band lead (the guaranteed minimum must land on
     // screen), and presence roll orders each band.
     constexpr double kForwardBand = 0.35; // cells within ~69 deg of the sight axis
-    const auto forwardFirst = [kForwardBand](const NearCandidate &a, const NearCandidate &b)
+    const auto forwardFirst = [kForwardBand](const NearDeferral &a, const NearDeferral &b)
     {
         const bool aFront = a.forwardShare > kForwardBand;
         const bool bFront = b.forwardShare > kForwardBand;
@@ -1612,544 +1710,709 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
         }
         return a.roll < b.roll;
     };
-    std::vector<NearCandidate> nearTreeCandidates;
 
-    std::uint32_t treeCount = 0;
-    if (params_.vegetationTreeDensity > 0.0)
+    // Emit styling for this family: the tree fade band and the aerial-haze
+    // fold (see the walk comments below - both replay per emit against the
+    // anchor, so a re-anchored mesh shows the right distance response).
+    FoliageEmitStyle style;
+    style.groundFadeStartMeters = 160.0;
+    style.groundFadeEndMeters = 620.0;
+    style.groundFadeWeight = 0.55;
+    style.aerialHaze = true;
     {
-        std::vector<PlanetVertex> vertices;
-        std::vector<std::uint32_t> indices;
-        vertices.reserve(1024);
-        indices.reserve(1536);
-        constexpr std::uint32_t kMaxTrees = 1200;
-        // Distance haze folded into the card albedo: the terrain fades
-        // toward the horizon band per chunk, and without the same fade the
-        // distant treeline photographs as a saturated green wall pasting
-        // against its own hazed ground - the aerial-perspective depth ramp
-        // must reach the vegetation or the whole midground flattens. The
-        // weight is the module's own exponential profile evaluated at the
-        // card's distance from the rebuild eye (the eye roams well inside
-        // the rebuild radius, so the weight's error stays invisible), and
-        // the target color is the sky's horizon band scaled to the band a
-        // lit card scatters back - a lit distant canopy returns roughly
-        // half the incident light, so the fold lands the distant trees
-        // near where the exact per-chunk fog puts the terrain beside them.
-        const glm::vec3 hazeColor = [&]()
+        const engine::planet::Vec3 horizon = engine::planet::skyGradientColor(params_, 0.04);
+        style.hazeColor = glm::vec3(
+            static_cast<float>(horizon.x * 0.55), static_cast<float>(horizon.y * 0.55),
+            static_cast<float>(horizon.z * 0.55));
+    }
+    style.hazeScaleMeters = std::max(1.0, params_.aerialPerspectiveScaleMeters);
+    style.hazeAsymptote = std::clamp(params_.aerialPerspectiveAsymptote, 0.0, 1.0);
+
+    PlacementCache &cache = familyCache_[static_cast<std::size_t>(Family::Trees)];
+    PlacementCache next;
+    next.reserve(cache.size() + 64);
+    std::vector<PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    vertices.reserve(1024);
+    indices.reserve(1536);
+    constexpr std::uint32_t kMaxTrees = 1200;
+    std::uint32_t treeCount = 0;
+    std::size_t nearTreesPlanted = 0;
+    std::vector<NearDeferral> nearDeferrals;
+
+    // Dense forest biomes double up: a passing cell plants a companion
+    // tree at its own hashed offset (the lattice cell stays the walk's
+    // cost unit, so the forest floor thickens without doubling the
+    // surface and climate samples). Companions draw from the same size
+    // band with an independent hash lane, so stands read as mixed-age
+    // growth instead of cloned pairs.
+    const auto denseStand = [](Biome biome)
+    {
+        return biome == Biome::Taiga || biome == Biome::TropicalRainforest
+                           || biome == Biome::TemperateRainforest
+                           || biome == Biome::TemperateForest
+                           || biome == Biome::SeasonalForest;
+    };
+
+    walkLattice(eyePlanetLocal, east, north, 12.0, treeRadius, kTreeCellMeters,
+        [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
         {
-            const engine::planet::Vec3 horizon = engine::planet::skyGradientColor(params_, 0.04);
-            return glm::vec3(
-                static_cast<float>(horizon.x * 0.55), static_cast<float>(horizon.y * 0.55),
-                static_cast<float>(horizon.z * 0.55));
-        }();
-        const double hazeScale
-            = std::max(1.0, params_.aerialPerspectiveScaleMeters);
-        const double hazeAsymptote = std::clamp(params_.aerialPerspectiveAsymptote, 0.0, 1.0);
-        const auto cardHaze = [&](std::array<float, 3> &color, double cardDistance)
-        {
-            const double weight = hazeAsymptote * (1.0 - std::exp(-cardDistance / hazeScale));
-            if (weight <= 0.0)
+            if (treeCount >= kMaxTrees)
             {
                 return;
             }
-            for (std::uint32_t channel = 0; channel < 3; ++channel)
+            const CellKey key{{cx, cy, cz, 0}};
+            if (const auto cached = cache.find(key); cached != cache.end())
             {
-                color[channel] = std::lerp(color[channel], hazeColor[channel], static_cast<float>(weight));
-            }
-        };
-        // Dense forest biomes double up: a passing cell plants a companion
-        // tree at its own hashed offset (the lattice cell stays the walk's
-        // cost unit, so the forest floor thickens without doubling the
-        // surface and climate samples). Companions draw from the same size
-        // band with an independent hash lane, so stands read as mixed-age
-        // growth instead of cloned pairs.
-        const auto denseStand = [](Biome biome)
-        {
-            return biome == Biome::Taiga || biome == Biome::TropicalRainforest
-                               || biome == Biome::TemperateRainforest
-                               || biome == Biome::TemperateForest
-                               || biome == Biome::SeasonalForest;
-        };
-        walkLattice(eyePlanetLocal, east, north, 12.0, treeRadius, kTreeCellMeters,
-            [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
-            {
-                if (treeCount >= kMaxTrees)
+                // Cached cell: the probes already happened; re-emit the
+                // cards with this anchor's distance response.
+                for (const PlacedCard &card : cached->second)
                 {
-                    return;
-                }
-                const std::uint64_t hash = cellHash(params_.seed, kSaltTree, cx, cy, cz);
-                if (hashUnit(hash, 0) > 0.70)
-                {
-                    return; // cheap pre-gate: most cells hold no tree attempt
-                }
-                const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kTreeCellMeters * 0.7
-                    + north * (hashUnit(hash, 2) - 0.5) * kTreeCellMeters * 0.7;
-                const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
-                double radius = 0.0;
-                if (!sampleSurfaceRadius(direction, radius))
-                {
-                    return;
-                }
-                if (radius < seaRadius + kTreeMinElevationMeters)
-                {
-                    return; // water, intertidal sand and exposed dunes stay bare
-                }
-                ClimateSample sample;
-                const double directionArray[3] = {direction.x, direction.y, direction.z};
-                if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
-                {
-                    return;
-                }
-                const double base = treeBaseDensity(sample.biome);
-                if (base <= 0.0)
-                {
-                    return;
-                }
-                const glm::dvec3 point = direction * radius;
-                const double clump = engine::planet::fbm(clumpSeeds, Vec3{point.x, point.y, point.z}, 280.0, clumpParams);
-                double clumpGate = smoothStepLocal(-0.55, 0.25, clump);
-                // Dense forest biomes keep their canopy floor: the boreal and
-                // rain forests are continuous stands with only small
-                // clearings, so the grove field floors instead of opening
-                // empty country (a taiga spot in a grove-field minimum
-                // rendered two trees per frame).
-                const bool denseForest = sample.biome == Biome::Taiga
-                    || sample.biome == Biome::TropicalRainforest
-                    || sample.biome == Biome::TemperateRainforest;
-                if (denseForest)
-                {
-                    clumpGate = std::max(clumpGate, 0.62);
-                }
-                double presence
-                    = base * (0.45 + 0.55 * sample.moisture01) * clumpGate * params_.vegetationTreeDensity;
-                if (denseForest)
-                {
-                    // The continuous stands keep a presence floor: the moisture
-                    // term collapses over cold boreal latitudes whose field
-                    // values sit low even though the forest there is solid
-                    // (the grove gate above already carries the clumping).
-                    presence = std::max(presence, 0.78 * params_.vegetationTreeDensity);
-                }
-                // Slope gate: cliff faces carry no soil, so nothing grows on
-                // them. The climate sample always carries a flat-ground slope
-                // (it reads the flats at the cliff's feet), so without this
-                // gate trees planted straight onto vertical rock - perched
-                // trunks on overhangs and mid-wall ledges. The relief field's
-                // cliff factor is the same terraced-country mask the mesher's
-                // bare-rock row keys on; only actual cliff-grade steepness
-                // opens it, so hillsides and terrace benches keep their trees.
-                {
-                    engine::planet::ReliefSample relief{};
-                    if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
-                        && relief.cliffFactor >= params_.cliffSteepnessLow)
+                    emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+                    if (glm::length(card.base - eyePlanetLocal) <= kTreeNearRingMeters)
                     {
-                        return;
+                        ++nearTreesPlanted;
                     }
                 }
-                const double presenceRoll = hashUnit(hash, 3);
-                if (cellDistance <= kTreeNearRingMeters)
-                {
-                    // Near-ring candidate: viability already cleared every
-                    // gate but the draw; the ranking pass below plants the
-                    // best few whatever their roll.
-                    nearTreeCandidates.push_back(NearCandidate{presenceRoll, presence,
-                        forwardShareOf(cellCenter), {cx, cy, cz}});
-                    return;
-                }
-                if (presenceRoll > clamp01(presence))
-                {
-                    return;
-                }
-                const SpeciesCard species = treeSpeciesFor(sample.biome, hash);
-                const double height = species.minHeightMeters
-                    + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
-                const double halfWidth = 0.5 * height * species.aspect * (0.62 + 0.72 * hashUnit(hash, 5));
-                const glm::dvec3 up = direction;
-                // Trunk foot sunk a tenth of the height: the drawn terrain at
-                // any LOD sits at or under the density surface on convex
-                // ground, and a sprite anchored exactly at the surface can
-                // float above the coarse mesh's ridge - the detached-trunk
-                // look distant views show. A deeper burial reads as the
-                // trunk's root flare disappearing into soil.
-                const glm::dvec3 baseCenter = point - up * (0.10 * height);
-                // The per-instance tint range spans half the multiplier's
-                // dynamic range: at billboard distances the eye averages a
-                // narrow band into one tone, so the stand's variation must
-                // survive the minification.
-                std::array<float, 3> color
-                    = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(hash, 6));
-                if (species.tile == 2)
-                {
-                    // Conifers carry their own spruce tone: cooler and deeper
-                    // than the broadleaf multiply, but not near-black - the
-                    // needle sprite is already dark, and the multiply must
-                    // stay in the shaded-foliage band.
-                    color[0] *= 0.86f;
-                    color[1] *= 1.00f;
-                    color[2] *= 0.90f;
-                }
-                // A distant canopy minifies to a handful of pixels and reads
-                // against the muted ground mass; a fully saturated species
-                // tint turns those pixels into neon chips (the classic
-                // billboard tell). Real distant forests lose saturation into
-                // the haze and read close to the ground tone they stand on,
-                // so the tint carries the planting site's own albedo in with
-                // distance - full species color at the eye, ground-faded
-                // beyond the mid ring.
-                const double groundFade = smoothStepLocal(160.0, 620.0, cellDistance);
-                const float groundMix = static_cast<float>(0.55 * groundFade);
-                // Cloud shade: the same field the terrain's vertex albedo
-                // carries (see the mesher's macro sample). A bank's shadow
-                // darkens the ground AND everything standing on it - without
-                // the multiply, foliage glows like a sticker against its own
-                // shaded ground.
-                const float cloudShade = static_cast<float>(clamp01(
-                    1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
-                        params_.derivedVoxelMeters)));
-                for (std::uint32_t channel = 0; channel < 3; ++channel)
-                {
-                    color[channel] = std::lerp(color[channel],
-                        clamp01(static_cast<float>(sample.color[channel]) * 0.9f), groundMix) * cloudShade;
-                }
-                cardHaze(color, cellDistance);
-                pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
-                    height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 10) < 0.5, 0.35f);
-                appendShadow(point, up, halfWidth * 1.15, height * 0.82);
-                ++treeCount;
-                // The companion lane follows the configured tree density the
-                // way the primary lane does: thinning the forests must thin
-                // BOTH stands of a cell, not leave the companion rate at full
-                // strength inside whatever cells still plant a primary. The
-                // full-density fill stays 0.72 - a mixed-age companion in
-                // roughly three of four forest cells reads as a stand, while
-                // a 1.0 rate would butt canopies into hedges.
-                if (treeCount < kMaxTrees && denseStand(sample.biome)
-                    && hashUnit(hash, 9) < 0.72 * clamp01(params_.vegetationTreeDensity))
-                {
-                    const std::uint64_t companionHash = cellHash(params_.seed, kSaltTree ^ 0xA5A5A5A5A5A5A5A5ull,
-                        cx * 2 + 1, cy * 2 + 1, cz * 2 + 1);
-                    const glm::dvec3 companionJitter = east * (hashUnit(companionHash, 1) - 0.5) * kTreeCellMeters * 0.8
-                        + north * (hashUnit(companionHash, 2) - 0.5) * kTreeCellMeters * 0.8;
-                    const glm::dvec3 companionDirection = glm::normalize(cellCenter + companionJitter);
-                    double companionRadius = 0.0;
-                    if (sampleSurfaceRadius(companionDirection, companionRadius)
-                        && companionRadius >= seaRadius + kTreeMinElevationMeters)
-                    {
-                        const SpeciesCard companionSpecies = treeSpeciesFor(sample.biome, companionHash);
-                        const double companionHeight = companionSpecies.minHeightMeters
-                            + hashUnit(companionHash, 4)
-                                * (companionSpecies.maxHeightMeters - companionSpecies.minHeightMeters);
-                        const double companionHalfWidth = 0.5 * companionHeight * companionSpecies.aspect
-                            * (0.72 + 0.56 * hashUnit(companionHash, 5));
-                        const glm::dvec3 companionPoint = companionDirection * companionRadius;
-                        const glm::dvec3 companionUp = companionDirection;
-                        const glm::dvec3 companionBase = companionPoint - companionUp * (0.10 * companionHeight);
-                        std::array<float, 3> companionColor
-                            = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(companionHash, 6));
-                        if (companionSpecies.tile == 2)
-                        {
-                            companionColor[0] *= 0.86f;
-                            companionColor[1] *= 1.00f;
-                            companionColor[2] *= 0.90f;
-                        }
-                        const double companionGroundFade = smoothStepLocal(160.0, 620.0, cellDistance);
-                        const float companionGroundMix = static_cast<float>(0.55 * companionGroundFade);
-                        for (std::uint32_t channel = 0; channel < 3; ++channel)
-                        {
-                            companionColor[channel] = std::lerp(companionColor[channel],
-                                clamp01(static_cast<float>(sample.color[channel]) * 0.9f), companionGroundMix)
-                                * cloudShade;
-                        }
-                        cardHaze(companionColor, cellDistance);
-                        pushBillboard(vertices, indices, companionBase, companionUp,
-                            anchorEye_ - companionBase, companionHalfWidth, companionHeight, companionColor,
-                            anchorEye_, speciesUv(companionSpecies.tile), hashUnit(companionHash, 10) < 0.5, 0.35f);
-                        appendShadow(companionPoint, companionUp, companionHalfWidth * 1.15, companionHeight * 0.82);
-                        ++treeCount;
-                    }
-                }
-            });
-
-        // Pass 2 (trees): the near-ring guarantee. The walk above deferred
-        // every near-ring candidate; the ranking plants the strongest few
-        // (presence margin - how badly the candidate wanted to grow) with
-        // the camera's forward hemisphere leading the order, so the
-        // guaranteed minimum lands on screen. Cells the far walk already
-        // accepted never appear here (they live outside the ring by
-        // construction), and a ranked cell re-runs the same geometry path a
-        // regular accept runs, with the identical hash lanes.
-        std::sort(nearTreeCandidates.begin(), nearTreeCandidates.end(), forwardFirst);
-        std::size_t nearTreesPlanted = 0;
-        for (const NearCandidate &candidate : nearTreeCandidates)
-        {
-            if (nearTreesPlanted >= kTreeNearRingMinimum || treeCount >= kMaxTrees)
-            {
-                break;
+                next.emplace(key, cached->second);
+                treeCount += static_cast<std::uint32_t>(cached->second.size());
+                return;
             }
-            // A candidate whose roll already passed its presence threshold
-            // would have been planted by a correct draw region; count it and
-            // continue so the guaranteed minimum stays a true minimum.
-            const std::uint64_t hash = cellHash(params_.seed, kSaltTree,
-                candidate.cell[0], candidate.cell[1], candidate.cell[2]);
-            const glm::dvec3 cellCenter((static_cast<double>(candidate.cell[0]) + 0.5) * kTreeCellMeters,
-                (static_cast<double>(candidate.cell[1]) + 0.5) * kTreeCellMeters,
-                (static_cast<double>(candidate.cell[2]) + 0.5) * kTreeCellMeters);
+            const std::uint64_t hash = cellHash(params_.seed, kSaltTree, cx, cy, cz);
+            if (hashUnit(hash, 0) > 0.70)
+            {
+                return; // cheap pre-gate: most cells hold no tree attempt
+            }
             const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kTreeCellMeters * 0.7
                 + north * (hashUnit(hash, 2) - 0.5) * kTreeCellMeters * 0.7;
             const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
             double radius = 0.0;
-            if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kTreeMinElevationMeters)
+            if (!sampleSurfaceRadius(direction, radius))
             {
-                continue;
+                return;
             }
-            const glm::dvec3 point = direction * radius;
+            if (radius < seaRadius + kTreeMinElevationMeters)
+            {
+                return; // water, intertidal sand and exposed dunes stay bare
+            }
             ClimateSample sample;
             const double directionArray[3] = {direction.x, direction.y, direction.z};
             if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
             {
-                continue;
+                return;
             }
             const double base = treeBaseDensity(sample.biome);
             if (base <= 0.0)
             {
-                continue;
+                return;
             }
+            const glm::dvec3 point = direction * radius;
+            const double clump = engine::planet::fbm(clumpSeeds, Vec3{point.x, point.y, point.z}, 280.0, clumpParams);
+            double clumpGate = smoothStepLocal(-0.55, 0.25, clump);
+            // Dense forest biomes keep their canopy floor: the boreal and
+            // rain forests are continuous stands with only small
+            // clearings, so the grove field floors instead of opening
+            // empty country (a taiga spot in a grove-field minimum
+            // rendered two trees per frame).
+            const bool denseForest = sample.biome == Biome::Taiga
+                || sample.biome == Biome::TropicalRainforest
+                || sample.biome == Biome::TemperateRainforest;
+            if (denseForest)
+            {
+                clumpGate = std::max(clumpGate, 0.62);
+            }
+            double presence
+                = base * (0.45 + 0.55 * sample.moisture01) * clumpGate * params_.vegetationTreeDensity;
+            if (denseForest)
+            {
+                // The continuous stands keep a presence floor: the moisture
+                // term collapses over cold boreal latitudes whose field
+                // values sit low even though the forest there is solid
+                // (the grove gate above already carries the clumping).
+                presence = std::max(presence, 0.78 * params_.vegetationTreeDensity);
+            }
+            // Slope gate: cliff faces carry no soil, so nothing grows on
+            // them. The climate sample always carries a flat-ground slope
+            // (it reads the flats at the cliff's feet), so without this
+            // gate trees planted straight onto vertical rock - perched
+            // trunks on overhangs and mid-wall ledges. The relief field's
+            // cliff factor is the same terraced-country mask the mesher's
+            // bare-rock row keys on; only actual cliff-grade steepness
+            // opens it, so hillsides and terrace benches keep their trees.
             {
                 engine::planet::ReliefSample relief{};
                 if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
                     && relief.cliffFactor >= params_.cliffSteepnessLow)
                 {
-                    continue;
+                    return;
                 }
             }
+            const double presenceRoll = hashUnit(hash, 3);
+            const glm::dvec3 up = direction;
+            // Trunk foot sunk a tenth of the height: the drawn terrain at
+            // any LOD sits at or under the density surface on convex
+            // ground, and a sprite anchored exactly at the surface can
+            // float above the coarse mesh's ridge - the detached-trunk
+            // look distant views show. A deeper burial reads as the
+            // trunk's root flare disappearing into soil.
             const SpeciesCard species = treeSpeciesFor(sample.biome, hash);
             const double height = species.minHeightMeters
                 + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
             const double halfWidth = 0.5 * height * species.aspect * (0.62 + 0.72 * hashUnit(hash, 5));
-            const glm::dvec3 up = direction;
-            const glm::dvec3 baseCenter = point - up * (0.10 * height);
+            // The per-instance tint range spans half the multiplier's
+            // dynamic range: at billboard distances the eye averages a
+            // narrow band into one tone, so the stand's variation must
+            // survive the minification. The cloud-shade multiply (the same
+            // field the terrain's vertex albedo carries) folds in here;
+            // the distance-driven ground fade and haze apply at emit.
             std::array<float, 3> color
                 = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(hash, 6));
             if (species.tile == 2)
             {
+                // Conifers carry their own spruce tone: cooler and deeper
+                // than the broadleaf multiply, but not near-black - the
+                // needle sprite is already dark, and the multiply must
+                // stay in the shaded-foliage band.
                 color[0] *= 0.86f;
                 color[1] *= 1.00f;
                 color[2] *= 0.90f;
             }
-            // The near field stands at full species color (the ground-fade
-            // only starts past 160 m; a near-ring landmark sits closer).
             const float cloudShade = static_cast<float>(clamp01(
                 1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
                     params_.derivedVoxelMeters)));
+            std::array<float, 3> groundColor{};
             for (std::uint32_t channel = 0; channel < 3; ++channel)
             {
                 color[channel] *= cloudShade;
+                groundColor[channel] = clamp01(static_cast<float>(sample.color[channel]) * 0.9f);
             }
-            pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
-                height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 10) < 0.5, 0.35f);
-            appendShadow(point, up, halfWidth * 1.15, height * 0.82);
+            const glm::dvec3 baseCenter = point - up * (0.10 * height);
+            PlacedCard card;
+            card.base = baseCenter;
+            card.up = up;
+            card.halfWidth = halfWidth;
+            card.height = height;
+            card.speciesColor = color;
+            card.groundColor = groundColor;
+            card.uvTile = species.tile;
+            card.mirrorU = hashUnit(hash, 10) < 0.5;
+            card.rootDarken = 0.35f;
+            card.fixedRight = false;
+            bakeShadowRibbon(point, up, halfWidth * 1.15, height * 0.82, card.shadowRibbon);
+            if (cellDistance <= kTreeNearRingMeters)
+            {
+                // Near-ring candidate: the card is fully evaluated; the
+                // ranking pass below decides whether it plants (the best
+                // few whatever their roll, so the near field keeps its
+                // landmarks).
+                nearDeferrals.push_back(NearDeferral{presenceRoll, forwardShareOf(cellCenter), key, card});
+                return;
+            }
+            if (presenceRoll > clamp01(presence))
+            {
+                return;
+            }
+            emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+            next[key].push_back(card);
             ++treeCount;
-            ++nearTreesPlanted;
-        }
+            // The companion lane follows the configured tree density the
+            // way the primary lane does: thinning the forests must thin
+            // BOTH stands of a cell, not leave the companion rate at full
+            // strength inside whatever cells still plant a primary. The
+            // full-density fill stays 0.72 - a mixed-age companion in
+            // roughly three of four forest cells reads as a stand, while
+            // a 1.0 rate would butt canopies into hedges.
+            if (treeCount < kMaxTrees && denseStand(sample.biome)
+                && hashUnit(hash, 9) < 0.72 * clamp01(params_.vegetationTreeDensity))
+            {
+                const std::uint64_t companionHash = cellHash(params_.seed, kSaltTree ^ 0xA5A5A5A5A5A5A5A5ull,
+                    cx * 2 + 1, cy * 2 + 1, cz * 2 + 1);
+                const glm::dvec3 companionJitter = east * (hashUnit(companionHash, 1) - 0.5) * kTreeCellMeters * 0.8
+                    + north * (hashUnit(companionHash, 2) - 0.5) * kTreeCellMeters * 0.8;
+                const glm::dvec3 companionDirection = glm::normalize(cellCenter + companionJitter);
+                double companionRadius = 0.0;
+                if (sampleSurfaceRadius(companionDirection, companionRadius)
+                    && companionRadius >= seaRadius + kTreeMinElevationMeters)
+                {
+                    const SpeciesCard companionSpecies = treeSpeciesFor(sample.biome, companionHash);
+                    const double companionHeight = companionSpecies.minHeightMeters
+                        + hashUnit(companionHash, 4)
+                            * (companionSpecies.maxHeightMeters - companionSpecies.minHeightMeters);
+                    const double companionHalfWidth = 0.5 * companionHeight * companionSpecies.aspect
+                        * (0.72 + 0.56 * hashUnit(companionHash, 5));
+                    const glm::dvec3 companionPoint = companionDirection * companionRadius;
+                    const glm::dvec3 companionUp = companionDirection;
+                    const glm::dvec3 companionBase = companionPoint - companionUp * (0.10 * companionHeight);
+                    std::array<float, 3> companionColor
+                        = speciesTint(sample, kTreeTint, 0.70 + 0.60 * hashUnit(companionHash, 6));
+                    if (companionSpecies.tile == 2)
+                    {
+                        companionColor[0] *= 0.86f;
+                        companionColor[1] *= 1.00f;
+                        companionColor[2] *= 0.90f;
+                    }
+                    std::array<float, 3> companionGround{};
+                    for (std::uint32_t channel = 0; channel < 3; ++channel)
+                    {
+                        companionColor[channel] *= cloudShade;
+                        companionGround[channel] = clamp01(static_cast<float>(sample.color[channel]) * 0.9f);
+                    }
+                    PlacedCard companion;
+                    companion.base = companionBase;
+                    companion.up = companionUp;
+                    companion.halfWidth = companionHalfWidth;
+                    companion.height = companionHeight;
+                    companion.speciesColor = companionColor;
+                    companion.groundColor = companionGround;
+                    companion.uvTile = companionSpecies.tile;
+                    companion.mirrorU = hashUnit(companionHash, 10) < 0.5;
+                    companion.rootDarken = 0.35f;
+                    companion.fixedRight = false;
+                    bakeShadowRibbon(companionPoint, companionUp, companionHalfWidth * 1.15,
+                        companionHeight * 0.82, companion.shadowRibbon);
+                    emitFoliageCard(vertices, indices, companion, eyePlanetLocal, style);
+                    next[key].push_back(companion);
+                    ++treeCount;
+                }
+            }
+        });
 
-        treeMesh_.anchorPlanetLocal = anchorEye_;
-        uploadMesh(treeMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
-        treeMesh_.material.baseColorTexture = treeTexture_;
-    }
-    else
+    // Pass 2: the near-ring guarantee. The deferrals carry fully evaluated
+    // cards (the probes happened in the walk), so the ranking is pure
+    // selection: the guaranteed minimum lands on screen (the camera's
+    // forward hemisphere leads the order), and cells the walk already
+    // planted (fresh or cached) count toward the minimum.
+    std::sort(nearDeferrals.begin(), nearDeferrals.end(), forwardFirst);
+    for (const NearDeferral &deferral : nearDeferrals)
     {
-        treeMesh_.active = false;
+        if (nearTreesPlanted >= kTreeNearRingMinimum || treeCount >= kMaxTrees)
+        {
+            break;
+        }
+        emitFoliageCard(vertices, indices, deferral.card, eyePlanetLocal, style);
+        next[deferral.key].push_back(deferral.card);
+        ++treeCount;
+        ++nearTreesPlanted;
     }
+
+    cache = std::move(next);
+    treeMesh_.anchorPlanetLocal = eyePlanetLocal;
+    uploadMesh(treeMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
+    treeMesh_.material.baseColorTexture = treeTexture_;
+    rebuildShadowMesh(eyePlanetLocal);
+}
+
+void PlanetScatterSystem::rebuildBushes(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward)
+{
+    familyAnchor_[static_cast<std::size_t>(Family::Bushes)] = eyePlanetLocal;
+    familyAnchored_[static_cast<std::size_t>(Family::Bushes)] = true;
+    if (params_.vegetationBushDensity <= 0.0)
+    {
+        bushMesh_.active = false;
+        familyCache_[static_cast<std::size_t>(Family::Bushes)].clear();
+        return;
+    }
+    const double seaRadius = params_.derivedSeaRadiusMeters;
+    const double grassRadius = std::max(2.0, params_.vegetationGrassRadiusMeters);
+    const double treeRadius = std::max(grassRadius + 10.0, params_.vegetationTreeRadiusMeters);
+    const double bushRadius = std::max(8.0, std::min(460.0, treeRadius * 0.33));
+    glm::dvec3 eyeDirection, east, north;
+    tangentFrameAt(eyePlanetLocal, eyeDirection, east, north);
+    (void)eyeDirection;
 
     // The bush walk's own near-ring collection (see the tree walk's
     // near-ring minimum population comment): the ranking pass below plants
     // the best few whatever their presence roll, so the meadow's near field
     // keeps its shrub patches.
-    std::vector<NearCandidate> nearBushCandidates;
-
-    std::uint32_t bushCount = 0;
-    if (params_.vegetationBushDensity > 0.0)
+    constexpr double kBushNearRingMeters = 150.0;
+    constexpr std::size_t kBushNearRingMinimum = 12;
+    const bool viewKnown = glm::dot(viewForward, viewForward) > 0.25;
+    struct NearDeferral
     {
-        std::vector<PlanetVertex> vertices;
-        std::vector<std::uint32_t> indices;
-        vertices.reserve(512);
-        indices.reserve(768);
-        constexpr std::uint32_t kMaxBushes = 360;
-        walkLattice(eyePlanetLocal, east, north, 4.0, bushRadius, kBushCellMeters,
-            [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
+        double roll = 1.0;
+        double forwardShare = 0.0;
+        CellKey key{};
+        PlacedCard card{};
+    };
+    const auto forwardShareOf = [&eyePlanetLocal, &viewKnown, &viewForward](const glm::dvec3 &cellCenter)
+    {
+        if (!viewKnown)
+        {
+            return 0.0;
+        }
+        const glm::dvec3 delta = cellCenter - eyePlanetLocal;
+        const double length = glm::length(delta);
+        return length > 1.0e-6 ? glm::dot(delta / length, viewForward) : 0.0;
+    };
+    constexpr double kForwardBand = 0.35;
+    const auto forwardFirst = [kForwardBand](const NearDeferral &a, const NearDeferral &b)
+    {
+        const bool aFront = a.forwardShare > kForwardBand;
+        const bool bFront = b.forwardShare > kForwardBand;
+        if (aFront != bFront)
+        {
+            return aFront;
+        }
+        return a.roll < b.roll;
+    };
+
+    // Emit styling: bushes stay inside the mid ring where the species tint
+    // still reads, so their ground fade runs weaker and later than the
+    // trees' (same distant-chip guard, softer band).
+    FoliageEmitStyle style;
+    style.groundFadeStartMeters = 200.0;
+    style.groundFadeEndMeters = 620.0;
+    style.groundFadeWeight = 0.40;
+    style.aerialHaze = true;
+    {
+        const engine::planet::Vec3 horizon = engine::planet::skyGradientColor(params_, 0.04);
+        style.hazeColor = glm::vec3(
+            static_cast<float>(horizon.x * 0.55), static_cast<float>(horizon.y * 0.55),
+            static_cast<float>(horizon.z * 0.55));
+    }
+    style.hazeScaleMeters = std::max(1.0, params_.aerialPerspectiveScaleMeters);
+    style.hazeAsymptote = std::clamp(params_.aerialPerspectiveAsymptote, 0.0, 1.0);
+
+    PlacementCache &cache = familyCache_[static_cast<std::size_t>(Family::Bushes)];
+    PlacementCache next;
+    next.reserve(cache.size() + 64);
+    std::vector<PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    vertices.reserve(512);
+    indices.reserve(768);
+    constexpr std::uint32_t kMaxBushes = 360;
+    std::uint32_t bushCount = 0;
+    std::size_t nearBushesPlanted = 0;
+    std::vector<NearDeferral> nearDeferrals;
+
+    walkLattice(eyePlanetLocal, east, north, 4.0, bushRadius, kBushCellMeters,
+        [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
+        {
+            if (bushCount >= kMaxBushes)
             {
-                if (bushCount >= kMaxBushes)
+                return;
+            }
+            const CellKey key{{cx, cy, cz, 0}};
+            if (const auto cached = cache.find(key); cached != cache.end())
+            {
+                for (const PlacedCard &card : cached->second)
                 {
-                    return;
-                }
-                const std::uint64_t hash = cellHash(params_.seed, kSaltBush, cx, cy, cz);
-                if (hashUnit(hash, 0) > 0.55)
-                {
-                    return;
-                }
-                const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kBushCellMeters * 0.75
-                    + north * (hashUnit(hash, 2) - 0.5) * kBushCellMeters * 0.75;
-                const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
-                double radius = 0.0;
-                if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kMinLandElevationMeters)
-                {
-                    return;
-                }
-                ClimateSample sample;
-                const double directionArray[3] = {direction.x, direction.y, direction.z};
-                if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
-                {
-                    return;
-                }
-                const double base = bushBaseDensity(sample.biome);
-                if (base <= 0.0)
-                {
-                    return;
-                }
-                // Slope gate: see the tree walk - cliff faces carry no soil.
-                {
-                    engine::planet::ReliefSample relief{};
-                    if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
-                        && relief.cliffFactor >= params_.cliffSteepnessLow)
+                    emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+                    if (glm::length(card.base - eyePlanetLocal) <= kBushNearRingMeters)
                     {
-                        return;
+                        ++nearBushesPlanted;
                     }
                 }
-                const double presence = base * (0.5 + 0.5 * sample.moisture01) * params_.vegetationBushDensity;
-                const double presenceRoll = hashUnit(hash, 3);
-                if (cellDistance <= kBushNearRingMeters)
-                {
-                    nearBushCandidates.push_back(NearCandidate{presenceRoll, presence,
-                        forwardShareOf(cellCenter), {cx, cy, cz}});
-                    return;
-                }
-                if (presenceRoll > clamp01(presence))
-                {
-                    return;
-                }
-                const SpeciesCard species = bushSpeciesFor(sample.biome, hash);
-                const double height = species.minHeightMeters
-                    + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
-                const double halfWidth = 0.5 * height * species.aspect * (1.05 + 0.35 * hashUnit(hash, 5));
-                const glm::dvec3 up = direction;
-                const glm::dvec3 baseCenter = direction * radius - up * (0.25 * height);
-                std::array<float, 3> color
-                    = speciesTint(sample, kBushTint, 0.88 + 0.26 * hashUnit(hash, 6));
-                // Same distant-chip guard as the trees, weaker: bushes stay
-                // inside the mid ring where the species tint still reads.
-                const double groundFade = smoothStepLocal(200.0, 620.0, cellDistance);
-                const float groundMix = static_cast<float>(0.40 * groundFade);
-                // Cloud shade (see the tree walk): sprites darken with the
-                // ground under the same bank.
-                const float bushCloudShade = static_cast<float>(clamp01(
-                    1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
-                        params_.derivedVoxelMeters)));
-                for (std::uint32_t channel = 0; channel < 3; ++channel)
-                {
-                    color[channel] = std::lerp(color[channel],
-                        clamp01(static_cast<float>(sample.color[channel]) * 0.9f), groundMix) * bushCloudShade;
-                }
-                pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
-                    height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 7) < 0.5, 0.40f);
-                appendShadow(direction * radius, up, halfWidth * 0.95, height * 0.9);
-                ++bushCount;
-            });
-        // Pass 2 (bushes): the near-ring guarantee (see the trees' pass 2).
-        std::sort(nearBushCandidates.begin(), nearBushCandidates.end(), forwardFirst);
-        std::size_t nearBushesPlanted = 0;
-        for (const NearCandidate &candidate : nearBushCandidates)
-        {
-            if (nearBushesPlanted >= kBushNearRingMinimum || bushCount >= kMaxBushes)
-            {
-                break;
+                next.emplace(key, cached->second);
+                bushCount += static_cast<std::uint32_t>(cached->second.size());
+                return;
             }
-            const std::uint64_t hash = cellHash(params_.seed, kSaltBush,
-                candidate.cell[0], candidate.cell[1], candidate.cell[2]);
-            const glm::dvec3 cellCenter((static_cast<double>(candidate.cell[0]) + 0.5) * kBushCellMeters,
-                (static_cast<double>(candidate.cell[1]) + 0.5) * kBushCellMeters,
-                (static_cast<double>(candidate.cell[2]) + 0.5) * kBushCellMeters);
+            const std::uint64_t hash = cellHash(params_.seed, kSaltBush, cx, cy, cz);
+            if (hashUnit(hash, 0) > 0.55)
+            {
+                return;
+            }
             const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kBushCellMeters * 0.75
                 + north * (hashUnit(hash, 2) - 0.5) * kBushCellMeters * 0.75;
             const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
             double radius = 0.0;
             if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kMinLandElevationMeters)
             {
-                continue;
+                return;
             }
             ClimateSample sample;
             const double directionArray[3] = {direction.x, direction.y, direction.z};
             if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
             {
-                continue;
+                return;
             }
             const double base = bushBaseDensity(sample.biome);
             if (base <= 0.0)
             {
-                continue;
+                return;
             }
-            // The ranking plants the best few whatever their presence roll
-            // (the trees' pass 2 contract): the near-ring minimum is a
-            // guarantee, and re-rolling presence here can silently zero it
-            // on sparse-biome seeds.
+            // Slope gate: see the tree walk - cliff faces carry no soil.
             {
                 engine::planet::ReliefSample relief{};
                 if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
                     && relief.cliffFactor >= params_.cliffSteepnessLow)
                 {
-                    continue;
+                    return;
                 }
             }
+            const double presence = base * (0.5 + 0.5 * sample.moisture01) * params_.vegetationBushDensity;
+            const double presenceRoll = hashUnit(hash, 3);
+            const glm::dvec3 up = direction;
             const SpeciesCard species = bushSpeciesFor(sample.biome, hash);
             const double height = species.minHeightMeters
                 + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters);
             const double halfWidth = 0.5 * height * species.aspect * (1.05 + 0.35 * hashUnit(hash, 5));
-            const glm::dvec3 up = direction;
             const glm::dvec3 baseCenter = direction * radius - up * (0.25 * height);
             std::array<float, 3> color
                 = speciesTint(sample, kBushTint, 0.88 + 0.26 * hashUnit(hash, 6));
+            // Cloud shade (see the tree walk): sprites darken with the
+            // ground under the same bank.
             const float bushCloudShade = static_cast<float>(clamp01(
                 1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
                     params_.derivedVoxelMeters)));
+            std::array<float, 3> groundColor{};
             for (std::uint32_t channel = 0; channel < 3; ++channel)
             {
                 color[channel] *= bushCloudShade;
+                groundColor[channel] = clamp01(static_cast<float>(sample.color[channel]) * 0.9f);
             }
-            pushBillboard(vertices, indices, baseCenter, up, anchorEye_ - baseCenter, halfWidth,
-                height, color, anchorEye_, speciesUv(species.tile), hashUnit(hash, 7) < 0.5, 0.40f);
-            appendShadow(direction * radius, up, halfWidth * 0.95, height * 0.9);
+            PlacedCard card;
+            card.base = baseCenter;
+            card.up = up;
+            card.halfWidth = halfWidth;
+            card.height = height;
+            card.speciesColor = color;
+            card.groundColor = groundColor;
+            card.uvTile = species.tile;
+            card.mirrorU = hashUnit(hash, 7) < 0.5;
+            card.rootDarken = 0.40f;
+            card.fixedRight = false;
+            bakeShadowRibbon(direction * radius, up, halfWidth * 0.95, height * 0.9, card.shadowRibbon);
+            if (cellDistance <= kBushNearRingMeters)
+            {
+                nearDeferrals.push_back(NearDeferral{presenceRoll, forwardShareOf(cellCenter), key, card});
+                return;
+            }
+            if (presenceRoll > clamp01(presence))
+            {
+                return;
+            }
+            emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+            next[key].push_back(card);
             ++bushCount;
-            ++nearBushesPlanted;
+        });
+
+    // Pass 2 (bushes): the near-ring guarantee (see the trees' pass 2); the
+    // ranking plants the best few whatever their presence roll, and the walk's
+    // fresh and cached plants count toward the minimum.
+    std::sort(nearDeferrals.begin(), nearDeferrals.end(), forwardFirst);
+    for (const NearDeferral &deferral : nearDeferrals)
+    {
+        if (nearBushesPlanted >= kBushNearRingMinimum || bushCount >= kMaxBushes)
+        {
+            break;
         }
-
-        bushMesh_.anchorPlanetLocal = anchorEye_;
-        uploadMesh(bushMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
-        bushMesh_.material.baseColorTexture = bushTexture_;
+        emitFoliageCard(vertices, indices, deferral.card, eyePlanetLocal, style);
+        next[deferral.key].push_back(deferral.card);
+        ++bushCount;
+        ++nearBushesPlanted;
     }
-    else
+
+    cache = std::move(next);
+    bushMesh_.anchorPlanetLocal = eyePlanetLocal;
+    uploadMesh(bushMesh_, vertices, indices, true, false, false, 1.0f, false); // lit foliage keeps its ground-up normal
+    bushMesh_.material.baseColorTexture = bushTexture_;
+    rebuildShadowMesh(eyePlanetLocal);
+}
+
+void PlanetScatterSystem::rebuildGrass(const glm::dvec3 &eyePlanetLocal)
+{
+    familyAnchor_[static_cast<std::size_t>(Family::Grass)] = eyePlanetLocal;
+    familyAnchored_[static_cast<std::size_t>(Family::Grass)] = true;
+    // The clearance gate stands the family down while the eye is higher than
+    // the ring's own radius (a tuft subtends under a pixel there); the anchor
+    // still tracks the eye so descending re-anchors promptly, and the cache
+    // survives so the sward re-emits without re-probing.
+    if (params_.vegetationGrassDensity <= 0.0)
     {
-        bushMesh_.active = false;
+        grassMesh_.active = false;
+        familyCache_[static_cast<std::size_t>(Family::Grass)].clear();
+        return;
     }
+    if (!grassAllowed_)
+    {
+        grassMesh_.active = false;
+        return;
+    }
+    const double seaRadius = params_.derivedSeaRadiusMeters;
+    const double grassRadius = std::max(2.0, params_.vegetationGrassRadiusMeters);
+    glm::dvec3 eyeDirection, east, north;
+    tangentFrameAt(eyePlanetLocal, eyeDirection, east, north);
 
+    // Grass emit styling: no ground fade and no aerial haze - the sward is a
+    // near-field system, and its color story is the site's own sward tint.
+    FoliageEmitStyle style;
+
+    PlacementCache &cache = familyCache_[static_cast<std::size_t>(Family::Grass)];
+    PlacementCache next;
+    next.reserve(cache.size() + 128);
+    std::vector<PlanetVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    vertices.reserve(4096);
+    indices.reserve(6144);
+    // Two-scale sward: the near disc plants tufts on a 0.62 m lattice with
+    // CROSSED cards (the sward reads as volume underfoot); the mid annulus
+    // thins onto a 1.4 m lattice with single cards (crossing is invisible
+    // past arm's reach). The split keeps the fill cost of the near disc
+    // while the old one-scale 0.62 m ring across the full radius doubled
+    // the frame for no visual gain beyond nine meters. The mid cap carries
+    // the 14..90 m band as a real sward (a sparse-dots band read as bare
+    // ground with stranded tufts).
+    constexpr std::uint32_t kMaxGrassNear = 3000;
+    constexpr std::uint32_t kMaxGrassMid = 6400;
+    const double nearDiscMeters = std::min(grassRadius, 14.0);
     std::uint32_t grassCount = 0;
-    if (params_.vegetationGrassDensity > 0.0)
+
+    walkLattice(eyePlanetLocal, east, north, 1.8, nearDiscMeters, kGrassCellMeters,
+        [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
+        {
+            if (grassCount >= kMaxGrassNear)
+            {
+                return;
+            }
+            const CellKey key{{cx, cy, cz, 0}};
+            if (const auto cached = cache.find(key); cached != cache.end())
+            {
+                for (const PlacedCard &card : cached->second)
+                {
+                    emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+                }
+                next.emplace(key, cached->second);
+                grassCount += static_cast<std::uint32_t>(cached->second.size());
+                return;
+            }
+            const std::uint64_t hash = cellHash(params_.seed, kSaltGrass, cx, cy, cz);
+            if (hashUnit(hash, 0) > 0.9)
+            {
+                return;
+            }
+            const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kGrassCellMeters * 1.0
+                + north * (hashUnit(hash, 2) - 0.5) * kGrassCellMeters * 1.0;
+            const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
+            double radius = 0.0;
+            if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kMinLandElevationMeters * 0.6)
+            {
+                return;
+            }
+            ClimateSample sample;
+            const double directionArray[3] = {direction.x, direction.y, direction.z};
+            if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
+            {
+                return;
+            }
+            const double base = grassBaseDensity(sample.biome);
+            if (base <= 0.0)
+            {
+                return;
+            }
+            // Moisture drives the sward: wet sites fill in nearly solid,
+            // dry sites thin to the sparse arid card. The presence gate
+            // and the height band both key on it, so a savanna reads dry
+            // and short while a rainforest floor reads lush and deep. The
+            // ring fade in the presence gate keys on the cell's distance
+            // from the anchor the evaluation ran against; a cached cell
+            // keeps its planted verdict while it stays inside the ring
+            // (the sward gains a trailing memory instead of popping out
+            // behind the eye).
+            const double grassRadiusMeters = std::max(2.0, params_.vegetationGrassRadiusMeters);
+            const double ringFade = smoothStepLocal(grassRadiusMeters, grassRadiusMeters * 0.55, cellDistance);
+            const double presence = base * (0.55 + 0.45 * sample.moisture01) * ringFade
+                * params_.vegetationGrassDensity;
+            if (hashUnit(hash, 3) > clamp01(presence))
+            {
+                return;
+            }
+            // Slope gate: see the tree walk - cliff faces carry no soil,
+            // and a sward of tufts on vertical rock reads as noise.
+            {
+                engine::planet::ReliefSample relief{};
+                if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
+                    && relief.cliffFactor >= params_.cliffSteepnessLow)
+                {
+                    return;
+                }
+            }
+            const SpeciesCard species = grassSpeciesFor(sample.biome, hash);
+            const double moisture = clamp01(static_cast<float>(sample.moisture01));
+            const double height = (species.minHeightMeters
+                + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters))
+                * (0.78 + 0.44 * moisture) * 1.55;
+            const double halfWidth = 0.5 * height * species.aspect * (0.95 + 0.5 * hashUnit(hash, 5));
+            const glm::dvec3 up = direction;
+            // Near-disc tufts bury three tenths of their height (the same
+            // burial the mid annulus uses): the drawn terrain can sit a
+            // voxel or more under the density surface on convex ground,
+            // and a shallower sink lets the first coarse mesh float a
+            // tuft above its own ground.
+            const glm::dvec3 center = direction * radius - up * (0.30 * height);
+            glm::dvec3 right1 = glm::cross(up, east);
+            if (glm::length(right1) < 1.0e-6)
+            {
+                right1 = north;
+            }
+            right1 = glm::normalize(right1);
+            const double angle = hashUnit(hash, 6) * 2.0 * kPi;
+            const glm::dvec3 rotated = right1 * std::cos(angle) + glm::cross(up, right1) * std::sin(angle);
+            const glm::dvec3 right2 = glm::normalize(glm::cross(up, rotated));
+            right1 = glm::normalize(rotated);
+            const std::array<float, 3> color = grassSwardTint(sample,
+                0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
+            // Cloud shade (see the tree walk): the sward darkens with the
+            // ground it stands on.
+            const float grassCloudShade = static_cast<float>(clamp01(
+                1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                    params_.derivedVoxelMeters)));
+            const std::array<float, 3> shadedColor{color[0] * grassCloudShade,
+                color[1] * grassCloudShade, color[2] * grassCloudShade};
+            const glm::dvec3 shadowGround = direction * (radius - 0.30 * height);
+            PlacedCard cardA;
+            PlacedCard cardB;
+            for (PlacedCard *card : {&cardA, &cardB})
+            {
+                card->base = center;
+                card->up = up;
+                card->halfWidth = halfWidth;
+                card->height = height;
+                card->speciesColor = shadedColor;
+                card->uvTile = species.tile;
+                card->rootDarken = 0.45f;
+                card->fixedRight = true;
+                card->mirrorU = hashUnit(hash, card == &cardA ? 9 : 10) < 0.5;
+            }
+            cardA.right = right1;
+            cardB.right = right2;
+            // Contact shadow: the tuft's own footprint darkens the soil
+            // right under the blades and stretches to the sun's own
+            // cotangent - the one directional cue a tuft owns. Without it
+            // the cutout sprite's hard bottom edge sits on undarkened
+            // ground and the tuft reads as a painted sticker floating on
+            // the soil - the decal the trees wear, scaled to the tuft (a
+            // sward clump's shadow is barely wider than the clump itself
+            // and roughly half its height stretched down-sun).
+            bakeShadowRibbon(shadowGround, up, halfWidth * 1.35, height * 0.50, cardA.shadowRibbon);
+            cardB.shadowRibbon.strips = 0; // one ribbon per tuft (the crossed pair shares it)
+            emitFoliageCard(vertices, indices, cardA, eyePlanetLocal, style);
+            emitFoliageCard(vertices, indices, cardB, eyePlanetLocal, style);
+            next[key].push_back(cardA);
+            next[key].push_back(cardB);
+            grassCount += 2u;
+        });
+    // Mid annulus (near disc edge .. full radius): coarser lattice,
+    // single card per tuft - the crossed pair is invisible beyond a few
+    // meters and costs a full extra card of fill per tuft.
+    if (grassRadius > nearDiscMeters)
     {
-        std::vector<PlanetVertex> vertices;
-        std::vector<std::uint32_t> indices;
-        vertices.reserve(4096);
-        indices.reserve(6144);
-        // Two-scale sward: the near disc plants tufts on a 0.62 m lattice with
-        // CROSSED cards (the sward reads as volume underfoot); the mid annulus
-        // thins onto a 1.4 m lattice with single cards (crossing is invisible
-        // past arm's reach). The split keeps the fill cost of the near disc
-        // while the old one-scale 0.62 m ring across the full radius doubled
-        // the frame for no visual gain beyond nine meters.
-        constexpr std::uint32_t kMaxGrassNear = 3000;
-        constexpr std::uint32_t kMaxGrassMid = 2600;
-        const double nearDiscMeters = std::min(grassRadius, 14.0);
-        walkLattice(eyePlanetLocal, east, north, 1.8, nearDiscMeters, kGrassCellMeters,
+        walkLattice(eyePlanetLocal, east, north, nearDiscMeters, grassRadius, kGrassMidCellMeters,
             [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
             {
-                if (grassCount >= kMaxGrassNear)
+                if (grassCount >= kMaxGrassNear + kMaxGrassMid)
                 {
+                    return;
+                }
+                const CellKey key{{cx, cy, cz, 1}};
+                if (const auto cached = cache.find(key); cached != cache.end())
+                {
+                    for (const PlacedCard &card : cached->second)
+                    {
+                        emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+                    }
+                    next.emplace(key, cached->second);
+                    grassCount += static_cast<std::uint32_t>(cached->second.size());
                     return;
                 }
                 const std::uint64_t hash = cellHash(params_.seed, kSaltGrass, cx, cy, cz);
@@ -2157,8 +2420,8 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 {
                     return;
                 }
-                const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kGrassCellMeters * 1.0
-                    + north * (hashUnit(hash, 2) - 0.5) * kGrassCellMeters * 1.0;
+                const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kGrassMidCellMeters * 1.0
+                    + north * (hashUnit(hash, 2) - 0.5) * kGrassMidCellMeters * 1.0;
                 const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
                 double radius = 0.0;
                 if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kMinLandElevationMeters * 0.6)
@@ -2176,20 +2439,14 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 {
                     return;
                 }
-                // Moisture drives the sward: wet sites fill in nearly solid,
-                // dry sites thin to the sparse arid card. The presence gate
-                // and the height band both key on it, so a savanna reads dry
-                // and short while a rainforest floor reads lush and deep.
-                const double grassRadiusMeters = std::max(2.0, params_.vegetationGrassRadiusMeters);
-                const double ringFade = smoothStepLocal(grassRadiusMeters, grassRadiusMeters * 0.55, cellDistance);
+                const double ringFade = smoothStepLocal(grassRadius, grassRadius * 0.55, cellDistance);
                 const double presence = base * (0.55 + 0.45 * sample.moisture01) * ringFade
                     * params_.vegetationGrassDensity;
                 if (hashUnit(hash, 3) > clamp01(presence))
                 {
                     return;
                 }
-                // Slope gate: see the tree walk - cliff faces carry no soil,
-                // and a sward of tufts on vertical rock reads as noise.
+                // Slope gate: see the tree walk - cliff faces carry no soil.
                 {
                     engine::planet::ReliefSample relief{};
                     if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
@@ -2202,10 +2459,19 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 const double moisture = clamp01(static_cast<float>(sample.moisture01));
                 const double height = (species.minHeightMeters
                     + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters))
-                    * (0.78 + 0.44 * moisture) * 1.55;
+                    * (0.78 + 0.44 * moisture);
                 const double halfWidth = 0.5 * height * species.aspect * (0.95 + 0.5 * hashUnit(hash, 5));
                 const glm::dvec3 up = direction;
-                const glm::dvec3 center = direction * radius - up * (0.08 * height);
+                // Mid-annulus tufts sink well into the ground: at this
+                // distance the rendered terrain can sit under the exact
+                // density surface by a voxel or more (a coarse LOD mesh
+                // cuts a convex ridge's top off), and a sprite anchored
+                // at the exact surface then FLOATS above the drawn
+                // ground - the sky-background specks distant views show.
+                // A third-height burial keeps every tuft's foot inside
+                // the drawn surface at any LOD while the blades still
+                // emerge from the soil.
+                const glm::dvec3 center = direction * radius - up * (0.30 * height);
                 glm::dvec3 right1 = glm::cross(up, east);
                 if (glm::length(right1) < 1.0e-6)
                 {
@@ -2214,132 +2480,36 @@ void PlanetScatterSystem::scatterVegetation(const glm::dvec3 &eyePlanetLocal, co
                 right1 = glm::normalize(right1);
                 const double angle = hashUnit(hash, 6) * 2.0 * kPi;
                 const glm::dvec3 rotated = right1 * std::cos(angle) + glm::cross(up, right1) * std::sin(angle);
-                const glm::dvec3 right2 = glm::normalize(glm::cross(up, rotated));
                 right1 = glm::normalize(rotated);
                 const std::array<float, 3> color = grassSwardTint(sample,
                     0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
-                // Cloud shade (see the tree walk): the sward darkens with the
-                // ground it stands on.
-                const float grassCloudShade = static_cast<float>(clamp01(
+                const float midCloudShade = static_cast<float>(clamp01(
                     1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
                         params_.derivedVoxelMeters)));
-                const std::array<float, 3> shadedColor{color[0] * grassCloudShade,
-                    color[1] * grassCloudShade, color[2] * grassCloudShade};
-                const SpeciesUvRect grassUv = speciesUv(species.tile);
-                pushBillboard(vertices, indices, center, up, right1, halfWidth, height, shadedColor,
-                    anchorEye_, grassUv, hashUnit(hash, 9) < 0.5, 0.45f);
-                pushBillboard(vertices, indices, center, up, right2, halfWidth, height, shadedColor,
-                    anchorEye_, grassUv, hashUnit(hash, 10) < 0.5, 0.45f);
-                // Contact shadow: the tuft's own footprint darkens the soil
-                // right under the blades and stretches to the sun's own
-                // cotangent - the one directional cue a tuft owns. Without it
-                // the cutout sprite's hard bottom edge sits on undarkened
-                // ground and the tuft reads as a painted sticker floating on
-                // the soil - the decal the trees wear, scaled to the tuft (a
-                // sward clump's shadow is barely wider than the clump itself
-                // and roughly half its height stretched down-sun).
-                appendShadow(direction * (radius - 0.30 * height), up, halfWidth * 1.35, height * 0.50);
+                const std::array<float, 3> midShaded{color[0] * midCloudShade,
+                    color[1] * midCloudShade, color[2] * midCloudShade};
+                PlacedCard card;
+                card.base = center;
+                card.up = up;
+                card.right = right1;
+                card.halfWidth = halfWidth;
+                card.height = height;
+                card.speciesColor = midShaded;
+                card.uvTile = species.tile;
+                card.mirrorU = hashUnit(hash, 9) < 0.5;
+                card.rootDarken = 0.45f;
+                card.fixedRight = true;
+                card.shadowRibbon.strips = 0; // mid tufts carry no ribbon (the near disc owns the footprint shade)
+                emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+                next[key].push_back(card);
                 ++grassCount;
             });
-        // Mid annulus (near disc edge .. full radius): coarser lattice,
-        // single card per tuft - the crossed pair is invisible beyond a few
-        // meters and costs a full extra card of fill per tuft.
-        if (grassRadius > nearDiscMeters)
-        {
-            walkLattice(eyePlanetLocal, east, north, nearDiscMeters, grassRadius, kGrassMidCellMeters,
-                [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
-                {
-                    if (grassCount >= kMaxGrassNear + kMaxGrassMid)
-                    {
-                        return;
-                    }
-                    const std::uint64_t hash = cellHash(params_.seed, kSaltGrass, cx, cy, cz);
-                    if (hashUnit(hash, 0) > 0.9)
-                    {
-                        return;
-                    }
-                    const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kGrassMidCellMeters * 1.0
-                        + north * (hashUnit(hash, 2) - 0.5) * kGrassMidCellMeters * 1.0;
-                    const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
-                    double radius = 0.0;
-                    if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kMinLandElevationMeters * 0.6)
-                    {
-                        return;
-                    }
-                    ClimateSample sample;
-                    const double directionArray[3] = {direction.x, direction.y, direction.z};
-                    if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
-                    {
-                        return;
-                    }
-                    const double base = grassBaseDensity(sample.biome);
-                    if (base <= 0.0)
-                    {
-                        return;
-                    }
-                    const double ringFade = smoothStepLocal(grassRadius, grassRadius * 0.55, cellDistance);
-                    const double presence = base * (0.55 + 0.45 * sample.moisture01) * ringFade
-                        * params_.vegetationGrassDensity;
-                    if (hashUnit(hash, 3) > clamp01(presence))
-                    {
-                        return;
-                    }
-                    // Slope gate: see the tree walk - cliff faces carry no soil.
-                    {
-                        engine::planet::ReliefSample relief{};
-                        if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
-                            && relief.cliffFactor >= params_.cliffSteepnessLow)
-                        {
-                            return;
-                        }
-                    }
-                    const SpeciesCard species = grassSpeciesFor(sample.biome, hash);
-                    const double moisture = clamp01(static_cast<float>(sample.moisture01));
-                    const double height = (species.minHeightMeters
-                        + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters))
-                        * (0.78 + 0.44 * moisture);
-                    const double halfWidth = 0.5 * height * species.aspect * (0.95 + 0.5 * hashUnit(hash, 5));
-                    const glm::dvec3 up = direction;
-                    // Mid-annulus tufts sink well into the ground: at this
-                    // distance the rendered terrain can sit under the exact
-                    // density surface by a voxel or more (a coarse LOD mesh
-                    // cuts a convex ridge's top off), and a sprite anchored
-                    // at the exact surface then FLOATS above the drawn
-                    // ground - the sky-background specks distant views show.
-                    // A quarter-height burial keeps every tuft's foot inside
-                    // the drawn surface at any LOD while the blades still
-                    // emerge from the soil.
-                    const glm::dvec3 center = direction * radius - up * (0.30 * height);
-                    glm::dvec3 right1 = glm::cross(up, east);
-                    if (glm::length(right1) < 1.0e-6)
-                    {
-                        right1 = north;
-                    }
-                    right1 = glm::normalize(right1);
-                    const double angle = hashUnit(hash, 6) * 2.0 * kPi;
-                    const glm::dvec3 rotated = right1 * std::cos(angle) + glm::cross(up, right1) * std::sin(angle);
-                    right1 = glm::normalize(rotated);
-                    const std::array<float, 3> color = grassSwardTint(sample,
-                        0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
-                    // Cloud shade (see the near disc).
-                    const float midCloudShade = static_cast<float>(clamp01(
-                        1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
-                            params_.derivedVoxelMeters)));
-                    const std::array<float, 3> midShaded{color[0] * midCloudShade,
-                        color[1] * midCloudShade, color[2] * midCloudShade};
-                    pushBillboard(vertices, indices, center, up, right1, halfWidth, height, midShaded,
-                        anchorEye_, speciesUv(species.tile), hashUnit(hash, 9) < 0.5, 0.45f);
-                    ++grassCount;
-                });
-        }
-        grassMesh_.anchorPlanetLocal = anchorEye_;
-        uploadMesh(grassMesh_, vertices, indices, true, false, false, 1.0f, false); // cutout blades keep hard edges
-        grassMesh_.material.baseColorTexture = grassTexture_;
     }
-    else
-    {
-        grassMesh_.active = false;
-    }
+    cache = std::move(next);
+    grassMesh_.anchorPlanetLocal = eyePlanetLocal;
+    uploadMesh(grassMesh_, vertices, indices, true, false, false, 1.0f, false); // cutout blades keep hard edges
+    grassMesh_.material.baseColorTexture = grassTexture_;
+    rebuildShadowMesh(eyePlanetLocal);
 }
 
 bool PlanetScatterSystem::sampleSurfaceRadius(const glm::dvec3 &direction, double &outRadius) const
@@ -2348,24 +2518,31 @@ bool PlanetScatterSystem::sampleSurfaceRadius(const glm::dvec3 &direction, doubl
     return capability_.sampleSurfaceRadius(capability_.self, planet_, directionArray, &outRadius);
 }
 
-void PlanetScatterSystem::scatterRocks(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
-    const glm::dvec3 &east, const glm::dvec3 &north)
+void PlanetScatterSystem::rebuildRocks(const glm::dvec3 &eyePlanetLocal)
 {
-    (void)eyeDirection;
+    familyAnchor_[static_cast<std::size_t>(Family::Rocks)] = eyePlanetLocal;
+    familyAnchored_[static_cast<std::size_t>(Family::Rocks)] = true;
     if (params_.surfaceRockDensity <= 0.0)
     {
         rockMesh_.active = false;
+        rockShadowRibbons_.clear();
         return;
     }
     const double seaRadius = params_.derivedSeaRadiusMeters;
     const double rockRadius = std::max(20.0, params_.surfaceRockRadiusMeters);
+    glm::dvec3 eyeDirection, east, north;
+    tangentFrameAt(eyePlanetLocal, eyeDirection, east, north);
+    (void)eyeDirection;
     std::vector<PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
     vertices.reserve(2048);
     indices.reserve(2048);
+    rockShadowRibbons_.clear();
     std::uint32_t rockCount = 0;
     constexpr std::uint32_t kMaxRocks = 160;
 
+    // The rock family is small enough (a bounded handful of cells) to walk
+    // directly; its baked shadow ribbons ride the shared shadow mesh.
     walkLattice(eyePlanetLocal, east, north, 2.0, rockRadius, kRockCellMeters,
         [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double)
         {
@@ -2430,23 +2607,12 @@ void PlanetScatterSystem::scatterRocks(const glm::dvec3 &eyePlanetLocal, const g
                 const glm::dvec3 b = corners[face[1]];
                 const glm::dvec3 c = corners[face[2]];
                 const glm::dvec3 faceNormal = glm::normalize(glm::cross(b - a, c - a));
-                QuadPush quad;
-                quad.normal = faceNormal;
-                for (std::uint32_t corner = 0; corner < 4; ++corner)
-                {
-                    quad.color[corner][0] = color[0];
-                    quad.color[corner][1] = color[1];
-                    quad.color[corner][2] = color[2];
-                }
-                quad.corners[0] = a;
-                quad.corners[1] = b;
-                quad.corners[2] = c;
-                quad.corners[3] = c; // unused by the first triangle's winding? pushQuad emits 2 tris; degenerate second
                 const std::uint32_t base = static_cast<std::uint32_t>(vertices.size());
                 for (std::uint32_t corner = 0; corner < 3; ++corner)
                 {
+                    const glm::dvec3 &cornerPosition = corner == 0 ? a : (corner == 1 ? b : c);
+                    const glm::dvec3 position = cornerPosition - eyePlanetLocal;
                     PlanetVertex vertex;
-                    const glm::dvec3 position = quad.corners[corner] - anchorEye_;
                     vertex.position[0] = static_cast<float>(position.x);
                     vertex.position[1] = static_cast<float>(position.y);
                     vertex.position[2] = static_cast<float>(position.z);
@@ -2463,14 +2629,15 @@ void PlanetScatterSystem::scatterRocks(const glm::dvec3 &eyePlanetLocal, const g
                 indices.push_back(base + 0u);
                 indices.push_back(base + 1u);
                 indices.push_back(base + 2u);
-                (void)quad;
             }
-            appendShadow(center, direction, rockSize * 1.2, rockSize * 0.9);
+            rockShadowRibbons_.emplace_back();
+            bakeShadowRibbon(center, direction, rockSize * 1.2, rockSize * 0.9, rockShadowRibbons_.back());
             ++rockCount;
         });
 
-    rockMesh_.anchorPlanetLocal = anchorEye_;
+    rockMesh_.anchorPlanetLocal = eyePlanetLocal;
     uploadMesh(rockMesh_, vertices, indices, false, false, false, 1.0f, false); // closed lit geometry, outward normals
+    rebuildShadowMesh(eyePlanetLocal);
 }
 
 void PlanetScatterSystem::scatterWhitecaps(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
@@ -2597,7 +2764,7 @@ void PlanetScatterSystem::scatterWhitecaps(const glm::dvec3 &eyePlanetLocal, con
         quad.corners[1] = center + windTangent * slot.halfLength - crosswise * slot.halfWidth;
         quad.corners[2] = center + windTangent * slot.halfLength + crosswise * slot.halfWidth;
         quad.corners[3] = center - windTangent * slot.halfLength + crosswise * slot.halfWidth;
-        pushQuad(vertices, indices, quad, anchorEye_);
+        pushQuad(vertices, indices, quad, transientAnchor_);
     }
 
     // Pad to capacity with degenerate quads so the churn path can refresh the
@@ -2618,13 +2785,13 @@ void PlanetScatterSystem::scatterWhitecaps(const glm::dvec3 &eyePlanetLocal, con
         {
             degenerate.uv[corner][0] = 0.0f;
             degenerate.uv[corner][1] = 0.0f;
-            degenerate.corners[corner] = anchorEye_ - eyeDirection * 4.0;
+            degenerate.corners[corner] = transientAnchor_ - eyeDirection * 4.0;
         }
-        pushQuad(vertices, indices, degenerate, anchorEye_);
+        pushQuad(vertices, indices, degenerate, transientAnchor_);
     }
     (void)totalQuads;
     (void)aliveCount;
-    whitecapMesh_.anchorPlanetLocal = anchorEye_;
+    whitecapMesh_.anchorPlanetLocal = transientAnchor_;
     uploadMesh(whitecapMesh_, vertices, indices, false, true, true, 0.80f);
     whitecapMesh_.material.baseColorTexture = foamTexture_;
 }
@@ -2730,7 +2897,7 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
             quad.corners[1] = center + shoreTangent * halfAlong - walk * halfAcross;
             quad.corners[2] = center + shoreTangent * halfAlong + walk * halfAcross;
             quad.corners[3] = center - shoreTangent * halfAlong + walk * halfAcross;
-            pushQuad(vertices, indices, quad, anchorEye_);
+            pushQuad(vertices, indices, quad, transientAnchor_);
             ++stripCount;
         };
         const std::uint64_t stripHash = cellHash(params_.seed, kSaltSurf, static_cast<std::int64_t>(azimuthIndex), 1, 0);
@@ -2751,7 +2918,7 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
         }
     }
 
-    surfMesh_.anchorPlanetLocal = anchorEye_;
+    surfMesh_.anchorPlanetLocal = transientAnchor_;
     uploadMesh(surfMesh_, vertices, indices, false, true, true, static_cast<float>(0.55 + 0.30 * strength));
     surfMesh_.material.baseColorTexture = foamTexture_;
 }
@@ -2766,7 +2933,7 @@ void PlanetScatterSystem::scatterMist(const glm::dvec3 &eyePlanetLocal, const gl
         return;
     }
     const double seaRadius = params_.derivedSeaRadiusMeters;
-    const double eyeElevation = anchorEyeRadius_ - seaRadius;
+    const double eyeElevation = glm::length(transientAnchor_) - seaRadius;
     std::vector<PlanetVertex> vertices;
     std::vector<std::uint32_t> indices;
     vertices.reserve(64);
@@ -2847,11 +3014,11 @@ void PlanetScatterSystem::scatterMist(const glm::dvec3 &eyePlanetLocal, const gl
         quad.corners[1] = center + axisA * halfWidth - axisB * halfDepth;
         quad.corners[2] = center + axisA * halfWidth + axisB * halfDepth;
         quad.corners[3] = center - axisA * halfWidth + axisB * halfDepth;
-        pushQuad(vertices, indices, quad, anchorEye_);
+        pushQuad(vertices, indices, quad, transientAnchor_);
         ++bankCount;
     }
 
-    mistMesh_.anchorPlanetLocal = anchorEye_;
+    mistMesh_.anchorPlanetLocal = transientAnchor_;
     // Fainter than the old vertical cards: the pools cover far more frame
     // area lying flat, and fog photographs as a light veil, not a slab.
     uploadMesh(mistMesh_, vertices, indices, false, true, true, static_cast<float>(0.08 * params_.valleyMistStrength));
@@ -2936,7 +3103,7 @@ void PlanetScatterSystem::scatterBirdFlocks(const glm::dvec3 &eyePlanetLocal, co
         flock.birdCount = static_cast<std::uint32_t>(std::max(1.0, std::round(params_.birdFlockSize)));
         flocks_.push_back(flock);
     }
-    birdMesh_.anchorPlanetLocal = anchorEye_;
+    birdMesh_.anchorPlanetLocal = transientAnchor_;
 
     // Initial geometry (animateBirds rewrites it every rendered frame).
     std::vector<PlanetVertex> vertices;
@@ -3025,7 +3192,7 @@ void PlanetScatterSystem::appendBirdGeometry(std::vector<PlanetVertex> &vertices
             body.corners[1] = birdCenter + heading * bodyHalfChord - left * bodyHalfSpan;
             body.corners[2] = birdCenter + heading * bodyHalfChord + left * bodyHalfSpan;
             body.corners[3] = birdCenter - heading * bodyHalfChord + left * bodyHalfSpan;
-            pushQuad(vertices, indices, body, anchorEye_);
+            pushQuad(vertices, indices, body, transientAnchor_);
             // Wings: two quads hinged at the body sides, tips lifted by the
             // flap angle; up-stroke and down-stroke alternate per frame.
             for (std::uint32_t wing = 0; wing < 2; ++wing)
@@ -3050,11 +3217,38 @@ void PlanetScatterSystem::appendBirdGeometry(std::vector<PlanetVertex> &vertices
                 wingQuad.corners[1] = rootInner + heading * wingChord;
                 wingQuad.corners[2] = rootInner + heading * wingChord * 0.4 + wingOut;
                 wingQuad.corners[3] = rootInner - heading * wingChord * 0.4 + wingOut;
-                pushQuad(vertices, indices, wingQuad, anchorEye_);
+                pushQuad(vertices, indices, wingQuad, transientAnchor_);
             }
         }
     }
     (void)seaRadius;
+}
+
+void PlanetScatterSystem::rebuildTransients(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward)
+{
+    transientAnchor_ = eyePlanetLocal;
+    transientAnchored_ = true;
+    lastSunDirection_ = glm::length(lastSunDirection_) > 1.0e-9 ? lastSunDirection_ : glm::dvec3(0.0, 1.0, 0.0);
+    glm::dvec3 eyeDirection, east, north;
+    tangentFrameAt(eyePlanetLocal, eyeDirection, east, north);
+    scatterWhitecaps(eyePlanetLocal, eyeDirection, east, north, false);
+    scatterSurf(eyePlanetLocal, eyeDirection, east, north);
+    const double sunUp = glm::dot(glm::normalize(lastSunDirection_), eyeDirection);
+    scatterMist(eyePlanetLocal, eyeDirection, east, north, sunUp);
+    // viewForward (the camera's sight axis this rebuild) - NOT eyeDirection,
+    // which is the eye's own radial up: the flocks place into the camera's
+    // forward fan, and the up-direction would collapse that fan to nothing.
+    scatterBirdFlocks(eyePlanetLocal, viewForward, east, north);
+    animateBirds(0.0);
+}
+
+void PlanetScatterSystem::forceRebuild()
+{
+    for (std::size_t family = 0; family < static_cast<std::size_t>(Family::Count); ++family)
+    {
+        familyAnchored_[family] = false;
+    }
+    transientAnchored_ = false;
 }
 
 void PlanetScatterSystem::update(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForwardPlanetLocal,
@@ -3087,23 +3281,100 @@ void PlanetScatterSystem::update(const glm::dvec3 &eyePlanetLocal, const glm::dv
     }
 
     lastSunDirection_ = sunDirection;
-    const double moved = glm::length(eyePlanetLocal - anchorEye_);
-    if (!hasAnchor_ || moved >= params_.scatterRebuildDistanceMeters)
+
+    // The grass family's clearance gate: the sward's ring hugs the eye, and
+    // from higher than the ring's own radius a tuft subtends under a pixel,
+    // so the family stands down until the eye descends again - the same
+    // altitude rule in every view (the walk eye always qualifies; a surface
+    // view flying low does too; the 140 m spawn altitude does not).
     {
-        rebuild(eyePlanetLocal, viewForward_);
+        double surfaceRadius = eyeRadius;
+        const glm::dvec3 eyeDirection = eyePlanetLocal / std::max(1.0, eyeRadius);
+        (void)sampleSurfaceRadius(eyeDirection, surfaceRadius);
+        const double grassRadius = std::max(2.0, params_.vegetationGrassRadiusMeters);
+        grassAllowed_ = (eyeRadius - surfaceRadius) < grassRadius;
+    }
+
+    // Family scheduling: each family re-anchors when the eye leaves its
+    // hysteresis band - the configured rebuild distance, widened with the
+    // ring's own radius (a wide tree ring shifts on a wide step, the grass
+    // ring follows close) - and at most ONE family re-anchors per update, so
+    // no frame ever pays for two ring shifts at once. The caches turn every
+    // re-anchor into its leading annulus; the placement itself never
+    // reshuffles (cells are world-keyed).
+    const double grassRadius = std::max(2.0, params_.vegetationGrassRadiusMeters);
+    const double treeRadius = std::max(grassRadius + 10.0, params_.vegetationTreeRadiusMeters);
+    const double bushRadius = std::max(8.0, std::min(460.0, treeRadius * 0.33));
+    const double rockRadius = std::max(20.0, params_.surfaceRockRadiusMeters);
+    const double ringRadius[static_cast<std::size_t>(Family::Count)] = {treeRadius, bushRadius, grassRadius,
+        rockRadius};
+    const double configuredStep = std::max(0.0, params_.scatterRebuildDistanceMeters);
+
+    bool anyUnanchored = false;
+    for (std::size_t family = 0; family < static_cast<std::size_t>(Family::Count); ++family)
+    {
+        if (!familyAnchored_[family])
+        {
+            anyUnanchored = true;
+        }
+    }
+    if (anyUnanchored)
+    {
+        // The initial placement (or a forced rebuild after a view switch):
+        // every family anchors at once, exactly once - the placement caches
+        // keep the cells that still overlap the previous position.
+        rebuildTrees(eyePlanetLocal, viewForward_);
+        rebuildBushes(eyePlanetLocal, viewForward_);
+        rebuildGrass(eyePlanetLocal);
+        rebuildRocks(eyePlanetLocal);
+        rebuildTransients(eyePlanetLocal, viewForward_);
     }
     else
     {
-        // Keep the sea state and the birds alive between rebuilds: the foam
-        // churns on its staggered quarters, the flocks fly their paths.
-        const glm::dvec3 eyeDirection = eyePlanetLocal / std::max(1.0, eyeRadius);
-        glm::dvec3 axis(0.0, 0.0, 1.0);
-        if (std::abs(glm::dot(axis, eyeDirection)) > 0.9)
+        // The most overdue family re-anchors this update.
+        std::size_t chosen = static_cast<std::size_t>(Family::Count);
+        double bestRatio = 1.0;
+        for (std::size_t family = 0; family < static_cast<std::size_t>(Family::Count); ++family)
         {
-            axis = glm::dvec3(0.0, 1.0, 0.0);
+            const double threshold = std::max(configuredStep, ringRadius[family] / 5.0);
+            const double moved = glm::length(eyePlanetLocal - familyAnchor_[family]);
+            const double ratio = moved / std::max(1.0e-6, threshold);
+            if (ratio >= 1.0 && ratio > bestRatio)
+            {
+                bestRatio = ratio;
+                chosen = family;
+            }
         }
-        const glm::dvec3 east = glm::normalize(glm::cross(axis, eyeDirection));
-        const glm::dvec3 north = glm::cross(eyeDirection, east);
+        switch (static_cast<Family>(chosen))
+        {
+            case Family::Trees:
+                rebuildTrees(eyePlanetLocal, viewForward_);
+                break;
+            case Family::Bushes:
+                rebuildBushes(eyePlanetLocal, viewForward_);
+                break;
+            case Family::Grass:
+                rebuildGrass(eyePlanetLocal);
+                break;
+            case Family::Rocks:
+                rebuildRocks(eyePlanetLocal);
+                break;
+            default:
+                break;
+        }
+    }
+
+    // The transient groups re-roll together on the configured distance.
+    if (!transientAnchored_ || glm::length(eyePlanetLocal - transientAnchor_) >= configuredStep)
+    {
+        rebuildTransients(eyePlanetLocal, viewForward_);
+    }
+    else
+    {
+        // Keep the sea state and the birds alive between re-anchors: the foam
+        // churns on its staggered quarters, the flocks fly their paths.
+        glm::dvec3 eyeDirection, east, north;
+        tangentFrameAt(eyePlanetLocal, eyeDirection, east, north);
         scatterWhitecaps(eyePlanetLocal, eyeDirection, east, north, true);
         animateBirds(deltaSeconds);
     }

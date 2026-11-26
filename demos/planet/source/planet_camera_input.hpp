@@ -20,7 +20,8 @@ public:
     void handleWindowEvent(const engine::window::WindowEvent &event);
 
     // Returns one frame's input sample. When the backend has no input support,
-    // or the automatic --orbit path owns the camera, this returns zero input.
+    // or the automated camera path (DEMO_ORBIT) owns the camera, this returns
+    // zero input.
     engine::camera::CameraInputState sample(bool enabled = true);
 
     [[nodiscard]] bool cursorCaptured() const noexcept

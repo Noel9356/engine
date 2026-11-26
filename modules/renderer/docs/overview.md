@@ -39,7 +39,7 @@ When the optional `radiance_cache` capability is present and `[renderer] gi_indi
 
 The snapshot can lag the latest `radiance_cache::evaluate()` by one frame: module update order does not guarantee radiance_cache runs before the renderer, and the cache is temporal by design (Lumen's updates are amortized the same way).
 
-The demo `demos/lighting/` exercises this hook end to end: it registers its ground field and object scatter into both the renderer and radiance_cache, and `--set renderer.gi_indirect_lighting=false` renders the same scene without the hook for A/B validation.
+The demo `demos/lighting/` exercises this hook end to end: it registers its ground field and object scatter into both the renderer and radiance_cache, and DEMO_SET=renderer.gi_indirect_lighting=false renders the same scene without the hook for A/B validation.
 
 ## reflection_field screen-space field hook
 
@@ -50,7 +50,7 @@ When the optional `reflection_field` capability is present and `[renderer] refle
 
 The snapshot can lag the latest `reflection_field::evaluate()` by one frame, exactly like the probe grid above.
 
-The demo `demos/lighting/` exercises this hook alongside radiance_cache: every scene surface is registered into both modules, and `--set renderer.reflection_indirect_specular=false` renders the same scene without the composite for A/B validation.
+The demo `demos/lighting/` exercises this hook alongside radiance_cache: every scene surface is registered into both modules, and DEMO_SET=renderer.reflection_indirect_specular=false renders the same scene without the composite for A/B validation.
 
 Note: the `renderer.vulkan` entries only work when the module was built with `ENGINE_RENDERER_BACKEND_VULKAN=1` (set by CMake when Vulkan headers and a loader were found); otherwise they fail gracefully.
 

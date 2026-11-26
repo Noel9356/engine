@@ -7,13 +7,22 @@
 // per-frame budget, so the frame cost stays flat no matter how large the
 // registered scene is.
 //
-// Headless by default (CI / screenshot runs): the window and renderer run on
-// their CPU backends and the demo exports PNG screenshots. For a windowed
-// run pass --set window.backend=glfw --set renderer.backend=vulkan (or edit
-// the config).
+// The demo takes no command-line arguments: interactive runs use the keys
+// (mouse look, WASD + Space/Ctrl movement, Shift sprint, 1..3 camera
+// framings, F12 screenshot, Escape quits), and the headless/capture hooks
+// ride DEMO_* environment variables (DEMO_VIEW selects the framing,
+// DEMO_FRAMES/DEMO_WARMUP bound a run, DEMO_SCREENSHOT/DEMO_FRAME_TIMES
+// export artifacts, DEMO_ORBIT drives the automated camera path,
+// DEMO_SELF_TEST runs the registration audit; DEMO_OBJECTS/DEMO_DYNAMIC/
+// DEMO_LIGHTS/DEMO_SEED/DEMO_FIELD/DEMO_ORIGIN shape the scene and
+// DEMO_SHOWCASE toggles the reflection/refraction cluster). The window and
+// renderer backends follow the hardware (GLFW + Vulkan when present, the
+// CPU backends otherwise).
 
 #include "lighting_demo_options.hpp"
 #include "lighting_scene.hpp"
+
+#include "demo_environment.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -44,37 +53,50 @@
 #include <engine/renderer/capabilities.hpp>
 #include <engine/window/capabilities.hpp>
 
-int main(int argc, char **argv)
+int main()
 {
     using namespace demo;
     using namespace demo::lighting_demo;
 
-    engine::ApplicationCommandLineOptions commandLine;
-    std::string                           commandLineError;
-    if (!engine::parseApplicationCommandLine(argc, argv, commandLine, commandLineError))
+    // The demo takes no command-line arguments (see the header comment): the
+    // headless and capture hooks ride DEMO_* environment variables, and
+    // interactive runs configure everything through the keys.
+    LightingDemoOptions options;
+    std::string         optionsError;
+    if (!lightingDemoOptionsFromEnvironment(options, optionsError))
     {
-        std::cerr << "demo_lighting: " << commandLineError << '\n'
-                  << engine::applicationCommandLineUsage(argv[0]);
+        std::cerr << "demo_lighting: " << optionsError << "\n";
         return 2;
     }
-    if (commandLine.helpRequested)
+    std::vector<std::string> profilePathList;
+    std::vector<std::string> stagedOverrides;
+    if (!demo::environment::readProfilePaths(profilePathList, optionsError)
+        || !demo::environment::readConfigurationOverrides(stagedOverrides, optionsError))
     {
-        std::cout << engine::applicationCommandLineUsage(argv[0]) << lightingOptionsUsage();
-        return 0;
-    }
-
-    LightingDemoOptions options;
-    if (!parseLightingOptions(commandLine.applicationArguments, options, commandLineError))
-    {
-        std::cerr << "demo_lighting: " << commandLineError << "\n";
+        std::cerr << "demo_lighting: " << optionsError << "\n";
         return 2;
     }
 
     // The demo's requirements: the window/renderer/camera trio every demo
     // needs, plus the whole lighting stack. Optional capabilities (scripting,
     // audio) stay out of the demand set.
-    engine::ApplicationHostOptions hostOptions = engine::makeApplicationHostOptions(commandLine,
-        {"window", "renderer", "camera", "pbr", "direct_lighting", "radiance_cache", "reflection_field"});
+    engine::ApplicationHostOptions hostOptions;
+    hostOptions.requiredCapabilities
+        = {"window", "renderer", "camera", "pbr", "direct_lighting", "radiance_cache", "reflection_field"};
+    for (const std::string &profile : profilePathList)
+    {
+        hostOptions.configurationProfileFiles.push_back(profile);
+    }
+    // The scene registers one GI and one reflection surface per instance plus
+    // the ground quadrants and the showcase cluster, so the registries must
+    // hold the full scatter: the demo stages the same floors its own
+    // configuration carries, and a launch that lands on a configuration
+    // without the capacity keys (a foreign or hand-rolled engine.toml) keeps
+    // working instead of failing the first registration.
+    hostOptions.configurationOverrides.push_back("radiance_cache.scene.max_surfaces=8192");
+    hostOptions.configurationOverrides.push_back("reflection_field.scene.max_surfaces=8192");
+    hostOptions.configurationOverrides.insert(hostOptions.configurationOverrides.end(), stagedOverrides.begin(),
+        stagedOverrides.end());
 
     // The scene anchor: the whole renderable world composes relative to this
     // ground-plane offset, so the identical scene can be placed anywhere on
@@ -85,13 +107,6 @@ int main(int argc, char **argv)
 
     engine::ApplicationHost host;
     std::string             startupReport;
-    if (commandLine.validateOnly)
-    {
-        const bool valid = host.validate(hostOptions, startupReport);
-        std::cout << startupReport;
-        std::cout << (valid ? "validate: ok\n" : "validate: failed\n");
-        return valid ? 0 : 1;
-    }
     if (!host.start(hostOptions, startupReport))
     {
         std::cerr << startupReport << "demo_lighting: the engine failed to start\n";
@@ -270,15 +285,27 @@ int main(int argc, char **argv)
         frameTiming.setAutoFlushPath(options.frameTimesPath);
         std::vector<window::WindowEvent> eventBuffer(64);
 
-        const bool  headless = backendName.find("headless") != std::string::npos;
-        std::uint32_t framesRendered = 0;
-        const std::uint32_t totalFrames = headless ? options.frames : 0u;
-        bool          screenshotTaken = options.screenshotPath.empty();
-        const std::uint32_t screenshotFrame
-            = options.screenshotFrame == 0xffffffffu ? totalFrames - 1u : options.screenshotFrame;
-        double        simSeconds   = 0.0;
-        const bool    windowedRun  = !headless;
-        std::uint64_t frameIndex   = 0;
+            const bool  headless = backendName.find("headless") != std::string::npos;
+            std::uint32_t framesRendered = 0;
+            const std::uint32_t totalFrames = headless ? options.frames : 0u;
+            bool          screenshotTaken = options.screenshotPath.empty();
+            const std::uint32_t screenshotFrame
+                = options.screenshotFrame == 0xffffffffu ? totalFrames - 1u : options.screenshotFrame;
+            double        simSeconds   = 0.0;
+            const bool    windowedRun  = !headless;
+            std::uint64_t frameIndex   = 0;
+        // The active camera framing: the startup DEMO_VIEW choice, then
+        // whatever the 1..3 keys switch to (the framings share the scene;
+        // only the camera path changes).
+        std::string activeView = options.view;
+        bool        screenshotQueued = false;
+        std::uint64_t screenshotIndex = 0;
+        if (windowedRun)
+        {
+            std::cout << "demo_lighting: controls - mouse looks, WASD moves, Space rises, Ctrl descends,\n"
+                         "      Shift sprints, 1..3 switch framings (field/showcase/pool), F12 saves a screenshot,\n"
+                         "      Escape quits\n";
+        }
 
         for (; windowedRun || framesRendered < totalFrames + options.warmupFrames; ++frameIndex)
         {
@@ -298,8 +325,59 @@ int main(int argc, char **argv)
                         cursorDeltaX += event.cursorDeltaX;
                         cursorDeltaY += event.cursorDeltaY;
                     }
+                    else if (event.kind == window::WindowEventKind::KeyPressed)
+                    {
+                        // The in-app controls beyond camera movement: F12
+                        // saves a timestamped screenshot, 1..3 switch the
+                        // camera framing.
+                        if (event.key == window::Key::F12)
+                        {
+                            screenshotQueued = true;
+                        }
+                        else if (event.key == window::Key::Num1)
+                        {
+                            activeView = "field";
+                        }
+                        else if (event.key == window::Key::Num2)
+                        {
+                            activeView = "showcase";
+                        }
+                        else if (event.key == window::Key::Num3)
+                        {
+                            activeView = "pool";
+                        }
+                    }
                 });
             harness::clampCursorDelta(cursorDeltaX, cursorDeltaY, 128.0);
+
+            if (windowCapability.isKeyDown != nullptr
+                && windowCapability.isKeyDown(windowCapability.self, windowHandle, window::Key::Escape))
+            {
+                std::cout << "demo_lighting: escape pressed\n";
+                break;
+            }
+
+            // F12 exports the frame this update renders (a headless window
+            // exports its surface directly; a Vulkan renderer defers the
+            // readback to that frame's retirement) as a timestamped PNG in
+            // the working directory.
+            if (screenshotQueued)
+            {
+                screenshotQueued = false;
+                std::string writtenPath;
+                const std::string request
+                    = demo::environment::timestampedScreenshotPath("screenshot_lighting", screenshotIndex++);
+                if (harness::exportScreenshot(context, windowCapability, windowHandle, renderCapability,
+                        rendererHandle, request, writtenPath))
+                {
+                    std::cout << "demo_lighting: F12 screenshot written to " << writtenPath << "\n";
+                }
+                else
+                {
+                    std::cerr << "demo_lighting: F12 screenshot export failed for backend '" << backendName
+                              << "'\n";
+                }
+            }
 
             const auto   now             = std::chrono::steady_clock::now();
             const double wallDeltaSeconds = std::min(0.25, std::chrono::duration<double>(now - lastWallClock).count());
@@ -307,12 +385,12 @@ int main(int argc, char **argv)
             const double deltaSeconds    = headless ? frameDelta : wallDeltaSeconds;
 
             // The camera path per view: 'field' sweeps the whole plaza on a
-            // slow circle (the capture path); 'showcase' and 'pool' frame the
-            // reflecting pool - a fixed three-quarter pose and a low
-            // across-the-water pose whose gaze runs toward the sun, so the
-            // glints, the refraction and the caustics all read in one frame.
-            // --orbit animates whichever view is active; windowed runs keep
-            // the free camera.
+            // slow circle (the capture path); 'showcase' and 'pool' frame
+            // the reflecting pool - a fixed three-quarter pose and a low
+            // across-the-water pose whose gaze runs toward the sun, so
+            // the glints, the refraction and the caustics all read in one
+            // frame. DEMO_ORBIT (or any headless run) animates whichever
+            // framing is active; windowed runs keep the free camera.
             if (options.orbit || headless)
             {
                 const glm::dvec3 focus = scene->showcaseFocus();
@@ -320,14 +398,14 @@ int main(int argc, char **argv)
                 glm::vec3       target;
                 double          sweepRadians = 0.0;
                 double          sweepRadius  = 0.0;
-                if (options.view == "showcase")
+                if (activeView == "showcase")
                 {
                     eye   = glm::vec3(static_cast<float>(focus.x) + 11.0f, 4.6f, static_cast<float>(focus.z) + 15.0f);
                     target = glm::vec3(static_cast<float>(focus.x), 0.8f, static_cast<float>(focus.z));
                     sweepRadians = 0.16;
                     sweepRadius  = 3.5;
                 }
-                else if (options.view == "pool")
+                else if (activeView == "pool")
                 {
                     eye   = glm::vec3(static_cast<float>(focus.x) + 4.5f, 1.9f, static_cast<float>(focus.z) + 8.0f);
                     target = glm::vec3(static_cast<float>(focus.x) - 3.5f, 0.3f, static_cast<float>(focus.z) - 3.5f);
@@ -339,7 +417,7 @@ int main(int argc, char **argv)
                     const double angle = 0.55 + simSeconds * 0.05;
                     const double radius = 46.0;
                     eye = glm::vec3(static_cast<float>(std::cos(angle) * radius), 15.0f,
-                        static_cast<float>(std::sin(angle) * radius));
+                    static_cast<float>(std::sin(angle) * radius));
                     target = glm::vec3(0.0f, 2.5f, 0.0f);
                 }
                 if (sweepRadius > 0.0)
@@ -351,19 +429,46 @@ int main(int argc, char **argv)
                     eye.z += static_cast<float>(std::sin(sweep) * sweepRadians * sweepRadius);
                 }
                 cameraCapability.setLookAt(cameraCapability.self, cameraHandle, glm::value_ptr(eye),
-                    glm::value_ptr(target), glm::value_ptr(glm::vec3(0.0f, 1.0f, 0.0f)));
+                glm::value_ptr(target), glm::value_ptr(glm::vec3(0.0f, 1.0f, 0.0f)));
             }
             else
             {
+                // Full manual flight: WASD walks the plane, Space/Ctrl
+                // ride the height axis, Shift sprints (the same movement
+                // set the planet demo's ground views carry).
                 camera::CameraInputState input{};
-                input.moveForward = windowCapability.isKeyDown(windowCapability.self, windowHandle,
-                    window::Key::W) ? 1.0f : 0.0f;
-                input.moveRight = windowCapability.isKeyDown(windowCapability.self, windowHandle,
-                    window::Key::D) ? 1.0f : 0.0f;
+                const auto keyDown = [&windowCapability, &windowHandle](window::Key key)
+                {
+                    return windowCapability.isKeyDown(
+                    windowCapability.self, windowHandle, key);
+                };
+                if (keyDown(window::Key::W))
+                {
+                    input.moveForward += 1.0f;
+                }
+                if (keyDown(window::Key::S))
+                {
+                    input.moveForward -= 1.0f;
+                }
+                if (keyDown(window::Key::D))
+                {
+                    input.moveRight += 1.0f;
+                }
+                if (keyDown(window::Key::A))
+                {
+                    input.moveRight -= 1.0f;
+                }
+                if (keyDown(window::Key::Space))
+                {
+                    input.moveUp += 1.0f;
+                }
+                if (keyDown(window::Key::LeftControl))
+                {
+                    input.moveUp -= 1.0f;
+                }
                 input.lookHorizontal = static_cast<float>(cursorDeltaX);
                 input.lookVertical   = static_cast<float>(cursorDeltaY);
-                input.sprint         = windowCapability.isKeyDown(windowCapability.self, windowHandle,
-                    window::Key::LeftShift);
+                input.sprint         = keyDown(window::Key::LeftShift);
                 cameraCapability.update(cameraCapability.self, cameraHandle, &input, deltaSeconds);
             }
 

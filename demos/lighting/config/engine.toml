@@ -1,8 +1,10 @@
 # demo_lighting: the lighting pipeline showcase configuration.
 #
-# Headless by default (CI / screenshot runs): the window and renderer run on
-# their CPU backends and the demo exports PNG screenshots. For a windowed run
-# pass --set window.backend=glfw --set renderer.backend=vulkan (or edit here).
+# The window and renderer backends are chosen from the hardware: machines with
+# a display and a Vulkan-capable GPU run the windowed GLFW + Vulkan path, and
+# machines without fall back to the CPU backends (the automatic selection
+# prints which one is active). Force a specific backend by setting
+# [window] backend / [renderer] backend here.
 
 [engine]
 active_plugins        = []
@@ -74,7 +76,6 @@ depth_layers     = 1
 photons_per_frame = 24576
 
 [renderer]
-backend     = "headless"
 clear_color = [0.012, 0.014, 0.028, 1.0]
 # The whole lighting stack consumes its modules' outputs: the probe grid and
 # the gather field light the ambient term, the reflection field adds the

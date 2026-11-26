@@ -49,8 +49,9 @@ std::uint32_t drainWindowEvents(engine::window::WindowCapability &windowCapabili
 
 // Exports the current frame as a PNG (the default) or, when the requested
 // path carries a .ppm suffix, as a binary P6 PPM - the same pixel payload
-// either way. A path with no known image suffix is completed with .png so
-// --screenshot <name> writes <name>.png. Headless windows export their CPU
+// either way. A path with no known image suffix is completed with .png so a
+// DEMO_SCREENSHOT name without a suffix writes <name>.png; the interactive
+// F12 key names its own timestamped file. Headless windows export their CPU
 // surface directly; Vulkan renderers schedule the export through the
 // renderer's vulkan extension (written at the next frame retirement). Both
 // paths are tried in that order; the return value reports success and

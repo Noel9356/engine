@@ -18,6 +18,15 @@
 namespace engine
 {
 
+// Default engine.toml resolution for applications: the configuration beside
+// the executable (the application's own installed copy) wins over one found in
+// the working directory. A launched-from-anywhere application must keep using
+// its own configuration - trust bindings, plugin directories, and every
+// module's settings belong to the application, not to whatever directory the
+// process happened to start in. The working-directory copy is the fallback
+// (and still wins when the executable has no configuration of its own).
+std::filesystem::path defaultEngineConfigurationPath();
+
 struct ApplicationHostOptions
 {
     std::filesystem::path              configurationFile;

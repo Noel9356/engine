@@ -21,10 +21,10 @@ namespace demo::planet_demo
 struct PlanetDemoOptions
 {
     std::string viewName = "globe";
-    // Optional biome-pin for the surface view ("--biome taiga"): the view
-    // picker then requires the spot's biome to be exactly this one, so a
-    // capture shows that climate zone's ground, flora and water. Empty = the
-    // standard per-view windows.
+    // Optional biome-pin for the surface-family views (DEMO_BIOME=taiga):
+    // the view picker then requires the spot's biome to be exactly this one,
+    // so a capture shows that climate zone's ground, flora and water. Empty
+    // = the standard per-view windows.
     std::string biomeName;
     std::uint64_t seed = 0;
     double radius = 0.0;
@@ -32,7 +32,7 @@ struct PlanetDemoOptions
     std::string screenshotPath;
     std::string frameTimesPath;
     std::uint64_t screenshotFrame = 0;
-    bool screenshotFrameSet = false; // --screenshot-frame appeared (0 is a valid index)
+    bool screenshotFrameSet = false; // DEMO_SCREENSHOT_FRAME appeared (0 is a valid index)
     std::uint32_t warmupFrames = 0;
     // Wall-clock warmup window: while it is open the warmup budget is not
     // consumed - warmup runs until the visible set is fully built or this
@@ -43,12 +43,12 @@ struct PlanetDemoOptions
     // looks right" directly.
     double settleSeconds = 0.0;
     std::uint32_t statsEveryFrames = 30;
-    // --biome-census <n>: sample the climate field over a golden-spiral of n
-    // points and print the biome histogram, then exit. Answers "which climate
-    // zones does this planet actually realize" straight from the generator
-    // (a classifier zone can be structurally absent on a given seed - the
-    // census reports zero coverage for it instead of a sample silently
-    // degrading to the fallback view).
+    // DEMO_BIOME_CENSUS=n: sample the climate field over a golden-spiral of
+    // n points and print the biome histogram, then exit. Answers "which
+    // climate zones does this planet actually realize" straight from the
+    // generator (a classifier zone can be structurally absent on a given
+    // seed - the census reports zero coverage for it instead of a sample
+    // silently degrading to the fallback view).
     std::uint32_t biomeCensusSamples = 0;
     bool orbit = false;
     bool caves = false;
@@ -56,7 +56,8 @@ struct PlanetDemoOptions
     bool selfTest = false;
     bool benchmark = false;
     // Screen pixels one texture tile must span for the terrain detail
-    // multiply to apply (see the gate setup in main.cpp): the budget keeps
+    // multiply to apply (DEMO_TEXTURE_TILE_PIXELS; see the gate setup in
+    // main.cpp): the budget keeps
     // the multiply where a tile still photographs as detail and cuts it
     // where the scan's motif has minified into a repeating stamp (the
     // per-chunk gate plus the mip chain fade the boundary so no ring
@@ -87,14 +88,16 @@ struct SelfTestResult
 int runBenchmark(const engine::planet::PlanetGenerationParams &params);
 
 // Biome name table (the 16 climate zones the classifier produces): maps the
-// CLI spelling to the Biome id and back. Shared by --biome validation and
-// the view placement.
+// DEMO_BIOME spelling to the Biome id and back. Shared by DEMO_BIOME
+// validation and the view placement.
 bool biomeFromName(const std::string &name, engine::planet::Biome &outBiome);
 const char *biomeName(engine::planet::Biome biome);
 const std::vector<std::string> &biomeNames();
 
-const char *planetOptionsUsage() noexcept;
-bool parsePlanetOptions(const std::vector<std::string> &arguments, PlanetDemoOptions &options, std::string &outError);
+// Reads the demo's DEMO_* environment variables into the options (unset
+// variables keep the defaults; an invalid value fills outError naming the
+// variable). The demo takes no command-line arguments.
+bool planetDemoOptionsFromEnvironment(PlanetDemoOptions &options, std::string &outError);
 std::vector<engine::planet::Vec3> goldenSpiralDirections(std::uint32_t count);
 engine::planet::Vec3 rotateDirection(const engine::planet::Vec3 &direction, const engine::planet::Vec3 &axis,
     double angleRadians);

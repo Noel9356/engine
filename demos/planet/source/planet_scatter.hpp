@@ -14,6 +14,14 @@
 // surf, mist) re-roll on a short interval instead, which is exactly the churn
 // real breaking foam shows.
 //
+// Re-anchor cost model: each stationary family (trees, bushes, grass) keeps
+// its OWN anchor and a per-cell placement cache, and at most one family
+// re-anchors per update. A re-anchor only evaluates the cells that entered
+// the ring (the leading annulus); every cached cell re-emits as pure
+// arithmetic with the distance-driven terms (ground fade, aerial haze,
+// contact-shadow ribbons) replayed against the new anchor, so a moving eye
+// pays a small bounded cost per ring shift instead of a full re-scatter.
+//
 // The foliage sprites are DOWNLOADED photographic cutouts (Poly Haven, CC0;
 // see assets/textures/vegetation): one 2x2 atlas per group - four tree species
 // (broadleaf, acacia, conifer, dry broadleaf), four bush species (green
@@ -30,9 +38,10 @@
 //
 // Frame-cost discipline: the rebuild is deterministic and bounded (candidate
 // counts derive from the configured radii, not from the visible chunk set),
-// the bird mesh is the only per-frame geometry work (a few hundred vertices),
-// and space views skip the system entirely (nothing on the ground is visible
-// from orbit that these elements express).
+// one family re-anchors per update at most, the caches keep every re-anchor
+// to its leading annulus, the bird mesh is the only per-frame geometry work
+// (a few hundred vertices), and space views skip the system entirely
+// (nothing on the ground is visible from orbit that these elements express).
 #pragma once
 
 #include <engine/planet/capabilities.hpp>
@@ -44,7 +53,10 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
+#include <cstdint>
 #include <filesystem>
+#include <unordered_map>
 #include <vector>
 
 namespace engine::planet
@@ -84,6 +96,12 @@ public:
     void update(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForwardPlanetLocal,
         const glm::dvec3 &sunDirection, bool sunEnabled, double deltaSeconds);
 
+    // Drops every family anchor so the next update re-scatters around the
+    // current eye (the in-app view switch lands the eye somewhere new; the
+    // per-cell caches keep the world-keyed placements identical wherever the
+    // rings still overlap).
+    void forceRebuild();
+
     // Draw commands referencing this system's meshes (materials point into
     // this system's pools; valid until the next update). Opaque commands
     // first, transparent last - the backend routes each draw by its material
@@ -107,6 +125,15 @@ private:
         engine::renderer::MeshHandle mesh = engine::renderer::invalidMesh;
         engine::renderer::MeshMaterial material{};
         glm::dvec3 anchorPlanetLocal{0.0};
+        // The stream sizes the live mesh was created with. The in-place
+        // vertex refresh only covers a mesh whose vertex AND index counts
+        // still match (the renderer rejects a partial or oversized write),
+        // so a rebuild whose population changed recreates the mesh instead -
+        // a count-mismatched refresh would leave the previous geometry
+        // behind while the anchor moves on, sliding the whole stale mesh
+        // with the eye.
+        std::uint32_t uploadedVertexCount = 0;
+        std::uint32_t uploadedIndexCount = 0;
         bool vertexUpdated = false; // refresh via updateMeshVertices, not re-create
         bool active = false;
     };
@@ -120,6 +147,96 @@ public:
     static double hashUnit(std::uint64_t hash, std::uint64_t lane); // [0, 1)
 
 private:
+
+    // ---- placement caches -------------------------------------------------
+    //
+    // A cell's placement (site, size, tint, shadow ribbon) is a pure function
+    // of the cell and the planet, so every fully-evaluated card is cached by
+    // cell identity and re-emitted as arithmetic at any anchor. The
+    // distance-driven terms (the foliage ground fade, the aerial haze, the
+    // shadow's anchor-relative lift) apply at EMIT time against the anchor
+    // the mesh is being baked for, so a re-anchored family reproduces exactly
+    // what a fresh walk at that anchor would show for its cached cells.
+
+    // Identity of one lattice cell: the planet-centered cell coordinates plus
+    // the sub-lattice (the grass family walks a near disc and a mid annulus
+    // on different cell sizes; the sub index keeps their integer coordinates
+    // from colliding).
+    struct CellKey
+    {
+        std::array<std::int64_t, 4> value{};
+        bool operator==(const CellKey &other) const noexcept { return value == other.value; }
+    };
+    struct CellKeyHash
+    {
+        std::size_t operator()(const CellKey &key) const noexcept;
+    };
+
+    // The contact shadow under one card: a ribbon of world-space quads draped
+    // along the away-from-sun direction, baked once per placement (the ground
+    // march is the expensive part; the sun direction is carried along so a
+    // changed sun drops the ribbon instead of replaying it stale). strips == 0
+    // means the placement casts no readable shadow.
+    struct ShadowRibbon
+    {
+        glm::dvec3 corners[4][4]{}; // up to four strips x four world corners
+        glm::dvec3 normals[4]{};
+        float uv[4][4][2]{};
+        glm::dvec3 sun{0.0}; // the direction the ribbon was baked against
+        std::uint32_t strips = 0;
+    };
+
+    // One fully-evaluated billboard (a tree, a companion tree, a bush, or one
+    // card of a grass tuft's crossed pair). fixedRight marks the families
+    // that orient the card by an explicit in-plane right vector (the grass
+    // crossed cards) instead of spherical billboarding toward the anchor.
+    struct PlacedCard
+    {
+        glm::dvec3 base{0.0};          // planet-local card base (burial applied)
+        glm::dvec3 up{0.0, 1.0, 0.0};  // the site's radial up
+        glm::dvec3 right{0.0};         // explicit card right (fixedRight only)
+        double halfWidth = 0.0;
+        double height = 0.0;
+        std::array<float, 3> speciesColor{}; // tint x cloud shade (pre ground fade, pre haze)
+        std::array<float, 3> groundColor{};  // the ground-fade target (site albedo x 0.9)
+        std::uint32_t uvTile = 0;
+        bool mirrorU = false;
+        bool fixedRight = false;
+        float rootDarken = 0.0f;
+        ShadowRibbon shadowRibbon; // baked contact shadow (see above)
+    };
+
+    // The per-family placement cache: one entry per planted cell, holding the
+    // cell's fully-evaluated cards (a tree plus its companion, a bush, or a
+    // grass tuft's crossed pair).
+    using PlacementCache = std::unordered_map<CellKey, std::vector<PlacedCard>, CellKeyHash>;
+
+    // The stationary families the scheduler re-anchors independently: wide
+    // rings (trees) re-anchor on a wide step, the near-field grass follows
+    // the configured rebuild distance, and at most one family re-anchors per
+    // update so no frame pays for two ring shifts at once.
+    enum class Family
+    {
+        Trees = 0,
+        Bushes,
+        Grass,
+        Rocks,
+        Count
+    };
+
+    // Foliage emit styling: the ground-fade band and the aerial-haze fold
+    // differ per family (trees fade hardest, grass not at all), and both key
+    // on the card's distance from the anchor the mesh is baked against.
+    struct FoliageEmitStyle
+    {
+        double groundFadeStartMeters = 0.0;
+        double groundFadeEndMeters = 0.0;
+        double groundFadeWeight = 0.0;
+        bool aerialHaze = false;
+        glm::vec3 hazeColor{};
+        double hazeScaleMeters = 1.0;
+        double hazeAsymptote = 0.0;
+    };
 
     // Foliage sprite textures. The PRIMARY source is the downloaded
     // photographic atlases (tree/bush/grass, 2x2 species tiles each; see
@@ -137,21 +254,44 @@ private:
     engine::renderer::TextureHandle createSpriteAtlas(const std::vector<std::uint8_t> &sprite,
         std::uint32_t spriteSize);
 
-    // Rebuilds (re-scatters) every stationary element group for a new eye
-    // anchor, and refreshes the transient sea-state groups. viewForward is
-    // the camera's sight axis in planet-local space (see update).
-    void rebuild(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward);
-    void scatterVegetation(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
-        const glm::dvec3 &east, const glm::dvec3 &north, const glm::dvec3 &viewForward);
-    void scatterRocks(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
-        const glm::dvec3 &east, const glm::dvec3 &north);
+    // Tangent frame (east/north) at one eye position; the shared basis every
+    // walk's cell jitter and grass card orientation derive from.
+    void tangentFrameAt(const glm::dvec3 &eyePlanetLocal, glm::dvec3 &outEyeDirection, glm::dvec3 &outEast,
+        glm::dvec3 &outNorth) const;
 
-    // One sun-aligned contact shadow (a soft dark quad laid tangent to the
-    // ground under a scattered element, stretched along the away-from-sun
-    // direction by the site's sun elevation). Appends into the shared shadow
-    // scratch the rebuild uploads as one mesh; a no-op when the strength is
-    // zero, the sun is at/below the horizon, or the textures are missing.
-    void appendShadow(const glm::dvec3 &groundPoint, const glm::dvec3 &up, double sizeMeters, double heightMeters);
+    // Bakes one placement's contact-shadow ribbon (the pure part of the old
+    // appendShadow: gates, sun geometry, and the ground march; no scratch
+    // writes). The replay into the shadow mesh happens in
+    // rebuildShadowMesh.
+    void bakeShadowRibbon(const glm::dvec3 &groundPoint, const glm::dvec3 &up, double sizeMeters, double heightMeters,
+        ShadowRibbon &outRibbon) const;
+
+    // Emits one cached card into a family mesh: the distance-driven ground
+    // fade and aerial haze apply here (against the bake anchor), then the
+    // billboard goes through pushBillboard with the card's own orientation
+    // mode. Card distance is measured from the card base to the anchor.
+    void emitFoliageCard(std::vector<engine::planet::PlanetVertex> &vertices, std::vector<std::uint32_t> &indices,
+        const PlacedCard &card, const glm::dvec3 &anchor, const FoliageEmitStyle &style) const;
+
+    // Family rebuilds: walk the ring at the family's new anchor, re-emit
+    // cached cells, evaluate only the cells that entered the ring, and swap
+    // the cache to the emitted set (cells outside the ring drop). Trees and
+    // bushes carry the near-ring minimum population (see the walk comments);
+    // viewForward ranks it into the camera's forward hemisphere.
+    void rebuildTrees(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward);
+    void rebuildBushes(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward);
+    void rebuildGrass(const glm::dvec3 &eyePlanetLocal);
+    void rebuildRocks(const glm::dvec3 &eyePlanetLocal);
+
+    // The transient groups re-roll by design (real foam turns over): they
+    // re-scatter together on the configured rebuild distance.
+    void rebuildTransients(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &viewForward);
+
+    // Replays every family's cached shadow ribbons (plus the rocks' baked
+    // ribbons) into the one contact-shadow mesh, anchored at the given eye.
+    // Pure arithmetic: the ground march happened at bake time.
+    void rebuildShadowMesh(const glm::dvec3 &eyePlanetLocal);
+
     void scatterWhitecaps(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
         const glm::dvec3 &east, const glm::dvec3 &north, bool partial);
     void scatterSurf(const glm::dvec3 &eyePlanetLocal, const glm::dvec3 &eyeDirection,
@@ -224,10 +364,23 @@ private:
     ScatterMesh mistMesh_;
     ScatterMesh birdMesh_;
 
-    // The contact-shadow scratch the rebuild fills through appendShadow and
-    // uploads as one mesh at the end (cleared per rebuild, not per frame).
+    // The contact-shadow scratch the ribbon replay fills and uploads as one
+    // mesh (cleared per shadow rebuild, not per frame).
     std::vector<engine::planet::PlanetVertex> shadowScratch_;
     std::vector<std::uint32_t> shadowIndexScratch_;
+
+    // Per-family scheduling state: each family keeps its own anchor (the
+    // re-anchor threshold derives from its ring radius - wide rings shift
+    // rarely) and its placement cache. The rocks walk directly (a bounded
+    // handful of cells) and carry their baked shadow ribbons in a plain list.
+    glm::dvec3 familyAnchor_[static_cast<std::size_t>(Family::Count)]{};
+    bool familyAnchored_[static_cast<std::size_t>(Family::Count)] = {};
+    PlacementCache familyCache_[static_cast<std::size_t>(Family::Count)];
+    std::vector<ShadowRibbon> rockShadowRibbons_;
+
+    // The transient groups' shared anchor (whitecaps, surf, mist, flocks).
+    glm::dvec3 transientAnchor_{0.0};
+    bool transientAnchored_ = false;
 
     std::vector<engine::renderer::RenderDrawCommand> drawCommands_;
     // Per-command planet-local anchor the renderer composes the shifted model
@@ -263,14 +416,16 @@ private:
     std::vector<BirdFlock> flocks_;
     std::vector<WhitecapSlot> whitecapSlots_;
 
-    glm::dvec3 anchorEye_{0.0};      // the rebuild anchor (planet-local)
-    double anchorEyeRadius_ = 0.0;   // its radial distance from the planet center
-    bool hasAnchor_ = false;         // any rebuild happened yet
     glm::dvec3 viewForward_{0.0};    // camera sight axis (planet-local; zero = unknown)
     glm::dvec3 lastSunDirection_{0.0, 1.0, 0.0}; // the scene sun at the last update
     double refreshAccumulator_ = 0.0;
     std::uint32_t refreshCounter_ = 0;
     bool groundLevel_ = false;
+    // The eye's ground clearance vs the grass ring radius: the sward is a
+    // near-field system (its ring hugs the eye), and from higher than the
+    // ring's own radius a tuft subtends under a pixel, so the grass family
+    // stands down until the eye descends again - the same rule in every view.
+    bool grassAllowed_ = true;
     bool initialized_ = false;
     bool rendererBound_ = false;
 };

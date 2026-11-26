@@ -6,22 +6,30 @@
 // self-tests so generation can be validated without any manual inspection.
 //
 // Views (deterministic camera placement from the planet's own sampling):
-//   --view globe    whole planet from space: continents, oceans, ice caps.
-//   --view orbit    mid-altitude sweep over the limbs and ranges.
-//   --view coast    standing on a beach looking along the shoreline.
-//   --view cliffs   terraced mountain country with overhanging cliff faces.
-//   --view surface  rolling green hills under the sun.
-//   --view walk     first person on the terrain: the planet module's
-//                   SurfaceWalker carries the camera (WASD + mouse + Space +
-//                   Shift in a window; --orbit auto-walks deterministically).
+// the view only selects the SPAWN and the camera pose - the streaming
+// selection, the scatter system and the terrain pipeline run identically in
+// every view:
+//   globe    whole planet from space: continents, oceans, ice caps.
+//   orbit    mid-altitude sweep over the limbs and ranges.
+//   coast    standing on a beach looking along the shoreline.
+//   cliffs   terraced mountain country with overhanging cliff faces.
+//   surface  rolling green hills under the sun (a fly camera).
+//   walk     first person on the terrain: the planet module's SurfaceWalker
+//            carries the camera (WASD + mouse + Space + Shift in a window).
 //
-// Useful flags: --seed N / --radius M override the planet description,
-// --frames N renders exactly N frames (deterministic; --warmup W prepends W
-// build-only frames), --screenshot exports the rendered frame as PPM,
-// --self-test verifies chunk generation is deterministic and independent of
-// chunk build order and audits the walk controller, --stats-every prints
-// planet statistics cadence, --caves enables the cave worm carving,
-// --chunk-borders highlights chunk borders on the surface.
+// The demo takes no command-line arguments. Windowed runs use the keys
+// (mouse look, WASD, Space/Ctrl up/down, Shift sprint, arrows look, Left Alt
+// cursor, 1..6 switch views, F12 screenshot, Escape quits); the headless and
+// capture hooks ride DEMO_* environment variables (DEMO_VIEW selects the
+// spawn, DEMO_FRAMES/DEMO_WARMUP/DEMO_SETTLE_SECONDS bound a run,
+// DEMO_SCREENSHOT/DEMO_FRAME_TIMES export artifacts, DEMO_ORBIT drives the
+// automated camera path, DEMO_SELF_TEST runs the determinism audit,
+// DEMO_BENCH benchmarks the generation core, DEMO_SEED/DEMO_RADIUS override
+// the planet description, DEMO_CAVES/DEMO_CHUNK_BORDERS stage the toggles,
+// DEMO_BIOME pins a surface-family spawn to one climate zone,
+// DEMO_BIOME_CENSUS prints the climate histogram, DEMO_TEXTURE_TILE_PIXELS
+// tunes the terrain texture gate, DEMO_PROFILES/DEMO_SET stage configuration
+// profiles and overrides).
 
 #include <engine/application/application.hpp>
 #include <engine/application/frame_pacer.hpp>
@@ -39,6 +47,8 @@
 #include "planet_camera_input.hpp"
 #include "planet_chunk_renderer.hpp"
 #include "planet_scatter.hpp"
+
+#include "demo_environment.hpp"
 #include "planet_demo_support.hpp"
 #include "demo_harness.hpp"
 #include "planet_walk_controller.hpp"
@@ -90,25 +100,16 @@ namespace planet = engine::planet;
 // its own, and the module itself only reads its own config.toml plus the
 // staged overrides. The base file is read first, then each profile in the
 // order the kernel would apply them (later wins), and every produced override
-// is inserted BEFORE the command line's own --set list so an explicit --set
+// is inserted BEFORE the DEMO_SET entries so an explicit DEMO_SET
 // planet.<key>=<value> keeps winning over both file and profiles.
 
-// The configuration file path the kernel itself would resolve: an explicit
-// --config wins; otherwise config/engine.toml next to the cwd (if present)
-// over the one beside the executable.
-std::filesystem::path resolveDemoConfigurationFile(const engine::ApplicationCommandLineOptions &commandLine)
+// The configuration file path the kernel itself resolves (the application's
+// own copy beside the executable over one in the working directory): the
+// forwarding must read the same file the kernel loads, so the resolution
+// comes from the one place that owns the policy.
+std::filesystem::path resolveDemoConfigurationFile()
 {
-    if (!commandLine.configurationFile.empty())
-    {
-        return commandLine.configurationFile;
-    }
-    const std::filesystem::path workingDirectoryPath
-        = std::filesystem::current_path() / "config" / "engine.toml";
-    if (std::filesystem::exists(workingDirectoryPath))
-    {
-        return workingDirectoryPath;
-    }
-    return engine::executableDirectory() / "config" / "engine.toml";
+    return engine::defaultEngineConfigurationPath();
 }
 
 // Serializes one [planet] table entry as an override assignment; sub-tables
@@ -195,20 +196,13 @@ void stagePlanetFileOverrides(const std::filesystem::path &file, std::vector<std
 // kernel order (the multi-profile list when present, otherwise the single
 // profile path), so the effective [planet] table matches the one the rest of
 // the configuration stack builds.
-std::vector<std::string> planetConfigurationOverrides(const engine::ApplicationCommandLineOptions &commandLine)
+std::vector<std::string> planetConfigurationOverrides(const std::vector<std::filesystem::path> &profileFiles)
 {
     std::vector<std::string> overrides;
-    stagePlanetFileOverrides(resolveDemoConfigurationFile(commandLine), overrides);
-    if (!commandLine.configurationProfileFiles.empty())
+    stagePlanetFileOverrides(resolveDemoConfigurationFile(), overrides);
+    for (const std::filesystem::path &profile : profileFiles)
     {
-        for (const std::filesystem::path &profile : commandLine.configurationProfileFiles)
-        {
-            stagePlanetFileOverrides(profile, overrides);
-        }
-    }
-    else if (!commandLine.configurationProfileFile.empty())
-    {
-        stagePlanetFileOverrides(commandLine.configurationProfileFile, overrides);
+        stagePlanetFileOverrides(profile, overrides);
     }
     return overrides;
 }
@@ -274,43 +268,47 @@ planet::PlanetCullingVolume buildCullingVolume(const camera::ViewState &viewStat
 
 } // namespace
 
-int main(int argc, char **argv)
+int main()
 {
     std::cout << std::unitbuf;
 
-    engine::ApplicationCommandLineOptions commandLine;
-    std::string                           commandLineError;
-    if (!engine::parseApplicationCommandLine(argc, argv, commandLine, commandLineError))
-    {
-        std::cerr << "demo_planet: " << commandLineError << '\n'
-                  << engine::applicationCommandLineUsage(argv[0]);
-        return 2;
-    }
-    if (commandLine.helpRequested)
-    {
-        std::cout << engine::applicationCommandLineUsage(argv[0]) << planetOptionsUsage();
-        return 0;
-    }
-
+    // The demo takes no command-line arguments: the headless and capture
+    // hooks ride DEMO_* environment variables (see the header comment), and
+    // interactive runs configure everything through the keys.
     PlanetDemoOptions options;
-    if (!parsePlanetOptions(commandLine.applicationArguments, options, commandLineError))
+    std::string       optionsError;
+    if (!planetDemoOptionsFromEnvironment(options, optionsError))
     {
-        std::cerr << "demo_planet: " << commandLineError << "\n";
+        std::cerr << "demo_planet: " << optionsError << "\n";
+        return 2;
+    }
+    std::vector<std::string> profilePathList;
+    std::vector<std::string> stagedOverrides;
+    if (!demo::environment::readProfilePaths(profilePathList, optionsError)
+        || !demo::environment::readConfigurationOverrides(stagedOverrides, optionsError))
+    {
+        std::cerr << "demo_planet: " << optionsError << "\n";
         return 2;
     }
 
-    engine::ApplicationHostOptions hostOptions
-        = engine::makeApplicationHostOptions(commandLine, {"window", "renderer", "camera", "pbr", "planet", "radiance_cache"});
+    engine::ApplicationHostOptions hostOptions;
+    hostOptions.requiredCapabilities
+        = {"window", "renderer", "camera", "pbr", "planet", "radiance_cache"};
+    for (const std::string &profile : profilePathList)
+    {
+        hostOptions.configurationProfileFiles.push_back(profile);
+    }
     {
         // The [planet] section of the demo's engine.toml and its profiles
         // overlays the planet module's configuration (see the forwarding
         // block's comment at the top of this file); the staged assignments
-        // sit in front of the command line's own --set list so an explicit
-        // --set still wins.
-        std::vector<std::string> forwarded = planetConfigurationOverrides(commandLine);
+        // sit in front of the DEMO_SET entries so an explicit entry wins.
+        std::vector<std::string> forwarded = planetConfigurationOverrides(hostOptions.configurationProfileFiles);
         hostOptions.configurationOverrides.insert(hostOptions.configurationOverrides.begin(), forwarded.begin(),
             forwarded.end());
     }
+    hostOptions.configurationOverrides.insert(hostOptions.configurationOverrides.end(), stagedOverrides.begin(),
+        stagedOverrides.end());
     if (options.caves)
     {
         // The demo stages the toggle as a configuration override so the
@@ -321,7 +319,7 @@ int main(int argc, char **argv)
     }
     if (options.chunkBorders)
     {
-        // Same staging as --caves: the overlay is baked into the chunk's
+        // Same staging as DEMO_CAVES: the overlay is baked into the chunk's
         // vertex colors at build time, so it rides the configured template.
         hostOptions.configurationOverrides.push_back("planet.debug_chunk_borders=true");
     }
@@ -363,13 +361,6 @@ int main(int argc, char **argv)
     }
     engine::ApplicationHost host;
     std::string             startupReport;
-    if (commandLine.validateOnly)
-    {
-        const bool valid = host.validate(hostOptions, startupReport);
-        std::cout << startupReport;
-        std::cout << (valid ? "validate: ok\n" : "validate: failed\n");
-        return valid ? 0 : 1;
-    }
     if (!host.start(hostOptions, startupReport))
     {
         std::cerr << startupReport << "demo_planet: the engine failed to start\n";
@@ -478,474 +469,497 @@ int main(int argc, char **argv)
     // ---- camera placement per view ----------------------------------------------------
     const glm::dvec3 planetCenter(params.centerMeters[0], params.centerMeters[1], params.centerMeters[2]);
     const double     planetRadius = params.radiusMeters;
-    const bool       walkView     = options.viewName == "walk";
+    bool             walkView     = options.viewName == "walk";
+    // The active view: the startup DEMO_VIEW choice, then whatever the
+    // in-app 1..6 keys switch to. The view only selects the spawn and the
+    // camera pose - every pipeline behind the frame runs identically.
+    std::string activeView = options.viewName;
 
-    glm::dvec3 eye      = planetCenter + glm::dvec3(0.0, 0.0, planetRadius * 3.0);
-    glm::dvec3 target   = planetCenter;
-    double     nearZ    = planetRadius * 0.01;
-    double     farZ     = planetRadius * 12.0;
+    glm::dvec3 eye;
+    glm::dvec3 target;
+    double     nearZ = 0.0;
+    double     farZ  = 0.0;
 
     // The walk controller owns the density-field walk surface; it is only
     // built for the walk view (one extra seed schedule, no worker threads).
     std::unique_ptr<PlanetWalkController> walkController;
 
-    // Terrain windows shared by the surface view placements (they pin the
-    // biome/climate range a view's spot may sit in).
-    const auto elevationWindow = [](double low, double high)
+    // Places the spawn (eye, target, depth planes, and the walk controller
+    // for the walk view) for one view. Deterministic placement from the
+    // planet's own sampling; returns false when the view has no usable
+    // spawn (the caller keeps the previous view then). The startup
+    // placement and the in-app view switch both route through here.
+    const auto placeView = [&](const std::string &viewName) -> bool
     {
-        return [low, high](double elevation, engine::planet::Biome, double, const planet::PlanetGenerationParams &)
-        { return elevation >= low && elevation <= high; };
-    };
-    // Warm-land windows: the biome check alone is not enough - the biome
-    // colors BLEND into snow below the climate snow line (and toward the
-    // freeze line), so a spot the enum calls "taiga" can still render
-    // half-white. Require strictly warm air and a spot clearly below the
-    // blended snow band so showcase views land on green/sandy terrain.
-    const auto warmLandWindow = [](double low, double high)
-    {
-        return [low, high](double elevation, engine::planet::Biome biome, double temperature01,
-            const planet::PlanetGenerationParams &params)
-        {
-            if (elevation < low || elevation > high)
-            {
-                return false;
-            }
-            if (biome == planet::Biome::Snow || biome == planet::Biome::Tundra || temperature01 <= 0.45)
-            {
-                return false;
-            }
-            const double snowLine = params.snowLineMeters * (0.25 + 0.75 * temperature01);
-            const double snowBand = params.snowLineMeters * params.elevationBlendFraction;
-            return elevation < snowLine - snowBand;
-        };
-    };
-    // Mountain-foothill window for the cliffs view: terraced mountain
-    // country is cold (the lapse rate takes 0.2-0.8 temperature01 off by
-    // 400-900 m of altitude), so a warm-land window zeroes nearly every
-    // mountain candidate - only tropical ranges survive, and those rarely
-    // carry terraced flanks at showcase scale. Taiga/tundra air is the
-    // honest climate on terraced massifs; the picker's own gates add the
-    // terraced-mountain requirement (it needs the relief sample, which this
-    // predicate signature has not).
-    const auto mountainFoothillWindow = [](double low, double high)
-    {
-        return [low, high](double elevation, engine::planet::Biome biome, double,
-            const planet::PlanetGenerationParams &)
-        {
-            return elevation >= low && elevation <= high
-                && biome != planet::Biome::Snow && biome != planet::Biome::Beach;
-        };
-    };
-    const auto warmGreenLandWindow = [warmLandWindow](double low, double high)
-    {
-        auto warm = warmLandWindow(low, high);
-        return [warm](double elevation, engine::planet::Biome biome, double temperature01,
-            const planet::PlanetGenerationParams &params)
-        {
-            // TropicalRainforest is excluded: its canopy palette is the
-            // darkest row (linear albedo ~0.09-0.13) and a front-lit
-            // frame over it still photographs as a murky near-black
-            // sheet under the demo's linear exposure.
-            const bool green = biome == planet::Biome::Grassland
-                || biome == planet::Biome::TemperateForest || biome == planet::Biome::SeasonalForest
-                || biome == planet::Biome::TemperateRainforest
-                || biome == planet::Biome::Taiga;
-            return warm(elevation, biome, temperature01, params) && green;
-        };
-    };
+        walkView = viewName == "walk";
+        walkController.reset();
+        eye    = planetCenter + glm::dvec3(0.0, 0.0, planetRadius * 3.0);
+        target = planetCenter;
+        nearZ  = planetRadius * 0.01;
+        farZ   = planetRadius * 12.0;
 
-    if (options.viewName == "globe")
-    {
-        // The eye sits ~51 degrees OFF the sun: the terminator crosses the
-        // anti-sun limb cleanly, relief reads through cast shading, and the
-        // sun-side disc photographs bright - the Blue Marble lighting. The
-        // off-axis floor matters as much as the ceiling: inside ~45 degrees
-        // the sun itself rides the frame's diagonal corner, and its glare
-        // halo plus the bloom response washes the whole off-sun side of the
-        // frame into a blown-out cream wall that reads as an overexposed
-        // backdrop instead of black space (real Earth imagery is made with
-        // the sun at the photographer's back; glare in frame is a lens
-        // artifact, not the scene). The eye stays lifted above the equator
-        // so the north polar cap and its sea ice stay in frame, and the
-        // bearing's longitude comes from the visible cap's climate census
-        // so the disc carries the seed's landmasses and biome variety
-        // instead of whatever hemisphere the sun-relative slot happens to
-        // hold.
-        const glm::dvec3 sun = environment.sun.enabled
-            ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
-            : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
-        const glm::dvec3 direction = pickMacroViewDirection(*planetCapability, planetHandle, sun,
-            0.55, 0.60, 0.35, 3.1);
-        eye                        = planetCenter + direction * planetRadius * 3.1;
-        target                     = planetCenter;
-    }
-    else if (options.viewName == "orbit")
-    {
-        // Mid-altitude view: the planet fills most of the frame while the
-        // limb and its atmosphere ring stay visible - the scale between the
-        // globe and the surface where range structure (or its absence) shows
-        // most clearly. The eye sits ~53 degrees off the sun so the ranges
-        // model through shading while most of the disc stays lit and the sun
-        // itself stays clear of the frame's corner (see the globe branch's
-        // glare note), and the bearing's longitude rides the same climate
-        // census as the globe.
-        const glm::dvec3 sun = environment.sun.enabled
-            ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
-            : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
-        const glm::dvec3 direction = pickMacroViewDirection(*planetCapability, planetHandle, sun,
-            0.55, 0.55, 0.30, 2.2);
-        eye                        = planetCenter + direction * planetRadius * 2.2;
-        target                     = planetCenter;
-    }
-    else if (walkView)
-    {
-        // First-person walk: spawn on green inland terrain (the same warm
-        // green window the surface view uses - it guarantees walkable,
-        // non-snowy, non-desert country), then let the walker stand on the
-        // terrain top at 1.7 m eye height. The probe height keeps the
-        // viewpoint's sight caps calibrated while the walker itself decides
-        // the exact standing height from the field.
-        Viewpoint viewpoint;
-        bool found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(2.0, 200.0), ProbePolicy::Inland,
-            60.0, sunDirection, viewpoint);
-        if (!found)
+        // Terrain windows shared by the surface view placements (they pin the
+        // biome/climate range a view's spot may sit in).
+        const auto elevationWindow = [](double low, double high)
         {
-            found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 800.0), ProbePolicy::Inland,
-                60.0, sunDirection, viewpoint);
-        }
-        if (!found)
+            return [low, high](double elevation, engine::planet::Biome, double, const planet::PlanetGenerationParams &)
+            { return elevation >= low && elevation <= high; };
+        };
+        // Warm-land windows: the biome check alone is not enough - the biome
+        // colors BLEND into snow below the climate snow line (and toward the
+        // freeze line), so a spot the enum calls "taiga" can still render
+        // half-white. Require strictly warm air and a spot clearly below the
+        // blended snow band so showcase views land on green/sandy terrain.
+        const auto warmLandWindow = [](double low, double high)
         {
-            std::cerr << "demo_planet: no usable walk spawn found for view 'walk'\n";
-            planetCapability->destroyPlanet(planetCapability->self, planetHandle);
-            host.stop();
-            return 1;
-        }
-        walkController = std::make_unique<PlanetWalkController>(params, planetCenter);
-        // Spawn facing the SUN (its horizon tangent at the spawn point): a
-        // standing eye keeps the sun disc, its glare wedge and the warm
-        // sun-side horizon in frame through the whole capture - the one
-        // composition cue every ground view was missing (the sun sat behind
-        // the camera, so the frame showed flat front-lit country and no
-        // light source at all).
-        const planet::Vec3 walkFacing = environment.sun.enabled
-            ? planet::Vec3{sunDirection.x - viewpoint.direction.x * planet::dot(sunDirection, viewpoint.direction),
-                sunDirection.y - viewpoint.direction.y * planet::dot(sunDirection, viewpoint.direction),
-                sunDirection.z - viewpoint.direction.z * planet::dot(sunDirection, viewpoint.direction)}
-            : planet::Vec3{0.0, 0.0, 0.0};
-        walkController->spawn(viewpoint.direction, walkFacing);
-        walkController->setAutoWalk(options.orbit);
-        eye    = walkController->eye();
-        target = walkController->target();
-        // Walking sees metres, not kilometres: a 0.1 m near plane keeps the
-        // ground under the feet from clipping while the far plane still
-        // reaches the horizon.
-        nearZ = 0.1;
-        farZ  = planetRadius * 2.0;
-        std::cout << "demo_planet: walk spawn - eye (" << eye.x << ", " << eye.y << ", " << eye.z << ") radius "
-                  << glm::length(eye - planetCenter) << "\n";
-    }
-    else
-    {
-        // Surface views: find a deterministic spot matching the view's
-        // terrain predicate, stand eyeHeight above the ground, look along the
-        // horizon toward the view's focus.
-        Viewpoint viewpoint;
-        bool found = false;
-        // View placement: biome-aware, climate-aware and sightline-checked so
-        // the view shows landscape rather than the nearest slope wall.
-
-        // Biome-pinned sample views (--biome <name>): the spot must sit in
-        // exactly that climate zone, so a capture photographs one biome's
-        // ground, flora and water. Water biomes stand over open sea (the
-        // seabed camera would render the underwater sheet edge-on); the
-        // beach keeps its shoreline framing; steep rock faces use the
-        // mountain probe rings.
-        engine::planet::Biome pinnedBiome = engine::planet::Biome::Ocean;
-        const bool biomePinned = !options.biomeName.empty() && biomeFromName(options.biomeName, pinnedBiome);
-        bool overWater = false;
-        if (biomePinned)
-        {
-            overWater = pinnedBiome == engine::planet::Biome::DeepOcean
-                || pinnedBiome == engine::planet::Biome::Ocean
-                || pinnedBiome == engine::planet::Biome::ShallowOcean;
-            const bool forestPin = pinnedBiome == engine::planet::Biome::TemperateForest
-                || pinnedBiome == engine::planet::Biome::SeasonalForest
-                || pinnedBiome == engine::planet::Biome::TropicalRainforest
-                || pinnedBiome == engine::planet::Biome::TemperateRainforest
-                || pinnedBiome == engine::planet::Biome::Taiga;
-            const double deepFloor = pinnedBiome == engine::planet::Biome::DeepOcean ? -8000.0
-                : (pinnedBiome == engine::planet::Biome::Ocean ? -1500.0 : -150.0);
-            // Forest pins stay off the coastal flats (their planed-off sand
-            // shelves photograph as a beach with stray trees instead of the
-            // biome's own country).
-            const double low = overWater ? deepFloor : (forestPin ? 80.0 : 0.5);
-            const double high = overWater ? (pinnedBiome == engine::planet::Biome::ShallowOcean ? -2.0 : 0.0)
-                : 3000.0;
-            const auto biomeWindow = [pinnedBiome, overWater, low, high](double elevation, engine::planet::Biome biome,
-                double temperature01, const planet::PlanetGenerationParams &params)
+            return [low, high](double elevation, engine::planet::Biome biome, double temperature01,
+                const planet::PlanetGenerationParams &params)
             {
-                if (biome != pinnedBiome || elevation < low || elevation > high)
+                if (elevation < low || elevation > high)
                 {
                     return false;
                 }
-                if (overWater)
+                if (biome == planet::Biome::Snow || biome == planet::Biome::Tundra || temperature01 <= 0.45)
                 {
-                    // A water-biome sample photographs the biome's WATER: the
-                    // sea freezes where the SEA-LEVEL temperature drops under
-                    // the freeze band, and a pin that lands there photographs
-                    // an ice sheet instead of deep-ocean water. The climate
-                    // sample's temperature01 is the SEABED's lapse-adjusted
-                    // value (depth warms it by |elevation|/lapse), so back out
-                    // the sea-level figure with the same lapse and require it
-                    // above the ice transition, plus a margin so the sample
-                    // sits in open water, not on the noisy ice edge.
-                    const double seaLevelTemperature = temperature01
-                        + elevation / std::max(1.0, params.temperatureLapseMeters);
-                    const double iceFree = params.seaIceTemperature
-                        + std::max(1.0e-4, params.seaIceTransition) + 0.02;
-                    return seaLevelTemperature > iceFree;
+                    return false;
                 }
-                if (pinnedBiome == engine::planet::Biome::Rock)
-                {
-                    // Rock's classifier identity is slope-only, but the
-                    // RENDERED look keys on the snow blend: a cliff face
-                    // above the climate's snow line photographs as a
-                    // snowfield with rock peeking out, not as the bare-rock
-                    // biome. Keep rock pins in warm cliff country - below
-                    // the blended snow band AND with the spot's own air warm
-                    // enough that the mid-field mesa rims (several hundred
-                    // meters above the eye) stay under the blend too, where
-                    // the same snowLine(t) rule the classifier and mesher use
-                    // leaves the strata reading as rock, not frost.
-                    const double snowLine = params.snowLineMeters * (0.25 + 0.75 * temperature01);
-                    const double snowBand = params.snowLineMeters * params.elevationBlendFraction;
-                    if (elevation >= snowLine - snowBand || temperature01 < 0.30)
-                    {
-                        return false;
-                    }
-                }
-                return true;
+                const double snowLine = params.snowLineMeters * (0.25 + 0.75 * temperature01);
+                const double snowBand = params.snowLineMeters * params.elevationBlendFraction;
+                return elevation < snowLine - snowBand;
             };
-            // All land pins use the Pinned policy (the Mountain spot gate
-            // additionally demands mountainFactor - a bare-rock face need not
-            // be a massif, and the neighborhood matching already prefers
-            // deep rock country).
-            const ProbePolicy policy = pinnedBiome == engine::planet::Biome::Beach && !overWater
-                ? ProbePolicy::Coastline
-                : ProbePolicy::Pinned;
-            // Water rings: the pinned water biome's own depth band qualifies
-            // everywhere (the probe loop accepts open-sea hops for water pins;
-            // the land+water composition gates stand down - open water IS the
-            // sample); land rings: the biome's own country qualifies everywhere.
-            const engine::planet::Biome *neighborhoodBiome = &pinnedBiome;
-            // The picker's probe height must match the camera's eye height
-            // below (140 m for land pins, 25 m over water) so the sight-fan
-            // wall caps clear exactly the walls the rendered frame will see.
-            found = pickViewpoint(*planetCapability, planetHandle, biomeWindow, overWater ? ProbePolicy::Coastline : policy,
-                overWater ? 25.0 : 140.0, sunDirection, viewpoint, neighborhoodBiome);
+        };
+        // Mountain-foothill window for the cliffs view: terraced mountain
+        // country is cold (the lapse rate takes 0.2-0.8 temperature01 off by
+        // 400-900 m of altitude), so a warm-land window zeroes nearly every
+        // mountain candidate - only tropical ranges survive, and those rarely
+        // carry terraced flanks at showcase scale. Taiga/tundra air is the
+        // honest climate on terraced massifs; the picker's own gates add the
+        // terraced-mountain requirement (it needs the relief sample, which this
+        // predicate signature has not).
+        const auto mountainFoothillWindow = [](double low, double high)
+        {
+            return [low, high](double elevation, engine::planet::Biome biome, double,
+                const planet::PlanetGenerationParams &)
+            {
+                return elevation >= low && elevation <= high
+                    && biome != planet::Biome::Snow && biome != planet::Biome::Beach;
+            };
+        };
+        const auto warmGreenLandWindow = [warmLandWindow](double low, double high)
+        {
+            auto warm = warmLandWindow(low, high);
+            return [warm](double elevation, engine::planet::Biome biome, double temperature01,
+                const planet::PlanetGenerationParams &params)
+            {
+                // TropicalRainforest is excluded: its canopy palette is the
+                // darkest row (linear albedo ~0.09-0.13) and a front-lit
+                // frame over it still photographs as a murky near-black
+                // sheet under the demo's linear exposure.
+                const bool green = biome == planet::Biome::Grassland
+                    || biome == planet::Biome::TemperateForest || biome == planet::Biome::SeasonalForest
+                    || biome == planet::Biome::TemperateRainforest
+                    || biome == planet::Biome::Taiga;
+                return warm(elevation, biome, temperature01, params) && green;
+            };
+        };
+
+            if (viewName == "globe")
+            {
+            // The eye sits ~51 degrees OFF the sun: the terminator crosses the
+            // anti-sun limb cleanly, relief reads through cast shading, and the
+            // sun-side disc photographs bright - the Blue Marble lighting. The
+            // off-axis floor matters as much as the ceiling: inside ~45 degrees
+            // the sun itself rides the frame's diagonal corner, and its glare
+            // halo plus the bloom response washes the whole off-sun side of the
+            // frame into a blown-out cream wall that reads as an overexposed
+            // backdrop instead of black space (real Earth imagery is made with
+            // the sun at the photographer's back; glare in frame is a lens
+            // artifact, not the scene). The eye stays lifted above the equator
+            // so the north polar cap and its sea ice stay in frame, and the
+            // bearing's longitude comes from the visible cap's climate census
+            // so the disc carries the seed's landmasses and biome variety
+            // instead of whatever hemisphere the sun-relative slot happens to
+            // hold.
+            const glm::dvec3 sun = environment.sun.enabled
+                ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
+                : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
+            const glm::dvec3 direction = pickMacroViewDirection(*planetCapability, planetHandle, sun,
+                0.55, 0.60, 0.35, 3.1);
+            eye                        = planetCenter + direction * planetRadius * 3.1;
+            target                     = planetCenter;
+        }
+            else if (viewName == "orbit")
+            {
+            // Mid-altitude view: the planet fills most of the frame while the
+            // limb and its atmosphere ring stay visible - the scale between the
+            // globe and the surface where range structure (or its absence) shows
+            // most clearly. The eye sits ~53 degrees off the sun so the ranges
+            // model through shading while most of the disc stays lit and the sun
+            // itself stays clear of the frame's corner (see the globe branch's
+            // glare note), and the bearing's longitude rides the same climate
+            // census as the globe.
+            const glm::dvec3 sun = environment.sun.enabled
+                ? glm::normalize(glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z))
+                : glm::normalize(glm::dvec3(0.38, 0.30, 0.87));
+            const glm::dvec3 direction = pickMacroViewDirection(*planetCapability, planetHandle, sun,
+                0.55, 0.55, 0.30, 2.2);
+            eye                        = planetCenter + direction * planetRadius * 2.2;
+            target                     = planetCenter;
+        }
+            else if (walkView)
+            {
+            // First-person walk: spawn on green inland terrain (the same warm
+            // green window the surface view uses - it guarantees walkable,
+            // non-snowy, non-desert country), then let the walker stand on the
+            // terrain top at 1.7 m eye height. The probe height keeps the
+            // viewpoint's sight caps calibrated while the walker itself decides
+            // the exact standing height from the field.
+            Viewpoint viewpoint;
+            bool found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(2.0, 200.0), ProbePolicy::Inland,
+                60.0, sunDirection, viewpoint);
             if (!found)
             {
-                // Pathological seeds (or water floors deeper than the gate's
-                // elevation window): retry with the elevation band widened -
-                // water pins keep the ice-free gate (the relaxed retry must
-                // not land the camera back on a frozen sea).
-                const auto relaxed = [pinnedBiome, overWater](double elevation, engine::planet::Biome biome,
+                found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 800.0), ProbePolicy::Inland,
+                    60.0, sunDirection, viewpoint);
+            }
+            if (!found)
+            {
+                std::cerr << "demo_planet: no usable walk spawn found for view 'walk'\n";
+                return false;
+            }
+            walkController = std::make_unique<PlanetWalkController>(params, planetCenter);
+            // Spawn facing the SUN (its horizon tangent at the spawn point): a
+            // standing eye keeps the sun disc, its glare wedge and the warm
+            // sun-side horizon in frame through the whole capture - the one
+            // composition cue every ground view was missing (the sun sat behind
+            // the camera, so the frame showed flat front-lit country and no
+            // light source at all).
+            const planet::Vec3 walkFacing = environment.sun.enabled
+                ? planet::Vec3{sunDirection.x - viewpoint.direction.x * planet::dot(sunDirection, viewpoint.direction),
+                    sunDirection.y - viewpoint.direction.y * planet::dot(sunDirection, viewpoint.direction),
+                    sunDirection.z - viewpoint.direction.z * planet::dot(sunDirection, viewpoint.direction)}
+                : planet::Vec3{0.0, 0.0, 0.0};
+            walkController->spawn(viewpoint.direction, walkFacing);
+            walkController->setAutoWalk(options.orbit);
+            eye    = walkController->eye();
+            target = walkController->target();
+            // Walking sees metres, not kilometres: a 0.1 m near plane keeps the
+            // ground under the feet from clipping while the far plane still
+            // reaches the horizon.
+            nearZ = 0.1;
+            farZ  = planetRadius * 2.0;
+            std::cout << "demo_planet: walk spawn - eye (" << eye.x << ", " << eye.y << ", " << eye.z << ") radius "
+                      << glm::length(eye - planetCenter) << "\n";
+        }
+        else
+        {
+            // Surface views: find a deterministic spot matching the view's
+            // terrain predicate, stand eyeHeight above the ground, look along the
+            // horizon toward the view's focus.
+            Viewpoint viewpoint;
+            bool found = false;
+            // View placement: biome-aware, climate-aware and sightline-checked so
+            // the view shows landscape rather than the nearest slope wall.
+
+            // Biome-pinned sample views (DEMO_BIOME): the spot must sit in
+            // exactly that climate zone, so a capture photographs one biome's
+            // ground, flora and water. Water biomes stand over open sea (the
+            // seabed camera would render the underwater sheet edge-on); the
+            // beach keeps its shoreline framing; steep rock faces use the
+            // mountain probe rings.
+            engine::planet::Biome pinnedBiome = engine::planet::Biome::Ocean;
+            const bool biomePinned = !options.biomeName.empty() && biomeFromName(options.biomeName, pinnedBiome);
+            bool overWater = false;
+            if (biomePinned)
+            {
+                overWater = pinnedBiome == engine::planet::Biome::DeepOcean
+                    || pinnedBiome == engine::planet::Biome::Ocean
+                    || pinnedBiome == engine::planet::Biome::ShallowOcean;
+                const bool forestPin = pinnedBiome == engine::planet::Biome::TemperateForest
+                    || pinnedBiome == engine::planet::Biome::SeasonalForest
+                    || pinnedBiome == engine::planet::Biome::TropicalRainforest
+                    || pinnedBiome == engine::planet::Biome::TemperateRainforest
+                    || pinnedBiome == engine::planet::Biome::Taiga;
+                const double deepFloor = pinnedBiome == engine::planet::Biome::DeepOcean ? -8000.0
+                    : (pinnedBiome == engine::planet::Biome::Ocean ? -1500.0 : -150.0);
+                // Forest pins stay off the coastal flats (their planed-off sand
+                // shelves photograph as a beach with stray trees instead of the
+                // biome's own country).
+                const double low = overWater ? deepFloor : (forestPin ? 80.0 : 0.5);
+                const double high = overWater ? (pinnedBiome == engine::planet::Biome::ShallowOcean ? -2.0 : 0.0)
+                    : 3000.0;
+                const auto biomeWindow = [pinnedBiome, overWater, low, high](double elevation, engine::planet::Biome biome,
                     double temperature01, const planet::PlanetGenerationParams &params)
                 {
-                    if (biome != pinnedBiome)
+                    if (biome != pinnedBiome || elevation < low || elevation > high)
                     {
                         return false;
                     }
                     if (overWater)
                     {
+                        // A water-biome sample photographs the biome's WATER: the
+                        // sea freezes where the SEA-LEVEL temperature drops under
+                        // the freeze band, and a pin that lands there photographs
+                        // an ice sheet instead of deep-ocean water. The climate
+                        // sample's temperature01 is the SEABED's lapse-adjusted
+                        // value (depth warms it by |elevation|/lapse), so back out
+                        // the sea-level figure with the same lapse and require it
+                        // above the ice transition, plus a margin so the sample
+                        // sits in open water, not on the noisy ice edge.
                         const double seaLevelTemperature = temperature01
                             + elevation / std::max(1.0, params.temperatureLapseMeters);
                         const double iceFree = params.seaIceTemperature
                             + std::max(1.0e-4, params.seaIceTransition) + 0.02;
                         return seaLevelTemperature > iceFree;
                     }
+                    if (pinnedBiome == engine::planet::Biome::Rock)
+                    {
+                        // Rock's classifier identity is slope-only, but the
+                        // RENDERED look keys on the snow blend: a cliff face
+                        // above the climate's snow line photographs as a
+                        // snowfield with rock peeking out, not as the bare-rock
+                        // biome. Keep rock pins in warm cliff country - below
+                        // the blended snow band AND with the spot's own air warm
+                        // enough that the mid-field mesa rims (several hundred
+                        // meters above the eye) stay under the blend too, where
+                        // the same snowLine(t) rule the classifier and mesher use
+                        // leaves the strata reading as rock, not frost.
+                        const double snowLine = params.snowLineMeters * (0.25 + 0.75 * temperature01);
+                        const double snowBand = params.snowLineMeters * params.elevationBlendFraction;
+                        if (elevation >= snowLine - snowBand || temperature01 < 0.30)
+                        {
+                            return false;
+                        }
+                    }
                     return true;
                 };
-                found = pickViewpoint(*planetCapability, planetHandle, relaxed,
-                    overWater ? ProbePolicy::Coastline : policy, overWater ? 25.0 : 140.0, sunDirection, viewpoint,
-                    neighborhoodBiome);
-            }
-            if (!found && pinnedBiome == engine::planet::Biome::Desert)
-            {
-                // Arid-belt substitution: on seeds whose dry belts never
-                // bottom out past the desert row, the honest arid sample is
-                // the HOT SAVANNA (the classifier's next-drier row), not a
-                // mislabeled green spot. The substitution is logged and the
-                // sample sheet documents it.
-                static const engine::planet::Biome kHotSavanna = engine::planet::Biome::Savanna;
-                const auto hotArid = [](double, engine::planet::Biome biome, double temperature01,
-                    const planet::PlanetGenerationParams &)
-                { return biome == engine::planet::Biome::Savanna && temperature01 > 0.55; };
-                found = pickViewpoint(*planetCapability, planetHandle, hotArid, ProbePolicy::Pinned, 140.0,
-                    sunDirection, viewpoint, &kHotSavanna);
+                // All land pins use the Pinned policy (the Mountain spot gate
+                // additionally demands mountainFactor - a bare-rock face need not
+                // be a massif, and the neighborhood matching already prefers
+                // deep rock country).
+                const ProbePolicy policy = pinnedBiome == engine::planet::Biome::Beach && !overWater
+                    ? ProbePolicy::Coastline
+                    : ProbePolicy::Pinned;
+                // Water rings: the pinned water biome's own depth band qualifies
+                // everywhere (the probe loop accepts open-sea hops for water pins;
+                // the land+water composition gates stand down - open water IS the
+                // sample); land rings: the biome's own country qualifies everywhere.
+                const engine::planet::Biome *neighborhoodBiome = &pinnedBiome;
+                // The picker's probe height must match the camera's eye height
+                // below (140 m for land pins, 25 m over water) so the sight-fan
+                // wall caps clear exactly the walls the rendered frame will see.
+                found = pickViewpoint(*planetCapability, planetHandle, biomeWindow, overWater ? ProbePolicy::Coastline : policy,
+                    overWater ? 25.0 : 140.0, sunDirection, viewpoint, neighborhoodBiome);
+                if (!found)
+                {
+                    // Pathological seeds (or water floors deeper than the gate's
+                    // elevation window): retry with the elevation band widened -
+                    // water pins keep the ice-free gate (the relaxed retry must
+                    // not land the camera back on a frozen sea).
+                    const auto relaxed = [pinnedBiome, overWater](double elevation, engine::planet::Biome biome,
+                        double temperature01, const planet::PlanetGenerationParams &params)
+                    {
+                        if (biome != pinnedBiome)
+                        {
+                            return false;
+                        }
+                        if (overWater)
+                        {
+                            const double seaLevelTemperature = temperature01
+                                + elevation / std::max(1.0, params.temperatureLapseMeters);
+                            const double iceFree = params.seaIceTemperature
+                                + std::max(1.0e-4, params.seaIceTransition) + 0.02;
+                            return seaLevelTemperature > iceFree;
+                        }
+                        return true;
+                    };
+                    found = pickViewpoint(*planetCapability, planetHandle, relaxed,
+                        overWater ? ProbePolicy::Coastline : policy, overWater ? 25.0 : 140.0, sunDirection, viewpoint,
+                        neighborhoodBiome);
+                }
+                if (!found && pinnedBiome == engine::planet::Biome::Desert)
+                {
+                    // Arid-belt substitution: on seeds whose dry belts never
+                    // bottom out past the desert row, the honest arid sample is
+                    // the HOT SAVANNA (the classifier's next-drier row), not a
+                    // mislabeled green spot. The substitution is logged and the
+                    // sample sheet documents it.
+                    static const engine::planet::Biome kHotSavanna = engine::planet::Biome::Savanna;
+                    const auto hotArid = [](double, engine::planet::Biome biome, double temperature01,
+                        const planet::PlanetGenerationParams &)
+                    { return biome == engine::planet::Biome::Savanna && temperature01 > 0.55; };
+                    found = pickViewpoint(*planetCapability, planetHandle, hotArid, ProbePolicy::Pinned, 140.0,
+                        sunDirection, viewpoint, &kHotSavanna);
+                    if (found)
+                    {
+                        std::cout << "demo_planet: biome 'desert' not present on this seed; capturing the hot arid savanna belt instead (the classifier's next-drier row)\n";
+                    }
+                }
+                if (!found && pinnedBiome == engine::planet::Biome::TemperateRainforest)
+                {
+                    // Wet-temperate substitution: this seed's moisture field
+                    // never crosses the rainforest row inside the temperate
+                    // bands (the census reports the zone absent), so the honest
+                    // wet-forest sample is the TEMPERATE FOREST - the same
+                    // temperature band's next-wetter realized row. The
+                    // substitution is logged and the sample sheet documents it.
+                    static const engine::planet::Biome kTemperateWoodland = engine::planet::Biome::TemperateForest;
+                    const auto wetTemperate = [](double, engine::planet::Biome biome, double temperature01,
+                        const planet::PlanetGenerationParams &)
+                    { return biome == engine::planet::Biome::TemperateForest && temperature01 > 0.30 && temperature01 < 0.50; };
+                    found = pickViewpoint(*planetCapability, planetHandle, wetTemperate, ProbePolicy::Pinned, 140.0,
+                        sunDirection, viewpoint, &kTemperateWoodland, 1);
+                    if (found)
+                    {
+                        std::cout << "demo_planet: biome 'temperate_rainforest' not present on this seed; capturing its temperate-forest neighbor instead (the same band's next-wetter realized row, a different pocket than the temperate_forest sample)\n";
+                    }
+                }
                 if (found)
                 {
-                    std::cout << "demo_planet: biome 'desert' not present on this seed; capturing the hot arid savanna belt instead (the classifier's next-drier row)\n";
+                    std::cout << "demo_planet: biome-pinned view '" << options.biomeName << "' - elevation "
+                              << (viewpoint.surfaceRadius - params.derivedSeaRadiusMeters) << " m\n";
                 }
             }
-            if (!found && pinnedBiome == engine::planet::Biome::TemperateRainforest)
+            else if (viewName == "coast")
             {
-                // Wet-temperate substitution: this seed's moisture field
-                // never crosses the rainforest row inside the temperate
-                // bands (the census reports the zone absent), so the honest
-                // wet-forest sample is the TEMPERATE FOREST - the same
-                // temperature band's next-wetter realized row. The
-                // substitution is logged and the sample sheet documents it.
-                static const engine::planet::Biome kTemperateWoodland = engine::planet::Biome::TemperateForest;
-                const auto wetTemperate = [](double, engine::planet::Biome biome, double temperature01,
-                    const planet::PlanetGenerationParams &)
-                { return biome == engine::planet::Biome::TemperateForest && temperature01 > 0.30 && temperature01 < 0.50; };
-                found = pickViewpoint(*planetCapability, planetHandle, wetTemperate, ProbePolicy::Pinned, 140.0,
-                    sunDirection, viewpoint, &kTemperateWoodland, 1);
-                if (found)
+                // A warm beach seen from just above the shoreline; the sea may
+                // (should) enter the frame. The window reaches 45 m: the coastal
+                // flattening damps most shoreline terrain toward the waterline,
+                // so a 2-18 m window nearly only ever matched tiny islets whose
+                // land hides under the camera.
+                found = pickViewpoint(*planetCapability, planetHandle, warmLandWindow(2.0, 45.0), ProbePolicy::Coastline, 120.0,
+                    sunDirection, viewpoint);
+            }
+            else if (viewName == "cliffs")
+            {
+                // Below the snow blend, at any elevation where terraced cliff
+                // faces and overhangs live (the snow blend rides the climate
+                // line, so the window adapts to temperature). Higher country than
+                // the other views: rock faces and strata need real relief. The
+                // picker adds the terraced-country gate (cliff mask at the spot).
+                found = pickViewpoint(*planetCapability, planetHandle, mountainFoothillWindow(150.0, 1200.0), ProbePolicy::Mountain, 140.0,
+                    sunDirection, viewpoint);
+            }
+            else // surface
+            {
+                // Rolling green hills: the SPOT itself must be a genuinely green
+                // biome (shrubland is excluded - its pale khaki albedo photographs
+                // as washed-out empty country), above the coastal-flatten band
+                // (its planed-off terrain photographs as an empty sheet) and
+                // below the snow blend. The floor stays at 10 m - not 60 - so the
+                // picker keeps every green candidate inside the sun's own golden
+                // band in play (a floor high enough to exclude the band's spots
+                // lands the view under a flatter, higher sun).
+                found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(10.0, 200.0), ProbePolicy::Inland, 140.0,
+                    sunDirection, viewpoint);
+            }
+            if (!found)
+            {
+                // Very flat or very mountainous seeds may lack a match; fall back
+                // to any land-ish point rather than failing the demo.
+                found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 2000.0), ProbePolicy::Coastline, 110.0,
+                    sunDirection, viewpoint);
+            }
+            if (!found)
+            {
+                // Last resort: the coastline gate (land AND water inside the
+                // sight fan) can fail on pathological seeds; an inland land view
+                // always beats an error exit.
+                found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 2000.0), ProbePolicy::Inland, 140.0,
+                    sunDirection, viewpoint);
+            }
+            if (!found)
+            {
+                std::cerr << "demo_planet: no usable viewpoint found for view '" << viewName << "'\n";
+                return false;
+            }
+
+            const glm::dvec3 direction(viewpoint.direction.x, viewpoint.direction.y, viewpoint.direction.z);
+            // Water biome samples stand over the SEA SURFACE (the spot radius is
+            // the seabed below it; standing there renders the water sheet from
+            // beneath, not the biome's water).
+            const glm::dvec3 position = planetCenter
+                + direction * (overWater ? params.derivedSeaRadiusMeters : viewpoint.surfaceRadius);
+            {
+                // Degenerate or non-finite tangent: fall back to the world-up
+                // cross product below.
+                const planet::Vec3 &stored = viewpoint.lookTangent;
+                const bool usable = std::isfinite(stored.x) && std::isfinite(stored.y) && std::isfinite(stored.z)
+                    && planet::length(stored) > 0.5;
+                if (!usable)
                 {
-                    std::cout << "demo_planet: biome 'temperate_rainforest' not present on this seed; capturing its temperate-forest neighbor instead (the same band's next-wetter realized row, a different pocket than the temperate_forest sample)\n";
+                    viewpoint.hasLookTangent = false;
                 }
             }
-            if (found)
+            // Tangent frame at the spot: coast views get the waterward direction
+            // the picker chose; everything else uses the world-up cross tangent.
+            const glm::dvec3 up       = direction;
+            glm::dvec3       tangent  = viewpoint.hasLookTangent
+                ? glm::dvec3(viewpoint.lookTangent.x, viewpoint.lookTangent.y, viewpoint.lookTangent.z)
+                : glm::normalize(glm::cross(up, glm::dvec3(0.0, 1.0, 0.0)));
+            if (viewpoint.hasLookTangent)
             {
-                std::cout << "demo_planet: biome-pinned view '" << options.biomeName << "' - elevation "
-                          << (viewpoint.surfaceRadius - params.derivedSeaRadiusMeters) << " m\n";
+                tangent = glm::normalize(tangent);
             }
-        }
-        else if (options.viewName == "coast")
-        {
-            // A warm beach seen from just above the shoreline; the sea may
-            // (should) enter the frame. The window reaches 45 m: the coastal
-            // flattening damps most shoreline terrain toward the waterline,
-            // so a 2-18 m window nearly only ever matched tiny islets whose
-            // land hides under the camera.
-            found = pickViewpoint(*planetCapability, planetHandle, warmLandWindow(2.0, 45.0), ProbePolicy::Coastline, 120.0,
-                sunDirection, viewpoint);
-        }
-        else if (options.viewName == "cliffs")
-        {
-            // Below the snow blend, at any elevation where terraced cliff
-            // faces and overhangs live (the snow blend rides the climate
-            // line, so the window adapts to temperature). Higher country than
-            // the other views: rock faces and strata need real relief. The
-            // picker adds the terraced-country gate (cliff mask at the spot).
-            found = pickViewpoint(*planetCapability, planetHandle, mountainFoothillWindow(150.0, 1200.0), ProbePolicy::Mountain, 140.0,
-                sunDirection, viewpoint);
-        }
-        else // surface
-        {
-            // Rolling green hills: the SPOT itself must be a genuinely green
-            // biome (shrubland is excluded - its pale khaki albedo photographs
-            // as washed-out empty country), above the coastal-flatten band
-            // (its planed-off terrain photographs as an empty sheet) and
-            // below the snow blend. The floor stays at 10 m - not 60 - so the
-            // picker keeps every green candidate inside the sun's own golden
-            // band in play (a floor high enough to exclude the band's spots
-            // lands the view under a flatter, higher sun).
-            found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(10.0, 200.0), ProbePolicy::Inland, 140.0,
-                sunDirection, viewpoint);
-        }
-        if (!found)
-        {
-            // Very flat or very mountainous seeds may lack a match; fall back
-            // to any land-ish point rather than failing the demo.
-            found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 2000.0), ProbePolicy::Coastline, 110.0,
-                sunDirection, viewpoint);
-        }
-        if (!found)
-        {
-            // Last resort: the coastline gate (land AND water inside the
-            // sight fan) can fail on pathological seeds; an inland land view
-            // always beats an error exit.
-            found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 2000.0), ProbePolicy::Inland, 140.0,
-                sunDirection, viewpoint);
-        }
-        if (!found)
-        {
-            std::cerr << "demo_planet: no usable viewpoint found for view '" << options.viewName << "'\n";
-            planetCapability->destroyPlanet(planetCapability->self, planetHandle);
-            host.stop();
-            return 1;
-        }
-
-        const glm::dvec3 direction(viewpoint.direction.x, viewpoint.direction.y, viewpoint.direction.z);
-        // Water biome samples stand over the SEA SURFACE (the spot radius is
-        // the seabed below it; standing there renders the water sheet from
-        // beneath, not the biome's water).
-        const glm::dvec3 position = planetCenter
-            + direction * (overWater ? params.derivedSeaRadiusMeters : viewpoint.surfaceRadius);
-        {
-            // Degenerate or non-finite tangent: fall back to the world-up
-            // cross product below.
-            const planet::Vec3 &stored = viewpoint.lookTangent;
-            const bool usable = std::isfinite(stored.x) && std::isfinite(stored.y) && std::isfinite(stored.z)
-                && planet::length(stored) > 0.5;
-            if (!usable)
+            else if (glm::length(tangent) < 0.5)
             {
-                viewpoint.hasLookTangent = false;
+                tangent = glm::normalize(glm::cross(up, glm::dvec3(1.0, 0.0, 0.0)));
             }
-        }
-        // Tangent frame at the spot: coast views get the waterward direction
-        // the picker chose; everything else uses the world-up cross tangent.
-        const glm::dvec3 up       = direction;
-        glm::dvec3       tangent  = viewpoint.hasLookTangent
-            ? glm::dvec3(viewpoint.lookTangent.x, viewpoint.lookTangent.y, viewpoint.lookTangent.z)
-            : glm::normalize(glm::cross(up, glm::dvec3(0.0, 1.0, 0.0)));
-        if (viewpoint.hasLookTangent)
-        {
-            tangent = glm::normalize(tangent);
-        }
-        else if (glm::length(tangent) < 0.5)
-        {
-            tangent = glm::normalize(glm::cross(up, glm::dvec3(1.0, 0.0, 0.0)));
-        }
 
-        // Camera eye heights MATCH the picker's altitudes: the sightline wall
-        // caps are calibrated at exactly these heights, and the old mismatch
-        // (camera at 220/420 m after the caps cleared 110/140 m) let walls
-        // the caps never saw fill the frame.
-        const double eyeHeight = overWater ? 25.0
-            : (options.viewName == "cliffs" ? 140.0 : (options.viewName == "surface" ? 140.0 : 120.0));
-        eye                    = position + up * eyeHeight;
-        // The cliffs view keeps its subject HALF the look-ahead of the other
-        // views: a terrace riser is a few tens of meters tall, and the
-        // angular LOD rule only resolves it (and the strata bands riding
-        // it) when the wall sits well inside a few hundred meters - at the
-        // other views' distance the wall's chunks mesh at voxels coarse
-        // enough to smooth the riser into a ramp.
-        const double lookAheadDistance = overWater ? 220.0
-            : (options.viewName == "cliffs" ? 380.0 : (options.viewName == "surface" ? 420.0 : 320.0));
-        // Exact pitch aim below the local horizontal - no terrain
-        // re-projection (when the ground ahead rises, a re-projected target
-        // snaps onto the hillside wall and fills the frame with slope) and
-        // no level tangent aim (it put the horizon mid-frame, the shoreline
-        // out of it, and half the frame black sky). Per-view pitch centers
-        // the subject: the coast shoreline sits ~15 deg below a 120 m eye at
-        // 320 m; surface ground at 420 m sits ~15.5 deg below a 140 m eye;
-        // the cliffs view aims near level AT the terraced wall the picker
-        // located (the wall rises ahead and fills the center frame).
-        const double aimPitchRadians = overWater ? 0.14
-            : (options.viewName == "cliffs" ? 0.12
-                : (options.viewName == "surface" ? 0.27 : 0.26)); // 8 / 6.9 / 15.5 / 14.9 deg
-        target = eye + (tangent * std::cos(aimPitchRadians) - up * std::sin(aimPitchRadians)) * lookAheadDistance;
-        // Ground views sit close to the terrain: a near plane scaled from
-        // the eye height (55-105 m) clipped everything inside it. 15 m keeps
-        // near clipping out of the frame while leaving depth precision for
-        // the 120 km far plane.
-        nearZ    = 15.0;
-        farZ     = planetRadius * 2.0;
-        // Open-framing guarantee: whatever the ground ahead does, the view
-        // pitch stays in a band that keeps the horizon in frame (deep enough
-        // to keep landscape in the lower half, shallow enough to keep sky
-        // above it). Cliff views may pitch deeper - the risers below the eye
-        // are the showcase. (The exact-pitch aim above already lands inside
-        // this band; the clamp is a safety net.)
-        const double maxPitchRadians = options.viewName == "cliffs" ? 0.52359877559829882 : 0.38397243543875248; // 30 deg / 22 deg
-        clampCameraPitch(eye, up, target, 0.08726646259971647, maxPitchRadians); // >= 5 deg down
-        std::cout << "demo_planet: view pose - eye (" << eye.x << ", " << eye.y << ", " << eye.z << ") radius "
-                  << glm::length(eye - planetCenter) << ", target (" << target.x << ", " << target.y << ", "
-                  << target.z << ")\n";
+            // Camera eye heights MATCH the picker's altitudes: the sightline wall
+            // caps are calibrated at exactly these heights, and the old mismatch
+            // (camera at 220/420 m after the caps cleared 110/140 m) let walls
+            // the caps never saw fill the frame.
+            const double eyeHeight = overWater ? 25.0
+                : (viewName == "cliffs" ? 140.0 : (viewName == "surface" ? 140.0 : 120.0));
+            eye                    = position + up * eyeHeight;
+            // The cliffs view keeps its subject HALF the look-ahead of the other
+            // views: a terrace riser is a few tens of meters tall, and the
+            // angular LOD rule only resolves it (and the strata bands riding
+            // it) when the wall sits well inside a few hundred meters - at the
+            // other views' distance the wall's chunks mesh at voxels coarse
+            // enough to smooth the riser into a ramp.
+            const double lookAheadDistance = overWater ? 220.0
+                : (viewName == "cliffs" ? 380.0 : (viewName == "surface" ? 420.0 : 320.0));
+            // Exact pitch aim below the local horizontal - no terrain
+            // re-projection (when the ground ahead rises, a re-projected target
+            // snaps onto the hillside wall and fills the frame with slope) and
+            // no level tangent aim (it put the horizon mid-frame, the shoreline
+            // out of it, and half the frame black sky). Per-view pitch centers
+            // the subject: the coast shoreline sits ~15 deg below a 120 m eye at
+            // 320 m; surface ground at 420 m sits ~15.5 deg below a 140 m eye;
+            // the cliffs view aims near level AT the terraced wall the picker
+            // located (the wall rises ahead and fills the center frame).
+            const double aimPitchRadians = overWater ? 0.14
+                : (viewName == "cliffs" ? 0.12
+                    : (viewName == "surface" ? 0.27 : 0.26)); // 8 / 6.9 / 15.5 / 14.9 deg
+            target = eye + (tangent * std::cos(aimPitchRadians) - up * std::sin(aimPitchRadians)) * lookAheadDistance;
+            // Ground views sit close to the terrain: a near plane scaled from
+            // the eye height (55-105 m) clipped everything inside it. 15 m keeps
+            // near clipping out of the frame while leaving depth precision for
+            // the 120 km far plane.
+            nearZ    = 15.0;
+            farZ     = planetRadius * 2.0;
+            // Open-framing guarantee: whatever the ground ahead does, the view
+            // pitch stays in a band that keeps the horizon in frame (deep enough
+            // to keep landscape in the lower half, shallow enough to keep sky
+            // above it). Cliff views may pitch deeper - the risers below the eye
+            // are the showcase. (The exact-pitch aim above already lands inside
+            // this band; the clamp is a safety net.)
+            const double maxPitchRadians = viewName == "cliffs" ? 0.52359877559829882 : 0.38397243543875248; // 30 deg / 22 deg
+            clampCameraPitch(eye, up, target, 0.08726646259971647, maxPitchRadians); // >= 5 deg down
+            std::cout << "demo_planet: view pose - eye (" << eye.x << ", " << eye.y << ", " << eye.z
+                      << ") radius " << glm::length(eye - planetCenter) << ", target (" << target.x << ", "
+                      << target.y << ", " << target.z << ")\n";
+        }
+        return true;
+    };
+
+    if (!placeView(activeView))
+    {
+        planetCapability->destroyPlanet(planetCapability->self, planetHandle);
+        host.stop();
+        return 1;
     }
 
     // ---- window / renderer / camera ------------------------------------------------
@@ -978,10 +992,13 @@ int main(int argc, char **argv)
     if (windowedBackend)
     {
         std::cout << "demo_planet: controls - mouse looks, WASD moves, Space jumps (walk) or rises, Ctrl descends,\n"
-                     "      Shift sprints, arrows look, Left Alt toggles the cursor, Escape quits\n";
+                     "      Shift sprints, arrows look, Left Alt toggles the cursor, F12 saves a screenshot,\n"
+                     "      1..6 switch views (globe/orbit/coast/cliffs/surface/walk - spawn and camera pose),\n"
+                     "      Escape quits\n";
         if (options.orbit)
         {
-            std::cout << "demo_planet: --orbit drives the camera automatically; disable it for manual movement\n";
+            std::cout << "demo_planet: the automated camera path (DEMO_ORBIT=1) drives the camera; unset it for "
+                         "manual movement\n";
         }
     }
 
@@ -995,7 +1012,7 @@ int main(int argc, char **argv)
     }
     renderCapability.setViewport(renderCapability.self, rendererHandle, framebufferWidth, framebufferHeight);
 
-    const bool macroView = options.viewName == "globe" || options.viewName == "orbit";
+    bool macroView = activeView == "globe" || activeView == "orbit";
     glm::dvec3 initialCameraUp = macroView ? glm::dvec3(0.0, 1.0, 0.0)
                                           : glm::normalize(eye - planetCenter);
     if (macroView
@@ -1005,19 +1022,23 @@ int main(int argc, char **argv)
         initialCameraUp = glm::normalize(glm::dvec3(0.05, 0.9987, 0.0));
     }
 
-    // Camera movement scales with the view: close terrain uses walking/flying
-    // speeds, while globe/orbit views need larger world-unit steps. The walk
-    // view leaves the speed untouched - the walker owns movement, the camera
-    // only carries the pose.
-    const float cameraMoveSpeed = macroView
-        ? std::clamp(static_cast<float>(planetRadius * (options.viewName == "globe" ? 0.05 : 0.025)), 250.0f, 50000.0f)
-        : std::clamp(static_cast<float>(planetRadius * 0.001), 12.0f, 300.0f);
+    // Camera movement scales with the view: ground views fly at
+    // landscape-camera speed so the streaming selection keeps up with the
+    // eye (the module builds terrain at its own rate - a teleport-speed eye
+    // outruns every build pool and only ever sees the coarse fallback ring),
+    // while globe/orbit views need larger world-unit steps. The walk view
+    // leaves the speed untouched - the walker owns movement, the camera only
+    // carries the pose. Both values re-apply through applyCameraView below
+    // when the in-app view keys switch views.
+    float cameraMoveSpeed = macroView
+        ? std::clamp(static_cast<float>(planetRadius * (activeView == "globe" ? 0.05 : 0.025)), 250.0f, 50000.0f)
+        : 24.0f;
 
     // Field of view per view family (walk leans wide; globe frames the whole
     // planet; surface views lean wide for ground context). Hoisted so the
     // texture gate below and the camera share one source.
-    const float cameraFovYDegrees = walkView ? 70.0f
-        : (macroView ? (options.viewName == "orbit" ? 55.0f : 42.0f) : 65.0f);
+    float cameraFovYDegrees = walkView ? 70.0f
+        : (macroView ? (activeView == "orbit" ? 55.0f : 42.0f) : 65.0f);
 
     const camera::CameraHandle cameraHandle = [&]()
     {
@@ -1075,7 +1096,7 @@ int main(int argc, char **argv)
     // warmup frames are dropped, so a warmup value just needs to be large
     // enough for the view's chunk population on the current machine.
     std::uint64_t warmupRemaining = options.warmupFrames;
-    // --settle-seconds window: while it is open the warmup budget is not
+    // DEMO_SETTLE_SECONDS window: while it is open the warmup budget is not
     // consumed (see the warmup block in the main loop). Ground views want
     // thousands of chunks that deliver at the build pool's own rate, so a
     // frame budget large enough for them depends on the machine's build
@@ -1095,24 +1116,24 @@ int main(int argc, char **argv)
     const double        frameDelta     = 1.0 / 30.0;
     if (!options.screenshotFrameSet)
     {
-        // Without --screenshot-frame the capture lands on the last rendered
+        // Without DEMO_SCREENSHOT_FRAME the capture lands on the last rendered
         // frame (0 remains a valid explicit index through the boolean).
         options.screenshotFrame = totalFrames - 1;
     }
 
-    std::cout << "demo_planet: view '" << options.viewName << "', " << totalFrames << " frames ("
+    std::cout << "demo_planet: view '" << activeView << "', " << totalFrames << " frames ("
               << options.warmupFrames << " warmup";
     if (settleWindowOpen)
     {
         std::cout << " + settle window up to " << options.settleSeconds << "s";
     }
     std::cout << ")\n";
-    // A --screenshot-frame beyond the run's frame count can never capture;
+    // A DEMO_SCREENSHOT_FRAME beyond the run's frame count can never capture;
     // say so upfront (the lumen demo reports the same condition) instead of
     // finishing silently without the requested file.
     if (!options.screenshotPath.empty() && options.screenshotFrame >= totalFrames)
     {
-        std::cout << "demo_planet: warning - --screenshot-frame " << options.screenshotFrame
+        std::cout << "demo_planet: warning - DEMO_SCREENSHOT_FRAME " << options.screenshotFrame
                   << " is beyond this run of " << totalFrames << " frames; no screenshot will be taken\n";
     }
     // Warmup exhaustion record: a budget that runs out before the visible
@@ -1143,8 +1164,8 @@ int main(int argc, char **argv)
     // demo still runs from a checkout without the asset directory.
     //
     // Each group's multiply only applies to chunks within the gate distance:
-    // one texture tile must still span at least --texture-tile-pixels screen
-    // pixels. The CPU sampler filters through a full trilinear mip chain, so
+    // one texture tile must still span at least DEMO_TEXTURE_TILE_PIXELS
+    // screen pixels. The CPU sampler filters through a full trilinear mip chain, so
     // a tile minified to a handful of pixels still contributes its macro
     // variation instead of shimmering. The gate follows from the viewport
     // height and the view's field of view (the tile's projected pixel span
@@ -1168,23 +1189,34 @@ int main(int argc, char **argv)
     // height keeps the gate calibrated for a viewport the frame no longer
     // renders into. Falls back to the configured height only while the
     // window cannot be queried (no handle yet, or a backend without sizes).
-    std::uint32_t viewportHeightPixels = 0u;
-    std::uint32_t viewportWidthPixels  = 0u;
-    if (windowCapability.getSize != nullptr && windowHandle != window::invalidWindow)
+    // The gates recompute with the active view's framing (applyCameraView
+    // re-runs this after the in-app view keys switch views, because the
+    // view families carry different fields of view).
+    double groundTextureGateMeters = 0.0;
+    double rockTextureGateMeters = 0.0;
+    double groundReliefGateMeters = 0.0;
+    const auto recomputeTextureGates = [&]()
     {
-        windowCapability.getSize(windowCapability.self, windowHandle, &viewportWidthPixels, &viewportHeightPixels);
-    }
-    if (viewportHeightPixels == 0u)
-    {
-        viewportHeightPixels = static_cast<std::uint32_t>(
-            context.configurationIntegerInSection("window", "height").value_or(540));
-    }
-    const double viewportHeightMeters = static_cast<double>(viewportHeightPixels);
-    const double tanHalfFovY = std::tan(glm::radians(static_cast<double>(cameraFovYDegrees)) * 0.5);
-    const double groundTextureGateMeters = params.terrainTextureTileMetersGround * viewportHeightMeters
-        / (2.0 * tanHalfFovY * textureMinTilePixels);
-    const double rockTextureGateMeters = params.terrainTextureTileMetersRock * viewportHeightMeters
-        / (2.0 * tanHalfFovY * textureMinTilePixels);
+        std::uint32_t viewportHeightPixels = 0u;
+        std::uint32_t viewportWidthPixels  = 0u;
+        if (windowCapability.getSize != nullptr && windowHandle != window::invalidWindow)
+        {
+            windowCapability.getSize(windowCapability.self, windowHandle, &viewportWidthPixels, &viewportHeightPixels);
+        }
+        if (viewportHeightPixels == 0u)
+        {
+            viewportHeightPixels = static_cast<std::uint32_t>(
+                context.configurationIntegerInSection("window", "height").value_or(540));
+        }
+        const double viewportHeightMeters = static_cast<double>(viewportHeightPixels);
+        const double tanHalfFovY = std::tan(glm::radians(static_cast<double>(cameraFovYDegrees)) * 0.5);
+        groundTextureGateMeters = params.terrainTextureTileMetersGround * viewportHeightMeters
+            / (2.0 * tanHalfFovY * textureMinTilePixels);
+        rockTextureGateMeters = params.terrainTextureTileMetersRock * viewportHeightMeters
+            / (2.0 * tanHalfFovY * textureMinTilePixels);
+        groundReliefGateMeters = groundTextureGateMeters * 0.30;
+    };
+    recomputeTextureGates();
     {
         const std::filesystem::path textureDirectory
             = engine::executableDirectory() / "assets" / "textures";
@@ -1265,7 +1297,7 @@ int main(int argc, char **argv)
         rockVariants.push_back(loadVariant("rocky_terrain_02_diff_1k.jpg", "rocky_terrain_02_nor_gl_1k.jpg"));
         rockVariants.push_back(loadVariant("rock_face_diff_1k.jpg", "rock_face_nor_gl_1k.jpg"));
         chunkRenderer.setTerrainTextures(groundVariants, rockVariants,
-            groundTextureGateMeters, rockTextureGateMeters, groundTextureGateMeters * 0.30);
+            groundTextureGateMeters, rockTextureGateMeters, groundReliefGateMeters);
     }
     // The world-anchored cloud shell bakes the pbr environment's lighting
     // into its vertex colors and draws unlit (see BackdropLighting); the
@@ -1300,9 +1332,52 @@ int main(int argc, char **argv)
         environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
     chunkRenderer.ensureCirrusLayer(
         environment.sun.enabled ? glm::dvec3(sunDirection.x, sunDirection.y, sunDirection.z) : glm::dvec3(0.0));
-    chunkRenderer.setCloudLayerVisible(macroView);
-    chunkRenderer.setSkyCloudLayerVisible(!macroView);
     scatterSystem.initialize(renderCapability, rendererHandle, engine::executableDirectory() / "assets" / "textures");
+
+    // Re-applies every view-derived setting for the active view: camera
+    // framing and speed, control mode, pose, backdrop visibility and the
+    // terrain texture gates. The startup placement and the in-app 1..6 view
+    // switch both route through here - a switched view is configured exactly
+    // like a fresh start, and the streaming selection, the scatter system
+    // and the terrain pipeline run identically in every view (the view
+    // changes spawn and camera pose only; the streaming voxel cutoff stays
+    // the one staged at startup, a generation parameter like the seed).
+    const auto applyCameraView = [&]()
+    {
+        walkView  = activeView == "walk";
+        macroView = activeView == "globe" || activeView == "orbit";
+        cameraFovYDegrees = walkView ? 70.0f
+            : (macroView ? (activeView == "orbit" ? 55.0f : 42.0f) : 65.0f);
+        cameraMoveSpeed = macroView
+            ? std::clamp(static_cast<float>(planetRadius * (activeView == "globe" ? 0.05 : 0.025)), 250.0f, 50000.0f)
+            : 24.0f;
+        cameraCapability.setControlMode(cameraCapability.self, cameraHandle,
+            walkView ? camera::CameraControlMode::Fixed : camera::CameraControlMode::Fly);
+        cameraCapability.setMovementSpeed(cameraCapability.self, cameraHandle, cameraMoveSpeed);
+        cameraCapability.setProjection(cameraCapability.self, cameraHandle, camera::ProjectionType::Perspective,
+            cameraFovYDegrees, static_cast<float>(nearZ), static_cast<float>(farZ));
+        glm::dvec3 cameraUp = macroView ? glm::dvec3(0.0, 1.0, 0.0) : glm::normalize(eye - planetCenter);
+        if (macroView
+            && glm::abs(glm::dot(glm::normalize(eye - planetCenter), glm::dvec3(0.0, 1.0, 0.0))) > 0.99)
+        {
+            // Avoid a singular look-at basis when the view starts near a pole.
+            cameraUp = glm::normalize(glm::dvec3(0.05, 0.9987, 0.0));
+        }
+        const glm::dvec3 poseShift = cameraRelativeShift(eye - planetCenter);
+        const float poseEye[3] = {static_cast<float>(eye.x - poseShift.x), static_cast<float>(eye.y - poseShift.y),
+            static_cast<float>(eye.z - poseShift.z)};
+        const float poseTarget[3] = {static_cast<float>(target.x - poseShift.x),
+            static_cast<float>(target.y - poseShift.y), static_cast<float>(target.z - poseShift.z)};
+        const float poseUp[3] = {static_cast<float>(cameraUp.x), static_cast<float>(cameraUp.y),
+            static_cast<float>(cameraUp.z)};
+        cameraCapability.setLookAt(cameraCapability.self, cameraHandle, poseEye, poseTarget, poseUp);
+        chunkRenderer.setCloudLayerVisible(macroView);
+        chunkRenderer.setSkyCloudLayerVisible(!macroView);
+        recomputeTextureGates();
+        chunkRenderer.setTerrainTextureGates(
+            groundTextureGateMeters, rockTextureGateMeters, groundReliefGateMeters);
+    };
+    applyCameraView();
 
     // ---- frame loop -------------------------------------------------------------------
     std::uint64_t framesRendered = 0;
@@ -1316,6 +1391,12 @@ int main(int argc, char **argv)
     }
     bool          screenshotTaken = false;
     double        orbitAngle      = 0.0;
+    // Interactive keys: F12 queues a timestamped screenshot of the frame
+    // being rendered, 1..6 switch views (processed right after the event
+    // drain, at a point where the placement and camera can be re-applied).
+    bool          screenshotQueued = false;
+    std::uint64_t screenshotIndex  = 0;
+    std::string   pendingViewSwitch;
     // Simulation clock for the orbital model (moon_orbital_period_seconds):
     // capture runs drive it by the fixed frame delta, so the companion's
     // position is a pure function of the frame index there.
@@ -1362,6 +1443,40 @@ int main(int argc, char **argv)
                         renderCapability.setViewport(renderCapability.self, rendererHandle, framebufferWidth, framebufferHeight);
                     }
                 }
+                else if (event.kind == window::WindowEventKind::KeyPressed)
+                {
+                    // The in-app controls that are not camera movement: the
+                    // screenshot key and the view keys (the camera input
+                    // ignores them).
+                    if (event.key == window::Key::F12)
+                    {
+                        screenshotQueued = true;
+                    }
+                    else if (event.key == window::Key::Num1)
+                    {
+                        pendingViewSwitch = "globe";
+                    }
+                    else if (event.key == window::Key::Num2)
+                    {
+                        pendingViewSwitch = "orbit";
+                    }
+                    else if (event.key == window::Key::Num3)
+                    {
+                        pendingViewSwitch = "coast";
+                    }
+                    else if (event.key == window::Key::Num4)
+                    {
+                        pendingViewSwitch = "cliffs";
+                    }
+                    else if (event.key == window::Key::Num5)
+                    {
+                        pendingViewSwitch = "surface";
+                    }
+                    else if (event.key == window::Key::Num6)
+                    {
+                        pendingViewSwitch = "walk";
+                    }
+                }
                 else
                 {
                     cameraInput.handleWindowEvent(event);
@@ -1378,6 +1493,57 @@ int main(int argc, char **argv)
         {
             std::cout << "demo_planet: escape pressed\n";
             break;
+        }
+
+        // In-app view switch (1..6): respawn at the new view's placement and
+        // re-apply the camera framing. The streaming selection, the scatter
+        // system and the terrain pipeline keep running untouched - a view
+        // switch changes spawn and camera pose only.
+        if (!pendingViewSwitch.empty() && pendingViewSwitch != activeView)
+        {
+            const std::string previousView = activeView;
+            activeView = pendingViewSwitch;
+            std::cout << "demo_planet: switching to view '" << activeView << "'\n";
+            if (placeView(activeView))
+            {
+                applyCameraView();
+                scatterSystem.forceRebuild();
+                orbitAngle = 0.0;
+                std::cout << "demo_planet: view switched to '" << activeView
+                          << "' (spawn and camera pose; the streaming voxel cutoff stays the one staged at startup)\n";
+            }
+            else
+            {
+                std::cout << "demo_planet: keeping view '" << previousView
+                          << "' (the requested view found no usable spawn)\n";
+                activeView = previousView;
+                placeView(previousView);
+                applyCameraView();
+                scatterSystem.forceRebuild();
+            }
+        }
+        pendingViewSwitch.clear();
+
+        // F12 exports the frame this update renders (a headless window
+        // exports its surface directly; a Vulkan renderer defers the readback
+        // to that frame's retirement) as a timestamped PNG in the working
+        // directory.
+        if (screenshotQueued)
+        {
+            screenshotQueued = false;
+            std::string screenshotWrittenPath;
+            const std::string request
+                = demo::environment::timestampedScreenshotPath("screenshot_planet", screenshotIndex++);
+            if (demo::harness::exportScreenshot(context, windowCapability, windowHandle, renderCapability,
+                    rendererHandle, request, screenshotWrittenPath))
+            {
+                std::cout << "demo_planet: F12 screenshot written to " << screenshotWrittenPath << "\n";
+            }
+            else
+            {
+                std::cerr << "demo_planet: F12 screenshot export failed for backend '" << windowBackendName
+                          << "'\n";
+            }
         }
 
         const auto   now               = std::chrono::steady_clock::now();
@@ -1413,8 +1579,8 @@ int main(int argc, char **argv)
         {
             // Deterministic automatic orbit mode remains available for captures
             // and headless runs; normal windowed runs use live keyboard/mouse input.
-            orbitAngle += deltaSeconds * (options.viewName == "globe" ? 0.05 : 0.10);
-            if (options.viewName == "globe")
+            orbitAngle += deltaSeconds * (activeView == "globe" ? 0.05 : 0.10);
+            if (activeView == "globe")
             {
                 const glm::dvec3 axis(0.0, 1.0, 0.0);
                 const glm::dvec3 offset = eye - planetCenter;
@@ -1499,7 +1665,7 @@ int main(int argc, char **argv)
             // floor interval in that case, and ends early once the visible
             // set is fully built (the streaming pool is idle), so a large
             // warmup budget costs nothing on an already-complete view. The
-            // --settle-seconds window suspends the budget's consumption for
+            // The DEMO_SETTLE_SECONDS window suspends the budget's consumption for
             // its duration: warmup then runs until the visible set is
             // complete or the window closes, whichever comes first, and the
             // frame budget (with its exhaustion warning) resumes after it.
@@ -1755,7 +1921,7 @@ int main(int argc, char **argv)
             std::cout << "demo_planet: warning - the warmup budget ran out with "
                       << warmupExhaustionStats.chunksReady << "/" << warmupExhaustionStats.chunksVisible
                       << " visible chunks ready; the first rendered frames and any early screenshot"
-                      << " may show streaming gaps (raise --warmup for a complete capture)";
+                      << " may show streaming gaps (raise DEMO_WARMUP for a complete capture)";
             if (completedLater)
             {
                 std::cout << "; the set finished building during the rendered frames (now "

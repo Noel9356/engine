@@ -1,11 +1,11 @@
-// CLI options of the lighting demo (parsed after the application-level
-// options; see applicationCommandLineUsage for those).
+// Environment-variable options of the lighting demo (see
+// lighting_demo_options.cpp): the demo takes no command-line arguments, and
+// the headless/capture hooks ride DEMO_* variables instead.
 
 #pragma once
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
 namespace demo::lighting_demo
 {
@@ -30,8 +30,9 @@ struct LightingDemoOptions
     std::string   frameTimesPath;
 };
 
-const char *lightingOptionsUsage() noexcept;
-bool parseLightingOptions(
-    const std::vector<std::string> &arguments, LightingDemoOptions &options, std::string &outError);
+// Reads the demo's DEMO_* environment variables into the options (unset
+// variables keep the defaults; an invalid value fills outError naming the
+// variable).
+bool lightingDemoOptionsFromEnvironment(LightingDemoOptions &options, std::string &outError);
 
 } // namespace demo::lighting_demo

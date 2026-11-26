@@ -1,8 +1,10 @@
 # demo_planet: procedural planet generation test harness configuration.
 #
-# Headless by default (CI / screenshot runs): the window and renderer run on
-# their CPU backends and the demo exports PPM screenshots. For a windowed run
-# pass --set window.backend=glfw --set renderer.backend=vulkan (or edit here).
+# The window and renderer backends are chosen from the hardware: machines with
+# a display and a Vulkan-capable GPU run the windowed GLFW + Vulkan path, and
+# machines without fall back to the CPU backends (the automatic selection
+# prints which one is active). Force a specific backend by setting
+# [window] backend / [renderer] backend here.
 # The renderer's own LOD index-striding is disabled: the planet module does
 # its own octree LOD and the striding shreds dense terrain meshes.
 
@@ -38,10 +40,10 @@ sun_intensity     = 3.8
 [planet]
 # The demo's planet: this section overlays the planet module's own
 # configuration (the harness forwards it as staged kernel overrides before
-# the command line's --set list, so an explicit --set planet.<key>=<value>
-# still wins). Seed and radius can also be overridden per run with --seed /
-# --radius (capability-level overrides). Deep screen-space LOD ground views
-# pair with the demo's --warmup N (render-free build frames).
+# the DEMO_SET entries, so an explicit DEMO_SET planet.<key>=<value>
+# still wins). Seed and radius can also be overridden per run with DEMO_SEED /
+# DEMO_RADIUS (capability-level overrides). Deep screen-space LOD ground views
+# pair with the demo's DEMO_WARMUP (render-free build frames).
 seed                   = 1337
 radius_meters          = 6371000.0
 # Earth's volumetric mean radius (6,371 km): the module's metric close-range
@@ -69,6 +71,13 @@ cloud_shadow_sun_direction = [0.55, 0.34, 0.76]
 # billow lobes run at the module's full strength (the cauliflower clumping
 # the per-pixel read resolves). A very narrow band smears the whole deck;
 # a very wide one erases the bank boundaries.
+# Coverage runs under the module's 0.42 default: the showcase's weather and
+# convective organization piles the provinces' partial cover on top of the
+# base amount, and the sum reads from orbit as a near-continuous shroud that
+# buries the land/ocean contrast (the orbital view is the one frame where
+# the whole field shows at once). 0.30 keeps pronounced banks with real gaps
+# between the systems; the ground sky clears by the same share.
+cloud_coverage_amount = 0.30
 cloud_edge_softness   = 0.22
 cloud_billow_strength = 0.72
 cloud_detail_strength = 0.26
@@ -131,7 +140,6 @@ aerial_perspective_asymptote     = 0.75
 vegetation_grass_radius_meters   = 90.0
 
 [renderer]
-backend     = "headless"
 clear_color = [0.012, 0.014, 0.028, 1.0]
 # Presentation bloom rides its OWN defaults softened for general scenes
 # (threshold 0.8 in linear: only near-white pixels glow). This showcase
@@ -173,6 +181,5 @@ sun_shadows = false
 trustModules = ["renderer"]
 
 [window]
-backend = "headless"
 height  = 540
 width   = 960

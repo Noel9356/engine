@@ -498,6 +498,17 @@ void PlanetChunkRenderer::setTerrainTextures(const std::vector<TerrainTextureVar
         ? groundReliefMaxDistanceMeters * groundReliefMaxDistanceMeters : 0.0;
 }
 
+void PlanetChunkRenderer::setTerrainTextureGates(double groundTextureMaxDistanceMeters,
+    double rockTextureMaxDistanceMeters, double groundReliefMaxDistanceMeters)
+{
+    groundTextureMaxDistanceMetersSquared_ = groundTextureMaxDistanceMeters > 0.0
+        ? groundTextureMaxDistanceMeters * groundTextureMaxDistanceMeters : 0.0;
+    rockTextureMaxDistanceMetersSquared_ = rockTextureMaxDistanceMeters > 0.0
+        ? rockTextureMaxDistanceMeters * rockTextureMaxDistanceMeters : 0.0;
+    groundReliefMaxDistanceMetersSquared_ = groundReliefMaxDistanceMeters > 0.0
+        ? groundReliefMaxDistanceMeters * groundReliefMaxDistanceMeters : 0.0;
+}
+
 void PlanetChunkRenderer::destroyChunkMeshes(ChunkMeshHandles &handles)
 {
     if (renderer_ == nullptr || rendererHandle_ == renderer::invalidRenderer)
@@ -1496,7 +1507,7 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
                 : 1.0;
             const double upMix = direction.y * 0.5 + 0.5;
             const glm::dvec3 ambient = glm::mix(ambientGround, ambientSky, upMix);
-            const double nightGate = planet::smoothstep(-0.10, 0.06, sunDot);
+            const double nightGate = planet::smoothstep(0.0, 0.12, sunDot);
             glm::dvec3 light = ambient * nightGate + sunRadiance * sunDot;
             // Terminator silver lining: banks whose tops graze the sun ray
             // forward-scatter strongly, so the cloud rims near the terminator
@@ -1504,7 +1515,7 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
             // is the twilight band itself - the lining fades OUT through the
             // terminator (a lining that survived into the night would light
             // the dark side's banks like a second sun).
-            const double silver = 0.55 * planet::smoothstep(-0.02, 0.10, sunDot)
+            const double silver = 0.55 * planet::smoothstep(0.0, 0.08, sunDot)
                 * (1.0 - planet::smoothstep(0.10, 0.35, sunDot))
                 * std::pow(coverage, 0.5);
             light += silver * glm::dvec3(1.0, 0.78, 0.55);
@@ -1517,7 +1528,19 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
                 cloudTexturePixels_[index + static_cast<std::size_t>(channel)]
                     = static_cast<std::uint8_t>(std::clamp(value, 0.0, 1.0) * 255.0);
             }
-            cloudTexturePixels_[index + 3u] = static_cast<std::uint8_t>(coverage * 255.0);
+            // The shell's alpha runs the blurred coverage through a clear-band
+            // ramp before it blends: the coverage field's mid values are the
+            // weather provinces' own partial cover, and mapping them linearly
+            // hangs a semi-opaque haze over most of the disc from orbit - a
+            // frosted marble that buries the land/ocean contrast under the
+            // cloud story. The ramp keeps sub-band coverage CLEAR (the gaps
+            // real Earth photography shows between cloud systems), holds the
+            // wisps as thin partial banks inside the band, and leaves bank
+            // cores fully opaque; the ground deck's own bake
+            // (coverageTexelGround) is a separate consumer and keeps its
+            // softer mapping.
+            const double shellAlpha = planet::smoothstep(0.16, 0.60, coverage);
+            cloudTexturePixels_[index + 3u] = static_cast<std::uint8_t>(shellAlpha * 255.0);
         }
     }
 

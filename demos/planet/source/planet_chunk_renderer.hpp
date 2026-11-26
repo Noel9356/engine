@@ -82,6 +82,13 @@ public:
         const std::vector<TerrainTextureVariant> &rockVariants, double groundTextureMaxDistanceMeters,
         double rockTextureMaxDistanceMeters, double groundReliefMaxDistanceMeters);
 
+    // Updates the texture gate distances after the initial setTerrainTextures
+    // registration: the in-app view switch re-applies the framing (a view
+    // family carries its own field of view, which rescales every gate). The
+    // variants and their mean compensations stay as registered.
+    void setTerrainTextureGates(double groundTextureMaxDistanceMeters,
+        double rockTextureMaxDistanceMeters, double groundReliefMaxDistanceMeters);
+
     // Installs the environment lighting the world-anchored cloud shell bakes
     // into its vertex colors (see BackdropLighting). Called before
     // ensureCloudLayer; the shell's material draws unlit, so the per-pixel

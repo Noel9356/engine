@@ -26,8 +26,9 @@ namespace glfw_keys
 {
 
 // (engine Key, GLFW key code) pairs; every tracked key other than Unknown.
-// Slash is the last tracked key, so the table covers the full 64-bit mask.
-constexpr std::array<std::pair<Key, int>, 63> keyPairs{{
+// Slash closes the 64-bit state-mask range; F12 follows it as an event-only
+// key (see capabilities.hpp), so the table spans the full Key enum.
+constexpr std::array<std::pair<Key, int>, 64> keyPairs{{
     {Key::Escape, GLFW_KEY_ESCAPE},
     {Key::Space, GLFW_KEY_SPACE},
     {Key::W, GLFW_KEY_W},
@@ -91,9 +92,10 @@ constexpr std::array<std::pair<Key, int>, 63> keyPairs{{
     {Key::Comma, GLFW_KEY_COMMA},
     {Key::Period, GLFW_KEY_PERIOD},
     {Key::Slash, GLFW_KEY_SLASH},
+    {Key::F12, GLFW_KEY_F12},
 }};
 
-static_assert(keyPairs.size() == static_cast<std::size_t>(Key::Slash), "every tracked key must be mapped exactly once");
+static_assert(keyPairs.size() == static_cast<std::size_t>(Key::F12), "every tracked key must be mapped exactly once");
 
 // O(1) lookup tables compiled from keyPairs: GLFW code -> engine Key and
 // engine Key -> GLFW code (unmapped slots hold Unknown / GLFW_KEY_UNKNOWN).
@@ -107,7 +109,7 @@ inline constexpr auto glfwToEngine = [] {
 }();
 
 inline constexpr auto engineToGlfw = [] {
-    std::array<int, 64> table{};
+    std::array<int, static_cast<std::size_t>(Key::F12) + 1> table{};
     for (auto &entry : table)
     {
         entry = GLFW_KEY_UNKNOWN;
@@ -129,7 +131,7 @@ inline Key mapGlfwKey(int key)
 inline int mapEngineKey(Key key)
 {
     const std::size_t index = static_cast<std::size_t>(key);
-    return index < 64 ? engineToGlfw[index] : GLFW_KEY_UNKNOWN;
+    return index < engineToGlfw.size() ? engineToGlfw[index] : GLFW_KEY_UNKNOWN;
 }
 
 } // namespace glfw_keys

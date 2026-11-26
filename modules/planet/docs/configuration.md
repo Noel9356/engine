@@ -220,7 +220,7 @@ The mesher partitions terrain into two surface groups - ground (soil, grass, sno
 
 ## Surface walking
 
-A kinematic, point-feet character controller lives in the module (`SurfaceWalker`, see `walker.hpp`): gravity pulls toward the planet center, movement lives in the tangent plane, and terrain collision queries the same pure density field the mesher samples (a march-and-bisect along the local radial direction), so overhang ledges and cave floors are walkable without any collision proxy geometry. A full physics module is not needed for this: the field answers the ground queries directly, and the controller stays deterministic (fixed inputs walk one exact path, which the demo's `--self-test` asserts).
+A kinematic, point-feet character controller lives in the module (`SurfaceWalker`, see `walker.hpp`): gravity pulls toward the planet center, movement lives in the tangent plane, and terrain collision queries the same pure density field the mesher samples (a march-and-bisect along the local radial direction), so overhang ledges and cave floors are walkable without any collision proxy geometry. A full physics module is not needed for this: the field answers the ground queries directly, and the controller stays deterministic (fixed inputs walk one exact path, which the demo's self-test asserts).
 
 | Key | Default | Effect |
 | --- | --- | --- |

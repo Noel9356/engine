@@ -22,7 +22,10 @@ namespace window
 // 11 -> 12 added standardized gamepad events and a platform-neutral touch ingress; 12 -> 13 added clipboard text access; 13 -> 14 added dropped-file batches; 14 -> 15 added runtime window control (visibility, attributes, opacity, focus/attention, iconify/restore/maximize), position/content-scale queries, event waiting, the Hidden cursor mode, and twelve text-editing keys.
 // 15 -> 16 added the headless PNG surface export (exportSurfacePng appended to
 // HeadlessWindowCapability).
-inline constexpr std::uint32_t windowCapabilityAbi = 16u;
+// 16 -> 17 added Key::F12 (event-only; it sits beyond the 64-bit state mask,
+// so isKeyDown/keyStateMask never report it - KeyPressed/KeyReleased events
+// carry it, which is all an edge-triggered action like a screenshot needs).
+inline constexpr std::uint32_t windowCapabilityAbi = 17u;
 
 // Opaque window identifier; 0 (invalidWindow) means "none".
 using WindowHandle = std::uint32_t;
@@ -115,8 +118,8 @@ enum class Key : std::uint32_t
     RightControl,
     RightAlt,
 
-    // Text-editing and console-toggle keys; Slash is the last tracked key
-    // (value 63) because the key state mask is exactly 64 bits wide.
+    // Text-editing and console-toggle keys; Slash is the last key the 64-bit
+    // state mask tracks (value 63, one bit per key with Unknown reserved).
     Delete,
     Home,
     End,
@@ -128,7 +131,12 @@ enum class Key : std::uint32_t
     Equal,
     Comma,
     Period,
-    Slash
+    Slash,
+
+    // Event-only keys beyond the state mask: F12 (the demos' screenshot key)
+    // surfaces through KeyPressed/KeyReleased events but has no held-state
+    // bit, so isKeyDown and keyStateMask never report it.
+    F12
 };
 
 static_assert(static_cast<std::uint32_t>(Key::Slash) < 64, "Window key masks require Key values below 64");

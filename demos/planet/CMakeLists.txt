@@ -26,6 +26,7 @@ engine_add_application(
     source/planet_viewpoints.cpp
     source/planet_walk_controller.cpp
     ../common/demo_harness.cpp
+    ../common/demo_environment.cpp
     INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/../common"
     CAPABILITIES

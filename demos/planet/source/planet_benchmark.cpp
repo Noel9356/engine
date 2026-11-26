@@ -6,7 +6,7 @@
 // builds over a fixed surface-hugging chunk set, and the streaming
 // pipeline's delivery rate and update overhead. Everything the benchmark
 // measures derives from the module's own parameters (seed, radius), so
-// `--bench` next to `--self-test` gives a repeatable profile without any
+// DEMO_BENCH next to DEMO_SELF_TEST gives a repeatable profile without any
 // manual inspection.
 
 #include <engine/planet/density.hpp>

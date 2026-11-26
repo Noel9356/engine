@@ -4,7 +4,7 @@ window owns the engine's OS windows: it creates and destroys them, pumps the OS 
 
 ## Capability
 
-The module provides four capabilities, all sharing ABI 15 (constant `windowCapabilityAbi`, see `include/engine/window/capabilities.hpp`):
+The module provides four capabilities, all sharing ABI 17 (constant `windowCapabilityAbi`, see `include/engine/window/capabilities.hpp`):
 
 | Capability | Role |
 | --- | --- |
@@ -102,7 +102,7 @@ Mouse button indices match GLFW's eight-button ordering (`Left`, `Right`, `Middl
 
 `WindowEventKind::CursorMoved`, `MouseScrolled`, and `TextInput` carry `cursorX/cursorY` plus `cursorDeltaX/cursorDeltaY`, `scrollX/scrollY`, and `codepoint`, respectively. Forward these events to UI pointer, wheel, and text-input handling as appropriate.
 
-The tracked key set covers the letters, digits, arrows, modifiers, and the navigation and editing keys (`Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Tab`, `Enter`, `Backspace`, `Grave`, `Minus`, `Equal`, `Comma`, `Period`, `Slash`); `Key::Slash` is the highest tracked value because the key state mask is exactly 64 bits wide. Untracked keys surface as `Key::Unknown` in events.
+The tracked key set covers the letters, digits, arrows, modifiers, and the navigation and editing keys (`Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Tab`, `Enter`, `Backspace`, `Grave`, `Minus`, `Equal`, `Comma`, `Period`, `Slash`); `Key::Slash` is the highest value the key state mask tracks because the mask is exactly 64 bits wide. `Key::F12` follows beyond the mask and surfaces through key events only - the edge-triggered action keys (the demos bind F12 to the screenshot export) need no held-state bit. Untracked keys surface as `Key::Unknown` in events.
 
 ### Touch ingress
 

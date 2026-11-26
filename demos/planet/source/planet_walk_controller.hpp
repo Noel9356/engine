@@ -39,7 +39,7 @@ public:
     // (zero movement) while the walker still settles under gravity.
     void update(const engine::camera::CameraInputState &input, bool enabled, double deltaSeconds);
 
-    // Deterministic automatic walk used by --orbit captures.
+    // Deterministic automatic walk used by the DEMO_ORBIT capture path.
     void setAutoWalk(bool enabled)
     {
         autoWalk_ = enabled;

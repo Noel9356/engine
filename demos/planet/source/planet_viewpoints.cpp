@@ -76,7 +76,7 @@ void clampCameraPitch(const glm::dvec3 &eye, const glm::dvec3 &localUp, glm::dve
 }
 
 // The biome name table: the classifier's 16 climate zones with their CLI
-// spellings (shared by --biome validation and the biome-pinned view).
+// spellings (shared by DEMO_BIOME validation and the biome-pinned view).
 const std::vector<std::string> &biomeNames()
 {
     static const std::vector<std::string> names = {

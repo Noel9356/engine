@@ -19,6 +19,38 @@
 
 namespace engine
 {
+
+// The application's own installed configuration wins: config/engine.toml
+// beside the executable over one in the working directory. The working
+// directory depends on how the application was launched and can sit inside an
+// unrelated tree (a repository root whose configuration belongs to other
+// applications) - silently swapping trust bindings, plugin directories, and
+// module settings with the launch directory's copies breaks the application,
+// so a divergent working-directory copy earns a loud note on stderr while the
+// executable's own configuration stays in charge.
+std::filesystem::path defaultEngineConfigurationPath()
+{
+    const std::filesystem::path besideExecutable = executableDirectory() / "config" / "engine.toml";
+    if (std::filesystem::exists(besideExecutable))
+    {
+        const std::filesystem::path workingDirectoryPath = std::filesystem::current_path() / "config" / "engine.toml";
+        if (std::error_code error; std::filesystem::exists(workingDirectoryPath)
+            && !std::filesystem::equivalent(workingDirectoryPath, besideExecutable, error) && !error)
+        {
+            std::fprintf(stderr,
+                "engine: using the configuration beside the executable (%s), not the one from the working "
+                "directory (%s); an application runs on its own installed configuration\n",
+                besideExecutable.string().c_str(), workingDirectoryPath.string().c_str());
+        }
+        return besideExecutable;
+    }
+    const std::filesystem::path workingDirectoryPath = std::filesystem::current_path() / "config" / "engine.toml";
+    if (std::filesystem::exists(workingDirectoryPath))
+    {
+        return workingDirectoryPath;
+    }
+    return besideExecutable;
+}
 namespace
 {
 
@@ -32,28 +64,6 @@ std::filesystem::path resolveApplicationPath(const std::filesystem::path &path)
     return std::filesystem::absolute(path).lexically_normal();
 }
 
-// config/engine.toml next to the cwd wins over the one beside the
-// executable. The cwd copy also drives trust and plugin discovery, so a
-// startup from an unexpected directory deserves a loud note on stderr
-// before anything loads from there.
-std::filesystem::path defaultConfigurationPath()
-{
-    const std::filesystem::path workingDirectoryPath = std::filesystem::current_path() / "config" / "engine.toml";
-    if (std::filesystem::exists(workingDirectoryPath))
-    {
-        const std::filesystem::path besideExecutable = executableDirectory() / "config" / "engine.toml";
-        if (std::error_code error; !std::filesystem::equivalent(workingDirectoryPath, besideExecutable, error)
-            && !error)
-        {
-            std::fprintf(stderr,
-                "engine: using the configuration from the working directory (%s), not the one beside the "
-                "executable; this file decides trust bindings and plugin directories\n",
-                workingDirectoryPath.string().c_str());
-        }
-        return workingDirectoryPath;
-    }
-    return executableDirectory() / "config" / "engine.toml";
-}
 
 } // namespace
 
@@ -67,7 +77,7 @@ ApplicationHost::~ApplicationHost()
 bool ApplicationHost::configureKernel(EngineKernel &kernel, const ApplicationHostOptions &options, std::string &report)
 {
     const std::filesystem::path configurationFile = options.configurationFile.empty()
-                                                      ? defaultConfigurationPath()
+                                                      ? defaultEngineConfigurationPath()
                                                       : resolveApplicationPath(options.configurationFile);
     kernel.setConfigurationFile(configurationFile);
     if (!options.configurationProfileFiles.empty())
